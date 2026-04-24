@@ -30,8 +30,8 @@
 
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 import { USERS_DIR } from '../lib/paths.mjs';
+import { effectiveCpuCount } from '../lib/cpu-count.mjs';
 
 // Task tokens added to the SmolLM2 vocab during training (see training/train.py).
 // Prepended to the user content so the multi-task adapter routes to the right
@@ -87,14 +87,15 @@ export async function initBuiltinReason() {
     _LlamaCompletion = LlamaCompletion;
     _llama = await getLlama();
     _model = await _llama.loadModel({ modelPath: MODEL_PATH });
-    // node-llama-cpp reads CPUID directly, so `maxThreads` reflects the host's
-    // physical cores — not what's visible inside an LXC/container (cgroups are
-    // ignored). Letting it default to, say, 8 inside a 4-cpu container causes
-    // catastrophic thread thrashing (~1000x slowdown in our bench). Cap at
-    // os.cpus().length which DOES honor the cgroup.
+    // See lib/cpu-count.mjs — node-llama-cpp defaults to the host's physical
+    // core count via CPUID, which oversubscribes any container/VM with a CPU
+    // limit and thrashes (400x slowdown observed). effectiveCpuCount()
+    // respects cgroup v1/v2 quotas, sched_getaffinity, and lxcfs-filtered
+    // /proc/cpuinfo, so the same binary behaves correctly on bare metal, VMs,
+    // LXC, and Docker/K8s regardless of how the operator capped CPU.
     _context = await _model.createContext({
       contextSize: CONTEXT_SIZE,
-      threads: os.cpus().length,
+      threads: effectiveCpuCount(),
     });
     _ready = true;
     return true;

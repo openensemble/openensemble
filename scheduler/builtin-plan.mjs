@@ -11,8 +11,8 @@
 
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
 import { USERS_DIR } from '../lib/paths.mjs';
+import { effectiveCpuCount } from '../lib/cpu-count.mjs';
 import { loadConfig } from '../routes/_helpers.mjs';
 
 const MODEL_FILE = 'openensemble-plan-v12.q8_0.gguf';
@@ -57,10 +57,11 @@ export async function initBuiltinPlan() {
     _LlamaJsonSchemaGrammar = LlamaJsonSchemaGrammar;
     _llama = await getLlama();
     _model = await _llama.loadModel({ modelPath: MODEL_PATH });
-    // Cap threads to cgroup-visible CPUs — see memory/builtin-reason.mjs.
+    // Cap threads via effectiveCpuCount() — see lib/cpu-count.mjs for why
+    // os.cpus().length isn't enough (Docker --cpus, K8s limits, etc.).
     _context = await _model.createContext({
       contextSize: CONTEXT_SIZE,
-      threads: os.cpus().length,
+      threads: effectiveCpuCount(),
     });
     _ready = true;
     return true;
