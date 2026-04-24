@@ -11,6 +11,7 @@
 
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { loadConfig } from '../routes/_helpers.mjs';
 
@@ -18,7 +19,10 @@ const MODEL_FILE = 'openensemble-plan-v12.q8_0.gguf';
 const CACHE_DIR = path.join(USERS_DIR, '..', 'models');
 const MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
 
-const CONTEXT_SIZE = 2048;
+// Matches the training context (n_ctx_train=8192 in the GGUF). Running below
+// this triggers a "full capacity not utilized" warning from llama.cpp and
+// clips long scheduler prompts. KV cache at 8192 ≈ 110 MB for this 135M model.
+const CONTEXT_SIZE = 8192;
 
 let _initPromise = null;
 let _ready = false;
@@ -53,7 +57,11 @@ export async function initBuiltinPlan() {
     _LlamaJsonSchemaGrammar = LlamaJsonSchemaGrammar;
     _llama = await getLlama();
     _model = await _llama.loadModel({ modelPath: MODEL_PATH });
-    _context = await _model.createContext({ contextSize: CONTEXT_SIZE });
+    // Cap threads to cgroup-visible CPUs — see memory/builtin-reason.mjs.
+    _context = await _model.createContext({
+      contextSize: CONTEXT_SIZE,
+      threads: os.cpus().length,
+    });
     _ready = true;
     return true;
   })();
