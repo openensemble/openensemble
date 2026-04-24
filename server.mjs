@@ -256,8 +256,24 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   // Try each route module in order
-  for (const handler of routeHandlers) {
-    if (await handler(req, res)) return;
+  try {
+    for (const handler of routeHandlers) {
+      if (await handler(req, res)) return;
+    }
+  } catch (e) {
+    // Any handler throw (sync or async) lands here — without this, an
+    // unhandled rejection crashes the whole Node process under the default
+    // Node 20+ --unhandled-rejections=throw policy.
+    console.error('[http] unhandled route error:', e);
+    if (!res.headersSent) {
+      try {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal server error' }));
+      } catch {}
+    } else {
+      try { res.end(); } catch {}
+    }
+    return;
   }
 
   res.writeHead(404); res.end('Not found');

@@ -49,7 +49,19 @@ setInterval(() => {
 
 /** Build the Google authorization URL for the given nonce/state. */
 function buildAuthUrl(nonce, service, redirectUri) {
-  const creds = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
+  let creds;
+  try {
+    creds = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
+  } catch (e) {
+    // Missing or malformed creds file — surface a clean error so the route
+    // handler can return a 500 instead of crashing the server.
+    const msg = e?.code === 'ENOENT'
+      ? `Google OAuth is not configured on this server: ${CREDS_PATH} is missing. Upload your OAuth client credentials JSON from Google Cloud Console.`
+      : `Failed to read ${CREDS_PATH}: ${e?.message || e}`;
+    const err = new Error(msg);
+    err.userFacing = true;
+    throw err;
+  }
   const c = creds.installed || creds.web;
   const params = new URLSearchParams({
     client_id:     c.client_id,
@@ -89,7 +101,15 @@ export async function handle(req, res) {
     // at the /token exchange matches the one used at /auth, so we must reuse
     // exactly the same URI even if the request arrives on a different origin.
     pendingStates.set(nonce, { userId, service, accountId, redirectUri, expires: Date.now() + 10 * 60 * 1000 });
-    const authUrl = buildAuthUrl(nonce, service, redirectUri);
+    let authUrl;
+    try {
+      authUrl = buildAuthUrl(nonce, service, redirectUri);
+    } catch (e) {
+      console.error('[oauth] connect failed:', e?.message || e);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e?.userFacing ? e.message : 'Failed to start OAuth flow' }));
+      return true;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ url: authUrl }));
     return true;
@@ -105,7 +125,16 @@ export async function handle(req, res) {
       return true;
     }
     // Redirect browser directly to Google
-    res.writeHead(302, { Location: buildAuthUrl(nonce, entry.service, entry.redirectUri) });
+    let authUrl;
+    try {
+      authUrl = buildAuthUrl(nonce, entry.service, entry.redirectUri);
+    } catch (e) {
+      console.error('[oauth] go failed:', e?.message || e);
+      res.writeHead(500, { 'Content-Type': 'text/html' });
+      res.end(`<html><body><h2>OAuth not configured</h2><p>${e?.userFacing ? e.message : 'Server error'}</p></body></html>`);
+      return true;
+    }
+    res.writeHead(302, { Location: authUrl });
     res.end();
     return true;
   }
