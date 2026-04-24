@@ -319,16 +319,50 @@ async function connectOpenAIOAuth() {
     const { url } = await res.json();
     window.open(url, '_blank', 'noopener');
     // Poll status so the UI flips to "connected" once the popup finishes.
+    // On a remote/LXC deployment the redirect to localhost:1455 can't reach
+    // the server — prompt the user to paste the failed URL after ~15s so
+    // they have a way to finish connecting.
     let tries = 0;
+    let promptedPaste = false;
     const poll = async () => {
       if (tries++ > 60) return; // ~5 min
       try {
         const s = await fetch('/api/oauth/openai/status').then(r => r.json());
         if (s.connected) { refreshOpenAIOAuthStatus(); return; }
       } catch {}
+      if (!promptedPaste && tries >= 3) {
+        promptedPaste = true;
+        // Detached to avoid blocking the poll; picks up on success via polling.
+        setTimeout(offerOpenAIPasteCallback, 0);
+      }
       setTimeout(poll, 5000);
     };
     setTimeout(poll, 5000);
+  } catch (e) { alert(`Error: ${e.message}`); }
+}
+
+// Fallback for remote-server deployments: the authorize page redirects to
+// http://localhost:1455/auth/callback?code=...&state=..., which only loads
+// when the browser runs on the same machine as the server. When that fails,
+// the user copies the URL from the broken page's address bar and pastes it
+// here; the server completes the exchange.
+async function offerOpenAIPasteCallback() {
+  const box = document.getElementById('providerStatus_openai-oauth');
+  if (box && box.textContent?.includes('Connected')) return;
+  const pasted = prompt(
+    'If the ChatGPT page finished with "could not connect" (the URL starts with http://localhost:1455/auth/callback?code=...), paste that URL here to finish connecting. Otherwise cancel.',
+    ''
+  );
+  if (!pasted) return;
+  try {
+    const r = await fetch('/api/oauth/openai/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: pasted.trim() }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(data?.error || 'Failed to complete OAuth.'); return; }
+    refreshOpenAIOAuthStatus();
   } catch (e) { alert(`Error: ${e.message}`); }
 }
 
