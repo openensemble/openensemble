@@ -189,15 +189,17 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'This authorization belongs to a different user.' }));
       return true;
     }
-    pendingStates.delete(state);
 
     try {
       const token = await exchangeCode({ code, verifier: entry.verifier });
+      pendingStates.delete(state);
       writeToken(entry.userId, token);
       console.log(`[openai-oauth] stored token (paste) for user=${entry.userId} account=${token.account_id} plan=${token.plan_type}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, plan: token.plan_type, accountId: token.account_id }));
     } catch (e) {
+      // Leave state intact so the user can retry with a corrected URL without
+      // having to hit Connect again. It self-expires after STATE_TTL_MS.
       console.error('[openai-oauth] paste-exchange error:', e?.message || e);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `Token exchange failed: ${e?.message || e}` }));

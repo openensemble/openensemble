@@ -342,23 +342,34 @@ async function connectOpenAIOAuth() {
 function showOpenAIPasteBox() {
   const box = document.getElementById('providerPaste_openai-oauth');
   const input = document.getElementById('providerPasteInput_openai-oauth');
+  const msg = document.getElementById('providerPasteMsg_openai-oauth');
   if (!box || !input) return;
   box.style.display = 'block';
   input.value = '';
+  if (msg) msg.textContent = '';
   input.focus();
-  // Auto-submit the moment the user pastes something URL-shaped — no extra
-  // click needed. The paste event fires before the input's value updates,
-  // so read from the clipboard data directly.
-  input.onpaste = (e) => {
-    const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+  // Auto-submit whenever the input holds a URL-shaped value, regardless of how
+  // it got there (keyboard paste, right-click paste, drag-drop, typing). The
+  // old onpaste-only handler missed right-click paste in some browsers, forcing
+  // a second paste. Guarded so it only auto-fires once per Connect flow.
+  let submitted = false;
+  input.oninput = () => {
+    const text = (input.value || '').trim();
+    if (submitted) return;
     if (/[?&]code=/.test(text) && /[?&]state=/.test(text)) {
-      e.preventDefault();
-      input.value = text.trim();
+      submitted = true;
       submitOpenAIPasteCallback();
     }
   };
-  // Fallback: Enter to submit manually.
-  input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submitOpenAIPasteCallback(); } };
+  // Enter as a manual fallback — also resets the guard so a corrected URL can
+  // be re-submitted if the first attempt hit an error.
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitted = true;
+      submitOpenAIPasteCallback();
+    }
+  };
 }
 
 function hideOpenAIPasteBox() {
@@ -399,18 +410,28 @@ async function disconnectOpenAIOAuth() {
 async function refreshOpenAIOAuthStatus() {
   const box = document.getElementById('providerStatus_openai-oauth');
   if (!box) return;
+  const connectBtn    = document.getElementById('oauthConnect_openai-oauth');
+  const disconnectBtn = document.getElementById('oauthDisconnect_openai-oauth');
   try {
     const s = await fetch('/api/oauth/openai/status').then(r => r.json());
     if (s.connected) {
       const plan = s.plan ? ` (${s.plan})` : '';
       const acct = s.accountId ? ` · account ${s.accountId.slice(0, 8)}…` : '';
       box.textContent = `Connected${plan}${acct}.`;
+      if (connectBtn)    connectBtn.style.display    = 'none';
+      if (disconnectBtn) disconnectBtn.style.display = '';
       // Load the static model list so the agent model picker shows Codex models
       loadCompatProviderModels('openai-oauth').catch(() => {});
     } else {
       box.textContent = 'Not connected.';
+      if (connectBtn)    connectBtn.style.display    = '';
+      if (disconnectBtn) disconnectBtn.style.display = 'none';
     }
-  } catch { box.textContent = 'Status check failed.'; }
+  } catch {
+    box.textContent = 'Status check failed.';
+    if (connectBtn)    connectBtn.style.display    = '';
+    if (disconnectBtn) disconnectBtn.style.display = 'none';
+  }
 }
 
 async function disconnectGoogle(service) {
@@ -539,10 +560,10 @@ function renderCompatProviderCards(cfg) {
           <div id="providerBody_${p.id}">
             <div class="settings-section-desc" style="margin-bottom:8px">${p.blurb}</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button onclick="connectOpenAIOAuth()"
+              <button id="oauthConnect_${p.id}" onclick="connectOpenAIOAuth()"
                 style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Connect ChatGPT account</button>
-              <button onclick="disconnectOpenAIOAuth()"
-                style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Disconnect</button>
+              <button id="oauthDisconnect_${p.id}" onclick="disconnectOpenAIOAuth()"
+                style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Disconnect</button>
               <button onclick="refreshOpenAIOAuthStatus()"
                 style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Check status</button>
             </div>
@@ -757,13 +778,14 @@ async function saveProvider(provider) {
     ...(key ? { [sel.keyField]: key } : {}),
   };
   try {
-    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const r = await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body) });
-    if (key) {
-      $(sel.keyEl).value = '';
-      $(sel.statusEl).textContent = 'API key is set.';
-    }
+    if (!r.ok) { showToast(`Save failed (${r.status})`); return; }
+    if (key) { $(sel.keyEl).value = ''; }
     showToast(`${sel.label} saved`);
+    // Re-pull authoritative state so the URL field shows the persisted value
+    // and status lines reflect whether a key is now set.
+    await loadProviderConfig();
   } catch { showToast('Failed to save'); }
 }
 
