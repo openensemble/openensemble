@@ -629,7 +629,7 @@ async function loadProviderConfig() {
 
     $('providerOllamaKeyStatus').textContent  = cfg.ollamaKeySet     ? 'API key is set.' : '';
     $('providerLmstudioKeyStatus').textContent = cfg.lmstudioKeySet  ? 'API key is set.' : '';
-    $('providerOllamaUrl').value   = cfg.ollamaUrl   ?? '';
+    // Cloud Ollama URL is fixed server-side — no input to populate.
     $('providerLmstudioUrl').value = cfg.lmstudioUrl ?? '';
     if ($('providerOllamaLocalUrl'))    $('providerOllamaLocalUrl').value = cfg.ollamaLocalUrl ?? '';
     if ($('providerOllamaLocalKeyStatus')) $('providerOllamaLocalKeyStatus').textContent = cfg.ollamaLocalKeySet ? 'API key is set.' : '';
@@ -740,16 +740,22 @@ async function saveProviderAnthropicKey() {
 }
 
 async function saveProvider(provider) {
+  // Ollama (cloud) is key-only — the endpoint is fixed server-side to
+  // https://ollama.com/api, so there's no URL input to read.
   const sel = {
-    'ollama':       { urlEl: 'providerOllamaUrl',      keyEl: 'providerOllamaKey',      statusEl: 'providerOllamaKeyStatus',      urlField: 'ollamaUrl',      keyField: 'ollamaApiKey',      label: 'Ollama (cloud)' },
+    'ollama':       { urlEl: null,                     keyEl: 'providerOllamaKey',      statusEl: 'providerOllamaKeyStatus',      urlField: null,             keyField: 'ollamaApiKey',      label: 'Ollama (cloud)' },
     'ollama-local': { urlEl: 'providerOllamaLocalUrl', keyEl: 'providerOllamaLocalKey', statusEl: 'providerOllamaLocalKeyStatus', urlField: 'ollamaLocalUrl', keyField: 'ollamaLocalApiKey', label: 'Ollama (local)' },
     'lmstudio':     { urlEl: 'providerLmstudioUrl',    keyEl: 'providerLmstudioKey',    statusEl: 'providerLmstudioKeyStatus',    urlField: 'lmstudioUrl',    keyField: 'lmstudioApiKey',    label: 'LM Studio' },
   }[provider];
   if (!sel) return;
-  const url = $(sel.urlEl).value.trim();
+  const url = sel.urlEl ? $(sel.urlEl).value.trim() : null;
   const key = $(sel.keyEl).value.trim();
-  if (!url) { showToast('Enter a URL'); return; }
-  const body = { [sel.urlField]: url, ...(key && { [sel.keyField]: key }) };
+  if (sel.urlEl && !url) { showToast('Enter a URL'); return; }
+  if (!sel.urlEl && !key) { showToast('Enter an API key'); return; }
+  const body = {
+    ...(sel.urlField && url ? { [sel.urlField]: url } : {}),
+    ...(key ? { [sel.keyField]: key } : {}),
+  };
   try {
     await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body) });

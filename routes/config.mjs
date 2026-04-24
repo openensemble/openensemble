@@ -69,7 +69,7 @@ export async function handle(req, res) {
         ollamaKeySet:      !!cfg.cortex?.ollamaApiKey,
         lmstudioKeySet:    !!cfg.cortex?.lmstudioApiKey,
         openrouterKeySet:  !!cfg.openrouterApiKey,
-        ollamaUrl:    cfg.cortex?.ollamaUrl    ?? OLLAMA_DEFAULT,
+        ollamaUrl:    OLLAMA_DEFAULT,
         lmstudioUrl:  cfg.cortex?.lmstudioUrl  ?? LMS_DEFAULT,
         // Secondary, local-only Ollama endpoint. Users with Ollama Cloud for
         // chat still need a local Ollama to host the memory-lane GGUF (Cloud
@@ -107,7 +107,9 @@ export async function handle(req, res) {
             if (body[keyField]) cfg[keyField] = body[keyField];
           }
           cfg.cortex = cfg.cortex ?? {};
-          if (body.ollamaUrl      !== undefined) cfg.cortex.ollamaUrl      = body.ollamaUrl;
+          // Cloud Ollama endpoint is fixed (OLLAMA_DEFAULT) and not user-editable;
+          // ignore any ollamaUrl the client sends and keep the canonical value.
+          cfg.cortex.ollamaUrl = OLLAMA_DEFAULT;
           if (body.lmstudioUrl    !== undefined) cfg.cortex.lmstudioUrl    = body.lmstudioUrl;
           if (body.ollamaApiKey)                 cfg.cortex.ollamaApiKey   = body.ollamaApiKey;
           if (body.lmstudioApiKey)               cfg.cortex.lmstudioApiKey = body.lmstudioApiKey;

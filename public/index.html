@@ -749,9 +749,7 @@
               <label class="provider-toggle"><input type="checkbox" id="providerToggle_ollama" checked onchange="toggleProvider('ollama',this.checked)"><span class="provider-toggle-slider"></span></label>
             </div>
             <div id="providerBody_ollama">
-              <div class="settings-section-desc" style="margin-bottom:8px">Ollama Cloud / Turbo (ollama.com). Requires an API key.</div>
-              <input type="text" id="providerOllamaUrl" placeholder="https://ollama.com/api"
-                style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+              <div class="settings-section-desc" style="margin-bottom:8px">Ollama Cloud / Turbo — endpoint is fixed at <code>https://ollama.com/api</code>. Requires an API key.</div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 <input type="password" id="providerOllamaKey" placeholder="API key" autocomplete="new-password"
                   style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
