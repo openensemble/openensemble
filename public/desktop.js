@@ -15,9 +15,11 @@ function switchView(mode) {
     const pill = $('agentPill'); if (pill) pill.style.display = 'none';
     $('viewBtnChat').classList.remove('active');
     $('viewBtnDesktop').classList.add('active');
-    if (!_desktopLoaded) { _desktopLoaded = true; loadDesktopCategories(); }
-    $('desktopBoard').style.display = '';
-    loadDesktopBoard();
+    // Always reset to the top-level categories+board view on entry, so the
+    // previous session's "items" drawer (e.g. Code Projects list) doesn't leak
+    // through when the user toggles back to desktop mode.
+    _desktopLoaded = true;
+    showDesktopCategories();
   } else {
     chatArea.style.display = '';
     inputArea.style.display = '';
