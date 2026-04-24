@@ -30,6 +30,7 @@
 
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { USERS_DIR } from '../lib/paths.mjs';
 
 // Task tokens added to the SmolLM2 vocab during training (see training/train.py).
@@ -86,7 +87,15 @@ export async function initBuiltinReason() {
     _LlamaCompletion = LlamaCompletion;
     _llama = await getLlama();
     _model = await _llama.loadModel({ modelPath: MODEL_PATH });
-    _context = await _model.createContext({ contextSize: CONTEXT_SIZE });
+    // node-llama-cpp reads CPUID directly, so `maxThreads` reflects the host's
+    // physical cores — not what's visible inside an LXC/container (cgroups are
+    // ignored). Letting it default to, say, 8 inside a 4-cpu container causes
+    // catastrophic thread thrashing (~1000x slowdown in our bench). Cap at
+    // os.cpus().length which DOES honor the cgroup.
+    _context = await _model.createContext({
+      contextSize: CONTEXT_SIZE,
+      threads: os.cpus().length,
+    });
     _ready = true;
     return true;
   })();
