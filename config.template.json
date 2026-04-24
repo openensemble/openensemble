@@ -9,7 +9,8 @@
     "reasonModelOllama": "openensemble-reason:v1",
     "reasonModelLmstudio": "openensemble/reason-v1",
     "lmstudioUrl": "http://127.0.0.1:1234",
-    "ollamaUrl": "http://localhost:11434",
+    "ollamaUrl": "https://ollama.com/api",
+    "ollamaLocalUrl": "http://localhost:11434",
     "lmstudioApiKey": "lmstudio",
     "ollamaApiKey": ""
   },

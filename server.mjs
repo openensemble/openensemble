@@ -81,6 +81,28 @@ try {
   console.warn('[security] Could not chmod config.json:', e.message);
 }
 
+// ── One-time migration: split Ollama cloud/local endpoints ───────────────────
+// Historically cortex.ollamaUrl defaulted to http://localhost:11434 and was
+// used for both "cloud" and "local" tiers. After the split, the cloud slot
+// keeps the name `ollamaUrl` (now defaulting to ollama.com) and a separate
+// `ollamaLocalUrl` holds the local endpoint. Existing installs still have the
+// legacy localhost value pointed at the cloud slot — move it to local here.
+try {
+  if (fs.existsSync(CFG_PATH)) {
+    const raw = JSON.parse(fs.readFileSync(CFG_PATH, 'utf8'));
+    const cortex = raw.cortex ?? {};
+    if (cortex.ollamaUrl === 'http://localhost:11434') {
+      cortex.ollamaLocalUrl = cortex.ollamaLocalUrl || 'http://localhost:11434';
+      cortex.ollamaUrl = 'https://ollama.com/api';
+      raw.cortex = cortex;
+      fs.writeFileSync(CFG_PATH, JSON.stringify(raw, null, 2));
+      console.log('[migrate] Split legacy cortex.ollamaUrl (localhost) → ollamaLocalUrl; cloud now defaults to ollama.com');
+    }
+  }
+} catch (e) {
+  console.warn('[migrate] ollama endpoint migration skipped:', e.message);
+}
+
 // Expose the install root to skills and drawer plugins so they can locate
 // user data without hard-coding an absolute path or relying on relative
 // `../..` tricks (which break for user-created skills at
