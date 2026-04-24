@@ -1,0 +1,100 @@
+/* ── Custom drawer design tokens ──────────────────────────────────────────────
+ * Reusable class set for drawers created by the skill-builder. These give
+ * plugin-authored UIs the same look as the built-in drawers without having
+ * to reinvent colors, spacing, and buttons.
+ *
+ * Prefix: `.cdraw-*` (custom drawer). Prefer these over ad-hoc inline styles.
+ */
+
+/* Rows — the workhorse for lists inside a drawer body. */
+.cdraw-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+.cdraw-row-main { flex: 1; min-width: 0; }
+.cdraw-row-title {
+  font-weight: 600; font-size: 13px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cdraw-row-sub {
+  font-size: 11px; color: var(--muted); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cdraw-row-actions {
+  display: flex; gap: 4px; flex-shrink: 0;
+  opacity: 0; transition: opacity .15s;
+}
+.cdraw-row:hover .cdraw-row-actions { opacity: 1; }
+
+/* Buttons — pick a variant to match intent. */
+.cdraw-btn {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  padding: 7px 12px; border-radius: 6px; cursor: pointer;
+  font-size: 12px; font-weight: 500; font-family: inherit;
+  transition: all .15s;
+}
+.cdraw-btn:hover { border-color: var(--accent); color: var(--accent); }
+.cdraw-btn-primary {
+  background: var(--accent); border: 1px solid var(--accent); color: #fff;
+}
+.cdraw-btn-primary:hover { filter: brightness(1.1); color: #fff; }
+.cdraw-btn-danger { /* icon-only destructive; see .cdraw-icon-btn */ }
+.cdraw-btn-full { width: 100%; }
+
+/* Compact icon-only button — for Mark read / Email / Delete style actions. */
+.cdraw-icon-btn {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; padding: 4px 6px; border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: color .15s, background .15s;
+}
+.cdraw-icon-btn:hover { color: var(--text); background: var(--bg2); }
+.cdraw-icon-btn.danger:hover { color: var(--red); }
+.cdraw-icon-btn.accent:hover { color: var(--accent); }
+.cdraw-icon-btn .icon,
+.cdraw-icon-btn [data-lucide] { width: 15px; height: 15px; }
+
+/* Badges — small status pills (READ, SENT, etc.). */
+.cdraw-badge {
+  display: inline-block;
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .05em;
+  padding: 2px 7px; border-radius: 10px;
+  background: var(--bg2); color: var(--muted);
+  border: 1px solid var(--border);
+  margin-right: 4px;
+}
+.cdraw-badge.accent { background: rgba(91,141,239,.15); color: var(--accent); border-color: rgba(91,141,239,.3); }
+.cdraw-badge.green  { background: rgba(52,211,153,.15); color: var(--green);  border-color: rgba(52,211,153,.3); }
+.cdraw-badge.yellow { background: rgba(251,191,36,.15); color: var(--yellow); border-color: rgba(251,191,36,.3); }
+.cdraw-badge.red    { background: rgba(239,68,68,.15);  color: var(--red);    border-color: rgba(239,68,68,.3); }
+
+/* Empty / loading / error states. */
+.cdraw-empty,
+.cdraw-loading,
+.cdraw-error {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+.cdraw-error { color: var(--red); }
+
+/* Section headers inside the drawer body. */
+.cdraw-section-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted);
+  margin: 14px 0 8px;
+}
+
+/* Toolbar — e.g. a Refresh button sticky at the top of the body. */
+.cdraw-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 10px; margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.cdraw-toolbar > :first-child { flex: 1; }

@@ -1,0 +1,9 @@
+node_modules
+.claude
+.git
+*.log
+venv
+users/
+config.json
+active-sessions.json
+*.jsonl

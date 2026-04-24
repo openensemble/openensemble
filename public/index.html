@@ -1,0 +1,1425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#121214">
+<title>OpenEnsemble</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- Mobile-only header -->
+<div class="mobile-header" id="mobileHeader">
+  <h1>OpenEnsemble</h1>
+  <div class="status-dot" id="statusDotMobile"></div>
+  <button class="btn-menu" id="btnMenu" aria-label="Menu">⋮</button>
+</div>
+
+<!-- Status bar (Option B) -->
+<div id="statusBar">
+  <div class="sb-item">
+    <span>BTC</span>
+    <span class="sb-price" id="sbBtcPrice">—</span>
+    <span class="sb-change" id="sbBtcChange"></span>
+  </div>
+  <span class="sb-sep">|</span>
+  <div class="sb-item">
+    <span>ETH</span>
+    <span class="sb-price" id="sbEthPrice">—</span>
+    <span class="sb-change" id="sbEthChange"></span>
+  </div>
+  <span class="sb-sep">|</span>
+  <div class="sb-item">
+    <i data-lucide="mail" style="width:14px;height:14px"></i>
+    <span id="sbEmailCount">—</span>
+  </div>
+  <span class="sb-time" id="sbTime">—</span>
+</div>
+
+<!-- Login Screen -->
+<div id="loginScreen">
+  <div class="login-panel">
+    <div class="login-logo">🎼</div>
+    <div class="login-title">OpenEnsemble</div>
+    <div class="login-subtitle" id="loginSubtitle">Select your profile</div>
+    <div id="loginUserList" class="login-user-list"></div>
+    <div class="login-pw-row" id="loginPwRow" style="display:none">
+      <label>Password</label>
+      <input type="password" id="loginPw" placeholder="Enter your password" autocomplete="current-password">
+    </div>
+    <div class="login-error" id="loginError"></div>
+    <button class="login-btn" id="loginBtn" onclick="doLogin()" style="display:none">Sign In</button>
+    <!-- Setup form (shown when no users exist) -->
+    <div id="loginSetupForm" class="login-setup-form" style="display:none">
+      <div style="font-size:13px;color:var(--muted);text-align:center">Create your first profile to get started</div>
+      <div class="login-emoji-row">
+        <select id="setupEmoji">
+          <option>🧑</option><option>👩</option><option>👨</option><option>🧒</option>
+          <option>🧑‍💻</option><option>🧑‍🎨</option><option>🧑‍🏫</option><option>🦊</option>
+        </select>
+        <input id="setupName" placeholder="Your name" maxlength="30">
+      </div>
+      <input type="password" id="setupPw" placeholder="Choose a password" autocomplete="new-password">
+      <input type="password" id="setupPw2" placeholder="Confirm password" autocomplete="new-password">
+      <div class="login-error" id="setupError"></div>
+      <button class="login-btn" onclick="doSetup()">Create Profile & Sign In</button>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--bg3);display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:12px;color:var(--muted);text-align:center">Already have an OpenEnsemble backup?</div>
+        <input type="file" id="setupRestoreFile" accept=".tar.gz,.tgz,application/gzip" style="font-size:12px">
+        <button class="login-btn" id="setupRestoreBtn" onclick="doInitialRestore()" disabled style="background:var(--bg3)">Restore from Backup</button>
+        <div class="login-error" id="setupRestoreStatus" style="color:var(--muted);font-size:12px"></div>
+      </div>
+    </div>
+    <div class="login-setup" id="loginSetupLink" style="display:none">
+      <a onclick="showSetupForm()">+ Add new profile</a>
+    </div>
+  </div>
+</div>
+
+<!-- Desk layout -->
+<div class="desk">
+
+  <!-- Left sidebar strip -->
+  <div class="sidebar-strip" id="sidebarStrip">
+    <button class="strip-btn" id="sbtnAgents" onclick="toggleDrawer('drawerAgents','sbtnAgents')" title="Agents">
+      <i data-lucide="bot"></i>
+      <span class="strip-tooltip">Agents</span>
+    </button>
+    <button class="strip-btn" id="sbtnInbox" onclick="toggleDrawer('drawerInbox','sbtnInbox')" title="Inbox">
+      <i data-lucide="mail"></i>
+      <span class="strip-badge" id="inboxBadge" style="display:none"></span>
+      <span class="strip-tooltip">Inbox</span>
+    </button>
+    <button class="strip-btn" id="sbtnNews" onclick="toggleDrawer('drawerNews','sbtnNews')" title="News">
+      <i data-lucide="newspaper"></i>
+      <span class="strip-tooltip">News</span>
+    </button>
+    <button class="strip-btn" id="sbtnMarkets" onclick="toggleDrawer('drawerMarkets','sbtnMarkets')" title="Markets">
+      <i data-lucide="trending-up"></i>
+      <span class="strip-tooltip">Markets</span>
+    </button>
+    <button class="strip-btn" id="sbtnTutorToday" onclick="toggleDrawer('drawerTutorToday','sbtnTutorToday')" title="Today · Tutor">
+      <i data-lucide="graduation-cap"></i>
+      <span class="strip-tooltip">Today · Tutor</span>
+    </button>
+    <button class="strip-btn" id="sbtnTasks" onclick="toggleDrawer('drawerTasks','sbtnTasks')" title="Tasks">
+      <i data-lucide="square-check"></i>
+      <span class="strip-tooltip">Tasks</span>
+      <span class="strip-badge" id="tasksBadge" style="display:none"></span>
+    </button>
+    <button class="strip-btn" id="sbtnNotes" onclick="toggleDrawer('drawerNotes','sbtnNotes')" title="Docs">
+      <i data-lucide="folder"></i>
+      <span class="strip-tooltip">Docs</span>
+    </button>
+    <button class="strip-btn" id="sbtnMessages" onclick="toggleDrawer('drawerMessages','sbtnMessages')" title="Messages">
+      <i data-lucide="message-circle"></i>
+      <span class="strip-tooltip">Messages</span>
+      <span class="strip-badge" id="notesBadge" style="display:none"></span>
+    </button>
+    <button class="strip-btn" id="sbtnExpenses" onclick="toggleDrawer('drawerExpenses','sbtnExpenses')" title="Expenses">
+      <i data-lucide="wallet"></i>
+      <span class="strip-tooltip">Expenses</span>
+    </button>
+    <button class="strip-btn" id="sbtnSettings" onclick="toggleDrawer('drawerSettings','sbtnSettings')" title="Settings">
+      <i data-lucide="settings"></i>
+      <span class="strip-tooltip">Settings</span>
+    </button>
+    <button class="strip-btn" id="sbtnDash" onclick="toggleDrawer('drawerDashboard','sbtnDash')" title="Dashboard">
+      <i data-lucide="layout-dashboard"></i>
+      <span class="strip-tooltip">Dashboard</span>
+    </button>
+    <button class="strip-btn" id="sbtnNodes" onclick="toggleDrawer('drawerNodes','sbtnNodes')" title="Nodes">
+      <i data-lucide="server"></i>
+      <span class="strip-tooltip">Nodes</span>
+    </button>
+
+    <div class="strip-spacer"></div>
+    <div class="strip-sep"></div>
+
+    <button id="stripUserBtn" class="strip-user-btn" onclick="openUserPicker()" title="Switch profile">
+      <span id="stripUserEmoji">🧑</span>
+      <span class="strip-tooltip" id="stripUserTooltip">Profile</span>
+    </button>
+
+    <button class="strip-btn" id="sbtnClear" onclick="clearSession()" title="Clear session">
+      <i data-lucide="trash-2"></i>
+      <span class="strip-tooltip">Clear session</span>
+      <span class="session-dot" id="sessionDot"></span>
+    </button>
+    <button class="strip-btn" id="sbtnSearch" onclick="openSearch()" title="Search conversations (Ctrl+K)">
+      <i data-lucide="search"></i>
+      <span class="strip-tooltip">Search</span>
+    </button>
+    <button class="strip-btn" id="sbtnLayout" onclick="toggleLayout()" title="Toggle layout">
+      <i data-lucide="columns-2"></i>
+      <span class="strip-tooltip" id="layoutTooltip">Switch layout</span>
+    </button>
+  </div>
+
+  <!-- Main workspace -->
+  <div class="workspace" id="workspace">
+
+    <!-- Agent pill -->
+    <div class="agent-pill" id="agentPill">
+      <span id="agentPillEmoji">🤖</span>
+      <span id="agentPillName">Agent</span>
+      <div class="status-dot" id="statusDot"></div>
+    </div>
+
+    <!-- View toggle (Chat / Desktop) -->
+    <div class="view-toggle" id="viewToggle">
+      <button class="view-btn active" id="viewBtnChat" onclick="switchView('chat')" title="Chat">
+        <i data-lucide="message-square"></i>
+      </button>
+      <button class="view-btn" id="viewBtnDesktop" onclick="switchView('desktop')" title="Desktop">
+        <i data-lucide="layout-grid"></i>
+      </button>
+    </div>
+
+    <!-- Agent activity panel (background tasks) -->
+    <div id="agentActivityPanel" class="agent-activity-panel" style="display:none"></div>
+
+    <!-- Chat area -->
+    <div class="chat-area">
+      <div class="messages" id="messages">
+        <div id="emptyState" class="empty-state-wrap" style="display:none">
+          <div class="empty-state-card">
+            <div style="font-size:52px"><i data-lucide="bot" style="width:52px;height:52px;stroke-width:1.5"></i></div>
+            <h2>Welcome!</h2>
+            <p>Create your first agent to get started. Give it a name, description, and role.</p>
+            <button class="btn-create-agent" onclick="openNewAgentModal()"><i data-lucide="sparkles" style="width:14px;height:14px"></i> Create Your Agent</button>
+          </div>
+        </div>
+        <div class="typing" id="typing"><span></span><span></span><span></span></div>
+      </div>
+    </div>
+
+    <!-- Input area -->
+    <div class="input-area" style="position:relative">
+      <div class="slash-menu" id="slashMenu" style="display:none"></div>
+      <div class="attach-preview" id="attachPreview" style="display:none"></div>
+      <div class="input-row">
+        <button class="btn-attach" id="btnAttach" title="Attach file"><i data-lucide="paperclip"></i></button>
+        <input type="file" id="chatFileInput" accept="image/*,.pdf,.csv" style="display:none">
+        <textarea id="input" placeholder="Message…" rows="1"></textarea>
+        <button class="btn-stop" id="btnStop" title="Stop generating">■</button>
+        <button class="btn-send" id="btnSend"><i data-lucide="arrow-up"></i></button>
+      </div>
+    </div>
+
+    <!-- Desktop view -->
+    <div id="desktopView" class="desktop-view" style="display:none">
+      <div id="desktopCategories" class="desktop-categories"></div>
+      <div id="desktopBoard" class="desktop-widget-grid"></div>
+      <!-- Widget picker modal -->
+      <div class="widget-picker-overlay" id="widgetPicker" onclick="if(event.target===this)closeWidgetPicker()">
+        <div class="widget-picker-modal">
+          <div class="widget-picker-header">
+            <span>Add Widget</span>
+            <button class="widget-picker-close" onclick="closeWidgetPicker()">✕</button>
+          </div>
+          <div class="widget-picker-list"></div>
+        </div>
+      </div>
+      <div id="desktopItems" class="desktop-items" style="display:none">
+        <div class="desktop-items-hdr">
+          <button class="desktop-back-btn" onclick="showDesktopCategories()"><i data-lucide="arrow-left" style="width:14px;height:14px"></i> Back</button>
+          <span class="desktop-items-title" id="desktopItemsTitle"></span>
+        </div>
+        <div class="desktop-items-grid" id="desktopItemsGrid"></div>
+      </div>
+    </div>
+
+    <!-- Drawer overlay (click to close) -->
+    <div class="desk-drawer-overlay" id="drawerOverlay" onclick="closeAllDrawers()"></div>
+
+    <!-- Drawer: Agents -->
+    <div class="desk-drawer" id="drawerAgents">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="bot"></i></span>
+        <span class="drawer-label">Agents</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body">
+        <div id="agentListContainer"></div>
+        <button class="btn-new-agent-strip" id="btnNewAgentDrawer" onclick="closeAllDrawers();openNewAgentModal()">
+          <i data-lucide="sparkles" style="width:14px;height:14px"></i> New Agent
+        </button>
+      </div>
+    </div>
+
+    <!-- Drawer: Inbox -->
+    <div class="desk-drawer" id="drawerInbox">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="mail"></i></span>
+        <span class="drawer-label">Inbox</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div id="inboxAccountTabs" style="display:flex;gap:0;border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;background:var(--bg2);min-height:34px"></div>
+      <div class="desk-drawer-body" style="padding:0">
+        <div id="inboxPreview" style="display:flex;flex-direction:column;gap:0">
+          <div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Loading…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Drawer: News -->
+    <div class="desk-drawer" id="drawerNews">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="newspaper"></i></span>
+        <span class="drawer-label">News</span>
+        <span class="drawer-hint" data-tip="Tip: Click a topic button to set your default news category — it's saved to your profile. You can also configure your preferred news provider in Settings."><i data-lucide="info" style="width:14px;height:14px"></i></span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body" style="padding:0">
+        <div id="newsFeed" style="display:flex;flex-direction:column">
+          <div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Loading…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Drawer: Markets -->
+    <div class="desk-drawer" id="drawerMarkets">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="trending-up"></i></span>
+        <span class="drawer-label">Markets</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body" id="marketsBody">
+        <div style="color:var(--muted);font-size:13px">Loading market data…</div>
+      </div>
+    </div>
+
+    <!-- Drawer: Today (Tutor) -->
+    <div class="desk-drawer" id="drawerTutorToday">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="graduation-cap"></i></span>
+        <span class="drawer-label">Today</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body" id="tutorTodayBody">
+        <div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Drawer: Tasks -->
+    <div class="desk-drawer" id="drawerTasks">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="square-check"></i></span>
+        <span class="drawer-label">Tasks</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body">
+        <div class="task-list" id="taskList"><em style="color:var(--muted);font-size:13px">No tasks yet.</em></div>
+        <div class="task-form">
+          <label>Agent<select id="tAgent"></select></label>
+          <label>What should happen?
+            <textarea id="tPrompt" placeholder="remind me at 5pm every day to take medication&#10;or&#10;email me a news briefing tomorrow at 8am"></textarea>
+          </label>
+          <div style="font-size:11px;color:var(--muted);line-height:1.45;margin-top:-4px">
+            Start with <b>"remind me"</b> for a chime + banner only.
+            Anything else fires the agent — output lands in their chat. To get pushed,
+            include <i>"and send me a notification when done"</i> or <i>"text me the result"</i>.
+          </div>
+          <button class="btn-add-task" id="btnAddTask">Add Task</button>
+          <div id="tParseError" style="display:none;color:var(--err,#c33);font-size:12px;margin-top:4px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Drawer: Documents (+ Notes tab) -->
+    <div class="desk-drawer" id="drawerNotes">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="folder"></i></span>
+        <span class="drawer-label">Documents</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <!-- Tab bar -->
+      <div style="display:flex;border-bottom:1px solid var(--border);flex-shrink:0">
+        <button id="docTabDocs" onclick="switchDocTab('docs')" style="flex:1;padding:9px 4px;font-size:13px;font-weight:600;border:none;border-bottom:2px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer">Documents</button>
+        <button id="docTabNotes" onclick="switchDocTab('notes')" style="flex:1;padding:9px 4px;font-size:13px;font-weight:500;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Notes</button>
+      </div>
+      <!-- Documents view -->
+      <div id="docViewDocs" class="desk-drawer-body" style="flex-direction:column;gap:10px;overflow-y:auto">
+        <div id="docUploadTrigger" onclick="$('docFileInput').click()" style="border:2px dashed var(--border);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+          <div style="font-size:24px;margin-bottom:4px">📤</div>
+          <div style="font-size:13px;color:var(--muted)">Click to upload a document</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">PDF, images, text files — up to 25 MB</div>
+        </div>
+        <input id="docFileInput" type="file" style="display:none" onchange="handleDocFileSelect(event)">
+        <!-- Upload form -->
+        <div id="docUploadForm" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:12px;flex-direction:column;gap:9px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span id="docUploadIcon" style="font-size:20px">📄</span>
+            <span id="docUploadFilename" style="font-size:13px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:5px;font-weight:500;letter-spacing:.04em">SHARE WITH</div>
+            <div id="docSharePicker" style="display:flex;flex-wrap:wrap;gap:5px;min-height:24px"></div>
+          </div>
+          <input id="docUploadDesc" placeholder="Description (optional)" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:6px 9px;font-size:13px;font-family:inherit;outline:none">
+          <div style="display:flex;gap:7px">
+            <button onclick="cancelDocUpload()" style="flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px;font-size:13px;cursor:pointer">Cancel</button>
+            <button onclick="uploadDoc()" style="flex:2;background:var(--accent);border:none;color:#fff;border-radius:7px;padding:7px;font-size:13px;font-weight:600;cursor:pointer">Upload</button>
+          </div>
+        </div>
+        <!-- Filter tabs -->
+        <div style="display:flex;border-bottom:1px solid var(--border);margin:0 -14px;padding:0 14px;flex-shrink:0">
+          <button id="docFilter-all"    onclick="switchDocFilter('all')"    style="flex:1;padding:7px 4px;font-size:12px;font-weight:600;border:none;border-bottom:2px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer">Documents</button>
+          <button id="docFilter-photos" onclick="switchDocFilter('photos')" style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Images</button>
+          <button id="docFilter-videos" onclick="switchDocFilter('videos')" style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Videos</button>
+          <button id="docFilter-code"   onclick="switchDocFilter('code')"   style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Code</button>
+        </div>
+        <!-- Document list -->
+        <div id="docList"></div>
+      </div>
+      <!-- Notes view -->
+      <div id="docViewNotes" class="desk-drawer-body" style="display:none;flex-direction:column;gap:10px">
+        <div id="notesMetaRow" style="font-size:11px;color:var(--muted);min-height:14px"></div>
+        <textarea id="notesTextarea" placeholder="Write shared notes here…" style="flex:1;min-height:300px;resize:vertical;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px;font-size:13px;font-family:inherit;line-height:1.55"></textarea>
+        <button onclick="saveNotes()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 16px;font-size:13px;cursor:pointer;font-weight:600;align-self:flex-end">Save Notes</button>
+      </div>
+    </div>
+
+    <!-- Document viewer modal -->
+    <div id="docViewModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:600;align-items:center;justify-content:center">
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;width:min(820px,96vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
+          <span id="docViewTitle" style="flex:1;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <button id="docViewDownloadBtn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 13px;font-size:12px;cursor:pointer;flex-shrink:0">⬇ Download</button>
+          <button onclick="closeDocViewer()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:2px 4px;line-height:1;flex-shrink:0">✕</button>
+        </div>
+        <div id="docViewContent" style="flex:1;overflow:auto;min-height:0;display:flex;align-items:center;justify-content:center;padding:16px"></div>
+      </div>
+    </div>
+
+    <!-- Ask Agent modal -->
+    <div id="docAskModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:500;align-items:center;justify-content:center">
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:20px;width:320px;max-width:90vw;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:15px;font-weight:700">Ask your agent</div>
+        <div id="docAskFilename" style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;font-weight:500;letter-spacing:.04em">AGENT</div>
+          <select id="docAskAgent" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:6px 9px;font-size:13px;font-family:inherit;outline:none"></select>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;font-weight:500;letter-spacing:.04em">PROMPT</div>
+          <textarea id="docAskPrompt" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 9px;font-size:13px;font-family:inherit;resize:vertical;min-height:72px;outline:none"></textarea>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="closeDocAskModal()" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;font-size:13px;cursor:pointer">Cancel</button>
+          <button onclick="submitDocAsk()" style="flex:2;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px;font-size:13px;font-weight:600;cursor:pointer">Send to Agent</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Share modal -->
+    <div id="docShareModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:500;align-items:center;justify-content:center">
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:20px;width:340px;max-width:90vw;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:15px;font-weight:700">Share</div>
+        <div id="docShareModalFilename" style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:500;letter-spacing:.04em">SHARE WITH</div>
+          <div id="docShareModalPicker" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="closeDocShareModal()" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;font-size:13px;cursor:pointer">Cancel</button>
+          <button onclick="saveDocShare()" style="flex:2;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px;font-size:13px;font-weight:600;cursor:pointer">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Drawer: Messages -->
+    <div class="desk-drawer" id="drawerMessages">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="message-circle"></i></span>
+        <span class="drawer-label">Messages</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <!-- Three views: thread list, new thread, conversation -->
+      <div style="display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden">
+
+        <!-- View: Thread list -->
+        <div id="msgViewList" style="display:flex;flex-direction:column;flex:1;min-height:0">
+          <div style="padding:10px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
+            <button onclick="openNewThreadView()" style="background:var(--accent);border:none;color:#fff;border-radius:20px;padding:6px 18px;font-size:13px;cursor:pointer;font-weight:600">+ New Message</button>
+          </div>
+          <div id="msgThreadList" style="flex:1;overflow-y:auto"></div>
+        </div>
+
+        <!-- View: New thread picker -->
+        <div id="msgViewNew" style="display:none;flex-direction:column;flex:1;min-height:0">
+          <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <button onclick="showMsgView('list')" style="background:none;border:none;color:var(--accent);font-size:13px;cursor:pointer;padding:4px 0">← Back</button>
+            <span style="font-size:14px;font-weight:600;flex:1">New Message</span>
+          </div>
+          <div style="padding:12px;border-bottom:1px solid var(--border);flex-shrink:0">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500">To:</div>
+            <div id="msgNewPicker" style="display:flex;flex-wrap:wrap;gap:6px;min-height:30px"></div>
+          </div>
+          <div id="msgGroupNameRow" style="display:none;padding:10px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
+            <input id="msgGroupName" placeholder="Group name (optional)" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit">
+          </div>
+          <div style="flex:1"></div>
+          <div style="padding:12px;border-top:1px solid var(--border);flex-shrink:0">
+            <button onclick="startNewThread()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 16px;font-size:13px;cursor:pointer;font-weight:600;width:100%">Start Conversation</button>
+          </div>
+        </div>
+
+        <!-- View: Conversation -->
+        <div id="msgViewConvo" style="display:none;flex-direction:column;flex:1;min-height:0">
+          <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <button onclick="showMsgView('list')" style="background:none;border:none;color:var(--accent);font-size:20px;cursor:pointer;padding:0 4px;line-height:1;flex-shrink:0">←</button>
+            <span id="msgConvoTitle" style="flex:1;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+            <button onclick="deleteThread()" title="Delete conversation" style="background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:0 4px;line-height:1;flex-shrink:0;transition:color .15s" onmouseover="this.style.color='var(--red,#e05c5c)'" onmouseout="this.style.color='var(--muted)'">🗑</button>
+          </div>
+          <div id="msgConvoMessages" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:1px;min-height:0"></div>
+          <div style="padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0">
+            <div style="display:flex;gap:8px;align-items:flex-end">
+              <textarea id="msgConvoInput" placeholder="Message…" rows="1" style="flex:1;resize:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:20px;padding:8px 14px;font-size:13px;font-family:inherit;line-height:1.4;overflow-y:hidden;min-height:36px;max-height:120px" oninput="resizeMsgInput(this)" onkeydown="msgInputKeydown(event)"></textarea>
+              <button onclick="sendThreadMsg()" style="background:var(--accent);border:none;color:#fff;border-radius:50%;width:34px;height:34px;cursor:pointer;font-size:18px;line-height:1;flex-shrink:0;display:flex;align-items:center;justify-content:center">↑</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Drawer: Expenses (full-screen app) -->
+    <div class="desk-drawer" id="drawerExpenses">
+      <div class="exp-app">
+        <!-- Sidebar -->
+        <div class="exp-sidebar">
+          <div class="exp-sidebar-hdr">
+            <span style="font-size:20px"><i data-lucide="wallet" style="width:20px;height:20px"></i></span>
+            <span class="exp-sidebar-title">Expenses</span>
+            <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+          </div>
+          <div class="exp-book-selector" id="expBookSelector" style="padding:8px 12px">
+            <select id="expBookSelect" onchange="expBookChanged()" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer">
+              <option value="">All Transactions</option>
+            </select>
+            <div style="display:flex;gap:6px;margin-top:6px">
+              <button onclick="expShowCreateBook()" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer" title="New book">+ New Book</button>
+              <button id="expBookManageBtn" onclick="expShowManageBook()" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;display:none" title="Manage book">Manage</button>
+            </div>
+          </div>
+          <nav class="exp-nav">
+            <button class="exp-nav-item active" id="expNav-dashboard"    onclick="showExpView('dashboard')"><span class="exp-nav-icon"><i data-lucide="layout-dashboard"></i></span> Dashboard</button>
+            <button class="exp-nav-item"        id="expNav-transactions" onclick="showExpView('transactions')"><span class="exp-nav-icon"><i data-lucide="credit-card"></i></span> Transactions</button>
+            <button class="exp-nav-item"        id="expNav-reports"      onclick="showExpView('reports')"><span class="exp-nav-icon"><i data-lucide="bar-chart-2"></i></span> Reports</button>
+            <button class="exp-nav-item"        id="expNav-import"       onclick="showExpView('import')"><span class="exp-nav-icon"><i data-lucide="paperclip"></i></span> Import</button>
+            <button class="exp-nav-item"        id="expNav-group"        onclick="showExpView('group')"><span class="exp-nav-icon"><i data-lucide="users"></i></span> Group</button>
+          </nav>
+        </div>
+        <!-- Main -->
+        <div class="exp-main">
+
+          <!-- Dashboard -->
+          <div class="exp-view active" id="expView-dashboard">
+            <div class="exp-view-hdr">
+              <h2 class="exp-view-title">Dashboard</h2>
+              <button class="exp-refresh-btn" onclick="loadExpDashboard()">↻ Refresh</button>
+            </div>
+            <div class="exp-kpi-row">
+              <div class="exp-kpi-card"><div class="exp-kpi-label">This Month</div><div class="exp-kpi-value" id="expKpiMonth">—</div></div>
+              <div class="exp-kpi-card"><div class="exp-kpi-label">This Year</div><div class="exp-kpi-value" id="expKpiYear">—</div></div>
+              <div class="exp-kpi-card"><div class="exp-kpi-label">All Transactions</div><div class="exp-kpi-value" id="expKpiCount">—</div></div>
+              <div class="exp-kpi-card"><div class="exp-kpi-label">Top Category</div><div class="exp-kpi-value exp-kpi-cat" id="expKpiTopCat">—</div></div>
+            </div>
+            <div class="exp-dash-body">
+              <!-- Donut chart -->
+              <div class="exp-chart-panel">
+                <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:10px">Spending by Category</div>
+                <div id="expChartPeriods" class="exp-chart-period"></div>
+                <div style="position:relative;display:flex;justify-content:center;align-items:center">
+                  <canvas id="expCatChart" style="max-width:220px;max-height:220px"></canvas>
+                  <div id="expChartCenter" style="position:absolute;text-align:center;pointer-events:none">
+                    <div style="font-size:11px;color:var(--muted)" id="expChartCenterLabel">Total</div>
+                    <div style="font-size:18px;font-weight:700;color:var(--text)" id="expChartCenterVal">—</div>
+                  </div>
+                </div>
+                <div class="exp-legend" id="expChartLegend"></div>
+              </div>
+              <!-- Recent transactions -->
+              <div class="exp-recent-panel">
+                <div class="exp-section-hdr" style="margin-bottom:10px">Recent Transactions</div>
+                <div class="exp-table-wrap">
+                  <table class="exp-table"><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th class="exp-th-r">Amount</th></tr></thead>
+                  <tbody id="expDashRecent"></tbody></table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Transactions -->
+          <div class="exp-view" id="expView-transactions">
+            <div class="exp-view-hdr">
+              <h2 class="exp-view-title">Transactions</h2>
+              <div class="exp-txn-filters">
+                <input type="text" id="expSearch" placeholder="Search merchant…" oninput="loadExpTxns()" class="exp-filter-input" style="width:160px">
+                <input type="month" id="expFilterMonth" onchange="loadExpTxns()" class="exp-filter-input">
+                <select id="expFilterCat" onchange="loadExpTxns()" class="exp-filter-input">
+                  <option value="">All Categories</option>
+                </select>
+                <span id="expTxnTotal" class="exp-txn-total"></span>
+              </div>
+            </div>
+            <div class="exp-table-wrap">
+              <table class="exp-table">
+                <thead><tr><th>Date</th><th>Merchant</th><th>Description</th><th>Category</th><th class="exp-th-r">Amount</th><th></th></tr></thead>
+                <tbody id="expTxnList"></tbody>
+              </table>
+              <div id="expTxnEmpty" style="display:none;padding:48px;text-align:center;color:var(--muted);font-size:13px">No transactions found — try adjusting your filters or import a statement.</div>
+            </div>
+          </div>
+
+          <!-- Reports -->
+          <div class="exp-view" id="expView-reports">
+            <div class="exp-view-hdr">
+              <h2 class="exp-view-title">Reports</h2>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <select id="expOverviewYear" onchange="expOverviewYearChanged()" class="exp-filter-input"></select>
+                <select id="expOverviewPeriod" onchange="loadExpOverview()" class="exp-filter-input"></select>
+                <span id="expOverviewTotal" class="exp-txn-total"></span>
+              </div>
+            </div>
+            <div style="padding:0 16px 16px;flex-shrink:0">
+              <canvas id="expTimeChart" style="width:100%;max-height:200px"></canvas>
+            </div>
+            <div style="flex:1;overflow-y:auto" id="expOverviewTable"></div>
+          </div>
+
+          <!-- Import -->
+          <div class="exp-view" id="expView-import">
+            <div class="exp-view-hdr"><h2 class="exp-view-title">Import Statement</h2></div>
+            <div style="max-width:580px;overflow-y:auto">
+              <div id="expImportBookPicker" style="display:none;margin-bottom:14px;padding:12px;background:var(--bg3);border-radius:10px">
+                <label style="font-size:12px;font-weight:600;color:var(--muted);display:block;margin-bottom:6px">Import to book</label>
+                <select id="expImportBookSelect" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;cursor:pointer">
+                  <option value="">General (no book)</option>
+                </select>
+              </div>
+              <div id="expDropZone" ondragover="expDragOver(event)" ondragleave="expDragLeave(event)" ondrop="expDrop(event)"
+                   class="exp-drop-zone" onclick="document.getElementById('expFileInput').click()">
+                <div style="font-size:48px;margin-bottom:12px"><i data-lucide="paperclip" style="width:48px;height:48px;stroke-width:1.5"></i></div>
+                <div style="font-size:15px;font-weight:600;margin-bottom:6px">Drop files here or click to browse</div>
+                <div style="font-size:13px;color:var(--muted)">Receipts, invoices, bank statements — PDF, JPG, PNG, CSV</div>
+              </div>
+              <input type="file" id="expFileInput" accept=".pdf,.jpg,.jpeg,.png,.webp,.csv,.heic" style="display:none" onchange="expHandleFile(this.files[0])">
+              <div id="expUploadStatus" style="display:none;padding:14px;border-radius:10px;background:var(--bg3);font-size:13px;margin-top:14px"></div>
+              <div id="expNewTxns" style="display:none;margin-top:18px">
+                <div class="exp-section-hdr" style="margin-bottom:10px">Extracted Transactions</div>
+                <div class="exp-table-wrap"><table class="exp-table"><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th class="exp-th-r">Amount</th></tr></thead><tbody id="expNewTxnsList"></tbody></table></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Group -->
+          <div class="exp-view" id="expView-group">
+            <div class="exp-view-hdr"><h2 class="exp-view-title">Shared Group</h2></div>
+            <div style="max-width:500px;display:flex;flex-direction:column;gap:16px;overflow-y:auto">
+              <div id="expGroupInfo" style="display:flex;flex-direction:column;gap:10px">
+                <div style="color:var(--muted);font-size:13px;text-align:center;padding:16px">Loading…</div>
+              </div>
+              <div id="expGroupCreatePanel" style="display:none;flex-direction:column;gap:12px;padding:18px;background:var(--bg3);border-radius:10px">
+                <div style="font-size:14px;font-weight:600">Create Shared Group</div>
+                <input id="expGroupName" placeholder="Group name (e.g. Household)" class="exp-input">
+                <div style="font-size:12px;color:var(--muted)">Select members to share expenses with:</div>
+                <div id="expGroupMemberPicker" style="display:flex;flex-direction:column;gap:8px"></div>
+                <button onclick="expCreateGroup()" class="exp-btn-primary" style="align-self:flex-start">Create Group</button>
+              </div>
+              <div id="expGroupManagePanel" style="display:none;flex-direction:column;gap:10px">
+                <div style="font-size:12px;color:var(--muted)">Add member:</div>
+                <div style="display:flex;gap:8px">
+                  <select id="expGroupAddSel" class="exp-filter-input" style="flex:1"></select>
+                  <button onclick="expGroupAddMember()" class="exp-btn-primary" style="padding:6px 14px">Add</button>
+                </div>
+                <button onclick="expGroupDelete()" class="exp-btn-ghost" style="align-self:flex-start">Disband Group</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Book management overlay -->
+        <div id="expBookOverlay" style="display:none;position:absolute;inset:0;background:rgba(0,0,0,.5);z-index:50;display:none;align-items:center;justify-content:center">
+          <div style="background:var(--bg);border-radius:12px;padding:20px;width:340px;max-width:90%;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+            <div id="expBookOverlayContent"></div>
+            <button onclick="expCloseBookOverlay()" style="margin-top:12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;width:100%">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Drawer: Settings -->
+    <div class="desk-drawer" id="drawerSettings">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="settings"></i></span>
+        <span class="drawer-label">Settings</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="settings-tabs">
+        <button class="stab-btn active" onclick="switchSettingsTab('agents')"  id="stab-agents">Agents</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('plugins')" id="stab-plugins">Drawers</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('skills')"  id="stab-skills">Skills</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('tasks')"   id="stab-tasks">Tasks</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('users')"   id="stab-users"  style="display:none">Users</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('providers')" id="stab-providers" style="display:none">Providers</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('profile')" id="stab-profile">Profile</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('system')"  id="stab-system" style="display:none">System</button>
+        <button class="stab-btn"        onclick="switchSettingsTab('backup')" id="stab-backup" style="display:none">Backup</button>
+      </div>
+      <div class="desk-drawer-body">
+
+        <!-- ── Agents tab ── -->
+        <div class="stab-panel active" id="stab-panel-agents">
+          <div class="models-header-row">
+            <span style="font-size:12px;color:var(--muted)">Assign a model to each agent</span>
+            <button class="models-refresh" id="btnRefreshModels">↻ Refresh</button>
+          </div>
+          <div id="agentModelRows" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px"></div>
+          <div style="border-top:1px solid var(--border);padding-top:12px">
+            <div class="model-list-scroll" id="modelBrowser" style="margin-bottom:10px"></div>
+            <div class="model-custom-row" id="customModelRow">
+              <input id="customModelName" placeholder="Custom model name">
+              <select id="customModelProvider">
+                <option value="ollama">Ollama</option>
+                <option value="lmstudio">LM Studio</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="grok">xAI Grok</option>
+              </select>
+              <button class="model-add-btn" id="btnAddCustomModel">Add</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Providers tab (admin/owner only) ── -->
+        <div class="stab-panel" id="stab-panel-providers" style="overflow-y:auto;max-height:calc(100dvh - 200px);padding-right:4px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:14px">Configure LLM provider endpoints and API keys. Toggle providers on/off to control which models agents can use.</div>
+
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_anthropic">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="key" style="width:14px;height:14px"></i> Anthropic</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_anthropic" checked onchange="toggleProvider('anthropic',this.checked)"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_anthropic">
+              <div class="settings-section-desc" style="margin-bottom:8px">API key for Claude models.</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="password" id="providerAnthropicKey" placeholder="sk-ant-…" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProviderAnthropicKey()"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerAnthropicStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_fireworks">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="flame" style="width:14px;height:14px"></i> Fireworks AI</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_fireworks" checked onchange="toggleProvider('fireworks',this.checked)"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_fireworks">
+              <div class="settings-section-desc" style="margin-bottom:8px">API key for image generation (Flux models).</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="password" id="providerFireworksKey" placeholder="fw_…" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProviderFireworksKey()"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerFireworksStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_ollama">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="cloud" style="width:14px;height:14px"></i> Ollama (cloud)</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_ollama" checked onchange="toggleProvider('ollama',this.checked)"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_ollama">
+              <div class="settings-section-desc" style="margin-bottom:8px">Ollama Cloud / Turbo (ollama.com). Requires an API key.</div>
+              <input type="text" id="providerOllamaUrl" placeholder="https://ollama.com/api"
+                style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="password" id="providerOllamaKey" placeholder="API key" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProvider('ollama')"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerOllamaKeyStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_ollama_local">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="cpu" style="width:14px;height:14px"></i> Ollama (local)</div>
+            </div>
+            <div id="providerBody_ollama_local">
+              <div class="settings-section-desc" style="margin-bottom:8px">Base URL for a locally-installed Ollama instance. Required to host the memory-lane GGUF — Cloud doesn't accept custom model uploads.</div>
+              <input type="text" id="providerOllamaLocalUrl" placeholder="http://localhost:11434"
+                style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="password" id="providerOllamaLocalKey" placeholder="API key (optional)" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProvider('ollama-local')"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerOllamaLocalKeyStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_grok">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="zap" style="width:14px;height:14px"></i> xAI Grok</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_grok" checked onchange="toggleProvider('grok',this.checked)"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_grok">
+              <div class="settings-section-desc" style="margin-bottom:8px">API key for xAI Grok — chat (grok-4, grok-3, grok-3-mini), image (grok-imagine), and video (grok-video) models.</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="password" id="providerGrokKey" placeholder="xai-… (inference key)" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProviderGrokKey()"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerGrokStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_lmstudio">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="monitor" style="width:14px;height:14px"></i> LM Studio</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_lmstudio" checked onchange="toggleProvider('lmstudio',this.checked)"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_lmstudio">
+              <div class="settings-section-desc" style="margin-bottom:8px">Base URL for your local LM Studio server.</div>
+              <input type="text" id="providerLmstudioUrl" placeholder="http://127.0.0.1:1234"
+                style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="password" id="providerLmstudioKey" placeholder="API key (optional)" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProvider('lmstudio')"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerLmstudioKeyStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_openrouter">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="route" style="width:14px;height:14px"></i> OpenRouter</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_openrouter" checked onchange="toggleProvider('openrouter',this.checked)"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_openrouter">
+              <div class="settings-section-desc" style="margin-bottom:8px">API key for OpenRouter — access hundreds of AI models through a single endpoint.</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="password" id="providerOpenrouterKey" placeholder="sk-or-…" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProviderOpenRouterKey()"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerOpenrouterStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+
+          <!-- Cloud LLM providers (OpenAI-compatible) — rendered dynamically by loadProviderConfig() -->
+          <div id="providerCompatList"></div>
+
+          <div class="provider-card" id="providerCard_tts">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="volume-2" style="width:14px;height:14px"></i> Text-to-Speech</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_tts" checked onchange="toggleProvider('tts',this.checked)"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_tts">
+              <div class="settings-section-desc" style="margin-bottom:8px">Optional external TTS for pronunciation audio. Uses OpenAI-compatible API format. Leave blank to use browser built-in speech.</div>
+              <input type="text" id="providerTtsUrl" placeholder="https://api.openai.com/v1/audio/speech"
+                style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                <input type="password" id="providerTtsKey" placeholder="API key" autocomplete="new-password"
+                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="text" id="providerTtsModel" placeholder="Model (e.g. tts-1)"
+                  style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <input type="text" id="providerTtsVoice" placeholder="Voice (e.g. alloy)"
+                  style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <button onclick="saveProviderTts()"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              </div>
+              <div id="providerTtsStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Drawers tab ── -->
+        <div class="stab-panel" id="stab-panel-plugins">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Enable or configure drawers. Disabled drawers are hidden from the sidebar.</div>
+          <div id="pluginsList" style="display:flex;flex-direction:column;gap:10px">
+            <div style="color:var(--muted);font-size:12px">Loading drawers…</div>
+          </div>
+        </div>
+
+        <!-- ── Skills tab (Roles + Tools) ── -->
+        <div class="stab-panel" id="stab-panel-skills">
+          <div class="settings-section-title" style="margin-bottom:8px">Roles</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Roles define what each agent is responsible for. Claim a role to assign it exclusively to one agent.</div>
+          <div id="rolesList" style="display:flex;flex-direction:column;gap:8px">
+            <div style="color:var(--muted);font-size:12px">Loading…</div>
+          </div>
+          <div class="settings-section-title" style="margin-top:24px;margin-bottom:8px">Tools</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Tools are capabilities available to any agent.</div>
+          <div id="skillsList" style="display:flex;flex-direction:column;gap:8px">
+            <div style="color:var(--muted);font-size:12px">Loading…</div>
+          </div>
+        </div>
+
+        <!-- ── Tasks tab ── -->
+        <div class="stab-panel" id="stab-panel-tasks">
+          <div class="settings-section-title" style="margin-bottom:8px">Scheduled Tasks</div>
+          <div class="task-list" id="settingsTaskList"><em style="color:var(--muted);font-size:13px">No tasks yet.</em></div>
+          <div class="task-form" style="margin-top:10px">
+            <label>Agent<select id="stAgent"></select></label>
+            <label>What should happen?
+              <textarea id="stPrompt" placeholder="remind me at 5pm every day to take medication&#10;or&#10;email me a news briefing tomorrow at 8am"></textarea>
+            </label>
+            <div style="font-size:11px;color:var(--muted);line-height:1.45;margin-top:-4px">
+              Start with <b>"remind me"</b> for a chime + banner only.
+              Anything else fires the agent — output lands in their chat. To get pushed,
+              include <i>"and send me a notification when done"</i> or <i>"text me the result"</i>.
+            </div>
+            <button class="btn-add-task" id="btnAddSettingsTask">Add Task</button>
+            <div id="stParseError" style="display:none;color:var(--err,#c33);font-size:12px;margin-top:4px"></div>
+          </div>
+          <div id="autoLabelSection" style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span style="font-size:15px"><i data-lucide="tag" style="width:15px;height:15px"></i></span>
+              <div style="flex:1">
+                <div class="settings-section-title">Auto-Label</div>
+                <div style="font-size:11px;color:var(--muted)">Tag incoming emails automatically — Gmail accounts only</div>
+              </div>
+              <label style="display:flex;align-items:center;gap:6px;flex-shrink:0;cursor:pointer">
+                <input type="checkbox" id="autoLabelToggle" onchange="toggleGmailAutoLabel(this.checked)"
+                  style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent)">
+              </label>
+            </div>
+            <div id="autoLabelContent"></div>
+          </div>
+        </div>
+
+        <!-- ── Users tab (admin/owner only) ── -->
+        <div class="stab-panel" id="stab-panel-users">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Control which tools each user can access, lock their settings, or adjust roles.</div>
+          <div id="manageUsersList" style="display:flex;flex-direction:column;gap:10px">
+            <div style="color:var(--muted);font-size:12px">Loading…</div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button onclick="openAddUserModal()" style="flex:1;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">+ Add User</button>
+            <button onclick="openInviteModal()" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600"><i data-lucide="link" style="width:12px;height:12px"></i> Invite Link</button>
+          </div>
+        </div>
+
+        <!-- ── Profile tab ── -->
+        <div class="stab-panel" id="stab-panel-profile">
+          <div id="avatarPickerContainer" style="margin-bottom:16px"></div>
+          <div id="profileInfoRow" style="font-size:13px;color:var(--muted);margin-bottom:8px"></div>
+          <div id="profileRoleBadge" style="display:none;margin-bottom:10px"></div>
+          <div style="display:flex;gap:8px;margin-bottom:16px">
+            <button onclick="openUserPicker()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 12px;font-size:12px;cursor:pointer">Switch Profile</button>
+            <button onclick="logout()" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:8px;padding:7px 12px;font-size:12px;cursor:pointer">Sign Out</button>
+          </div>
+          <details style="font-size:12px;color:var(--muted)">
+            <summary style="cursor:pointer">Change password</summary>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+              <input type="password" id="pwCurrent" placeholder="Current password" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+              <input type="password" id="pwNew" placeholder="New password" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+              <input type="password" id="pwNew2" placeholder="Confirm new password" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+              <div id="pwChangeError" style="font-size:11px;color:var(--red,#e05c5c);min-height:14px"></div>
+              <button onclick="changePassword()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;font-weight:600">Update Password</button>
+            </div>
+          </details>
+          <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+            <div class="settings-section-title" style="margin-bottom:10px">Active Sessions</div>
+            <div id="sessionsList" style="display:flex;flex-direction:column;gap:6px;font-size:12px;margin-bottom:16px">
+              <div style="color:var(--muted)">Loading...</div>
+            </div>
+          </div>
+          <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+            <div class="settings-section-title" style="margin-bottom:10px">Connected Accounts</div>
+            <div id="oauthStatusRows" style="display:flex;flex-direction:column;gap:8px">
+              <div style="color:var(--muted);font-size:12px">Loading…</div>
+            </div>
+          </div>
+          <div id="telegramSection" style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+            <div class="settings-section-title" style="margin-bottom:4px"><i data-lucide="send" style="width:14px;height:14px"></i> Telegram</div>
+            <div class="settings-section-desc" style="margin-bottom:10px">Chat with your coordinator agent from anywhere via your own Telegram bot. Create one with <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent)">@BotFather</a>, paste the token, register a public HTTPS webhook, then send /start from your bot.</div>
+            <div id="telegramBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
+          </div>
+          <div id="mirrorSection" style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
+            <div class="settings-section-title" style="margin-bottom:4px"><i data-lucide="hard-drive-download" style="width:14px;height:14px"></i> Local mirror folder</div>
+            <div class="settings-section-desc" style="margin-bottom:10px">
+              Pick a folder on <em>your</em> computer that coding-project files should be saved to. Whenever the coder agent writes, edits, or deletes a file on the server, the same change is streamed to this folder in your browser.
+              Each project becomes a subfolder, so you can open them in your local editor (VS Code, etc.).
+              Requires a Chromium-based browser. Only files under 5 MB each (50 MB per project) are mirrored.
+            </div>
+            <div id="mirrorBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
+          </div>
+        </div>
+
+        <!-- ── System tab ── -->
+        <div class="stab-panel" id="stab-panel-system">
+          <div style="margin-bottom:16px">
+            <div class="settings-section-title"><i data-lucide="brain" style="width:14px;height:14px"></i> Cortex Memory Models</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">Models used to embed memories and score importance. Any provider you have enabled is available here.</div>
+            <div id="cortexModelRows" style="display:flex;flex-direction:column;gap:8px"></div>
+          </div>
+
+          <div style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <div class="settings-section-title"><i data-lucide="calendar-clock" style="width:14px;height:14px"></i> Scheduler Model</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">Fine-tuned model that interprets scheduling requests ("remind me to...", "every morning..."). Picking Ollama or LM Studio pushes our model into that runtime.</div>
+            <div id="planModelRows" style="display:flex;flex-direction:column;gap:8px"></div>
+          </div>
+
+          <div id="visionProviderRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <div class="settings-section-title"><i data-lucide="eye" style="width:14px;height:14px"></i> Expense Receipt Model</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">Parses receipts, invoices, and statements uploaded directly through the Expenses drawer. Chat attachments use the agent's own model and ignore this setting.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" id="visionModelSelectRow">
+              <div style="color:var(--muted);font-size:12px">Loading…</div>
+            </div>
+          </div>
+          <div id="reminderChannelRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <div class="settings-section-title"><i data-lucide="bell" style="width:14px;height:14px"></i> Reminder Delivery</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">Where your scheduled reminders get delivered when they fire. "All" sends to every channel you have set up.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="reminderChannelSelect" onchange="saveReminderChannel(this.value)" style="flex:0 0 auto;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+                <option value="websocket">In-app (banner + chime)</option>
+                <option value="telegram">Telegram</option>
+                <option value="email">Email</option>
+                <option value="all">All channels</option>
+              </select>
+              <span id="reminderChannelStatus" style="font-size:11px;color:var(--muted)"></span>
+            </div>
+          </div>
+          <div id="sessionExpiryRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <div class="settings-section-title"><i data-lucide="timer" style="width:14px;height:14px"></i> Session Expiry</div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+              <label style="font-size:12px;color:var(--muted);flex:1">Hours (0 = never expire)</label>
+              <input type="number" id="sessionExpiryInput" min="0" max="720" style="width:80px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+              <button onclick="saveSessionExpiry()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+            </div>
+          </div>
+          <div id="stripThinkingRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+              <div>
+                <div class="settings-section-title" style="margin-bottom:2px"><i data-lucide="eye-off" style="width:14px;height:14px"></i> Strip Thinking Output</div>
+                <div class="settings-section-desc">Hide internal reasoning blocks (&lt;think&gt;…&lt;/think&gt;) emitted by reasoning models before showing their response.</div>
+              </div>
+              <label style="position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0">
+                <input type="checkbox" id="stripThinkingToggle" onchange="saveStripThinkingTags(this.checked)" style="opacity:0;width:0;height:0">
+                <span style="position:absolute;cursor:pointer;inset:0;background:var(--bg3);border:1px solid var(--border);border-radius:11px;transition:.2s" id="stripThinkingTrack"></span>
+              </label>
+            </div>
+          </div>
+          <div id="claudeCodeLimitsRow" style="border-top:1px solid var(--border);padding-top:14px">
+            <div class="settings-section-title"><i data-lucide="bot" style="width:14px;height:14px"></i> Claude Code Limits</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">Token limits for usage tracking. Check your Anthropic console for exact plan numbers.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="number" id="claudeCodeDailyLimitInput" placeholder="Daily limit" min="0" style="width:130px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+              <input type="number" id="claudeCodeWeeklyLimitInput" placeholder="Weekly limit" min="0" style="width:130px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+              <button onclick="saveClaudeCodeLimits()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+            </div>
+          </div>
+
+          <div id="restartServerRow" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <div style="flex:1;min-width:200px">
+                <div class="settings-section-title" style="margin-bottom:2px"><i data-lucide="refresh-cw" style="width:14px;height:14px"></i> Restart Server</div>
+                <div class="settings-section-desc">Fully shut down and respawn OpenEnsemble. All in-flight chats and WebSocket connections will be dropped.</div>
+              </div>
+              <button id="btnRestartServer" onclick="restartServer()" style="background:#f44336;border:none;color:#fff;border-radius:6px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Restart</button>
+            </div>
+            <div id="restartServerStatus" style="font-size:11px;color:var(--muted);margin-top:8px;display:none"></div>
+          </div>
+
+          <div id="logsViewerRow" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px">
+            <div class="settings-section-title"><i data-lucide="file-text" style="width:14px;height:14px"></i> Server Logs</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">View recent server events. Logs rotate automatically at ~5 MB.</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+              <select id="logFileSelect" onchange="refreshLogs()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
+                <option value="app">app.log</option>
+                <option value="error">error.log</option>
+              </select>
+              <select id="logLevelSelect" onchange="refreshLogs()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
+                <option value="">All levels</option>
+                <option value="info">Info</option>
+                <option value="warn">Warn</option>
+                <option value="error">Error</option>
+              </select>
+              <input type="text" id="logSearchInput" placeholder="search…" oninput="debounceLogs()" style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
+              <input type="number" id="logTailInput" value="200" min="10" max="5000" step="50" onchange="refreshLogs()" style="width:76px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px" title="Number of lines to show">
+              <button onclick="refreshLogs()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;font-weight:600">Refresh</button>
+            </div>
+            <div id="logFileMeta" style="font-size:10px;color:var(--muted);margin-bottom:6px">—</div>
+            <div id="logEntries" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:320px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word">
+              <div style="color:var(--muted)">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Backup & Restore tab (admin/owner only) ── -->
+        <div class="stab-panel" id="stab-panel-backup">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:16px">Download a full backup of your OpenEnsemble data, or restore from a previous backup. Backups include config, users, sessions, expenses, tasks, and autolabel rules.</div>
+
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <div>
+              <div class="settings-section-title" style="margin-bottom:8px">Export Backup</div>
+              <button id="btnBackupDownload" onclick="downloadBackup()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:10px 18px;font-size:12px;cursor:pointer;font-weight:600;width:100%">Download Backup (.tar.gz)</button>
+            </div>
+
+            <div style="border-top:1px solid var(--border);padding-top:14px">
+              <div class="settings-section-title" style="margin-bottom:4px">Restore Backup</div>
+              <div style="font-size:11px;color:var(--red,#e05c5c);margin-bottom:8px">Warning: This will overwrite current data. The server should be restarted after restoring.</div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="file" id="backupFileInput" accept=".tar.gz,.tgz" style="font-size:11px;color:var(--muted);flex:1">
+                <button id="btnBackupRestore" onclick="restoreBackup()" style="background:var(--red,#e05c5c);border:none;color:#fff;border-radius:8px;padding:10px 18px;font-size:12px;cursor:pointer;font-weight:600;white-space:nowrap" disabled>Restore</button>
+              </div>
+              <div id="restoreStatus" style="font-size:11px;color:var(--muted);margin-top:6px;min-height:16px"></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Dashboard drawer (must be inside .workspace for correct absolute positioning) -->
+    <div class="desk-drawer" id="drawerDashboard">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="layout-dashboard"></i></span>
+        <span class="drawer-label">Dashboard</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body" id="dashBody">
+        <div style="color:var(--muted);padding:20px">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Nodes drawer -->
+    <div class="desk-drawer" id="drawerNodes">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="server"></i></span>
+        <span class="drawer-label">Remote Nodes</span>
+        <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body" id="drawerNodesBody" style="padding:0">
+        <div class="cdraw-empty">Loading…</div>
+      </div>
+    </div>
+
+    <!-- New Agent drawer (must be inside .workspace for correct absolute positioning) -->
+    <div class="desk-drawer" id="newAgentModal">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon" id="newAgentModalTitle"><i data-lucide="sparkles" style="width:16px;height:16px"></i> New Agent</span>
+        <button class="btn-drawer-x" id="btnNewAgentClose" onclick="closeAllDrawers()">✕</button>
+      </div>
+      <div class="desk-drawer-body" style="padding:16px;display:flex;flex-direction:column;gap:14px;overflow-y:auto">
+        <div class="agent-form" id="agentForm">
+          <div class="agent-form-row">
+            <label style="flex:0 0 56px">Emoji
+              <input id="aEmoji" maxlength="4" value="🤖" style="text-align:center;font-size:22px;padding:6px;cursor:pointer" title="Click to pick emoji" onclick="document.getElementById('emojiPicker').classList.toggle('open')" readonly>
+            </label>
+            <label>Name
+              <input id="aName" placeholder="e.g. Trader, Coach, Coder…">
+            </label>
+          </div>
+          <div class="emoji-picker" id="emojiPicker"></div>
+          <label>Description — what does this agent do?
+            <textarea id="aDesc" placeholder="e.g. Helps me research stocks, analyse charts, and track my portfolio. Knows about technical analysis and options."></textarea>
+          </label>
+          <label id="aRoleLabel">Role
+            <select id="aRole">
+              <option value="">— General Assistant —</option>
+            </select>
+          </label>
+          <div class="agent-form-row">
+            <label>Tools
+              <select id="aToolSet">
+                <option value="web">🌐 Web + Tasks</option>
+                <option value="none">🚫 None</option>
+              </select>
+            </label>
+            <label>Model
+              <select id="aModel" onchange="onAgentModelChange()"></select>
+            </label>
+          </div>
+          <label id="aOutputDirLabel" style="display:none">Output Directory
+            <input id="aOutputDir" placeholder="/path/to/output/dir" style="font-family:monospace;font-size:12px">
+          </label>
+          <details style="margin-top:4px">
+            <summary style="cursor:pointer;color:var(--muted);font-size:12px;user-select:none;padding:4px 0">Advanced</summary>
+            <div style="display:flex;flex-direction:column;gap:10px;padding-top:6px">
+              <label>Context Size <span style="opacity:0.5;font-size:11px">(tokens — leave blank for default 32768)</span>
+                <input id="aContextSize" type="number" min="1024" max="2000000" step="1024" placeholder="32768">
+              </label>
+              <label>Max Output Tokens <span style="opacity:0.5;font-size:11px">(leave blank for default 8192)</span>
+                <input id="aMaxTokens" type="number" min="256" max="200000" step="256" placeholder="8192">
+              </label>
+            </div>
+          </details>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding-top:4px;flex-shrink:0">
+          <button class="btn-modal-close" onclick="closeAllDrawers()">Cancel</button>
+          <button class="btn-create-agent" id="btnCreateAgent">Create Agent</button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /workspace -->
+</div><!-- /desk -->
+
+<!-- Mobile bottom nav (populated by JS) -->
+<nav class="bottom-nav" id="bottomNav">
+  <div class="bottom-nav-inner" id="bottomNavInner"></div>
+</nav>
+
+<!-- Mobile drawer (hamburger) -->
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-header">
+    <h3>OpenEnsemble</h3>
+    <button class="btn-drawer-close" id="btnDrawerClose">✕</button>
+  </div>
+  <div class="drawer-body">
+    <button class="drawer-item" onclick="closeDrawer();openNewAgentModal()">
+      <span class="di-icon"><i data-lucide="sparkles"></i></span> New Agent
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerAgents')">
+      <span class="di-icon"><i data-lucide="bot"></i></span> Agents
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();switchView('desktop')">
+      <span class="di-icon"><i data-lucide="layout-grid"></i></span> Desktop
+    </button>
+    <div class="drawer-sep"></div>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerInbox')">
+      <span class="di-icon"><i data-lucide="mail"></i></span> Inbox
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerNews')">
+      <span class="di-icon"><i data-lucide="newspaper"></i></span> News
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerMarkets')">
+      <span class="di-icon"><i data-lucide="trending-up"></i></span> Markets
+    </button>
+    <button class="drawer-item" id="drawerTasksMobile" onclick="closeDrawer();openTasksDrawer()">
+      <span class="di-icon"><i data-lucide="clock"></i></span> <span id="drawerTasksLabel">Tasks</span>
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerNotes','sbtnNotes')">
+      <span class="di-icon"><i data-lucide="folder"></i></span> Docs
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerMessages','sbtnMessages')">
+      <span class="di-icon"><i data-lucide="message-circle"></i></span> Messages<span id="notesBadgeMobile" style="display:none;background:var(--accent);color:#fff;border-radius:8px;font-size:9px;padding:1px 5px;margin-left:6px;vertical-align:middle;line-height:14px"></span>
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerExpenses')">
+      <span class="di-icon"><i data-lucide="wallet"></i></span> Expenses
+    </button>
+    <div class="drawer-sep"></div>
+    <button class="drawer-item" onclick="closeDrawer();openSettingsDrawer()">
+      <span class="di-icon"><i data-lucide="settings"></i></span> Settings
+    </button>
+    <button class="drawer-item" onclick="closeDrawer();toggleDrawer('drawerDashboard','sbtnDash')">
+      <span class="di-icon"><i data-lucide="layout-dashboard"></i></span> Dashboard
+    </button>
+    <div class="drawer-sep"></div>
+    <button class="drawer-item danger" onclick="closeDrawer();clearSession()">
+      <span class="di-icon"><i data-lucide="trash-2"></i></span> Clear session
+      <span class="session-dot" id="sessionDotMobile"></span>
+    </button>
+  </div>
+</div>
+
+
+<!-- Search modal -->
+<div class="modal-backdrop" id="searchModal" onclick="if(event.target===this)closeSearch()" style="display:none">
+  <div class="modal" style="width:500px;max-height:70vh;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <i data-lucide="search" style="width:18px;height:18px;opacity:.6"></i>
+      <input id="searchInput" type="text" placeholder="Search conversations…" style="flex:1;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text-primary);font-size:14px" autocomplete="off">
+    </div>
+    <div id="searchResults" style="overflow-y:auto;flex:1;min-height:0"></div>
+  </div>
+</div>
+
+<!-- Desktop detail modal -->
+<div class="modal-backdrop" id="desktopDetailModal" onclick="if(event.target===this)closeDesktopDetail()">
+  <div class="modal desktop-detail-modal" id="desktopDetailContent"></div>
+</div>
+
+<!-- User Picker modal -->
+<div class="user-picker-modal hidden" id="userPickerModal" onclick="if(event.target===this)closeUserPicker()">
+  <div class="user-picker-panel">
+    <div class="user-picker-title"><i data-lucide="user" style="width:16px;height:16px"></i> Switch Profile</div>
+    <div class="user-list" id="userList"></div>
+    <button onclick="closeUserPicker()" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;cursor:pointer;font-size:13px;width:100%">Close</button>
+  </div>
+</div>
+
+<!-- Add User modal (admin only) -->
+<div class="modal-backdrop" id="addUserModal" onclick="if(event.target===this)closeAddUserModal()">
+  <div class="modal" style="width:360px">
+    <h2><i data-lucide="user-plus" style="width:16px;height:16px"></i> Add User</h2>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+      <div style="display:flex;gap:8px">
+        <select id="addUserEmoji" style="width:56px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:16px">
+          <option>🧑</option><option>👩</option><option>👨</option><option>🧒</option>
+          <option>👴</option><option>👵</option><option>🧑‍💻</option><option>🧑‍🎨</option>
+          <option>🧑‍🏫</option><option>🐱</option><option>🐶</option><option>🦊</option>
+        </select>
+        <input id="addUserName" placeholder="Name" maxlength="30" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px">
+      </div>
+      <input type="password" id="addUserPassword" placeholder="Password" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px">
+      <div id="addUserRoleRow" style="display:none;flex-direction:column;gap:4px">
+        <label style="font-size:12px;color:var(--muted)">Account type</label>
+        <select id="addUserRole" onchange="updateAddUserRoleHint()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px">
+          <option value="user">👤 User — standard account</option>
+          <option value="child">🧒 Child — age-safe, homework help</option>
+          <option value="admin">🔑 Admin — can manage other users</option>
+        </select>
+        <div id="addUserRoleHint" style="font-size:11px;color:var(--muted);padding:4px 2px"></div>
+      </div>
+      <div id="addUserChildPromptRow" style="display:none;flex-direction:column;gap:4px">
+        <label style="font-size:12px;color:var(--muted)">Child safety prompt (optional, leave blank for default)</label>
+        <textarea id="addUserChildPrompt" rows="3" placeholder="You are a friendly coding tutor for a 10-year-old..." style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:11px;font-family:inherit;resize:vertical"></textarea>
+      </div>
+      <div id="addUserFeaturesRow" style="display:none;flex-direction:column;gap:4px">
+        <label style="font-size:12px;color:var(--muted)">Feature access</label>
+        <div id="addUserFeaturesGrid" style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0"></div>
+      </div>
+      <div id="addUserError" style="font-size:11px;color:var(--red,#e05c5c);min-height:14px"></div>
+      <div style="display:flex;gap:8px">
+        <button onclick="submitAddUser()" style="flex:1;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px;font-size:13px;cursor:pointer;font-weight:600">Create</button>
+        <button onclick="closeAddUserModal()" style="flex:1;background:none;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;font-size:13px;cursor:pointer">Cancel</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PIN modal -->
+<div id="pin-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;align-items:center;justify-content:center">
+  <div style="background:var(--bg);border-radius:12px;padding:24px;width:280px;text-align:center">
+    <div id="pin-modal-title" style="font-weight:600;margin-bottom:16px">Enter PIN</div>
+    <input id="pin-input" type="password" maxlength="6" placeholder="••••" style="font-size:24px;text-align:center;width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-input,var(--bg));color:inherit">
+    <div id="pin-error" style="color:#f44336;font-size:12px;margin-top:8px;min-height:16px"></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button id="pin-cancel" style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border);background:transparent;color:inherit;cursor:pointer">Cancel</button>
+      <button id="pin-confirm" style="flex:1;padding:8px;border-radius:8px;background:var(--accent);color:#fff;border:none;cursor:pointer">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Conversation viewer modal -->
+<div class="modal-backdrop" id="convViewerModal" onclick="if(event.target===this)closeConvViewer()">
+  <div class="modal" style="width:600px;max-height:80dvh">
+    <h2 id="convViewerTitle"><i data-lucide="message-square" style="width:16px;height:16px"></i> Conversations</h2>
+    <div id="convViewerBody" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px">
+      <div style="color:var(--muted);font-size:13px">Loading…</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal-close" onclick="closeConvViewer()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Invite modal -->
+<div class="modal-backdrop" id="inviteModal" onclick="if(event.target===this)closeInviteModal()">
+  <div class="modal" style="width:420px">
+    <h2><i data-lucide="link" style="width:16px;height:16px"></i> Generate Invite</h2>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-top:8px">
+      <label style="font-size:12px;color:var(--muted)">Role
+        <select id="inviteRole" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;width:100%;margin-top:4px">
+          <option value="user">👤 User</option>
+          <option value="child">🧒 Child</option>
+        </select>
+      </label>
+      <label style="font-size:12px;color:var(--muted)">Email to (optional — sends invite link)
+        <input id="inviteEmailTo" type="email" placeholder="name@example.com" autocomplete="off" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;width:100%;margin-top:4px;box-sizing:border-box">
+      </label>
+      <div id="inviteResult" style="display:none;flex-direction:column;gap:6px">
+        <div style="font-size:12px;color:var(--muted)">Invite URL (expires in 48 hours):</div>
+        <div style="display:flex;gap:6px">
+          <input id="inviteUrlInput" readonly style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:12px">
+          <button onclick="copyInviteUrl()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Copy</button>
+        </div>
+      </div>
+      <div id="inviteListSection" style="margin-top:8px">
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px">Pending Invites</div>
+        <div id="inviteList" style="display:flex;flex-direction:column;gap:4px;max-height:150px;overflow-y:auto">
+          <div style="color:var(--muted);font-size:12px">Loading…</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer" style="justify-content:space-between">
+      <button class="btn-modal-close" onclick="closeInviteModal()">Close</button>
+      <button onclick="generateInvite()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 18px;font-size:13px;cursor:pointer;font-weight:600">Generate Invite</button>
+    </div>
+  </div>
+</div>
+
+<!-- Dir Picker modal -->
+<div id="dirPickerOverlay" style="display:none;position:fixed;inset:0;background:#0009;z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;width:420px;max-width:95vw;max-height:70vh;display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span style="font-weight:600;font-size:14px;flex:1"><i data-lucide="folder" style="width:14px;height:14px"></i> Select Folder</span>
+      <button onclick="closeDirPicker()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;line-height:1">×</button>
+    </div>
+    <div id="dirPickerPath" style="padding:8px 14px;font-family:monospace;font-size:11px;color:var(--muted);background:var(--bg3);border-bottom:1px solid var(--border);flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+    <div id="dirPickerList" style="flex:1;overflow-y:auto;padding:6px 0"></div>
+    <div style="display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--border);flex-shrink:0">
+      <button onclick="selectCurrentDir()" style="flex:1;background:var(--accent);border:none;color:#fff;border-radius:7px;padding:8px;font-size:13px;font-weight:600;cursor:pointer">Select This Folder</button>
+      <button onclick="closeDirPicker()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:8px 14px;font-size:13px;cursor:pointer">Cancel</button>
+    </div>
+  </div>
+</div>
+
+
+
+<script src="/core.js"></script>
+<script src="/tutor.js"></script>
+<script src="/tutor-today.js"></script>
+<script src="/websocket.js"></script>
+<script src="/chat.js"></script>
+<script src="/drawers.js"></script>
+<script src="/agents.js"></script>
+<script src="/settings.js"></script>
+<script src="/oauth.js"></script>
+<script src="/telegram.js"></script>
+<script src="/auth.js"></script>
+<script src="/gmail-autolabel.js"></script>
+<script src="/admin.js"></script>
+<script src="/invites.js"></script>
+<script src="/backup.js"></script>
+<script src="/tasks.js"></script>
+<script src="/dashboard.js"></script>
+<script src="/markets.js"></script>
+<script src="/inbox.js"></script>
+<script src="/news.js"></script>
+<script src="/expenses.js"></script>
+<script src="/notes.js"></script>
+<script src="/docs.js"></script>
+<script src="/avatars.js"></script>
+<!-- code-projects.js must load before desktop.js — DESKTOP_CATEGORIES
+     references fetchCodeProjectCount at const-init time. -->
+<script src="/code-projects.js"></script>
+<script src="/desktop.js"></script>
+<script src="/nodes.js"></script>
+<script src="/mirror.js"></script>
+<script src="/init.js"></script>
+</body>
+</html>

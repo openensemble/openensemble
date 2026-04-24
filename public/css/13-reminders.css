@@ -1,0 +1,103 @@
+/* ── Reminder Banner ──────────────────────────────────────────────────────── */
+
+.reminder-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--surface, #1e1e2e);
+  border-bottom: 2px solid var(--accent, #89b4fa);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  transform: translateY(-100%);
+  transition: transform 0.3s ease;
+}
+
+.reminder-banner.visible {
+  transform: translateY(0);
+}
+
+.reminder-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.reminder-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.reminder-text {
+  min-width: 0;
+}
+
+.reminder-label {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg, #cdd6f4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.reminder-time {
+  font-size: 12px;
+  color: var(--muted, #6c7086);
+  margin-top: 2px;
+}
+
+.reminder-dismiss {
+  background: var(--accent, #89b4fa);
+  border: none;
+  color: var(--bg, #1e1e2e);
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.reminder-dismiss:hover {
+  opacity: 0.85;
+}
+
+/* ── Tutor nudge banner ──────────────────────────────────────────────────── */
+.tutor-nudge-banner {
+  border-bottom-color: #f9c74f !important;
+}
+.tutor-nudge-banner .reminder-dismiss {
+  background: #f9c74f;
+  margin-left: 8px;
+}
+
+/* ── Celebration overlay ─────────────────────────────────────────────────── */
+.tutor-celebration {
+  position: fixed; inset: 0; z-index: 10050;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.tutor-celebration.visible { opacity: 1; pointer-events: auto; }
+.tutor-celebration-card {
+  background: var(--surface, #1e1e2e);
+  border: 2px solid #f9c74f;
+  border-radius: 18px;
+  padding: 32px 40px;
+  text-align: center;
+  min-width: 260px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 80px rgba(249, 199, 79, 0.35);
+  transform: scale(0.7);
+  transition: transform 0.4s cubic-bezier(.3,1.5,.6,1);
+}
+.tutor-celebration.visible .tutor-celebration-card { transform: scale(1); }
+.tutor-celebration-icon { font-size: 72px; line-height: 1; margin-bottom: 12px; }
+.tutor-celebration-kind { font-size: 12px; color: var(--muted, #6c7086); text-transform: uppercase; letter-spacing: 0.12em; }
+.tutor-celebration-label { font-size: 22px; font-weight: 700; color: var(--fg, #cdd6f4); margin-top: 6px; }

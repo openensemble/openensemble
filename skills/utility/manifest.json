@@ -1,0 +1,11 @@
+{
+  "id": "utility",
+  "name": "Utility",
+  "description": "Built-in utility tools available to all agents",
+  "icon": "🔧",
+  "category": "utility",
+  "always_on": false,
+  "enabled_by_default": true,
+  "setup": "No setup required.",
+  "tools": []
+}

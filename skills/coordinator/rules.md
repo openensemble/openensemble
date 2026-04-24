@@ -1,0 +1,1 @@
+- Always delegate coding, software development, debugging, and project creation requests to Ada.

@@ -1,0 +1,237 @@
+{
+  "id": "expenses",
+  "name": "Expenses",
+  "description": "Track and categorize expenses from receipts, invoices, and bank statements",
+  "icon": "💰",
+  "category": "finance",
+  "service": true,
+  "enabled_by_default": false,
+  "setup": "No setup required. Upload receipts and statements to get started.",
+  "systemPromptAddition": "## Expenses\n\nHelp {{USER_NAME}} understand and manage spending. ALWAYS use live tool data — never answer spending questions from memory. Lead with numbers. Format currency as $X.XX. Proactively highlight unusual spending or patterns.\n\n### User scoping\nAlways pass the current user's ID (provided in your context as \"Current user ID\") to every expense tool call. Never show or mix another user's transactions.\n\n### Expense books (required)\nAll transactions must belong to a book. Books keep expenses completely isolated — there is no cross-book view.\n- ALWAYS call expense_books at the start of every conversation to know which books exist.\n- ALWAYS pass bookId when calling expense_add, expense_add_batch, expense_list, or expense_summary.\n- When {{USER_NAME}} says \"add to Business\" or \"add to Household\", pass the matching bookId.\n- When {{USER_NAME}} wants to add without specifying a book: if they have one book, use it. If they have multiple, ask which book. If they have none, tell them to create a book first (use expense_create_book).\n- Never add a transaction without a bookId.\n- When querying, always scope to a specific book. Never query across all books.\n\n### Adding transactions\nWhen {{USER_NAME}} uploads a document (receipt, statement, CSV), extract transactions and show the full list for review before saving. Wait for explicit confirmation before calling expense_add_batch.\n\n### Editing and updating\n- Transaction IDs appear as `txn_id:txn_xxxxxxxx` in expense_list results — copy the full value after `txn_id:` (e.g. `txn_1b92fcae5eca`). Never use the amount, date, or any other field as the ID.\n- To update a transaction (merchant, category, amount, date): call expense_list first to get the real ID, then call expense_update. NEVER guess or fabricate a transaction ID.\n\n### Deleting\n- expense_delete or expense_delete_batch → always confirm before calling.\n- expense_delete_all → call with ONLY the userId. Do NOT pass a bookId — this tool has no bookId parameter. It removes ALL of {{USER_NAME}}'s transactions regardless of book, including unbooked transactions. NEVER scope a \"delete all\" to a specific book. NEVER call expense_list first and batch-delete — always use expense_delete_all directly. Explicitly warn that this cannot be undone and require clear confirmation.\n\n### Categorization\nUse the standard categories from expense_categories. When unsure, use your best judgment. Common mappings:\n- Restaurant, café, bar → Food & Dining / Restaurants\n- Supermarket, grocery → Food & Dining / Groceries\n- Amazon → Shopping / Amazon (unless clearly something else)\n- Netflix, Spotify, Hulu → Entertainment / Streaming\n- Gas station → Transportation / Gas\n- Doctor, hospital, pharmacy → Healthcare\n- Electric, water, internet → Utilities\n\n### Displaying expenses\nWhen showing transactions, group by date or category depending on the question. Always include the transaction ID so follow-up actions (\"update that\", \"delete it\") can reference it. Show date, amount, merchant, and category clearly.\n\n### Time ranges\nPrefer the period shortcut (this_month, last_month, this_year, last_7_days) over manual dateFrom/dateTo for relative time questions. Your system context provides exact date ranges — use them precisely:\n- \"this month\" / \"in <current month>\" / \"so far this month\" → use the \"This month\" range ONLY\n- \"this year\" / \"year to date\" → use the \"This year\" range\n- Never use the year range when {{USER_NAME}} is asking about the current month.\n\n### Tone\nClear and factual. Lead with numbers. Flag high spending months or categories. Be concise.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_books",
+        "description": "List the user's expense books (portfolios). Call this first to know which books exist so you can route transactions correctly. If the user mentions a book by name (e.g. 'Business', 'Household'), match it to a bookId from this list.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId": { "type": "string", "description": "User ID (always pass the current user's ID)" }
+          },
+          "required": ["userId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_create_book",
+        "description": "Create a new expense book (portfolio) for the user. Use when the user wants to set up a new expense category like 'Household' or 'Business'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId": { "type": "string", "description": "User ID" },
+            "name":   { "type": "string", "description": "Name for the book (e.g. 'Household', 'Business', 'Vacation Fund')" }
+          },
+          "required": ["userId", "name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_delete_book",
+        "description": "Delete an expense book. Always confirm with the user before calling, and ask whether they also want to delete the transactions inside it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId":             { "type": "string",  "description": "User ID (always pass the current user's ID)" },
+            "bookId":             { "type": "string",  "description": "The book ID to delete — get this from expense_books" },
+            "deleteTransactions": { "type": "boolean", "description": "If true, permanently delete all transactions in the book." },
+            "moveToBookId":       { "type": "string",  "description": "If provided, move all transactions to this book instead of deleting or unlinking them. Takes precedence over deleteTransactions=false." }
+          },
+          "required": ["userId", "bookId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_share_book",
+        "description": "Share an expense book with other users so they can view and add transactions to it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "bookId":           { "type": "string", "description": "The book ID to share" },
+            "shareWithUserIds": { "type": "array", "items": { "type": "string" }, "description": "User IDs to share the book with" }
+          },
+          "required": ["bookId", "shareWithUserIds"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_list",
+        "description": "List expense transactions with optional filters. Use this to show the user their expenses. Always filter by the requesting user's ID. Prefer 'period' over manual dateFrom/dateTo for relative time ranges like 'this month'. Pass bookId to filter to a specific expense book.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId":    { "type": "string",  "description": "Filter by user ID (always pass the current user's ID)" },
+            "bookId":    { "type": "string",  "description": "Filter to a specific expense book. Pass the book ID to see only that book's transactions. Omit to see all." },
+            "period":    { "type": "string",  "enum": ["this_month", "last_month", "this_year", "last_7_days"], "description": "Shortcut for common date ranges — use this instead of dateFrom/dateTo when user says 'this month', 'last month', 'this year', 'this week'" },
+            "dateFrom":  { "type": "string",  "description": "Start date filter, YYYY-MM-DD (use period instead for relative ranges)" },
+            "dateTo":    { "type": "string",  "description": "End date filter, YYYY-MM-DD" },
+            "category":  { "type": "string",  "description": "Filter by category name" },
+            "merchant":  { "type": "string",  "description": "Filter by merchant name (case-insensitive partial match)" },
+            "limit":     { "type": "integer", "description": "Max results to return (default 50)" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_summary",
+        "description": "Get spending totals grouped by period and/or category. Use for questions like 'how much did I spend on food this month?' or 'show my monthly breakdown'. Prefer period shortcuts (this_month, last_month, this_year) over manual year/month for relative time questions. Pass bookId to scope to a specific book.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId":    { "type": "string",  "description": "User ID (always pass the current user's ID)" },
+            "bookId":    { "type": "string",  "description": "Filter to a specific expense book. Omit to see all." },
+            "period":    { "type": "string",  "enum": ["this_month", "last_month", "this_year", "last_7_days", "daily", "monthly", "yearly"], "description": "Use 'this_month', 'last_month', 'this_year', or 'last_7_days' for relative ranges. Use 'monthly' or 'yearly' only when grouping all-time data." },
+            "year":      { "type": "integer", "description": "Filter to a specific year (e.g. 2026) — only use when user asks about a specific year" },
+            "month":     { "type": "integer", "description": "Filter to a specific month 1-12 — only use when user asks about a specific month number" },
+            "byCategory": { "type": "boolean", "description": "If true, also break down totals by category" }
+          },
+          "required": ["userId", "period"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_add",
+        "description": "Manually add a single expense transaction. Pass bookId to add to a specific expense book.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId":      { "type": "string",  "description": "User ID" },
+            "bookId":      { "type": "string",  "description": "Expense book ID to add to. If user has books, always specify which one." },
+            "date":        { "type": "string",  "description": "Date YYYY-MM-DD" },
+            "amount":      { "type": "number",  "description": "Amount (positive number)" },
+            "currency":    { "type": "string",  "description": "Currency code e.g. USD" },
+            "merchant":    { "type": "string",  "description": "Merchant or payee name" },
+            "description": { "type": "string",  "description": "Description of the expense" },
+            "category":    { "type": "string",  "description": "Expense category" }
+          },
+          "required": ["userId", "date", "amount", "merchant", "category"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_update",
+        "description": "Update an existing transaction's merchant, category, amount, date, or description. ALWAYS get the transaction ID from a prior expense_list result — NEVER guess or fabricate an ID.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id":          { "type": "string", "description": "Transaction ID — must come from an expense_list result (prefixed ID:xxxx in the output)" },
+            "category":    { "type": "string", "description": "New category" },
+            "description": { "type": "string", "description": "New description" },
+            "merchant":    { "type": "string", "description": "New merchant name" },
+            "date":        { "type": "string", "description": "New date YYYY-MM-DD" },
+            "amount":      { "type": "number", "description": "New amount" }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_delete",
+        "description": "Delete an expense transaction by ID. Always confirm with the user before calling.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Transaction ID to delete" }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_delete_batch",
+        "description": "Delete multiple expense transactions by ID in a single call. Use this instead of calling expense_delete repeatedly. Always confirm with the user before calling.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "ids": { "type": "array", "items": { "type": "string" }, "description": "List of transaction IDs to delete" }
+          },
+          "required": ["ids"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_delete_all",
+        "description": "Delete ALL stored transactions for a user. Use this when the user asks to clear or delete all their transactions. Always confirm with the user before calling — this cannot be undone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId": { "type": "string", "description": "User ID — only deletes transactions belonging to this user" }
+          },
+          "required": ["userId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_add_batch",
+        "description": "Save multiple expense transactions at once. Use this after extracting transactions from an uploaded statement when the user confirms they should be saved. Pass bookId to add to a specific expense book.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "userId": { "type": "string", "description": "User ID (always pass the current user's ID)" },
+            "bookId": { "type": "string", "description": "Expense book ID to add transactions to. If user has books, always specify which one." },
+            "transactions": {
+              "type": "array",
+              "description": "Array of transactions to save",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "date":        { "type": "string",  "description": "Date YYYY-MM-DD" },
+                  "amount":      { "type": "number",  "description": "Amount (positive USD)" },
+                  "merchant":    { "type": "string",  "description": "Merchant or payee name" },
+                  "description": { "type": "string",  "description": "Description" },
+                  "category":    { "type": "string",  "description": "Expense category" },
+                  "subcategory": { "type": "string",  "description": "Subcategory" }
+                },
+                "required": ["date", "amount", "merchant", "category"]
+              }
+            }
+          },
+          "required": ["userId", "transactions"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "expense_categories",
+        "description": "List all available expense categories and subcategories.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  ]
+}

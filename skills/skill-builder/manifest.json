@@ -1,0 +1,134 @@
+{
+  "id": "skill-builder",
+  "name": "Skill Builder",
+  "description": "Create, update, and delete custom skills on demand",
+  "icon": "🔩",
+  "category": "service",
+  "always_on": false,
+  "enabled_by_default": false,
+  "systemPromptAddition": "You can create, update, and delete custom skills using the skill-builder tools. IMPORTANT: Before calling skill_create or skill_update_code, you MUST first call skill_read_blueprint to read the skill authoring guide. Never skip this step. Skills may optionally include a drawer — a small UI panel that opens from the sidebar — but a drawer is entirely optional; most skills should not include one. Only add a drawer when the user explicitly asks for a visual panel. To delete a custom skill use skill_delete — never use shell commands or coder tools to remove skill directories. FIXING BUGS IN EXISTING SKILLS: when a bug is reported in a skill you already created, prefer skill_read_code + skill_patch_code over skill_update_code. skill_patch_code takes an array of targeted find/replace edits and avoids resending the entire file — use it for any change that fits as a focused edit. Only fall back to skill_update_code when the change is large or structural.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_read_blueprint",
+        "description": "Read the skill authoring guide before writing any skill code. Always call this first.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_create",
+        "description": "Create a new custom skill and load it immediately into the user's session without a server restart. The id will be prefixed with 'usr_' automatically. Tools will be available in the next message turn. Only use Node built-ins and packages in ~/.openensemble/node_modules.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Unique id: lowercase letters, numbers, hyphens. Will be stored as usr_{id}." },
+            "name": { "type": "string", "description": "Human-readable skill name" },
+            "description": { "type": "string", "description": "One-sentence description" },
+            "icon": { "type": "string", "description": "Single emoji icon" },
+            "tools": {
+              "type": "array",
+              "description": "OpenAI-compatible tool schemas. Each: {type:'function', function:{name, description, parameters}}. Always prefix tool names with the skill id (e.g. ha_turn_on for skill id 'ha').",
+              "items": { "type": "object" }
+            },
+            "code": { "type": "string", "description": "Complete ESM source for execute.mjs. Must export: async function executeSkillTool(name, args, userId, agentId) and export default executeSkillTool. Return a string result. Never import app internals at the top level — use dynamic await import() inside handlers only." },
+            "drawer": {
+              "type": "object",
+              "description": "OPTIONAL. Provide ONLY if the user wants a sidebar drawer UI for this skill. Omit entirely otherwise — most skills should not include a drawer.",
+              "properties": {
+                "name":       { "type": "string", "description": "Drawer label shown in the header (e.g. 'Home Assistant')" },
+                "lucideIcon": { "type": "string", "description": "STRONGLY PREFERRED. A lucide icon name (e.g. 'receipt', 'home', 'bell', 'calendar') rendered in the sidebar button and drawer header so the drawer matches the rest of the UI. See https://lucide.dev/icons for names. Fall back to emoji only if no lucide icon fits." },
+                "icon":       { "type": "string", "description": "Single emoji, only used if lucideIcon is not provided. Prefer lucideIcon for visual consistency with built-in drawers." },
+                "html":       { "type": "string", "description": "HTML injected into the drawer body. Use plain HTML and the .cdraw-* classes documented in the skill blueprint (.cdraw-row, .cdraw-btn, .cdraw-badge, .cdraw-empty, .cdraw-toolbar, etc.) so the drawer matches the app's look and feel. Give any custom ids a unique prefix (e.g. usr_myskill_root) to avoid DOM collisions." },
+                "initJs":     { "type": "string", "description": "OPTIONAL JS body that runs when the drawer is opened. Runs in the page global scope; use `document.getElementById(...)` and `fetch('/api/usr_myskill/...')` freely." },
+                "serverCode": { "type": "string", "description": "OPTIONAL ESM source for plugins/usr_{id}/server.mjs. Must export: async function handleRequest(req, res, cfg). Return true if handled, false otherwise. Only needed if the drawer needs custom HTTP endpoints." }
+              },
+              "required": ["name", "html"]
+            }
+          },
+          "required": ["id", "name", "description", "tools", "code"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_update_code",
+        "description": "Replace the entire execute.mjs of an existing user-created skill and hot-reload it without a server restart. Prefer skill_patch_code for small fixes — only use this tool when the change is large or structural. Only the skill's creator or an admin/owner can update it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Full skill id including usr_ prefix (e.g. usr_homeassistant)" },
+            "code": { "type": "string", "description": "Complete new execute.mjs source code" }
+          },
+          "required": ["id", "code"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_read_code",
+        "description": "Read the current execute.mjs source of a user-created skill. Use this before skill_patch_code so you know the exact strings to target for find/replace.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Full skill id including usr_ prefix" }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_patch_code",
+        "description": "Apply one or more find/replace edits to a user-created skill's execute.mjs and hot-reload it, without resending the whole file. Each edit's 'find' string must appear EXACTLY ONCE in the current file — include surrounding context to make it unique. Edits are applied in order. If the patched file fails validation, the original is restored automatically. Use this for bug fixes and small changes instead of skill_update_code. Only the skill's creator or an admin/owner can patch it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Full skill id including usr_ prefix" },
+            "edits": {
+              "type": "array",
+              "description": "Edits to apply in order. Each must be an object with 'find' and 'replace' string fields.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "find":    { "type": "string", "description": "Exact substring to replace. Must appear exactly once in the current file — include enough surrounding context to make it unique." },
+                  "replace": { "type": "string", "description": "Replacement string. May be empty to delete the matched region." }
+                },
+                "required": ["find", "replace"]
+              },
+              "minItems": 1
+            }
+          },
+          "required": ["id", "edits"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_delete",
+        "description": "Permanently delete a user-created skill and remove it from the session. Only the skill's creator or an admin/owner can delete it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Full skill id including usr_ prefix" }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_list",
+        "description": "List all custom skills currently in the user's session.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    }
+  ]
+}

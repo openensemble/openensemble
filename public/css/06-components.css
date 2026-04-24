@@ -1,0 +1,111 @@
+/* ── New Agent modal ── */
+.modal-backdrop { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh;
+  background: rgba(0,0,0,.6);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  z-index: 1200; align-items: center; justify-content: center;
+  padding: 16px 16px 16px calc(var(--strip-w) + 16px); box-sizing: border-box; }
+.modal-backdrop.open { display: flex; }
+.modal { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 20px; width: 520px; max-width: 100%; max-height: 85dvh;
+  display: flex; flex-direction: column; gap: 16px; overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,.4); }
+.modal h2 { font-size: 16px; color: var(--text); flex-shrink: 0; }
+.modal-footer { display: flex; justify-content: flex-end; flex-shrink: 0; }
+.btn-modal-close { background: none; border: 1px solid var(--border); color: var(--muted);
+  padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+
+.agent-form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.agent-form label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.agent-form input, .agent-form select, .agent-form textarea {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 9px 10px; font-size: 14px; font-family: inherit;
+  width: 100%; min-width: 0; box-sizing: border-box; }
+.agent-form textarea { resize: vertical; min-height: 90px; }
+.agent-form-row { display: flex; gap: 8px; min-width: 0; }
+.agent-form-row label { flex: 1; min-width: 0; }
+.btn-create-agent { background: var(--accent); border: none; color: #fff; padding: 10px 20px;
+  border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; align-self: flex-end;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: transform .2s cubic-bezier(.4,0,.2,1), box-shadow .2s cubic-bezier(.4,0,.2,1); }
+.btn-create-agent:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(91,141,239,.25); }
+.emoji-picker { display: none; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.emoji-picker.open { display: flex; }
+.emoji-opt { font-size: 20px; cursor: pointer; padding: 2px 4px; border-radius: 4px; transition: background .1s; }
+.emoji-opt:hover, .emoji-opt.selected { background: var(--accent); }
+
+/* ── Agent activity panel (background tasks) ─────────────────────────────── */
+.agent-activity-panel {
+  position: fixed;
+  bottom: 80px;
+  right: 20px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 320px;
+  pointer-events: none;
+}
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  pointer-events: all;
+  box-shadow: 0 4px 16px rgba(0,0,0,.25);
+  animation: activity-in .2s ease;
+}
+.activity-row.done   { opacity: 0.6; }
+.activity-row.error  { border-color: #e05c5c44; }
+@keyframes activity-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.activity-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.activity-dot.running { background: var(--accent); animation: pulse-dot 1.2s ease-in-out infinite; }
+.activity-dot.done    { background: #10b981; }
+.activity-dot.error   { background: #e05c5c; }
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: .4; transform: scale(.7); }
+}
+.activity-label {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.activity-elapsed {
+  color: var(--muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.activity-dismiss {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; padding: 0 2px; line-height: 1; flex-shrink: 0;
+}
+.activity-dismiss:hover { color: var(--text); }
+
+/* ── Agent report card ───────────────────────────────────────────────────── */
+.agent-report {
+  margin: 8px 16px;
+  border-left: 3px solid var(--accent, #89b4fa);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(137,180,250,0.06);
+}
+.agent-report-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 12px;
+  font-size: 12px; font-weight: 600;
+  background: rgba(137,180,250,0.1);
+}
+.agent-report-time { color: var(--muted); font-weight: 400; }
+.agent-report-body { border-radius: 0 0 8px 8px; margin: 0; border: none; }

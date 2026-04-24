@@ -1,0 +1,43 @@
+{
+  "id": "logs",
+  "name": "Server Logs",
+  "description": "Read and scan server logs for errors, warnings, or unusual patterns. Admin/owner only.",
+  "always_on": false,
+  "hidden": false,
+  "systemPromptAddition": "## Server logs\n\nYou can inspect the OpenEnsemble server logs to help the admin diagnose issues. Use `read_logs` to fetch recent entries (optionally filtered by file, level, or keyword) and `scan_for_concerns` to get a high-signal summary of errors and repeated warnings.\n\nWhen the admin asks vague questions like 'is everything OK?', 'anything concerning in the logs?', or 'why did X fail?', default to `scan_for_concerns` first — it returns a digest instead of raw lines. Report findings plainly: counts of each issue class, the first/last time each occurred, and a sentence of impact. Don't dump raw JSON unless asked.\n\nLogs never contain message bodies or prompts — only metadata. If the admin needs deeper evidence, point them at the specific file/timestamp rather than trying to reconstruct content.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_logs",
+        "description": "Read recent entries from the server log. Returns newest-last. Admin/owner only. Use this when the user asks to 'see the logs', 'show recent errors', or wants to inspect a specific time window or keyword.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file":  { "type": "string", "enum": ["app", "error"], "description": "Which log file to read. 'app' is everything; 'error' is errors-only (faster to scan)." },
+            "tail":  { "type": "integer", "description": "Max entries to return (1–500). Default 100.", "minimum": 1, "maximum": 500 },
+            "level": { "type": "string", "enum": ["info", "warn", "error"], "description": "Filter by level. Omit for all." },
+            "q":     { "type": "string", "description": "Case-insensitive substring match on tag/msg/meta." },
+            "since": { "type": "string", "description": "ISO timestamp or epoch-ms; only return entries at or after this time." }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "scan_for_concerns",
+        "description": "Scan recent log entries and return a digest of issues worth attention: errors, repeated warnings, auth failures, provider/tool failures. Groups by tag + message so the user sees counts and timespans rather than raw lines. Use this for open-ended questions like 'anything wrong?' or 'what's been failing lately?'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "since":     { "type": "string", "description": "ISO timestamp or epoch-ms. Default: last 24h." },
+            "maxGroups": { "type": "integer", "description": "Max distinct issue groups to return (default 15).", "minimum": 1, "maximum": 50 }
+          },
+          "required": []
+        }
+      }
+    }
+  ]
+}

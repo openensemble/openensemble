@@ -1,0 +1,317 @@
+/* ── Remote Nodes ──────────────────────────────────────────────────────────── */
+
+.node-card {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.node-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.node-platform-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.node-hostname {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.node-pulse {
+  animation: nodePulse 1.5s ease-in-out infinite;
+}
+
+@keyframes nodePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.node-card-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.node-card-info {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.node-card-stats {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono, 'SF Mono', 'Fira Code', monospace);
+}
+
+.node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.node-actions .cdraw-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+/* ── Terminal ──────────────────────────────────────────────────────────────── */
+
+.node-terminal {
+  margin-top: 10px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.node-terminal-output {
+  padding: 10px 12px;
+  max-height: 350px;
+  overflow-y: auto;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.node-terminal-input-row {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid #30363d;
+  padding: 6px 12px;
+  background: #161b22;
+}
+
+.node-terminal-prompt {
+  color: #58a6ff;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.node-terminal-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: #c9d1d9;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  caret-color: #58a6ff;
+}
+
+.node-terminal-input::placeholder {
+  color: #484f58;
+}
+
+/* Terminal output styles */
+.term-cmd-line {
+  color: #58a6ff;
+  margin-top: 4px;
+}
+
+.term-prompt {
+  color: #3fb950;
+  font-weight: 600;
+}
+
+.term-output {
+  color: #c9d1d9;
+}
+
+.term-stderr {
+  color: #f85149;
+}
+
+.term-exit-ok {
+  color: #3fb950;
+  font-size: 11px;
+  margin-top: 2px;
+  opacity: 0.7;
+}
+
+.term-exit-err {
+  color: #f85149;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+/* ── Access level badges ──────────────────────────────────────────────────── */
+
+.access-badge-click {
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.access-badge-click:hover {
+  opacity: 0.8;
+}
+
+.cdraw-badge.access-red {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+  border: 1px solid rgba(248, 81, 73, 0.3);
+}
+
+.cdraw-badge.access-orange {
+  background: rgba(210, 153, 34, 0.15);
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.3);
+}
+
+.cdraw-badge.access-green {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+  border: 1px solid rgba(63, 185, 80, 0.3);
+}
+
+.cdraw-badge.access-blue {
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+  border: 1px solid rgba(88, 166, 255, 0.3);
+}
+
+/* ── Confirm modal buttons ───────────────────────────────────────────────── */
+
+.cdraw-btn-warning {
+  background: rgba(210, 153, 34, 0.2) !important;
+  color: #d29922 !important;
+  border-color: rgba(210, 153, 34, 0.4) !important;
+}
+
+.cdraw-btn-warning:hover {
+  background: rgba(210, 153, 34, 0.35) !important;
+}
+
+.cdraw-btn-danger {
+  background: rgba(248, 81, 73, 0.2) !important;
+  color: #f85149 !important;
+  border-color: rgba(248, 81, 73, 0.4) !important;
+}
+
+.cdraw-btn-danger:hover {
+  background: rgba(248, 81, 73, 0.35) !important;
+}
+
+/* ── Toast notifications ──────────────────────────────────────────────────── */
+
+.node-toast-stack {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.node-toast {
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.3s, transform 0.3s;
+  max-width: 350px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  pointer-events: auto;
+}
+
+.node-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.node-toast-error {
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  color: #f85149;
+}
+
+.node-toast-success {
+  background: rgba(63, 185, 80, 0.15);
+  border: 1px solid rgba(63, 185, 80, 0.4);
+  color: #3fb950;
+}
+
+.node-toast-warning {
+  background: rgba(210, 153, 34, 0.15);
+  border: 1px solid rgba(210, 153, 34, 0.4);
+  color: #d29922;
+}
+
+/* ── Pairing modal ────────────────────────────────────────────────────────── */
+
+.node-pair-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.node-pair-modal.show { opacity: 1; }
+
+.node-pair-modal-bg {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+}
+
+.node-pair-modal-box {
+  position: relative;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 380px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+}
+
+.node-pair-code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  background: var(--bg2);
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  padding: 16px;
+  user-select: all;
+  cursor: pointer;
+}

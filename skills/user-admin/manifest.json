@@ -1,0 +1,54 @@
+{
+  "id": "user-admin",
+  "name": "User Administration",
+  "always_on": true,
+  "hidden": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "manage_user",
+        "description": "Manage user accounts: lock/unlock accounts, set access schedules (blocked hours), or reset passwords. Requires admin or owner privileges. Use this when the user asks to lock someone out, block access at certain times, unblock an account, or reset a password. Examples: 'lock the guest account', 'block guest from 8pm to 8am', 'unlock guest', 'reset guest password'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "user_name": {
+              "type": "string",
+              "description": "The name of the user account to manage"
+            },
+            "action": {
+              "type": "string",
+              "enum": ["lock", "unlock", "set_schedule", "clear_schedule", "reset_password"],
+              "description": "Action to perform: 'lock' to lock the account, 'unlock' to unlock, 'set_schedule' to block login during specific hours, 'clear_schedule' to remove time restrictions, 'reset_password' to set a new password"
+            },
+            "blocked_from": {
+              "type": "string",
+              "description": "Start of blocked period in HH:MM 24h format (e.g. '20:00'). Required for set_schedule."
+            },
+            "blocked_until": {
+              "type": "string",
+              "description": "End of blocked period in HH:MM 24h format (e.g. '08:00'). Required for set_schedule."
+            },
+            "new_password": {
+              "type": "string",
+              "description": "New password (min 8 chars). Required for reset_password."
+            }
+          },
+          "required": ["user_name", "action"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_users",
+        "description": "List all user accounts with their current status (role, locked, access schedule). Requires admin or owner privileges.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    }
+  ]
+}

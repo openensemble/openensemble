@@ -1,0 +1,40 @@
+{
+  "id": "web",
+  "name": "Web Search",
+  "description": "Search the web and fetch URLs using Brave Search",
+  "icon": "🌐",
+  "category": "utility",
+  "enabled_by_default": true,
+  "systemPromptAddition": "## Web Access\n\nYou have web_search (Brave) and fetch_url for reading current information.\n- Prefer web_search over fetch_url when you don't already have a URL — it returns multiple candidates with snippets.\n- Use fetch_url to read a specific article, doc page, or result that web_search surfaced.\n- Pass a real http:// or https:// URL to fetch_url. Never call it with a missing or malformed URL — if you don't have one, search first.\n- Avoid news.google.com redirector URLs — find the original publisher URL instead.\n- Long fetches may truncate. If a page is too long to summarize faithfully, say so rather than guessing.\n- Cite sources inline (publisher + date) for factual claims from the web. Don't present scraped content as your own analysis.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "web_search",
+        "description": "Search the web using Brave Search. Use for current news, facts, or anything that needs up-to-date information.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query":  { "type": "string",  "description": "Search query" },
+            "count":  { "type": "integer", "description": "Number of results to return (default: 5, max: 10)" }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fetch_url",
+        "description": "Fetch the text content of any URL. Use to read news articles, documentation, or any web page. Avoid news.google.com URLs — use the original publisher URL instead.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string", "description": "The URL to fetch" }
+          },
+          "required": ["url"]
+        }
+      }
+    }
+  ]
+}

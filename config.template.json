@@ -1,0 +1,59 @@
+{
+  "anthropicApiKey": "",
+  "braveApiKey": "",
+  "cortex": {
+    "embedModel": "nomic-embed-text-v1",
+    "embedProvider": "builtin",
+    "reasonProvider": "auto",
+    "reasonModel": "openensemble-reason-v1.q8_0.gguf",
+    "reasonModelOllama": "openensemble-reason:v1",
+    "reasonModelLmstudio": "openensemble/reason-v1",
+    "lmstudioUrl": "http://127.0.0.1:1234",
+    "ollamaUrl": "http://localhost:11434",
+    "lmstudioApiKey": "lmstudio",
+    "ollamaApiKey": ""
+  },
+  "visionProvider": "ollama",
+  "visionModel": "llava",
+  "skillAssignments": {
+    "coordinator": "coordinator",
+    "coder": "",
+    "email": "",
+    "gcal": "",
+    "expenses": "",
+    "skill-builder": "",
+    "image_generator": "",
+    "deep_research": "",
+    "role_tutor": ""
+  },
+  "fireworksApiKey": "",
+  "grokApiKey": "",
+  "grokMgmtApiKey": "",
+  "ollamaApiKey": "",
+  "enabledProviders": {
+    "anthropic": false,
+    "fireworks": false,
+    "grok": false,
+    "ollama": false,
+    "lmstudio": false,
+    "openrouter": false,
+    "tts": false,
+    "openai": false,
+    "openai-oauth": false,
+    "gemini": false,
+    "deepseek": false,
+    "mistral": false,
+    "groq": false,
+    "together": false,
+    "perplexity": false,
+    "zai": false
+  },
+  "openrouterApiKey": "",
+  "openrouterPricing": {},
+  "agentModels": {},
+  "providerFailover": {
+    "enabled": false,
+    "fallbackProvider": "",
+    "fallbackModel": ""
+  }
+}

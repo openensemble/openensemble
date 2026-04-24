@@ -1,0 +1,352 @@
+{
+  "id": "coder",
+  "name": "Coder",
+  "description": "File editing, shell commands, and project management for coding agents",
+  "icon": "💻",
+  "category": "coding",
+  "service": true,
+  "always_on": false,
+  "enabled_by_default": true,
+  "defaultToolIds": [
+    "coder_list_projects", "coder_create_project",
+    "coder_switch_project", "coder_delete_project", "coder_read_file",
+    "coder_write_file", "coder_edit_file", "coder_multi_edit", "coder_delete_file",
+    "coder_run_command", "coder_start_server", "coder_stop_server", "coder_server_status",
+    "coder_list_files", "coder_search",
+    "coder_todo_write", "coder_todo_read",
+    "role_add_rule", "role_remove_rule", "role_list_rules",
+    "skill_read_blueprint", "skill_create", "skill_update_code", "skill_delete", "skill_list"
+  ],
+  "setup": "Coding projects live under users/{userId}/documents/code inside OpenEnsemble. That folder is the only place the coding agent can read, write, or run shell commands. Users download finished projects as a zip from Desktop → Code Projects.",
+  "systemPromptAddition": "## Coding agent\nYou are a coding agent with full filesystem and shell access inside the workspace **{{WORKSPACE}}**. Use your tools aggressively — never claim you lack access, never ask permission for read-only work, never describe what you are about to do instead of doing it.\n\n## Tools\n- **Projects**: `coder_list_projects`, `coder_create_project`, `coder_switch_project`, `coder_delete_project`. You must create or switch into a project before any file or shell operation. When something is created, report its exact path from the tool result — do not guess.\n- **Files**: `coder_read_file` (with `offset`/`limit` for large files), `coder_write_file`, `coder_edit_file` (single unique replacement), `coder_multi_edit` (batched atomic edits — prefer this over multiple `coder_edit_file` calls on the same file), `coder_delete_file`.\n- **Search**: `coder_list_files` (glob), `coder_search` (ripgrep regex). Use these before reading to locate the relevant section.\n- **Shell**: `coder_run_command` streams stdout/stderr live as the command runs and delivers a full capped transcript at the end. Use it for commands that finish on their own (`npm install`, `npm test`, `npm run build`, `tsc`, `pytest`, `git …`, one-off scripts). Default timeout 30s, max 300s.\n- **Long-running processes**: for anything that doesn't exit on its own — `node server.mjs`, `npm run dev`, `npm start`, `flask run`, `rails s`, `python -m http.server`, `nodemon`, `vite`, `next dev`, anything `--watch` — use `coder_start_server` (pass `port` whenever the server listens on one), `coder_stop_server`, and `coder_server_status`. NEVER start a dev server with `coder_run_command` or backgrounded shell tricks (`&`, `nohup`, `disown`) — the sandbox is torn down when the tool returns and the process dies with it. Prefer running commands over asking the user.\n- **Planning**: `coder_todo_write` / `coder_todo_read`. For any task with 3+ steps, call `coder_todo_write` first to plan, then update statuses (`pending` → `in_progress` → `completed`) as you work. Keep exactly one item `in_progress` at a time.\n\n## Workflow\nCreate or switch project → (plan with todos if multi-step) → read/search to understand existing code → edit → run and test → report.\nNever use `coder_run_command` with `rm` to delete projects — always call `coder_delete_project`.\n\n## Output style\nBe terse. Lead with the answer or the action, not the reasoning. No preamble like \"Sure!\", \"Let me…\", \"I'll…\". No trailing summaries of what you did — the diff and tool output are the proof. No emojis unless the user asks for them. When referencing code, use `file_path:line_number`. Don't add features, comments, or refactors that weren't asked for.\n\n## Context discipline\n- NEVER call `coder_read_file` on a file you just wrote in the same session — you already have the content, re-reading it wastes a tool call.\n- If you need to reference or modify a file written earlier, re-read only the sections you need using `offset`/`limit`.\n- Use `coder_search` to locate the exact line before opening a file.\n- Keep context small: one `in_progress` todo at a time, no redundant reads.\n\n## Deploying to a remote node\nWhen the user wants the project to actually run on one of their machines, build and iterate locally first. Then hand off to the **nodes** skill: `node_push_project` transfers the active project, and `node_start_service` launches it. Do NOT try to deploy by running rsync/scp via coder_run_command — the sandbox has no SSH keys and no path into user dotfiles. The nodes skill is the supported path.\n\n## Building skills\nWhen asked to build, create, or add a skill/tool/integration:\n1. Call `skill_read_blueprint` first — always, every time, no exceptions.\n2. Use `skill_create` to create the skill. Never use coder file tools to write into `~/.openensemble/skills/`.\n3. To update an existing skill's code, use `skill_update_code`. To delete one, use `skill_delete`.\n4. The function signature MUST be exactly: `export async function executeSkillTool(name, args, userId, agentId)` — four parameters, those exact names. The validator will reject any other form.\n\n## Non-negotiable rules\n- NEVER claim you performed a filesystem or shell action without actually calling the corresponding tool. Saying \"Created file\" without the tool call is lying.\n- NEVER guess or invent file paths. Report the exact path returned by the tool result.\n- NEVER echo, restate, or repeat the user's request back to them before answering.\n- NEVER write directly to `~/.openensemble/skills/` using coder file tools. Always use `skill_create` or `skill_update_code` to create or modify skills — these tools validate and hot-load the skill correctly.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_list_projects",
+        "description": "List all projects in the workspace with their log summaries.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_create_project",
+        "description": "Create a new project directory in the workspace and set it as the active project.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Project directory name (e.g. 'my-app', 'api-server'). No slashes."
+            }
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_switch_project",
+        "description": "Switch the active project. All subsequent file and command operations will run within this project directory.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Name of an existing project directory in the workspace."
+            }
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_delete_project",
+        "description": "Permanently delete a project and all its files from the workspace. This cannot be undone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Name of the project to delete. Must match exactly."
+            }
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_read_file",
+        "description": "Read a file from the active project. Returns numbered lines.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path relative to the project root."
+            },
+            "offset": {
+              "type": "integer",
+              "description": "Line number to start reading from (1-based). Optional."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of lines to return. Optional, defaults to 2000."
+            }
+          },
+          "required": ["path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_write_file",
+        "description": "Write or create a file in the active project. Creates parent directories automatically. Use coder_edit_file for surgical edits to existing files.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path relative to the project root."
+            },
+            "content": {
+              "type": "string",
+              "description": "The full content to write to the file."
+            }
+          },
+          "required": ["path", "content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_edit_file",
+        "description": "Perform a surgical string replacement in a file. The old_string must appear exactly once in the file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path relative to the project root."
+            },
+            "old_string": {
+              "type": "string",
+              "description": "The exact text to find and replace. Must be unique in the file."
+            },
+            "new_string": {
+              "type": "string",
+              "description": "The replacement text."
+            }
+          },
+          "required": ["path", "old_string", "new_string"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_multi_edit",
+        "description": "Apply multiple surgical edits to a single file in one call. All edits succeed or none are written (atomic). Prefer this over multiple coder_edit_file calls when making several changes to the same file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "File path relative to the project root."
+            },
+            "edits": {
+              "type": "array",
+              "description": "Ordered list of string replacements to apply. Each edit runs against the buffer left by the previous one.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "old_string": { "type": "string", "description": "Exact text to find. Must be unique unless replace_all is true." },
+                  "new_string": { "type": "string", "description": "Replacement text." },
+                  "replace_all": { "type": "boolean", "description": "If true, replace every occurrence instead of requiring a unique match." }
+                },
+                "required": ["old_string", "new_string"]
+              }
+            }
+          },
+          "required": ["file_path", "edits"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_todo_write",
+        "description": "Overwrite the project's TODO list with the supplied items. Use this to plan multi-step work and track progress; update the status field as you work through items.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "todos": {
+              "type": "array",
+              "description": "The full list of todos after your update. Use short stable ids like 't1', 't2', ….",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id":      { "type": "string" },
+                  "content": { "type": "string", "description": "Short, action-oriented description of the step." },
+                  "status":  { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                },
+                "required": ["id", "content", "status"]
+              }
+            }
+          },
+          "required": ["todos"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_todo_read",
+        "description": "Read the current TODO list for the active project.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_delete_file",
+        "description": "Delete a file or empty directory within the active project.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File or empty directory path relative to the project root."
+            }
+          },
+          "required": ["path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_run_command",
+        "description": "Execute a short-lived shell command in the active project directory. Returns stdout, stderr, and exit code. Use for commands that finish on their own — e.g. `npm install`, `npm test`, `npm run build`, `tsc`, `eslint`, `pytest`, `pip install`, `git status`, `node scripts/seed.mjs`. The sandbox is torn down when the command returns, so anything long-running dies the moment this tool finishes; DO NOT use it for `node server.mjs`, `npm run dev`, `npm start`, `flask run`, `rails s`, `python -m http.server`, `nodemon`, or anything with `--watch` — those are for coder_start_server. Default timeout is 30s; if a legitimate one-off might run longer (large `npm install`, slow build), raise the timeout (max 300).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "The shell command to run."
+            },
+            "timeout": {
+              "type": "integer",
+              "description": "Timeout in seconds. Default 30, max 300. Output streams live as the command runs."
+            }
+          },
+          "required": ["command"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_start_server",
+        "description": "Start a long-running process (HTTP server, watcher, daemon) in the active project. The process runs in its own persistent sandbox that survives across tool calls, so the server stays reachable after this returns. Use this for `node server.mjs`, `npm run dev`, `npm start`, `flask run`, `rails s`, `python -m http.server 8000`, `nodemon`, `vite`, `next dev`, `tsc --watch`, or anything else that doesn't exit on its own. Pass the `port` arg whenever the server listens on one (surfaced in status output so users know where to connect). Only one server per project at a time — call coder_stop_server first if one is already running. Stdout/stderr go to .run/server.log; use coder_server_status to check health and tail the log.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "The command to run (e.g. 'node server.mjs', 'npm run dev', 'python3 -m http.server 8000')."
+            },
+            "port": {
+              "type": "integer",
+              "description": "Optional port the server listens on, recorded in status output so users know where to connect."
+            }
+          },
+          "required": ["command"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_stop_server",
+        "description": "Stop the long-running server for the active project (started via coder_start_server). Sends SIGTERM, escalates to SIGKILL after a grace period, and clears the pid/meta files.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_server_status",
+        "description": "Report whether the long-running server is up for the active project, plus its command, port, pid, and the tail of its log. If the server died on its own, shows the last log lines so you can diagnose the crash.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "lines": {
+              "type": "integer",
+              "description": "Number of log lines to show. Defaults to 20, max 500."
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_list_files",
+        "description": "List files in the active project, optionally filtered by glob pattern.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "directory": {
+              "type": "string",
+              "description": "Subdirectory to list (relative to project root). Defaults to project root."
+            },
+            "pattern": {
+              "type": "string",
+              "description": "Glob pattern to filter results (e.g. '**/*.js', 'src/**/*.ts')."
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "coder_search",
+        "description": "Search file contents in the active project using ripgrep regex patterns.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Regex pattern to search for."
+            },
+            "path": {
+              "type": "string",
+              "description": "Subdirectory or file to search within (relative to project root). Defaults to project root."
+            },
+            "glob": {
+              "type": "string",
+              "description": "File glob filter (e.g. '*.js', '*.py')."
+            }
+          },
+          "required": ["pattern"]
+        }
+      }
+    }
+  ]
+}

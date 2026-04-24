@@ -1,0 +1,159 @@
+{
+  "id": "nodes",
+  "name": "Remote Nodes",
+  "description": "Manage and execute commands on remote machines connected to OpenEnsemble",
+  "icon": "🖥️",
+  "category": "infrastructure",
+  "service": true,
+  "always_on": false,
+  "enabled_by_default": true,
+  "systemPromptAddition": "## Remote Nodes\n\nYou can inspect and run commands on remote Linux/Windows/macOS machines connected via oe-node-agent.\n- Files or commands on a **remote registered node** (anything that appears in node_list) live behind node_exec — run it yourself, do NOT delegate to the Coder. The Coder only handles source files on THIS server.\n- Call node_list first to see what nodes are reachable and healthy before attempting node_exec.\n- Use the nodeId (or hostname) from node_list. Never guess a nodeId.\n- Show the exact command you plan to run before executing anything destructive (package removal, service restart, file delete). For read-only commands (uptime, df, cat of a config file), just run them.\n- Reference {{USER_NAME}}'s nodes by hostname in responses so it's clear which machine you're on.\n- NOT for Home Assistant or smart home devices — use those skills for smart home.\n\n## Deploying a project to a node\nWhen {{USER_NAME}} asks you to put a website, script, or app on one of their nodes, the canonical flow is:\n1. Build and iterate on the project locally in the workspace (coder_* tools).\n2. Call **node_push_project** to transfer the active coder project to a path on the node.\n3. Call **node_start_service** to launch a webserver or long-running command in the background. It returns a PID and a log path — share both with {{USER_NAME}} so they can find the running process.\n4. If it needs to stop later, call **node_stop_service** with the PID.\n\nPrefer standard webservers (`python3 -m http.server`, `npx serve`, `node server.js`) over writing custom ones. Pick a high port (8080, 8000, 3000) unless {{USER_NAME}} specifies. After start_service returns, tell {{USER_NAME}} the exact URL they can open in their browser (http://<node-hostname-or-ip>:<port>).\n\n## Provisioning new nodes unattended (Proxmox, bulk installs)\nWhen {{USER_NAME}} asks you to install the node agent on a machine they already have shell access to — typically a Proxmox host that needs every running LXC/VM paired — use **node_pair_code**. Each call mints a fresh single-use code (10-min TTL) and returns a ready-to-run install one-liner.\n- Codes are **single-use**: one code per target machine. For N LXCs, call node_pair_code N times.\n- Rate-limited (30 codes/hour/user). If you hit the limit, stop and tell {{USER_NAME}}.\n- Every code generation is logged to `users/{userId}/agent-pairings.log` — that's intentional, not noise.\n- Proxmox bulk-install pattern (run on the Proxmox host, after pairing each container one at a time):\n  ```\n  # For each running LXC, mint a fresh code with node_pair_code, then:\n  pct exec <CTID> -- bash -c 'curl -fsSL <installUrl> | sh -s -- --server <serverUrl> --code <CODE>'\n  ```\n- Do not reuse one code across multiple containers — the second attempt will fail with \"Invalid or expired pairing code\".\n- **Re-pairing an already-installed agent (token invalidated, agent still installed):** use `sudo oe repair <CODE>` on the node. This is much lighter than a full re-install — it swaps the token in-place and restarts the service. Only fall back to the full `curl … install.sh -- --code` flow if `oe repair` fails (e.g. agent older than v1.5.0, which predates the feature).\n- **Proxmox hosts need \"full\" access level, and agent v1.6.0+ is required.** `pct`/`qm` read /etc/pve/priv/* which the unprivileged oe-agent user cannot see — so even with NOPASSWD sudo, calls fail with \"ipcc_send_rec failed: Unknown error -1\". In v1.6.0+ the \"full\" access level runs the systemd service as root, fixing this. If {{USER_NAME}} reports pct/qm permission errors on an already-\"full\" node, it's running a pre-1.6.0 agent: tell them to `sudo oe update` then `sudo oe install-service` (or pick `full` again in `sudo oe change-access`) to rewrite the unit file as User=root.\n- **Batch parallel installs in groups of 3.** After minting all the codes, emit the `node_exec` pct-exec install calls in parallel **batches of 3 in the same response** — not serial one-at-a-time, and not full fan-out of N at once. Independent tool calls in one response run concurrently, so a batch of 3 finishes ~3× faster than serial while respecting the Proxmox host's disk I/O and RAM budget during concurrent Node.js installs. Wait for each batch to return before firing the next batch.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "node_list",
+        "description": "List all remote Linux/Windows/macOS computers (servers, VMs, workstations) connected via oe-node-agent. Shows hostname, OS, package manager, uptime, and health status. NOT for Home Assistant or smart home devices — use this for remote machine management.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "node_exec",
+        "description": "Execute a shell command on a remote computer (Linux/Windows/macOS server, VM, or workstation) connected via oe-node-agent. Returns stdout, stderr, and exit code. Use for system administration: package updates, service management, file operations, etc. Shell is auto-detected (bash for Linux/macOS, PowerShell for Windows). NOT for Home Assistant.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "node_id": {
+              "type": "string",
+              "description": "The node ID to run the command on. Use node_list to see available nodes."
+            },
+            "command": {
+              "type": "string",
+              "description": "The shell command to execute on the remote node."
+            },
+            "timeout": {
+              "type": "integer",
+              "description": "Timeout in seconds. Default 60, max 300."
+            }
+          },
+          "required": ["node_id", "command"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "node_push_project",
+        "description": "Transfer the currently active coder project to a directory on a remote node. Tars the project locally, sends it over the existing node connection, and extracts it on the remote machine. Use this to deploy a website, script, or app the coder has been building.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "node_id": {
+              "type": "string",
+              "description": "Node ID or hostname of the destination machine. Get from node_list."
+            },
+            "dest_path": {
+              "type": "string",
+              "description": "Absolute path on the remote node where the project contents will be written (e.g. '/srv/gallery', '/home/user/apps/bot'). Created if missing."
+            },
+            "clean": {
+              "type": "boolean",
+              "description": "If true, wipe the contents of dest_path before extracting. Default false — files are merged, existing files with the same name are overwritten."
+            }
+          },
+          "required": ["node_id", "dest_path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "node_start_service",
+        "description": "Launch a long-running command in the background on a remote node — typically a webserver started after node_push_project. The command is detached from the invocation, stdout/stderr are captured to a log file, and the PID is returned for later stop. Does NOT block while the service runs.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "node_id": {
+              "type": "string",
+              "description": "Node ID or hostname."
+            },
+            "command": {
+              "type": "string",
+              "description": "Shell command to launch (e.g. 'python3 -m http.server 8080'). Runs inside cwd if provided."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Absolute working directory to cd into before running the command. Usually the dest_path you just pushed to."
+            },
+            "name": {
+              "type": "string",
+              "description": "Short label used in the log filename (e.g. 'gallery', 'api'). Alphanumeric + dash only."
+            }
+          },
+          "required": ["node_id", "command"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "node_stop_service",
+        "description": "Kill a background process on a remote node by PID. Sends SIGTERM, waits 2 seconds, then SIGKILL if still alive.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "node_id": {
+              "type": "string",
+              "description": "Node ID or hostname."
+            },
+            "pid": {
+              "type": "integer",
+              "description": "Process ID returned by node_start_service."
+            }
+          },
+          "required": ["node_id", "pid"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "node_pair_code",
+        "description": "Mint a fresh single-use pairing code for unattended node-agent installs (10-minute TTL). Returns the code, the install URL, and a ready-to-run one-liner. Use for Proxmox bulk provisioning or any scenario where a user wants an agent to install oe-node-agent on a machine without manually copying a code. Rate-limited to 30 codes/hour/user; every call is written to a per-user audit log.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "description": "Short human-readable reason this code is being generated (e.g. 'provisioning a new LXC container'). Written to the audit log."
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "node_status",
+        "description": "Get detailed system status of a remote computer (Linux/Windows/macOS) connected via oe-node-agent: OS info, uptime, CPU load, memory usage, disk usage, and health state. NOT for Home Assistant devices.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "node_id": {
+              "type": "string",
+              "description": "The node ID to query."
+            }
+          },
+          "required": ["node_id"]
+        }
+      }
+    }
+  ]
+}

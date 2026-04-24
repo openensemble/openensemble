@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  openensemble:
+    build: .
+    container_name: openensemble
+    restart: unless-stopped
+    ports:
+      - "3737:3737"
+    volumes:
+      - oe-data:/app/users
+      - ./config.json:/app/config.json
+    environment:
+      # Set API keys via environment variables instead of config.json:
+      # ANTHROPIC_API_KEY: sk-ant-...
+      # OPENROUTER_API_KEY: sk-or-...
+      # FIREWORKS_API_KEY: ...
+      # BRAVE_API_KEY: ...
+      # OLLAMA_API_KEY: ...
+      #
+      # Point to host Ollama (if running on host machine):
+      # OLLAMA_HOST: http://host.docker.internal:11434
+      NODE_ENV: production
+
+  # Optional: Caddy reverse proxy for HTTPS
+  # Uncomment and set your domain to enable.
+  # caddy:
+  #   image: caddy:2-alpine
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile
+  #     - caddy-data:/data
+  #   depends_on:
+  #     - openensemble
+
+volumes:
+  oe-data:
+  # caddy-data:

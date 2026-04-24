@@ -1,0 +1,85 @@
+/* ── Dashboard (inside drawer) ── */
+#drawerDashboard .desk-drawer-body {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px; align-content: start; padding: 16px;
+}
+.dash-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.dash-card.memory-card { border-color: #4a9eff55; }
+.dash-card-title { font-size: 15px; font-weight: 600; }
+.dash-card-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.dash-card-badge { font-size: 11px; border-radius: 6px; padding: 2px 8px; background: var(--bg3); color: var(--muted); white-space: nowrap; }
+.dash-card-badge.on { background: rgba(76,175,80,.15); color: var(--green); }
+.dash-card-output { font-size: 13px; background: var(--bg3); border-radius: 8px; padding: 10px 12px; max-height: 200px; overflow-y: auto; line-height: 1.55; cursor: pointer; transition: max-height .3s; }
+.dash-card-output.expanded { max-height: 600px; }
+.dash-card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 2px; }
+.btn-dash-go { background: none; border: 1px solid var(--border); color: var(--accent); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.btn-dash-go:hover { border-color: var(--accent); }
+.btn-dash-close { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+
+/* ── News cards ── */
+.news-card {
+  display: flex; flex-direction: column; cursor: pointer;
+  background: var(--bg2); transition: background .15s;
+  text-decoration: none; min-width: 0;
+}
+.news-card:hover { background: var(--bg3); }
+.news-card-img {
+  width: 100%; height: 120px; object-fit: cover; display: block; flex-shrink: 0;
+}
+.news-card-body { padding: 9px 11px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.news-card-meta { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.news-card-source {
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  color: var(--accent); letter-spacing: .04em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+.news-card-age { font-size: 9px; color: var(--muted); }
+.news-card-title { font-size: 12px; font-weight: 600; color: var(--text); line-height: 1.4; }
+.news-card-desc {
+  font-size: 11px; color: var(--muted); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ── Inbox cards (single-column list, no avatar tile) ── */
+.inbox-card-list { display: flex; flex-direction: column; gap: 1px; background: var(--border); }
+.email-card-row { border-left: 3px solid transparent; }
+.email-card-row:hover { border-left-color: var(--accent); }
+
+/* ── Email detail panel ── */
+.email-detail {
+  display: flex; flex-direction: column; height: 100%;
+}
+.email-detail-hdr {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.btn-email-back {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 18px; padding: 2px 6px; line-height: 1; transition: color .15s;
+}
+.btn-email-back:hover { color: var(--text); }
+.email-detail-subject { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; line-height: 1.3; }
+.email-detail-meta { padding: 10px 16px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.email-detail-from { font-size: 12px; color: var(--text); font-weight: 500; }
+.email-detail-date { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.email-detail-body {
+  flex: 1; overflow: hidden; min-height: 0;
+}
+.email-detail-body iframe {
+  width: 100%; height: 100%; border: none; display: block;
+  background: #fff;
+}
+.email-action-bar {
+  display: flex; gap: 8px; padding: 12px 16px;
+  border-top: 1px solid var(--border); background: var(--bg2);
+  position: sticky; bottom: 0;
+}
+.btn-email-action {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 10px 6px; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer; color: var(--text); transition: background .15s, border-color .15s;
+  font-size: 11px; font-weight: 500;
+}
+.btn-email-action .action-icon { font-size: 18px; line-height: 1; }
+.btn-email-action:hover { background: var(--bg1); border-color: var(--accent); color: var(--accent); }
+.btn-email-action.danger:hover { border-color: var(--red, #e05c5c); color: var(--red, #e05c5c); }

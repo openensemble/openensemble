@@ -1,0 +1,16 @@
+{
+  "name": "oe-node-agent",
+  "version": "1.0.0",
+  "description": "OpenEnsemble Remote Node Agent — lightweight client for remote machine management",
+  "type": "module",
+  "main": "oe-node-agent.mjs",
+  "scripts": {
+    "start": "node oe-node-agent.mjs",
+    "install-service": "node oe-node-agent.mjs install-service",
+    "uninstall-service": "node oe-node-agent.mjs uninstall"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.0.0"
+  }
+}

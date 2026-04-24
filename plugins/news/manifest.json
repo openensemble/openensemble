@@ -1,0 +1,22 @@
+{
+  "id": "news",
+  "name": "News",
+  "icon": "📰",
+  "description": "Personalized news feed powered by Brave Search",
+  "version": "1.0.0",
+  "drawer": true,
+  "drawerId": "drawerNews",
+  "btnId": "sbtnNews",
+  "enabled_by_default": true,
+  "defaultSettings": {
+    "defaultTopic": 0,
+    "topics": [
+      { "label": "Top",      "q": "top news today" },
+      { "label": "Politics", "q": "politics news today" },
+      { "label": "Tech",     "q": "technology news today" },
+      { "label": "Crypto",   "q": "cryptocurrency bitcoin news today" },
+      { "label": "Markets",  "q": "stock market finance news today" }
+    ],
+    "usesModel": false
+  }
+}

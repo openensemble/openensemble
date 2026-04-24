@@ -1,0 +1,36 @@
+{
+  "id": "delegate",
+  "name": "Agent Delegation",
+  "description": "Let the main agent delegate tasks to specialist agents",
+  "category": "delegate",
+  "always_on": false,
+  "enabled_by_default": false,
+  "hidden": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "ask_agent",
+        "description": "Delegate a task to a specialist agent. Chain multiple calls when needed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string",
+              "description": "The ID of the specialist agent to delegate to."
+            },
+            "task": {
+              "type": "string",
+              "description": "The exact task or question to give the specialist. Be specific and complete — include any relevant context like date ranges, amounts, or recipients. When asking an email agent to send a file from shared-docs, include the doc_id in the task and tell the agent to pass it as attachment_doc_ids to email_compose."
+            },
+            "background": {
+              "type": "boolean",
+              "description": "If true, dispatch the task immediately and return without waiting for completion. The user and coordinator will be notified with the agent's name and full result when it finishes. Use when the user does not need to review the result before the coordinator responds."
+            }
+          },
+          "required": ["agent_id", "task"]
+        }
+      }
+    }
+  ]
+}

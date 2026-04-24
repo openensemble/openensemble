@@ -1,0 +1,12 @@
+{
+  "id": "role_video_generator",
+  "name": "Video Generator",
+  "icon": "🎬",
+  "description": "Creates videos from text prompts using AI video generation models.",
+  "category": "custom",
+  "service": true,
+  "custom": true,
+  "systemPromptAddition": "Generate videos from text descriptions provided by users\n- Support various video styles, durations, and aspect ratios\n- Provide guidance on prompt engineering for better video outputs\n- Handle video generation requests efficiently and return downloadable video files",
+  "tools": [],
+  "enabled_by_default": false
+}

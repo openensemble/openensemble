@@ -1,0 +1,99 @@
+# ============================================================
+# OpenEnsemble .gitignore
+# Protects personal data, credentials, and runtime state.
+# If a new runtime path appears, add it here BEFORE committing.
+# ============================================================
+
+# --- Credentials & config ---
+config.json
+gmail-credentials.json
+*.pem
+*.key
+.env
+.env.*
+
+# --- Per-user data (anchored to repo root) ---
+/users/
+/sessions/
+/sharing.json
+/shared-notes.json
+/shared-docs/
+/messages.json
+/threads.json
+/active-sessions.json
+/nodes.json
+/invites.json
+/MCP_TODO.md
+
+# --- User-generated content (anchored to repo root) ---
+/expenses/
+/tasks/
+/research/
+/images/
+/videos/
+/activity/
+/agents/
+
+# --- Vector DBs & ML artifacts ---
+cortex-lancedb/
+memory-db/
+lancedb/
+training-data/
+training/
+models/
+vendor/
+unsloth_compiled_cache/
+venv/
+*.safetensors
+*.ckpt
+*.gguf
+*.onnx
+
+# --- User-installed plugins (keep only default markets/news) ---
+plugins/*
+!plugins/markets/
+!plugins/news/
+
+# --- Developer tools (scripts with local auth paths) ---
+tools/
+
+# --- Logs ---
+*.log
+server.log
+/logs/
+
+# --- Scratch skill dirs ---
+skills/temp/
+
+# --- Build artifacts ---
+public/styles.css
+
+# --- Node ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- IDE / OS ---
+.claude/
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+
+# --- Scheduled task state ---
+scheduled_tasks.lock
+
+# --- Backup/restore owner state (per-install, not code) ---
+.backup-meta/
+
+# --- Design / working notes (not for public repo) ---
+SCHEDULER_V2_CHANGES.md
+*_CHANGES.md
+*_NOTES.md
+CLAUDE.md
+scripts/*.failures.jsonl

@@ -1,0 +1,216 @@
+{
+  "id": "gcal",
+  "name": "Google Calendar",
+  "description": "View and manage your Google Calendar events",
+  "icon": "\ud83d\udcc5",
+  "category": "utility",
+  "service": true,
+  "enabled_by_default": false,
+  "setup": "Enable to start Google Calendar authorization in your browser.",
+  "systemPromptAddition": "## Google Calendar\n\n### Core Rule: Always use live data\nNever answer scheduling questions from memory. Always call gcal_list for current events. \"What am I doing tomorrow?\" = call gcal_list with tomorrow's date range, every time.\n\n\"Recheck\", \"check again\", \"look again\" \u2014 call the tool again immediately. Never restate a previous answer.\n\n### Displaying events\nFormat each event as:\n  \ud83d\udcc5 **[Title]** \u2014 Day, Month Date \u00b7 Time \u2013 Time (timezone)\n  ID: <eventId>\n  \u2192 Location (if set) \u00b7 Attendees (if any) \u00b7 Notes (if any)\n\nAlways include the raw event ID \u2014 needed for follow-up actions like \"update that\" or \"delete it\".\n\nGroup by day when showing multiple events.\n\n### Confirmation rules\n- {{USER_NAME}} directly commands a delete (\"delete that\", \"cancel that meeting\", \"remove it\") after you showed the event \u2192 call gcal_delete immediately. His command IS the confirmation.\n- Creating or updating an event \u2192 always show the full event details first and wait for explicit approval before calling the tool.\n- Quick add \u2192 call it, then show {{USER_NAME}} what Google parsed so he can verify the time and title were understood correctly.\n- NEVER say an action was completed unless you called the tool and received a successful response. If you did not call a tool, the action did not happen.\n\n### Moving events\n\"Move [event] to [day/time]\" always means call gcal_update with the existing eventId and new start/end \u2014 never gcal_delete + gcal_create. Moving preserves the event ID, description, attendees, and all metadata.\n\n### Conflict checking\nBefore creating or moving an event into a time slot, call gcal_list for that window. If a conflict exists, flag it: \"You already have [X] at that time \u2014 still want to create this?\"\n\n### Recurring events\nWhen updating or deleting a recurring event, always clarify scope before acting:\n\"This will affect just this occurrence. Should it apply to all future occurrences, or every instance of this event?\"\nWait for the answer before calling the tool.\n\n### Time zones\nAlways use explicit timezones in ISO 8601 format. Never leave a time ambiguous. If a time is given without a timezone, use America/Los_Angeles unless told otherwise.\n\n### Scheduling workflows\nWhen asked to \"schedule X\" or \"find time for X\":\n1. Call gcal_list for the relevant window to see what's already booked\n2. Propose specific open slots based on what you find\n3. Show the full draft event (title, time, location if provided) and wait for confirmation\n4. Then call gcal_create\n\nWhen asked \"what's on my calendar [period]\":\n1. Call gcal_list with that time range\n2. Group by day, format each event as above\n3. Proactively flag conflicts, back-to-back meetings, or unusually long gaps\n\n### Multiple calendars\nOn first use each session, call gcal_list_calendars to learn what calendars exist. Reference them by name in responses (\"your Work calendar\", \"your Personal calendar\").\n\n### Tone\nConcise. Lead with the schedule. Flag conflicts and time-sensitive items proactively. Suggest optimizations (\"You have a 3-hour gap Tuesday \u2014 good time for that call?\") but only act on your own suggestions after explicit confirmation.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "gcal_list",
+        "description": "List events from Google Calendar. Always scope with timeMin/timeMax \u2014 never list without a time range. When asked 'what's on my calendar today/tomorrow/this week', compute the appropriate ISO 8601 range. Default calendarId is 'primary'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "calendarId": {
+              "type": "string",
+              "description": "Calendar ID to query (default: primary)"
+            },
+            "maxResults": {
+              "type": "integer",
+              "description": "Max events to return (default: 10)"
+            },
+            "timeMin": {
+              "type": "string",
+              "description": "Start of time range, ISO 8601 (default: now)"
+            },
+            "timeMax": {
+              "type": "string",
+              "description": "End of time range, ISO 8601"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "gcal_get",
+        "description": "Get full details of a specific calendar event by its ID.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "eventId": {
+              "type": "string",
+              "description": "Google Calendar event ID"
+            },
+            "calendarId": {
+              "type": "string",
+              "description": "Calendar ID (default: primary)"
+            }
+          },
+          "required": [
+            "eventId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "gcal_create",
+        "description": "Create a new calendar event. Before calling: (1) call gcal_list for that time window to check for conflicts, (2) show {{USER_NAME}} the full event summary (title, time with timezone, location, attendees) and wait for explicit confirmation. Times must be ISO 8601 with timezone (e.g. 2026-03-25T14:00:00-07:00). For all-day events use date format: 2026-03-25.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string",
+              "description": "Event title"
+            },
+            "start": {
+              "type": "string",
+              "description": "Start time (ISO 8601 datetime with timezone, or date for all-day)"
+            },
+            "end": {
+              "type": "string",
+              "description": "End time (ISO 8601 datetime with timezone, or date for all-day)"
+            },
+            "description": {
+              "type": "string",
+              "description": "Event description/notes"
+            },
+            "location": {
+              "type": "string",
+              "description": "Event location"
+            },
+            "calendarId": {
+              "type": "string",
+              "description": "Calendar ID (default: primary)"
+            },
+            "attendees": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of attendee email addresses"
+            },
+            "allDay": {
+              "type": "boolean",
+              "description": "If true, creates an all-day event (start/end should be dates like 2026-03-25)"
+            }
+          },
+          "required": [
+            "summary",
+            "start",
+            "end"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "gcal_update",
+        "description": "Update an existing calendar event. Only include fields you want to change. Show a before/after summary and wait for confirmation before calling. For recurring events, first ask whether the change applies to: this occurrence only, all future occurrences, or all instances.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "eventId": {
+              "type": "string",
+              "description": "Google Calendar event ID"
+            },
+            "summary": {
+              "type": "string",
+              "description": "New event title"
+            },
+            "start": {
+              "type": "string",
+              "description": "New start time (ISO 8601 with timezone)"
+            },
+            "end": {
+              "type": "string",
+              "description": "New end time (ISO 8601 with timezone)"
+            },
+            "description": {
+              "type": "string",
+              "description": "New description"
+            },
+            "location": {
+              "type": "string",
+              "description": "New location"
+            },
+            "calendarId": {
+              "type": "string",
+              "description": "Calendar ID (default: primary)"
+            }
+          },
+          "required": [
+            "eventId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "gcal_delete",
+        "description": "Delete a calendar event. If {{USER_NAME}} directly says 'delete that event', 'cancel that meeting', or 'remove it' after you showed the event \u2014 his command IS the confirmation, call immediately. For recurring events, always clarify scope first: this occurrence, all future, or all instances.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "eventId": {
+              "type": "string",
+              "description": "Google Calendar event ID"
+            },
+            "calendarId": {
+              "type": "string",
+              "description": "Calendar ID (default: primary)"
+            }
+          },
+          "required": [
+            "eventId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "gcal_quick_add",
+        "description": "Create a calendar event from natural language text. Google parses the time and title automatically. Call it, then show {{USER_NAME}} what was parsed (title, date, time) so he can verify it was understood correctly.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Natural language event description, e.g. 'Lunch with John tomorrow at noon'"
+            },
+            "calendarId": {
+              "type": "string",
+              "description": "Calendar ID (default: primary)"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "gcal_list_calendars",
+        "description": "List all calendars in the user's Google account (personal, work, shared, etc.). Call on first use each session to learn what calendars exist before referencing them by name.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  ]
+}

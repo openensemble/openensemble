@@ -1,0 +1,54 @@
+{
+  "id": "tasks",
+  "name": "Task Scheduler",
+  "description": "Schedule recurring and one-time tasks for your agents",
+  "icon": "⏰",
+  "category": "utility",
+  "enabled_by_default": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_tasks",
+        "description": "List all currently scheduled tasks.",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "delete_task",
+        "description": "Delete a scheduled task by its ID.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Task ID to delete" }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_reminders",
+        "description": "List all active reminders for the current user.",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cancel_reminder",
+        "description": "Cancel a reminder by its ID.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Reminder ID to cancel" }
+          },
+          "required": ["id"]
+        }
+      }
+    }
+  ]
+}

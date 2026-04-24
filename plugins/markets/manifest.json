@@ -1,0 +1,14 @@
+{
+  "id": "markets",
+  "name": "Markets",
+  "icon": "📈",
+  "description": "Live crypto and stock market data via CryptoCompare and Yahoo Finance",
+  "version": "1.0.0",
+  "drawer": true,
+  "drawerId": "drawerMarkets",
+  "btnId": "sbtnMarkets",
+  "enabled_by_default": true,
+  "defaultSettings": {
+    "usesModel": false
+  }
+}

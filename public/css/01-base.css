@@ -1,0 +1,33 @@
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+:root {
+  --bg: #121214; --bg2: #1c1c1f; --bg3: #26262a;
+  --border: #32323a; --text: #ececf0; --muted: #7a7a85;
+  --accent: #5b8def; --green: #34d399; --yellow: #fbbf24;
+  --red: #ef4444; --radius: 10px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bot: env(safe-area-inset-bottom, 0px);
+  --strip-w: 52px;
+  --drawer-w: 560px;
+}
+
+html, body { height: 100%; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg); color: var(--text);
+  height: 100dvh; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+
+/* ── Lucide icon base ── */
+.icon, [data-lucide] { width: 18px; height: 18px; stroke-width: 1.75; vertical-align: middle; flex-shrink: 0; }
+.strip-btn .icon { width: 20px; height: 20px; }
+.drawer-icon .icon { width: 18px; height: 18px; }
+.di-icon .icon { width: 20px; height: 20px; }
+.exp-nav-icon .icon { width: 16px; height: 16px; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }

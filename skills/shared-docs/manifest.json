@@ -1,0 +1,44 @@
+{
+  "id": "shared-docs",
+  "name": "Shared Documents",
+  "description": "Access documents, photos, and videos that users have uploaded",
+  "icon": "📁",
+  "category": "utility",
+  "enabled_by_default": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_shared_docs",
+        "description": "List documents, photos, and videos that have been uploaded and shared. Returns file names, types, sizes, who uploaded them, and sharing status.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filter": {
+              "type": "string",
+              "description": "Optional filter: 'photos' for images only, 'videos' for videos only, 'docs' for documents only. Omit for all files."
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_shared_doc",
+        "description": "Read the text content of an uploaded document (PDF, txt, md, csv). Use the doc_id from list_shared_docs.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "doc_id": {
+              "type": "string",
+              "description": "The document ID from list_shared_docs"
+            }
+          },
+          "required": ["doc_id"]
+        }
+      }
+    }
+  ]
+}

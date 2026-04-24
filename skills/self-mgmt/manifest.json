@@ -1,0 +1,167 @@
+{
+  "id": "self-mgmt",
+  "name": "Self Management",
+  "always_on": true,
+  "hidden": true,
+  "systemPromptAddition": "## Role management\n\nWhen {{USER_NAME}} asks you to take on, manage, or delegate yourself to a role (e.g. \"handle coding\", \"you're my coder now\", \"delegate yourself as my coder\"), use the claim_role tool with the appropriate role ID to formally claim it. This gives you the tools for that role. Don't just say you'll do it — actually call claim_role.\n\nOnly call claim_role when {{USER_NAME}} explicitly asks for the change. Never call it to answer questions about your role, capabilities, or what you do — answer those from your system prompt instead.\n\nWhen {{USER_NAME}} says \"always do X with <role>\" or gives a standing instruction for a role, use role_add_rule to attach it to the role manifest — that way the rule survives agent changes and follows whoever holds the role.\n\n## Durable memory\n\n**Hard rule — no hallucinated memory.** If {{USER_NAME}} asks you to remember, save, note, record, preserve, or \"keep track of\" information — whether a single fact or the findings of a dive, investigation, or inventory — you MUST call `remember_fact` for each durable item BEFORE telling {{USER_NAME}} it's saved. Never respond with \"I'll remember that\", \"noted\", \"saved\", \"got it\", \"I'll keep that in mind\", or any equivalent without first calling the tool. If you did a multi-step investigation (e.g. listed nodes, probed each one), call `remember_fact` once per distinct durable finding — not a single summary. Claiming you remembered without the tool call is a bug; {{USER_NAME}} will lose the information on the next conversation and it will be your fault.\n\nFacts you learn about {{USER_NAME}}'s environment, infrastructure, people, or standing decisions should be preserved across conversations so no agent has to re-discover them. Use these tools:\n\n- **remember_fact** — Call AFTER you've confirmed something durable (typically via tool use — probing a node, checking a file, reading config) AND whenever {{USER_NAME}} asks you to remember/save/note something. Good fact: 'host X is a Proxmox VE 8.2 server at 10.0.0.10, 32GB RAM'. Bad fact: 'it's a server' (too vague), 'the weather is nice' (ephemeral). Facts are auto-scoped to your current service role by default — infra facts you learn while holding the nodes role only get injected into nodes-role agents' contexts, keeping other agents' prompts clean. Pass `scope: 'shared'` only for universal facts about {{USER_NAME}} (name, location, timezone, cross-cutting preferences).\n\n- **recall_facts** — Call BEFORE asking {{USER_NAME}} something that might already be known (server IPs, people's roles, past decisions). This saves the user from re-explaining context.\n\n- **forget_fact** — When {{USER_NAME}} corrects a stored fact or says it's no longer true.\n\n{{USER_NAME}} saying \"remember X\" or \"this is a fact: X\" is auto-pinned by the system before you see it — you only need to confirm briefly. Call remember_fact yourself when you discover something worth preserving through your own tool use, or when {{USER_NAME}}'s request to \"remember\" is more complex than a single literal fact (e.g. \"dive into X and remember what you find\").",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "role_add_rule",
+        "description": "Add a persistent rule to a role that will apply to any agent handling it. Use this when the user says 'always do X with gmail/gcal/expenses' or similar standing instructions that should survive agent changes. Rules are appended to the role's rules.md and injected into the system prompt alongside the role's built-in instructions.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "roleId": { "type": "string", "description": "ID of the role to add the rule to (e.g. 'gmail', 'gcal', 'expenses')" },
+            "rule":    { "type": "string", "description": "The rule to add, written as a clear instruction (e.g. 'Always fetch the latest email before replying')" }
+          },
+          "required": ["roleId", "rule"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "role_remove_rule",
+        "description": "Remove a previously added rule from a role. Use role_list_rules first to see the current rules and their indices.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "roleId": { "type": "string", "description": "ID of the role" },
+            "index":   { "type": "integer", "description": "Zero-based index of the rule to remove, as shown by role_list_rules" }
+          },
+          "required": ["roleId", "index"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "role_list_rules",
+        "description": "List all user-added rules for a role. Shows each rule with its index so rules can be removed by index if needed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "roleId": { "type": "string", "description": "ID of the role to list rules for" }
+          },
+          "required": ["roleId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "claim_role",
+        "description": "Claim or release a role so that you — and only you — handle it. ONLY call this when the user explicitly asks you to take over or manage a specific role (e.g. 'I want you to handle my calendar'). Never call this to answer questions about your role, capabilities, or what you do — answer those from your system prompt instead. Before claiming a role someone else owns, tell the user who currently has it and ask for confirmation, then call again with force=true. System/delegate roles cannot be assigned.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "roleId":  { "type": "string",  "description": "ID of the role to claim or release (e.g. 'gcal', 'tasks', 'web')" },
+            "force":    { "type": "boolean", "description": "Set true to claim even if currently owned by another agent — only after the user has confirmed the transfer" },
+            "release":  { "type": "boolean", "description": "Set true to release your ownership of the role (returns it to all agents)" }
+          },
+          "required": ["roleId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_roles",
+        "description": "List all roles and which agents they're currently assigned to.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_role",
+        "description": "Create a new role that can be assigned to an agent. IMPORTANT: Before creating a role, ALWAYS call list_roles first to check if a role with that name already exists. If it does, use assign_role_to_agent instead — do NOT create a duplicate. WORKFLOW for new roles — you MUST follow these steps in order: (1) Call list_roles to verify the role doesn't already exist. (2) Draft a system prompt for the role based on the user's description. (3) Present the draft to the user and ask if they want any changes. (4) Only after the user explicitly approves the system prompt, call this tool with confirmed=true. Never call with confirmed=false or omit it — the backend will reject it and remind you to show the draft first. Requires admin privileges.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name":             { "type": "string", "description": "Role name, e.g. 'Image Generator'" },
+            "icon":             { "type": "string", "description": "Single emoji icon for the role" },
+            "description":      { "type": "string", "description": "Short one-line description shown in the UI" },
+            "responsibilities": { "type": "string", "description": "The full system prompt injected when this role is active — must be the exact text the user approved" },
+            "confirmed":        { "type": "boolean", "description": "Set true ONLY after you have shown the user the draft system prompt and they have explicitly approved it" }
+          },
+          "required": ["name", "description", "responsibilities", "confirmed"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "delete_role",
+        "description": "Permanently delete a custom role and remove it from any agent it was assigned to. Only custom roles can be deleted — built-in roles (coder, email, expenses, gcal) cannot. Requires admin privileges.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "description": "Name of the role to delete, e.g. 'Image Generator'" }
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "assign_role_to_agent",
+        "description": "Assign a role to a specific agent, delegating that responsibility to them. Use when the user says things like 'let my helper handle image generation' or 'assign the coder role to my coding agent'. Requires admin privileges.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "role_name":  { "type": "string", "description": "Name of the role to assign, e.g. 'Coder' or 'Image Generator'" },
+            "agent_name": { "type": "string", "description": "Display name of the agent to assign the role to" }
+          },
+          "required": ["role_name", "agent_name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "remember_fact",
+        "description": "Pin a durable fact to memory. Facts are immortal (never decay) and injected into the system prompt on every future turn. By default, facts learned while you hold a service role (nodes, email, gcal, etc.) are auto-scoped to that role — only agents holding that role will see them. This keeps each agent's context clean: e.g. infra facts stay with the nodes-role holder and don't clutter the email agent's prompt. Use when you learn something load-bearing via tool use — probing a node, reading config, confirming a policy. Do NOT call for ephemeral details, chit-chat, or casual preferences. The user saying 'remember X' or 'this is a fact: X' is already auto-pinned by the system.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "The fact in one clear sentence, framed so it makes sense out of context. Include specifics (names, IPs, versions, paths). Good: 'host X is a Proxmox VE 8.2 server at 10.0.0.10, 32GB RAM, runs 8 VMs'. Bad: 'it's a server'." },
+            "scope": { "type": "string", "description": "Optional override. Omit for auto-scoping (recommended — scopes to your current service role if you hold exactly one). Pass 'shared' to force the fact to be visible to every agent regardless of role (use for universal truths about the user: name, timezone, location, cross-cutting preferences). Pass a role id (e.g. 'nodes', 'email') to force that scope." }
+          },
+          "required": ["text"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "recall_facts",
+        "description": "Search stored facts and past conversation episodes for anything relevant to a query. Use this BEFORE asking the user something that may already be known (e.g. server IPs, people's roles, past decisions). Returns up to 10 matches ranked by relevance.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "description": "What to search for — e.g. 'proxmox server', 'my wife's name', 'backup schedule'" }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "forget_fact",
+        "description": "Remove a fact or memory by describing it. Semantic search finds the best-matching memories and soft-deletes them. Use when the user asks to forget something or when you detect a stored fact has become wrong. Immortal pins are deletable via this path too — unlike normal forget, which refuses immortals.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "Describe the memory to forget, e.g. 'my old Proxmox host' or 'the old backup schedule'" }
+          },
+          "required": ["text"]
+        }
+      }
+    }
+  ]
+}

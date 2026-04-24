@@ -1,0 +1,163 @@
+{
+  "id": "deep_research",
+  "name": "Deep Research",
+  "description": "Multi-step web research with persistent document storage",
+  "icon": "📚",
+  "category": "service",
+  "service": true,
+  "enabled_by_default": true,
+  "systemPromptAddition": "## Deep Research\n\nYou have tools for in-depth, multi-step research with persistent document storage.\n\n### Research approach\n- For quick factual questions: answer directly from knowledge if confident, otherwise do a single targeted search.\n- For deep dives: search → read sources → synthesize → present. Don't dump raw search results.\n- Always lead with the answer or summary. Put sources and detail at the bottom.\n- If sources conflict, flag it explicitly — don't pick one arbitrarily.\n- Cite sources inline when making specific factual claims.\n\n### Output format\n- Summary first (2-5 sentences), then supporting detail, then sources.\n- Use headers for long responses only. If it fits in a paragraph, skip the headers.\n- Flag confidence level when uncertain: \"I'm not confident about this — you may want to verify.\"\n- Neutral and factual. No filler. Don't editorialize unless asked.\n\n### Picking the right tool\n- **`deep_research_parallel`** — use for broad or multi-angle topics where the user asks for comprehensive coverage (\"deep research on X\", \"thorough analysis of Y\", \"comprehensive report on Z\", \"explore the landscape of W\"). It internally decomposes the topic into 3-7 angles, spawns parallel research workers, synthesizes findings, and auto-saves the document. Returns a finished report — you just present a summary.\n- **`research_search`** — use for narrower single-facet questions, follow-ups on existing research, or when the user asks about one specific aspect. Faster, single-pass.\n- Do NOT use either for simple factual questions you can answer directly.\n\n### When deep_research_parallel falls back\nIf the planner decides the topic is too narrow (<3 distinct angles), `deep_research_parallel` automatically falls through to a single-pass `research_search` — so it is always safe to call it for borderline cases.\n\n### Workflow for research_search (single-pass)\n1. Call `research_search` with the topic and appropriate depth (quick/standard/deep)\n2. Review the findings. If there are gaps or you need more detail, use `web_search` and `fetch_url` for targeted follow-ups\n3. Synthesize everything into a well-structured markdown document with clear headers and citations\n4. **Before saving**, call `list_research` to check if a document on the same topic already exists\n5. If an existing document covers the same topic, use `update_research` instead of `save_research` — this returns the existing content so you can merge old and new findings without losing anything\n6. If no existing document, use `save_research` to create a new one\n7. Present a concise summary to the user and mention the full document is saved\n\n### Workflow for deep_research_parallel\n1. Call `deep_research_parallel` with the topic. The tool handles planning, parallel research, synthesis, and saving itself.\n2. The tool returns a summary + document id + the synthesized markdown. Present a concise summary to the user and mention the saved document.\n3. You do NOT need to call save_research — it is already saved.\n\n### Updating existing research\nWhen updating a document with `update_research`:\n- The tool returns the existing document content alongside your new content\n- Merge both: keep unique findings from the old document, add new findings, remove outdated info, deduplicate sources\n- The merged content replaces the old document\n- This prevents duplicate documents and ensures no information is lost\n\n### Document format guidelines\n- Use clear markdown with headers (##), bullet points, and inline source links\n- Always include a **Sources** section at the end with numbered URLs\n- Include the date of research (and update date if updated)\n- Keep the summary you present in chat brief — the saved document has the full details\n\n### Retrieving past research\nWhen the user asks about previous research, wants to revisit a topic, or references a past report:\n1. Call `list_research` to find matching documents\n2. Call `get_research` with the document ID to retrieve the full content\n3. Present the relevant information or the full document as requested",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "deep_research_parallel",
+        "description": "Comprehensive research for broad or multi-angle topics. Decomposes the topic into 3-7 distinct angles, spawns parallel ephemeral research sub-agents (one per angle), synthesizes their findings into a single markdown document, and auto-saves it. Use when the user asks for 'deep research', 'comprehensive analysis', 'thorough investigation', 'explore the landscape of X', or when a topic clearly spans multiple dimensions. For narrow single-facet questions, use research_search instead. If the internal planner decides the topic cannot be decomposed into 3+ distinct angles, this tool automatically falls through to a standard research_search — so it is always safe to call.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "string",
+              "description": "The research topic or question to investigate comprehensively"
+            },
+            "depth": {
+              "type": "string",
+              "enum": ["standard", "deep"],
+              "description": "Depth per sub-angle (if the planner decomposes the topic). Default: standard. Only affects the fallback single-pass path — parallel workers always use standard depth internally."
+            }
+          },
+          "required": ["topic"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "research_search",
+        "description": "Perform a multi-step web research search on a topic. Runs multiple search queries to build comprehensive findings. Returns structured results with sources and suggested follow-up queries. Use 'quick' for overviews, 'standard' for solid coverage, 'deep' for exhaustive research with page fetches. Optionally include specific URLs to fetch and incorporate as primary sources.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "string",
+              "description": "The research topic or question to investigate"
+            },
+            "depth": {
+              "type": "string",
+              "enum": ["quick", "standard", "deep"],
+              "description": "Research depth: quick (3 searches), standard (6 searches), deep (10 searches + URL fetches). Default: standard"
+            },
+            "urls": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Optional list of specific URLs to fetch and include as primary sources in the research"
+            }
+          },
+          "required": ["topic"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "save_research",
+        "description": "Save a research document as a persistent markdown file for the user. The document can be retrieved later by the user at any time.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Title of the research document"
+            },
+            "content": {
+              "type": "string",
+              "description": "Full markdown content of the research document"
+            },
+            "tags": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Tags for categorization and search (e.g. ['quantum computing', 'physics', '2026'])"
+            }
+          },
+          "required": ["title", "content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_research",
+        "description": "List the user's saved research documents. Optionally filter by a search query that matches against titles and tags.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Optional search query to filter documents by title or tags"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_research",
+        "description": "Retrieve the full content of a saved research document by its ID.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "description": "The document ID to retrieve"
+            }
+          },
+          "required": ["documentId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "update_research",
+        "description": "Update an existing research document with new content. Returns the existing document content so you can merge old and new findings — ensuring no information is lost. Pass the merged result as the new content.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "description": "The ID of the document to update"
+            },
+            "content": {
+              "type": "string",
+              "description": "The new/merged markdown content to replace the existing document"
+            },
+            "tags": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Updated tags (optional — keeps existing tags if omitted)"
+            }
+          },
+          "required": ["documentId", "content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "delete_research",
+        "description": "Delete a saved research document. Ask the user for confirmation before calling this.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "documentId": {
+              "type": "string",
+              "description": "The document ID to delete"
+            }
+          },
+          "required": ["documentId"]
+        }
+      }
+    }
+  ]
+}
