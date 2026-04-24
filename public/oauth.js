@@ -318,52 +318,74 @@ async function connectOpenAIOAuth() {
     if (!res.ok) { alert('Failed to start ChatGPT authorization.'); return; }
     const { url } = await res.json();
     window.open(url, '_blank', 'noopener');
-    // Poll status so the UI flips to "connected" once the popup finishes.
-    // On a remote/LXC deployment the redirect to localhost:1455 can't reach
-    // the server — prompt the user to paste the failed URL after ~15s so
-    // they have a way to finish connecting.
+
+    // Show the inline paste fallback up-front so remote-server users don't
+    // have to wait for the popup to fail. Local-machine installs will finish
+    // via the :1455 callback and the poll below will hide the paste box.
+    showOpenAIPasteBox();
+
+    // Poll status so the UI flips to "connected" once auth finishes (either
+    // via the :1455 callback on local installs, or via the paste submission).
     let tries = 0;
-    let promptedPaste = false;
     const poll = async () => {
       if (tries++ > 60) return; // ~5 min
       try {
         const s = await fetch('/api/oauth/openai/status').then(r => r.json());
-        if (s.connected) { refreshOpenAIOAuthStatus(); return; }
+        if (s.connected) { hideOpenAIPasteBox(); refreshOpenAIOAuthStatus(); return; }
       } catch {}
-      if (!promptedPaste && tries >= 3) {
-        promptedPaste = true;
-        // Detached to avoid blocking the poll; picks up on success via polling.
-        setTimeout(offerOpenAIPasteCallback, 0);
-      }
       setTimeout(poll, 5000);
     };
-    setTimeout(poll, 5000);
+    setTimeout(poll, 3000);
   } catch (e) { alert(`Error: ${e.message}`); }
 }
 
-// Fallback for remote-server deployments: the authorize page redirects to
-// http://localhost:1455/auth/callback?code=...&state=..., which only loads
-// when the browser runs on the same machine as the server. When that fails,
-// the user copies the URL from the broken page's address bar and pastes it
-// here; the server completes the exchange.
-async function offerOpenAIPasteCallback() {
-  const box = document.getElementById('providerStatus_openai-oauth');
-  if (box && box.textContent?.includes('Connected')) return;
-  const pasted = prompt(
-    'If the ChatGPT page finished with "could not connect" (the URL starts with http://localhost:1455/auth/callback?code=...), paste that URL here to finish connecting. Otherwise cancel.',
-    ''
-  );
+function showOpenAIPasteBox() {
+  const box = document.getElementById('providerPaste_openai-oauth');
+  const input = document.getElementById('providerPasteInput_openai-oauth');
+  if (!box || !input) return;
+  box.style.display = 'block';
+  input.value = '';
+  input.focus();
+  // Auto-submit the moment the user pastes something URL-shaped — no extra
+  // click needed. The paste event fires before the input's value updates,
+  // so read from the clipboard data directly.
+  input.onpaste = (e) => {
+    const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+    if (/[?&]code=/.test(text) && /[?&]state=/.test(text)) {
+      e.preventDefault();
+      input.value = text.trim();
+      submitOpenAIPasteCallback();
+    }
+  };
+  // Fallback: Enter to submit manually.
+  input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submitOpenAIPasteCallback(); } };
+}
+
+function hideOpenAIPasteBox() {
+  const box = document.getElementById('providerPaste_openai-oauth');
+  const input = document.getElementById('providerPasteInput_openai-oauth');
+  if (box) box.style.display = 'none';
+  if (input) { input.value = ''; input.onpaste = null; input.onkeydown = null; }
+}
+
+async function submitOpenAIPasteCallback() {
+  const input = document.getElementById('providerPasteInput_openai-oauth');
+  const msg = document.getElementById('providerPasteMsg_openai-oauth');
+  if (!input || !msg) return;
+  const pasted = (input.value || '').trim();
   if (!pasted) return;
+  msg.textContent = 'Completing…';
   try {
     const r = await fetch('/api/oauth/openai/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: pasted.trim() }),
+      body: JSON.stringify({ url: pasted }),
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) { alert(data?.error || 'Failed to complete OAuth.'); return; }
+    if (!r.ok) { msg.textContent = data?.error || 'Failed to complete OAuth.'; return; }
+    hideOpenAIPasteBox();
     refreshOpenAIOAuthStatus();
-  } catch (e) { alert(`Error: ${e.message}`); }
+  } catch (e) { msg.textContent = `Error: ${e.message}`; }
 }
 
 async function disconnectOpenAIOAuth() {
@@ -525,6 +547,12 @@ function renderCompatProviderCards(cfg) {
                 style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Check status</button>
             </div>
             <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:4px">Checking…</div>
+            <div id="providerPaste_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">If the ChatGPT page ended on a "could not connect" screen (URL starts with <code>http://localhost:1455/auth/callback?code=…</code>), paste that full URL here.</div>
+              <input type="text" id="providerPasteInput_${p.id}" placeholder="http://localhost:1455/auth/callback?code=…"
+                style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;font-family:monospace">
+              <div id="providerPasteMsg_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+            </div>
           </div>
         </div>`;
     }
