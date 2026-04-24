@@ -25,6 +25,13 @@ const SIGNALS_INSTRUCTION = (
 // If the agent's last response was about email/task operations, skip correction detection
 const AGENT_ACTION_RESPONSE_RE = /\b(moved to trash|trashed|permanently deleted|found \d+|done!? all \d+|email(s)? (have been|were)|scheduled (to run|at)|task .{1,40} scheduled)\b/i;
 
+// User turn that is purely a question ("what/which/who/...", "do/does/is/..."):
+// a question asks about existing memory, it doesn't assert a new preference.
+// When the user recalls ("what fruit do i like") and the agent answers ("you
+// like pineapples"), the signals classifier otherwise sees the agent's echo
+// and re-saves the same preference on every recall.
+const QUESTION_ONLY_RE = /^(?:what'?s?|which|who'?s?|whose|when|where|why|how|do|does|did|is|are|was|were|can|could|should|would|will|am|have|has|had)\b[^.!]*\??\s*$/i;
+
 async function detectSignals({ agentId, userMessage, agentLastResponse, userId = 'default' }) {
   if (!await providerHealthy()) return { correction: null, preference: null };
 
@@ -37,6 +44,14 @@ async function detectSignals({ agentId, userMessage, agentLastResponse, userId =
   const raw = await generateCombined(SIGNALS_INSTRUCTION, inputText, { caller: 'signals', userId, agentId });
   const s   = safeParseJSON(raw);
   if (!s) return { correction: null, preference: null };
+
+  // A pure question from the user is a recall, not an assertion. Drop any
+  // preference the classifier emits so we don't re-save the agent's echoed
+  // answer on every "what fruit do i like" turn.
+  if (QUESTION_ONLY_RE.test(userMessage.trim())) {
+    s.is_preference = false;
+    s.preference = null;
+  }
 
   let correctionRecord = null;
   let preferenceRecord = null;
