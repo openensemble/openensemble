@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
 
 const BASE_DIR  = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const GMAIL_CLI = path.join(BASE_DIR, 'tools/gmail.mjs');
@@ -28,30 +29,6 @@ function resolveAccount(accounts, accountParam) {
   ) ?? accounts[0] ?? null;
 }
 
-// ── Shared-doc attachment loader ─────────────────────────────────────────────
-
-const DOCS_DIR   = path.join(BASE_DIR, 'shared-docs');
-const DOCS_INDEX = path.join(DOCS_DIR, 'index.json');
-
-function canAccessDoc(doc, userId) {
-  return doc.uploadedBy === userId ||
-    doc.sharedWith.includes('*') ||
-    doc.sharedWith.includes(userId);
-}
-
-function loadAttachments(docIds, userId) {
-  if (!docIds?.length) return [];
-  let index = [];
-  try { index = JSON.parse(fs.readFileSync(DOCS_INDEX, 'utf8')); } catch { return []; }
-  return docIds.map(id => {
-    const doc = index.find(d => d.id === id);
-    if (!doc || !canAccessDoc(doc, userId)) return null;
-    const filePath = path.join(DOCS_DIR, doc.id + doc.ext);
-    if (!fs.existsSync(filePath)) return null;
-    return { filename: doc.filename, mimeType: doc.mimeType, data: fs.readFileSync(filePath) };
-  }).filter(Boolean);
-}
-
 // ── Gmail compose with attachments (direct API, no CLI) ───────────────────────
 
 async function gmailComposeWithAttachments(args, userId, accountId) {
@@ -59,7 +36,9 @@ async function gmailComposeWithAttachments(args, userId, accountId) {
   const token    = await getAccessToken('gmail', userId, accountId);
   const boundary = `boundary_${Date.now().toString(36)}`;
 
-  const attachments = loadAttachments(args.attachment_doc_ids, userId);
+  const { attachments, errors } = loadEmailAttachments(args.attachment_doc_ids, userId);
+  const resolveErr = attachmentResolutionError(args.attachment_doc_ids, errors);
+  if (resolveErr) return resolveErr;
 
   let rawEmail;
   const htmlBody = args.html_body ?? null;
@@ -284,7 +263,9 @@ async function execImap(name, args, account, userId) {
     if (!account.smtpHost) {
       return `"${account.label}" is an IMAP account with no SMTP configured — sending is not available. The user can add SMTP settings by removing and re-adding the account in Settings → Profile → Connected Accounts.`;
     }
-    const attachments = loadAttachments(args.attachment_doc_ids, userId);
+    const { attachments, errors } = loadEmailAttachments(args.attachment_doc_ids, userId);
+    const resolveErr = attachmentResolutionError(args.attachment_doc_ids, errors);
+    if (resolveErr) return resolveErr;
     const { sendSmtpEmail } = await import('../../lib/smtp-client.mjs');
     return sendSmtpEmail(account, { to: args.to, subject: args.subject, body: args.body, html: args.html_body, attachments });
   }
