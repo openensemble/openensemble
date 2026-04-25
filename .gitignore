@@ -56,6 +56,11 @@ plugins/*
 
 # --- Developer tools (scripts with local auth paths) ---
 tools/
+scripts/probe-oauth-models.mjs
+scripts/test-parse-endpoint.mjs
+
+# --- Runtime artifacts ---
+server.pid
 
 # --- Logs ---
 *.log
