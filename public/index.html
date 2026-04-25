@@ -45,6 +45,7 @@
     <span id="sbEmailCount">—</span>
   </div>
   <span class="sb-time" id="sbTime">—</span>
+  <span id="updateBadge" onclick="openSettingsDrawer(); switchSettingsTab('system');" style="display:none;align-items:center;gap:4px;margin-left:10px;padding:2px 8px;border-radius:10px;background:#43b89c;color:#fff;font-size:11px;font-weight:600;cursor:pointer" title="Update available — click to install"><i data-lucide="download-cloud" style="width:11px;height:11px"></i>Update</span>
 </div>
 
 <!-- Login Screen -->
@@ -1041,15 +1042,7 @@
               </label>
             </div>
           </div>
-          <div id="claudeCodeLimitsRow" style="border-top:1px solid var(--border);padding-top:14px">
-            <div class="settings-section-title"><i data-lucide="bot" style="width:14px;height:14px"></i> Claude Code Limits</div>
-            <div class="settings-section-desc" style="margin-bottom:8px">Token limits for usage tracking. Check your Anthropic console for exact plan numbers.</div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <input type="number" id="claudeCodeDailyLimitInput" placeholder="Daily limit" min="0" style="width:130px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
-              <input type="number" id="claudeCodeWeeklyLimitInput" placeholder="Weekly limit" min="0" style="width:130px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
-              <button onclick="saveClaudeCodeLimits()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
-            </div>
-          </div>
+          <div id="updateRow" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px"></div>
 
           <div id="restartServerRow" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -1414,6 +1407,7 @@
 <script src="/auth.js"></script>
 <script src="/gmail-autolabel.js"></script>
 <script src="/admin.js"></script>
+<script src="/update.js"></script>
 <script src="/invites.js"></script>
 <script src="/backup.js"></script>
 <script src="/tasks.js"></script>

@@ -54,7 +54,7 @@ Users can also install **plugins** (drop-in skills + UI drawers, e.g. `markets`,
 
 - Linux (tested on Debian-family LXCs and VMs); macOS works for local dev
 - Node.js ≥ 18 (the installer pulls one via `nvm` if missing)
-- `build-essential`, `python3`, `zip`, `bubblewrap` (installer offers to install them)
+- `build-essential`, `python3`, `zip`, `bubblewrap`, `git` (installer offers to install them — `git` is required for in-app auto-update; if you grabbed the source as a zip instead of cloning, install `git` and run `git clone` over the install dir or auto-update will be disabled)
 
 ## Install
 
@@ -98,6 +98,22 @@ Providers start disabled. Enable them from the web UI under Settings → Provide
 ```
 
 Environment variables override config values: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `BRAVE_API_KEY`, `FIREWORKS_API_KEY`, `GROK_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `OE_SESSION_EXPIRY`, `OE_VISION_PROVIDER`, `OE_VISION_MODEL`.
+
+## Auto-update
+
+Admin users see an "Update available" badge in the status bar and can apply updates from **Settings → System → Software Update** without dropping to a terminal. The server polls the configured git remote (default `origin`) every hour, fast-forwards the working tree on demand, runs `npm install` if `package.json` changed, then restarts itself using the same detached-respawn mechanism as the manual Restart button.
+
+Tunable in `config.json`:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `updateCheckEnabled` | `true` | Master switch for periodic polling |
+| `updateCheckIntervalMs` | `3600000` | Poll interval (ms) — minimum 60000 |
+| `updateRemote` | `'origin'` | Git remote to follow |
+
+The flow refuses to update when the working tree is dirty or has unpushed commits — it will never `git stash` or `git reset --hard`. Resolve those manually with `git status` first.
+
+> **Trust note:** auto-update means anyone with push access to the configured `updateRemote` can ship code that runs on every install. If you don't fully trust the upstream, fork the repo and set `updateRemote` to your fork.
 
 ## Security model
 

@@ -15,6 +15,7 @@ import { loadTasks, isSchedulerRunning } from '../scheduler.mjs';
 import { isWatcherRunning } from '../gmail-autolabel.mjs';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
 import { readToken as readOpenAIOAuthToken } from '../lib/openai-codex-auth.mjs';
+import { getCachedState as getUpdateState } from '../lib/update.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const startedAt = Date.now();
@@ -150,23 +151,25 @@ async function buildFullHealth() {
   const embedProvider  = cortex.embedProvider ?? 'builtin';
   const reasonProvider = cortex.reasonProvider ?? 'auto';
   const enabled = cfg.enabledProviders ?? {};
+  // The toggle is authoritative: if a provider is explicitly disabled
+  // (enabledProviders[id] === false) it must not appear in system health,
+  // even if its API key is still in config. Default (undefined) is enabled.
+  const isEnabled = (id) => enabled[id] !== false;
 
-  // A provider is "configured" if it has an API key or is explicitly enabled
-  // (or cortex relies on it). Unconfigured providers are neither probed nor
-  // reported, so they can't trigger a spurious Degraded state.
   const cortexUsesOllama   = embedProvider === 'ollama'   || reasonProvider === 'ollama';
   const cortexUsesLmstudio = embedProvider === 'lmstudio' || reasonProvider === 'lmstudio';
-  const anthropicConfigured = !!cfg.anthropicApiKey;
-  const ollamaConfigured    = !!ollamaKey || !!enabled.ollama || cortexUsesOllama;
-  const lmstudioConfigured  = !!enabled.lmstudio || cortexUsesLmstudio;
+  const anthropicConfigured = !!cfg.anthropicApiKey                                   && isEnabled('anthropic');
+  const ollamaConfigured    = (!!ollamaKey || enabled.ollama === true || cortexUsesOllama) && isEnabled('ollama');
+  const lmstudioConfigured  = (enabled.lmstudio === true || cortexUsesLmstudio)        && isEnabled('lmstudio');
 
   // Probe only what's configured
   const ollamaAuthHeaders = ollamaKey ? { Authorization: `Bearer ${ollamaKey}` } : {};
 
-  // Compat-provider probes: fire only those with a key set, in parallel with the
-  // three core probes so the dashboard load stays under the 4s timeout ceiling.
+  // Compat-provider probes: fire only those with a key set AND not toggled
+  // off, in parallel with the core probes so the dashboard load stays under
+  // the 4s timeout ceiling.
   const compatProbes = COMPAT_HEALTH_PROBES
-    .filter(p => !!cfg[p.keyField])
+    .filter(p => !!cfg[p.keyField] && isEnabled(p.id))
     .map(p => ({ id: p.id, promise: checkBearerKey(p.modelsUrl, cfg[p.keyField]) }));
 
   const [ollamaOk, lmstudioOk, anthropicOk, ...compatResults] = await Promise.all([
@@ -183,11 +186,11 @@ async function buildFullHealth() {
   compatProbes.forEach((p, i) => { providers[p.id] = compatResults[i]; });
 
   // Perplexity has no /models endpoint — treat "key present" as configured+ok.
-  if (cfg.perplexityApiKey) providers.perplexity = true;
+  if (cfg.perplexityApiKey && isEnabled('perplexity')) providers.perplexity = true;
 
   // OpenAI OAuth (ChatGPT login) — per-user tokens, no global API key.
   const oauthStatus = openAIOAuthStatus(users);
-  if (oauthStatus.configured) providers['openai-oauth'] = oauthStatus.ok;
+  if (oauthStatus.configured && isEnabled('openai-oauth')) providers['openai-oauth'] = oauthStatus.ok;
 
   // Cortex health. Embed and reason both have a built-in tier (nomic ONNX +
   // our llama.cpp adapter) that runs in-process, so we check those first
@@ -267,6 +270,7 @@ async function buildFullHealth() {
       },
       nodeVersion: process.version,
     },
+    update: getUpdateState(),
   };
 }
 

@@ -63,9 +63,10 @@ prompt_yn() {
 
 # Ensure build tools for native npm modules (node-pty, node-llama-cpp, lancedb)
 # plus runtime binaries the server shells out to: zip for code project
-# downloads, bubblewrap for the coder skill's shell sandbox. Fresh LXC/VM
-# images typically lack these → npm install fails partway through, downloads
-# silently serve 0-byte archives, or coder refuses every shell command.
+# downloads, bubblewrap for the coder skill's shell sandbox, git for the
+# in-app auto-update flow. Fresh LXC/VM images typically lack these → npm
+# install fails partway through, downloads silently serve 0-byte archives,
+# coder refuses every shell command, or auto-update reports "Not a git repo".
 ensure_build_tools() {
   local need=()
   command -v make    &>/dev/null || need+=(make)
@@ -73,26 +74,27 @@ ensure_build_tools() {
   command -v python3 &>/dev/null || need+=(python3)
   command -v zip     &>/dev/null || need+=(zip)
   command -v bwrap   &>/dev/null || need+=(bubblewrap)
+  command -v git     &>/dev/null || need+=(git)
   [[ ${#need[@]} -eq 0 ]] && return 0
 
   warn "Missing build/runtime tools: ${need[*]}"
   local SUDO=""
   if [[ $EUID -ne 0 ]]; then
-    command -v sudo &>/dev/null || { error "Tools missing and no sudo — install build-essential, python3, zip, bubblewrap manually and re-run."; exit 1; }
+    command -v sudo &>/dev/null || { error "Tools missing and no sudo — install build-essential, python3, zip, bubblewrap, git manually and re-run."; exit 1; }
     SUDO="sudo"
   fi
   if ! prompt_yn "Install build tools now?" "y"; then
-    error "Build tools required for native modules and coder sandbox. Install manually and re-run."
+    error "Build tools required for native modules, coder sandbox, and auto-update. Install manually and re-run."
     exit 1
   fi
-  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap
-  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap
-  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap
-  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap
-  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap
-  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap
+  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git
+  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git
+  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git
+  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git
+  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git
+  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git
   else
-    error "No supported package manager found. Install build-essential, python3, zip, and bubblewrap manually and re-run."
+    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, and git manually and re-run."
     exit 1
   fi
   success "Build tools installed"

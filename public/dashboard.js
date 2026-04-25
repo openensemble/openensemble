@@ -10,30 +10,6 @@ async function loadDashboard() {
   catch { body.innerHTML = '<div style="color:var(--red);padding:20px">Failed to load dashboard.</div>'; return; }
   body.innerHTML = '';
 
-  // Claude Code usage card
-  try {
-    const usage = await fetch('/api/claude-usage').then(r => r.json());
-    const uc = document.createElement('div');
-    uc.className = 'dash-card';
-    uc.style.borderColor = '#a78bfa55';
-    const fmtTokens = n => n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n;
-    function usageBar(used, limit, label) {
-      if (!limit) return `<div style="font-size:12px;color:var(--muted)">${label}: <b style="color:var(--text)">${fmtTokens(used)}</b> tokens <span style="color:var(--muted);font-size:11px">(no limit set)</span></div>`;
-      const pct = Math.min(100, Math.round(used / limit * 100));
-      const color = pct >= 90 ? 'var(--red,#e05c5c)' : pct >= 70 ? 'var(--yellow,#f0c040)' : 'var(--accent)';
-      const left = fmtTokens(Math.max(0, limit - used));
-      return `<div style="font-size:12px;color:var(--muted);margin-bottom:4px">${label}: <b style="color:var(--text)">${fmtTokens(used)}</b> / ${fmtTokens(limit)} — <b style="color:${color}">${pct}% used</b> · ${left} remaining</div>
-        <div style="height:6px;background:var(--bg3);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${color};border-radius:3px;transition:width .4s"></div></div>`;
-    }
-    uc.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><span>${icon('zap', 24)}</span><div class="dash-card-title">Claude Code Usage</div></div>
-      <div style="display:flex;flex-direction:column;gap:10px">
-        ${usageBar(usage.today, usage.dailyLimit, 'Today')}
-        ${usageBar(usage.week,  usage.weeklyLimit, 'This week')}
-      </div>
-      ${!usage.dailyLimit && !usage.weeklyLimit ? '<div style="font-size:11px;color:var(--muted);margin-top:4px">Set limits in Settings → System to see usage %</div>' : ''}`;
-    body.appendChild(uc);
-  } catch {}
-
   // System Health card (admin/owner only)
   const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
   if (isPriv) {

@@ -1,6 +1,6 @@
 /**
  * Config routes: /api/config, /api/config-public, /api/cortex-config,
- *                /api/cortex-health, /api/models, /api/claude-usage
+ *                /api/cortex-health, /api/models
  */
 
 import fs from 'fs';
@@ -561,54 +561,8 @@ export async function handle(req, res) {
     res.end(JSON.stringify({
       visionProvider: cfg.visionProvider, visionModel: cfg.visionModel,
       sessionExpiryHours: cfg.sessionExpiryHours,
-      claudeCodeWeeklyLimit: cfg.claudeCodeWeeklyLimit ?? null,
-      claudeCodeDailyLimit: cfg.claudeCodeDailyLimit ?? null,
       stripThinkingTags: cfg.stripThinkingTags !== false,
     }));
-    return true;
-  }
-
-  // Claude Code usage
-  if (req.url === '/api/claude-usage' && req.method === 'GET') {
-    const authId = requirePrivileged(req, res); if (!authId) return true;
-    try {
-      const claudeDir = path.join(process.env.HOME, '.claude/projects');
-      const now = Date.now();
-      const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-      const weekStart  = new Date(now - 7 * 24 * 3600 * 1000);
-      let todayTokens = 0, weekTokens = 0;
-      const dirs = fs.existsSync(claudeDir) ? fs.readdirSync(claudeDir) : [];
-      for (const dir of dirs) {
-        const dirPath = path.join(claudeDir, dir);
-        if (!fs.statSync(dirPath).isDirectory()) continue;
-        const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.jsonl'));
-        for (const file of files) {
-          const lines = fs.readFileSync(path.join(dirPath, file), 'utf8').split('\n');
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const entry = JSON.parse(line);
-              if (entry.type !== 'assistant' || !entry.message?.usage) continue;
-              const ts = new Date(entry.timestamp);
-              const u = entry.message.usage;
-              const tokens = (u.input_tokens || 0) + (u.output_tokens || 0) +
-                             (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
-              if (ts >= weekStart)  weekTokens  += tokens;
-              if (ts >= todayStart) todayTokens += tokens;
-            } catch { /* skip malformed JSONL line */ }
-          }
-        }
-      }
-      const cfg = loadConfig();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        today: todayTokens, week: weekTokens,
-        dailyLimit:  cfg.claudeCodeDailyLimit  ?? null,
-        weeklyLimit: cfg.claudeCodeWeeklyLimit ?? null,
-      }));
-    } catch (e) {
-      safeError(res, e);
-    }
     return true;
   }
 
@@ -617,7 +571,7 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
       const changes = JSON.parse(await readBody(req));
-      const allowed = ['sessionExpiryHours', 'visionProvider', 'visionModel', 'claudeCodeWeeklyLimit', 'claudeCodeDailyLimit', 'stripThinkingTags', 'providerFailover'];
+      const allowed = ['sessionExpiryHours', 'visionProvider', 'visionModel', 'stripThinkingTags', 'providerFailover'];
       await modifyConfig(cfg => { for (const key of allowed) { if (key in changes) cfg[key] = changes[key]; } });
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }

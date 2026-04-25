@@ -501,20 +501,19 @@ async function openSettingsDrawer(openIt = true) {
     loadProviderConfig();
     fetch('/api/config-public').then(r => r.json()).then(fullCfg => {
       renderVisionModelSelect(fullCfg.visionProvider, fullCfg.visionModel);
-      if (fullCfg.claudeCodeDailyLimit)  $('claudeCodeDailyLimitInput').value  = fullCfg.claudeCodeDailyLimit;
-      if (fullCfg.claudeCodeWeeklyLimit) $('claudeCodeWeeklyLimitInput').value = fullCfg.claudeCodeWeeklyLimit;
       if (fullCfg.sessionExpiryHours)    $('sessionExpiryInput').value          = fullCfg.sessionExpiryHours;
       const tog = $('stripThinkingToggle');
       if (tog) { tog.checked = fullCfg.stripThinkingTags !== false; setStripThinkingTrack(tog.checked); }
     }).catch(() => {});
     // Show admin-only system sections
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','claudeCodeLimitsRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = '';
     });
     if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus();
+    if (typeof loadUpdateStatus === 'function') loadUpdateStatus();
   } else {
     // Hide admin-only sections for regular users
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','claudeCodeLimitsRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = 'none';
     });
   }
@@ -834,15 +833,5 @@ async function saveProviderTts() {
     _ttsConfigured = !!(key || url);
     showToast('TTS settings saved');
   } catch { showToast('Failed to save TTS settings'); }
-}
-
-async function saveClaudeCodeLimits() {
-  const daily  = parseInt($('claudeCodeDailyLimitInput')?.value  || '0') || null;
-  const weekly = parseInt($('claudeCodeWeeklyLimitInput')?.value || '0') || null;
-  try {
-    await fetch('/api/config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ claudeCodeDailyLimit: daily, claudeCodeWeeklyLimit: weekly }) });
-    showToast('Limits saved');
-  } catch { showToast('Failed to save limits'); }
 }
 

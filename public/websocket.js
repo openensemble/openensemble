@@ -361,6 +361,26 @@ function handleServerMessage(msg) {
       showToast('Your session has expired. Please sign in again.');
       showLoginScreen();
       break;
+    case 'update_available':
+      if (typeof _updateState === 'object') {
+        _updateState = { ..._updateState, available: true, currentSha: msg.currentSha, remoteSha: msg.remoteSha };
+        if (typeof renderUpdateRow === 'function') renderUpdateRow();
+      }
+      if (typeof refreshUpdateBadge === 'function') refreshUpdateBadge();
+      // Toast once per remoteSha so we don't re-spam on reconnect.
+      if (window._lastUpdateToastSha !== msg.remoteSha) {
+        window._lastUpdateToastSha = msg.remoteSha;
+        showToast('Update available — open Settings → System to install', 6000);
+      }
+      break;
+    case 'update_applying':
+      if (msg.stage === 'restarting' && typeof _waitForServerBack === 'function') _waitForServerBack();
+      else if (msg.stage === 'npm_install') showToast('Installing dependencies…', 4000);
+      break;
+    case 'update_failed':
+      showToast('Update failed: ' + (msg.message || msg.code), 8000);
+      if (typeof loadUpdateStatus === 'function') loadUpdateStatus();
+      break;
     case 'active_streams': {
       // Restore streaming state for agents that are still working
       const activeIds = new Set((msg.agents ?? []).map(a => a.agentId));

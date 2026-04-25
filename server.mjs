@@ -49,6 +49,7 @@ import { sendTelegramToUser }             from './routes/telegram.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn } from './background-tasks.mjs';
+import { startUpdateChecker } from './lib/update.mjs';
 
 // Shared helpers
 import {
@@ -543,7 +544,31 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   initAutoLabel(loadUsers());
   startDiscoveryBeacon(PORT);
   cortexHealthCheck();
+
+  // ── Auto-update checker ───────────────────────────────────────────────────
+  // Polls origin for new commits and broadcasts to admin browsers when a new
+  // version is available. Toggle with config.updateCheckEnabled (default on).
+  const _upCfg = loadConfig();
+  _stopUpdateChecker = startUpdateChecker({
+    enabled:    _upCfg.updateCheckEnabled !== false,
+    intervalMs: _upCfg.updateCheckIntervalMs ?? 3_600_000,
+    remote:     _upCfg.updateRemote || 'origin',
+    onAvailable: (state) => {
+      const adminIds = loadUsers()
+        .filter(u => u.role === 'owner' || u.role === 'admin')
+        .map(u => u.id);
+      if (!adminIds.length) return;
+      broadcastToUsers(adminIds, {
+        type: 'update_available',
+        currentSha: state.currentSha,
+        remoteSha:  state.remoteSha,
+        ts: Date.now(),
+      });
+    },
+  });
 });
+
+let _stopUpdateChecker = null;
 
 // Probes the embed endpoint once at startup. If it returns an all-zero vector
 // (provider unreachable or model missing), every vector search will collapse
@@ -641,9 +666,10 @@ async function shutdown(signal) {
   // 1. Stop accepting new connections
   httpServer.close(() => console.log('[shutdown] HTTP server closed'));
 
-  // 2. Stop scheduled tasks and gmail watchers
+  // 2. Stop scheduled tasks, gmail watchers, and the update checker
   stopScheduler();
   stopAllWatchers();
+  _stopUpdateChecker?.();
 
   // 3. Abort all in-flight chat streams
   abortAllChats();

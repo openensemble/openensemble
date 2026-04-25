@@ -11,7 +11,7 @@ import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import {
   requireAuth, requirePrivileged, getAuthToken, getSessionUserId,
-  loadUsers, loadActivity, loadInvites,
+  loadUsers, loadActivity, loadInvites, loadConfig, modifyConfig,
   modifyUsers, modifyInvites,
   hashPassword, validatePassword, createSession, clearUserSessions, readBody,
   getDefaultChildSafetyPrompt, safeId, getUserDir, safeError,
@@ -20,8 +20,16 @@ import {
 import { getDefaultRoles } from '../roles.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
 import { getLanAddress } from '../discovery.mjs';
+import {
+  getCachedState as getUpdateState, checkForUpdate, isCleanForUpdate,
+  applyUpdate, restartProcess,
+} from '../lib/update.mjs';
+import { broadcastToUsers } from '../ws-handler.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+// Throttle for /api/admin/update/check — protects origin from refresh-spamming.
+let _lastForcedCheckAt = 0;
 
 // Shared file list for backup and restore — keeps them in sync automatically
 const BACKUP_DATA_FILES = [
@@ -397,26 +405,112 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ restarting: true }));
+    // Shared with applyUpdate(); fires after the response is flushed.
+    setImmediate(() => restartProcess());
+    return true;
+  }
 
-    // Fire after the response is flushed so the client sees the 200.
-    setImmediate(() => {
-      try {
-        const nodeBin = process.execPath;
-        const entry = process.argv[1] || path.join(BASE_DIR, 'server.mjs');
-        const args = process.argv.slice(2);
-        const cmd = [nodeBin, entry, ...args].map(s => `'${String(s).replace(/'/g, `'\\''`)}'`).join(' ');
-        const child = spawn('sh', ['-c', `sleep 2 && cd '${BASE_DIR.replace(/'/g, `'\\''`)}' && exec ${cmd}`], {
-          cwd: BASE_DIR,
-          detached: true,
-          stdio: 'ignore',
+  // ── Auto-update: status / check / apply / config ──────────────────────────
+  if (req.url === '/api/admin/update/status' && req.method === 'GET') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const cfg = loadConfig();
+    const remote = cfg.updateRemote || 'origin';
+    const cached = getUpdateState();
+    const cleanCheck = await isCleanForUpdate(remote);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ...cached,
+      remote,
+      enabled: cached.enabled && (cfg.updateCheckEnabled !== false),
+      pollingEnabled: cfg.updateCheckEnabled !== false,
+      intervalMs: cfg.updateCheckIntervalMs ?? 3_600_000,
+      dirty:    cleanCheck.dirty,
+      unpushed: cleanCheck.unpushed,
+      blockReason: cleanCheck.reason,
+    }));
+    return true;
+  }
+
+  if (req.url === '/api/admin/update/check' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    if (_lastForcedCheckAt && Date.now() - _lastForcedCheckAt < 60_000) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Rate limited — wait 60s between manual checks.' }));
+      return true;
+    }
+    _lastForcedCheckAt = Date.now();
+    const cfg = loadConfig();
+    const remote = cfg.updateRemote || 'origin';
+    try {
+      const state = await checkForUpdate({ remote });
+      const cleanCheck = await isCleanForUpdate(remote);
+      // Force a transition broadcast on manual checks too, so admins see the
+      // badge even if the periodic check hasn't run yet.
+      if (state.available) {
+        const adminIds = loadUsers()
+          .filter(u => u.role === 'owner' || u.role === 'admin')
+          .map(u => u.id);
+        broadcastToUsers(adminIds, {
+          type: 'update_available',
+          currentSha: state.currentSha, remoteSha: state.remoteSha, ts: Date.now(),
         });
-        child.unref();
-      } catch (e) {
-        console.error('[restart] Failed to spawn child:', e);
       }
-      // Trigger the existing graceful shutdown path in server.mjs
-      process.kill(process.pid, 'SIGTERM');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ...state, remote,
+        dirty: cleanCheck.dirty, unpushed: cleanCheck.unpushed, blockReason: cleanCheck.reason,
+      }));
+    } catch (e) {
+      safeError(res, e);
+    }
+    return true;
+  }
+
+  if (req.url === '/api/admin/update/apply' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const cfg = loadConfig();
+    const remote = cfg.updateRemote || 'origin';
+
+    const adminIds = loadUsers()
+      .filter(u => u.role === 'owner' || u.role === 'admin').map(u => u.id);
+    const broadcastUpdate = (msg) => broadcastToUsers(adminIds, msg);
+
+    // Acknowledge before doing the work — broadcast carries progress to all admins.
+    res.writeHead(202, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ applying: true }));
+
+    setImmediate(async () => {
+      broadcastUpdate({ type: 'update_applying', stage: 'starting', ts: Date.now() });
+      try {
+        const result = await applyUpdate({ remote, broadcast: broadcastUpdate });
+        if (!result.ok) {
+          broadcastUpdate({
+            type: 'update_failed',
+            code: result.code, message: result.message, ts: Date.now(),
+          });
+        }
+        // On success, applyUpdate() already triggered restart — no further broadcast.
+      } catch (e) {
+        broadcastUpdate({ type: 'update_failed', code: 'INTERNAL', message: e.message, ts: Date.now() });
+      }
     });
+    return true;
+  }
+
+  if (req.url === '/api/admin/update/config' && req.method === 'PATCH') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    let body;
+    try { body = JSON.parse((await readBody(req)).toString() || '{}'); }
+    catch { res.writeHead(400); res.end('Bad JSON'); return true; }
+
+    await modifyConfig(cfg => {
+      if (typeof body.updateCheckEnabled === 'boolean')   cfg.updateCheckEnabled   = body.updateCheckEnabled;
+      if (Number.isFinite(body.updateCheckIntervalMs))    cfg.updateCheckIntervalMs = Math.max(60_000, body.updateCheckIntervalMs);
+      if (typeof body.updateRemote === 'string' && body.updateRemote.trim())
+        cfg.updateRemote = body.updateRemote.trim();
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, note: 'Settings saved. Polling interval/remote take effect on next server restart.' }));
     return true;
   }
 

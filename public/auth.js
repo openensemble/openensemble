@@ -245,6 +245,10 @@ function setCurrentUser(user) {
     // Apply saved news topic (may be overridden by plugin prefs in loadPlugins)
     if (typeof user.newsDefaultTopic === 'number') newsTopic = user.newsDefaultTopic;
     loadDrawers();
+    // Surface the update badge for admins without requiring them to open Settings.
+    if ((user.role === 'owner' || user.role === 'admin') && typeof loadUpdateStatus === 'function') {
+      loadUpdateStatus();
+    }
   } else {
     localStorage.removeItem('oe_user_id');
     $('stripUserEmoji').textContent = '🧑';
