@@ -68,6 +68,28 @@ const PORT    = 3737;
 const UI_DIR  = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 const BASE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
+// ── PID-file guard ───────────────────────────────────────────────────────────
+// Refuse to start if another OE server is already running. Prevents the
+// EADDRINUSE crash-loop you get when systemd thinks the unit is stopped but a
+// stray instance (manual `node server.mjs`, orphan child) still holds port 3737.
+const PID_FILE = path.join(BASE_DIR, 'server.pid');
+(function pidGuard() {
+  let stalePid = NaN;
+  try { stalePid = parseInt(fs.readFileSync(PID_FILE, 'utf8'), 10); } catch { return; }
+  if (!Number.isInteger(stalePid) || stalePid === process.pid || stalePid <= 0) return;
+  try { process.kill(stalePid, 0); } catch { return; } // not alive → stale file, ignore
+  // PID is alive. Confirm it's actually our server (guard against PID reuse).
+  let cmdline = '';
+  try { cmdline = fs.readFileSync(`/proc/${stalePid}/cmdline`, 'utf8'); } catch {}
+  if (cmdline && !cmdline.includes('server.mjs')) return; // unrelated process, stale file
+  console.error(`[startup] Another OpenEnsemble server is already running (PID ${stalePid}).`);
+  console.error(`[startup] To take over manually:  kill ${stalePid} && oe start`);
+  process.exit(1);
+})();
+try { fs.writeFileSync(PID_FILE, String(process.pid)); } catch (e) {
+  console.warn('[startup] Could not write PID file:', e.message);
+}
+
 // ── Lock down config.json permissions on startup ─────────────────────────────
 // config.json holds API keys; keep it owner-readable only.
 try {
@@ -533,6 +555,15 @@ loadPersistedSessions();
 httpServer.headersTimeout = 30_000;  // 30s to receive request headers
 httpServer.requestTimeout = 120_000; // 2 min to receive full request
 httpServer.keepAliveTimeout = 65_000;
+httpServer.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[startup] Port ${PORT} is already in use. Another OpenEnsemble instance may be running.`);
+    try { fs.unlinkSync(PID_FILE); } catch {} // don't strand our own pid file
+    process.exit(1);
+  }
+  console.error('[startup] HTTP server error:', err);
+  process.exit(1);
+});
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🎵 OpenEnsemble running at http://localhost:${PORT}\n`);
   console.log('Agents:', listAgents().map(a => `${a.emoji} ${a.name}`).join('  '));
@@ -686,6 +717,8 @@ async function shutdown(signal) {
   forceTimer.unref();
 
   await new Promise(r => setTimeout(r, 500));
+
+  try { fs.unlinkSync(PID_FILE); } catch {}
 
   console.log('[shutdown] Clean exit');
   log.info('shutdown', 'Clean exit', { signal });

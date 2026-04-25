@@ -314,6 +314,8 @@ if [[ "$INSTALL_SERVICE" == "true" ]] && command -v systemctl &>/dev/null; then
 [Unit]
 Description=OpenEnsemble AI Assistant Server
 After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -321,6 +323,11 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$NODE_BIN $INSTALL_DIR/server.mjs
 Restart=on-failure
 RestartSec=5
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=10
+SendSIGKILL=yes
+ExecStopPost=-/bin/sh -c 'fuser -k -TERM 3737/tcp 3738/udp 2>/dev/null; sleep 1; fuser -k -KILL 3737/tcp 3738/udp 2>/dev/null; rm -f $INSTALL_DIR/server.pid; true'
 Environment=NODE_ENV=production
 
 [Install]
@@ -343,108 +350,22 @@ fi
 # Installed to ~/.local/bin/oe so users get a single unified command for
 # start/stop/restart/status/logs/update/uninstall — no sudo needed because
 # the server runs as a systemd --user service.
+#
+# The wrapper body lives in scripts/oe-cli.template.sh (versioned with the
+# repo). Both this installer AND lib/update.mjs render it by substituting
+# __INSTALL_DIR__, so new subcommands reach existing users via auto-update
+# without requiring a re-install.
 header "Installing oe CLI"
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 OE_BIN="$BIN_DIR/oe"
 
-cat > "$OE_BIN" << OE_CLI
-#!/usr/bin/env bash
-# OpenEnsemble server CLI — wraps systemctl --user + install-dir operations.
-set -euo pipefail
-
-INSTALL_DIR="$INSTALL_DIR"
-SERVICE="openensemble.service"
-
-cmd="\${1:-status}"
-shift || true
-
-case "\$cmd" in
-  start|stop|restart)
-    systemctl --user "\$cmd" "\$SERVICE"
-    ;;
-  status|'')
-    if systemctl --user is-active --quiet "\$SERVICE" 2>/dev/null; then
-      echo "✓ OpenEnsemble is running"
-    else
-      state=\$(systemctl --user is-active "\$SERVICE" 2>/dev/null || true)
-      [ -z "\$state" ] && state="not installed"
-      echo "✗ OpenEnsemble is \$state"
-    fi
-    lan_ip=\$(hostname -I 2>/dev/null | awk '{print \$1}')
-    [ -z "\$lan_ip" ] && lan_ip=\$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if(\$i=="src"){print \$(i+1); exit}}')
-    [ -z "\$lan_ip" ] && lan_ip="localhost"
-    echo ""
-    echo "  Install:  \$INSTALL_DIR"
-    echo "  Web UI:   http://\$lan_ip:3737"
-    echo ""
-    systemctl --user status "\$SERVICE" --no-pager -n 5 2>/dev/null || true
-    ;;
-  logs)
-    if [ "\${1:-}" = "-f" ] || [ "\${1:-}" = "--follow" ]; then
-      journalctl --user -u "\$SERVICE" -f
-    else
-      journalctl --user -u "\$SERVICE" -n 100 --no-pager
-    fi
-    ;;
-  update)
-    cd "\$INSTALL_DIR"
-    if [ ! -d .git ]; then
-      echo "✗ \$INSTALL_DIR is not a git checkout — cannot update in place."
-      echo "  Re-clone the repo and run install.sh --dir \$INSTALL_DIR, or"
-      echo "  cd to your source checkout and re-run install.sh."
-      exit 1
-    fi
-    echo "→ git pull"
-    git pull --ff-only
-    echo "→ npm install"
-    npm install --prefer-offline --no-audit --no-fund
-    echo "→ restart service"
-    systemctl --user restart "\$SERVICE" 2>/dev/null || \\
-      echo "  (no user service registered — start manually with \$INSTALL_DIR/start.sh)"
-    echo "✓ Update complete"
-    ;;
-  uninstall)
-    read -rp "Remove OpenEnsemble service? [y/N]: " yn
-    case "\${yn:-n}" in [Yy]*) ;; *) exit 0 ;; esac
-    systemctl --user stop "\$SERVICE" 2>/dev/null || true
-    systemctl --user disable "\$SERVICE" 2>/dev/null || true
-    rm -f "\$HOME/.config/systemd/user/\$SERVICE"
-    systemctl --user daemon-reload 2>/dev/null || true
-    echo "✓ Service removed"
-    read -rp "Also delete install dir (\$INSTALL_DIR) — config, users, memory? [y/N]: " yn
-    case "\${yn:-n}" in
-      [Yy]*) rm -rf "\$INSTALL_DIR"; echo "✓ \$INSTALL_DIR removed" ;;
-      *) echo "  \$INSTALL_DIR preserved" ;;
-    esac
-    rm -f "\$0"
-    echo "✓ oe CLI removed"
-    ;;
-  help|--help|-h)
-    cat <<HELP
-OpenEnsemble — server CLI
-
-Usage:  oe <command>
-
-  status              Show service status (default)
-  start               Start the server
-  stop                Stop the server
-  restart             Restart the server
-  logs [-f]           Show logs (pass -f to follow)
-  update              git pull + npm install + restart
-  uninstall           Remove service (optionally wipe install dir)
-  help                Show this message
-
-The server runs as a systemd --user service; no sudo required.
-HELP
-    ;;
-  *)
-    echo "Unknown command: \$cmd"
-    echo "Run 'oe help' for usage."
-    exit 1
-    ;;
-esac
-OE_CLI
+TEMPLATE="$INSTALL_DIR/scripts/oe-cli.template.sh"
+if [[ ! -f "$TEMPLATE" ]]; then
+  error "Missing $TEMPLATE — installer cannot render the oe wrapper."
+  exit 1
+fi
+sed "s|__INSTALL_DIR__|$INSTALL_DIR|g" "$TEMPLATE" > "$OE_BIN"
 chmod +x "$OE_BIN"
 success "Installed $OE_BIN"
 
