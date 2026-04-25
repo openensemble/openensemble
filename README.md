@@ -1,3 +1,4 @@
+<img width="1878" height="927" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
 # OpenEnsemble
 
 Self-hosted, multi-user AI assistant platform. Run a team of specialist agents and choose which LLM providers they use.
