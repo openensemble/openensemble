@@ -508,12 +508,13 @@ async function openSettingsDrawer(openIt = true) {
       if (tog) { tog.checked = fullCfg.stripThinkingTags !== false; setStripThinkingTrack(tog.checked); }
     }).catch(() => {});
     // Show admin-only system sections
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','claudeCodeLimitsRow','stab-backup','customModelRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','claudeCodeLimitsRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = '';
     });
+    if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus();
   } else {
     // Hide admin-only sections for regular users
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','claudeCodeLimitsRow','stab-backup','customModelRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','claudeCodeLimitsRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = 'none';
     });
   }

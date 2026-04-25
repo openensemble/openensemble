@@ -76,6 +76,7 @@ export async function handle(req, res) {
         // refuses /api/create). Kept separate so they can have both.
         ollamaLocalUrl:    cfg.cortex?.ollamaLocalUrl    ?? '',
         ollamaLocalKeySet: !!cfg.cortex?.ollamaLocalApiKey,
+        braveKeySet:  !!cfg.braveApiKey,
         ttsKeySet:    !!cfg.ttsApiKey,
         ttsApiUrl:    cfg.ttsApiUrl   ?? '',
         ttsModel:     cfg.ttsModel    ?? '',
@@ -101,6 +102,12 @@ export async function handle(req, res) {
           if (body.grokApiKey)        cfg.grokApiKey        = body.grokApiKey;
 
           if (body.openrouterApiKey)  cfg.openrouterApiKey  = body.openrouterApiKey;
+          // Brave Search API key — used by web/deep_research skills and news plugin.
+          // Accept empty string as an explicit clear.
+          if (body.braveApiKey !== undefined) {
+            if (body.braveApiKey) cfg.braveApiKey = body.braveApiKey;
+            else delete cfg.braveApiKey;
+          }
 
           // OpenAI-compat provider keys (openaiApiKey, deepseekApiKey, …)
           for (const { keyField } of Object.values(COMPAT_PROVIDERS)) {

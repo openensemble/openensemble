@@ -958,6 +958,19 @@
               <div style="color:var(--muted);font-size:12px">Loading…</div>
             </div>
           </div>
+          <div id="braveApiKeyRow" style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px;display:none">
+            <div class="settings-section-title" style="margin-bottom:4px"><i data-lucide="search" style="width:14px;height:14px"></i> Brave Search API</div>
+            <div class="settings-section-desc" style="margin-bottom:10px">API key used by the Web and Deep Research skills and the News drawer. Server-wide setting — changes apply to all users. Get a key at <a href="https://api-dashboard.search.brave.com/" target="_blank" style="color:var(--accent)">api-dashboard.search.brave.com</a>.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="password" id="braveApiKeyInput" placeholder="BSA…" autocomplete="new-password"
+                style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+              <button onclick="saveBraveApiKey()"
+                style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              <button onclick="clearBraveApiKey()" id="braveApiKeyClearBtn"
+                style="display:none;background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Clear</button>
+            </div>
+            <div id="braveApiKeyStatus" style="font-size:11px;color:var(--muted);margin-top:4px">Loading…</div>
+          </div>
           <div id="telegramSection" style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px">
             <div class="settings-section-title" style="margin-bottom:4px"><i data-lucide="send" style="width:14px;height:14px"></i> Telegram</div>
             <div class="settings-section-desc" style="margin-bottom:10px">Chat with your coordinator agent from anywhere via your own Telegram bot. Create one with <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent)">@BotFather</a>, paste the token, register a public HTTPS webhook, then send /start from your bot.</div>

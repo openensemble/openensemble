@@ -659,7 +659,7 @@ function switchSettingsTab(name) {
   document.querySelectorAll('.stab-panel').forEach(p => p.classList.remove('active'));
   $(`stab-${name}`)?.classList.add('active');
   $(`stab-panel-${name}`)?.classList.add('active');
-  if (name === 'profile') { loadOAuthStatus(); loadActiveSessions(); if (typeof loadTelegramUser === 'function') loadTelegramUser(); if (typeof renderAvatarPicker === 'function') renderAvatarPicker($('avatarPickerContainer')); if (typeof renderMirrorStatus === 'function') renderMirrorStatus(); }
+  if (name === 'profile') { loadOAuthStatus(); loadActiveSessions(); if (typeof loadTelegramUser === 'function') loadTelegramUser(); if (typeof renderAvatarPicker === 'function') renderAvatarPicker($('avatarPickerContainer')); if (typeof renderMirrorStatus === 'function') renderMirrorStatus(); if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus(); }
   if (name === 'skills') loadSkillsList();
   if (name === 'plugins') renderDrawersSettings();
   if (name === 'tasks') {
@@ -899,6 +899,55 @@ async function saveSessionExpiry() {
     });
     showToast('Session expiry saved!', 2000);
   } catch { showToast('Failed to save setting'); }
+}
+
+// ── Brave Search API key (admin/owner only) ──────────────────────────────────
+// Server-wide setting; the row is hidden for non-privileged users by openSettingsDrawer().
+async function loadBraveApiKeyStatus() {
+  const status = $('braveApiKeyStatus');
+  const clearBtn = $('braveApiKeyClearBtn');
+  if (!status) return;
+  const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+  if (!isPriv) return;
+  try {
+    const cfg = await fetch('/api/provider-config').then(r => r.json());
+    if (cfg.braveKeySet) {
+      status.textContent = 'API key is set.';
+      if (clearBtn) clearBtn.style.display = '';
+    } else {
+      status.textContent = 'No API key configured.';
+      if (clearBtn) clearBtn.style.display = 'none';
+    }
+  } catch { status.textContent = 'Status check failed.'; }
+}
+
+async function saveBraveApiKey() {
+  const input = $('braveApiKeyInput');
+  const key = input?.value.trim();
+  if (!key) { showToast('Enter a Brave API key'); return; }
+  try {
+    const r = await fetch('/api/provider-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ braveApiKey: key }),
+    });
+    if (!r.ok) { showToast('Failed to save Brave key'); return; }
+    input.value = '';
+    showToast('Brave API key saved');
+    loadBraveApiKeyStatus();
+  } catch { showToast('Failed to save Brave key'); }
+}
+
+async function clearBraveApiKey() {
+  if (!confirm('Remove the Brave Search API key? Web search and news will stop working until a new key is set.')) return;
+  try {
+    const r = await fetch('/api/provider-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ braveApiKey: '' }),
+    });
+    if (!r.ok) { showToast('Failed to clear Brave key'); return; }
+    showToast('Brave API key cleared');
+    loadBraveApiKeyStatus();
+  } catch { showToast('Failed to clear Brave key'); }
 }
 
 // ── Drawers ───────────────────────────────────────────────────────────────────
