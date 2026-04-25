@@ -14,6 +14,7 @@ import {
 import { loadTasks, isSchedulerRunning } from '../scheduler.mjs';
 import { isWatcherRunning } from '../gmail-autolabel.mjs';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
+import { readToken as readOpenAIOAuthToken } from '../lib/openai-codex-auth.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const startedAt = Date.now();
@@ -39,6 +40,43 @@ async function checkAnthropicKey(apiKey) {
     });
     return r.ok;
   } catch (e) { console.debug('[health] Anthropic key check failed:', e.message); return false; }
+}
+
+// Cloud OpenAI-compatible providers that expose a Bearer-auth GET /models endpoint.
+// Each entry maps a top-level config field to the URL we hit to validate the key.
+// Perplexity is intentionally omitted — it has no /models endpoint, so we fall
+// back to "configured iff key present" for it below.
+const COMPAT_HEALTH_PROBES = [
+  { id: 'openai',     keyField: 'openaiApiKey',     modelsUrl: 'https://api.openai.com/v1/models' },
+  { id: 'gemini',     keyField: 'geminiApiKey',     modelsUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/models' },
+  { id: 'deepseek',   keyField: 'deepseekApiKey',   modelsUrl: 'https://api.deepseek.com/v1/models' },
+  { id: 'groq',       keyField: 'groqApiKey',       modelsUrl: 'https://api.groq.com/openai/v1/models' },
+  { id: 'mistral',    keyField: 'mistralApiKey',    modelsUrl: 'https://api.mistral.ai/v1/models' },
+  { id: 'together',   keyField: 'togetherApiKey',   modelsUrl: 'https://api.together.xyz/v1/models' },
+  { id: 'zai',        keyField: 'zaiApiKey',        modelsUrl: 'https://api.z.ai/api/paas/v4/models' },
+  { id: 'grok',       keyField: 'grokApiKey',       modelsUrl: 'https://api.x.ai/v1/models' },
+  { id: 'openrouter', keyField: 'openrouterApiKey', modelsUrl: 'https://openrouter.ai/api/v1/models' },
+  { id: 'fireworks',  keyField: 'fireworksApiKey',  modelsUrl: 'https://api.fireworks.ai/inference/v1/models' },
+];
+
+async function checkBearerKey(url, apiKey) {
+  if (!apiKey) return false;
+  return checkProvider(url, 4000, { Authorization: `Bearer ${apiKey}` });
+}
+
+// Any user has a non-expired OpenAI OAuth token (or a refresh token to mint one).
+// Returns { configured, ok }. We don't hit the network — the OAuth helper
+// auto-refreshes on real use, so a present-and-refreshable token is "healthy".
+function openAIOAuthStatus(users) {
+  let anyToken = false, anyOk = false;
+  for (const u of users) {
+    const t = readOpenAIOAuthToken(u.id);
+    if (!t) continue;
+    anyToken = true;
+    const expired = t.expires_at ? Date.now() > t.expires_at : true;
+    if (!expired || t.refresh_token) { anyOk = true; break; }
+  }
+  return { configured: anyToken, ok: anyOk };
 }
 
 function gmailTokenStatus(userId) {
@@ -124,16 +162,32 @@ async function buildFullHealth() {
 
   // Probe only what's configured
   const ollamaAuthHeaders = ollamaKey ? { Authorization: `Bearer ${ollamaKey}` } : {};
-  const [ollamaOk, lmstudioOk, anthropicOk] = await Promise.all([
+
+  // Compat-provider probes: fire only those with a key set, in parallel with the
+  // three core probes so the dashboard load stays under the 4s timeout ceiling.
+  const compatProbes = COMPAT_HEALTH_PROBES
+    .filter(p => !!cfg[p.keyField])
+    .map(p => ({ id: p.id, promise: checkBearerKey(p.modelsUrl, cfg[p.keyField]) }));
+
+  const [ollamaOk, lmstudioOk, anthropicOk, ...compatResults] = await Promise.all([
     ollamaConfigured    ? checkProvider(`${ollamaUrl}/api/tags`, 2500, ollamaAuthHeaders) : Promise.resolve(null),
     lmstudioConfigured  ? checkProvider(`${lmstudioUrl}/v1/models`)                       : Promise.resolve(null),
     anthropicConfigured ? checkAnthropicKey(cfg.anthropicApiKey)                          : Promise.resolve(null),
+    ...compatProbes.map(p => p.promise),
   ]);
 
   const providers = {};
   if (anthropicConfigured) providers.anthropic = anthropicOk;
   if (ollamaConfigured)    providers.ollama    = ollamaOk;
   if (lmstudioConfigured)  providers.lmstudio  = lmstudioOk;
+  compatProbes.forEach((p, i) => { providers[p.id] = compatResults[i]; });
+
+  // Perplexity has no /models endpoint — treat "key present" as configured+ok.
+  if (cfg.perplexityApiKey) providers.perplexity = true;
+
+  // OpenAI OAuth (ChatGPT login) — per-user tokens, no global API key.
+  const oauthStatus = openAIOAuthStatus(users);
+  if (oauthStatus.configured) providers['openai-oauth'] = oauthStatus.ok;
 
   // Cortex health. Embed and reason both have a built-in tier (nomic ONNX +
   // our llama.cpp adapter) that runs in-process, so we check those first

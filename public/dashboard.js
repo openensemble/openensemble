@@ -72,7 +72,23 @@ async function loadDashboard() {
           <div>
             <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Providers</div>
             ${(() => {
-              const labels = { anthropic: 'Anthropic', ollama: 'Ollama', lmstudio: 'LM Studio' };
+              const labels = {
+                anthropic: 'Anthropic',
+                ollama: 'Ollama',
+                lmstudio: 'LM Studio',
+                openai: 'OpenAI',
+                'openai-oauth': 'OpenAI (ChatGPT login)',
+                gemini: 'Google Gemini',
+                deepseek: 'DeepSeek',
+                groq: 'Groq',
+                mistral: 'Mistral AI',
+                together: 'Together AI',
+                perplexity: 'Perplexity',
+                zai: 'Z.AI',
+                grok: 'xAI Grok',
+                openrouter: 'OpenRouter',
+                fireworks: 'Fireworks',
+              };
               const entries = Object.entries(health.providers || {});
               if (!entries.length) return '<div style="font-size:12px;color:var(--muted)">None configured</div>';
               return entries.map(([k, ok]) => `<div style="font-size:12px">${dot(ok)}${labels[k] ?? k}</div>`).join('');
