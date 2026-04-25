@@ -226,6 +226,22 @@ async function runTask(task, broadcast) {
       ts: Date.now(),
     });
 
+    // The agent is firing on a schedule with no human present. Without this
+    // note, "send me an email" makes the agent ask "what address?" and the
+    // task hangs (see Sydney session 2026-04-25). Resolves "me" to the user's
+    // own email and tells the agent that any "in N minutes" / "tomorrow" /
+    // "at HH:MM" phrases in the request are the trigger that already fired.
+    const ownerProfile = task.ownerId ? getUser(task.ownerId) : null;
+    const userEmailLine = ownerProfile?.email
+      ? `\nThe user's own email address is ${ownerProfile.email} — if the request says "send me an email" / "email myself", that is the recipient.`
+      : '';
+    const scheduledNote =
+      `[SCHEDULED RUN] You are executing a previously-scheduled task right now. ` +
+      `The user is NOT present and cannot answer follow-up questions. ` +
+      `Any "in N minutes" / "tomorrow" / "at HH:MM" phrases in the request are the trigger time that has already arrived — do not try to re-schedule. ` +
+      `Use reasonable defaults for anything unspecified, complete the task, and report what you did.` +
+      userEmailLine;
+
     // Drain the stream with retries — cloud models can return empty on transient failures
     const MAX_ATTEMPTS = 3;
     const RETRY_DELAY_MS = 30_000;
@@ -233,7 +249,7 @@ async function runTask(task, broadcast) {
 
     const runAttempt = async (attempt) => {
       let failed = false;
-      for await (const event of streamChat(scopedAgent, task.prompt, new AbortController().signal, null, userId)) {
+      for await (const event of streamChat(scopedAgent, task.prompt, new AbortController().signal, null, userId, null, scheduledNote)) {
         if (event.type === 'error') {
           console.error(`[scheduler] Task "${task.label}" attempt ${attempt}/${MAX_ATTEMPTS} error:`, event.message);
           failed = true;
