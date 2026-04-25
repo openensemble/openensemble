@@ -39,15 +39,28 @@ function checkEmptyState() {
 }
 
 function _hasAnyProviderConfigured() {
-  // Single source of truth: did the admin enable any provider? The shipped
-  // template disables everything explicitly, so any `true` value in
-  // _enabledProviders means an admin actively turned something on. Each
-  // save*Key call also flips its provider to enabled, so saving a key alone
-  // (without touching the toggle) still flips this. Avoids the *KeySet
-  // detection trap where template placeholder values (lmstudioApiKey:
-  // "lmstudio") look "set" on a fresh install.
+  // Non-admin users don't configure providers themselves — they're granted
+  // specific models by the admin (allowedModels). For them, the welcome state
+  // should reflect that grant directly: do they have any models to pick from?
+  // Looking at provider toggles instead would gate them on admin-side state
+  // they can't see or change.
+  const allowed = _currentUser?.allowedModels;
+  if (Array.isArray(allowed)) return allowed.length > 0;
+  // Admin or unrestricted user: check whether any provider is configured.
+  //   (a) the admin flipped a toggle on, OR
+  //   (b) a real API key is set (covers keys written directly to config.json
+  //       or env without the UI flipping the toggle).
+  // lmstudio is excluded from (b) because the shipped template seeds
+  // `lmstudioApiKey` with the literal string "lmstudio" — its *KeySet flag is
+  // unreliable on fresh installs.
   const ep = (typeof _enabledProviders !== 'undefined') ? _enabledProviders : {};
-  return Object.values(ep).some(v => v === true);
+  if (Object.values(ep).some(v => v === true)) return true;
+  const ks = (typeof _providerKeyStatus !== 'undefined' && _providerKeyStatus) ? _providerKeyStatus : {};
+  for (const [prov, keySet] of Object.entries(ks)) {
+    if (prov === 'lmstudio') continue;
+    if (keySet === true) return true;
+  }
+  return false;
 }
 
 function buildTabs() {

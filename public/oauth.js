@@ -524,9 +524,15 @@ async function openSettingsDrawer(openIt = true) {
     // is paged and can stall for 10-15s when the upstream is flaky — fire it
     // in the background and just re-render the model browser/agent rows when
     // it returns.
-    await Promise.all([loadModels(), loadCortexConfig(), loadReasonRuntimeStatus(), loadPlanRuntimeStatus()]);
-    renderModelBrowser(); renderAgentModelRows(); renderCortexModelRows(); renderPlanModelRows(); renderDrawersSettings();
-    checkCortexHealth().then(renderCortexModelRows);
+    // Cortex/reason/plan runtime endpoints are admin-only (requirePrivileged)
+    // and back the System tab which is hidden for non-admins; skip them for
+    // regular users so the network tab doesn't pile up 403s.
+    const adminOnlyLoads = isPriv
+      ? [loadCortexConfig(), loadReasonRuntimeStatus(), loadPlanRuntimeStatus()]
+      : [];
+    await Promise.all([loadModels(), ...adminOnlyLoads]);
+    renderModelBrowser(); renderAgentModelRows(); renderDrawersSettings();
+    if (isPriv) { renderCortexModelRows(); renderPlanModelRows(); checkCortexHealth().then(renderCortexModelRows); }
     loadFireworksModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); }).catch(() => {});
     loadAnthropicModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); }).catch(() => {});
     loadGrokModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); }).catch(() => {});
@@ -538,6 +544,7 @@ async function openSettingsDrawer(openIt = true) {
 }
 
 let _enabledProviders = {};
+let _providerKeyStatus = {};
 
 // Metadata for OpenAI-compatible cloud LLM providers. Adding a new provider
 // is a one-line change: it auto-renders a card and wires up save + fetch-models.
@@ -682,6 +689,19 @@ async function loadProviderConfig() {
     if (cfg.openrouterKeySet && typeof loadOpenRouterModels === 'function') loadOpenRouterModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); });
     // Apply provider toggle states (default: all enabled)
     _enabledProviders = cfg.enabledProviders ?? {};
+    // Mirror the *KeySet booleans into a global so _hasAnyProviderConfigured()
+    // can spot providers whose keys were set directly in config.json without the
+    // UI flipping the toggle. Compat providers expose <id>KeySet too.
+    _providerKeyStatus = {
+      anthropic:    !!cfg.anthropicKeySet,
+      fireworks:    !!cfg.fireworksKeySet,
+      grok:         !!cfg.grokKeySet,
+      ollama:       !!cfg.ollamaKeySet,
+      'ollama-local': !!cfg.ollamaLocalKeySet,
+      lmstudio:     !!cfg.lmstudioKeySet,
+      openrouter:   !!cfg.openrouterKeySet,
+      ...Object.fromEntries(COMPAT_PROVIDER_META.map(p => [p.id, !!cfg[`${p.id}KeySet`]])),
+    };
     const allProviders = ['anthropic', 'fireworks', 'ollama', 'ollama-local', 'grok', 'lmstudio', 'openrouter', 'tts', ...COMPAT_PROVIDER_META.map(p => p.id)];
     for (const prov of allProviders) {
       const enabled = _enabledProviders[prov] !== false;

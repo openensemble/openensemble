@@ -56,9 +56,14 @@ const PERPLEXITY_STATIC_MODELS = [
 ];
 
 export async function handle(req, res) {
-  // Provider config GET/POST (admin only)
+  // Provider config: GET is readable by any authed user (so non-admin clients
+  // can see which providers are enabled and populate the agent model picker);
+  // POST stays admin-only since it writes API keys and toggle state.
   if (req.url === '/api/provider-config') {
-    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const authId = req.method === 'POST'
+      ? requirePrivileged(req, res)
+      : requireAuth(req, res);
+    if (!authId) return true;
     if (req.method === 'GET') {
       const cfg = loadConfig();
       // Dynamic OpenAI-compat provider key flags (openaiKeySet, deepseekKeySet, …)
@@ -442,15 +447,29 @@ export async function handle(req, res) {
       ...ollamaFetches,
     ]);
 
-    // Merge Ollama results and dedupe on name+tier (the same model can appear
-    // in both local daemon's list and the cloud catalog; keep one).
+    // Merge Ollama results and dedupe on canonical-name + tier. The cloud catalog
+    // exposes the same model under both a bare name (`glm-4.7`, `cogito-2.1:671b`)
+    // and a suffixed alias (`glm-4.7:cloud`, `cogito-2.1:671b-cloud`); without
+    // canonicalization the picker shows duplicates. Local-tier entries skip the
+    // strip so a real `something-cloud` local pull (rare) wouldn't collapse.
+    const canonicalCloudName = (name) => {
+      if (typeof name !== 'string') return name;
+      if (name.endsWith(':cloud')) return name.slice(0, -':cloud'.length);
+      if (name.endsWith('-cloud')) return name.slice(0, -'-cloud'.length);
+      return name;
+    };
     const ollamaSeen = new Set();
     const ollamaMerged = [];
     for (const r of ollamaResults) {
       if (r.status !== 'fulfilled') continue;
       for (const m of r.value) {
-        const key = `${m.name}::${m.tier}`;
-        if (!ollamaSeen.has(key)) { ollamaSeen.add(key); ollamaMerged.push(m); }
+        const canonical = m.tier === 'cloud' ? canonicalCloudName(m.name) : m.name;
+        const key = `${canonical}::${m.tier}`;
+        if (ollamaSeen.has(key)) continue;
+        ollamaSeen.add(key);
+        // Prefer the bare canonical form so the picker shows e.g. `glm-4.7`
+        // instead of `glm-4.7:cloud` even if the suffixed variant arrived first.
+        ollamaMerged.push(m.tier === 'cloud' && canonical !== m.name ? { ...m, name: canonical } : m);
       }
     }
 
@@ -559,9 +578,12 @@ export async function handle(req, res) {
     return true;
   }
 
-  // Public config
+  // Public config — readable by any authed user. Returns only non-secret UI
+  // settings (vision model, session expiry, strip-thinking toggle); safe to
+  // expose to regular users so loadSkillsList() and similar non-admin paths
+  // don't 403 trying to fetch it.
   if (req.url === '/api/config-public' && req.method === 'GET') {
-    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({

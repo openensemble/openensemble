@@ -74,11 +74,17 @@ async function loadUserManagement() {
       // Allowed models (for child and user accounts) — grouped by provider
       let allowedModelsSection = '';
       if ((u.role === 'child' || u.role === 'user') && !isSelf) {
-        const providerOrder = ['anthropic', 'ollama', 'lmstudio', 'fireworks', 'grok'];
-        const provLabels = { anthropic: 'Anthropic', ollama: 'Ollama', lmstudio: 'LM Studio', fireworks: 'Fireworks', grok: 'Grok' };
+        const providerOrder = ['anthropic', 'ollama-local', 'ollama-cloud', 'lmstudio', 'fireworks', 'grok'];
+        const provLabels = { anthropic: 'Anthropic', 'ollama-local': 'Ollama (local)', 'ollama-cloud': 'Ollama (cloud)', lmstudio: 'LM Studio', fireworks: 'Fireworks', grok: 'Grok' };
         const grouped = {};
         for (const m of masterModels) {
-          const prov = m.provider ?? 'other';
+          // Bundled core models (embedding, reasoning) are always-on for every
+          // user — they're not user-configurable, so don't pollute the picker.
+          if (m.provider === 'builtin') continue;
+          // Split Ollama into local vs cloud tiers so admins can grant access
+          // by where the model actually runs.
+          let prov = m.provider ?? 'other';
+          if (prov === 'ollama') prov = m.tier === 'cloud' ? 'ollama-cloud' : 'ollama-local';
           if (!grouped[prov]) grouped[prov] = [];
           grouped[prov].push(m);
         }
@@ -559,15 +565,13 @@ async function switchToUser(targetId) {
     const data = await resp.json();
     if (!resp.ok) { showToast(data.error ?? 'Switch failed'); return; }
 
-    // Update auth token and reconnect
+    // Update auth token, then full-reload so every panel (agents, models,
+    // provider state, drawers, settings) rebuilds against the new user.
+    // A WS reconnect alone leaves all the DOM state from the previous user.
     setToken(data.token);
     setCurrentUser(data.user);
     closeUserPicker();
-
-    // Clear local sessions and reconnect WebSocket so backend serves the new user's data
-    sessions = {};
-    if (ws) ws.close();
-    connect();
+    location.reload();
   } catch (e) {
     if (e.message) showToast(e.message);
   }

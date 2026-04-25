@@ -86,6 +86,18 @@ async function loadOpenRouterModels() {
   } catch {}
 }
 
+// System-internal model names that show up via Ollama / built-in providers but
+// aren't chat-capable (embedding, salience scoring, the reason GGUF). They power
+// memory + cortex behind the scenes and must never appear in any user-facing
+// model picker — picking one for an agent would render the agent unusable.
+function _isSystemInternalModel(m) {
+  if (m.provider === 'builtin') return true;
+  const n = m.name ?? '';
+  return n.startsWith('nomic-embed-text')
+      || n.startsWith('openensemble-reason')
+      || n.startsWith('memory-scorer');
+}
+
 function allAvailableModels({ unfiltered = false } = {}) {
   const seen = new Set(), merged = [];
   const compatModels = getCompatProviderModels();
@@ -101,8 +113,10 @@ function allAvailableModels({ unfiltered = false } = {}) {
     if (m.provider !== 'ollama') return m.provider;
     return m.tier === 'local' ? 'ollama-local' : 'ollama';
   };
-  const filtered = merged.filter(m => typeof isProviderEnabled !== 'function' || isProviderEnabled(providerKey(m)));
-  // Unless unfiltered requested (admin UI), restrict to user's allowed models
+  const filtered = merged
+    .filter(m => typeof isProviderEnabled !== 'function' || isProviderEnabled(providerKey(m)))
+    .filter(m => !_isSystemInternalModel(m));
+  // Unless unfiltered requested (admin UI), restrict to user's allowed models.
   if (!unfiltered && _currentUser?.allowedModels != null) {
     const allowed = new Set(_currentUser.allowedModels);
     return filtered.filter(m => allowed.has(m.name));
@@ -218,12 +232,19 @@ function renderAgentModelRows() {
 
 
 async function assignModelToAgent(agentId, model, provider) {
-  await fetch(`/api/agent-model/${agentId}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+  // PATCH /api/agents/:id is auth-gated and ownership-checked, so it works for
+  // any user editing an agent they own. The legacy POST /api/agent-model/:id
+  // path is admin-only (requirePrivileged) and 403s for regular users — which
+  // looked like a UI revert because the row re-painted from the unchanged
+  // server state.
+  const r = await fetch(`/api/agents/${agentId}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, provider }),
   });
-  const r = await fetch('/api/agents');
-  agents = await r.json();
+  if (!r.ok) { showToast('Failed to update model'); return; }
+  // The agent_list WS broadcast will refresh `agents` shortly; do an immediate
+  // GET so the row reflects the change without waiting for the round-trip.
+  agents = await fetch('/api/agents').then(r => r.json());
   renderAgentModelRows();
 }
 function assignModelToAgentFromSelect(agentId, val) {
