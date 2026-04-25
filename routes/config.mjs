@@ -33,10 +33,16 @@ const COMPAT_PROVIDERS = {
 };
 
 // ChatGPT backend (OAuth) — the Codex /responses endpoint accepts these model
-// slugs against a ChatGPT Plus/Pro account. There's no /models endpoint.
+// slugs against a ChatGPT Plus/Pro account. There's no /models endpoint, and
+// the backend rejects every -pro/-codex/-mini/-nano variant of 5.5/5.3 plus
+// the entire o-series and 4o/4.1 families with: "The '<slug>' model is not
+// supported when using Codex with a ChatGPT account." Verified by probing
+// /responses with each slug (scripts/probe-oauth-models.mjs, 2026-04-25).
 const OPENAI_OAUTH_STATIC_MODELS = [
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
+  { id: 'gpt-5.5',       name: 'GPT-5.5' },
   { id: 'gpt-5.4',       name: 'GPT-5.4' },
+  { id: 'gpt-5.4-mini',  name: 'GPT-5.4 Mini' },
+  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
   { id: 'gpt-5.2',       name: 'GPT-5.2' },
 ];
 
