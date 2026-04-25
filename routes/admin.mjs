@@ -327,9 +327,9 @@ export async function handle(req, res) {
   if (req.url === '/api/admin/invite' && req.method === 'POST') {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
-      const { role = 'user', allowedAgents, allowedSkills, emailTo } = JSON.parse(await readBody(req));
+      const { role = 'user', allowedSkills, emailTo } = JSON.parse(await readBody(req));
       const token = randomBytes(32).toString('hex');
-      const invite = { token, role, allowedAgents: allowedAgents ?? [], allowedSkills: allowedSkills ?? [], createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 48 * 3600000).toISOString(), createdBy: authId };
+      const invite = { token, role, allowedSkills: allowedSkills ?? [], createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 48 * 3600000).toISOString(), createdBy: authId };
       await modifyInvites(invites => { invites.push(invite); });
       const port = req.socket.localPort ?? 3737;
       const url = `http://${getLanAddress()}:${port}/invite/${token}`;
@@ -383,7 +383,7 @@ export async function handle(req, res) {
       const id = 'user_' + randomBytes(8).toString('hex');
       const passwordHash = await hashPassword(password);
       const pinHash = pin ? await hashPassword(pin) : undefined;
-      const newUser = { id, name: name.trim(), emoji, color: '#' + randomBytes(3).toString('hex'), role: invite.role, passwordHash, skills: getDefaultRoles(), skillsLocked: false, allowedAgents: invite.allowedAgents?.length ? invite.allowedAgents : undefined, allowedSkills: invite.allowedSkills?.length ? invite.allowedSkills : undefined, agentOverrides: {}, createdAt: new Date().toISOString() };
+      const newUser = { id, name: name.trim(), emoji, color: '#' + randomBytes(3).toString('hex'), role: invite.role, passwordHash, skills: getDefaultRoles(), skillsLocked: false, allowedSkills: invite.allowedSkills?.length ? invite.allowedSkills : undefined, agentOverrides: {}, createdAt: new Date().toISOString() };
       if (pinHash) newUser.pinHash = pinHash;
       await modifyUsers(list => { list.push(newUser); });
       await modifyInvites(invites => { const i = invites.findIndex(x => x.token === token); if (i !== -1) invites.splice(i, 1); });

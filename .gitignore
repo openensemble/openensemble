@@ -102,3 +102,7 @@ SCHEDULER_V2_CHANGES.md
 *_NOTES.md
 CLAUDE.md
 scripts/*.failures.jsonl
+
+# --- Local revert references (not for public repo) ---
+REVERT_*.md
+REVERT_*.patch

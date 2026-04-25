@@ -74,17 +74,15 @@ export async function handle(req, res) {
         }
         // Safe-by-default child sandbox. Admin can override by PATCHing after
         // create. Intentionally narrow: only kid-friendly tools and drawers.
-        // allowedAgents is omitted — for children, agents = "agents they own",
-        // enforced server-side in getAgentsForUser (the admin UI also does not
-        // render an allowedAgents picker for child cards).
         const childDefaults = role === 'child' ? {
           skillsLocked: true,
           skills: ['web'],
           allowedSkills: ['deep_research', 'web', 'image_generator'],
           allowedFeatures: ['notes', 'news'],
         } : {};
-        // Non-admin users start with no agents/skills/features — admin explicitly grants access
-        const freshUserDefaults = (role !== 'owner' && role !== 'admin' && role !== 'child') ? { allowedAgents: [], allowedSkills: [], allowedFeatures: [], skills: [] } : {};
+        // Non-admin users start with no skills/features — admin explicitly grants access.
+        // Agents are always "agents you own" — there is no sharing.
+        const freshUserDefaults = (role !== 'owner' && role !== 'admin' && role !== 'child') ? { allowedSkills: [], allowedFeatures: [], skills: [] } : {};
         // Allow admin to override allowedFeatures at creation time (for non-owner/admin roles)
         const featureOverride = (role !== 'owner' && role !== 'admin' && Array.isArray(requestedFeatures)) ? { allowedFeatures: requestedFeatures } : {};
         // Parent-child linking: auto-set parentId to creating admin's ID for child/user accounts
@@ -203,9 +201,8 @@ export async function handle(req, res) {
         }
       }
       if (changes.telegramAllowed !== undefined && !isPriv) { delete changes.telegramAllowed; }
-      if (changes.allowedAgents !== undefined && !isPriv) { delete changes.allowedAgents; }
-      // Children only see agents they own — the allowedAgents field has no meaning for them.
-      if (changes.allowedAgents !== undefined && snap[snapIdx].role === 'child') { delete changes.allowedAgents; }
+      // allowedAgents is no longer a concept (agent sharing was removed); strip any incoming value.
+      if (changes.allowedAgents !== undefined) delete changes.allowedAgents;
       if (changes.allowedSkills !== undefined && !isPriv) { delete changes.allowedSkills; }
       if (changes.allowedFeatures !== undefined && !isPriv) { delete changes.allowedFeatures; }
       if (changes.exitPinUserId !== undefined && !isPriv) { delete changes.exitPinUserId; }

@@ -91,23 +91,17 @@ function buildToolOwnerIndex(userId) {
 
 export function getAgentsForUser(userId) {
   const userSkills = getUserEnabledSkills(userId);
-  let overrides = {}, userRole = 'user', allowedAgentIds;
+  let overrides = {}, userRole = 'user';
   let currentUser = null;
   if (userId) {
     currentUser = getUser(userId);
     overrides = currentUser?.agentOverrides ?? {};
     userRole = currentUser?.role ?? 'user';
-    allowedAgentIds = currentUser?.allowedAgents;
   }
   const isChild = userRole === 'child';
-  // Child hard gate: only agents the child owns. No allowlist, no ownerless fallthrough,
-  // no delegate fanout. This invariant must not be softened.
-  const base = isChild
-    ? listAgents().filter(a => a.ownerId === userId)
-    : listAgents().filter(a => !a.custom || !a.ownerId || a.ownerId === userId);
-  // For non-children: null/undefined = unrestricted; [] = none; [...] = explicit list
-  const restricted = !isChild && allowedAgentIds != null && userRole !== 'owner' && userRole !== 'admin';
-  const visibleBase = restricted ? base.filter(a => allowedAgentIds.includes(a.id) || a.ownerId === userId) : base;
+  // Every user — including owner/admin — only sees agents they own. No sharing,
+  // no allowlist, no ownerless fallthrough.
+  const visibleBase = listAgents().filter(a => a.ownerId === userId);
   // Build a summary of delegatable agents (all non-general agents) for the ask_agent tool description.
   // Compute each agent's effective skillCategory the same way the main return does, so agents
   // whose skillCategory is implicit (derived from role assignments, not stored on the raw record)

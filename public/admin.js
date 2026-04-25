@@ -5,10 +5,9 @@ async function loadUserManagement() {
   try {
     // Ensure provider model lists are loaded for the allowed-models UI
     if (!allModels.length) await loadModels();
-    const [users, skills, agentList] = await Promise.all([
+    const [users, skills] = await Promise.all([
       fetch('/api/users').then(r => r.json()),
       fetch('/api/roles').then(r => r.json()),
-      fetch('/api/agents').then(r => r.json()),
     ]);
     // Master model list from all providers (unfiltered so admin sees everything)
     const masterModels = allAvailableModels({ unfiltered: true }).sort((a, b) => a.name.localeCompare(b.name));
@@ -24,17 +23,6 @@ async function loadUserManagement() {
       const roleColor = { owner: 'var(--accent)', admin: '#f5a623', user: 'var(--muted)', child: '#43b89c' }[u.role] ?? 'var(--muted)';
       const isSelf = u.id === myId;
       const isOwner = u.role === 'owner';
-      // Allowed agents checkboxes — null = unrestricted (all checked); [] = none; [...] = explicit list
-      const allowedAgents = u.allowedAgents ?? null;
-      const agentChecks = agents.map(a => {
-        const checked = allowedAgents == null || allowedAgents.includes(a.id);
-        return `<label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text);cursor:pointer">
-          <input type="checkbox" ${checked ? 'checked' : ''} data-uid="${u.id}" data-agentid="${a.id}" class="agent-allow-chk"
-            style="accent-color:var(--accent);cursor:pointer">
-          ${escHtml(a.emoji)} ${escHtml(a.name)}
-        </label>`;
-      }).join('');
-
       // Roles + Skills checkboxes split — checked = granted access; null = unrestricted (all checked)
       const allowedSkills = u.allowedSkills ?? null;
       const roleSkills  = skills.filter(s => s.service);
@@ -143,19 +131,10 @@ async function loadUserManagement() {
         </summary>
         <div style="padding:0 12px 12px 12px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-size:11px;color:var(--muted)">Role:</span>
+          <span style="font-size:11px;color:var(--muted)">Account:</span>
           ${roleSelect}
           ${deleteBtn}
         </div>
-        ${u.role === 'child' ? `
-        <div style="margin-bottom:6px;padding:8px 10px;background:var(--bg2);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.4">
-          Child accounts only use agents they create themselves. Other users' agents are never visible to this account.
-        </div>` : `
-        <details style="margin-bottom:6px">
-          <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Allowed agents (unchecked = blocked)</summary>
-          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;padding:6px" id="agentAllowGrid_${u.id}">${agentChecks}</div>
-          <button onclick="adminSaveAllowedAgents('${u.id}')" style="margin-top:6px;background:var(--accent);border:none;color:#fff;border-radius:6px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600">Save</button>
-        </details>`}
         <details style="margin-bottom:6px">
           <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Roles (unchecked = no access)</summary>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;padding:6px" id="roleAllowGrid_${u.id}">${roleChecks}</div>
@@ -217,21 +196,6 @@ async function loadUserManagement() {
   }
 }
 
-
-async function adminSaveAllowedAgents(userId) {
-  const grid = $(`agentAllowGrid_${userId}`);
-  if (!grid) return;
-  const checked = [...grid.querySelectorAll('.agent-allow-chk:checked')].map(el => el.dataset.agentid);
-  const all = [...grid.querySelectorAll('.agent-allow-chk')].map(el => el.dataset.agentid);
-  const allowedAgents = checked.length === all.length ? null : checked;
-  try {
-    await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allowedAgents }),
-    });
-    showToast('Allowed agents saved', 2000);
-  } catch { showToast('Failed to save'); }
-}
 
 async function adminSaveAllowedSkills(userId) {
   const roleGrid  = $(`roleAllowGrid_${userId}`);
