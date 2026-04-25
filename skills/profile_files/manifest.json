@@ -1,0 +1,49 @@
+{
+  "id": "profile_files",
+  "name": "Profile Files",
+  "description": "Read-only access to everything in the user's profile folder: uploaded documents, saved research, generated images/videos, and coder workspace files.",
+  "icon": "🗂️",
+  "category": "utility",
+  "enabled_by_default": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_profile_files",
+        "description": "List files saved in the user's profile folders. Covers uploaded documents, saved research, generated images, generated videos, and coder workspace files. Returns ids, filenames, sizes, types, and timestamps. Use this when the user asks about their files, photos, videos, code, research, or anything 'in their profile' / 'in their folder' / 'that they have saved'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "folder": {
+              "type": "string",
+              "enum": ["all", "documents", "research", "images", "videos", "code"],
+              "description": "Which folder to list. 'all' (default) returns everything. 'documents' = uploaded files. 'research' = saved research markdowns. 'images' / 'videos' = AI-generated media. 'code' = coder workspace files."
+            },
+            "query": {
+              "type": "string",
+              "description": "Optional case-insensitive substring filter applied to filenames and titles."
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_profile_file",
+        "description": "Read the content of a file from the user's profile. Use the file_id returned by list_profile_files. Returns text for documents/research/code, image data for photos, and a metadata note for videos (which can't be read as text). Caps text output at 50,000 characters.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_id": {
+              "type": "string",
+              "description": "The file id from list_profile_files (looks like 'documents:doc_abc', 'research:doc_xyz', 'images:filename.png', 'videos:filename.mp4', or 'code:path/to/file.js')."
+            }
+          },
+          "required": ["file_id"]
+        }
+      }
+    }
+  ]
+}
