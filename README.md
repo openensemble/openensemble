@@ -1,4 +1,4 @@
-<img width="556" height="634" alt="agentlist" src="https://github.com/user-attachments/assets/c87e3a37-c0c2-4149-8f30-9d233e7d0b44" /><img width="1878" height="927" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
+<img width="1878" height="927" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
 <img width="556" height="634" alt="agentlist" src="https://github.com/user-attachments/assets/1852cbe2-859b-4ebd-ba71-304e900e3884" />
 
 # OpenEnsemble
