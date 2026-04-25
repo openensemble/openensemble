@@ -227,10 +227,10 @@ async function runTask(task, broadcast) {
     });
 
     // The agent is firing on a schedule with no human present. Without this
-    // note, "send me an email" makes the agent ask "what address?" and the
-    // task hangs (see Sydney session 2026-04-25). Resolves "me" to the user's
-    // own email and tells the agent that any "in N minutes" / "tomorrow" /
-    // "at HH:MM" phrases in the request are the trigger that already fired.
+    // note, "send me an email" makes the agent ask "what address?" or show a
+    // draft and wait for "send it" — the email skill's default safety rule.
+    // Resolves "me" to the user's own email and overrides the draft-first
+    // rule for this run so the action actually happens.
     const ownerProfile = task.ownerId ? getUser(task.ownerId) : null;
     const userEmailLine = ownerProfile?.email
       ? `\nThe user's own email address is ${ownerProfile.email} — if the request says "send me an email" / "email myself", that is the recipient.`
@@ -239,7 +239,9 @@ async function runTask(task, broadcast) {
       `[SCHEDULED RUN] You are executing a previously-scheduled task right now. ` +
       `The user is NOT present and cannot answer follow-up questions. ` +
       `Any "in N minutes" / "tomorrow" / "at HH:MM" phrases in the request are the trigger time that has already arrived — do not try to re-schedule. ` +
-      `Use reasonable defaults for anything unspecified, complete the task, and report what you did.` +
+      `The user's original scheduling message IS the confirmation: execute every action directly and do NOT show drafts, ask "are you sure?", or wait for "send it"/"confirm" — there is no one here to answer. ` +
+      `This overrides any "show draft and wait for approval" rule from skill prompts (email, finance, etc) for this run. ` +
+      `Use reasonable defaults for anything unspecified, complete the task, and report in your final message what you did (including a Message ID if a tool returned one).` +
       userEmailLine;
 
     // Drain the stream with retries — cloud models can return empty on transient failures
