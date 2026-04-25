@@ -203,95 +203,11 @@ function renderAgentModelRows() {
     web: 'Assistant', coding: 'Coder', code: 'Coder', coder: 'Coder', image_generator: 'Image Generator', role_video_generator: 'Video Generator', role_tutor: 'Tutor' }[sc] ?? (sc ? sc.charAt(0).toUpperCase() + sc.slice(1) : ''));
   $('agentModelRows').innerHTML = agents.map(a => {
     const role = roleLabel(a.skillCategory ?? a.toolSet);
-    const isFireworks = a.provider === 'fireworks' || a.provider === 'grok';
-    const outputDirRow = isFireworks ? `
-      <div style="width:100%;display:flex;align-items:center;gap:6px;margin-top:2px">
-        <span style="font-size:11px;color:var(--muted);white-space:nowrap;min-width:48px">Save to</span>
-        <input type="text" id="outdir_${a.id}" value="${escHtml(a.outputDir ?? '')}" placeholder="e.g. /path/to/output/dir"
-          style="flex:1;font-size:12px;font-family:monospace;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:5px 8px"
-          onchange="saveAgentOutputDir('${a.id}', this.value)">
-        <button onclick="openDirPicker('${a.id}')" title="Browse folders"
-          style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:5px 8px;cursor:pointer;font-size:13px;flex-shrink:0">📁</button>
-      </div>` : '';
-    return `<div class="agent-model-row" style="flex-direction:column;align-items:stretch">
-      <div style="display:flex;align-items:center;gap:10px">
-        <div style="min-width:80px"><div class="agent-name">${a.emoji} ${escHtml(a.name)}</div>${role ? `<div class="agent-role">${escHtml(role)}</div>` : ''}</div>
-        ${makeAgentModelSelect(a)}
-      </div>
-      ${outputDirRow}
+    return `<div class="agent-model-row">
+      <div style="min-width:80px"><div class="agent-name">${a.emoji} ${escHtml(a.name)}</div>${role ? `<div class="agent-role">${escHtml(role)}</div>` : ''}</div>
+      ${makeAgentModelSelect(a)}
     </div>`;
   }).join('');
-}
-
-async function saveAgentOutputDir(agentId, val) {
-  await fetch(`/api/agents/${agentId}`, {
-    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ outputDir: val.trim() || null }),
-  });
-  const r = await fetch('/api/agents');
-  agents = await r.json();
-}
-
-// ── Directory Picker ──────────────────────────────────────────────────────────
-let _dirPickerAgentId = null;
-let _dirPickerCurrent = null;
-let _dirPickerCallback = null; // generic callback override for non-agent dir picks
-
-async function openDirPicker(agentId, opts = {}) {
-  _dirPickerAgentId = agentId;
-  _dirPickerCallback = opts.onSelect ?? null;
-  const startPath = opts.startPath || (agentId ? $(`outdir_${agentId}`)?.value?.trim() : null)
-    || (await fetch('/api/browse-dir').then(r => r.json()).catch(() => ({ path: '/home' }))).path;
-  $('dirPickerOverlay').style.display = 'flex';
-  await browseTo(startPath);
-}
-
-function closeDirPicker() {
-  $('dirPickerOverlay').style.display = 'none';
-  _dirPickerAgentId = null;
-}
-
-async function browseTo(dirPath) {
-  _dirPickerCurrent = dirPath;
-  $('dirPickerPath').textContent = dirPath;
-  $('dirPickerList').innerHTML = '<div style="padding:12px 14px;color:var(--muted);font-size:13px">Loading…</div>';
-  try {
-    const data = await fetch(`/api/browse-dir?path=${encodeURIComponent(dirPath)}`).then(r => r.json());
-    _dirPickerCurrent = data.path;
-    $('dirPickerPath').textContent = data.path;
-    let html = '';
-    if (data.parent) {
-      html += `<div class="dir-picker-item" onclick="browseTo('${escHtml(data.parent)}')">
-        <span style="margin-right:8px">⬆️</span><span style="color:var(--muted)">..</span></div>`;
-    }
-    if (!data.entries?.length) {
-      html += `<div style="padding:10px 14px;color:var(--muted);font-size:12px">${data.error ? '⚠ ' + escHtml(data.error) : 'No subfolders here.'}</div>`;
-    } else {
-      html += data.entries.map(e => {
-        const full = data.path.replace(/\/$/, '') + '/' + e;
-        return `<div class="dir-picker-item" onclick="browseTo('${escHtml(full)}')">
-          <span style="margin-right:8px">📁</span>${escHtml(e)}</div>`;
-      }).join('');
-    }
-    $('dirPickerList').innerHTML = html;
-  } catch (e) {
-    $('dirPickerList').innerHTML = `<div style="padding:12px 14px;color:var(--red,#e05c5c);font-size:12px">Error: ${escHtml(e.message)}</div>`;
-  }
-}
-
-async function selectCurrentDir() {
-  if (!_dirPickerCurrent) return;
-  if (_dirPickerCallback) {
-    await _dirPickerCallback(_dirPickerCurrent);
-    closeDirPicker();
-    return;
-  }
-  if (!_dirPickerAgentId) return;
-  const input = $(`outdir_${_dirPickerAgentId}`);
-  if (input) input.value = _dirPickerCurrent;
-  await saveAgentOutputDir(_dirPickerAgentId, _dirPickerCurrent);
-  closeDirPicker();
-  showToast('Output folder saved');
 }
 
 

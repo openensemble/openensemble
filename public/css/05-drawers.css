@@ -176,8 +176,6 @@
 .agent-model-row select { flex: 1; min-width: 140px; background: var(--bg2); border: 1px solid var(--border);
   color: var(--text); border-radius: 6px; padding: 7px 8px; font-size: 13px; }
 .agent-model-row .agent-model-info { font-size: 11px; color: var(--muted); }
-.dir-picker-item { padding: 9px 14px; cursor: pointer; font-size: 13px; display: flex; align-items: center; }
-.dir-picker-item:hover { background: var(--bg3); }
 .models-refresh { background: none; border: 1px solid var(--border); color: var(--muted);
   padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .models-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }

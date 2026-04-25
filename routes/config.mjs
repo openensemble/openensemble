@@ -578,34 +578,6 @@ export async function handle(req, res) {
     return true;
   }
 
-  // Browse server filesystem directories (restricted to HOME tree)
-  if (req.url?.startsWith('/api/browse-dir') && req.method === 'GET') {
-    const authId = requirePrivileged(req, res); if (!authId) return true;
-    const u = new URL(req.url, 'http://localhost');
-    const homeBase = process.env.HOME || '/home';
-    const reqPath = u.searchParams.get('path') || homeBase;
-    const resolved = path.resolve(reqPath);
-    if (!resolved.startsWith(homeBase)) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Access restricted to home directory' }));
-      return true;
-    }
-    try {
-      const entries = fs.readdirSync(resolved, { withFileTypes: true })
-        .filter(e => e.isDirectory() && !e.name.startsWith('.'))
-        .map(e => e.name)
-        .sort();
-      // Also include hidden dirs if explicitly inside one
-      const parent = path.dirname(resolved);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ path: resolved, parent: parent !== resolved ? parent : null, entries }));
-    } catch (e) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ path: resolved, parent: path.dirname(resolved), entries: [], error: e.message }));
-    }
-    return true;
-  }
-
   // TTS endpoint — generates audio from text using configured TTS provider
   if (req.url === '/api/tts' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;

@@ -184,7 +184,6 @@ function _populateAgentModelSelect(agent, { preserveCurrent = false } = {}) {
     const orphan = `<option value="${escHtml(curModel)}||${escHtml(curProvider ?? '')}" selected>${escHtml(curModel)} (unavailable)</option>`;
     sel.innerHTML = orphan + sel.innerHTML;
   }
-  onAgentModelChange();
 }
 const EMOJI_PICKS = ['🤖','🔬','📧','📈','🎯','🛠','📝','🎓','💡','🔐','🧑‍💻','🎨',
   '🏋️','🍕','🚀','⚡','🧠','📊','🗂','🔎','💬','🌍','🎵','📱','🏠','💰','⚽','🎮',
@@ -242,25 +241,14 @@ async function openNewAgentModal(agent = null) {
 
   _populateAgentModelSelect(agent);
 
-  // Output dir field
-  $('aOutputDir').value = agent?.outputDir ?? '';
   $('aMaxTokens').value = agent?.maxTokens ?? '';
   // contextSize: show blank if the value is the default 32768 (agentToWire always populates it)
   const cs = agent?.contextSize;
   $('aContextSize').value = (cs && cs !== 32768) ? cs : '';
-  // Show output dir immediately if editing a Fireworks agent (before async model list loads)
-  if (agent?.provider === 'fireworks') $('aOutputDirLabel').style.display = '';
-  else onAgentModelChange();
 
   closeAllDrawers();
   $('newAgentModal').classList.add('open');
   $('aName').focus();
-}
-
-function onAgentModelChange() {
-  const val = $('aModel')?.value ?? '';
-  const isFireworks = val.endsWith('||fireworks');
-  $('aOutputDirLabel').style.display = isFireworks ? '' : 'none';
 }
 
 $('btnCreateAgent').addEventListener('click', async () => {
@@ -269,14 +257,12 @@ $('btnCreateAgent').addEventListener('click', async () => {
   if (!name) { $('aName').focus(); return; }
   const [model, provider] = $('aModel').value.split('||');
   const selectedRole = !editingAgentId ? ($('aRole').value || null) : null;
-  const outputDir = $('aOutputDir').value.trim() || null;
   const maxTokensRaw = parseInt($('aMaxTokens').value, 10);
   const maxTokens = maxTokensRaw >= 256 ? maxTokensRaw : null;
   const contextSizeRaw = parseInt($('aContextSize').value, 10);
   const contextSize = contextSizeRaw >= 1024 ? contextSizeRaw : null;
   const payload = { name, emoji: $('aEmoji').value.trim() || '🤖', description: desc, model, provider, toolSet: $('aToolSet').value };
   if (selectedRole) payload.skillCategory = selectedRole;
-  if (outputDir) payload.outputDir = outputDir;
   // Always send — PATCH uses 'in changes' to detect clears. For POST, null is harmless.
   payload.maxTokens = maxTokens;
   payload.contextSize = contextSize;
