@@ -401,10 +401,18 @@ async function submitOpenAIPasteCallback() {
 
 async function disconnectOpenAIOAuth() {
   if (!confirm('Disconnect your ChatGPT account? You will need to reconnect to use Codex OAuth models.')) return;
+  const box = document.getElementById('providerStatus_openai-oauth');
+  if (box) box.textContent = 'Disconnecting…';
   try {
-    await fetch('/api/oauth/openai', { method: 'DELETE' });
-    refreshOpenAIOAuthStatus();
-  } catch (e) { alert(`Error: ${e.message}`); }
+    const r = await fetch('/api/oauth/openai', { method: 'DELETE' });
+    if (!r.ok) {
+      if (box) box.textContent = `Disconnect failed (${r.status}).`;
+      return;
+    }
+    await refreshOpenAIOAuthStatus();
+  } catch (e) {
+    if (box) box.textContent = `Disconnect failed: ${e.message}`;
+  }
 }
 
 async function refreshOpenAIOAuthStatus() {
@@ -412,6 +420,7 @@ async function refreshOpenAIOAuthStatus() {
   if (!box) return;
   const connectBtn    = document.getElementById('oauthConnect_openai-oauth');
   const disconnectBtn = document.getElementById('oauthDisconnect_openai-oauth');
+  box.textContent = 'Checking…';
   try {
     const s = await fetch('/api/oauth/openai/status').then(r => r.json());
     if (s.connected) {
