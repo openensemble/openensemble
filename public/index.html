@@ -195,7 +195,18 @@
     <div class="chat-area">
       <div class="messages" id="messages">
         <div id="emptyState" class="empty-state-wrap" style="display:none">
-          <div class="empty-state-card">
+          <div class="empty-state-card" id="emptyStateNoProviders" style="display:none">
+            <div style="font-size:52px"><i data-lucide="plug" style="width:52px;height:52px;stroke-width:1.5"></i></div>
+            <h2>Welcome!</h2>
+            <p>Connect to your providers to get started. Agents need at least one AI provider before they can chat.</p>
+            <button class="btn-create-agent" onclick="openSettingsDrawer(); switchSettingsTab('providers')"><i data-lucide="settings" style="width:14px;height:14px"></i> Connect Providers</button>
+          </div>
+          <div class="empty-state-card" id="emptyStateNoProvidersUser" style="display:none">
+            <div style="font-size:52px"><i data-lucide="plug" style="width:52px;height:52px;stroke-width:1.5"></i></div>
+            <h2>Welcome!</h2>
+            <p>No AI providers are configured yet. Ask your administrator to add a provider before creating an agent.</p>
+          </div>
+          <div class="empty-state-card" id="emptyStateNoAgents" style="display:none">
             <div style="font-size:52px"><i data-lucide="bot" style="width:52px;height:52px;stroke-width:1.5"></i></div>
             <h2>Welcome!</h2>
             <p>Create your first agent to get started. Give it a name, description, and role.</p>
@@ -761,12 +772,13 @@
             </div>
           </div>
 
-          <div class="provider-card" style="margin-bottom:16px" id="providerCard_ollama_local">
+          <div class="provider-card" style="margin-bottom:16px" id="providerCard_ollama-local">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <div class="settings-section-title" style="margin:0"><i data-lucide="cpu" style="width:14px;height:14px"></i> Ollama (local)</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_ollama-local" onchange="toggleProvider('ollama-local',this.checked)"><span class="provider-toggle-slider"></span></label>
             </div>
-            <div id="providerBody_ollama_local">
-              <div class="settings-section-desc" style="margin-bottom:8px">Base URL for a locally-installed Ollama instance. Required to host the memory-lane GGUF — Cloud doesn't accept custom model uploads.</div>
+            <div id="providerBody_ollama-local">
+              <div class="settings-section-desc" style="margin-bottom:8px">Base URL for a locally-installed Ollama instance.</div>
               <input type="text" id="providerOllamaLocalUrl" placeholder="http://localhost:11434"
                 style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">

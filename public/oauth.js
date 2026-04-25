@@ -618,12 +618,13 @@ async function saveCompatProviderKey(providerId, keyField) {
     await fetch('/api/provider-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [keyField]: key }),
+      body: JSON.stringify({ [keyField]: key, enabledProviders: { [providerId]: true } }),
     });
     $(`providerKey_${providerId}`).value = '';
     $(`providerStatus_${providerId}`).textContent = 'API key is set.';
     showToast(`${providerId} key saved`);
     loadCompatProviderModels(providerId).catch(() => {});
+    _enableAndSync(providerId);
   } catch { showToast('Failed to save key'); }
 }
 
@@ -645,6 +646,7 @@ async function loadCompatProviderModels(providerId) {
     window._compatProviderModels = window._compatProviderModels || {};
     window._compatProviderModels[providerId] = models;
     renderModelBrowser?.(); renderAgentModelRows?.();
+    if (typeof checkEmptyState === 'function') checkEmptyState();
   } catch (e) {
     if (box) box.textContent = `Error: ${e.message}`;
   }
@@ -680,7 +682,7 @@ async function loadProviderConfig() {
     if (cfg.openrouterKeySet && typeof loadOpenRouterModels === 'function') loadOpenRouterModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); });
     // Apply provider toggle states (default: all enabled)
     _enabledProviders = cfg.enabledProviders ?? {};
-    const allProviders = ['anthropic', 'fireworks', 'ollama', 'grok', 'lmstudio', 'openrouter', 'tts', ...COMPAT_PROVIDER_META.map(p => p.id)];
+    const allProviders = ['anthropic', 'fireworks', 'ollama', 'ollama-local', 'grok', 'lmstudio', 'openrouter', 'tts', ...COMPAT_PROVIDER_META.map(p => p.id)];
     for (const prov of allProviders) {
       const enabled = _enabledProviders[prov] !== false;
       const toggle = $(`providerToggle_${prov}`);
@@ -690,6 +692,8 @@ async function loadProviderConfig() {
       const body = $(`providerBody_${prov}`);
       if (body) body.style.display = enabled ? '' : 'none';
     }
+
+    if (typeof checkEmptyState === 'function') checkEmptyState();
   } catch {}
 }
 
@@ -708,6 +712,7 @@ async function toggleProvider(provider, enabled) {
     if (typeof renderModelBrowser === 'function') renderModelBrowser();
     if (typeof renderAgentModelRows === 'function') renderAgentModelRows();
     if (typeof renderCortexModelRows === 'function') renderCortexModelRows();
+    if (typeof checkEmptyState === 'function') checkEmptyState();
     showToast(`${enabled ? 'Enabled' : 'Disabled'} ${provider}`);
   } catch { showToast('Failed to update provider'); }
 }
@@ -716,15 +721,31 @@ function isProviderEnabled(provider) {
   return _enabledProviders[provider] !== false;
 }
 
+// Saving a key implies the admin wants to use that provider, so auto-flip its
+// enabled toggle on. Otherwise the saved key sits there with the toggle off,
+// the model picker stays empty, and the welcome card never advances. Mirrors
+// the local _enabledProviders state too so checkEmptyState sees it instantly.
+function _enableAndSync(provider) {
+  _enabledProviders[provider] = true;
+  const toggle = $(`providerToggle_${provider}`);
+  if (toggle) toggle.checked = true;
+  const card = $(`providerCard_${provider}`);
+  if (card) card.classList.remove('disabled');
+  const body = $(`providerBody_${provider}`);
+  if (body) body.style.display = '';
+  if (typeof checkEmptyState === 'function') checkEmptyState();
+}
+
 async function saveProviderFireworksKey() {
   const key = $('providerFireworksKey').value.trim();
   if (!key) { showToast('Enter an API key'); return; }
   try {
     await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fireworksApiKey: key }) });
+      body: JSON.stringify({ fireworksApiKey: key, enabledProviders: { fireworks: true } }) });
     $('providerFireworksKey').value = '';
     $('providerFireworksStatus').textContent = 'API key is set.';
     showToast('Fireworks key saved');
+    _enableAndSync('fireworks');
   } catch { showToast('Failed to save key'); }
 }
 
@@ -734,10 +755,11 @@ async function saveProviderGrokKey() {
   if (!key) { showToast('Enter an API key'); return; }
   try {
     await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ grokApiKey: key }) });
+      body: JSON.stringify({ grokApiKey: key, enabledProviders: { grok: true } }) });
     $('providerGrokKey').value = '';
     $('providerGrokStatus').textContent = 'Inference key is set.';
     showToast('Grok key saved');
+    _enableAndSync('grok');
   } catch { showToast('Failed to save key'); }
 }
 
@@ -747,13 +769,14 @@ async function saveProviderOpenRouterKey() {
   if (!key) { showToast('Enter an API key'); return; }
   try {
     await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ openrouterApiKey: key }) });
+      body: JSON.stringify({ openrouterApiKey: key, enabledProviders: { openrouter: true } }) });
     $('providerOpenrouterKey').value = '';
     $('providerOpenrouterStatus').textContent = 'API key is set.';
     showToast('OpenRouter key saved');
     await loadOpenRouterModels();
     renderModelBrowser?.();
     renderAgentModelRows?.();
+    _enableAndSync('openrouter');
   } catch { showToast('Failed to save key'); }
 }
 
@@ -762,10 +785,11 @@ async function saveProviderAnthropicKey() {
   if (!key) { showToast('Enter an API key'); return; }
   try {
     await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anthropicApiKey: key }) });
+      body: JSON.stringify({ anthropicApiKey: key, enabledProviders: { anthropic: true } }) });
     $('providerAnthropicKey').value = '';
     $('providerAnthropicStatus').textContent = 'API key is set.';
     showToast('Anthropic key saved');
+    _enableAndSync('anthropic');
   } catch { showToast('Failed to save key'); }
 }
 
@@ -785,6 +809,7 @@ async function saveProvider(provider) {
   const body = {
     ...(sel.urlField && url ? { [sel.urlField]: url } : {}),
     ...(key ? { [sel.keyField]: key } : {}),
+    enabledProviders: { [provider]: true },
   };
   try {
     const r = await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -792,8 +817,9 @@ async function saveProvider(provider) {
     if (!r.ok) { showToast(`Save failed (${r.status})`); return; }
     if (key) { $(sel.keyEl).value = ''; }
     showToast(`${sel.label} saved`);
-    // Re-pull authoritative state so the URL field shows the persisted value
-    // and status lines reflect whether a key is now set.
+    // Re-pull authoritative state so the URL field shows the persisted value,
+    // status lines reflect whether a key is now set, and the welcome card
+    // re-evaluates against the freshly-stored enabledProviders.
     await loadProviderConfig();
   } catch { showToast('Failed to save'); }
 }

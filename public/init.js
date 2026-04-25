@@ -47,8 +47,8 @@ async function init() {
 
   buildTabs();
   buildAgentDrawer();
-  loadProviderConfig();
-  loadModels();
+  loadProviderConfig().then(() => checkEmptyState()).catch(() => {});
+  loadModels().then(() => checkEmptyState()).catch(() => {});
   loadTaskList();
   startStatusBar();
   if (typeof initMirror === 'function') initMirror();

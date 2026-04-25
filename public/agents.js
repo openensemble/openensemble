@@ -12,7 +12,42 @@ function checkEmptyState() {
   $('emptyState').style.display = empty ? 'flex' : 'none';
   $('input').disabled = empty;
   $('btnSend').disabled = empty;
-  $('input').placeholder = empty ? 'Create an agent to start chatting…' : 'Message…';
+  if (!empty) { $('input').placeholder = 'Message…'; return; }
+
+  const hasProviders = _hasAnyProviderConfigured();
+  const isAdmin = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+  const noProvAdmin = $('emptyStateNoProviders');
+  const noProvUser  = $('emptyStateNoProvidersUser');
+  const noAgents    = $('emptyStateNoAgents');
+  if (!hasProviders && isAdmin) {
+    noProvAdmin.style.display = '';
+    noProvUser.style.display  = 'none';
+    noAgents.style.display    = 'none';
+    $('input').placeholder = 'Connect a provider to start chatting…';
+  } else if (!hasProviders) {
+    noProvAdmin.style.display = 'none';
+    noProvUser.style.display  = '';
+    noAgents.style.display    = 'none';
+    $('input').placeholder = 'No providers configured…';
+  } else {
+    noProvAdmin.style.display = 'none';
+    noProvUser.style.display  = 'none';
+    noAgents.style.display    = '';
+    $('input').placeholder = 'Create an agent to start chatting…';
+  }
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function _hasAnyProviderConfigured() {
+  // Single source of truth: did the admin enable any provider? The shipped
+  // template disables everything explicitly, so any `true` value in
+  // _enabledProviders means an admin actively turned something on. Each
+  // save*Key call also flips its provider to enabled, so saving a key alone
+  // (without touching the toggle) still flips this. Avoids the *KeySet
+  // detection trap where template placeholder values (lmstudioApiKey:
+  // "lmstudio") look "set" on a fresh install.
+  const ep = (typeof _enabledProviders !== 'undefined') ? _enabledProviders : {};
+  return Object.values(ep).some(v => v === true);
 }
 
 function buildTabs() {

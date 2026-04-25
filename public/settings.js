@@ -94,8 +94,14 @@ function allAvailableModels({ unfiltered = false } = {}) {
     const key = `${m.provider}::${m.name}`;
     if (!seen.has(key)) { seen.add(key); merged.push(m); }
   }
-  // Filter out disabled providers
-  const filtered = merged.filter(m => typeof isProviderEnabled !== 'function' || isProviderEnabled(m.provider));
+  // Filter out disabled providers. Ollama is special: cloud and local share
+  // m.provider==='ollama' but each has its own toggle (`ollama` for cloud,
+  // `ollama-local` for local), so map per tier before checking.
+  const providerKey = (m) => {
+    if (m.provider !== 'ollama') return m.provider;
+    return m.tier === 'local' ? 'ollama-local' : 'ollama';
+  };
+  const filtered = merged.filter(m => typeof isProviderEnabled !== 'function' || isProviderEnabled(providerKey(m)));
   // Unless unfiltered requested (admin UI), restrict to user's allowed models
   if (!unfiltered && _currentUser?.allowedModels != null) {
     const allowed = new Set(_currentUser.allowedModels);

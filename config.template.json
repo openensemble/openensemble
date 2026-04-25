@@ -36,6 +36,7 @@
     "fireworks": false,
     "grok": false,
     "ollama": false,
+    "ollama-local": false,
     "lmstudio": false,
     "openrouter": false,
     "tts": false,
