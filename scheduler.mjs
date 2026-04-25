@@ -10,6 +10,7 @@ import { streamChat } from './chat.mjs';
 import { appendToSession } from './sessions.mjs';
 import { withLock, getAgentsForUser, getUser, isUserTimeBlocked } from './routes/_helpers.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
+import { scheduledContext } from './lib/scheduled-context.mjs';
 import { log } from './logger.mjs';
 
 const TASKS_DIR      = path.join(BASE_DIR, 'tasks'); // legacy fallback
@@ -266,7 +267,9 @@ async function runTask(task, broadcast) {
       return false;
     };
 
-    succeeded = await runAttempt(1);
+    // Wrap the entire run in AsyncLocalStorage so any ask_agent delegations
+    // nested under streamChat can read the systemNote and pass it down.
+    succeeded = await scheduledContext.run({ scheduledNote }, () => runAttempt(1));
     if (!succeeded) console.error(`[scheduler] Task "${task.label}" failed after ${MAX_ATTEMPTS} attempts`);
     else console.log(`[scheduler] Task "${task.label}" complete`);
     const durationMs = Date.now() - startedAt;

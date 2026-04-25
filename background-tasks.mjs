@@ -54,8 +54,12 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     }
     try {
       const { streamChat } = await import('./chat.mjs');
+      const { getScheduledNote } = await import('./lib/scheduled-context.mjs');
+      // ALS propagates through this detached IIFE because dispatchBackground
+      // was called from within scheduledContext.run(...). null in non-scheduled chats.
+      const scheduledNote = getScheduledNote();
       let fullText = '';
-      for await (const ev of streamChat(scopedAgent, task, null, null, userId)) {
+      for await (const ev of streamChat(scopedAgent, task, null, null, userId, null, scheduledNote)) {
         if (ev.type === 'token') fullText += ev.text;
         if (ev.type === 'error') throw new Error(ev.message);
       }

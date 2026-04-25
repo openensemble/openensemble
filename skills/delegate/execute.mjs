@@ -14,6 +14,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const { streamChat } = await import('../../chat.mjs');
   const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
   const { isAgentBusy, waitForAgentIdle, markAgentBusy } = await import('../../chat-dispatch.mjs');
+  const { getScheduledNote } = await import('../../lib/scheduled-context.mjs');
 
   const agents = getAgentsForUser(userId);
   // Accept either the real id (agent_2dfdf5ca) or the display name ("Ada").
@@ -113,8 +114,13 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const slot = markAgentBusy(scopedAgentId);
   let fullText = '';
   let errText = null;
+  // Inherit the [SCHEDULED RUN] note from the calling chain (set by
+  // scheduler.runTask via AsyncLocalStorage). Without this, sub-agents
+  // fall back to their default "show draft and wait" behavior, which
+  // never resolves on a scheduled run since no human is there to answer.
+  const scheduledNote = getScheduledNote();
   try {
-    for await (const event of streamChat(scopedAgent, task, null, null, userId)) {
+    for await (const event of streamChat(scopedAgent, task, null, null, userId, null, scheduledNote)) {
       if (event.type === 'token') fullText += event.text;
       if (event.type === 'error') { errText = `Error from ${agent_id}: ${event.message}`; break; }
     }
