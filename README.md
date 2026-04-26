@@ -1,17 +1,26 @@
+
 # OpenEnsemble
 
 Self-hosted, multi-user AI assistant platform. Run a team of specialist agents and choose which LLM providers they use.
 
-OpenEnsemble is a single Node.js server that serves a web UI on port 3737. Sign in, pick an agent, and start a conversation — or let the coordinator agent dispatch your message to whichever specialist is the right fit (coder, email, research, calendar, expenses, image gen, etc.). Every user gets their own isolated workspace, agents, skills, and data.
+<img width="378" height="315" alt="welcome" src="https://github.com/user-attachments/assets/8cfb9a9a-70cc-467f-95e6-0e9cef88b3d5" />
 
-<img width="939" height="463" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
-<img width="556" height="634" alt="agentlist" src="https://github.com/user-attachments/assets/1852cbe2-859b-4ebd-ba71-304e900e3884" />
+OpenEnsemble is a single Node.js server that serves a web UI on port 3737. Create your account, configure your providers, create an agent, select their role, and start a conversation.
+Built in roles create dedicated specialists (coder, email, research, calendar, expenses, image gen, etc.) that can have tasks delegates to them by other agents.
+"Give me a briefing on the lastest advancements in Ai and email it to me." Would call your research agent and then have the email delegated to your specialized email agent.
+
+Secured multi-profile accounts. Every user gets their own isolated workspace, agents, skills, and data. Admin can enable or disable features. Select the models available to that user.
+
+<img width="526" height="719" alt="accountscreenshot" src="https://github.com/user-attachments/assets/94e31e21-e46e-4f53-9766-850ca943781b" />
 
 ## What it does
 
 **Multi-agent chat.** A roster of specialist agents each tuned for a role. The Coordinator reads incoming messages and delegates to the right specialist, or you can talk to one directly.
 
-**Bring your own LLMs.** Providers include Anthropic, OpenAI (API key or ChatGPT-login/OAuth), Grok, Gemini, DeepSeek, Mistral, Groq, Together, Perplexity, Fireworks, OpenRouter, Z.ai, Ollama, and LM Studio. Enable what you want; assign different models per agent. A built-in fallback provider kicks in if your primary is down.
+**Bring your own LLMs.** Providers include Anthropic, OpenAI (API key or ChatGPT-login/OAuth), Grok, Gemini, DeepSeek, Mistral, Groq, Together, Perplexity, Fireworks, OpenRouter, Z.ai, Ollama, and LM Studio. Enable what you want; assign different models per agent.
+
+<img width="556" height="634" alt="agentlist" src="https://github.com/user-attachments/assets/202c580d-b2ca-4a8d-8a39-e827a9eb647e" />
+
 
 **Skills.** Capabilities agents can use, each defined by a small manifest:
 
@@ -32,19 +41,21 @@ OpenEnsemble is a single Node.js server that serves a web UI on port 3737. Sign 
 | `tasks` | Schedule recurring and one-time agent tasks |
 | `web` | Brave Search and URL fetch |
 
-Users can also install **plugins** (drop-in skills + UI drawers, e.g. `markets`, `news`, `tutor-today`) and extend with **user-scoped skills** kept in their own directory.
+Use the built in skill builder to have your coding agent add functionality to OpenEnsemble. A blueprint is shipped with the installation. Just ask your coding agent or coordinator to make a skill that will connect to your Home Assistant server so you can control your devices directly through chat. Or any other skill you can think of.
 
 **Roles.** Swap the persona/prompt on any agent without rebuilding it — role instructions live on the role, not the agent, so the coordinator can reassign roles cleanly.
 
-**Cortex — private reasoning & embeddings.** Bundled local models run in-process via `node-llama-cpp`: a reasoning model (`openensemble-reason-v1`, SmolLM2-based GGUF) and `nomic-embed-text-v1` embeddings. No external call required for retrieval, summarization, or classification.
+**Cortex — private reasoning & embeddings.** Bundled local models run in-process via `node-llama-cpp`: a reasoning model (`openensemble-reason-v1`, SmolLM2-based GGUF) and `nomic-embed-text-v1` embeddings. No external call required for retrieval, summarization, or classification. No GPU required. Small LLMs that run quickly on a CPU. Once OpenEnsemble is installed you can run oe bench in the terminal to see the performance.
 
 **Desktop & documents drawer.** A unified view of everything the user has: uploaded docs, AI-generated images, AI-generated videos, research reports, files shared from other users, and code projects — each with its own tab. Code projects are downloadable as zip archives.
 
-**Remote nodes.** Pair a machine with the server using a one-time code; the `oe-node-agent` then accepts exec and file-transfer commands scoped to that user. Useful for driving a homelab, a Raspberry Pi, or a workshop rig from the web UI.
+**Remote nodes.** Pair a machine with the server using a one-time code; the `oe-node-agent` then accepts exec and file-transfer commands scoped to that user. Useful for driving a homelab, a Raspberry Pi, or a workshop rig from the web UI. Have your agents keep your software up to date automatically, install new software, or debug your node. All from the chat interface.
+
+<img width="562" height="887" alt="nodes" src="https://github.com/user-attachments/assets/006a0158-50fa-4efc-9e0f-3b573b41d80d" />
 
 **Expenses.** Groups, books, receipt parsing, and per-user / per-group activity.
 
-**Background scheduler.** Cron-like recurring tasks. Custom built LLM to set and parse tasks. (e.g. a daily news briefing, a nightly uploads-folder cleanup) plus one-shot tasks an agent schedules for itself.
+**Background scheduler.** Cron-like recurring tasks. Custom built-in LLM to set and parse tasks. (e.g. a daily news briefing, a nightly uploads-folder cleanup) plus one-shot tasks an agent schedules for itself.
 
 **Per-user everything.** Agents, custom skills, sessions, chat history, uploads, AI outputs, code projects, and settings are all stored under `users/{userId}/` — a fresh install with multiple accounts is fully isolated.
 
@@ -136,20 +147,7 @@ users/                  per-user state (created on first run; ignored by git)
 config.template.json    template copied to config.json on install
 server.mjs              entry point
 ```
-
-## Development
-
-```bash
-npm start                 # run the server (auto-rebuilds styles on boot)
-npm test                  # vitest
-npm run test:watch        # vitest --watch
-```
-
-Hot tips:
-
-- The server restart wipes in-memory state: pairing codes, chat streams, pending node commands, and media tokens. Batch edits rather than restart-per-change when possible.
-- Tests must import `BASE_DIR` from `lib/paths.mjs`; derive-your-own paths break isolation.
-- User-scoped skills live in `users/{id}/skills/` in parallel with the global `skills/`. When wiring up a skill, check global, user-scope, and `plugins/`.
+<img width="939" height="463" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
 
 ## License
 
