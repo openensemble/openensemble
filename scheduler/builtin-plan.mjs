@@ -69,8 +69,25 @@ export async function initBuiltinPlan() {
   return _initPromise;
 }
 
-// Scheduler task types. System-prompt-only in Phase 1; become prefix tokens
-// in Phase 2 when the dedicated plan model is trained.
+// Training-format system prompt — verbatim from training/plan/train.py:44-49.
+// The bundled plan GGUF was fine-tuned with this single generic system across
+// all 4 tasks, with the task token (<parse>/<decide>/<decompose>/<classify>)
+// prepended to the user message for routing. Sending one of the per-task
+// detailed system prompts in TASKS below at inference broke decide/decompose
+// reasoning entirely (model returned `defer` for everything) and made parse
+// produce malformed JSON (the grammar then masked the rot at decode time).
+// See 2026-04-26 audit notes.
+const TRAINING_SYSTEM =
+  'You are a scheduler reasoning assistant. Given a task-prefix token, ' +
+  'parse scheduling requests, decide whether pending tasks should run, ' +
+  'break goals into checkpoints, or classify event urgency. ' +
+  'Output ONLY valid JSON unless the task explicitly asks for prose.';
+
+// Per-task verbose system prompts — preserved for two reasons: (1) used as the
+// system prompt when a non-bundled provider (Ollama with stock Llama, LM Studio)
+// is selected — those models need schema hints since they have no task-token
+// training; (2) self-documents the expected output shape for each task.
+// The bundled cortex path uses TRAINING_SYSTEM above.
 const TASKS = {
   parse: {
     system:
@@ -165,7 +182,10 @@ const SCHEMAS = {
           agent: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           skill: { anyOf: [{ type: 'string' }, { type: 'null' }] },
         },
-        required: ['agent', 'skill'],
+        // Only `agent` is required — 94% of training rows omit `skill`. When
+        // we previously required both, the model invented arbitrary skill
+        // strings just to satisfy the grammar.
+        required: ['agent'],
       },
     },
     required: ['intent', 'schedule', 'conditions', 'priority', 'target'],
@@ -195,11 +215,24 @@ async function _getGrammar(task) {
   }
 }
 
-// Build the ChatML prompt — same template SmolLM2-Instruct was trained on.
-function _buildPromptTokens(system, user) {
+// Task tokens added to the SmolLM2 vocab during fine-tuning (see
+// training/plan/train.py:37-42). Prepended to the user content so the LoRA
+// routes to the correct task head — earlier code stripped these entirely
+// at inference, which is why decide/decompose reasoning was broken.
+const TASK_TOKENS = {
+  parse: '<parse>',
+  decide: '<decide>',
+  decompose: '<decompose>',
+  classify: '<classify>',
+};
+
+// Build the ChatML prompt — same template SmolLM2-Instruct was trained on,
+// with the task token prepended to user content per training/plan/train.py:59.
+function _buildPromptTokens(system, user, task) {
+  const taskTok = task && TASK_TOKENS[task] ? `${TASK_TOKENS[task]}\n` : '';
   const text =
     `<|im_start|>system\n${system}<|im_end|>\n` +
-    `<|im_start|>user\n${user ?? ''}<|im_end|>\n` +
+    `<|im_start|>user\n${taskTok}${user ?? ''}<|im_end|>\n` +
     `<|im_start|>assistant\n`;
   return _model.tokenize(text, true);
 }
@@ -225,7 +258,6 @@ export async function planGenerate({
 } = {}) {
   const preset = TASKS[task];
   if (!preset) throw new Error(`planGenerate: unknown task "${task}"`);
-  const system = systemOverride ?? preset.system;
 
   // Routing: same three tiers as the reason runtime. The planProvider config
   // is written by scheduler/plan-transfer.mjs when the user clicks "Install
@@ -235,13 +267,18 @@ export async function planGenerate({
   const provider = cfg?.scheduler?.planProvider ?? 'builtin';
 
   if (provider === 'ollama' || provider === 'lmstudio') {
-    return _generateExternal({ provider, system, user, temperature, maxTokens, cfg });
+    // Stock external models need the schema-rich per-task prompt for hints.
+    return _generateExternal({ provider, system: systemOverride ?? preset.system, user, temperature, maxTokens, cfg });
   }
+
+  // Bundled GGUF: use the training-format system prompt the LoRA actually
+  // saw during fine-tuning, and inject the task token into the user message.
+  const system = systemOverride ?? TRAINING_SYSTEM;
 
   const run = async () => {
     try {
       await initBuiltinPlan();
-      const tokens = _buildPromptTokens(system, user);
+      const tokens = _buildPromptTokens(system, user, task);
       const grammar = await _getGrammar(task);
       const sequence = _context.getSequence();
       try {
