@@ -1,11 +1,11 @@
-<img width="1878" height="927" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
-<img width="556" height="634" alt="agentlist" src="https://github.com/user-attachments/assets/1852cbe2-859b-4ebd-ba71-304e900e3884" />
-
 # OpenEnsemble
 
 Self-hosted, multi-user AI assistant platform. Run a team of specialist agents and choose which LLM providers they use.
 
 OpenEnsemble is a single Node.js server that serves a web UI on port 3737. Sign in, pick an agent, and start a conversation — or let the coordinator agent dispatch your message to whichever specialist is the right fit (coder, email, research, calendar, expenses, image gen, etc.). Every user gets their own isolated workspace, agents, skills, and data.
+
+<img width="939" height="463" alt="dashboard" src="https://github.com/user-attachments/assets/47256c92-2e5a-4bad-938c-0190919ae824" />
+<img width="556" height="634" alt="agentlist" src="https://github.com/user-attachments/assets/1852cbe2-859b-4ebd-ba71-304e900e3884" />
 
 ## What it does
 
