@@ -3,8 +3,9 @@ import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const BASE_DIR  = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const GCAL_CLI = path.join(BASE_DIR, 'tools/gcal.mjs');
+const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
+const BASE_DIR  = path.resolve(SKILL_DIR, '../..');
+const GCAL_CLI = path.join(SKILL_DIR, 'gcal.mjs');
 
 
 function buildCmdArgs(name, args) {
@@ -92,7 +93,7 @@ export async function onEnable(userId) {
     ? path.join(BASE_DIR, 'users', userId, 'gcal-token.json')
     : path.join(BASE_DIR, 'gcal-token.json');
   if (existsSync(tokenPath)) return; // already authorized
-  const authScript = path.join(BASE_DIR, 'tools/gcal-auth.mjs');
+  const authScript = path.join(SKILL_DIR, 'gcal-auth.mjs');
   spawn('node', [authScript], {
     detached: true,
     stdio: 'ignore',

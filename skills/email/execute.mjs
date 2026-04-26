@@ -10,8 +10,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
 
-const BASE_DIR  = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const GMAIL_CLI = path.join(BASE_DIR, 'tools/gmail.mjs');
+const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
+const BASE_DIR  = path.resolve(SKILL_DIR, '../..');
+const GMAIL_CLI = path.join(SKILL_DIR, 'gmail.mjs');
 
 // ── Account resolution ────────────────────────────────────────────────────────
 
