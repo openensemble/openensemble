@@ -5,22 +5,16 @@
  */
 
 import {
-  assertId, queuedWrite, generate, generateCombined, safeParseJSON, providerHealthy,
+  assertId, queuedWrite, generateCombined, safeParseJSON, providerHealthy,
 } from './shared.mjs';
 import { getTable, remember, pin } from './lance.mjs';
 import { forgetByText } from './recall.mjs';
 
-// ── Combined signal detection — one model call replaces 4 ────────────────────
-const SIGNALS_INSTRUCTION = (
-  'Analyze this conversation turn for memory signals. Output JSON only.\n' +
-  'Format: {"is_correction":bool,"correction":str|null,"is_preference":bool,' +
-  '"preference":str|null,"preference_strength":"strong"|"moderate"|"weak"|null,' +
-  '"is_forget":bool,"forget_subject":str|null}\n' +
-  'preference_strength guide:\n' +
-  '- "strong": explicit demand, absolute language (always/never/must/hate/love), emotional emphasis\n' +
-  '- "moderate": clear preference with some flexibility (prefer/usually/like/dislike)\n' +
-  '- "weak": mild suggestion, one-time mention, hedged language (maybe/sometimes/kind of)'
-);
+// Cortex was trained on the bare `User: "..." Agent: "..."` wrapper (per
+// training/train.py format_record('signals')) — sending a verbose schema
+// instruction at inference broke the head completely (fields missing,
+// schema-violation outputs). The empty instruction tells generateCombined
+// to send the bare format the model learned.
 
 // If the agent's last response was about email/task operations, skip correction detection
 const AGENT_ACTION_RESPONSE_RE = /\b(moved to trash|trashed|permanently deleted|found \d+|done!? all \d+|email(s)? (have been|were)|scheduled (to run|at)|task .{1,40} scheduled)\b/i;
@@ -41,7 +35,7 @@ async function detectSignals({ agentId, userMessage, agentLastResponse, userId =
     ? `User: "${safeUser}"\nAgent: "${safeAgent}"`
     : `User: "${safeUser}"\nAgent: ""`;
 
-  const raw = await generateCombined(SIGNALS_INSTRUCTION, inputText, { caller: 'signals', userId, agentId });
+  const raw = await generateCombined('', inputText, { caller: 'signals', userId, agentId });
   const s   = safeParseJSON(raw);
   if (!s) return { correction: null, preference: null };
 
@@ -112,13 +106,10 @@ export async function trackFriction({ agentId, userMessage, userId = 'default' }
   for (const key of agentKeys) {
     const stored = _frictionCounters[key];
     const safeStored = stored.text.slice(0, 150).replace(/"/g, "'");
-    const raw = await generate(
-      'Output JSON only.\n' +
-      'Are A and B asking for the same thing, even if worded differently?\n\n' +
-      `A: "${safeStored}"\nB: "${safeMsg}"\n\n` +
-      '{"same_instruction":true} or {"same_instruction":false}',
-      { caller: 'friction', userId, agentId }
-    );
+    // Bare `First: "..." Second: "..."` matches training/train.py
+    // format_record('friction'). Production previously used A/B field names
+    // — wrong cue tokens for the trained head.
+    const raw = await generateCombined('', `First: "${safeStored}" Second: "${safeMsg}"`, { caller: 'friction', userId, agentId });
     const parsed = safeParseJSON(raw);
 
     if (parsed?.same_instruction === true) {

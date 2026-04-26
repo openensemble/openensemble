@@ -4,7 +4,7 @@
 
 import { createHash } from 'crypto';
 import {
-  VECTOR_DIM, getCortexConfig, getProviderSpec, generate, generateCombined, safeParseJSON,
+  VECTOR_DIM, getCortexConfig, getProviderSpec, generateCombined, safeParseJSON,
 } from './shared.mjs';
 import { builtinEmbed } from './builtin-embed.mjs';
 
@@ -90,17 +90,15 @@ export async function embed(text) {
 }
 
 // ── Salience scoring ─────────────────────────────────────────────────────────
-const SALIENCE_INSTRUCTION =
-  'Output JSON only. No explanation.\n' +
-  'Example: {"emotional_weight":0.5,"decision_weight":0.7,"uniqueness":0.3}\n\n' +
-  'Rate 0.0-1.0:\n' +
-  'emotional_weight = how emotionally significant\n' +
-  'decision_weight = how much this affects future behavior\n' +
-  'uniqueness = how novel or surprising';
+// Bare `Rate: "<text>"` matches training/train.py format_record('salience').
+// Earlier we passed a verbose instruction including an Example tuple — the
+// 135M cortex copied that tuple verbatim for every input regardless of
+// content. Removing the instruction restored the head's actual learned
+// discrimination.
 
 export async function scoreSalience(text, meta = {}) {
   const safeText = text.slice(0, 300).replace(/"/g, "'");
-  const raw = await generateCombined(SALIENCE_INSTRUCTION, `Text: "${safeText}"`, { caller: 'salience', ...meta });
+  const raw = await generateCombined('', `Rate: "${safeText}"`, { caller: 'salience', ...meta });
   const s = safeParseJSON(raw);
   if (!s || typeof s.emotional_weight !== 'number') {
     return { emotional_weight: 0.5, decision_weight: 0.5, uniqueness: 0.5, composite: 0.5 };
@@ -119,14 +117,8 @@ export async function checkContradiction(newText, existingMemories, meta = {}) {
   const safeNew = newText.slice(0, 300).replace(/"/g, "'");
   for (const existing of existingMemories.slice(0, 3)) {
     const safeEx = existing.text.slice(0, 300).replace(/"/g, "'");
-    const raw = await generate(
-      'Output JSON only.\n' +
-      'Do A and B directly contradict each other? Only yes if they clearly disagree.\n\n' +
-      'A: "' + safeNew + '"\n' +
-      'B: "' + safeEx + '"\n\n' +
-      '{"contradicts":true} or {"contradicts":false}',
-      { caller: 'contradiction', ...meta }
-    );
+    // Bare `A: "..." B: "..."` matches training/train.py format_record('contradiction').
+    const raw = await generateCombined('', `A: "${safeNew}" B: "${safeEx}"`, { caller: 'contradiction', ...meta });
     const result = safeParseJSON(raw);
     if (result?.contradicts === true) {
       return { contradicts: true, conflicting_id: existing.id };

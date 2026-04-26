@@ -399,10 +399,15 @@ export async function generate(prompt, meta = {}) {
 }
 
 // ── Combined signal detection — one model call replaces 4 ───────────────────
+// System prompt and empty-instruction behavior match training/train.py so the
+// bundled cortex GGUF sees the exact format it learned. Non-empty instruction
+// is still supported for callers using a generic provider that needs schema
+// hints (LM Studio with stock Llama, etc.) — they pay a small accuracy cost
+// at inference but keep working without trained task-token routing.
 export async function generateCombined(instruction, inputText, meta = {}) {
   return _chatCall({
-    system: 'You are a memory assistant. Output JSON only.',
-    user: `${instruction}\n${inputText}`,
+    system: 'You are a memory assistant. Output JSON only unless asked for prose.',
+    user: instruction ? `${instruction}\n${inputText}` : inputText,
   }, meta);
 }
 

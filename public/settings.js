@@ -94,8 +94,7 @@ function _isSystemInternalModel(m) {
   if (m.provider === 'builtin') return true;
   const n = m.name ?? '';
   return n.startsWith('nomic-embed-text')
-      || n.startsWith('openensemble-reason')
-      || n.startsWith('memory-scorer');
+      || n.startsWith('openensemble-reason');
 }
 
 function allAvailableModels({ unfiltered = false } = {}) {

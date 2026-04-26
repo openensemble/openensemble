@@ -21,10 +21,9 @@ const _sessionSummarized = new Set(); // bufKeys already summarized this idle cy
 const IDLE_THRESHOLD_MS = 30 * 60_000; // 30 minutes
 const SUMMARY_CHECK_INTERVAL_MS = 5 * 60_000; // check every 5 minutes
 
-const SUMMARY_INSTRUCTION =
-  'Summarize this conversation in 1-3 concise sentences. Focus on: decisions made, ' +
-  'topics discussed, preferences expressed, problems solved, and action items. ' +
-  'Skip greetings, filler, and meta-commentary. Output plain text only, no JSON.';
+// Cortex summary head was trained on bare `<conv>` per training/train.py
+// format_record('summary'). Empty instruction → generateCombined sends just
+// the conversation, matching the trained format.
 
 async function summarizeIdleSessions() {
   const now = Date.now();
@@ -45,7 +44,7 @@ async function summarizeIdleSessions() {
     _sessionSummarized.add(bufKey);
 
     // Generate summary via local LLM (non-blocking)
-    generateCombined(SUMMARY_INSTRUCTION, convText, { caller: 'summary', userId, agentId }).then(async summary => {
+    generateCombined('', convText, { caller: 'summary', userId, agentId }).then(async summary => {
       if (!summary || summary.length < 20) return;
       const record = await rememberFast({
         agentId, type: 'episodes', text: `[Session summary] ${summary}`,
