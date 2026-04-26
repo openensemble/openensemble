@@ -12,9 +12,7 @@ async function loadUserManagement() {
     // Master model list from all providers (unfiltered so admin sees everything)
     const masterModels = allAvailableModels({ unfiltered: true }).sort((a, b) => a.name.localeCompare(b.name));
     // allFeatures: drawer features from admin's (unrestricted) plugins list
-    // Exclude drawers that are auto-enabled by role skills (managed via Roles section instead)
-    const ROLE_MANAGED_DRAWERS = new Set(['expenses', 'inbox']);
-    const allFeatures = drawers.filter(p => p.drawer && !ROLE_MANAGED_DRAWERS.has(p.id));
+    const allFeatures = drawers.filter(p => p.drawer);
     const myId = getCurrentUserId();
     const myRole = _currentUser?.role;
     el.innerHTML = '';
@@ -58,24 +56,44 @@ async function loadUserManagement() {
         </select>` : `<span style="font-size:11px;padding:2px 7px;border-radius:20px;background:var(--bg2);color:${roleColor};border:1px solid ${roleColor}">${roleLabel}</span>`;
       const deleteBtn = (!isSelf && !isOwner) ? `<button onclick="adminDeleteUser('${u.id}','${escHtml(u.name)}')" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Delete</button>` : '';
 
-      // Child safety prompt (editable per child account)
+      // Child safety prompt (editable per child account) — saved via global Save
       const childSafetySection = (u.role === 'child' && !isSelf) ? `
-        <details style="margin-top:8px;margin-bottom:6px">
+        <details style="margin-bottom:6px">
           <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">🛡️ Child safety prompt (persona wrapper)</summary>
           <div style="margin-top:6px">
             <textarea id="childSafetyPrompt_${u.id}" rows="5" placeholder="Custom child safety prompt (leave empty for default)" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px;font-size:11px;font-family:inherit;resize:vertical;box-sizing:border-box">${escHtml(u.childSafetyPrompt ?? '')}</textarea>
-            <div style="display:flex;gap:6px;margin-top:4px;align-items:center">
-              <button onclick="adminSaveChildSafetyPrompt('${u.id}')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600">Save</button>
-              <button onclick="document.getElementById('childSafetyPrompt_${u.id}').value='';adminSaveChildSafetyPrompt('${u.id}')" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Reset to default</button>
-            </div>
           </div>
         </details>` : '';
+
+      // OAuth provider logins — admin-grantable capabilities (the user still
+      // has to complete the connect flow themselves; this just unhides the button).
+      let allowedOAuthSection = '';
+      if ((u.role === 'child' || u.role === 'user') && !isSelf) {
+        const OAUTH_PROVIDERS = [
+          { id: 'openai-oauth', label: 'OpenAI (ChatGPT login)', icon: '🔐' },
+        ];
+        const allowedOAuth = Array.isArray(u.allowedOAuthProviders) ? u.allowedOAuthProviders : [];
+        const oauthChecks = OAUTH_PROVIDERS.map(p => {
+          const checked = allowedOAuth.includes(p.id);
+          return `<label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text);cursor:pointer">
+            <input type="checkbox" ${checked ? 'checked' : ''} data-oauth="${escHtml(p.id)}" class="oauth-allow-chk" style="accent-color:var(--accent);cursor:pointer">
+            ${p.icon} ${escHtml(p.label)}
+          </label>`;
+        }).join('');
+        allowedOAuthSection = `
+          <details style="margin-bottom:6px">
+            <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">🔐 OAuth logins (let user connect their own account)</summary>
+            <div style="margin-top:6px;padding:6px;display:flex;flex-direction:column;gap:4px" id="oauthCheckboxes_${u.id}">
+              ${oauthChecks}
+            </div>
+          </details>`;
+      }
 
       // Allowed models (for child and user accounts) — grouped by provider
       let allowedModelsSection = '';
       if ((u.role === 'child' || u.role === 'user') && !isSelf) {
-        const providerOrder = ['anthropic', 'ollama-local', 'ollama-cloud', 'lmstudio', 'fireworks', 'grok'];
-        const provLabels = { anthropic: 'Anthropic', 'ollama-local': 'Ollama (local)', 'ollama-cloud': 'Ollama (cloud)', lmstudio: 'LM Studio', fireworks: 'Fireworks', grok: 'Grok' };
+        const providerOrder = ['anthropic', 'openai-oauth', 'ollama-local', 'ollama-cloud', 'lmstudio', 'fireworks', 'grok'];
+        const provLabels = { anthropic: 'Anthropic', 'openai-oauth': 'OpenAI (ChatGPT login)', 'ollama-local': 'Ollama (local)', 'ollama-cloud': 'Ollama (cloud)', lmstudio: 'LM Studio', fireworks: 'Fireworks', grok: 'Grok' };
         const grouped = {};
         for (const m of masterModels) {
           // Bundled core models (embedding, reasoning) are always-on for every
@@ -113,12 +131,24 @@ async function loadUserManagement() {
             <div style="margin-top:6px;padding:6px;max-height:240px;overflow-y:auto" id="modelCheckboxes_${u.id}">
               ${modelGroupsHtml || '<div style="font-size:11px;color:var(--muted)">No models available</div>'}
             </div>
-            <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
-              <button onclick="adminSaveAllowedModels('${u.id}')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600">Save</button>
-              <button onclick="adminClearAllowedModels('${u.id}')" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Unrestrict all</button>
-            </div>
           </details>`;
       }
+
+      // Access schedule — saved via global Save (empty fields = no schedule)
+      const accessScheduleSection = (!isSelf && !isOwner) ? `
+        <details style="margin-bottom:6px">
+          <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">⏰ Access schedule (block login during hours)</summary>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap" id="schedRow_${u.id}">
+            <label style="font-size:11px;color:var(--muted)">Block from
+              <input type="time" id="schedFrom_${u.id}" value="${u.accessSchedule?.blockedFrom ?? ''}" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px">
+            </label>
+            <label style="font-size:11px;color:var(--muted)">until
+              <input type="time" id="schedUntil_${u.id}" value="${u.accessSchedule?.blockedUntil ?? ''}" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px">
+            </label>
+            <span style="font-size:10px;color:var(--muted)">(leave both empty for no schedule)</span>
+          </div>
+          ${u.accessSchedule ? `<div style="font-size:10px;color:var(--muted);margin-top:4px">Currently blocked ${u.accessSchedule.blockedFrom} – ${u.accessSchedule.blockedUntil}</div>` : ''}
+        </details>` : '';
 
       // Parent link display
       const parentInfo = u.parentId ? (() => {
@@ -149,40 +179,28 @@ async function loadUserManagement() {
           <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Tools (unchecked = no access)</summary>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;padding:6px" id="skillAllowGrid_${u.id}">${toolChecks}</div>
         </details>
-        <button onclick="adminSaveAllowedSkills('${u.id}')" style="margin-bottom:6px;background:var(--accent);border:none;color:#fff;border-radius:6px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600">Save Roles &amp; Tools</button>
         <details style="margin-bottom:6px">
           <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Enabled drawers (unchecked = hidden)</summary>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;padding:6px" id="featureAllowGrid_${u.id}">${featureChecks}</div>
-          <button onclick="adminSaveAllowedFeatures('${u.id}')" style="margin-top:6px;background:var(--accent);border:none;color:#fff;border-radius:6px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600">Save</button>
         </details>
-        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer">
-          <input type="checkbox" ${lockChecked} onchange="adminSetSkillsLock('${u.id}',this.checked)"
+        ${allowedOAuthSection}
+        ${allowedModelsSection}
+        ${accessScheduleSection}
+        ${childSafetySection}
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;margin-top:8px">
+          <input type="checkbox" ${lockChecked} id="lockToolsChk_${u.id}"
             style="accent-color:var(--red,#e05c5c);cursor:pointer">
           🔒 Lock tools (prevent user from changing)
         </label>
         ${!isSelf && !isOwner ? `
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;margin-top:4px">
-          <input type="checkbox" ${u.telegramAllowed !== false ? 'checked' : ''} onchange="adminSetTelegramAllowed('${u.id}',this.checked)"
+          <input type="checkbox" ${u.telegramAllowed !== false ? 'checked' : ''} id="telegramAllowedChk_${u.id}"
             style="accent-color:var(--accent);cursor:pointer">
           <i data-lucide="send" style="width:12px;height:12px"></i> Allow Telegram bot setup
         </label>` : ''}
-        ${childSafetySection}
-        ${allowedModelsSection}
-        ${!isSelf && !isOwner ? `
-        <details style="margin-bottom:6px">
-          <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">⏰ Access schedule (block login during hours)</summary>
-          <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap">
-            <label style="font-size:11px;color:var(--muted)">Block from
-              <input type="time" id="schedFrom_${u.id}" value="${u.accessSchedule?.blockedFrom ?? ''}" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px">
-            </label>
-            <label style="font-size:11px;color:var(--muted)">until
-              <input type="time" id="schedUntil_${u.id}" value="${u.accessSchedule?.blockedUntil ?? ''}" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px">
-            </label>
-            <button onclick="adminSaveSchedule('${u.id}')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;font-weight:600">Save</button>
-            ${u.accessSchedule ? `<button onclick="adminClearSchedule('${u.id}')" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Clear</button>` : ''}
-          </div>
-          ${u.accessSchedule ? `<div style="font-size:10px;color:var(--muted);margin-top:4px">Currently blocked ${u.accessSchedule.blockedFrom} – ${u.accessSchedule.blockedUntil}</div>` : ''}
-        </details>` : ''}
+        <div style="margin-top:12px">
+          <button onclick="adminSaveUser('${u.id}')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 16px;font-size:12px;cursor:pointer;font-weight:600">Save changes</button>
+        </div>
         <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
           <button onclick="openConvViewer('${u.id}','${escHtml(u.name)}')" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">💬 Conversations</button>
           ${!isSelf ? `<button onclick="adminResetSessions('${u.id}','${escHtml(u.name)}')" style="background:none;border:1px solid var(--yellow,#ffc107);color:var(--yellow,#ffc107);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">🔄 Reset Sessions</button>` : ''}
@@ -203,77 +221,80 @@ async function loadUserManagement() {
 }
 
 
-async function adminSaveAllowedSkills(userId) {
+// Single save handler — collects every editable section in the user card and
+// PATCHes them in one request. Sections that don't exist for this user's role
+// (e.g. allowedModels for owner) are simply skipped.
+async function adminSaveUser(userId) {
+  const body = {};
+
+  // Roles + Tools (combined into allowedSkills + skills mirror)
   const roleGrid  = $(`roleAllowGrid_${userId}`);
   const skillGrid = $(`skillAllowGrid_${userId}`);
-  if (!roleGrid && !skillGrid) return;
-  const checkedRoles  = roleGrid  ? [...roleGrid.querySelectorAll('.skill-allow-chk:checked')].map(el => el.dataset.skillid)  : [];
-  const checkedSkills = skillGrid ? [...skillGrid.querySelectorAll('.skill-allow-chk:checked')].map(el => el.dataset.skillid) : [];
-  const allRoles  = roleGrid  ? [...roleGrid.querySelectorAll('.skill-allow-chk')].map(el => el.dataset.skillid)  : [];
-  const allSkills = skillGrid ? [...skillGrid.querySelectorAll('.skill-allow-chk')].map(el => el.dataset.skillid) : [];
-  const checked = [...checkedRoles, ...checkedSkills];
-  const all     = [...allRoles, ...allSkills];
-  const allowedSkills = checked.length === all.length ? null : checked;
-  try {
-    await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      // skills mirrors allowedSkills so checked = granted + active
-      body: JSON.stringify({ allowedSkills, skills: checked }),
-    });
-    showToast('Tools saved', 2000);
-  } catch { showToast('Failed to save'); }
-}
+  if (roleGrid || skillGrid) {
+    const checkedRoles  = roleGrid  ? [...roleGrid.querySelectorAll('.skill-allow-chk:checked')].map(el => el.dataset.skillid)  : [];
+    const checkedSkills = skillGrid ? [...skillGrid.querySelectorAll('.skill-allow-chk:checked')].map(el => el.dataset.skillid) : [];
+    const allRoles  = roleGrid  ? [...roleGrid.querySelectorAll('.skill-allow-chk')].map(el => el.dataset.skillid)  : [];
+    const allSkills = skillGrid ? [...skillGrid.querySelectorAll('.skill-allow-chk')].map(el => el.dataset.skillid) : [];
+    const checked = [...checkedRoles, ...checkedSkills];
+    const all     = [...allRoles, ...allSkills];
+    body.allowedSkills = checked.length === all.length ? null : checked;
+    body.skills = checked;
+  }
 
-async function adminSaveAllowedFeatures(userId) {
-  const grid = $(`featureAllowGrid_${userId}`);
-  if (!grid) return;
-  const checked = [...grid.querySelectorAll('.feature-allow-chk:checked')].map(el => el.dataset.fid);
-  const all = [...grid.querySelectorAll('.feature-allow-chk')].map(el => el.dataset.fid);
-  const allowedFeatures = checked.length === all.length ? null : checked;
-  try {
-    await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allowedFeatures }),
-    });
-    showToast('Enabled features saved', 2000);
-  } catch { showToast('Failed to save'); }
-}
+  // Enabled drawers
+  const featGrid = $(`featureAllowGrid_${userId}`);
+  if (featGrid) {
+    const checked = [...featGrid.querySelectorAll('.feature-allow-chk:checked')].map(el => el.dataset.fid);
+    const all = [...featGrid.querySelectorAll('.feature-allow-chk')].map(el => el.dataset.fid);
+    body.allowedFeatures = checked.length === all.length ? null : checked;
+  }
 
-async function adminSaveChildSafetyPrompt(userId) {
-  const textarea = document.getElementById(`childSafetyPrompt_${userId}`);
-  const prompt = textarea?.value?.trim() || null;
-  try {
-    await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ childSafetyPrompt: prompt }),
-    });
-    showToast(prompt ? 'Custom safety prompt saved' : 'Reset to default safety prompt', 2000);
-  } catch { showToast('Failed to save'); }
-}
+  // OAuth logins
+  const oauthGrid = document.getElementById(`oauthCheckboxes_${userId}`);
+  if (oauthGrid) {
+    body.allowedOAuthProviders = [...oauthGrid.querySelectorAll('.oauth-allow-chk:checked')].map(el => el.dataset.oauth);
+  }
 
-async function adminSaveAllowedModels(userId) {
-  const grid = document.getElementById(`modelCheckboxes_${userId}`);
-  if (!grid) return;
-  const checked = [...grid.querySelectorAll('.model-allow-chk:checked')].map(el => el.dataset.model);
-  const all = [...grid.querySelectorAll('.model-allow-chk')].map(el => el.dataset.model);
-  const allowedModels = checked.length === all.length ? null : checked;
-  try {
-    await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allowedModels }),
-    });
-    showToast(allowedModels ? `${checked.length} model(s) allowed` : 'All models unrestricted', 2000);
-    loadUserManagement();
-  } catch { showToast('Failed to save'); }
-}
+  // Allowed models
+  const modelGrid = document.getElementById(`modelCheckboxes_${userId}`);
+  if (modelGrid) {
+    const checked = [...modelGrid.querySelectorAll('.model-allow-chk:checked')].map(el => el.dataset.model);
+    const all = [...modelGrid.querySelectorAll('.model-allow-chk')].map(el => el.dataset.model);
+    body.allowedModels = checked.length === all.length ? null : checked;
+  }
 
-async function adminClearAllowedModels(userId) {
+  // Access schedule (both empty = clear; both set = save; partial = error)
+  const schedFromEl  = document.getElementById(`schedFrom_${userId}`);
+  const schedUntilEl = document.getElementById(`schedUntil_${userId}`);
+  if (schedFromEl && schedUntilEl) {
+    const from  = schedFromEl.value;
+    const until = schedUntilEl.value;
+    if (!from && !until) body.accessSchedule = null;
+    else if (from && until) body.accessSchedule = { blockedFrom: from, blockedUntil: until };
+    else { showToast('Access schedule needs both times (or both empty)'); return; }
+  }
+
+  // Child safety prompt
+  const childPromptEl = document.getElementById(`childSafetyPrompt_${userId}`);
+  if (childPromptEl) body.childSafetyPrompt = childPromptEl.value.trim() || null;
+
+  // Lock tools + Telegram allowed (plain checkboxes — saved with the rest)
+  const lockEl = document.getElementById(`lockToolsChk_${userId}`);
+  if (lockEl) body.skillsLocked = lockEl.checked;
+  const telEl = document.getElementById(`telegramAllowedChk_${userId}`);
+  if (telEl) body.telegramAllowed = telEl.checked;
+
   try {
-    await fetch(`/api/users/${userId}`, {
+    const r = await fetch(`/api/users/${userId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allowedModels: null }),
+      body: JSON.stringify(body),
     });
-    showToast('All models unrestricted', 2000);
+    if (!r.ok) { const d = await r.json().catch(() => ({})); showToast(d.error ?? 'Failed to save'); return; }
+    showToast('Saved', 2000);
+    if (userId === getCurrentUserId() && 'skillsLocked' in body) {
+      _currentUser = { ..._currentUser, skillsLocked: body.skillsLocked };
+      if (typeof loadSkillsList === 'function') loadSkillsList();
+    }
     loadUserManagement();
   } catch { showToast('Failed to save'); }
 }
@@ -304,33 +325,6 @@ async function adminToggleLock(userId, currentlyLocked) {
   } catch { showToast('Failed to update'); }
 }
 
-async function adminSaveSchedule(userId) {
-  const from = document.getElementById(`schedFrom_${userId}`)?.value;
-  const until = document.getElementById(`schedUntil_${userId}`)?.value;
-  if (!from || !until) { showToast('Both times required'); return; }
-  try {
-    const r = await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accessSchedule: { blockedFrom: from, blockedUntil: until } }),
-    });
-    if (!r.ok) { const d = await r.json(); showToast(d.error ?? 'Failed'); return; }
-    showToast('Access schedule saved', 2000);
-    loadUserManagement();
-  } catch { showToast('Failed to save schedule'); }
-}
-
-async function adminClearSchedule(userId) {
-  try {
-    const r = await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accessSchedule: null }),
-    });
-    if (!r.ok) { const d = await r.json(); showToast(d.error ?? 'Failed'); return; }
-    showToast('Access schedule cleared', 2000);
-    loadUserManagement();
-  } catch { showToast('Failed to clear schedule'); }
-}
-
 async function adminResetSessions(userId, name) {
   if (!confirm(`Reset all sessions for "${name}"? This will log them out.`)) return;
   try {
@@ -358,26 +352,6 @@ async function adminSetRole(userId, role) {
     });
     loadUserManagement();
   } catch {}
-}
-
-async function adminSetSkillsLock(userId, locked) {
-  try {
-    await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skillsLocked: locked }),
-    });
-    if (userId === getCurrentUserId()) { _currentUser = { ..._currentUser, skillsLocked: locked }; loadSkillsList(); }
-  } catch {}
-}
-
-async function adminSetTelegramAllowed(userId, allowed) {
-  try {
-    await fetch(`/api/users/${userId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ telegramAllowed: allowed }),
-    });
-    showToast(allowed ? 'Telegram enabled' : 'Telegram disabled', 1500);
-  } catch { showToast('Failed to save'); }
 }
 
 async function adminDeleteUser(userId, name) {

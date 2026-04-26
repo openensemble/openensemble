@@ -230,6 +230,7 @@ async function openEmailDetail(msgId) {
     </div>
     <div id="emailReplyComposer" style="display:none;border-top:1px solid var(--border);padding:10px 16px;background:var(--bg2);flex-shrink:0">
       <div id="emailReplyLabel" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
+      <input id="emailForwardTo" type="email" placeholder="Forward to (email address)" style="display:none;width:100%;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;color:var(--text);font-family:inherit;margin-bottom:6px;box-sizing:border-box">
       <textarea id="emailReplyText" style="width:100%;min-height:80px;max-height:200px;resize:vertical;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;color:var(--text);font-family:inherit" placeholder="Type your reply…"></textarea>
       <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
         <button onclick="closeReplyComposer()" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer">Cancel</button>
@@ -320,8 +321,14 @@ async function emailActionClick(actionId, msgId) {
     $('emailReplyLabel').innerHTML = label;
     $('emailReplyText').value = '';
     $('emailReplySend').textContent = actionId === 'forward' ? 'Forward' : 'Send Reply';
+    const fwdTo = $('emailForwardTo');
+    if (fwdTo) {
+      fwdTo.value = '';
+      fwdTo.style.display = actionId === 'forward' ? '' : 'none';
+    }
+    $('emailReplyText').placeholder = actionId === 'forward' ? 'Add a note (optional)…' : 'Type your reply…';
     composer.style.display = '';
-    $('emailReplyText').focus();
+    (actionId === 'forward' ? fwdTo : $('emailReplyText'))?.focus();
   }
 }
 
@@ -336,30 +343,36 @@ function closeReplyComposer() {
 
 async function sendInlineReply() {
   const text = $('emailReplyText')?.value?.trim();
-  if (!text) return;
   const btn = $('emailReplySend');
+  const isForward = _replyActionId === 'forward';
+  let to = '';
+  if (isForward) {
+    to = $('emailForwardTo')?.value?.trim() ?? '';
+    if (!to) { showToast('Enter a recipient to forward to'); $('emailForwardTo')?.focus(); return; }
+  } else {
+    if (!text) return;
+  }
   if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
   try {
-    if (_replyActionId === 'forward') {
-      const to = prompt('Forward to (email address):');
-      if (!to) { if (btn) { btn.disabled = false; btn.textContent = 'Forward'; } return; }
-      await fetch('/api/email/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: 'email_compose', args: { account: _activeInboxAccountId ?? undefined, to, subject: 'Fwd: ' + (_inboxEmailMeta[_replyMsgId]?.subject ?? ''), body: text } }),
-      });
-    } else {
-      await fetch('/api/email/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: 'email_reply', args: { messageId: _replyMsgId, account: _activeInboxAccountId ?? undefined, body: text } }),
-      });
-    }
+    const payload = isForward
+      ? { tool: 'email_compose', args: { account: _activeInboxAccountId ?? undefined, to, subject: 'Fwd: ' + (_inboxEmailMeta[_replyMsgId]?.subject ?? ''), body: text || '' } }
+      : { tool: 'email_reply',   args: { messageId: _replyMsgId, account: _activeInboxAccountId ?? undefined, body: text } };
+    const r = await fetch('/api/email/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+    const out = typeof data.result === 'string' ? data.result : '';
+    // Treat as success only if the underlying tool returned a Message ID.
+    // Anything else (Gmail API error, subprocess error, "Unknown tool", etc.) is a failure.
+    if (!/Message ID:/i.test(out)) throw new Error(out || 'Send failed (no Message ID returned)');
     closeReplyComposer();
-    showToast(_replyActionId === 'forward' ? 'Forwarded' : 'Reply sent');
+    showToast(isForward ? 'Forwarded' : 'Reply sent');
   } catch (e) {
     alert(`Failed: ${e.message}`);
-    if (btn) { btn.disabled = false; btn.textContent = _replyActionId === 'forward' ? 'Forward' : 'Send Reply'; }
+    if (btn) { btn.disabled = false; btn.textContent = isForward ? 'Forward' : 'Send Reply'; }
   }
 }
 

@@ -14,12 +14,21 @@
  */
 
 import http from 'http';
-import { requireAuth, readBody } from './_helpers.mjs';
+import { requireAuth, readBody, getUser, isPrivileged } from './_helpers.mjs';
 import {
   generatePkce, generateState, buildAuthorizeUrl, exchangeCode,
   writeToken, readToken, deleteToken, isConnected,
   CALLBACK_PORT, CALLBACK_PATH,
 } from '../lib/openai-codex-auth.mjs';
+
+// allowedOAuthProviders: null = unrestricted (owner/admin default); array = explicit grants.
+function isOAuthAllowed(userId, providerId) {
+  if (isPrivileged(userId)) return true;
+  const u = getUser(userId);
+  const list = u?.allowedOAuthProviders;
+  if (list == null) return false; // fresh non-priv users have no implicit grant
+  return Array.isArray(list) && list.includes(providerId);
+}
 
 const MAIN_APP_URL = 'http://localhost:3737';
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -118,6 +127,11 @@ export async function handle(req, res) {
 
   if (url.pathname === '/api/oauth/openai/connect' && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
+    if (!isOAuthAllowed(userId, 'openai-oauth')) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'OpenAI ChatGPT login is not enabled for your account. Ask an admin to enable it.' }));
+      return true;
+    }
     try {
       await startCallbackServer();
     } catch (e) {
@@ -156,6 +170,11 @@ export async function handle(req, res) {
   // exchange server-side.
   if (url.pathname === '/api/oauth/openai/complete' && req.method === 'POST') {
     const userId = requireAuth(req, res); if (!userId) return true;
+    if (!isOAuthAllowed(userId, 'openai-oauth')) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'OpenAI ChatGPT login is not enabled for your account.' }));
+      return true;
+    }
     let body;
     try { body = JSON.parse(await readBody(req)); }
     catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid JSON' })); return true; }

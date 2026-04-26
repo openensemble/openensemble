@@ -209,6 +209,7 @@ export async function handle(req, res) {
       // Tier fields — admin-only
       if (changes.childSafetyPrompt !== undefined && !isPriv) { delete changes.childSafetyPrompt; }
       if (changes.allowedModels !== undefined && !isPriv) { delete changes.allowedModels; }
+      if (changes.allowedOAuthProviders !== undefined && !isPriv) { delete changes.allowedOAuthProviders; }
       if (changes.parentId !== undefined && !isPriv) { delete changes.parentId; }
       // workspace is no longer configurable — silently drop any incoming value
       // (old clients may still send it) and ensure a stale stored field gets cleared.

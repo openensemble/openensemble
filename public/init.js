@@ -21,12 +21,17 @@ async function init() {
   const oauthParam = new URLSearchParams(window.location.search).get('oauth');
   if (oauthParam) {
     const service = new URLSearchParams(window.location.search).get('service') ?? '';
-    const label = service === 'gcal' ? 'Google Calendar' : 'Gmail';
+    const SERVICE_LABELS = {
+      'gcal':         'Google Calendar',
+      'gmail':        'Gmail',
+      'openai-codex': 'OpenAI (ChatGPT login)',
+    };
+    const label = SERVICE_LABELS[service] ?? 'Account';
     if (oauthParam === 'success') {
       setTimeout(() => appendAssistantBubble(`**${label} connected successfully.**`), 500);
     } else {
       const reason = new URLSearchParams(window.location.search).get('reason') ?? 'unknown error';
-      setTimeout(() => appendError(`Google authorization failed: ${reason}`), 500);
+      setTimeout(() => appendError(`${label} authorization failed: ${reason}`), 500);
     }
     history.replaceState({}, '', '/');
   }

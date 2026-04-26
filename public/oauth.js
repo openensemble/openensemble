@@ -1,5 +1,9 @@
 // ── OAuth / Connected Accounts ────────────────────────────────────────────────
 async function loadOAuthStatus() {
+  // Render the AI provider logins surface (Profile tab) every time the
+  // Connected Accounts section refreshes — keeps connect/disconnect state
+  // visible even when the user has no email skills (which short-circuits below).
+  loadAiProviderLogins();
   const el = $('oauthStatusRows');
   if (!el) return;
   // Hide entire Connected Accounts section if user has no email/calendar roles
@@ -399,6 +403,49 @@ async function submitOpenAIPasteCallback() {
   } catch (e) { msg.textContent = `Error: ${e.message}`; }
 }
 
+// Profile-tab surface for OAuth-based AI provider logins, shown only to
+// non-privileged users who have been granted access by an admin. Owner/admin
+// already get the full card under Settings > Providers, so we skip rendering
+// here for them to avoid duplicate DOM IDs.
+const AI_OAUTH_PROVIDER_META = [
+  { id: 'openai-oauth', label: 'OpenAI (ChatGPT login)', icon: 'log-in', blurb: 'Sign in with your ChatGPT Plus/Pro account to use Codex models via OAuth.' },
+];
+
+function loadAiProviderLogins() {
+  const section = $('aiProviderLoginsSection');
+  const host = $('aiProviderLoginsRows');
+  if (!section || !host) return;
+  const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+  const granted = Array.isArray(_currentUser?.allowedOAuthProviders) ? _currentUser.allowedOAuthProviders : [];
+  const visible = AI_OAUTH_PROVIDER_META.filter(p => !isPriv && granted.includes(p.id));
+  if (visible.length === 0) { section.style.display = 'none'; host.innerHTML = ''; return; }
+  section.style.display = '';
+  host.innerHTML = visible.map(p => `
+    <div class="provider-card" id="providerCard_${p.id}" style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:13px;font-weight:600">
+        <i data-lucide="${p.icon}" style="width:14px;height:14px"></i> ${p.label}
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${p.blurb}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button id="oauthConnect_${p.id}" onclick="connectOpenAIOAuth()"
+          style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Connect ChatGPT account</button>
+        <button id="oauthDisconnect_${p.id}" onclick="disconnectOpenAIOAuth()"
+          style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Disconnect</button>
+        <button onclick="refreshOpenAIOAuthStatus()"
+          style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Check status</button>
+      </div>
+      <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px">Checking…</div>
+      <div id="providerPaste_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">If the ChatGPT page ended on a "could not connect" screen (URL starts with <code>http://localhost:1455/auth/callback?code=…</code>), paste that full URL here.</div>
+        <input type="text" id="providerPasteInput_${p.id}" placeholder="http://localhost:1455/auth/callback?code=…"
+          style="width:100%;box-sizing:border-box;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px">
+        <div id="providerPasteMsg_${p.id}" style="font-size:11px;color:var(--red,#e05c5c);margin-top:6px"></div>
+      </div>
+    </div>`).join('');
+  if (window.lucide?.createIcons) try { window.lucide.createIcons(); } catch {}
+  refreshOpenAIOAuthStatus().catch(() => {});
+}
+
 async function disconnectOpenAIOAuth() {
   if (!confirm('Disconnect your ChatGPT account? You will need to reconnect to use Codex OAuth models.')) return;
   const box = document.getElementById('providerStatus_openai-oauth');
@@ -680,10 +727,17 @@ async function loadProviderConfig() {
     _ttsConfigured = !!cfg.ttsKeySet;
 
     // Render the dynamic OpenAI-compat provider cards and auto-load their
-    // model lists for any provider that has a key configured.
-    renderCompatProviderCards(cfg);
+    // model lists for any provider that has a key configured. Card rendering
+    // is admin/owner-only — non-priv users can't reach the Providers tab, and
+    // populating its (hidden) DOM here would create duplicate IDs that collide
+    // with the Profile-tab AI Provider Logins surface.
+    const _isPrivCfg = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+    if (_isPrivCfg) renderCompatProviderCards(cfg);
     for (const p of COMPAT_PROVIDER_META) {
-      if (cfg[`${p.id}KeySet`]) loadCompatProviderModels(p.id).catch(() => {});
+      // openai-oauth has a static model list (no API key needed) — always load it
+      // so admins can whitelist Codex models for users before anyone has connected,
+      // and so users granted the OAuth provider see those models in pickers.
+      if (cfg[`${p.id}KeySet`] || p.id === 'openai-oauth') loadCompatProviderModels(p.id).catch(() => {});
     }
 
     if (cfg.openrouterKeySet && typeof loadOpenRouterModels === 'function') loadOpenRouterModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); });
