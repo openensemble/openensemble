@@ -87,10 +87,15 @@ async function* consumeProvider(providerGen) {
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null) {
   // Finance/email agents handle transactions and actions — skip memory signal processing.
   // Ephemeral agents (deep_research_parallel workers) are stateless one-shots — skip all memory ops.
-  const skipSignals = agent.ephemeral || agent.skillCategory === 'finance' || agent.skillCategory === 'expenses' || agent.skillCategory === 'email';
+  // Scheduler intercepts: when chat-dispatch.mjs's interceptScheduling fired and
+  // produced a scheduler_result note, the user's turn was a scheduling request —
+  // the scheduler DB owns that state, so don't duplicate it as a memory. Users
+  // who want a behavior preference captured can state it in a separate turn.
+  const schedulerFired = (systemNote ?? '').includes('<scheduler_result>');
+  const skipSignals = schedulerFired || agent.ephemeral || agent.skillCategory === 'finance' || agent.skillCategory === 'expenses' || agent.skillCategory === 'email';
   // General/manager agents: skip episode storage (task requests aren't useful memories)
   // but still run processSignals to capture genuine preferences/corrections
-  const skipEpisodes = agent.ephemeral || agent.skillCategory === 'general';
+  const skipEpisodes = schedulerFired || agent.ephemeral || agent.skillCategory === 'general';
   // 1. Build rich cortex context (relevant memories, preferences, past episodes)
   // Expand deictic/pronominal queries ("tell me more about that") with recent context
   const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
