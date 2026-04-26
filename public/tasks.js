@@ -1,37 +1,119 @@
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 let tasks = [];
+// [TEST 2026-04-26] Inline-expand editor — track which task is open so we
+// can render its detail panel under the row. Click anywhere on the row body
+// to toggle. REVERT: drop this var, the toggle/save funcs, and the expanded
+// branch in renderTasks.
+let expandedTaskId = null;
 
 async function loadTaskList() {
   try { const r = await fetch('/api/tasks'); tasks = await r.json(); } catch { tasks = []; }
   renderTasks(); updateTasksBadge();
 }
 
+function _toLocalInputValue(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderTaskRow(t) {
+  const schedStr = t.repeat === 'once'
+    ? (t.datetime ? '1× ' + new Date(t.datetime).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '1× (no time set)')
+    : `🔁 ${t.time} daily`;
+  const statusSuffix = (t.repeat === 'once' && !t.enabled && t.lastRun) ? ' · ✓ done' : (t.lastRun ? ' · ' + new Date(t.lastRun).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '');
+  const isReminder = t.type === 'reminder';
+  const runner = isReminder ? '🔔 Reminder' : (agents.find(a=>a.id===t.agent)?.name ?? t.agent);
+  const isOpen = expandedTaskId === t.id;
+  const expandToggle = isOpen ? '▾' : '▸';
+  // The header row: clicking the info area toggles the expanded view.
+  // Edit/toggle/delete buttons remain accessible without expanding first.
+  const header = `
+    <div class="task-item${isOpen ? ' task-item-open' : ''}">
+      <div class="task-item-info" onclick="toggleTaskExpanded('${escHtml(t.id)}')" title="Click to view / edit details" style="cursor:pointer">
+        <div class="task-item-label">${expandToggle} ${escHtml(t.label)}</div>
+        <div class="task-item-meta">${schedStr} · ${runner}${statusSuffix}</div>
+      </div>
+      ${t.repeat === 'once' && !t.enabled ? '<span style="font-size:11px;color:var(--green)">✓</span>' : `<input type="checkbox" class="task-toggle" ${t.enabled ? 'checked' : ''} onchange="toggleTask('${escHtml(t.id)}', this.checked)">`}
+      <button class="btn-task-del" onclick="deleteTask('${escHtml(t.id)}')">✕</button>
+    </div>`;
+  if (!isOpen) return header;
+
+  // Expanded detail / editor. Reminder tasks don't have an agent or prompt;
+  // agent tasks expose those fields.
+  const agentOptions = agents.map(a => `<option value="${escHtml(a.id)}"${a.id===t.agent?' selected':''}>${escHtml(a.emoji||'')} ${escHtml(a.name)}</option>`).join('');
+  const timeField = t.repeat === 'once'
+    ? `<label>When<input type="datetime-local" id="te-dt-${escHtml(t.id)}" value="${_toLocalInputValue(t.datetime)}"></label>`
+    : `<label>Daily at<input type="time" id="te-tm-${escHtml(t.id)}" value="${escHtml(t.time||'09:00')}"></label>`;
+  const agentBlock = isReminder ? '' : `
+      <label>Runner
+        <select id="te-ag-${escHtml(t.id)}">${agentOptions}</select>
+      </label>
+      <label>Prompt (what to ask the agent at fire time)
+        <textarea id="te-pr-${escHtml(t.id)}" rows="3">${escHtml(t.prompt||'')}</textarea>
+      </label>`;
+  const lastOutput = t.lastOutput ? `<div class="task-edit-meta">Last run: ${escHtml(String(t.lastOutput).slice(0, 200))}</div>` : '';
+  const editor = `
+    <div class="task-edit-panel">
+      <label>Label<input type="text" id="te-lb-${escHtml(t.id)}" value="${escHtml(t.label||'')}"></label>
+      ${timeField}
+      ${agentBlock}
+      ${lastOutput}
+      <div class="task-edit-actions">
+        <button class="btn-task-save" onclick="saveTaskEdits('${escHtml(t.id)}')">Save</button>
+        <button class="btn-task-cancel" onclick="toggleTaskExpanded('${escHtml(t.id)}')">Cancel</button>
+      </div>
+    </div>`;
+  return header + editor;
+}
+
 function renderTasks() {
   const html = !tasks.length
     ? '<em style="color:var(--muted);font-size:13px">No tasks yet.</em>'
-    : tasks.map(t => {
-        const schedStr = t.repeat === 'once'
-          ? (t.datetime ? '1× ' + new Date(t.datetime).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '1× (no time set)')
-          : `🔁 ${t.time} daily`;
-        const statusSuffix = (t.repeat === 'once' && !t.enabled && t.lastRun) ? ' · ✓ done' : (t.lastRun ? ' · ' + new Date(t.lastRun).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '');
-        const isReminder = t.type === 'reminder';
-        const runner = isReminder ? '🔔 Reminder' : (agents.find(a=>a.id===t.agent)?.name ?? t.agent);
-        const editBtn = `<button class="btn-task-edit" title="Edit time — catch a bad parse before it fires" onclick="editTaskTime('${escHtml(t.id)}')" style="background:none;border:none;color:var(--muted);cursor:pointer;padding:2px 6px;font-size:12px">✎</button>`;
-        return `
-        <div class="task-item">
-          <div class="task-item-info">
-            <div class="task-item-label">${escHtml(t.label)}</div>
-            <div class="task-item-meta">${schedStr} · ${runner}${statusSuffix}</div>
-          </div>
-          ${editBtn}
-          ${t.repeat === 'once' && !t.enabled ? '<span style="font-size:11px;color:var(--green)">✓</span>' : `<input type="checkbox" class="task-toggle" ${t.enabled ? 'checked' : ''} onchange="toggleTask('${escHtml(t.id)}', this.checked)">`}
-          <button class="btn-task-del" onclick="deleteTask('${escHtml(t.id)}')">✕</button>
-        </div>`;
-      }).join('');
+    : tasks.map(renderTaskRow).join('');
   const list = $('taskList');
   if (list) list.innerHTML = html;
   const settingsList = $('settingsTaskList');
   if (settingsList) settingsList.innerHTML = html;
+}
+
+function toggleTaskExpanded(id) {
+  expandedTaskId = expandedTaskId === id ? null : id;
+  renderTasks();
+}
+
+async function saveTaskEdits(id) {
+  const t = tasks.find(x => x.id === id);
+  if (!t) return;
+  const patch = {};
+  const lb = document.getElementById(`te-lb-${id}`);
+  if (lb && lb.value.trim() && lb.value.trim() !== t.label) patch.label = lb.value.trim();
+  if (t.repeat === 'once') {
+    const dt = document.getElementById(`te-dt-${id}`);
+    if (dt && dt.value) {
+      const d = new Date(dt.value);
+      if (Number.isNaN(d.getTime())) { alert('Invalid date/time.'); return; }
+      if (d.getTime() < Date.now() + 5000) { alert('That time is in the past.'); return; }
+      const iso = d.toISOString();
+      if (iso !== t.datetime) patch.datetime = iso;
+    }
+  } else {
+    const tm = document.getElementById(`te-tm-${id}`);
+    if (tm && /^\d{1,2}:\d{2}$/.test(tm.value) && tm.value !== t.time) patch.time = tm.value;
+  }
+  if (t.type !== 'reminder') {
+    const ag = document.getElementById(`te-ag-${id}`);
+    if (ag && ag.value && ag.value !== t.agent) patch.agent = ag.value;
+    const pr = document.getElementById(`te-pr-${id}`);
+    if (pr && pr.value !== (t.prompt||'')) patch.prompt = pr.value;
+  }
+  if (!Object.keys(patch).length) { expandedTaskId = null; renderTasks(); return; }
+  const r = await fetch(`/api/tasks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+  if (!r.ok) { alert('Update failed.'); return; }
+  expandedTaskId = null;
+  await loadTaskList();
 }
 
 // Let the user correct a mis-parsed scheduled time. One-shot tasks get a

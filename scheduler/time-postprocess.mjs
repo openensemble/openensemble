@@ -597,7 +597,15 @@ function detectOneShotTime(request, now) {
     }
     const unit = unitKey(m[2]);
     if (n != null && unit) {
-      const pref = addMs(now, Math.round(n * UNIT_MS[unit]));
+      let pref = addMs(now, Math.round(n * UNIT_MS[unit]));
+      // [TEST 2026-04-26] If the request also names a clock time AND the unit
+      // is day-or-coarser, apply the clock time to the resolved date so
+      // "in 2 weeks ... 12pm" lands at 12:00 PM, not at the current second.
+      // REVERT: delete this block and the accompanying coarse-unit set check.
+      if (unit === 'day' || unit === 'week' || unit === 'month' || unit === 'year') {
+        const clk = findClockTime(r);
+        if (clk) pref = atClock(pref, clk.hour, clk.minute);
+      }
       return { earliest: null, latest: null, preferred: toIso(pref) };
     }
   }

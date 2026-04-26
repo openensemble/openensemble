@@ -198,6 +198,14 @@ const ACTION_REQUEST_RE = /\b(schedule|remind me|in \d+ (minute|hour|second|min|
 // Short confirmations/rejections — never meaningful for memory
 const CONFIRMATION_RE = /^(yes|no|ok|okay|sure|confirm|cancel|go|stop|done|trash|delete|send|proceed|continue|skip|nope|yep|yup|aye|nah|please|thanks|thank you|got it|sounds good|do it|go ahead|abort)[\s!.]*$/i;
 
+// [TEST 2026-04-26] Short conversational reactions / surprised disagreements
+// about transient facts ("o i thought it was 11", "wait, really?", "huh",
+// "hmm", "no way") — these are dialogue noise, not preferences or
+// corrections worth pinning. Capped at 80 chars so longer statements that
+// happen to start with "I thought" still flow through to the classifier.
+// REVERT: delete this regex and the early-return that uses it.
+const SHORT_REACTION_RE = /^(?:o+h?\s|wait\b|huh\b|hmm+\b|really\??$|no way\b|i thought\b|i think it'?s\b|actually\b|whoops\b|oops\b|nvm\b|never mind\b)/i;
+
 // ── pinFact — pin an explicit fact to shared user_facts (cross-agent) ───────
 // Every agent's buildAgentContext recalls shared user_facts; role_scope gates
 // which agents actually see the fact. If the pinning agent currently holds
@@ -238,6 +246,14 @@ export async function pinFact({ agentId, text, userId, scope = null }) {
 export async function processSignals({ agentId, userMessage, agentLastResponse = null, userId = 'default' }) {
   // Skip very short confirmations — "yes", "trash", "ok", "confirm", etc.
   if (CONFIRMATION_RE.test(userMessage.trim())) {
+    return { correction: false, preference: false };
+  }
+
+  // [TEST 2026-04-26] Skip short reactions / disagreements about transient
+  // facts. Cap at 80 chars to avoid swallowing real preference statements.
+  // REVERT: delete this block.
+  const _trimmed = userMessage.trim();
+  if (_trimmed.length <= 80 && SHORT_REACTION_RE.test(_trimmed)) {
     return { correction: false, preference: false };
   }
 

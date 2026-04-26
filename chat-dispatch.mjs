@@ -5,7 +5,7 @@
 
 import { getAgent, updateCustomAgent, loadCustomAgents } from './agents.mjs';
 import { streamChat } from './chat.mjs';
-import { appendToSession, writeStreamBuffer, clearStreamBuffer } from './sessions.mjs';
+import { appendToSession, writeStreamBuffer, clearStreamBuffer, loadSession } from './sessions.mjs';
 import { extractTransactions, getPendingDelete, clearPendingDelete, executePendingDelete } from './skills/expenses/execute.mjs';
 import { getRoleManifest, getRoleAssignments, setRoleAssignment, listRoles } from './roles.mjs';
 import { interceptScheduling } from './lib/scheduler-intent.mjs';
@@ -284,13 +284,25 @@ export async function handleChatMessage({
   let schedulerNote = null;
   if (userText) {
     try {
-      const intercept = await interceptScheduling({ userId, agentId, text: userText });
+      // [TEST 2026-04-26] Pass last few turns so the intercept can stitch
+       // multi-turn clarifications. REVERT: drop the `history` arg.
+       const recentHistory = loadSession(`${userId}_${agentId}`, 6);
+       const intercept = await interceptScheduling({ userId, agentId, text: userText, history: recentHistory });
       if (intercept.matched) {
         schedulerNote = `<scheduler_result>\n${intercept.outcome}\n</scheduler_result>`;
       }
     } catch (e) {
       console.warn('[chat-dispatch] scheduler intercept threw:', e.message);
     }
+  }
+
+  // [TEST 2026-04-26] Always tell the agent the current wall-clock time so
+  // it can answer "what time is it" without deferring or guessing. Prepended
+  // to whatever schedulerNote we already built. REVERT: delete this block.
+  {
+    const _now = new Date();
+    const _timeNote = `<current_time>${_now.toLocaleString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })}</current_time>`;
+    schedulerNote = schedulerNote ? `${_timeNote}\n${schedulerNote}` : _timeNote;
   }
 
   // ── Retriable error patterns for provider failover ──────────────────────
