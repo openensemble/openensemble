@@ -261,9 +261,15 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
     // Hard cap on advertised request size. Blocks multi-gigabyte uploads at the
-    // edge before any route-level parser allocates memory for them. Restore is
-    // exempt — it streams a tarball with its own 500 MB compressed cap.
-    if (req.url !== '/api/admin/restore' && req.url !== '/api/admin/restore-initial') {
+    // edge before any route-level parser allocates memory for them. Routes
+    // that legitimately accept large bodies (admin restore tarballs,
+    // shared-docs file uploads) are exempt — they enforce their own limits
+    // closer to the parser.
+    const exemptFromBodyCap =
+      req.url === '/api/admin/restore' ||
+      req.url === '/api/admin/restore-initial' ||
+      (req.method === 'POST' && req.url.startsWith('/api/shared-docs'));
+    if (!exemptFromBodyCap) {
       const declared = parseInt(req.headers['content-length'] || '0', 10);
       if (declared > API_BODY_CAP) {
         res.writeHead(413, { 'Content-Type': 'application/json' });
