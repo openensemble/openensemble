@@ -76,6 +76,7 @@ ensure_build_tools() {
   command -v bwrap    &>/dev/null || need+=(bubblewrap)
   command -v git      &>/dev/null || need+=(git)
   command -v pdftoppm &>/dev/null || need+=(poppler-utils)
+  command -v rg       &>/dev/null || need+=(ripgrep)
   [[ ${#need[@]} -eq 0 ]] && return 0
 
   warn "Missing build/runtime tools: ${need[*]}"
@@ -88,17 +89,18 @@ ensure_build_tools() {
     error "Build tools required for native modules, coder sandbox, and auto-update. Install manually and re-run."
     exit 1
   fi
-  # poppler-utils provides `pdftoppm`, used by routes/shared-docs.mjs to
-  # render PDF page-1 thumbnails for the Documents drawer. ~3MB package;
-  # installs alongside the rest of the build tools.
-  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git poppler-utils
-  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils
-  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils
-  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils
-  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler
-  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools
+  # poppler-utils provides `pdftoppm` (PDF page-1 thumbnails) and `pdftotext`
+  # (PDF text extraction for the documents/expenses skills). ripgrep provides
+  # `rg`, used by the coder skill for code search — without it, search
+  # silently returns "No matches found".
+  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git poppler-utils ripgrep
+  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils ripgrep
+  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils ripgrep
+  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils ripgrep
+  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler ripgrep
+  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep
   else
-    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, git, and poppler-utils manually and re-run."
+    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, git, poppler-utils, and ripgrep manually and re-run."
     exit 1
   fi
   success "Build tools installed"
