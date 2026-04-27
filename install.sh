@@ -320,6 +320,7 @@ StartLimitBurst=3
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
+ExecStartPre=-/bin/sh -c 'pkill -TERM -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; sleep 1; pkill -KILL -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; true'
 ExecStart=$NODE_BIN $INSTALL_DIR/server.mjs
 Restart=on-failure
 RestartSec=5
@@ -327,7 +328,7 @@ KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=10
 SendSIGKILL=yes
-ExecStopPost=-/bin/sh -c 'fuser -k -TERM 3737/tcp 3738/udp 2>/dev/null; sleep 1; fuser -k -KILL 3737/tcp 3738/udp 2>/dev/null; rm -f $INSTALL_DIR/server.pid; true'
+ExecStopPost=-/bin/sh -c 'pkill -TERM -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; sleep 1; pkill -KILL -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; rm -f $INSTALL_DIR/server.pid; true'
 Environment=NODE_ENV=production
 
 [Install]
