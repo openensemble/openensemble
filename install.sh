@@ -218,10 +218,12 @@ EXCLUDES=(
   --exclude='videos/'
   --exclude='cortex-lancedb/'
   --exclude='memory-db/'
-  --exclude='expenses/'
-  --exclude='tasks/'
-  --exclude='agents/'
-  --exclude='shared-docs/'
+  # Top-level user-data excludes — anchored with leading slash so they don't
+  # also match skills/{expenses,tasks,shared-docs} which the runtime imports.
+  --exclude='/expenses/'
+  --exclude='/tasks/'
+  --exclude='/agents/'
+  --exclude='/shared-docs/'
   --exclude='active-sessions.json'
   --exclude='messages.json'
   --exclude='threads.json'
