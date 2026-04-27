@@ -44,12 +44,31 @@ export { OPENAI_COMPAT_PROVIDERS };
 // unless the message actually contains preference/correction wording.
 const SIGNAL_WORDS_RE = /prefer|like|love|hate|want|don'?t like|remember|decided|will use|choose|chose|my name|i am|i'm|my \w+ is|call me|always|never|make sure|correction/i;
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false } = {}) {
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [] } = {}) {
   appendToSession(agent.id,
     { role: 'user', content: sessionText, ts: Date.now() },
     { role: 'assistant', content: assistantContent, ts: Date.now() });
 
   if (skipSignals) return;
+
+  // Explicit memory-mutating tools — agent already recorded its intent.
+  // Emit per-tool badges (both can fire when the agent does a forget+remember
+  // swap), then skip processSignals: running the LLM signal head here would
+  // re-create the topic the user just deleted, because the user message
+  // naturally contains the offending phrase. Use tool result text to skip
+  // toasts on no-op outcomes (dedup hit, no-match forget) so the badge
+  // reflects what actually changed in the DB.
+  const forgets   = toolsUsed.filter(t => t.name === 'forget_fact');
+  const remembers = toolsUsed.filter(t => t.name === 'remember_fact');
+  if (forgets.length || remembers.length) {
+    const wroteForget   = forgets.some(t => /^Forgot \d+ memor/i.test(t.text));
+    const wroteRemember = remembers.some(t => /^Pinned fact/i.test(t.text));
+    if (emit) {
+      if (wroteForget)   emit({ type: 'memory_forgotten' });
+      if (wroteRemember) emit({ type: 'memory_stored' });
+    }
+    return;
+  }
 
   if (!skipEpisodes) {
     addToSessionBuffer(agent.id, 'user', sessionText, userId);
@@ -71,16 +90,20 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
 }
 
 // Consume a provider stream: forward every event except __content (captured), and
-// bail out on error. Returns the final assistantContent string (or '' on error/empty).
+// bail out on error. Returns the final assistantContent string (or '' on error/empty)
+// plus the list of tool invocations (name + result text) — used by persist() to
+// gate signal detection and pick the right UI badge for memory-mutating tools.
 async function* consumeProvider(providerGen) {
   let assistantContent = '';
   let errored = false;
+  const toolsUsed = [];
   for await (const event of providerGen) {
     if (event.type === '__content') { assistantContent = event.content; continue; }
+    if (event.type === 'tool_result' && event.name) toolsUsed.push({ name: event.name, text: event.text || '' });
     yield event;
     if (event.type === 'error') { errored = true; break; }
   }
-  return errored ? { assistantContent: '', errored: true } : { assistantContent, errored: false };
+  return errored ? { assistantContent: '', errored: true, toolsUsed } : { assistantContent, errored: false, toolsUsed };
 }
 
 // ── Main chat generator ───────────────────────────────────────────────────────
@@ -469,7 +492,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
 
   const _llmStart = Date.now();
-  const { assistantContent, errored } = yield* consumeProvider(providerGen);
+  const { assistantContent, errored, toolsUsed } = yield* consumeProvider(providerGen);
   const _llmMeta = {
     userId,
     agentId: agent.id,
@@ -484,7 +507,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
   log.info('chat', 'llm turn complete', _llmMeta);
   if (assistantContent) {
-    persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate });
+    persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed });
   }
   yield { type: 'done' };
 }

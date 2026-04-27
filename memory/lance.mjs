@@ -309,9 +309,17 @@ export async function remember({
     throw new Error('Embedding failed (zero vector). Check cortex embed model configuration.');
   }
 
-  // Dedup check for non-episodes
+  // Dedup check for non-episodes. Threshold trade-off:
+  //   < 0.05 = essentially exact match — misses paraphrases like
+  //     "Shawn prefers plain English" vs "I prefer plain English, never markdown".
+  //   < 0.12 = same semantic meaning with different wording — catches the
+  //     paraphrase case without merging genuinely distinct facts.
+  // If the existing match was forgotten, we'd already have skipped it via
+  // the where(forgotten = false) filter.
   const existing = await table.vectorSearch(vector).where('forgotten = false').limit(3).toArray().catch(() => []);
-  if (existing.some(r => (r._distance ?? 2) < 0.05)) return existing[0]; // near-duplicate
+  const dupThreshold = immortal ? 0.12 : 0.05;
+  const dupHit = existing.find(r => (r._distance ?? 2) < dupThreshold);
+  if (dupHit) return { ...dupHit, _dedupHit: true }; // near-duplicate — return existing, flag for caller
 
   const record = {
     id: 'mem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),

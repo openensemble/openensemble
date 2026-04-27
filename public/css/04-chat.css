@@ -286,7 +286,7 @@ textarea::placeholder { color: var(--muted); }
 .btn-stop:hover { border-color: #e05555; color: #e05555; opacity: 1; }
 .btn-stop.visible { opacity: 1; }
 
-/* ── Memory gold bubble ── */
+/* ── Memory gold bubble (saved) / muted slate (forgotten) ── */
 @keyframes goldShimmer { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
 .msg.assistant.memory-stored .msg-bubble {
   background: linear-gradient(135deg, #1c1500, #2e2200, #3d2e00, #2e2200, #1c1500);
@@ -295,5 +295,13 @@ textarea::placeholder { color: var(--muted); }
   border: 1px solid #7a5c00;
   box-shadow: 0 0 14px rgba(180, 140, 0, 0.2);
 }
+.msg.assistant.memory-forgotten .msg-bubble {
+  background: linear-gradient(135deg, #14171c, #1c2028, #232834, #1c2028, #14171c);
+  background-size: 300% 300%;
+  animation: goldShimmer 4s ease infinite;
+  border: 1px solid #3d4452;
+  box-shadow: 0 0 14px rgba(120, 130, 150, 0.15);
+}
 .memory-badge { font-size: 10px; color: #c8a000; margin-top: 3px; padding: 0 4px; }
+.memory-badge.memory-badge-forgotten { color: #8a92a3; }
 .perf-bar { font-size: 10px; color: var(--muted); margin-top: 4px; padding: 0 4px; opacity: 0.7; }

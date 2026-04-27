@@ -134,7 +134,7 @@ function detectForgetRequest(text) {
   // Requires one of: "that i ...", "what i said", "that [preference/note/memory]",
   // "from memory", or just "forget X" (without email-action context).
   const m = text.match(
-    /^(?:please\s+)?(?:forget|remove|delete|discard)\s+(?:that\s+(?:i\s+(?:said\s+|told you\s+)?(?:that\s+)?)?|what\s+i\s+(?:said|told)|that\s+(?:preference|memory|note|fact)|from\s+memory\s*)(.+)/i
+    /^(?:please\s+)?(?:forget|remove|delete|discard)\s+(?:that\s+(?:i\s+(?:said\s+|told you\s+)?(?:that\s+)?)?|what\s+i\s+(?:said|told)|(?:that|the|my|this)\s+(?:preference|memory|note|fact|rule)\s*(?:about\s+|that\s+|of\s+)?|from\s+memory\s*)(.+)/i
   );
   return m ? m[1].trim() : null;
 }

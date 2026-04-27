@@ -191,6 +191,10 @@ export default async function execute(name, args, userId, agentId) {
     const { pinFact } = await import('../../memory.mjs');
     const rec = await pinFact({ agentId, text, userId, scope });
     if (!rec) return 'Failed to store fact (see server logs).';
+    if (rec._dedupHit) {
+      // Existing fact already covers this — no new row written.
+      return `Already knew that — kept the existing fact: ${rec.text}`;
+    }
     const scopeNote = rec.role_scope
       ? ` (scoped to role "${rec.role_scope}" — only agents holding this role will see it)`
       : ' (shared across all agents)';

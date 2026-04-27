@@ -288,10 +288,11 @@ function handleServerMessage(msg) {
       const bubbles = $('messages').querySelectorAll('.msg.assistant');
       if (bubbles.length) {
         const last = bubbles[bubbles.length - 1];
-        last.classList.add('memory-stored');
+        const isForget = msg.type === 'memory_forgotten';
+        last.classList.add(isForget ? 'memory-forgotten' : 'memory-stored');
         const badge = document.createElement('div');
-        badge.className = 'memory-badge';
-        badge.textContent = msg.type === 'memory_forgotten' ? '✦ memory forgotten' : '✦ saved to memory';
+        badge.className = isForget ? 'memory-badge memory-badge-forgotten' : 'memory-badge';
+        badge.textContent = isForget ? '✦ memory forgotten' : '✦ saved to memory';
         last.appendChild(badge);
       }
       break;
