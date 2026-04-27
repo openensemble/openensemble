@@ -186,14 +186,17 @@ const CSP = [
   "img-src 'self' data: blob: https: http:",
   "font-src 'self' data: https://fonts.gstatic.com",
   "connect-src 'self' ws: wss: https://unpkg.com https://cdn.jsdelivr.net",
-  "frame-ancestors 'none'",
+  // Allow OE pages to frame OE resources — PDF viewer in the Documents
+   // drawer mounts /api/shared-docs/<id>/view in an iframe. Foreign origins
+   // are still blocked (clickjacking guard intact).
+  "frame-ancestors 'self'",
   "base-uri 'self'",
   "object-src 'none'",
   "form-action 'self'",
 ].join('; ');
 
 const SECURITY_HEADERS = {
-  'X-Frame-Options': 'DENY',
+  'X-Frame-Options': 'SAMEORIGIN',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
