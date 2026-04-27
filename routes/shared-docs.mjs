@@ -8,6 +8,8 @@
 import fs   from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
+import { pipeline } from 'stream/promises';
+import busboy from 'busboy';
 import {
   requireAuth, isPrivileged, loadUsers, readBody, parseMultipart, withLock, BASE_DIR, safeError, getUserDir,
 } from './_helpers.mjs';
@@ -190,17 +192,20 @@ export async function handle(req, res) {
   }
 
   // ── POST /api/shared-docs — upload a document ──────────────────────────────
+  // [TEST 2026-04-27] Streams the multipart body directly to disk via
+  // busboy — earlier implementation buffered the whole file in memory
+  // (25MB → 500MB cap) which made large videos OOM-prone and forced an
+  // RSS spike of 1.5× the file size during parse. Now memory stays flat
+  // regardless of upload size; only a temp file under documents/ holds
+  // the bytes.
   if (pathname === '/api/shared-docs' && req.method === 'POST') {
     const userId = requireAuth(req, res); if (!userId) return true;
     try {
       const ct = req.headers['content-type'] ?? '';
-      const boundary = ct.match(/boundary=([^\s;]+)/)?.[1];
-      if (!boundary) throw new Error('No multipart boundary');
-      // [TEST 2026-04-27] Video uploads regularly exceed the old 25 MB cap;
-      // bump to 500 MB so reasonable music-video / screen-recording files
-      // land. Reject early via Content-Length so we 413 before the client
-      // has uploaded the whole file (was: stream until limit hit, leaving
-      // the UI stuck on "Uploading…").
+      if (!ct.startsWith('multipart/form-data')) throw new Error('Expected multipart/form-data');
+
+      // Per-file cap. Crosses the wire as Content-Length first; if the
+      // browser lies, busboy enforces again as bytes flow.
       const MAX = 500 * 1024 * 1024;
       const advertised = Number(req.headers['content-length']) || 0;
       if (advertised && advertised > MAX) {
@@ -208,35 +213,74 @@ export async function handle(req, res) {
         res.end(JSON.stringify({ error: `File too large — limit is ${MAX / 1024 / 1024} MB, got ${(advertised / 1024 / 1024).toFixed(1)} MB` }));
         return true;
       }
-      const chunks = [];
-      let size = 0;
-      for await (const chunk of req) {
-        size += chunk.length;
-        if (size > MAX) throw new Error(`File too large (max ${MAX / 1024 / 1024} MB)`);
-        chunks.push(chunk);
-      }
-      const raw    = Buffer.concat(chunks);
-      const parsed = parseMultipart(raw, boundary);
-      if (!parsed) throw new Error('No file found in upload');
-      const { fileData, fileName, mimeType } = parsed;
 
       const sharedWithRaw = url.searchParams.get('sharedWith') ?? '';
       const sharedWith    = sharedWithRaw ? sharedWithRaw.split(',').filter(Boolean) : [];
       const description   = url.searchParams.get('description') ?? '';
 
       const id      = 'doc_' + randomBytes(6).toString('hex');
-      const ext     = path.extname(fileName) || '.bin';
-      const users   = loadUsers();
-      const uploader = users.find(u => u.id === userId);
-
-      // Save file to user's documents directory
       const docsDir = getUserDocsDir(userId);
       fs.mkdirSync(docsDir, { recursive: true });
-      fs.writeFileSync(path.join(docsDir, id + ext), fileData);
+
+      const result = await new Promise((resolve, reject) => {
+        const bb = busboy({
+          headers: req.headers,
+          limits: { fileSize: MAX, files: 1 },
+        });
+        let landed = false;
+        let cleanupTmp = null;
+
+        bb.on('file', (_field, stream, info) => {
+          if (landed) { stream.resume(); return; }
+          landed = true;
+          const fileName = info.filename || 'upload.bin';
+          const mimeType = info.mimeType || info.mime || 'application/octet-stream';
+          const ext      = path.extname(fileName) || '.bin';
+          const dest     = path.join(docsDir, id + ext);
+          const tmp      = `${dest}.part`;
+          cleanupTmp     = tmp;
+
+          let truncated = false;
+          stream.on('limit', () => { truncated = true; });
+
+          const out = fs.createWriteStream(tmp);
+          pipeline(stream, out)
+            .then(() => {
+              if (truncated) {
+                try { fs.unlinkSync(tmp); } catch {}
+                reject(new Error(`File too large (max ${MAX / 1024 / 1024} MB)`));
+                return;
+              }
+              fs.renameSync(tmp, dest);
+              const size = fs.statSync(dest).size;
+              resolve({ fileName, mimeType, ext, dest, size });
+            })
+            .catch(err => {
+              try { fs.unlinkSync(tmp); } catch {}
+              reject(err);
+            });
+        });
+        bb.on('error', err => {
+          if (cleanupTmp) { try { fs.unlinkSync(cleanupTmp); } catch {} }
+          reject(err);
+        });
+        bb.on('close', () => {
+          if (!landed) reject(new Error('No file found in upload'));
+        });
+        req.on('aborted', () => {
+          if (cleanupTmp) { try { fs.unlinkSync(cleanupTmp); } catch {} }
+          reject(new Error('Upload aborted'));
+        });
+        req.pipe(bb);
+      });
+
+      const { fileName, mimeType, ext, size } = result;
+      const users    = loadUsers();
+      const uploader = users.find(u => u.id === userId);
 
       const entry = {
         id, filename: fileName, ext, mimeType,
-        size: fileData.length,
+        size,
         uploadedBy: userId,
         uploadedByName: uploader?.name ?? 'Unknown',
         sharedWith,

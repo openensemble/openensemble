@@ -11,6 +11,7 @@
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
     "@lancedb/lancedb": "^0.27.0",
+    "busboy": "^1.6.0",
     "imapflow": "^1.2.18",
     "node-llama-cpp": "^3.18.1",
     "node-pty": "^1.1.0",
