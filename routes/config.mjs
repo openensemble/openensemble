@@ -527,7 +527,7 @@ export async function handle(req, res) {
     const lmsBase    = c.lmstudioUrl ?? 'http://127.0.0.1:1234';
     const ollamaBase = (c.ollamaUrl ?? 'http://localhost:11434').replace(/\/api\/?$/, '');
     const ollamaKey  = c.ollamaApiKey ?? null;
-    const embedProvider = c.embedProvider ?? 'ollama';
+    const embedProvider = c.embedProvider ?? 'builtin';
     const reasonProvider = c.reasonProvider ?? 'auto';
     const check = async (url, headers = {}) => {
       try { const r = await fetch(url, { signal: AbortSignal.timeout(2000), headers }); return r.ok; }
