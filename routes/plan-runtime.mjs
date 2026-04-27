@@ -58,7 +58,7 @@ export async function handle(req, res) {
       await modifyConfig(x => {
         x.scheduler = x.scheduler ?? {};
         x.scheduler.planProvider = 'builtin';
-        x.scheduler.planModel = 'openensemble-plan-v12.q8_0.gguf';
+        x.scheduler.planModel = 'openensemble-plan-v3.q8_0.gguf';
       });
       sendJSON(res, 200, { ok: true, provider: 'builtin' });
       return true;

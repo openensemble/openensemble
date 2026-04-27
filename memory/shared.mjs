@@ -121,10 +121,10 @@ export function getCortexConfig() {
   // so configs written before the multi-provider switch still work. Default
   // names match where each runtime stores our fine-tuned adapter (reason-transfer.mjs).
   const reasonModel = c.reasonModel
-    ?? (reasonProvider === 'builtin'  ? 'openensemble-reason-v1.q8_0.gguf'
+    ?? (reasonProvider === 'builtin'  ? 'openensemble-reason-v3.q8_0.gguf'
      :  reasonProvider === 'lmstudio' ? (c.reasonModelLmstudio ?? 'openensemble/reason-v1')
      :  reasonProvider === 'ollama'   ? (c.reasonModelOllama   ?? 'openensemble-reason:v1')
-     :  c.reasonModelOllama ?? c.reasonModelLmstudio ?? 'openensemble-reason-v1.q8_0.gguf');
+     :  c.reasonModelOllama ?? c.reasonModelLmstudio ?? 'openensemble-reason-v3.q8_0.gguf');
 
   // Undocumented dev-only flag: when true, memory/training-log.mjs appends every
   // _chatCall I/O to ~/.openensemble/training/capture/ for corpus building.

@@ -119,6 +119,29 @@ function parseTime(str) {
   return { hour: h, minute: m };
 }
 
+// [TEST 2026-04-27] Parse a cron-style DOW field ("1-5", "0,6", "1,3,5",
+// "0,2-4,6") into a Set<number> of weekdays (0=Sun..6=Sat). Returns null
+// if the input is empty / "*" so callers can skip filtering. Returns an
+// empty set on parse failure (which would skip every day) — caller should
+// treat that as a config error and not gate firing on it.
+function parseCronDow(spec) {
+  if (!spec || spec === '*') return null;
+  const out = new Set();
+  for (const part of String(spec).split(',')) {
+    const range = part.trim().match(/^(\d)-(\d)$/);
+    if (range) {
+      const a = +range[1], b = +range[2];
+      if (a >= 0 && b >= 0 && a <= 7 && b <= 7) {
+        const lo = Math.min(a, b), hi = Math.max(a, b);
+        for (let d = lo; d <= hi; d++) out.add(d % 7);
+      }
+      continue;
+    }
+    if (/^\d$/.test(part.trim())) out.add(+part.trim() % 7);
+  }
+  return out.size ? out : new Set();
+}
+
 // Ms until next occurrence of HH:MM (daily).
 // If `tz` (IANA string, e.g. 'America/New_York') is given, compute the next
 // firing in that timezone so DST transitions don't silently shift the reminder.
@@ -173,6 +196,36 @@ async function runTask(task, broadcast) {
   log.info('scheduler', 'task start', { taskId: task.id, label: task.label, ownerId: task.ownerId, type: task.type });
 
   try {
+    // [TEST 2026-04-27] Day-of-week filter — applies to all task types, not
+    // just reminders (fireReminder still has its own check, but agent tasks
+    // were silently ignoring weekdaysOnly). For daily tasks this just skips
+    // today's run; the next-day timer is already armed by scheduleTask.
+    // Now supports a generic `dow` field with cron-style notation
+    // ("1-5", "0,6", "1,3,5", "0,2-4,6") in addition to the boolean shortcuts.
+    if (task.repeat !== 'once') {
+      const day = new Date().getDay();
+      const allowed = parseCronDow(task.dow);
+      if (allowed && !allowed.has(day)) {
+        const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][day];
+        console.log(`[scheduler] Task "${task.label}" skipped — dow="${task.dow}", today is ${dayName}`);
+        await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: `Skipped: ${dayName} not in dow=${task.dow}` });
+        return;
+      }
+      // Legacy boolean fallback for tasks created before the dow field was added.
+      if (!task.dow) {
+        if (task.weekdaysOnly && (day === 0 || day === 6)) {
+          console.log(`[scheduler] Task "${task.label}" skipped — weekdaysOnly, today is ${day === 0 ? 'Sunday' : 'Saturday'}`);
+          await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: 'Skipped: weekend (weekdaysOnly)' });
+          return;
+        }
+        if (task.weekendsOnly && day >= 1 && day <= 5) {
+          console.log(`[scheduler] Task "${task.label}" skipped — weekendsOnly, today is a weekday`);
+          await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: 'Skipped: weekday (weekendsOnly)' });
+          return;
+        }
+      }
+    }
+
     // Honor accessSchedule: a task scheduled during allowed hours that fires during
     // blocked hours is skipped. Daily tasks will try again at the next occurrence;
     // one-time tasks are logged and not rescheduled.
@@ -307,7 +360,8 @@ function scheduleTask(task, broadcast) {
     const { hour, minute } = parseTime(task.time);
     delay = msUntilNext(hour, minute, task.timezone ?? null);
     const hhmm = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
-    label = task.timezone ? `${hhmm} daily (${task.timezone})` : `${hhmm} daily`;
+    const cadence = task.weekdaysOnly ? 'weekdays' : task.weekendsOnly ? 'weekends' : 'daily';
+    label = task.timezone ? `${hhmm} ${cadence} (${task.timezone})` : `${hhmm} ${cadence}`;
   }
 
   const eta = new Date(Date.now() + delay);

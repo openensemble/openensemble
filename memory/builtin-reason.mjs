@@ -32,6 +32,7 @@ import path from 'path';
 import fs from 'fs';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { effectiveCpuCount } from '../lib/cpu-count.mjs';
+import { ensureGguf } from '../lib/model-fetch.mjs';
 
 // Task tokens added to the SmolLM2 vocab during training (see training/train.py).
 // Prepended to the user content so the multi-task adapter routes to the right
@@ -49,7 +50,7 @@ const TASK_TOKENS = {
 const DEFAULT_SYSTEM =
   'You are a memory assistant. Output JSON only unless asked for prose.';
 
-const MODEL_FILE = 'openensemble-reason-v1.q8_0.gguf';
+const MODEL_FILE = 'openensemble-reason-v3.q8_0.gguf';
 const CACHE_DIR = path.join(USERS_DIR, '..', 'models');
 const MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
 
@@ -68,10 +69,18 @@ let _queue = Promise.resolve();
 export async function initBuiltinReason() {
   if (_initPromise) return _initPromise;
   _initPromise = (async () => {
-    if (!fs.existsSync(MODEL_PATH)) {
+    // [TEST 2026-04-27] Always call ensureGguf so it can (a) auto-download
+    // on missing — closes the gap where `git pull` lands a new MODEL_FILE
+    // but the user hasn't run `npm install` — and (b) prune older versions
+    // from models/ on every server boot. ensureGguf is a fast no-op when
+    // the file exists.
+    const ok = await ensureGguf(CACHE_DIR, 'reason', MODEL_FILE, {
+      logger: (m) => console.log(m),
+    });
+    if (!ok && !fs.existsSync(MODEL_PATH)) {
       throw new Error(
-        `reason model missing at ${MODEL_PATH}. ` +
-          `Run \`node scripts/fetch-models.mjs\` or set reasonProvider to ollama/lmstudio.`,
+        `reason model missing at ${MODEL_PATH} and download failed. ` +
+          `Run \`node scripts/fetch-models.mjs\` manually or set reasonProvider to ollama/lmstudio.`,
       );
     }
     let mod;

@@ -475,7 +475,7 @@ export async function handle(req, res) {
 
     // Bundled reason model filename — imported lazily so config routes don't
     // eagerly load node-llama-cpp on machines where it's not installed yet.
-    let builtinReasonId = 'openensemble-reason-v1.q8_0.gguf';
+    let builtinReasonId = 'openensemble-reason-v3.q8_0.gguf';
     try {
       const { getBuiltinReasonModelId } = await import('../memory/builtin-reason.mjs');
       builtinReasonId = getBuiltinReasonModelId();

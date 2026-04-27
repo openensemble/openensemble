@@ -1,7 +1,7 @@
 /**
  * Smart-scheduler reasoning surface. Text in, text out.
  *
- * Loads the fine-tuned `openensemble-plan-v12` q8_0 GGUF (SmolLM2-135M base
+ * Loads the fine-tuned `openensemble-plan-v3` q8_0 GGUF (SmolLM2-135M base
  * + LoRA with task-prefix tokens <parse>, <decide>, <decompose>, <classify>)
  * in its own node-llama-cpp context, fully isolated from the cortex model.
  *
@@ -14,8 +14,9 @@ import fs from 'fs';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { effectiveCpuCount } from '../lib/cpu-count.mjs';
 import { loadConfig } from '../routes/_helpers.mjs';
+import { ensureGguf } from '../lib/model-fetch.mjs';
 
-const MODEL_FILE = 'openensemble-plan-v12.q8_0.gguf';
+const MODEL_FILE = 'openensemble-plan-v3.q8_0.gguf';
 const CACHE_DIR = path.join(USERS_DIR, '..', 'models');
 const MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
 
@@ -37,10 +38,15 @@ let _queue = Promise.resolve();
 export async function initBuiltinPlan() {
   if (_initPromise) return _initPromise;
   _initPromise = (async () => {
-    if (!fs.existsSync(MODEL_PATH)) {
+    // [TEST 2026-04-27] Always call ensureGguf so cleanup runs every boot
+    // and a missing GGUF auto-downloads from HF.
+    const ok = await ensureGguf(CACHE_DIR, 'plan', MODEL_FILE, {
+      logger: (m) => console.log(m),
+    });
+    if (!ok && !fs.existsSync(MODEL_PATH)) {
       throw new Error(
-        `plan model missing at ${MODEL_PATH}. ` +
-          `Run \`node scripts/fetch-plan-model.mjs\` to download it.`,
+        `plan model missing at ${MODEL_PATH} and download failed. ` +
+          `Run \`node scripts/fetch-plan-model.mjs\` manually.`,
       );
     }
     let mod;

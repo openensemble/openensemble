@@ -1,5 +1,5 @@
 /**
- * Install the OpenEnsemble-fine-tuned scheduler GGUF (openensemble-plan-v12)
+ * Install the OpenEnsemble-fine-tuned scheduler GGUF (openensemble-plan-v3)
  * into the user's external Ollama or LM Studio runtime. Same shape as
  * memory/reason-transfer.mjs — kept separate so cortex and scheduler stay
  * strictly isolated (see builtin-plan.mjs header).

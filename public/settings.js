@@ -287,7 +287,7 @@ function cortexStatusDot(ok) {
 // which is what the "Install" button triggers via /api/reason-runtime/*.
 
 const BUILTIN_EMBED_NAME  = 'nomic-embed-text-v1';
-const BUILTIN_REASON_NAME = 'openensemble-reason-v1.q8_0.gguf';
+const BUILTIN_REASON_NAME = 'openensemble-reason-v3.q8_0.gguf';
 
 function reasonRuntimeState(runtime) {
   const s = reasonRuntimeStatus;
@@ -440,7 +440,7 @@ async function installReasonRuntime(runtime) {
 // (it knows the <parse>/<decide>/<decompose>/<classify> prefix tokens), so the
 // user's choice is which runtime hosts it. Same builtin/ollama/lmstudio split.
 
-const BUILTIN_PLAN_NAME = 'openensemble-plan-v12.q8_0.gguf';
+const BUILTIN_PLAN_NAME = 'openensemble-plan-v3.q8_0.gguf';
 let planRuntimeStatus = null;
 
 async function loadPlanRuntimeStatus() {
