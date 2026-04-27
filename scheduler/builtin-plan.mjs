@@ -38,8 +38,6 @@ let _queue = Promise.resolve();
 export async function initBuiltinPlan() {
   if (_initPromise) return _initPromise;
   _initPromise = (async () => {
-    // [TEST 2026-04-27] Always call ensureGguf so cleanup runs every boot
-    // and a missing GGUF auto-downloads from HF.
     const ok = await ensureGguf(CACHE_DIR, 'plan', MODEL_FILE, {
       logger: (m) => console.log(m),
     });

@@ -119,11 +119,6 @@ function parseTime(str) {
   return { hour: h, minute: m };
 }
 
-// [TEST 2026-04-27] Parse a cron-style DOW field ("1-5", "0,6", "1,3,5",
-// "0,2-4,6") into a Set<number> of weekdays (0=Sun..6=Sat). Returns null
-// if the input is empty / "*" so callers can skip filtering. Returns an
-// empty set on parse failure (which would skip every day) — caller should
-// treat that as a config error and not gate firing on it.
 function parseCronDow(spec) {
   if (!spec || spec === '*') return null;
   const out = new Set();
@@ -196,12 +191,6 @@ async function runTask(task, broadcast) {
   log.info('scheduler', 'task start', { taskId: task.id, label: task.label, ownerId: task.ownerId, type: task.type });
 
   try {
-    // [TEST 2026-04-27] Day-of-week filter — applies to all task types, not
-    // just reminders (fireReminder still has its own check, but agent tasks
-    // were silently ignoring weekdaysOnly). For daily tasks this just skips
-    // today's run; the next-day timer is already armed by scheduleTask.
-    // Now supports a generic `dow` field with cron-style notation
-    // ("1-5", "0,6", "1,3,5", "0,2-4,6") in addition to the boolean shortcuts.
     if (task.repeat !== 'once') {
       const day = new Date().getDay();
       const allowed = parseCronDow(task.dow);

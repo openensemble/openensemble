@@ -191,22 +191,17 @@ export async function handle(req, res) {
     return true;
   }
 
-  // ── POST /api/shared-docs — upload a document ──────────────────────────────
-  // [TEST 2026-04-27] Streams the multipart body directly to disk via
-  // busboy — earlier implementation buffered the whole file in memory
-  // (25MB → 500MB cap) which made large videos OOM-prone and forced an
-  // RSS spike of 1.5× the file size during parse. Now memory stays flat
-  // regardless of upload size; only a temp file under documents/ holds
-  // the bytes.
   if (pathname === '/api/shared-docs' && req.method === 'POST') {
     const userId = requireAuth(req, res); if (!userId) return true;
+    const cl = req.headers['content-length'] || '?';
+    console.log(`[shared-docs] upload start userId=${userId} content-length=${cl}`);
     try {
       const ct = req.headers['content-type'] ?? '';
       if (!ct.startsWith('multipart/form-data')) throw new Error('Expected multipart/form-data');
 
       // Per-file cap. Crosses the wire as Content-Length first; if the
       // browser lies, busboy enforces again as bytes flow.
-      const MAX = 500 * 1024 * 1024;
+      const MAX = 150 * 1024 * 1024;
       const advertised = Number(req.headers['content-length']) || 0;
       if (advertised && advertised > MAX) {
         res.writeHead(413, { 'Content-Type': 'application/json' });
@@ -305,9 +300,13 @@ export async function handle(req, res) {
         });
       }
 
+      console.log(`[shared-docs] upload ok id=${id} filename=${fileName} size=${size}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, doc: entry }));
-    } catch (e) { safeError(res, e, 400); }
+    } catch (e) {
+      console.warn(`[shared-docs] upload failed: ${e.message}`);
+      safeError(res, e, 400);
+    }
     return true;
   }
 
@@ -371,8 +370,13 @@ export async function handle(req, res) {
       res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400' });
       fs.createReadStream(thumbPath).pipe(res);
     } catch (e) {
-      console.warn(`[shared-docs] thumbnail failed for ${doc.id}:`, e.message);
-      res.writeHead(404); res.end();
+      if (e.code === 'ENOENT' || /pdftoppm|LibreOffice|spawn/.test(e.message)) {
+        console.warn(`[shared-docs] thumbnail tool missing for ${doc.id}: ${e.message} — install poppler-utils + libreoffice for PDF/Office thumbnails`);
+      } else {
+        console.warn(`[shared-docs] thumbnail failed for ${doc.id}:`, e.message);
+      }
+      res.writeHead(204, { 'Cache-Control': 'private, max-age=3600' });
+      res.end();
     }
     return true;
   }

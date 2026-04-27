@@ -1,9 +1,5 @@
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 let tasks = [];
-// [TEST 2026-04-26] Inline-expand editor — track which task is open so we
-// can render its detail panel under the row. Click anywhere on the row body
-// to toggle. REVERT: drop this var, the toggle/save funcs, and the expanded
-// branch in renderTasks.
 let expandedTaskId = null;
 
 async function loadTaskList() {
@@ -207,4 +203,3 @@ $('btnAddTask').addEventListener('click', (e) => submitParsedTask({
 $('btnAddSettingsTask').addEventListener('click', (e) => submitParsedTask({
   promptId: 'stPrompt', agentId: 'stAgent', errId: 'stParseError', btn: e.currentTarget,
 }));
-

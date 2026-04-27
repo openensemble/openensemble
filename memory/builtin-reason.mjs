@@ -69,11 +69,6 @@ let _queue = Promise.resolve();
 export async function initBuiltinReason() {
   if (_initPromise) return _initPromise;
   _initPromise = (async () => {
-    // [TEST 2026-04-27] Always call ensureGguf so it can (a) auto-download
-    // on missing — closes the gap where `git pull` lands a new MODEL_FILE
-    // but the user hasn't run `npm install` — and (b) prune older versions
-    // from models/ on every server boot. ensureGguf is a fast no-op when
-    // the file exists.
     const ok = await ensureGguf(CACHE_DIR, 'reason', MODEL_FILE, {
       logger: (m) => console.log(m),
     });

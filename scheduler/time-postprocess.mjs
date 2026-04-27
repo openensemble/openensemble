@@ -236,10 +236,6 @@ function findClockTime(text) {
     const parsed = parseClockTime(m[1]);
     if (parsed) return { ...parsed, raw: m[1], ambiguous: true };
   }
-  // [TEST 2026-04-27] 4-digit military time. Strict 0000-2359; matches only
-  // when "hrs"/"hours" suffix OR after "at" OR as a standalone fragment to
-  // avoid false-positives on years (2026), house numbers, etc. Unambiguous —
-  // 24-hour reads itself.
   m = text.match(/\b([01]\d|2[0-3])([0-5]\d)\s*(?:hrs?|hours?)\b/i);
   if (!m) m = text.match(/\bat\s+([01]\d|2[0-3])([0-5]\d)\b(?!\s*[ap]m)/i);
   if (!m) m = text.match(/(?:^|\s)([01]\d|2[0-3])([0-5]\d)(?=\s|$|[.,!?;:])/);
@@ -331,9 +327,6 @@ function advanceToDow(date, dow, next) {
 // anchor (if one is AM, the other likely PM when earlier numerically).
 function findDualRecurringHours(text) {
   const t = text.toLowerCase();
-  // [TEST 2026-04-27] First try 12h+military pairings: "at 8am and 1700",
-  // "at 0800 and 5pm", "at 0830 and 1700hrs". Both halves can be either
-  // format, in either order.
   const milPairRe = /\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)|[01]\d[0-5]\d(?:\s*hrs?)?)\s+(?:and|&)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)|[01]\d[0-5]\d(?:\s*hrs?)?)\b/i;
   const milPair = t.match(milPairRe);
   if (milPair) {
@@ -432,12 +425,6 @@ function detectRecurrence(request) {
 
   if (/\bhourly\b|\bevery\s+hour\b/.test(r)) return '0 * * * *';
 
-  // [TEST 2026-04-27] Weekday-RANGE phrasings ("Monday through Friday",
-  // "Mon-Fri", "M-F") need to win over the multi-weekday-name scan below,
-  // which would otherwise read just the two endpoints as a comma list.
-  // The same branch picks up "every workday", "every day i (do )?work",
-  // "the days i work", "my workdays", and "weekdays at X" — all fold into
-  // cron "* * * * 1-5". REVERT: delete this block and the duplicate at line ~485.
   if (/\bevery\s+(weekday|work\s*day)s?\b|\bweekdays?\s+at\b|\bevery\s+day\s+(?:that\s+)?i\s+(?:do\s+)?work\b|\b(?:the\s+)?days\s+(?:that\s+)?i\s+(?:do\s+)?work\b|\bmy\s+work\s*days?\b|\bmonday\s+(?:through|to|-|–)\s+friday\b|\bm(?:on)?\s*[-–]\s*f(?:ri)?\b/i.test(r)) {
     const dual = findDualRecurringHours(r);
     if (dual) {
@@ -540,9 +527,6 @@ function detectRecurrence(request) {
     return `${mm} ${h} ${day} 1,4,7,10 *`;
   }
 
-  // (Weekday-range branch moved up above the multi-weekday-name scan; see
-  // the [TEST 2026-04-27] block earlier in this function.)
-
   // "every weekend"
   if (/\bevery\s+weekend\b|\bweekends?\s+at\b/.test(r)) {
     const clock = findClockTime(r);
@@ -582,8 +566,6 @@ function detectRecurrence(request) {
   // word or "remind"/"run"/"send"/etc.). "daily briefing" is fine as adjective,
   // but single-day fallback still wins because weekday-scan already ran.
   if (/\bevery\s+day\b|\bdaily\s+(?:at|reminder|briefing|check|report|run|ping)\b|\bat\s+[^,.]*\bdaily\b/.test(r)) {
-    // [TEST 2026-04-27] "except weekends" / "skip weekends" / "but skip
-    // weekends" / "no weekends" / "weekdays only" — rewrite DOW field to 1-5.
     const dowField = /\bexcept\s+(?:on\s+)?weekends?\b|\bnot\s+(?:on\s+)?weekends?\b|\bweekdays?\s+only\b|\bskip(?:ping)?\s+(?:on\s+)?weekends?\b|\bno\s+weekends?\b|\bbut\s+skip\s+(?:on\s+)?weekends?\b/.test(r) ? '1-5' : '*';
     const dual = findDualRecurringHours(r);
     if (dual) {
@@ -651,10 +633,6 @@ function detectOneShotTime(request, now) {
     const unit = unitKey(m[2]);
     if (n != null && unit) {
       let pref = addMs(now, Math.round(n * UNIT_MS[unit]));
-      // [TEST 2026-04-26] If the request also names a clock time AND the unit
-      // is day-or-coarser, apply the clock time to the resolved date so
-      // "in 2 weeks ... 12pm" lands at 12:00 PM, not at the current second.
-      // REVERT: delete this block and the accompanying coarse-unit set check.
       if (unit === 'day' || unit === 'week' || unit === 'month' || unit === 'year') {
         const clk = findClockTime(r);
         if (clk) pref = atClock(pref, clk.hour, clk.minute);

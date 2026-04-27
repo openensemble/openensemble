@@ -367,7 +367,7 @@
         <div id="docUploadTrigger" onclick="$('docFileInput').click()" style="border:2px dashed var(--border);border-radius:10px;padding:18px;text-align:center;cursor:pointer;transition:border-color .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
           <div style="font-size:24px;margin-bottom:4px">📤</div>
           <div style="font-size:13px;color:var(--muted)">Click to upload a document</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">PDF, images, text files — up to 25 MB</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">PDF, images, text files — up to 150 MB</div>
         </div>
         <input id="docFileInput" type="file" style="display:none" onchange="handleDocFileSelect(event)">
         <!-- Upload form -->
@@ -1275,7 +1275,10 @@
   <div class="user-picker-panel">
     <div class="user-picker-title"><i data-lucide="user" style="width:16px;height:16px"></i> Switch Profile</div>
     <div class="user-list" id="userList"></div>
-    <button onclick="closeUserPicker()" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;cursor:pointer;font-size:13px;width:100%">Close</button>
+    <div style="display:flex;gap:8px;width:100%">
+      <button onclick="closeUserPicker()" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;cursor:pointer;font-size:13px">Close</button>
+      <button onclick="closeUserPicker(); logout()" style="flex:1;background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:8px;padding:8px;cursor:pointer;font-size:13px">Sign Out</button>
+    </div>
   </div>
 </div>
 

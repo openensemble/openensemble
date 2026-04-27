@@ -219,7 +219,7 @@ async function logout() {
   await fetch('/api/logout', { method: 'POST' }).catch(() => {});
   setToken(null);
   setCurrentUser(null);
-  showLoginScreen();
+  location.reload();
 }
 
 // ── Users (multi-profile) ─────────────────────────────────────────────────────
@@ -359,7 +359,6 @@ async function loadSkillsList() {
   }
 }
 
-
 async function deleteRole(id) {
   if (!confirm('Delete this role? This cannot be undone.')) return;
   try {
@@ -424,7 +423,6 @@ async function submitNewRole() {
   } catch { if (errEl) errEl.textContent = 'Failed to create role'; }
 }
 
-
 async function toggleSkill(skillId, enabled) {
   try {
     await fetch('/api/roles/toggle', {
@@ -438,4 +436,3 @@ async function toggleSkill(skillId, enabled) {
     buildAgentDrawer();
   } catch {}
 }
-

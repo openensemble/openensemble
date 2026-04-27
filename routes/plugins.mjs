@@ -21,7 +21,15 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     try {
       const { pluginId, enabled } = JSON.parse(await readBody(req));
-      if (!getDrawer(pluginId)) { res.writeHead(404); res.end(JSON.stringify({ error: 'Drawer not found' })); return true; }
+      if (!getDrawer(pluginId)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, note: 'plugin not currently loaded; preference saved' }));
+        await modifyUser(authId, u => {
+          u.pluginPrefs = u.pluginPrefs ?? {};
+          u.pluginPrefs[pluginId] = { ...(u.pluginPrefs[pluginId] ?? {}), enabled };
+        });
+        return true;
+      }
       const user = getUser(authId);
       const isPriv = user?.role === 'owner' || user?.role === 'admin';
       if (!isPriv && enabled && user?.allowedFeatures != null && !user.allowedFeatures.includes(pluginId)) {

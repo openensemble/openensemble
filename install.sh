@@ -69,12 +69,13 @@ prompt_yn() {
 # coder refuses every shell command, or auto-update reports "Not a git repo".
 ensure_build_tools() {
   local need=()
-  command -v make    &>/dev/null || need+=(make)
-  command -v g++     &>/dev/null || need+=(g++)
-  command -v python3 &>/dev/null || need+=(python3)
-  command -v zip     &>/dev/null || need+=(zip)
-  command -v bwrap   &>/dev/null || need+=(bubblewrap)
-  command -v git     &>/dev/null || need+=(git)
+  command -v make     &>/dev/null || need+=(make)
+  command -v g++      &>/dev/null || need+=(g++)
+  command -v python3  &>/dev/null || need+=(python3)
+  command -v zip      &>/dev/null || need+=(zip)
+  command -v bwrap    &>/dev/null || need+=(bubblewrap)
+  command -v git      &>/dev/null || need+=(git)
+  command -v pdftoppm &>/dev/null || need+=(poppler-utils)
   [[ ${#need[@]} -eq 0 ]] && return 0
 
   warn "Missing build/runtime tools: ${need[*]}"
@@ -87,14 +88,17 @@ ensure_build_tools() {
     error "Build tools required for native modules, coder sandbox, and auto-update. Install manually and re-run."
     exit 1
   fi
-  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git
-  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git
-  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git
-  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git
-  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git
-  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git
+  # poppler-utils provides `pdftoppm`, used by routes/shared-docs.mjs to
+  # render PDF page-1 thumbnails for the Documents drawer. ~3MB package;
+  # installs alongside the rest of the build tools.
+  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git poppler-utils
+  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils
+  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils
+  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils
+  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler
+  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools
   else
-    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, and git manually and re-run."
+    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, git, and poppler-utils manually and re-run."
     exit 1
   fi
   success "Build tools installed"
@@ -299,6 +303,7 @@ cat > "$INSTALL_DIR/start.sh" << STARTSH
 export NVM_DIR="\$HOME/.nvm"
 [ -s "\$NVM_DIR/nvm.sh" ] && source "\$NVM_DIR/nvm.sh"
 cd "$INSTALL_DIR"
+node scripts/ensure-deps.mjs
 exec node server.mjs
 STARTSH
 chmod +x "$INSTALL_DIR/start.sh"
@@ -323,6 +328,7 @@ StartLimitBurst=3
 Type=simple
 WorkingDirectory=$INSTALL_DIR
 ExecStartPre=-/bin/sh -c 'pkill -TERM -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; sleep 1; pkill -KILL -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; true'
+ExecStartPre=-$NODE_BIN $INSTALL_DIR/scripts/ensure-deps.mjs
 ExecStart=$NODE_BIN $INSTALL_DIR/server.mjs
 Restart=on-failure
 RestartSec=5

@@ -431,6 +431,8 @@ function cancelDocUpload() {
   $('docUploadForm').style.display = 'none';
   $('docUploadTrigger').style.display = '';
   $('docUploadDesc').value = '';
+  const btn = $('docUploadForm').querySelector('button[onclick="uploadDoc()"]');
+  if (btn) { btn.textContent = 'Upload'; btn.disabled = false; }
   _docShareSel.clear();
 }
 
