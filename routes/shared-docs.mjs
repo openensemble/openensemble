@@ -196,12 +196,23 @@ export async function handle(req, res) {
       const ct = req.headers['content-type'] ?? '';
       const boundary = ct.match(/boundary=([^\s;]+)/)?.[1];
       if (!boundary) throw new Error('No multipart boundary');
-      const MAX = 25 * 1024 * 1024;
+      // [TEST 2026-04-27] Video uploads regularly exceed the old 25 MB cap;
+      // bump to 500 MB so reasonable music-video / screen-recording files
+      // land. Reject early via Content-Length so we 413 before the client
+      // has uploaded the whole file (was: stream until limit hit, leaving
+      // the UI stuck on "Uploading…").
+      const MAX = 500 * 1024 * 1024;
+      const advertised = Number(req.headers['content-length']) || 0;
+      if (advertised && advertised > MAX) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `File too large — limit is ${MAX / 1024 / 1024} MB, got ${(advertised / 1024 / 1024).toFixed(1)} MB` }));
+        return true;
+      }
       const chunks = [];
       let size = 0;
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > MAX) throw new Error('File too large (max 25 MB)');
+        if (size > MAX) throw new Error(`File too large (max ${MAX / 1024 / 1024} MB)`);
         chunks.push(chunk);
       }
       const raw    = Buffer.concat(chunks);
