@@ -11,7 +11,7 @@ import {
   loadConfig, loadUsers, requirePrivileged, getUserDir,
   EXPENSES_DB, SESSIONS_PATH,
 } from './_helpers.mjs';
-import { loadTasks, isSchedulerRunning } from '../scheduler.mjs';
+import { loadAllTasksForScheduler, isSchedulerRunning } from '../scheduler.mjs';
 import { isWatcherRunning } from '../gmail-autolabel.mjs';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
 import { readToken as readOpenAIOAuthToken } from '../lib/openai-codex-auth.mjs';
@@ -222,7 +222,7 @@ async function buildFullHealth() {
   }
 
   const sessions = countSessionFiles();
-  const tasks = loadTasks();
+  const tasks = loadAllTasksForScheduler();
   const cortexUsers = listCortexUsers();
 
   // Overall ok: every configured provider must be reachable, and embed must

@@ -2,6 +2,56 @@
 let tasks = [];
 let expandedTaskId = null;
 
+const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function _parseCronDow(spec) {
+  if (!spec || spec === '*') return null;
+  const out = new Set();
+  for (const part of String(spec).split(',')) {
+    const range = part.trim().match(/^(\d)-(\d)$/);
+    if (range) {
+      const a = +range[1], b = +range[2];
+      const lo = Math.min(a, b), hi = Math.max(a, b);
+      for (let d = lo; d <= hi; d++) out.add(d % 7);
+      continue;
+    }
+    if (/^\d$/.test(part.trim())) out.add(+part.trim() % 7);
+  }
+  return out.size ? out : null;
+}
+// Mirror of scheduler.mjs:formatTaskCadence — kept in sync so the UI doesn't
+// flatten "Mon/Wed/Fri" reminders to "daily".
+function formatTaskCadenceText(t) {
+  const time = t.time || '?';
+  const dow = t.dow;
+  if (dow && dow !== '*') {
+    if (dow === '1-5') return `${time} weekdays`;
+    if (dow === '0,6' || dow === '6,0') return `${time} weekends`;
+    const days = _parseCronDow(dow);
+    if (days && days.size) {
+      const ordered = [...days].sort((a, b) => a - b).map(d => _DOW_NAMES_SHORT[d]);
+      return `${time} ${ordered.join('/')}`;
+    }
+  }
+  if (t.weekdaysOnly) return `${time} weekdays`;
+  if (t.weekendsOnly) return `${time} weekends`;
+  return `${time} daily`;
+}
+function formatTaskCadenceLabel(t) {
+  const dow = t.dow;
+  if (dow && dow !== '*') {
+    if (dow === '1-5') return 'Weekdays at';
+    if (dow === '0,6' || dow === '6,0') return 'Weekends at';
+    const days = _parseCronDow(dow);
+    if (days && days.size) {
+      const ordered = [...days].sort((a, b) => a - b).map(d => _DOW_NAMES_SHORT[d]);
+      return `${ordered.join('/')} at`;
+    }
+  }
+  if (t.weekdaysOnly) return 'Weekdays at';
+  if (t.weekendsOnly) return 'Weekends at';
+  return 'Daily at';
+}
+
 async function loadTaskList() {
   try { const r = await fetch('/api/tasks'); tasks = await r.json(); } catch { tasks = []; }
   renderTasks(); updateTasksBadge();
@@ -18,7 +68,7 @@ function _toLocalInputValue(iso) {
 function renderTaskRow(t) {
   const schedStr = t.repeat === 'once'
     ? (t.datetime ? '1× ' + new Date(t.datetime).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '1× (no time set)')
-    : `🔁 ${t.time} daily`;
+    : `🔁 ${formatTaskCadenceText(t)}`;
   const statusSuffix = (t.repeat === 'once' && !t.enabled && t.lastRun) ? ' · ✓ done' : (t.lastRun ? ' · ' + new Date(t.lastRun).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '');
   const isReminder = t.type === 'reminder';
   const runner = isReminder ? '🔔 Reminder' : (agents.find(a=>a.id===t.agent)?.name ?? t.agent);
@@ -42,7 +92,7 @@ function renderTaskRow(t) {
   const agentOptions = agents.map(a => `<option value="${escHtml(a.id)}"${a.id===t.agent?' selected':''}>${escHtml(a.emoji||'')} ${escHtml(a.name)}</option>`).join('');
   const timeField = t.repeat === 'once'
     ? `<label>When<input type="datetime-local" id="te-dt-${escHtml(t.id)}" value="${_toLocalInputValue(t.datetime)}"></label>`
-    : `<label>Daily at<input type="time" id="te-tm-${escHtml(t.id)}" value="${escHtml(t.time||'09:00')}"></label>`;
+    : `<label>${escHtml(formatTaskCadenceLabel(t))}<input type="time" id="te-tm-${escHtml(t.id)}" value="${escHtml(t.time||'09:00')}"></label>`;
   const agentBlock = isReminder ? '' : `
       <label>Runner
         <select id="te-ag-${escHtml(t.id)}">${agentOptions}</select>

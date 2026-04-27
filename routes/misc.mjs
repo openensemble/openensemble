@@ -26,7 +26,7 @@ async function saveThreads(threads) {
   await withLock(THREADS_PATH, () => fs.writeFileSync(THREADS_PATH, JSON.stringify(threads, null, 2)));
 }
 import { loadSession } from '../sessions.mjs';
-import { loadTasks, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
+import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
 import { getGmailAuthHeader } from './gmail.mjs';
@@ -132,9 +132,13 @@ export async function handle(req, res) {
   // Tasks
   if (req.url === '/api/tasks' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    // Privileged users (install owner) also see install-level system tasks
+    // — cleanUploads, etc. — but never another user's personal tasks. System
+    // tasks live under tasks/system.json, never in users/<id>/tasks.json.
+    const own = loadTasksForOwner(authId);
+    const all = isPrivileged(authId) ? [...own, ...loadTasksForOwner('system')] : own;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    const priv = isPrivileged(authId);
-    res.end(JSON.stringify(loadTasks().filter(t => priv || t.ownerId === authId)));
+    res.end(JSON.stringify(all));
     return true;
   }
 
@@ -152,7 +156,7 @@ export async function handle(req, res) {
       // Per-user task cap — prevents a misbehaving account from scheduling
       // thousands of frequent-cron jobs that would swamp the scheduler.
       const MAX_TASKS_PER_USER = 100;
-      const existing = loadTasks().filter(t => t.ownerId === authId).length;
+      const existing = loadTasksForOwner(authId).length;
       if (existing >= MAX_TASKS_PER_USER) {
         res.writeHead(429); res.end(JSON.stringify({ error: `Task limit reached (${MAX_TASKS_PER_USER}). Delete some before adding more.` })); return true;
       }
@@ -182,13 +186,13 @@ export async function handle(req, res) {
       const agent = String(body.agent || '').trim();
       if (!text) { res.writeHead(400); res.end(JSON.stringify({ error: 'Empty prompt' })); return true; }
       const MAX_TASKS_PER_USER = 100;
-      const existing = loadTasks().filter(t => t.ownerId === authId).length;
+      const existing = loadTasksForOwner(authId).length;
       if (existing >= MAX_TASKS_PER_USER) {
         res.writeHead(429); res.end(JSON.stringify({ error: `Task limit reached (${MAX_TASKS_PER_USER}). Delete some before adding more.` })); return true;
       }
-      const before = new Set(loadTasks().map(t => t.id));
+      const before = new Set(loadTasksForOwner(authId).map(t => t.id));
       const result = await interceptScheduling({ userId: authId, agentId: agent || null, text, force: true });
-      const created = loadTasks().find(t => !before.has(t.id) && t.ownerId === authId);
+      const created = loadTasksForOwner(authId).find(t => !before.has(t.id));
       if (created) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(created));
@@ -203,18 +207,16 @@ export async function handle(req, res) {
   const taskMatch = req.url.match(/^\/api\/tasks\/([\w-]+)$/);
   if (taskMatch && req.method === 'DELETE') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const t = loadTasks().find(t => t.id === taskMatch[1]);
+    const t = findTaskById(taskMatch[1], authId);
     if (!t) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
-    if (t.ownerId && t.ownerId !== authId) { res.writeHead(403); res.end(JSON.stringify({ error: 'Not your task' })); return true; }
     await removeTask(taskMatch[1]);
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
     return true;
   }
   if (taskMatch && req.method === 'PATCH') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const t = loadTasks().find(t => t.id === taskMatch[1]);
+    const t = findTaskById(taskMatch[1], authId);
     if (!t) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
-    if (t.ownerId && t.ownerId !== authId) { res.writeHead(403); res.end(JSON.stringify({ error: 'Not your task' })); return true; }
     try {
       const patch = JSON.parse(await readBody(req));
       await updateTask(taskMatch[1], patch);
@@ -226,7 +228,7 @@ export async function handle(req, res) {
         await updateTask(taskMatch[1], { enabled: true, lastRun: null });
       }
       if (touchesSchedule || 'enabled' in patch) {
-        const updated = loadTasks().find(x => x.id === taskMatch[1]);
+        const updated = findTaskById(taskMatch[1], authId);
         if (updated) scheduleNewTask(updated);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
@@ -237,8 +239,8 @@ export async function handle(req, res) {
   // Dashboard
   if (req.url === '/api/dashboard' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const priv = isPrivileged(authId);
-    const tasks = loadTasks().filter(t => priv || t.ownerId === authId);
+    const own = loadTasksForOwner(authId);
+    const tasks = isPrivileged(authId) ? [...own, ...loadTasksForOwner('system')] : own;
     const tasksWithOutput = tasks.map(task => {
       const sessionId = task.ownerId ? `${task.ownerId}_${task.agent}` : task.agent;
       const messages = loadSession(sessionId, 200);

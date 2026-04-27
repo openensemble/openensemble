@@ -204,8 +204,9 @@ async function loadDashboard() {
       schedDesc = isDone ? `Ran once · ${runAt}` : `Runs once at ${runAt}`;
       noOutputMsg = isDone ? 'Completed — no output captured' : `Pending · runs at ${runAt}`;
     } else {
-      schedDesc = `Daily at ${escHtml(task.time ?? '?')}`;
-      noOutputMsg = `No output yet — runs daily at ${escHtml(task.time ?? '?')}`;
+      const cad = escHtml(formatTaskCadenceText(task));
+      schedDesc = `🔁 ${cad}`;
+      noOutputMsg = `No output yet — runs ${cad}`;
     }
 
     let badgeClass = '', badgeText;

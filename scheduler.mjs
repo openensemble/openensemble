@@ -24,9 +24,13 @@ function taskPath(ownerId) {
   return path.join(TASKS_DIR, `${ownerId}.json`);
 }
 
-export function loadTasks() {
+// Read every task across every owner. The only legitimate callers are the
+// scheduler tick (rehydrating timers on boot, daily-reschedule loop) and
+// internal save plumbing — anything user-facing should use loadTasksForOwner
+// or findTaskById to keep cross-user pollution structural. Renamed in
+// 2026-04-27 after a fake `_test` user dir leaked into the admin UI.
+export function loadAllTasksForScheduler() {
   const all = [];
-  // Load from user directories
   if (existsSync(USERS_DIR)) {
     try {
       for (const entry of readdirSync(USERS_DIR, { withFileTypes: true })) {
@@ -36,7 +40,6 @@ export function loadTasks() {
       }
     } catch (e) { console.warn('[scheduler] Failed to read user tasks:', e.message); }
   }
-  // Load system tasks from legacy tasks/ dir
   if (existsSync(TASKS_DIR)) {
     try {
       for (const f of readdirSync(TASKS_DIR)) {
@@ -46,6 +49,24 @@ export function loadTasks() {
     } catch {}
   }
   return all;
+}
+
+// Per-owner read: returns only the tasks stored under this ownerId. Default
+// for routes, skills, scheduler-intent — if a caller doesn't know an owner,
+// they probably shouldn't be reading tasks.
+export function loadTasksForOwner(ownerId) {
+  if (!ownerId) return [];
+  const p = taskPath(ownerId);
+  try { if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8')); } catch {}
+  return [];
+}
+
+// Owner-scoped lookup by id. Returns null if the task doesn't exist OR
+// belongs to a different owner — fails closed so a route handler can't
+// accidentally act on someone else's task by id.
+export function findTaskById(id, ownerId) {
+  if (!id || !ownerId) return null;
+  return loadTasksForOwner(ownerId).find(t => t.id === id) ?? null;
 }
 
 export function saveTasks(tasks) {
@@ -84,7 +105,7 @@ export function saveTasks(tasks) {
 }
 
 const modifyTasks = fn => withLock(TASKS_LOCK_KEY, () => {
-  const data = loadTasks();
+  const data = loadAllTasksForScheduler();
   const result = fn(data);
   saveTasks(data);
   return result;
@@ -117,6 +138,33 @@ export function updateTask(id, patch) {
 function parseTime(str) {
   const [h, m] = str.split(':').map(Number);
   return { hour: h, minute: m };
+}
+
+// Render a task's recurrence cadence for human display. Knows about the dow
+// field so multi-weekday schedules render as "Mon/Wed/Fri" instead of being
+// misreported as "daily" — same misread that surfaced the Take My Vitamins
+// regression in 2026-04. Single-weekday and weekday/weekend ranges get their
+// natural names; arbitrary day sets are joined as short names.
+const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+export function formatTaskCadence(task) {
+  if (!task) return '';
+  if (task.repeat === 'once') {
+    return task.datetime ? new Date(task.datetime).toLocaleString() : '?';
+  }
+  const time = task.time || '?';
+  const dow = task.dow;
+  if (dow && dow !== '*') {
+    if (dow === '1-5') return `${time} weekdays`;
+    if (dow === '0,6' || dow === '6,0') return `${time} weekends`;
+    const days = parseCronDow(dow);
+    if (days && days.size) {
+      const ordered = [...days].sort((a, b) => a - b).map(d => _DOW_NAMES_SHORT[d]);
+      return `${time} ${ordered.join('/')}`;
+    }
+  }
+  if (task.weekdaysOnly) return `${time} weekdays`;
+  if (task.weekendsOnly) return `${time} weekends`;
+  return `${time} daily`;
 }
 
 function parseCronDow(spec) {
@@ -349,7 +397,7 @@ function scheduleTask(task, broadcast) {
     const { hour, minute } = parseTime(task.time);
     delay = msUntilNext(hour, minute, task.timezone ?? null);
     const hhmm = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
-    const cadence = task.weekdaysOnly ? 'weekdays' : task.weekendsOnly ? 'weekends' : 'daily';
+    const cadence = formatTaskCadence({ ...task, time: hhmm }).replace(/^\S+\s+/, '');
     label = task.timezone ? `${hhmm} ${cadence} (${task.timezone})` : `${hhmm} ${cadence}`;
   }
 
@@ -359,11 +407,12 @@ function scheduleTask(task, broadcast) {
   const timerId = setTimeout(async () => {
     _timers.delete(task.id);
     if (!_schedulerRunning) return;
-    const current = loadTasks().find(t => t.id === task.id);
+    const current = task.ownerId ? findTaskById(task.id, task.ownerId)
+                                 : loadAllTasksForScheduler().find(t => t.id === task.id);
     if (current?.enabled) await runTask(current, broadcast);
-    // Reschedule only for daily tasks
     if (task.repeat !== 'once') {
-      const fresh = loadTasks().find(t => t.id === task.id);
+      const fresh = task.ownerId ? findTaskById(task.id, task.ownerId)
+                                 : loadAllTasksForScheduler().find(t => t.id === task.id);
       if (fresh) scheduleTask(fresh, broadcast);
     }
   }, delay);
@@ -379,7 +428,7 @@ let _schedulerRunning = false;
 export function startScheduler(broadcast) {
   _broadcast = broadcast;
   _schedulerRunning = true;
-  const tasks = loadTasks();
+  const tasks = loadAllTasksForScheduler();
   if (!tasks.length) {
     console.log('[scheduler] No tasks configured.');
     return;

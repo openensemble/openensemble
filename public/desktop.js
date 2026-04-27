@@ -481,7 +481,7 @@ function renderTasksWidget(tasks) {
         <div class="board-task-icon">📋</div>
         <div class="board-task-info">
           <div class="board-task-label">${escHtml(t.label)}</div>
-          <div class="board-task-meta">🔁 ${escHtml(t.time)} daily · ${escHtml(agentName)}${lastRun ? ` · Last run: ${lastRun}` : ''}</div>
+          <div class="board-task-meta">🔁 ${escHtml(formatTaskCadenceText(t))} · ${escHtml(agentName)}${lastRun ? ` · Last run: ${lastRun}` : ''}</div>
         </div>
       </div>`;
     }).join('') + `</div>`;

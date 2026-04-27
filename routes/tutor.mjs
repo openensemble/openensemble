@@ -17,7 +17,7 @@ import {
   loadTutorStats, recordSessionActivity, getWeeklyRecap, setUserTz, setWeeklyGoal,
   masteryBand, levelProgress,
 } from '../lib/tutor-stats.mjs';
-import { loadTasks, addTask, removeTask } from '../scheduler.mjs';
+import { loadTasksForOwner, addTask, removeTask } from '../scheduler.mjs';
 
 const DEFAULT_REMINDER_PREFS = {
   enabled: false,
@@ -56,8 +56,8 @@ async function rebuildTutorTasks(userId) {
   const stats = loadTutorStats(userId);
   const tz = stats.tz || null;
 
-  for (const t of loadTasks()) {
-    if (t.ownerId === userId && t?.meta?.tutor) {
+  for (const t of loadTasksForOwner(userId)) {
+    if (t?.meta?.tutor) {
       try { removeTask(t.id); } catch {}
     }
   }

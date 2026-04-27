@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 import { listAgents } from './agents.mjs';
 import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
 import { loadDrawerManifests } from './plugins.mjs';
-import { startScheduler, stopScheduler, loadTasks, addTask, registerBuiltin } from './scheduler.mjs';
+import { startScheduler, stopScheduler, loadTasksForOwner, addTask, registerBuiltin } from './scheduler.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
 import { getRateLimit } from './rate-limit.mjs';
@@ -535,7 +535,7 @@ registerBuiltin('cleanUploads', () => {
 });
 
 async function seedSystemTasks() {
-  const existing = loadTasks();
+  const existing = loadTasksForOwner('system');
   if (!existing.find(t => t.type === 'builtin' && t.handler === 'cleanUploads')) {
     await addTask({
       label: 'Clean uploads folder',

@@ -58,6 +58,9 @@ plugins/*
 tools/
 scripts/probe-oauth-models.mjs
 scripts/test-parse-endpoint.mjs
+scripts/test-miltime-*.mjs
+scripts/test-task-creation.mjs
+scripts/chat-smoke.mjs
 
 # --- Runtime artifacts ---
 server.pid
