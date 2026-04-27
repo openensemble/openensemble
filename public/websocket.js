@@ -119,7 +119,14 @@ function handleServerMessage(msg) {
         const lastServerTs = serverMsgs.length > 0
           ? Math.max(...serverMsgs.map(m => m.ts || 0))
           : 0;
-        const clientOnly = clientMsgs.filter(m => (m.ts || 0) > lastServerTs);
+        // Client and server stamp ts independently with Date.now(), so the
+        // client's copy of a just-completed message is usually a few ms newer
+        // than the server's persisted ts. Without a content check, that drift
+        // makes the merge keep the client's copy on top of the server's list
+        // and the last bubble doubles up after a WS reconnect.
+        const clientOnly = clientMsgs.filter(m =>
+          (m.ts || 0) > lastServerTs &&
+          !serverMsgs.some(s => s.role === m.role && s.content === m.content));
         sessions[msg.agent] = clientOnly.length > 0
           ? [...serverMsgs, ...clientOnly]
           : serverMsgs;
