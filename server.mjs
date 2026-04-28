@@ -6,6 +6,7 @@
 import http       from 'http';
 import fs         from 'fs';
 import path       from 'path';
+import os         from 'os';
 import { fileURLToPath } from 'url';
 import { listAgents } from './agents.mjs';
 import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
@@ -573,8 +574,20 @@ httpServer.on('error', (err) => {
   console.error('[startup] HTTP server error:', err);
   process.exit(1);
 });
+// First non-internal IPv4 is usually the right LAN address. Fall back to
+// localhost only when no external interface is configured (e.g. netns).
+function _detectLanIp() {
+  const ifs = os.networkInterfaces();
+  for (const name of Object.keys(ifs)) {
+    for (const iface of ifs[name] ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return 'localhost';
+}
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🎵 OpenEnsemble running at http://localhost:${PORT}\n`);
+  const lanIp = _detectLanIp();
+  console.log(`\n🎵 OpenEnsemble running at http://${lanIp}:${PORT}\n`);
   console.log('Agents:', listAgents().map(a => `${a.emoji} ${a.name}`).join('  '));
   console.log('Press Ctrl+C to stop\n');
   log.info('startup', 'Server listening', { port: PORT, agents: listAgents().length });

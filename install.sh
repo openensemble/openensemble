@@ -77,6 +77,7 @@ ensure_build_tools() {
   command -v git      &>/dev/null || need+=(git)
   command -v pdftoppm &>/dev/null || need+=(poppler-utils)
   command -v rg       &>/dev/null || need+=(ripgrep)
+  command -v fuser    &>/dev/null || need+=(psmisc)
   [[ ${#need[@]} -eq 0 ]] && return 0
 
   warn "Missing build/runtime tools: ${need[*]}"
@@ -92,15 +93,17 @@ ensure_build_tools() {
   # poppler-utils provides `pdftoppm` (PDF page-1 thumbnails) and `pdftotext`
   # (PDF text extraction for the documents/expenses skills). ripgrep provides
   # `rg`, used by the coder skill for code search — without it, search
-  # silently returns "No matches found".
-  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git poppler-utils ripgrep
-  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils ripgrep
-  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils ripgrep
-  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils ripgrep
-  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler ripgrep
-  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep
+  # silently returns "No matches found". psmisc provides `fuser`, used by
+  # the systemd unit's prestart cleanup to free port 3737 if a stale process
+  # still holds it (without fuser, the unit falls back to pkill matching).
+  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git poppler-utils ripgrep psmisc
+  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc
+  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc
+  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils ripgrep psmisc
+  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler ripgrep psmisc
+  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep psmisc
   else
-    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, git, poppler-utils, and ripgrep manually and re-run."
+    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, git, poppler-utils, ripgrep, and psmisc manually and re-run."
     exit 1
   fi
   success "Build tools installed"
@@ -142,6 +145,50 @@ echo -e "${BOLD}║    OpenEnsemble Installer v${OE_VERSION}         ║${RESET}
 echo -e "${BOLD}║  Self-hosted multi-user AI assistant   ║${RESET}"
 echo -e "${BOLD}╚════════════════════════════════════════╝${RESET}"
 echo ""
+
+# ─── Privilege precheck ───────────────────────────────────────────────────────
+# Detect upfront whether we can elevate. Two install steps need it:
+#   - apt/dnf system deps (build-essential, ripgrep, bubblewrap, etc.)
+#   - loginctl enable-linger, so systemd --user works without an active login
+# Catching the no-sudo case BEFORE we do 5+ minutes of npm install / file
+# copy / config work means the user can re-run as root or with sudo upfront,
+# instead of getting stranded near the end.
+header "Privilege Check"
+if [[ $EUID -eq 0 ]]; then
+  success "Running as root — no sudo needed"
+  CAN_ELEVATE=true
+elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
+  success "sudo available without password (cached or NOPASSWD)"
+  CAN_ELEVATE=true
+elif command -v sudo &>/dev/null; then
+  info "sudo is installed but will prompt for a password during install."
+  if sudo -v 2>/dev/null; then
+    success "sudo session validated"
+    CAN_ELEVATE=true
+  else
+    CAN_ELEVATE=false
+  fi
+else
+  CAN_ELEVATE=false
+fi
+
+if [[ "$CAN_ELEVATE" != "true" ]]; then
+  echo ""
+  warn "Cannot elevate to root and sudo is unavailable for this user."
+  warn "OpenEnsemble needs root for two steps:"
+  warn "  1. Installing system packages (build-essential, ripgrep, etc.)"
+  warn "  2. Enabling user lingering so the service auto-starts at boot"
+  echo ""
+  warn "Re-run installation as root or with sudo:"
+  warn "  ${YELLOW}su -${RESET} ${YELLOW}# then re-run the installer${RESET}"
+  warn "  ${YELLOW}sudo bash install.sh${RESET}"
+  warn "  ${YELLOW}curl -fsSL <install-url> | sudo bash${RESET}"
+  echo ""
+  if ! prompt_yn "Continue anyway? (npm install will work; service auto-start will not)" "n"; then
+    echo "Aborted. Re-run with sudo/root and try again."
+    exit 1
+  fi
+fi
 
 # ─── Confirm Install Dir ──────────────────────────────────────────────────────
 header "Installation Directory"
@@ -329,7 +376,13 @@ StartLimitBurst=3
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
-ExecStartPre=-/bin/sh -c 'pkill -TERM -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; sleep 1; pkill -KILL -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; true'
+# Prestart cleanup — covers three cases:
+#   1. server.pid points at a live orphan started outside systemd (manual
+#      start.sh, prior root invocation) — kill by PID file (authoritative).
+#   2. cmdline-matched orphan that didn't write a pid file — pkill any
+#      "server.mjs" process under this install dir.
+#   3. port 3737 still bound by something else — fuser -k as last resort.
+ExecStartPre=-/bin/sh -c 'if [ -f $INSTALL_DIR/server.pid ]; then OLDPID=\$(cat $INSTALL_DIR/server.pid 2>/dev/null); if [ -n "\$OLDPID" ] && kill -0 "\$OLDPID" 2>/dev/null; then kill -TERM "\$OLDPID" 2>/dev/null; for i in 1 2 3 4 5; do kill -0 "\$OLDPID" 2>/dev/null || break; sleep 1; done; kill -KILL "\$OLDPID" 2>/dev/null || true; fi; rm -f $INSTALL_DIR/server.pid; fi; pkill -TERM -f "node .*server.mjs" 2>/dev/null || true; sleep 1; pkill -KILL -f "node .*server.mjs" 2>/dev/null || true; fuser -k -TERM 3737/tcp 2>/dev/null || true; sleep 1; fuser -k -KILL 3737/tcp 2>/dev/null || true; true'
 ExecStartPre=-$NODE_BIN $INSTALL_DIR/scripts/ensure-deps.mjs
 ExecStart=$NODE_BIN $INSTALL_DIR/server.mjs
 Restart=on-failure
@@ -338,7 +391,7 @@ KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=10
 SendSIGKILL=yes
-ExecStopPost=-/bin/sh -c 'pkill -TERM -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; sleep 1; pkill -KILL -f "node $INSTALL_DIR/server.mjs" 2>/dev/null; rm -f $INSTALL_DIR/server.pid; true'
+ExecStopPost=-/bin/sh -c 'if [ -f $INSTALL_DIR/server.pid ]; then OLDPID=\$(cat $INSTALL_DIR/server.pid 2>/dev/null); if [ -n "\$OLDPID" ] && kill -0 "\$OLDPID" 2>/dev/null; then kill -TERM "\$OLDPID" 2>/dev/null; sleep 1; kill -KILL "\$OLDPID" 2>/dev/null || true; fi; rm -f $INSTALL_DIR/server.pid; fi; pkill -TERM -f "node .*server.mjs" 2>/dev/null || true; sleep 1; pkill -KILL -f "node .*server.mjs" 2>/dev/null || true; true'
 Environment=NODE_ENV=production
 
 [Install]
