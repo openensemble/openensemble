@@ -345,11 +345,39 @@ Environment=NODE_ENV=production
 WantedBy=default.target
 SERVICE
 
-    systemctl --user daemon-reload
-    systemctl --user enable openensemble.service
-    systemctl --user start openensemble.service
-    HAVE_SERVICE=true
-    success "Systemd service installed and started"
+    # systemctl --user needs a running user manager. On a fresh install over
+    # SSH (no graphical login, no active console) $XDG_RUNTIME_DIR isn't set
+    # and the user D-Bus isn't reachable, so the systemctl call dies with
+    # "Failed to connect to user scope bus". Fix: export XDG_RUNTIME_DIR
+    # and, if the directory doesn't exist, enable user lingering so the
+    # manager runs without a login session.
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [ ! -S "$XDG_RUNTIME_DIR/bus" ]; then
+      info "No active user-session bus — enabling lingering (allows systemd --user to run without a login)..."
+      if sudo -n loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null; then
+        # Lingering creates /run/user/<UID> on next manager spawn; nudge it.
+        for _ in 1 2 3 4 5; do
+          [ -S "$XDG_RUNTIME_DIR/bus" ] && break
+          sleep 1
+        done
+      else
+        warn "Could not enable lingering (sudo unavailable). Skipping systemd service install."
+        warn "To finish later, run as $USER on a logged-in console:"
+        warn "  sudo loginctl enable-linger \$USER"
+        warn "  systemctl --user daemon-reload"
+        warn "  systemctl --user enable --now openensemble.service"
+        warn "Until then, start manually: $INSTALL_DIR/start.sh"
+        HAVE_SERVICE=false
+      fi
+    fi
+
+    if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+      systemctl --user daemon-reload
+      systemctl --user enable openensemble.service
+      systemctl --user start openensemble.service
+      HAVE_SERVICE=true
+      success "Systemd service installed and started"
+    fi
   else
     HAVE_SERVICE=false
   fi
