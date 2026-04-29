@@ -542,7 +542,7 @@ function renderPlanModelRows() {
 
   const externalHeader =
     `<div style="font-size:11px;color:var(--muted);margin:8px 0 2px 0;padding-top:6px;border-top:1px dashed var(--border-subtle)">
-       Or run on GPU via an external runtime you already have · ~300 MB VRAM
+       Or run on a GPU via an external runtime
      </div>`;
   // Tier picker is always visible — it controls which GGUF gets used across
   // all three runtimes. Switching tier while on an external runtime auto-
