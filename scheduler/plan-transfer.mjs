@@ -21,9 +21,20 @@ import os from 'os';
 import { getBuiltinPlanModelPath, getBuiltinPlanModelId } from './builtin-plan.mjs';
 import { modifyConfig, loadConfig } from '../routes/_helpers.mjs';
 
-export const OLLAMA_MODEL_TAG   = 'openensemble-plan:v12';
+// Derive the version suffix from the active GGUF file name so the destination
+// tag/dir match the bytes being pushed. Hardcoding "v12" here while the
+// bundled MODEL_FILE was actually v3/v4/v5 made LM Studio mislabel the
+// installed model — user saw "plan-v12" and assumed v12 was loaded, when
+// the bytes were the current GGUF.
+function _modelVersion() {
+  const id = getBuiltinPlanModelId();             // e.g. "openensemble-plan-v5.q8_0.gguf"
+  const m = id.match(/-v(\d+)\.q\d/i);
+  return m ? `v${m[1]}` : 'v0';
+}
+const _PLAN_VERSION = _modelVersion();
+export const OLLAMA_MODEL_TAG   = `openensemble-plan:${_PLAN_VERSION}`;
 export const LMSTUDIO_PUBLISHER = 'openensemble';
-export const LMSTUDIO_MODEL_DIR = 'plan-v12';
+export const LMSTUDIO_MODEL_DIR = `plan-${_PLAN_VERSION}`;
 
 function ollamaLocalBase() {
   const cfg = loadConfig();

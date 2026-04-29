@@ -335,7 +335,7 @@ if [[ -f "$CONFIG_FILE" && "$UPGRADING" == "true" ]]; then
 else
   cp "$SOURCE_DIR/config.template.json" "$CONFIG_FILE"
   success "config.json created — all providers start disabled"
-  info "Enable providers, paste API keys, and set your workspace from Settings in the web UI."
+  info "Enable providers and paste API keys from Settings in the web UI."
 fi
 
 # ─── Install Dependencies ─────────────────────────────────────────────────────
@@ -407,16 +407,33 @@ SERVICE
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     if [ ! -S "$XDG_RUNTIME_DIR/bus" ]; then
       info "No active user-session bus — enabling lingering (allows systemd --user to run without a login)..."
-      if sudo -n loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null; then
+      # Try direct call first if root (Proxmox LXCs and other minimal images
+      # often ship without sudo; root doesn't need it). Fall back to sudo for
+      # non-root users.
+      LINGER_OK=false
+      if [[ $EUID -eq 0 ]]; then
+        if loginctl enable-linger "$USER" 2>/dev/null; then
+          LINGER_OK=true
+        fi
+      elif command -v sudo &>/dev/null; then
+        if sudo -n loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null; then
+          LINGER_OK=true
+        fi
+      fi
+      if [[ "$LINGER_OK" == "true" ]]; then
         # Lingering creates /run/user/<UID> on next manager spawn; nudge it.
         for _ in 1 2 3 4 5; do
           [ -S "$XDG_RUNTIME_DIR/bus" ] && break
           sleep 1
         done
       else
-        warn "Could not enable lingering (sudo unavailable). Skipping systemd service install."
-        warn "To finish later, run as $USER on a logged-in console:"
-        warn "  sudo loginctl enable-linger \$USER"
+        warn "Could not enable lingering. Skipping systemd service install."
+        warn "To finish later, run on a logged-in console:"
+        if [[ $EUID -eq 0 ]]; then
+          warn "  loginctl enable-linger root"
+        else
+          warn "  sudo loginctl enable-linger \$USER"
+        fi
         warn "  systemctl --user daemon-reload"
         warn "  systemctl --user enable --now openensemble.service"
         warn "Until then, start manually: $INSTALL_DIR/start.sh"
@@ -538,7 +555,6 @@ else
   echo -e "  2. Open ${YELLOW}${WEB_URL}${RESET} and create your first user"
 fi
 echo -e "  ${YELLOW}→${RESET} From Settings → Providers, enable the ones you want and paste in API keys"
-echo -e "  ${YELLOW}→${RESET} From Settings → Profile, set your workspace folder"
 echo ""
 # If nvm was installed during this run, the current shell already has it on
 # PATH (we sourced nvm.sh mid-script) — but brand-new SSH sessions won't until

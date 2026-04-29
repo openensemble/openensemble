@@ -18,11 +18,19 @@ import os from 'os';
 import { getBuiltinReasonModelPath, getBuiltinReasonModelId } from './builtin-reason.mjs';
 import { modifyConfig, loadConfig } from '../routes/_helpers.mjs';
 
-// Name the model is installed as inside each external runtime. Stable across
-// releases so config doesn't need to change when a new GGUF ships.
-export const OLLAMA_MODEL_TAG  = 'openensemble-reason:v1';
+// Derive the version suffix from the active GGUF file name so the destination
+// tag/dir match the bytes being pushed. Was hardcoded "v1" while the bundled
+// MODEL_FILE was actually v3 — installed model showed up as "reason-v1" in
+// LM Studio even though the bytes were v3.
+function _modelVersion() {
+  const id = getBuiltinReasonModelId();           // e.g. "openensemble-reason-v3.q8_0.gguf"
+  const m = id.match(/-v(\d+)\.q\d/i);
+  return m ? `v${m[1]}` : 'v0';
+}
+const _REASON_VERSION = _modelVersion();
+export const OLLAMA_MODEL_TAG   = `openensemble-reason:${_REASON_VERSION}`;
 export const LMSTUDIO_PUBLISHER = 'openensemble';
-export const LMSTUDIO_MODEL_DIR = 'reason-v1';
+export const LMSTUDIO_MODEL_DIR = `reason-${_REASON_VERSION}`;
 
 // Memory-lane install targets the *local* Ollama, not the cloud one — cloud
 // (ollama.com) refuses /api/create for custom GGUFs. Configured separately
