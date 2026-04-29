@@ -338,6 +338,40 @@ else
   info "Enable providers and paste API keys from Settings in the web UI."
 fi
 
+# ─── Plan Model Tier ──────────────────────────────────────────────────────────
+# OpenEnsemble ships two fine-tuned scheduler models. Pick which one
+# postinstall fetches:
+#   - Accurate (default): SmolLM2-360M, ~370 MB, 95.6% smoke / 87.5% holdout.
+#     Best accuracy. Higher CPU latency, more RAM.
+#   - Fast: SmolLM2-135M, ~140 MB, ~88.5% smoke. Lower latency, lower RAM.
+# User can change at runtime later from Settings → Scheduler.
+if [[ "$UPGRADING" != "true" ]] && command -v node &>/dev/null; then
+  echo ""
+  echo -e "  ${BOLD}Plan model tier${RESET}"
+  echo -e "    ${YELLOW}1)${RESET} Accurate — SmolLM2-360M, ~370 MB download, best accuracy ${YELLOW}[default]${RESET}"
+  echo -e "    ${YELLOW}2)${RESET} Fast — SmolLM2-135M, ~140 MB download, lower latency"
+  read -rp "  Choice [1/2]: " plan_choice
+  case "${plan_choice:-1}" in
+    2|f|F|fast|Fast)
+      PLAN_TIER="fast"
+      PLAN_FILE="openensemble-plan-v5.q8_0.gguf"
+      ;;
+    *)
+      PLAN_TIER="accurate"
+      PLAN_FILE="openensemble-plan-360m-v1.q8_0.gguf"
+      ;;
+  esac
+  node -e "
+    const fs = require('fs');
+    const f = '$CONFIG_FILE';
+    const c = JSON.parse(fs.readFileSync(f, 'utf8'));
+    c.scheduler = c.scheduler || {};
+    c.scheduler.builtinPlanModel = '$PLAN_FILE';
+    fs.writeFileSync(f, JSON.stringify(c, null, 2) + '\n');
+  "
+  success "Plan tier set to '$PLAN_TIER' ($PLAN_FILE)"
+fi
+
 # ─── Install Dependencies ─────────────────────────────────────────────────────
 header "Installing Dependencies"
 ensure_build_tools

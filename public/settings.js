@@ -440,7 +440,15 @@ async function installReasonRuntime(runtime) {
 // (it knows the <parse>/<decide>/<decompose>/<classify> prefix tokens), so the
 // user's choice is which runtime hosts it. Same builtin/ollama/lmstudio split.
 
-const BUILTIN_PLAN_NAME = 'openensemble-plan-v3.q8_0.gguf';
+// Disk size = on-disk q8_0 GGUF; RAM ≈ disk size + KV cache + activation overhead
+// (measured loaded size at idle from OE startup). cpuLatency is the average
+// per-parse round-trip through node-llama-cpp on the builtin runtime,
+// measured 2026-04-29 on Shawn's dev box; YMMV depending on CPU. Through LM
+// Studio (GPU) or Ollama, latency is roughly half.
+const PLAN_TIER_LABELS = {
+  fast:     { name: 'Fast',     base: 'SmolLM2-135M', sizeMb: 140, ramMb: 339, cpuLatencyS: 3,  accNote: '88.5% smoke',                 desc: 'lower latency, lower RAM' },
+  accurate: { name: 'Accurate', base: 'SmolLM2-360M', sizeMb: 370, ramMb: 700, cpuLatencyS: 5,  accNote: '95.6% smoke / 87.5% holdout', desc: 'best accuracy' },
+};
 let planRuntimeStatus = null;
 
 async function loadPlanRuntimeStatus() {
@@ -536,17 +544,27 @@ function renderPlanModelRows() {
     `<div style="font-size:11px;color:var(--muted);margin:8px 0 2px 0;padding-top:6px;border-top:1px dashed var(--border-subtle)">
        Or run on GPU via an external runtime you already have · ~300 MB VRAM
      </div>`;
+  // Tier picker is always visible — it controls which GGUF gets used across
+  // all three runtimes. Switching tier while on an external runtime auto-
+  // reinstalls the new GGUF into that runtime.
+  const tierBlock = planTierPicker(current);
   const rows =
-      planRuntimeRow({ runtime: 'builtin',  label: 'Built-in (CPU)', hint: 'in-process via llama.cpp — no external runtime', selected: current === 'builtin' })
+      tierBlock
+    + planRuntimeRow({ runtime: 'builtin',  label: 'Built-in (CPU)', hint: 'in-process via llama.cpp — no external runtime', selected: current === 'builtin' })
     + externalHeader
     + planRuntimeRow({ runtime: 'ollama',   label: 'Via Ollama',     hint: '',                                                selected: current === 'ollama' })
     + planRuntimeRow({ runtime: 'lmstudio', label: 'Via LM Studio',  hint: '',                                                selected: current === 'lmstudio' });
 
+  const headerLabel = (() => {
+    const t = planRuntimeStatus?.builtin?.tier;
+    if (current === 'builtin' && t && PLAN_TIER_LABELS[t]) return `OpenEnsemble Plan · ${PLAN_TIER_LABELS[t].name} (${PLAN_TIER_LABELS[t].base})`;
+    return 'OpenEnsemble Plan';
+  })();
   container.innerHTML = `
     <div class="agent-model-row" style="align-items:flex-start;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:center;gap:10px;width:100%">
         <span class="agent-name" title="Fine-tuned adapter for scheduling: parse/decide/decompose/classify">📅 Plan</span>
-        <span style="flex:1;font-weight:500">OpenEnsemble Plan v3
+        <span style="flex:1;font-weight:500">${escHtml(headerLabel)}
           <span style="font-size:11px;color:var(--muted);margin-left:6px;font-weight:400">pick where to run it</span>
         </span>
         ${cortexStatusDot(health)}
@@ -554,6 +572,67 @@ function renderPlanModelRows() {
       <div style="width:100%;padding-left:90px">${rows}</div>
     </div>
     ${warning}`;
+}
+
+// Tier picker (Fast vs Accurate). Indented under the Built-in row when
+// builtin is the selected runtime. Switching downloads the chosen GGUF if
+// not already on disk and hot-reloads the in-process model.
+function planTierPicker(currentRuntime) {
+  const tiers = planRuntimeStatus?.builtin?.tiers ?? {};
+  const active = planRuntimeStatus?.builtin?.tier ?? 'accurate';
+  const rows = Object.entries(PLAN_TIER_LABELS).map(([tier, meta]) => {
+    const t = tiers[tier] ?? {};
+    const id = `plantier-${tier}`;
+    const sizeNote = t.present ? `${t.sizeMb} MB on disk` : `${meta.sizeMb} MB download`;
+    const stats = `RAM ~${meta.ramMb} MB · CPU ~${meta.cpuLatencyS}s/parse · ${meta.accNote}`;
+    return `
+      <label for="${id}" style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer">
+        <input type="radio" name="planTier" id="${id}" value="${tier}" ${tier === active ? 'checked' : ''}
+               onchange="selectPlanTier('${tier}')">
+        <span style="flex:1;display:flex;flex-direction:column;gap:1px">
+          <span style="font-weight:500">${escHtml(meta.name)} <span style="font-size:11px;color:var(--muted);font-weight:400">— ${escHtml(meta.base)}, ${escHtml(meta.desc)}</span></span>
+          <span style="font-size:11px;color:var(--muted)">${escHtml(sizeNote)} · ${escHtml(stats)}</span>
+        </span>
+      </label>`;
+  }).join('');
+  // Hint reflects what happens on switch: hot-reload for builtin, re-install
+  // into the active external runtime for ollama/lmstudio.
+  const switchNote = currentRuntime === 'builtin'
+    ? 'Switching tier hot-reloads the in-process model.'
+    : `Switching tier re-installs the GGUF into ${currentRuntime === 'ollama' ? 'Ollama' : 'LM Studio'}.`;
+  return `
+    <div style="margin:0 0 8px 22px;padding:6px 10px;border-left:2px solid var(--border-subtle);background:rgba(0,0,0,0.02)">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:2px">Model tier — affects every runtime below. ${escHtml(switchNote)}</div>
+      ${rows}
+    </div>`;
+}
+
+async function selectPlanTier(tier) {
+  const currentProvider = planRuntimeStatus?.current ?? 'builtin';
+  const tierName = PLAN_TIER_LABELS[tier]?.name ?? tier;
+  const action = currentProvider === 'builtin'
+    ? 'reload the in-process model'
+    : currentProvider === 'ollama'
+      ? 're-install the GGUF into Ollama (creates a new tag)'
+      : 're-install the GGUF into LM Studio (creates a new model dir)';
+  if (!confirm(`Switch plan model to "${tierName}"? Download if needed, then ${action}.`)) {
+    await loadPlanRuntimeStatus();
+    renderPlanModelRows();
+    return;
+  }
+  const r = await fetch('/api/plan-runtime/builtin-tier', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tier }),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    alert(`Tier switch failed: ${body.error ?? r.status}`);
+  } else if (body.externalPush && body.externalPush.ok === false) {
+    alert(`Tier saved + builtin reloaded, but ${currentProvider} push failed: ${body.externalPush.error}`);
+  }
+  await loadPlanRuntimeStatus();
+  renderPlanModelRows();
 }
 
 async function selectPlanRuntime(runtime) {

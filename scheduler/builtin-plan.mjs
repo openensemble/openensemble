@@ -14,11 +14,28 @@ import fs from 'fs';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { effectiveCpuCount } from '../lib/cpu-count.mjs';
 import { loadConfig } from '../routes/_helpers.mjs';
-import { ensureGguf } from '../lib/model-fetch.mjs';
+import { ensureGguf, BUNDLED_PLAN_MODELS, DEFAULT_PLAN_TIER, planFileForTier, tierForPlanFile } from '../lib/model-fetch.mjs';
 
-const MODEL_FILE = 'openensemble-plan-v3.q8_0.gguf';
+// The active plan model file is resolved at init time from config —
+// `scheduler.builtinPlanModel` may be a bare GGUF filename (one of the
+// BUNDLED_PLAN_MODELS) OR a tier alias ('fast' | 'accurate'). Defaults to
+// 'accurate' (v22, the current best). Resolved lazily so a user toggling
+// the tier in Settings + calling reloadBuiltinPlan() picks up the new
+// choice without restarting the server.
 const CACHE_DIR = path.join(USERS_DIR, '..', 'models');
-const MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
+
+function resolvePlanModelFile() {
+  const cfg = loadConfig() ?? {};
+  const sched = cfg.scheduler ?? {};
+  const requested = sched.builtinPlanModel;
+  if (requested) {
+    if (Object.values(BUNDLED_PLAN_MODELS).includes(requested)) return requested;
+    if (BUNDLED_PLAN_MODELS[requested]) return BUNDLED_PLAN_MODELS[requested];
+  }
+  return planFileForTier(DEFAULT_PLAN_TIER);
+}
+let MODEL_FILE = resolvePlanModelFile();
+let MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
 
 // Matches the training context (n_ctx_train=8192 in the GGUF). Running below
 // this triggers a "full capacity not utilized" warning from llama.cpp and
@@ -271,7 +288,22 @@ export async function planGenerate({
   const provider = cfg?.scheduler?.planProvider ?? 'builtin';
 
   if (provider === 'ollama' || provider === 'lmstudio') {
-    // Stock external models need the schema-rich per-task prompt for hints.
+    // Two paths through the same external runtime:
+    // 1. Our fine-tuned model (Ollama tag `openensemble-plan:...` or LM Studio
+    //    `openensemble/plan-...`) — was trained with the SHORT training-format
+    //    system prompt + a task-token prefix on the user message. Sending
+    //    `preset.system` (the verbose schema-hint prompt the bundled-cortex
+    //    path used to use) produces garbage because the LoRA never saw it.
+    // 2. A stock external model the user pointed us at (e.g. ministral, llama,
+    //    gemma) — needs the schema-rich `preset.system` since the stock model
+    //    has no task-token training.
+    const planModel = cfg?.scheduler?.planModel ?? '';
+    const isOurModel = /^openensemble-plan:/i.test(planModel) || /^openensemble\/plan-/i.test(planModel);
+    if (isOurModel && !systemOverride) {
+      const taskToken = TASK_TOKENS[task];
+      const userWithToken = taskToken ? `${taskToken}\n${user ?? ''}` : (user ?? '');
+      return _generateExternal({ provider, system: TRAINING_SYSTEM, user: userWithToken, temperature, maxTokens, cfg });
+    }
     return _generateExternal({ provider, system: systemOverride ?? preset.system, user, temperature, maxTokens, cfg });
   }
 
@@ -382,6 +414,32 @@ export function getBuiltinPlanModelId() {
 
 export function getBuiltinPlanModelPath() {
   return MODEL_PATH;
+}
+
+export function getBuiltinPlanTier() {
+  return tierForPlanFile(MODEL_FILE);
+}
+
+// Tear down the loaded model+context and re-init from the current config
+// value. Call after switching scheduler.builtinPlanModel — avoids an OE
+// server restart. Rejects if a download is needed and fails.
+export async function reloadBuiltinPlan() {
+  const targetFile = resolvePlanModelFile();
+  if (targetFile === MODEL_FILE && _ready) return { ok: true, model: MODEL_FILE, reloaded: false };
+  try {
+    if (_context && typeof _context.dispose === 'function') await _context.dispose();
+  } catch { /* ignore */ }
+  try {
+    if (_model && typeof _model.dispose === 'function') await _model.dispose();
+  } catch { /* ignore */ }
+  _ready = false;
+  _initPromise = null;
+  _llama = null; _model = null; _context = null;
+  _grammarCache = new Map();
+  MODEL_FILE = targetFile;
+  MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
+  await initBuiltinPlan();
+  return { ok: true, model: MODEL_FILE, reloaded: true };
 }
 
 export function planTasks() {
