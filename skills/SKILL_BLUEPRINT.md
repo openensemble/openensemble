@@ -10,7 +10,7 @@ User-created skills are prefixed `usr_` automatically by `skill_create`.
 
 ## ⚠️ REQUIRED: Copy this execute.mjs signature EXACTLY
 
-Every skill MUST use this exact function signature. Do not change the parameter names, do not use destructuring, do not use a different export style:
+Every skill MUST use this signature. Do not change parameter names, do not destructure, do not use a different export style:
 
 ```js
 export async function executeSkillTool(name, args, userId, agentId) {
@@ -23,6 +23,18 @@ export async function executeSkillTool(name, args, userId, agentId) {
 
 export default executeSkillTool;
 ```
+
+**5th `ctx` parameter (optional)** — only declare it if the skill needs to push images/videos inline to the chat (see "Showing images and videos" below). Skills that don't take 5 params still work normally:
+
+```js
+export async function executeSkillTool(name, args, userId, agentId, ctx) {
+  // ctx.showImage({ base64, mimeType, filename, savedPath, prompt })
+  // ctx.showVideo({ url, filename, savedPath })
+  ...
+}
+```
+
+The validator accepts either a 4-param or 5-param signature. Anything else is rejected.
 
 **Common mistakes that will cause the skill to silently fail:**
 - ❌ `executeSkillTool({ tool_name })` — wrong, do not destructure parameters
@@ -140,6 +152,37 @@ const res = await fetch('https://api.example.com/endpoint', {
 });
 const data = await res.json();
 ```
+
+---
+
+## Showing images and videos
+
+If your skill produces an image or video, return the file path *and* push an inline preview to the chat by accepting `ctx` as the 5th parameter:
+
+```js
+export async function executeSkillTool(name, args, userId, agentId, ctx) {
+  if (name === 'myskill_make_image') {
+    const base64 = await callSomeApiThatReturnsBase64Png(args.prompt);
+    const filename = `myskill-${Date.now()}.png`;
+    const savedPath = path.join(process.env.OPENENSEMBLE_ROOT, 'users', userId, 'images', filename);
+    fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+    fs.writeFileSync(savedPath, Buffer.from(base64, 'base64'));
+
+    // Push the inline preview bubble — same one Grok / Fireworks use.
+    await ctx?.showImage?.({ base64, mimeType: 'image/png', filename, savedPath, prompt: args.prompt });
+
+    return `Saved to ${savedPath}`;
+  }
+  return null;
+}
+```
+
+`ctx` exposes:
+- `ctx.showImage({ base64, mimeType, filename, savedPath, prompt? })` — chat renders an image bubble.
+- `ctx.showVideo({ url, filename, savedPath })` — chat renders a video bubble.
+- `ctx.userId`, `ctx.agentId` — for convenience (same values as the 3rd and 4th args).
+
+Always check with optional chaining (`ctx?.showImage?.(...)`). If the skill is invoked outside an interactive chat (e.g. by a scheduled task), `ctx` may be undefined or its helpers may be no-ops, and your skill should still complete and return its string result.
 
 ---
 

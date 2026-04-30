@@ -535,12 +535,41 @@ export async function onRoleEnabled(roleId, userId) {
 
 // ── Execution ─────────────────────────────────────────────────────────────────
 
+// Lazy ws-handler import — avoids the chat-dispatch ↔ roles ↔ ws-handler cycle.
+let _wsMod = null;
+async function _wsHandler() {
+  if (_wsMod === null) {
+    try { _wsMod = await import('./ws-handler.mjs'); }
+    catch { _wsMod = false; }
+  }
+  return _wsMod || null;
+}
+
+// Build the per-call context object passed to skill executors as the 5th arg.
+// Skills that don't accept it (4-param signature) ignore it transparently.
+async function buildCtx(userId, agentId) {
+  const ctx = { userId, agentId };
+  ctx.showImage = async ({ base64, mimeType = 'image/png', filename, savedPath, prompt } = {}) => {
+    if (!agentId || !base64 || !filename) return 0;
+    const mod = await _wsHandler();
+    if (!mod?.sendToUser) return 0;
+    return mod.sendToUser(userId, { type: 'image', agent: agentId, base64, mimeType, filename, savedPath, prompt });
+  };
+  ctx.showVideo = async ({ url, filename, savedPath } = {}) => {
+    if (!agentId || !url || !filename) return 0;
+    const mod = await _wsHandler();
+    if (!mod?.sendToUser) return 0;
+    return mod.sendToUser(userId, { type: 'video', agent: agentId, url, filename, savedPath });
+  };
+  return ctx;
+}
+
 // Execute a tool — routes to the skill that owns it, scoped to what `userId` can see.
 export async function executeRoleTool(name, args, userId = 'default', agentId = null) {
   for (const [key, wrap] of visibleEntries(userId)) {
     if (wrap.manifest.tools?.some(t => t.function?.name === name)) {
       const exec = await getExecutorByKey(key);
-      if (exec) return exec(name, args, userId, agentId);
+      if (exec) return exec(name, args, userId, agentId, await buildCtx(userId, agentId));
       break;
     }
   }
@@ -619,7 +648,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
 
   const _toolStart = Date.now();
   try {
-    const result = skillExec(name, args, userId, agentId);
+    const result = skillExec(name, args, userId, agentId, await buildCtx(userId, agentId));
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
       for await (const chunk of result) yield chunk;
     } else {

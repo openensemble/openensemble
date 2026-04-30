@@ -57,9 +57,10 @@ async function validateExecutor(skillDir, toolNames = []) {
       return 'execute.mjs must export executeSkillTool as a named or default export';
     }
 
-    // Check 0: must declare exactly 4 parameters (name, args, userId, agentId)
-    if (fn.length !== 4) {
-      return `executeSkillTool must declare exactly 4 parameters (name, args, userId, agentId) but yours declares ${fn.length}. Copy the signature from the blueprint exactly.`;
+    // Check 0: must declare 4 or 5 parameters. The 5th (ctx) is optional —
+    // skills that show images/videos inline take it; everything else uses 4.
+    if (fn.length !== 4 && fn.length !== 5) {
+      return `executeSkillTool must declare 4 or 5 parameters (name, args, userId, agentId[, ctx]) but yours declares ${fn.length}. Copy the signature from the blueprint exactly.`;
     }
 
     // Check 1: unknown tool name must return null
