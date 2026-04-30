@@ -42,8 +42,25 @@
 
 /* ── Inbox cards (single-column list, no avatar tile) ── */
 .inbox-card-list { display: flex; flex-direction: column; gap: 1px; background: var(--border); }
-.email-card-row { border-left: 3px solid transparent; }
+.email-card-row { border-left: 3px solid transparent; position: relative; }
 .email-card-row:hover { border-left-color: var(--accent); }
+.email-card-delete {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.email-card-row:hover .email-card-delete { opacity: 1; }
+.email-card-delete:hover { color: var(--red); border-color: var(--red); }
 
 /* ── Email detail panel ── */
 .email-detail {

@@ -248,9 +248,9 @@ export async function handle(req, res) {
       if (account.provider === 'gmail') {
         result = await fetchGmailInboxPage(userId, pageToken, max, account.id, query);
       } else if (account.provider === 'microsoft') {
-        result = await fetchMsInboxPage(userId, account.id, pageToken, max);
+        result = await fetchMsInboxPage(userId, account.id, pageToken, max, query);
       } else if (account.provider === 'imap') {
-        result = await fetchImapPage(userId, account, pageToken, max);
+        result = await fetchImapPage(userId, account, pageToken, max, query);
       } else {
         throw new Error('Unknown provider');
       }

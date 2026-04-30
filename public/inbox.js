@@ -1,18 +1,30 @@
 // ── Inbox preview ─────────────────────────────────────────────────────────────
 function makeDrawerToolbar(label, refreshFn) {
+  const q = _activeInboxQuery ?? '';
+  const clearBtn = q
+    ? `<button class="drawer-refresh" title="Clear search" onclick="clearInboxSearch()" style="padding:0 8px">✕</button>`
+    : '';
   return `<div class="drawer-toolbar" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
     <span style="font-size:11px;color:var(--muted)">${label}</span>
-    <input id="inboxSearch" type="text" placeholder="Search…" onkeydown="if(event.key==='Enter')searchInbox(this.value)" style="flex:1;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text);min-width:0">
+    <input id="inboxSearch" type="text" placeholder="Search…" value="${escHtml(q)}" onkeydown="if(event.key==='Enter')searchInbox(this.value)" style="flex:1;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text);min-width:0">
+    ${clearBtn}
     <button class="drawer-refresh" onclick="${refreshFn}()">↻</button>
   </div>`;
 }
 
 async function searchInbox(query) {
   query = query?.trim();
-  if (!query) { loadInboxPreview(); return; }
+  if (!query) { clearInboxSearch(); return; }
+  _activeInboxQuery = query;
   const el = $('inboxPreview');
-  const cardList = $('inboxCardList');
-  if (cardList) cardList.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Searching…</div>';
+  // Re-render toolbar so the X button appears and the input retains its value
+  // when the cardList is replaced below.
+  const tbHtml = makeDrawerToolbar('Inbox', 'loadInboxPreview');
+  if (el) {
+    el.innerHTML = tbHtml +
+      `<div id="inboxCardList" class="inbox-card-list"><div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Searching…</div></div>` +
+      `<div id="inboxScrollSentinel" style="height:1px"></div>`;
+  }
   try {
     const qs = `/api/inbox?max=30&query=${encodeURIComponent(query)}${_activeInboxAccountId ? `&accountId=${encodeURIComponent(_activeInboxAccountId)}` : ''}`;
     const data = await fetch(qs, { cache: 'no-store' }).then(r => r.json());
@@ -32,10 +44,16 @@ async function searchInbox(query) {
   }
 }
 
+function clearInboxSearch() {
+  _activeInboxQuery = null;
+  loadInboxPreview();
+}
+
 function _inboxCardHtml(e) {
   const from = e.from.replace(/<[^>]+>/, '').replace(/"/g, '').trim() || e.from;
   const date = e.date ? new Date(e.date).toLocaleDateString(undefined, { month:'short', day:'numeric' }) : '';
-  return `<div class="news-card email-card-row" onclick="openEmailDetail('${escHtml(e.id)}')">
+  const id = escHtml(e.id);
+  return `<div class="news-card email-card-row" onclick="openEmailDetail('${id}')">
     <div class="news-card-body">
       <div class="news-card-meta">
         <span class="news-card-source">${escHtml(from)}</span>
@@ -44,7 +62,49 @@ function _inboxCardHtml(e) {
       <div class="news-card-title">${escHtml(e.subject)}</div>
       <div class="news-card-desc">${escHtml(e.snippet)}</div>
     </div>
+    <button class="email-card-delete" title="Delete" aria-label="Delete email" onclick="inboxQuickDelete('${id}', event)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>
+    </button>
   </div>`;
+}
+
+async function inboxQuickDelete(msgId, ev) {
+  ev?.stopPropagation?.();
+  ev?.preventDefault?.();
+  if (!_inboxEmailActions.length) {
+    try {
+      const skills = await fetch('/api/roles').then(r => r.json());
+      const emailSkill = skills.find(s => s.category === 'email' && s.enabled && s.actions);
+      _inboxEmailActions = emailSkill?.actions ?? [];
+    } catch {}
+  }
+  const action = _inboxEmailActions.find(a => a.id === 'trash');
+  if (!action?.tool) { showToast?.('Trash action unavailable'); return; }
+  const card = ev?.currentTarget?.closest('.email-card-row');
+  if (card) { card.style.opacity = '0.5'; card.style.pointerEvents = 'none'; }
+  try {
+    await fetch('/api/email/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tool: action.tool,
+        args: { account: _activeInboxAccountId ?? undefined, messageId: msgId },
+      }),
+    });
+    if (typeof updateStatusBar === 'function') updateStatusBar();
+    // Optimistic remove — drop the card and keep the rest of the list intact.
+    delete _inboxEmailMeta[msgId];
+    if (card) card.remove();
+    const list = $('inboxCardList');
+    if (list && !list.querySelector('.email-card-row')) {
+      // Last visible card — refresh once to either pull the next page or
+      // show the "empty" placeholder.
+      loadInboxPreview();
+    }
+  } catch (e) {
+    if (card) { card.style.opacity = ''; card.style.pointerEvents = ''; }
+    showToast?.(`Delete failed: ${e.message}`);
+  }
 }
 
 async function loadEmailAccountTabs() {
@@ -77,8 +137,9 @@ async function loadInboxPreview(accountId) {
   if (!_inboxAccounts.length || Date.now() - _inboxAccountsLoadedAt > 300000) {
     await loadEmailAccountTabs();
   }
-  // Default to first account
-  if (!accountId) accountId = _inboxAccounts[0]?.id ?? null;
+  // No-arg calls (refresh-after-action, "back" button) preserve the current
+  // tab. Only fall back to the first account when nothing is selected yet.
+  if (!accountId) accountId = _activeInboxAccountId ?? _inboxAccounts[0]?.id ?? null;
   _activeInboxAccountId = accountId;
   // Re-render tabs to update active highlight
   await loadEmailAccountTabs();
@@ -95,14 +156,14 @@ async function loadInboxPreview(accountId) {
   el.innerHTML = makeDrawerToolbar('Inbox', 'loadInboxPreview') +
     `<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Loading…</div>`;
   try {
-    const qs = `/api/inbox?max=30${accountId ? `&accountId=${encodeURIComponent(accountId)}` : ''}`;
+    const qs = `/api/inbox?max=30${accountId ? `&accountId=${encodeURIComponent(accountId)}` : ''}${_activeInboxQuery ? `&query=${encodeURIComponent(_activeInboxQuery)}` : ''}`;
     const data = await fetch(qs, { cache: 'no-store' }).then(r => r.json());
     if (data.error) throw new Error(data.error);
     const emails = data.emails ?? [];
     _inboxNextPageToken = data.nextPageToken ?? null;
     if (!emails.length) {
       el.innerHTML = makeDrawerToolbar('Inbox', 'loadInboxPreview') +
-        `<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Inbox is empty.</div>`;
+        `<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">${_activeInboxQuery ? 'No results.' : 'Inbox is empty.'}</div>`;
       return;
     }
     // Store email metadata for the detail view to look up by id; clear action cache
@@ -142,7 +203,7 @@ async function loadMoreInboxEmails() {
   if (sentinel) sentinel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:8px;text-align:center">Loading more…</div>`;
 
   try {
-    const url = `/api/inbox?max=30&pageToken=${encodeURIComponent(_inboxNextPageToken)}${_activeInboxAccountId ? `&accountId=${encodeURIComponent(_activeInboxAccountId)}` : ''}`;
+    const url = `/api/inbox?max=30&pageToken=${encodeURIComponent(_inboxNextPageToken)}${_activeInboxAccountId ? `&accountId=${encodeURIComponent(_activeInboxAccountId)}` : ''}${_activeInboxQuery ? `&query=${encodeURIComponent(_activeInboxQuery)}` : ''}`;
     const data = await fetch(url, { cache: 'no-store' }).then(r => r.json());
     if (data.error) throw new Error(data.error);
     const emails = data.emails ?? [];
@@ -183,6 +244,7 @@ let _inboxLoading = false;
 let _inboxLastFetch = 0;
 let _inboxAccounts = [];
 let _activeInboxAccountId = null;
+let _activeInboxQuery = null;
 let _inboxAccountsLoadedAt = 0;
 
 async function openEmailDetail(msgId) {
