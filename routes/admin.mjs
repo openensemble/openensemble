@@ -652,7 +652,7 @@ async function sendInviteEmail(adminUserId, to, inviteUrl, role) {
 
   if (account.smtpHost) {
     const { sendSmtpEmail } = await import('../lib/smtp-client.mjs');
-    await sendSmtpEmail(account, { to, subject, body, html });
+    await sendSmtpEmail(adminUserId, account, { to, subject, body, html });
     return;
   }
 

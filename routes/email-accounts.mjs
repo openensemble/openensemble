@@ -133,11 +133,25 @@ export async function handle(req, res) {
       try {
         await testConnection({ host, port: port ?? 993, tls: tls !== false, username, password });
       } catch (e) {
+        // imapflow throws Error('Command failed') for pretty much every server-side
+        // rejection, with the real diagnostic on auxiliary fields. Surface them so
+        // the user sees something actionable instead of a generic message.
+        const parts = [];
+        if (e.responseText)       parts.push(`server said: ${e.responseText}`);
+        if (e.responseStatus)     parts.push(`status: ${e.responseStatus}`);
+        if (e.code)               parts.push(`code: ${e.code}`);
+        if (e.authenticationFailed) parts.push('authenticationFailed=true');
+        const detail = parts.length ? parts.join(' | ') : e.message;
+        console.warn('[email-accounts] IMAP testConnection failed', {
+          host, port: port ?? 993, username, message: e.message,
+          responseText: e.responseText, responseStatus: e.responseStatus,
+          code: e.code, authenticationFailed: e.authenticationFailed,
+        });
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `IMAP connection failed: ${e.message}` }));
+        res.end(JSON.stringify({ error: `IMAP connection failed: ${detail}` }));
         return true;
       }
-      const encryptedPassword = await encrypt(password);
+      const encryptedPassword = await encrypt(userId, password);
       account = { ...account, host, port: port ?? 993, tls: tls !== false, username, encryptedPassword };
       // Optional SMTP for sending
       if (smtpHost) {
@@ -208,7 +222,7 @@ export async function handle(req, res) {
       } else if (account.provider === 'microsoft') {
         html = await fetchMsMessageBody(userId, account.id, msgId);
       } else if (account.provider === 'imap') {
-        html = await fetchImapMessageBody(account, msgId);
+        html = await fetchImapMessageBody(userId, account, msgId);
       } else {
         throw new Error('Unknown provider');
       }
@@ -236,7 +250,7 @@ export async function handle(req, res) {
       } else if (account.provider === 'microsoft') {
         result = await fetchMsInboxPage(userId, account.id, pageToken, max);
       } else if (account.provider === 'imap') {
-        result = await fetchImapPage(account, pageToken, max);
+        result = await fetchImapPage(userId, account, pageToken, max);
       } else {
         throw new Error('Unknown provider');
       }

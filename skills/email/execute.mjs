@@ -268,7 +268,7 @@ async function execImap(name, args, account, userId) {
     const resolveErr = attachmentResolutionError(args.attachment_doc_ids, errors);
     if (resolveErr) return resolveErr;
     const { sendSmtpEmail } = await import('../../lib/smtp-client.mjs');
-    return sendSmtpEmail(account, { to: args.to, subject: args.subject, body: args.body, html: args.html_body, attachments });
+    return sendSmtpEmail(userId, account, { to: args.to, subject: args.subject, body: args.body, html: args.html_body, attachments });
   }
 
   if (name === 'email_reply') {
@@ -276,11 +276,11 @@ async function execImap(name, args, account, userId) {
       return `"${account.label}" has no SMTP configured — cannot send replies. Re-add the account with SMTP settings.`;
     }
     if (!args.messageId || !args.body) return 'messageId and body are required.';
-    const headers = await fetchImapReplyHeaders(account, args.messageId);
+    const headers = await fetchImapReplyHeaders(userId, account, args.messageId);
     if (!headers?.replyTo) return `Could not find message ${args.messageId} to reply to.`;
     const subject = headers.subject.startsWith('Re:') ? headers.subject : `Re: ${headers.subject}`;
     const { sendSmtpEmail } = await import('../../lib/smtp-client.mjs');
-    return sendSmtpEmail(account, {
+    return sendSmtpEmail(userId, account, {
       to: headers.replyTo,
       subject,
       body: args.body,
@@ -291,21 +291,21 @@ async function execImap(name, args, account, userId) {
 
   if (name === 'email_trash') {
     if (!args.messageId) return 'No messageId provided.';
-    await deleteImapMessages(account, [args.messageId]);
+    await deleteImapMessages(userId, account, [args.messageId]);
     return `Message ${args.messageId} deleted.`;
   }
 
   if (name === 'email_batch_trash') {
     const ids = args.messageIds ?? [];
     if (!ids.length) return 'No message IDs provided.';
-    const count = await deleteImapMessages(account, ids);
+    const count = await deleteImapMessages(userId, account, ids);
     return `${count} message(s) deleted.`;
   }
 
   if (name === 'email_mark_read') {
     const ids = args.messageIds ?? [];
     if (!ids.length) return 'No message IDs provided.';
-    const count = await markImapMessages(account, ids, args.unread ?? false);
+    const count = await markImapMessages(userId, account, ids, args.unread ?? false);
     return `${count} message(s) marked ${args.unread ? 'unread' : 'read'}.`;
   }
 
@@ -315,12 +315,12 @@ async function execImap(name, args, account, userId) {
   }
   switch (name) {
     case 'email_list': {
-      const { emails } = await fetchInboxPage(account, null, args.maxResults || 10);
+      const { emails } = await fetchInboxPage(userId, account, null, args.maxResults || 10);
       if (!emails.length) return 'No messages found.';
       return emails.map(e => `[${e.id}] From: ${e.from}\nSubject: ${e.subject}\nDate: ${e.date}\n${e.snippet}`).join('\n\n---\n\n');
     }
     case 'email_read': {
-      const html = await fetchImapMessageBody(account, args.messageId);
+      const html = await fetchImapMessageBody(userId, account, args.messageId);
       return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     }
     case 'email_thread':

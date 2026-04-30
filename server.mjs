@@ -392,7 +392,7 @@ registerBuiltin('fireReminder', async (task) => {
         const sender = accts.find(a => a.smtpHost && a.encryptedPassword);
         if (sender) {
           const { sendSmtpEmail } = await import('./lib/smtp-client.mjs');
-          await sendSmtpEmail(sender, {
+          await sendSmtpEmail(task.ownerId, sender, {
             to: sender.username,
             subject: `Reminder: ${task.label}`,
             body: `This is your reminder:\n\n${task.label}\n\nFired at ${new Date().toLocaleString()}.`,
