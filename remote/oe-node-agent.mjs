@@ -49,7 +49,7 @@ const __dirname = path.dirname(__filename);
 // Bump this any time the agent script changes so the server can detect outdated
 // nodes. The server reads this constant from /nodes/agent to know the latest
 // version; the agent sends it in the register message.
-const AGENT_VERSION = '1.6.0';
+const AGENT_VERSION = '1.6.2';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const CONFIG_DIR = process.platform === 'win32'
@@ -663,15 +663,45 @@ function runAgent(config) {
 
     let ws;
     try {
-      ws = new WebSocket(serverUrl);
+      // handshakeTimeout prevents the constructor from parking forever if the
+      // TCP connect succeeds but the upgrade handshake never completes.
+      ws = new WebSocket(serverUrl, { handshakeTimeout: 15000 });
     } catch (e) {
       return reject(e);
     }
 
     let registered = false;
     let pingTimer = null;
+    let livenessTimer = null;
+    let lastActivity = Date.now();
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (pingTimer)     { clearInterval(pingTimer);     pingTimer = null; }
+      if (livenessTimer) { clearInterval(livenessTimer); livenessTimer = null; }
+      try { ws.terminate(); } catch {}
+      resolve();
+    };
+
+    // Application-level liveness watchdog. If we haven't seen any server
+    // activity (message or pong) in 90s, treat the socket as dead and tear
+    // it down. Catches half-open TCP sockets where neither `close` nor
+    // `error` ever fire — e.g. when OE is restarted abruptly mid-frame.
+    livenessTimer = setInterval(() => {
+      const idle = Date.now() - lastActivity;
+      if (idle > 90000) {
+        log(`No server activity for ${Math.round(idle/1000)}s — terminating stale socket`);
+        settle();
+        return;
+      }
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.ping(); } catch {}
+      }
+    }, 30000);
 
     ws.on('open', () => {
+      lastActivity = Date.now();
       log('Connected. Registering...');
       ws.send(JSON.stringify({
         type: 'register',
@@ -690,6 +720,7 @@ function runAgent(config) {
     });
 
     ws.on('message', (raw) => {
+      lastActivity = Date.now();
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
 
@@ -801,18 +832,20 @@ function runAgent(config) {
 
     ws.on('close', (code, reason) => {
       registered = false;
-      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
       killAllPtys();
       log(`Disconnected (${code}${reason ? ': ' + reason : ''})`);
-      resolve(); // resolve to trigger reconnect loop
+      settle();
     });
 
     ws.on('error', (err) => {
       log(`WebSocket error: ${err.message}`);
-      // Don't reject — the close event will fire and resolve
+      // Don't trust `close` to always follow `error` — for some half-open
+      // socket failures only one of the two fires. Settle here too;
+      // settle() is idempotent so a later close is a no-op.
+      settle();
     });
 
-    ws.on('pong', () => { /* WS-level keepalive ack */ });
+    ws.on('pong', () => { lastActivity = Date.now(); });
   });
 }
 
@@ -1187,15 +1220,16 @@ function installCliWrapper() {
 # Read-only commands run as the current user; everything else auto-elevates.
 
 case "\${1:-}" in
-  ''|status|logs|help|--help|-h|discover|version|--version|-v)
+  status|logs|help|--help|-h|discover|version|--version|-v)
     ;;
   *)
+    # Bare "oe" lands here too — menu needs root, so elevate.
     if [ "$(id -u)" -ne 0 ]; then exec sudo "$0" "$@"; fi
     ;;
 esac
 
-# Bare "oe" → status
-if [ $# -eq 0 ]; then set -- status; fi
+# Bare "oe" → interactive config menu
+if [ $# -eq 0 ]; then set -- menu; fi
 
 exec ${nodePath} ${OE_INSTALL_DIR}/oe-node-agent.mjs "$@"
 `;
@@ -1362,6 +1396,17 @@ async function handleUpdateMessage(msg, ws, config) {
 
   fs.renameSync(tmp, dest);
   log(`[update] Wrote ${dest} (${size} bytes). ACKing and exiting for restart...`);
+
+  // Refresh the /usr/local/bin/oe wrapper from the *currently-running* code.
+  // The wrapper was added later than the auto-update flow, so older nodes that
+  // got the .mjs via push-update were never migrated off the legacy
+  // /usr/local/bin/openensemble name. Best-effort: writes need root, the
+  // function may be absent on very old agents — both cases are caught.
+  try {
+    if (typeof installCliWrapper === 'function') installCliWrapper();
+  } catch (e) {
+    log(`[update] wrapper refresh skipped: ${e.message}`);
+  }
 
   try { ws.send(JSON.stringify({ type: 'update_result', ok: true, size })); } catch {}
 
