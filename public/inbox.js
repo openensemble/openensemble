@@ -365,9 +365,13 @@ async function sendInlineReply() {
     const data = await r.json().catch(() => ({}));
     if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
     const out = typeof data.result === 'string' ? data.result : '';
-    // Treat as success only if the underlying tool returned a Message ID.
-    // Anything else (Gmail API error, subprocess error, "Unknown tool", etc.) is a failure.
-    if (!/Message ID:/i.test(out)) throw new Error(out || 'Send failed (no Message ID returned)');
+    // Success markers vary by backend:
+    //   - Gmail / SMTP return "...Message ID: <id>"
+    //   - Microsoft Graph /me/sendMail is async (202) and returns "Email sent." / "Reply sent."
+    //     with no synchronous message ID
+    // Accept either shape; treat anything else (Gmail API error, "Unknown tool", etc.) as failure.
+    const looksSuccessful = /Message ID:/i.test(out) || /^\s*(?:Email|Reply|Message)\s+(?:sent|moved)\b/i.test(out);
+    if (!looksSuccessful) throw new Error(out || 'Send failed');
     closeReplyComposer();
     showToast(isForward ? 'Forwarded' : 'Reply sent');
   } catch (e) {

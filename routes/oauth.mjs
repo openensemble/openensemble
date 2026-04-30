@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import { requireAuth, readBody, getUserDir, loadConfig } from './_helpers.mjs';
 import { seedGmailAccount } from './email-accounts.mjs';
 import { ensureFreshToken, resolveTokenPath, getClientCredentials, CREDS_PATH, GOOGLE_AUTH_BASE_DIR as BASE_DIR } from '../lib/google-auth.mjs';
+import { msTokenPath } from '../lib/ms-graph.mjs';
 
 // Resolve the redirect URI for this request. Preference order:
 //   1. config.json `externalUrl` (e.g. "https://oe.example.com") — for reverse-proxy deployments
@@ -192,8 +193,9 @@ export async function handle(req, res) {
   // ── Connection status ─────────────────────────────────────────────────────
   if (url.pathname === '/api/oauth/status' && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
-    // Check per-account Gmail token health
+    // Check per-account token health for Gmail and Microsoft accounts
     const gmailHealth = {};
+    const msHealth = {};
     try {
       const accountsPath = path.join(getUserDir(userId), 'email-accounts.json');
       if (fs.existsSync(accountsPath)) {
@@ -208,6 +210,16 @@ export async function handle(req, res) {
             gmailHealth[a.id] = 'ok';
           } catch { gmailHealth[a.id] = 'error'; }
         }
+        for (const a of accounts.filter(a => a.provider === 'microsoft')) {
+          const tp = msTokenPath(userId, a.id);
+          if (!fs.existsSync(tp)) { msHealth[a.id] = 'missing'; continue; }
+          try {
+            const tokens = JSON.parse(fs.readFileSync(tp, 'utf8'));
+            if (!tokens.access_token) { msHealth[a.id] = 'missing'; continue; }
+            if (!tokens.refresh_token) { msHealth[a.id] = 'no_refresh'; continue; }
+            msHealth[a.id] = 'ok';
+          } catch { msHealth[a.id] = 'error'; }
+        }
       }
     } catch {}
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -215,6 +227,7 @@ export async function handle(req, res) {
       gmail: isConnected(userId, 'gmail'),
       gcal:  isConnected(userId, 'gcal'),
       gmailHealth,
+      msHealth,
     }));
     return true;
   }

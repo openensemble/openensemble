@@ -20,12 +20,14 @@ async function loadOAuthStatus() {
       fetch('/api/oauth/status', {}).then(r => r.json()).catch(() => ({})),
       fetch('/api/provider-config').then(r => r.json()).catch(() => ({})),
     ]);
-    const { gcal, gmailHealth } = oauthStatus;
+    const { gcal, gmailHealth, msHealth } = oauthStatus;
     const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
     const msCreds = providerCfg.msClientIdSet && providerCfg.msClientSecretSet;
     const providerIcon = p => p === 'gmail' ? icon('mail', 13) : p === 'microsoft' ? icon('building', 13) : icon('globe', 13);
     const accountRows = (accounts ?? []).map(a => {
-      const health = a.provider === 'gmail' ? (gmailHealth ?? {})[a.id] : null;
+      const health = a.provider === 'gmail' ? (gmailHealth ?? {})[a.id]
+                   : a.provider === 'microsoft' ? (msHealth ?? {})[a.id]
+                   : null;
       const needsReconnect = health === 'expired' || health === 'no_refresh' || health === 'missing' || health === 'error';
       const statusBadge = health === 'ok' ? '<span style="font-size:10px;color:var(--green,#4caf50);margin-left:4px">Connected</span>'
         : needsReconnect ? '<span style="font-size:10px;color:var(--red,#e05c5c);margin-left:4px">Token expired</span>'
@@ -40,6 +42,7 @@ async function loadOAuthStatus() {
         </div>
         <div style="display:flex;gap:6px;flex-shrink:0">
           ${a.provider === 'gmail' ? `<button onclick="reconnectGmail('${escHtml(a.id)}')" style="background:${needsReconnect ? 'var(--accent)' : 'none'};border:1px solid ${needsReconnect ? 'transparent' : 'var(--border)'};color:${needsReconnect ? '#fff' : 'var(--text)'};border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:${needsReconnect ? '600' : '400'}">${needsReconnect ? 'Reconnect' : 'Re-auth'}</button>` : ''}
+          ${a.provider === 'microsoft' ? `<button onclick="reconnectMicrosoft('${escHtml(a.id)}')" style="background:${needsReconnect ? 'var(--accent)' : 'none'};border:1px solid ${needsReconnect ? 'transparent' : 'var(--border)'};color:${needsReconnect ? '#fff' : 'var(--text)'};border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:${needsReconnect ? '600' : '400'}">${needsReconnect ? 'Reconnect' : 'Re-auth'}</button>` : ''}
           <button onclick="renameEmailAccount('${escHtml(a.id)}','${escHtml(a.label.replace(/'/g,"\\'"))}')" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Rename</button>
           <button onclick="deleteEmailAccount('${escHtml(a.id)}')" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Delete</button>
         </div>
@@ -76,19 +79,12 @@ async function loadOAuthStatus() {
 }
 
 async function connectMicrosoft() {
-  // Check if credentials are already configured
+  // Default path: use OE's built-in multi-tenant Azure app. The server falls
+  // back to it automatically when no user-configured creds exist AND the
+  // redirect URI is loopback (Microsoft's localhost rule). Only show the
+  // credentials modal if the user explicitly opts in via the override link.
   try {
-    const cfg = await fetch('/api/provider-config').then(r => r.json()).catch(() => ({}));
-    if (cfg.msClientIdSet && cfg.msClientSecretSet) {
-      await _doMicrosoftOAuth();
-    } else {
-      const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
-      if (!isPriv) {
-        alert('Microsoft connection is not configured yet. Ask your OpenEnsemble admin to set it up.');
-        return;
-      }
-      showMicrosoftCredsModal();
-    }
+    await _doMicrosoftOAuth();
   } catch (e) { alert(`Error: ${e.message}`); }
 }
 
@@ -100,7 +96,7 @@ function showMicrosoftCredsModal() {
   modal.innerHTML = `
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;width:380px;max-width:calc(100vw - 32px);display:flex;flex-direction:column;gap:12px">
       <div style="font-size:14px;font-weight:700">Connect Microsoft / Outlook</div>
-      <div style="font-size:11px;color:var(--muted);line-height:1.5">Register an app at <strong>portal.azure.com → App registrations</strong> with redirect URI <code style="background:var(--bg3);padding:1px 4px;border-radius:3px">http://localhost:3737/api/oauth/microsoft/callback</code> and scopes <code style="background:var(--bg3);padding:1px 4px;border-radius:3px">Mail.Read offline_access</code>, then paste the credentials below.</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.5">Register an app at <strong>portal.azure.com → App registrations</strong> with redirect URI <code style="background:var(--bg3);padding:1px 4px;border-radius:3px">http://localhost:3737/api/oauth/microsoft/callback</code> and delegated scopes <code style="background:var(--bg3);padding:1px 4px;border-radius:3px">Mail.ReadWrite Mail.Send offline_access</code>, then paste the credentials below. Granting admin consent in Azure is required for organizational accounts (Office 365, GoDaddy 365, etc.).</div>
       <input id="msCrClientId" placeholder="Application (client) ID" autocomplete="off"
         style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
       <input id="msCrClientSecret" type="password" placeholder="Client secret value" autocomplete="new-password"
@@ -284,6 +280,14 @@ async function submitImapAccount() {
     if (errEl) { errEl.textContent = e.message; errEl.style.display = ''; }
     if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
   }
+}
+
+async function reconnectMicrosoft(accountId) {
+  try {
+    const res = await fetch(`/api/oauth/microsoft/connect?accountId=${encodeURIComponent(accountId)}`).then(r => r.json());
+    if (res.error) { alert(`Error: ${res.error}`); return; }
+    window.open(res.url, '_blank', 'noopener');
+  } catch (e) { alert(`Error: ${e.message}`); }
 }
 
 async function reconnectGmail(accountId) {
