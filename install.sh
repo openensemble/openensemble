@@ -439,8 +439,14 @@ SERVICE
     # and, if the directory doesn't exist, enable user lingering so the
     # manager runs without a login session.
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-    if [ ! -S "$XDG_RUNTIME_DIR/bus" ]; then
-      info "No active user-session bus — enabling lingering (allows systemd --user to run without a login)..."
+    # Probe whether `systemctl --user` actually works. On Proxmox / minimal
+    # Debian LXCs, lingering keeps the user manager alive but does NOT
+    # auto-start dbus.socket, so $XDG_RUNTIME_DIR/bus is missing even when
+    # the manager is fine. systemctl talks to systemd's private socket, not
+    # dbus — probe that path directly.
+    user_manager_ready() { systemctl --user list-units --no-pager >/dev/null 2>&1; }
+    if ! user_manager_ready; then
+      info "User manager unreachable — enabling lingering (allows systemd --user to run without a login)..."
       # Try direct call first if root (Proxmox LXCs and other minimal images
       # often ship without sudo; root doesn't need it). Fall back to sudo for
       # non-root users.
@@ -455,9 +461,10 @@ SERVICE
         fi
       fi
       if [[ "$LINGER_OK" == "true" ]]; then
-        # Lingering creates /run/user/<UID> on next manager spawn; nudge it.
-        for _ in 1 2 3 4 5; do
-          [ -S "$XDG_RUNTIME_DIR/bus" ] && break
+        # Lingering causes logind to spawn the user manager on next probe.
+        # Spawn can take 10-20s on cold/slow boxes, so allow 30s.
+        for _ in $(seq 1 30); do
+          user_manager_ready && break
           sleep 1
         done
       else
@@ -475,16 +482,20 @@ SERVICE
       fi
     fi
 
-    if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+    if user_manager_ready; then
       # Wait for the user manager to finish reaching default.target before
-      # calling `enable`. On a freshly-lingered manager the bus socket
-      # appears before default.target is active, and `enable` run during
-      # that window writes the symlink but reports the unit as `disabled`
-      # because the Install-section resolve races the target chain.
+      # calling `enable`. On a freshly-lingered manager, default.target can
+      # take a moment to settle and `enable` run in that window writes the
+      # Install symlink but reports the unit as `disabled` because the
+      # resolve races the target chain.
       for _ in $(seq 1 15); do
         [ "$(systemctl --user is-active default.target 2>/dev/null)" = "active" ] && break
         sleep 1
       done
+      # Best-effort: bring up dbus.socket so interactive sessions and any
+      # tool that does want dbus (loginctl, gdbus, etc.) finds it without
+      # waiting for pam_systemd. Harmless if already running.
+      systemctl --user start dbus.socket 2>/dev/null || true
       systemctl --user daemon-reload
       systemctl --user enable --now openensemble.service
       HAVE_SERVICE=true
