@@ -128,6 +128,7 @@ export async function drainToolWithEvents(name, args, userId, agentId) {
       if (chunk.type === 'token')              toolResult += chunk.text;
       if (chunk.type === 'permission_request') events.push(chunk);
       if (chunk.type === 'tool_call')          events.push({ type: 'tool_call', name: chunk.name, args: chunk.args });
+      if (chunk.type === 'tool_progress')      events.push({ type: 'tool_progress', name: chunk.name, text: chunk.text });
       if (chunk.type === 'tool_result')        events.push({ type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) });
       if (chunk.type === 'result')             toolResult = chunk.text;
     }

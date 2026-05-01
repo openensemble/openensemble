@@ -203,6 +203,36 @@
 .tool-pill.tool-done { color: var(--fg); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .tool-pill-summary { font-family: var(--font); font-size: 10px; opacity: 0.7; margin-left: 2px;
   max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-pill-subtitle { font-family: monospace; font-size: 10px; opacity: 0.7; margin-left: 4px;
+  max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Currently-streaming tool's output: a chat-bubble-sized container that lives
+   directly under the small-pill row. Only one is shown at a time; it vanishes
+   on tool_result and the small pill above flips to its done state. */
+.tool-stream-bubble {
+  display: flex; flex-direction: column; gap: 4px;
+  width: 100%; max-width: 820px; min-width: 0;
+  padding: 6px 10px; margin: 4px 0 6px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  box-sizing: border-box;
+}
+.tool-stream-bubble .tool-pill-head {
+  display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px;
+}
+.tool-stream-bubble .tool-pill-head .tool-pill-cmd {
+  font-family: monospace; font-size: 11px; color: var(--fg); opacity: 0.85;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+}
+.tool-pill-stream {
+  font-family: monospace; font-size: 11px; line-height: 1.35; color: var(--fg); opacity: 0.85;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; margin: 0;
+  /* ~10 lines: 10 × 1.35em + 12px padding. min-* are required so flex doesn't
+     let it grow to content size and ignore max-height / overflow-x. */
+  min-height: 0; min-width: 0; max-height: calc(10 * 1.35em + 12px);
+  overflow-y: auto; overflow-x: hidden;
+  white-space: pre-wrap; word-break: break-word;
+}
 .tool-pill.clickable { cursor: pointer; transition: border-color .15s, color .15s; }
 .tool-pill.clickable:hover,
 .tool-pill.clickable:focus-visible { color: var(--fg); border-color: var(--accent); outline: none; }

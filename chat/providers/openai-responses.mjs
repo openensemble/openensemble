@@ -249,6 +249,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           if (chunk.type === 'token')              toolResultText += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
           if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
+          if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
           if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
           if (chunk.type === 'result')             toolResultText = chunk.text;
         }

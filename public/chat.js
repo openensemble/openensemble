@@ -45,7 +45,7 @@ async function send() {
   $('input').value = '';
   resizeTextarea();
   clearAttachment();
-  toolPillsEl = null;
+  toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
   if (awaitingPermission) {
     awaitingPermission = false;
     // Don't reset streaming — Ada is still running; just show typing indicator
@@ -350,7 +350,25 @@ function appendStreamingBubble() {
   const el = msgEl('assistant'); insertBefore(el);
   return el.querySelector('.msg-bubble');
 }
-function showToolPill(name) {
+// Pull the most informative arg for a tool into a one-line subtitle.
+// Returns '' if nothing useful is available — the pill stays as just the name.
+function toolPillSubtitle(name, args) {
+  if (!args || typeof args !== 'object') return '';
+  // Tools where the headline arg is the user-visible action.
+  if (name === 'node_exec' && typeof args.command === 'string') return args.command;
+  if (name === 'node_push_project' && typeof args.dest_path === 'string') {
+    return `${args.node_id || ''} → ${args.dest_path}`.trim();
+  }
+  if (name === 'node_start_service' && typeof args.command === 'string') {
+    const cwd = args.cwd ? `(${args.cwd}) ` : '';
+    return `${cwd}${args.command}`;
+  }
+  if (name === 'node_stop_service') return `pid ${args.pid} on ${args.node_id || ''}`.trim();
+  if (name === 'node_status' || name === 'node_list') return args.node_id || '';
+  return '';
+}
+
+function showToolPill(name, args) {
   if (!toolPillsEl) {
     toolPillsEl = document.createElement('div');
     toolPillsEl.className = 'tool-pills';
@@ -362,14 +380,94 @@ function showToolPill(name) {
   pill.className = 'tool-pill';
   pill.dataset.tool = name;
   pill.innerHTML = `${icon('settings', 13)} ${escHtml(name)}`;
+  const subtitle = toolPillSubtitle(name, args);
+  if (subtitle) {
+    pill._argSubtitle = subtitle;
+    const sub = document.createElement('span');
+    sub.className = 'tool-pill-subtitle';
+    sub.textContent = subtitle.length > 100 ? subtitle.slice(0, 100) + '…' : subtitle;
+    sub.title = subtitle;
+    pill.appendChild(sub);
+  }
   toolPillsEl.appendChild(pill);
   scrollToBottom();
 }
-function updateToolPill(name, summary, fullText) {
-  if (!toolPillsEl) return;
+
+// One streaming bubble at a time, rendered as a separate element below the
+// small-pill row. The currently-streaming tool's output goes here; the small
+// pill above it stays small. On tool_result, the bubble vanishes and the small
+// pill flips to its done state in place. If a different tool starts streaming
+// before the current one finishes, the bubble switches to the newer tool.
+const PROGRESS_BUF_CAP = 16 * 1024;
+let toolStreamBubbleEl = null;
+let toolStreamBubbleTool = null;
+
+function _findLatestPendingPill(name) {
+  if (!toolPillsEl) return null;
   const pills = toolPillsEl.querySelectorAll('.tool-pill');
   for (let i = pills.length - 1; i >= 0; i--) {
     if (pills[i].dataset.tool === name && !pills[i].classList.contains('tool-done')) {
+      return pills[i];
+    }
+  }
+  return null;
+}
+
+function _ensureStreamBubble(name, argSubtitle) {
+  if (toolStreamBubbleEl && toolStreamBubbleTool === name) return toolStreamBubbleEl;
+  // Different tool (or none yet) — rebuild the bubble.
+  if (toolStreamBubbleEl) toolStreamBubbleEl.remove();
+  toolStreamBubbleEl = document.createElement('div');
+  toolStreamBubbleEl.className = 'tool-stream-bubble';
+  const head = document.createElement('div');
+  head.className = 'tool-pill-head';
+  head.innerHTML = `${icon('settings', 13)} ${escHtml(name)}`;
+  if (argSubtitle) {
+    const cmdEl = document.createElement('span');
+    cmdEl.className = 'tool-pill-cmd';
+    cmdEl.textContent = argSubtitle;
+    cmdEl.title = argSubtitle;
+    head.appendChild(cmdEl);
+  }
+  const stream = document.createElement('pre');
+  stream.className = 'tool-pill-stream';
+  stream._buf = '';
+  toolStreamBubbleEl.appendChild(head);
+  toolStreamBubbleEl.appendChild(stream);
+  // Insert directly after the pills row so it always lives just below.
+  toolPillsEl.parentNode.insertBefore(toolStreamBubbleEl, toolPillsEl.nextSibling);
+  toolStreamBubbleTool = name;
+  return toolStreamBubbleEl;
+}
+
+function appendToolPillProgress(name, text) {
+  if (!toolPillsEl || !text) return;
+  const pendingPill = _findLatestPendingPill(name);
+  if (!pendingPill) return; // nothing to attach progress to (already finished)
+  const argSub = pendingPill._argSubtitle || '';
+  const bubble = _ensureStreamBubble(name, argSub);
+  const stream = bubble.querySelector('.tool-pill-stream');
+  stream._buf = (stream._buf + text).slice(-PROGRESS_BUF_CAP);
+  stream.textContent = stream._buf;
+  stream.scrollTop = stream.scrollHeight;
+  scrollToBottom();
+}
+
+function _dismissStreamBubbleIf(name) {
+  if (toolStreamBubbleEl && toolStreamBubbleTool === name) {
+    toolStreamBubbleEl.remove();
+    toolStreamBubbleEl = null;
+    toolStreamBubbleTool = null;
+  }
+}
+function updateToolPill(name, summary, fullText) {
+  if (!toolPillsEl) return;
+  // If this tool was streaming into the bubble, dismiss it — the small pill below takes over.
+  _dismissStreamBubbleIf(name);
+  const pills = toolPillsEl.querySelectorAll('.tool-pill');
+  for (let i = pills.length - 1; i >= 0; i--) {
+    if (pills[i].dataset.tool === name && !pills[i].classList.contains('tool-done')) {
+      // innerHTML reassign drops the arg subtitle.
       pills[i].innerHTML = `${icon('check', 13)} ${escHtml(name)}`;
       if (summary) {
         const sum = document.createElement('span');

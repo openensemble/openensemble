@@ -169,28 +169,67 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list to see available nodes.` }; return; }
 
-    try {
-      let totalOutput = '';
-      // Use canonical nodeId for the send call — getNode may have resolved a hostname.
-      const result = await sendCommandStreaming(node.nodeId, userId, {
-        type: 'exec',
-        command,
-        timeout: Math.min(timeout, 300),
-      }, (stream, data) => {
-        // onChunk callback — not used for yielding (can't yield from callback)
-        // chunks are collected by the registry's pendingCommands.chunks
-      });
+    // Bridge the chunk callback (from the registry's WS stream) into yieldable
+    // events. A simple promise-queue: callback pushes, generator awaits next.
+    const queue = [];
+    let pendingResolver = null;
+    const push = (item) => {
+      if (pendingResolver) { const r = pendingResolver; pendingResolver = null; r(item); }
+      else queue.push(item);
+    };
+    const nextItem = () => queue.length
+      ? Promise.resolve(queue.shift())
+      : new Promise(res => { pendingResolver = res; });
 
-      // Build final result from the completed command
+    let cmdResult = null;
+    let cmdError = null;
+    sendCommandStreaming(node.nodeId, userId, {
+      type: 'exec',
+      command,
+      timeout: Math.min(timeout, 300),
+    }, (stream, data) => push({ kind: 'chunk', stream, data }))
+      .then(r => { cmdResult = r; push({ kind: 'done' }); })
+      .catch(e => { cmdError = e; push({ kind: 'done' }); });
+
+    // Coalesce bursts of small chunks into one progress event per ~150ms
+    // so a fast-streaming command doesn't flood the websocket.
+    const FLUSH_MS = 150;
+    const FLUSH_MAX = 4 * 1024;
+    let buf = { stdout: '', stderr: '' };
+    let lastFlush = 0;
+    const drainBuf = () => {
+      const out = (buf.stdout ? buf.stdout : '') + (buf.stderr ? `STDERR${buf.stderr}` : '');
+      buf = { stdout: '', stderr: '' };
+      lastFlush = Date.now();
+      return out;
+    };
+
+    while (true) {
+      const item = await nextItem();
+      if (item.kind === 'chunk') {
+        if (item.stream === 'stderr') buf.stderr += item.data;
+        else                          buf.stdout += item.data;
+        const total = buf.stdout.length + buf.stderr.length;
+        if (total >= FLUSH_MAX || Date.now() - lastFlush >= FLUSH_MS) {
+          yield { type: 'tool_progress', name: 'node_exec', text: drainBuf() };
+        }
+        continue;
+      }
+      // done
+      if (buf.stdout || buf.stderr) {
+        yield { type: 'tool_progress', name: 'node_exec', text: drainBuf() };
+      }
+      if (cmdError) {
+        yield { type: 'result', text: `Command failed: ${cmdError.message}` };
+        return;
+      }
       let output = '';
-      if (result.stdout) output += truncate(result.stdout);
-      if (result.stderr) output += (output ? '\n\n' : '') + `STDERR:\n${truncate(result.stderr)}`;
-      output += `\n\nExit code: ${result.exitCode} (${result.duration}ms)`;
-      yield { type: 'result', text: output || `Command completed with exit code ${result.exitCode}` };
-    } catch (e) {
-      yield { type: 'result', text: `Command failed: ${e.message}` };
+      if (cmdResult.stdout) output += truncate(cmdResult.stdout);
+      if (cmdResult.stderr) output += (output ? '\n\n' : '') + `STDERR:\n${truncate(cmdResult.stderr)}`;
+      output += `\n\nExit code: ${cmdResult.exitCode} (${cmdResult.duration}ms)`;
+      yield { type: 'result', text: output || `Command completed with exit code ${cmdResult.exitCode}` };
+      return;
     }
-    return;
   }
 
   if (name === 'node_push_project') {

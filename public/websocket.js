@@ -61,7 +61,7 @@ function forceReconnect() {
     if (!sessions[activeAgent]) sessions[activeAgent] = [];
     sessions[activeAgent].push({ role: 'assistant', content: streamBuf, ts: Date.now() });
   }
-  streamEl = null; streamBuf = ''; toolPillsEl = null;
+  streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
   // Don't reset the status dot yet — keep it busy until the server confirms
   // via active_streams whether the agent is still working.  This avoids the
   // green flash on reconnect when the agent is actually still thinking.
@@ -194,7 +194,12 @@ function handleServerMessage(msg) {
         break;
       }
       if (getActiveWidgetTarget?.()) break; // Suppress tool pills when response is in widget
-      showToolPill(msg.name);
+      showToolPill(msg.name, msg.args);
+      break;
+    case 'tool_progress':
+      if (msg.agent !== activeAgent) break;
+      if (getActiveWidgetTarget?.()) break;
+      appendToolPillProgress(msg.name, msg.text);
       break;
     case 'tool_result':
       if (msg.agent !== activeAgent) break;
@@ -257,7 +262,7 @@ function handleServerMessage(msg) {
           if (!sessions[msg.agent]) sessions[msg.agent] = [];
           sessions[msg.agent].push({ role: 'assistant', content: finalBuf, ts: Date.now(), hidden: true });
         }
-        streamEl = null; streamBuf = ''; toolPillsEl = null;
+        streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
         setStreaming(false);
         break;
       }
@@ -267,7 +272,7 @@ function handleServerMessage(msg) {
         addTimestamp(streamEl.closest('.msg'));
         if (msg.agent === activeAgent) updateSessionWarning();
       }
-      streamEl = null; streamBuf = ''; toolPillsEl = null;
+      streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
       setStreaming(false); setTyping(false);
       delete agentStreams[msg.agent];
       if (agents.find(a => a.skillCategory === 'expenses')?.id === msg.agent && $('drawerExpenses')?.classList.contains('open')) loadExpTxns();
