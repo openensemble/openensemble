@@ -476,9 +476,17 @@ SERVICE
     fi
 
     if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+      # Wait for the user manager to finish reaching default.target before
+      # calling `enable`. On a freshly-lingered manager the bus socket
+      # appears before default.target is active, and `enable` run during
+      # that window writes the symlink but reports the unit as `disabled`
+      # because the Install-section resolve races the target chain.
+      for _ in $(seq 1 15); do
+        [ "$(systemctl --user is-active default.target 2>/dev/null)" = "active" ] && break
+        sleep 1
+      done
       systemctl --user daemon-reload
-      systemctl --user enable openensemble.service
-      systemctl --user start openensemble.service
+      systemctl --user enable --now openensemble.service
       HAVE_SERVICE=true
       success "Systemd service installed and started"
     fi
@@ -590,15 +598,19 @@ echo ""
 # the server running via `systemctl --user start`.
 SERVER_AUTOSTARTED=false
 if [[ "${HAVE_SERVICE:-false}" != "true" ]]; then
-  if pgrep -f "node $INSTALL_DIR/server.mjs" >/dev/null 2>&1; then
+  # start.sh cd's into INSTALL_DIR then `exec node server.mjs`, so the live
+  # cmdline is the relative path — match the same regex the systemd unit uses
+  # rather than a literal absolute path that would never hit.
+  if pgrep -f "node .*server\.mjs" >/dev/null 2>&1; then
     SERVER_AUTOSTARTED=true
   else
     info "Starting OpenEnsemble in the background..."
     ( cd "$INSTALL_DIR" && nohup bash start.sh > server.log 2>&1 & ) >/dev/null 2>&1
-    # Give it a couple of seconds to bind 3737 before declaring success.
-    for _ in 1 2 3 4 5; do
+    # Give it a few seconds to bind 3737 before declaring success. Fresh
+    # installs take longer than a steady-state restart (skills/agents load).
+    for _ in $(seq 1 15); do
       sleep 1
-      if pgrep -f "node $INSTALL_DIR/server.mjs" >/dev/null 2>&1; then
+      if pgrep -f "node .*server\.mjs" >/dev/null 2>&1; then
         SERVER_AUTOSTARTED=true; break
       fi
     done
