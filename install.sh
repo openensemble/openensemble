@@ -517,9 +517,13 @@ success "Installed $OE_BIN"
 # from the next SSH session even though it installed cleanly. Append an
 # init line to each shell rc that doesn't already have one, and export
 # it in the current shell so the post-install banner works too.
+# Track whether the parent shell will see `oe` without intervention. If
+# ~/.local/bin wasn't already on the invoking shell's PATH, the user has to
+# `source` an rc file or open a new shell — say so explicitly in the banner.
+OE_PATH_NEEDS_RELOAD=false
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) export PATH="$BIN_DIR:$PATH" ;;
+  *) export PATH="$BIN_DIR:$PATH"; OE_PATH_NEEDS_RELOAD=true ;;
 esac
 for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
   [[ -f "$rc" ]] || continue
@@ -593,8 +597,10 @@ echo ""
 # If nvm was installed during this run, the current shell already has it on
 # PATH (we sourced nvm.sh mid-script) — but brand-new SSH sessions won't until
 # they re-read .bashrc. Tell the user so `node` isn't mysteriously missing.
-if [[ "$NVM_LOADED_IN_SHELL" == "true" ]]; then
-  echo -e "  ${BOLD}Note:${RESET} To use ${YELLOW}node${RESET} / ${YELLOW}npm${RESET} directly in future shells, either"
-  echo -e "        open a new terminal, or run: ${YELLOW}source ~/.bashrc${RESET}"
+if [[ "$OE_PATH_NEEDS_RELOAD" == "true" || "$NVM_LOADED_IN_SHELL" == "true" ]]; then
+  echo -e "  ${BOLD}Note:${RESET} The ${YELLOW}oe${RESET} command (and ${YELLOW}node${RESET}/${YELLOW}npm${RESET} if just installed)"
+  echo -e "        won't be on PATH until you reload your shell. Either:"
+  echo -e "          • open a new terminal, or"
+  echo -e "          • run: ${YELLOW}source ~/.bashrc${RESET} ${RESET}(or ${YELLOW}~/.zshrc${RESET} / ${YELLOW}~/.profile${RESET})"
   echo ""
 fi
