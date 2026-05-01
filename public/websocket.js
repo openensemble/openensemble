@@ -292,6 +292,15 @@ function handleServerMessage(msg) {
       sessions[msg.agent].push({ role: 'assistant', video: { url: msg.url, filename: msg.filename, savedPath: msg.savedPath }, content: `[Video: ${msg.filename}]`, ts: Date.now() });
       break;
     case 'error':
+      // Server-side auth rejection on the WS handshake — clear the stale
+      // token and bail. Without this, ws.onclose's reconnect loop would keep
+      // re-auth'ing with the same bad token and spawning a chat bubble per
+      // attempt.
+      if (msg.message === 'Unauthorized') {
+        setToken(null);
+        showLoginScreen();
+        break;
+      }
       if (msg.agent && msg.agent !== activeAgent) break;
       setStreaming(false); appendError(msg.message); break;
     case 'status':
