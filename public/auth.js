@@ -185,13 +185,24 @@ async function doInitialRestore() {
   status.textContent = 'Uploading backup…';
   try {
     const buf = await fileInput.files[0].arrayBuffer();
+    const password = document.getElementById('setupRestorePassword')?.value ?? '';
+    const headers = { 'Content-Type': 'application/octet-stream' };
+    if (password) headers['X-Restore-Password'] = password;
     const r = await _origFetch('/api/admin/restore-initial', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/gzip' },
+      headers,
       body: buf,
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || `Restore failed (${r.status})`);
+    if (!r.ok) {
+      if (data?.encrypted && !password) {
+        status.style.color = 'var(--muted)';
+        status.textContent = 'This backup is encrypted — enter the password and try again.';
+        btn.disabled = false; btn.textContent = 'Restore from Backup';
+        return;
+      }
+      throw new Error(data.error || `Restore failed (${r.status})`);
+    }
     status.style.color = 'var(--green,#43b89c)';
     status.textContent = `Restored ${data.restored} item(s). Reloading…`;
     setTimeout(() => location.reload(), 800);

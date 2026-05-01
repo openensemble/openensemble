@@ -77,7 +77,8 @@
       <button class="login-btn" onclick="doSetup()">Create Profile & Sign In</button>
       <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--bg3);display:flex;flex-direction:column;gap:8px">
         <div style="font-size:12px;color:var(--muted);text-align:center">Already have an OpenEnsemble backup?</div>
-        <input type="file" id="setupRestoreFile" accept=".tar.gz,.tgz,application/gzip" style="font-size:12px">
+        <input type="file" id="setupRestoreFile" accept=".tar.gz,.tgz,.oeb,application/gzip,application/octet-stream" style="font-size:12px">
+        <input type="password" id="setupRestorePassword" placeholder="Password (only if backup is encrypted)" autocomplete="off" style="font-size:12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;box-sizing:border-box">
         <button class="login-btn" id="setupRestoreBtn" onclick="doInitialRestore()" disabled style="background:var(--bg3)">Restore from Backup</button>
         <div class="login-error" id="setupRestoreStatus" style="color:var(--muted);font-size:12px"></div>
       </div>
@@ -1103,16 +1104,19 @@
           <div style="display:flex;flex-direction:column;gap:16px">
             <div>
               <div class="settings-section-title" style="margin-bottom:8px">Export Backup</div>
-              <button id="btnBackupDownload" onclick="downloadBackup()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:10px 18px;font-size:12px;cursor:pointer;font-weight:600;width:100%">Download Backup (.tar.gz)</button>
+              <input type="password" id="backupPassword" placeholder="Password (optional — encrypts the backup)" autocomplete="new-password" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;box-sizing:border-box;margin-bottom:8px">
+              <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4">If you set a password, the backup is encrypted with AES-256 and the password is required to restore. There is no recovery — if you forget it, the backup is unreadable.</div>
+              <button id="btnBackupDownload" onclick="downloadBackup()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:10px 18px;font-size:12px;cursor:pointer;font-weight:600;width:100%">Download Backup</button>
             </div>
 
             <div style="border-top:1px solid var(--border);padding-top:14px">
               <div class="settings-section-title" style="margin-bottom:4px">Restore Backup</div>
               <div style="font-size:11px;color:var(--red,#e05c5c);margin-bottom:8px">Warning: This will overwrite current data. The server should be restarted after restoring.</div>
-              <div style="display:flex;gap:8px;align-items:center">
-                <input type="file" id="backupFileInput" accept=".tar.gz,.tgz" style="font-size:11px;color:var(--muted);flex:1">
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+                <input type="file" id="backupFileInput" accept=".tar.gz,.tgz,.oeb" style="font-size:11px;color:var(--muted);flex:1">
                 <button id="btnBackupRestore" onclick="restoreBackup()" style="background:var(--red,#e05c5c);border:none;color:#fff;border-radius:8px;padding:10px 18px;font-size:12px;cursor:pointer;font-weight:600;white-space:nowrap" disabled>Restore</button>
               </div>
+              <input type="password" id="restorePassword" placeholder="Password (only if backup is encrypted)" autocomplete="off" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;box-sizing:border-box">
               <div id="restoreStatus" style="font-size:11px;color:var(--muted);margin-top:6px;min-height:16px"></div>
             </div>
           </div>

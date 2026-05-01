@@ -8,13 +8,24 @@ OpenEnsemble is fully backed by files on disk — `users/`, `config.json`, `mess
 
 **Settings → Backup → Export Backup** → **Download**. The file includes:
 
-- `config.json` (without your encryption secret, by default — see below)
-- All user dirs under `users/`
+- `config.json`
+- All user dirs under `users/` (which is where each user's per-user encryption key lives, so encrypted-at-rest fields restore cleanly)
 - `messages.json`, `threads.json`, `tasks/`
 - Expenses, autolabel rules, sharing manifest
 - Custom skills, custom drawers, custom roles
 
 It does **not** include the bundled GGUF models, your `node_modules/`, or anything in `.git`.
+
+### Password-protected backups
+
+The Export panel has an optional **Password** field. If you fill it in:
+
+- The backup is encrypted with **AES-256-GCM**, with the key derived from your password using **scrypt** (N=2¹⁵, r=8, p=1).
+- The downloaded file is named `.oeb` instead of `.tar.gz` and is no longer a readable tarball — `tar tzvf` won't work on it.
+- Restoring requires the same password (the Restore panel has a matching password field; first-run restore on a fresh install does too).
+- **There is no recovery.** The password is the only way in. If you forget it, the backup is unreadable.
+
+If you leave the password field blank, the backup is plain `.tar.gz` exactly as before, no encryption.
 
 ### Restore
 

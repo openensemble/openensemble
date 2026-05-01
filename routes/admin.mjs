@@ -25,6 +25,7 @@ import {
   applyUpdate, restartProcess,
 } from '../lib/update.mjs';
 import { broadcastToUsers } from '../ws-handler.mjs';
+import { encryptBackup, decryptBackup, isEncryptedBackup } from '../lib/backup-crypto.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -167,6 +168,27 @@ async function performRestore(raw, { clearOwnerConfig = false } = {}) {
     return restored;
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+// If the archive looks encrypted (magic bytes "OE1\x01"), require a password
+// in the X-Restore-Password header and return the decrypted tar.gz buffer.
+// Otherwise return the buffer unchanged. On error, writes the response and
+// returns null so the caller can early-return.
+async function maybeDecryptRestore(raw, req, res) {
+  if (!isEncryptedBackup(raw)) return raw;
+  const password = (req.headers['x-restore-password'] || '').toString();
+  if (!password) {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'X-Backup-Encrypted': '1' });
+    res.end(JSON.stringify({ error: 'This backup is encrypted — please enter the password.', encrypted: true }));
+    return null;
+  }
+  try {
+    return decryptBackup(raw, password);
+  } catch (e) {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'X-Backup-Encrypted': '1' });
+    res.end(JSON.stringify({ error: e.message, encrypted: true }));
+    return null;
   }
 }
 
@@ -515,20 +537,64 @@ export async function handle(req, res) {
   }
 
   // ── Backup endpoint ───────────────────────────────────────────────────────
-  if (req.url === '/api/admin/backup' && req.method === 'GET') {
+  // GET  → plain tar.gz, streamed (no password).
+  // POST → optional password in X-Backup-Password header; if present we
+  //        buffer the tar and emit an encrypted .oeb.gz file. Empty header
+  //        falls back to the streaming path.
+  if (req.url === '/api/admin/backup' && (req.method === 'GET' || req.method === 'POST')) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
       const files = collectBackupFiles();
+      const password = (req.headers['x-backup-password'] || '').toString();
+      const dateStr = new Date().toISOString().slice(0,10);
 
+      if (password) {
+        // Encrypted backup: buffer the tar first, encrypt, then write.
+        // Cap memory at 2 GiB compressed to avoid OOM on huge installs;
+        // anyone over that should use a plain backup or back up offline.
+        const ENC_MAX = 2 * 1024 * 1024 * 1024;
+        const tar = spawn('tar', ['czf', '-', '--', ...files], { cwd: BASE_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+        const chunks = [];
+        let collected = 0;
+        let aborted = false;
+        tar.stderr.on('data', d => console.error('[backup]', d.toString()));
+        tar.stdout.on('data', d => {
+          collected += d.length;
+          if (collected > ENC_MAX) {
+            aborted = true;
+            try { tar.kill('SIGKILL'); } catch {}
+            return;
+          }
+          chunks.push(d);
+        });
+        await new Promise((resolve, reject) => {
+          tar.on('close', code => code === 0 ? resolve() : reject(new Error(`tar exit ${code}`)));
+          tar.on('error', reject);
+        });
+        if (aborted) {
+          throw new Error(`Backup too large to encrypt in memory (>${Math.round(ENC_MAX/1024/1024)} MB). Use a plain backup or back up offline.`);
+        }
+        const plain = Buffer.concat(chunks);
+        const enc = encryptBackup(plain, password);
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': enc.length,
+          'Content-Disposition': `attachment; filename="openensemble-backup-${dateStr}.oeb"`,
+          'X-Backup-Encrypted': '1',
+        });
+        res.end(enc);
+        return true;
+      }
+
+      // Plain (legacy, streaming) path.
       res.writeHead(200, {
         'Content-Type': 'application/gzip',
-        'Content-Disposition': `attachment; filename="openensemble-backup-${new Date().toISOString().slice(0,10)}.tar.gz"`,
+        'Content-Disposition': `attachment; filename="openensemble-backup-${dateStr}.tar.gz"`,
       });
-
       const tar = spawn('tar', ['czf', '-', '--', ...files], { cwd: BASE_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
       tar.stdout.pipe(res);
       tar.stderr.on('data', d => console.error('[backup]', d.toString()));
-      tar.on('error', e => { if (!res.writableEnded) res.end(); });
+      tar.on('error', () => { if (!res.writableEnded) res.end(); });
     } catch (e) {
       if (!res.headersSent) safeError(res, e);
     }
@@ -539,7 +605,8 @@ export async function handle(req, res) {
   if (req.url === '/api/admin/restore' && req.method === 'POST') {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
-      const raw = await readRestoreBody(req);
+      let raw = await readRestoreBody(req);
+      raw = await maybeDecryptRestore(raw, req, res); if (!raw) return true;
       const restored = await performRestore(raw);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, restored }));
@@ -557,7 +624,8 @@ export async function handle(req, res) {
         res.end(JSON.stringify({ error: 'Restore-initial is only available before any profiles exist. Use /api/admin/restore as owner instead.' }));
         return true;
       }
-      const raw = await readRestoreBody(req);
+      let raw = await readRestoreBody(req);
+      raw = await maybeDecryptRestore(raw, req, res); if (!raw) return true;
       const restored = await performRestore(raw, { clearOwnerConfig: true });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, restored }));
