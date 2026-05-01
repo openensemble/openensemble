@@ -585,8 +585,33 @@ echo -e "    oe logs -f     — follow logs"
 echo -e "    oe update      — pull latest + restart"
 echo -e "    oe uninstall   — remove service"
 echo ""
+# Auto-start when no systemd service was registered, so a fresh box is
+# ready-to-use the moment install.sh finishes. Service-mode already has
+# the server running via `systemctl --user start`.
+SERVER_AUTOSTARTED=false
+if [[ "${HAVE_SERVICE:-false}" != "true" ]]; then
+  if pgrep -f "node $INSTALL_DIR/server.mjs" >/dev/null 2>&1; then
+    SERVER_AUTOSTARTED=true
+  else
+    info "Starting OpenEnsemble in the background..."
+    ( cd "$INSTALL_DIR" && nohup bash start.sh > server.log 2>&1 & ) >/dev/null 2>&1
+    # Give it a couple of seconds to bind 3737 before declaring success.
+    for _ in 1 2 3 4 5; do
+      sleep 1
+      if pgrep -f "node $INSTALL_DIR/server.mjs" >/dev/null 2>&1; then
+        SERVER_AUTOSTARTED=true; break
+      fi
+    done
+    if [[ "$SERVER_AUTOSTARTED" == "true" ]]; then
+      success "Server started — logs at $INSTALL_DIR/server.log"
+    else
+      warn "Server didn't come up in time — check $INSTALL_DIR/server.log"
+    fi
+  fi
+fi
+
 echo -e "  ${BOLD}Next steps:${RESET}"
-if [[ "${HAVE_SERVICE:-false}" == "true" ]]; then
+if [[ "${HAVE_SERVICE:-false}" == "true" || "$SERVER_AUTOSTARTED" == "true" ]]; then
   echo -e "  1. Open ${YELLOW}${WEB_URL}${RESET} and create your first user"
 else
   echo -e "  1. Run ${YELLOW}$INSTALL_DIR/start.sh${RESET} or ${YELLOW}oe start${RESET} to start the server"
