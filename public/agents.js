@@ -71,10 +71,15 @@ function buildTabs() {
     const btn = document.createElement('button');
     btn.className = 'nav-tab' + (a.id === activeAgent ? ' active' : '');
     const busy = agentStreams[a.id]?.active ? '<span class="busy-dot"></span>' : '';
-    btn.innerHTML = `<span class="nav-emoji">${a.emoji}</span><span>${a.name}</span>${busy}`;
+    btn.innerHTML = `<span class="nav-emoji">${a.emoji}</span><span class="nav-name">${escHtml(a.name)}</span>${busy}`;
     btn.onclick = () => switchAgent(a.id);
     inner.appendChild(btn);
   });
+  // Keep the active tab in view when the bar overflows horizontally
+  const activeBtn = inner.querySelector('.nav-tab.active');
+  if (activeBtn && inner.scrollWidth > inner.clientWidth) {
+    activeBtn.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
+  }
   updateAgentPill();
   checkEmptyState();
 }

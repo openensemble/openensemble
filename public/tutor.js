@@ -29,7 +29,11 @@ function pronounceWordBrowser(text, lang) {
 }
 
 function renderMarkdown(text) {
-  return renderTutorWidgets(renderPronounceButtons(DOMPurify.sanitize(marked.parse(text))));
+  return renderTutorWidgets(renderPronounceButtons(wrapTables(DOMPurify.sanitize(marked.parse(text)))));
+}
+
+function wrapTables(html) {
+  return html.replace(/<table(\s[^>]*)?>([\s\S]*?)<\/table>/g, (m) => `<div class="table-wrap">${m}</div>`);
 }
 
 // ── Widget dispatcher ────────────────────────────────────────────────────────

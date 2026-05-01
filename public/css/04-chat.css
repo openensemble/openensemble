@@ -36,15 +36,19 @@
 .msg-bubble p  { margin-bottom: 8px; }
 .msg-bubble p:last-child { margin-bottom: 0; }
 .msg-bubble pre { background: #111; border: 1px solid var(--border); border-radius: 6px;
-  padding: 10px 12px; overflow-x: auto; margin: 8px 0; }
+  padding: 10px 12px; overflow-x: auto; margin: 8px 0; max-width: 100%; }
+.msg-bubble pre code { white-space: pre; }
 .msg-bubble code { font-family: 'Fira Code', monospace; font-size: 12px; }
-.msg-bubble :not(pre) > code { background: #111; padding: 2px 5px; border-radius: 4px; }
+.msg-bubble :not(pre) > code { background: #111; padding: 2px 5px; border-radius: 4px;
+  word-break: break-word; overflow-wrap: anywhere; }
 .msg-bubble ul, .msg-bubble ol { padding-left: 18px; margin-bottom: 8px; }
 .msg-bubble li { margin-bottom: 3px; }
 .msg-bubble h1,.msg-bubble h2,.msg-bubble h3 { margin: 10px 0 6px; }
 .msg-bubble strong { color: #fff; }
 .msg-bubble a { color: var(--accent); }
-.msg-bubble table { border-collapse: collapse; width: 100%; margin: 8px 0; overflow-x: auto; display: block; }
+.msg-bubble .table-wrap { overflow-x: auto; max-width: 100%; margin: 8px 0; -webkit-overflow-scrolling: touch; }
+.msg-bubble table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+.msg-bubble .table-wrap table { margin: 0; }
 .msg-bubble th,.msg-bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 .msg-bubble th { background: var(--bg2); }
 
