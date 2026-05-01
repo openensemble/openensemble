@@ -53,6 +53,74 @@ function ollamaLocalAuthHeaders() {
 // format the adapter was trained on and pin the stop tokens so Ollama doesn't
 // over-generate past JSON close-braces. Stop tokens come from the SmolLM2
 // tokenizer's end-of-turn markers.
+/**
+ * Post-install smoke call. Sends a 1-token chat request through the runtime
+ * we just installed into. Surfaces the JIT-loading-off failure mode for
+ * LM Studio (404 because the model file is on disk but not loaded into RAM)
+ * before the user ever leaves Settings.
+ *
+ * Returns { ok, status, message } — never throws, so callers can attach the
+ * result to their install response without try/catch.
+ */
+async function _smokeChat({ provider, baseUrl, headers, model, kind = 'reason' }) {
+  const name = kind === 'plan' ? 'Plan' : 'Reason';
+  try {
+    let res;
+    if (provider === 'ollama') {
+      res = await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({
+          model, stream: false,
+          messages: [{ role: 'user', content: 'ok' }],
+          options: { temperature: 0, num_predict: 1, num_ctx: 64 },
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+    } else {
+      // lmstudio (openai-compat)
+      res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({
+          model, temperature: 0, stream: false, max_tokens: 1,
+          messages: [{ role: 'user', content: 'ok' }],
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+    }
+    if (res.ok) {
+      return { ok: true, status: res.status, message: `${name} test call succeeded — model is loaded and reachable.` };
+    }
+    if (res.status === 404 && provider === 'lmstudio') {
+      return {
+        ok: false, status: 404,
+        message:
+          `Install copied the file, but LM Studio rejected a test call (404 — model "${model}" not loaded). ` +
+          `LM Studio's "Just-In-Time Model Loading" is likely off (default). ` +
+          `Enable it under Developer → Just-In-Time Model Loading, or load the model manually in LM Studio's "My Models" tab. ` +
+          `Until you do, ${name.toLowerCase()} calls will fail silently.`,
+      };
+    }
+    if (res.status === 404 && provider === 'ollama') {
+      return {
+        ok: false, status: 404,
+        message: `Install reported success, but Ollama doesn't recognize "${model}". Try \`ollama list\` to confirm — you may need to restart the daemon.`,
+      };
+    }
+    const text = await res.text().catch(() => '');
+    return {
+      ok: false, status: res.status,
+      message: `${name} test call returned HTTP ${res.status}${text ? `: ${text.slice(0, 160)}` : ''}.`,
+    };
+  } catch (e) {
+    return {
+      ok: false, status: null,
+      message: `${name} test call could not reach ${provider} (${e.message}). The install completed but you'll need to verify the runtime is running.`,
+    };
+  }
+}
+
 function buildModelfile(ggufPath) {
   return [
     `FROM ${ggufPath}`,
@@ -137,7 +205,11 @@ export async function installIntoOllama() {
       x.cortex.reasonProvider = 'ollama';
       x.cortex.reasonModel = OLLAMA_MODEL_TAG;
     });
-    return { ok: true, tag: OLLAMA_MODEL_TAG };
+    const smoke = await _smokeChat({
+      provider: 'ollama', baseUrl: base, headers: ollamaLocalAuthHeaders(),
+      model: OLLAMA_MODEL_TAG, kind: 'reason',
+    });
+    return { ok: true, tag: OLLAMA_MODEL_TAG, smoke };
   } catch (e) {
     return { ok: false, error: `Ollama create failed: ${e.message}` };
   }
@@ -196,7 +268,15 @@ export async function installIntoLmstudio() {
       x.cortex.reasonProvider = 'lmstudio';
       x.cortex.reasonModel = modelId;
     });
-    return { ok: true, modelId, path: destFile };
+    const cfg = loadConfig();
+    const lmsBase = (cfg?.cortex?.lmstudioUrl ?? 'http://127.0.0.1:1234').replace(/\/$/, '');
+    const lmsHeaders = cfg?.cortex?.lmstudioApiKey
+      ? { Authorization: `Bearer ${cfg.cortex.lmstudioApiKey}` } : {};
+    const smoke = await _smokeChat({
+      provider: 'lmstudio', baseUrl: lmsBase, headers: lmsHeaders,
+      model: modelId, kind: 'reason',
+    });
+    return { ok: true, modelId, path: destFile, smoke };
   } catch (e) {
     return { ok: false, error: `LM Studio install failed: ${e.message}` };
   }

@@ -57,6 +57,67 @@ function ollamaLocalAuthHeaders() {
   return key ? { Authorization: `Bearer ${key}` } : {};
 }
 
+/**
+ * Post-install smoke call. Mirrors memory/reason-transfer.mjs:_smokeChat —
+ * surfaces LM Studio JIT-off (404) and Ollama-not-running cases at install
+ * time so users don't first hit them when the scheduler tries to parse a
+ * scheduling request and silently degrades.
+ */
+async function _smokeChat({ provider, baseUrl, headers, model }) {
+  try {
+    let res;
+    if (provider === 'ollama') {
+      res = await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({
+          model, stream: false,
+          messages: [{ role: 'user', content: 'ok' }],
+          options: { temperature: 0, num_predict: 1, num_ctx: 64 },
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+    } else {
+      res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({
+          model, temperature: 0, stream: false, max_tokens: 1,
+          messages: [{ role: 'user', content: 'ok' }],
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+    }
+    if (res.ok) return { ok: true, status: res.status, message: 'Plan test call succeeded — model is loaded and reachable.' };
+    if (res.status === 404 && provider === 'lmstudio') {
+      return {
+        ok: false, status: 404,
+        message:
+          `Install copied the file, but LM Studio rejected a test call (404 — model "${model}" not loaded). ` +
+          `LM Studio's "Just-In-Time Model Loading" is likely off (default). ` +
+          `Enable it under Developer → Just-In-Time Model Loading, or load the model manually in LM Studio's "My Models" tab. ` +
+          `Until you do, scheduling will fail silently.`,
+      };
+    }
+    if (res.status === 404 && provider === 'ollama') {
+      return {
+        ok: false, status: 404,
+        message: `Install reported success, but Ollama doesn't recognize "${model}". Try \`ollama list\` to confirm — you may need to restart the daemon.`,
+      };
+    }
+    const text = await res.text().catch(() => '');
+    return {
+      ok: false, status: res.status,
+      message: `Plan test call returned HTTP ${res.status}${text ? `: ${text.slice(0, 160)}` : ''}.`,
+    };
+  } catch (e) {
+    return {
+      ok: false, status: null,
+      message: `Plan test call could not reach ${provider} (${e.message}). The install completed but you'll need to verify the runtime is running.`,
+    };
+  }
+}
+
 // Modelfile template+params for the new-API shape (Ollama ≥ 0.6).
 // Same ChatML template as reason — both are SmolLM2-Instruct derivatives.
 const OLLAMA_TEMPLATE = '<|im_start|>system\n{{ .System }}<|im_end|>\n<|im_start|>user\n{{ .Prompt }}<|im_end|>\n<|im_start|>assistant\n';
@@ -169,7 +230,10 @@ export async function installIntoOllama() {
       x.scheduler.planProvider = 'ollama';
       x.scheduler.planModel = tag;
     });
-    return { ok: true, tag };
+    const smoke = await _smokeChat({
+      provider: 'ollama', baseUrl: base, headers: ollamaLocalAuthHeaders(), model: tag,
+    });
+    return { ok: true, tag, smoke };
   } catch (e) {
     return { ok: false, error: `Ollama create failed: ${e.message}` };
   }
@@ -214,7 +278,14 @@ export async function installIntoLmstudio() {
       x.scheduler.planProvider = 'lmstudio';
       x.scheduler.planModel = modelId;
     });
-    return { ok: true, modelId, path: destFile };
+    const cfg = loadConfig();
+    const lmsBase = (cfg?.cortex?.lmstudioUrl ?? 'http://127.0.0.1:1234').replace(/\/$/, '');
+    const lmsHeaders = cfg?.cortex?.lmstudioApiKey
+      ? { Authorization: `Bearer ${cfg.cortex.lmstudioApiKey}` } : {};
+    const smoke = await _smokeChat({
+      provider: 'lmstudio', baseUrl: lmsBase, headers: lmsHeaders, model: modelId,
+    });
+    return { ok: true, modelId, path: destFile, smoke };
   } catch (e) {
     return { ok: false, error: `LM Studio install failed: ${e.message}` };
   }

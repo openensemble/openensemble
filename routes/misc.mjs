@@ -27,6 +27,7 @@ async function saveThreads(threads) {
 }
 import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
+import { listWatchers, unregisterWatcher, patchWatcher, getWatcher } from '../scheduler/watchers.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
 import { getGmailAuthHeader } from './gmail.mjs';
@@ -126,6 +127,50 @@ export async function handle(req, res) {
     const messages = loadSession(sessionId, 60);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(messages));
+    return true;
+  }
+
+  // Watchers (per-user polls registered by skills via ctx.watch). Surfaced
+  // alongside tasks in the tasks drawer but they're a distinct concept:
+  //   tasks    = scheduled fire-and-complete actions
+  //   watchers = long-running monitors with progress updates
+  if (req.url === '/api/watchers' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(listWatchers(authId)));
+    return true;
+  }
+
+  const wMatch = req.url.match(/^\/api\/watchers\/([^?/]+)/);
+  if (wMatch && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const w = getWatcher(authId, wMatch[1]);
+    if (!w) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not found' })); return true; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      id: w.id, kind: w.kind, label: w.label, status: w.status,
+      createdAt: w.createdAt, endedAt: w.endedAt || null,
+      cadenceSec: w.cadenceSec, expiresAt: w.expiresAt,
+      ticks: w.ticks, failures: w.failures,
+      history: Array.isArray(w.history) ? w.history : [],
+    }));
+    return true;
+  }
+  if (wMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const ok = unregisterWatcher(authId, wMatch[1], 'cancelled');
+    res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok }));
+    return true;
+  }
+  if (wMatch && req.method === 'PATCH') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      const ok = patchWatcher(authId, wMatch[1], body);
+      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok }));
+    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
     return true;
   }
 
@@ -239,23 +284,6 @@ export async function handle(req, res) {
   // Dashboard
   if (req.url === '/api/dashboard' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const own = loadTasksForOwner(authId);
-    const tasks = isPrivileged(authId) ? [...own, ...loadTasksForOwner('system')] : own;
-    const tasksWithOutput = tasks.map(task => {
-      const sessionId = task.ownerId ? `${task.ownerId}_${task.agent}` : task.agent;
-      const messages = loadSession(sessionId, 200);
-      let lastOutput = null, lastRunTs = null;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].scheduled) {
-          lastRunTs = messages[i].ts;
-          for (let j = i + 1; j < messages.length; j++) {
-            if (messages[j].role === 'assistant') { lastOutput = messages[j].content; break; }
-          }
-          break;
-        }
-      }
-      return { ...task, lastOutput, lastRunTs };
-    });
     const [memoryCount, emailUnread] = await Promise.all([
       getMemoryStats(authId).catch(() => 0),
       getEmailUnreadCount(authId).catch(() => null),
@@ -265,7 +293,7 @@ export async function handle(req, res) {
         (t.messages ?? []).some(m => m.from !== authId && !(m.readBy ?? []).includes(authId)))
       .length;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ tasks: tasksWithOutput, memoryCount, emailUnread, messagesUnread }));
+    res.end(JSON.stringify({ memoryCount, emailUnread, messagesUnread }));
     return true;
   }
 

@@ -1,6 +1,8 @@
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 let tasks = [];
+let watchers = { active: [], recent: [] };
 let expandedTaskId = null;
+let expandedWatcherId = null;
 
 const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function _parseCronDow(spec) {
@@ -54,7 +56,93 @@ function formatTaskCadenceLabel(t) {
 
 async function loadTaskList() {
   try { const r = await fetch('/api/tasks'); tasks = await r.json(); } catch { tasks = []; }
+  try {
+    const r = await fetch('/api/watchers');
+    watchers = await r.json();
+    if (!watchers || typeof watchers !== 'object') watchers = { active: [], recent: [] };
+    if (!Array.isArray(watchers.active)) watchers.active = [];
+    if (!Array.isArray(watchers.recent)) watchers.recent = [];
+  } catch { watchers = { active: [], recent: [] }; }
   renderTasks(); updateTasksBadge();
+}
+
+// Format a "time ago" / "time until" tail for the watcher meta row.
+function _watcherEtaText(w) {
+  if (w.expiresAt === null || w.expiresAt === undefined) return 'indefinite';
+  const ms = w.expiresAt - Date.now();
+  if (ms <= 0) return 'expired';
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return `expires in ${m}m`;
+  const h = Math.floor(m / 60);
+  return `expires in ${h}h${m%60 ? ' ' + (m%60) + 'm' : ''}`;
+}
+
+function renderWatcherRow(w) {
+  const isOpen = expandedWatcherId === w.id;
+  const expandToggle = isOpen ? '▾' : '▸';
+  const isIndefinite = w.expiresAt === null || w.expiresAt === undefined;
+  const dot = isIndefinite ? `<span class="watcher-dot" title="Indefinite — click to dismiss" onclick="event.stopPropagation(); cancelWatcher('${escHtml(w.id)}')" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:6px;cursor:pointer"></span>` : '';
+  const status = w.lastStatusText || 'waiting for first tick…';
+  const meta = `${escHtml(w.kind)} · ${_watcherEtaText(w)}${w.ticks ? ' · tick ' + w.ticks : ''}`;
+  const header = `
+    <div class="task-item${isOpen ? ' task-item-open' : ''}" data-watcher="${escHtml(w.id)}">
+      <div class="task-item-info" onclick="toggleWatcherExpanded('${escHtml(w.id)}')" title="Click to view / adjust" style="cursor:pointer">
+        <div class="task-item-label">${dot}${expandToggle} 📡 ${escHtml(w.label || w.kind)}</div>
+        <div class="task-item-meta" style="font-style:italic">${escHtml(status)}</div>
+        <div class="task-item-meta">${meta}</div>
+      </div>
+      <button class="btn-task-del" onclick="cancelWatcher('${escHtml(w.id)}')" title="Cancel watcher">✕</button>
+    </div>`;
+  if (!isOpen) return header;
+  const presets = [
+    { label: '15 min', ms: 15*60*1000 },
+    { label: '1 hour', ms: 60*60*1000 },
+    { label: '4 hours', ms: 4*60*60*1000 },
+    { label: '24 hours', ms: 24*60*60*1000 },
+  ].map(p => `<button onclick="extendWatcher('${escHtml(w.id)}', ${p.ms})" style="margin-right:6px">${p.label}</button>`).join('');
+  const indefBtn = isIndefinite
+    ? ''
+    : `<button onclick="setWatcherIndefinite('${escHtml(w.id)}')" style="margin-right:6px">make indefinite</button>`;
+  const editor = `
+    <div class="task-edit-panel">
+      <div class="task-edit-meta">Started: ${new Date(w.createdAt).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })}</div>
+      <div class="task-edit-meta">Cadence: every ${w.cadenceSec}s</div>
+      ${w.expiresAt ? `<div class="task-edit-meta">Expires: ${new Date(w.expiresAt).toLocaleString()}</div>` : '<div class="task-edit-meta">Expires: indefinite</div>'}
+      <div style="margin-top:8px;font-size:12px;color:var(--muted)">Extend by:</div>
+      <div style="margin-top:4px">${presets}${indefBtn}</div>
+    </div>`;
+  return header + editor;
+}
+
+function toggleWatcherExpanded(id) {
+  expandedWatcherId = expandedWatcherId === id ? null : id;
+  renderTasks();
+}
+
+async function cancelWatcher(id) {
+  if (!confirm('Stop monitoring this?')) return;
+  await fetch(`/api/watchers/${id}`, { method: 'DELETE' });
+  await loadTaskList();
+}
+
+async function extendWatcher(id, addMs) {
+  await fetch(`/api/watchers/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expiresAt: Date.now() + addMs }),
+  });
+  expandedWatcherId = null;
+  await loadTaskList();
+}
+
+async function setWatcherIndefinite(id) {
+  await fetch(`/api/watchers/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expiresAt: null }),
+  });
+  expandedWatcherId = null;
+  await loadTaskList();
 }
 
 function _toLocalInputValue(iso) {
@@ -116,9 +204,34 @@ function renderTaskRow(t) {
 }
 
 function renderTasks() {
-  const html = !tasks.length
-    ? '<em style="color:var(--muted);font-size:13px">No tasks yet.</em>'
-    : tasks.map(renderTaskRow).join('');
+  // Two sections: scheduled tasks (cron / one-shot) and active monitors
+  // (watchers). They're related but distinct primitives — see
+  // scheduler/watchers.mjs for the design rationale.
+  const sectionHeader = (label) => `<div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;margin:8px 4px 4px">${label}</div>`;
+
+  const tasksHtml = tasks.length
+    ? tasks.map(renderTaskRow).join('')
+    : '<em style="color:var(--muted);font-size:13px">No scheduled tasks.</em>';
+
+  const activeWatchers = watchers.active || [];
+  const recentWatchers = watchers.recent || [];
+  const watchersHtml = activeWatchers.length
+    ? activeWatchers.map(renderWatcherRow).join('')
+    : '<em style="color:var(--muted);font-size:13px">No active monitors.</em>';
+
+  const recentHtml = recentWatchers.length
+    ? recentWatchers.slice(0, 5).map(w => {
+        const icon = w.status === 'done' ? '✓' : w.status === 'error' ? '⚠' : w.status === 'expired' ? '⏰' : '✕';
+        const ago = w.endedAt ? Math.round((Date.now() - w.endedAt) / 60000) + 'm ago' : '';
+        return `<div class="task-item" style="opacity:0.55"><div class="task-item-info"><div class="task-item-label" style="font-weight:normal">${icon} ${escHtml(w.label || w.kind)}</div><div class="task-item-meta">${escHtml(w.lastStatusText || w.status)} · ${ago}</div></div></div>`;
+      }).join('')
+    : '';
+
+  const html =
+    sectionHeader('⏰ Scheduled tasks') + tasksHtml +
+    sectionHeader('📡 Active monitors') + watchersHtml +
+    (recentHtml ? sectionHeader('Recent') + recentHtml : '');
+
   const list = $('taskList');
   if (list) list.innerHTML = html;
   const settingsList = $('settingsTaskList');
@@ -191,7 +304,9 @@ async function editTaskTime(id) {
 }
 
 function updateTasksBadge() {
-  const count = tasks.filter(t => t.enabled).length;
+  const tCount = tasks.filter(t => t.enabled).length;
+  const wCount = (watchers.active || []).length;
+  const count = tCount + wCount;
   const badge = $('tasksBadge');
   if (count > 0) {
     badge.textContent = count;

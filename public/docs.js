@@ -13,7 +13,7 @@ let _docShareModalSel = new Set();
 // Called by drawers.js when drawerNotes opens
 async function openNotesDrawer() {
   switchDocTab('docs');
-  _docFilter = 'all';
+  switchDocFilter('all');
   loadDocList();
   if (!_docUsers.length) {
     try { _docUsers = await fetch('/api/users').then(r => r.json()); } catch {}

@@ -289,6 +289,28 @@ function handleServerMessage(msg) {
     case 'error':
       if (msg.agent && msg.agent !== activeAgent) break;
       setStreaming(false); appendError(msg.message); break;
+    case 'status':
+      // Watcher supervisor pushes these — muted/italic bubble outside any
+      // agent assistant turn. One bubble per watcherId, updated in place.
+      // Session history is also deduped: we replace the existing entry for
+      // this watcher rather than appending, so a page reload renders one
+      // bubble instead of N stacked ones.
+      if (!msg.agent || msg.agent === activeAgent) {
+        appendStatusBubble({ text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus }, msg.ts || Date.now());
+      }
+      if (msg.agent) {
+        if (!sessions[msg.agent]) sessions[msg.agent] = [];
+        const statusEntry = { role: 'status', status: { text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus }, content: `[Status: ${msg.text}]`, ts: msg.ts || Date.now() };
+        const arr = sessions[msg.agent];
+        const existingIdx = msg.watcherId
+          ? arr.findIndex(m => m.role === 'status' && m.status?.watcherId === msg.watcherId)
+          : -1;
+        if (existingIdx >= 0) arr[existingIdx] = statusEntry;
+        else arr.push(statusEntry);
+      }
+      // Refresh the tasks drawer so its watcher rows stay current.
+      if (typeof loadTaskList === 'function') loadTaskList();
+      break;
     case 'memory_stored':
     case 'memory_forgotten': {
       if (msg.agent !== activeAgent) break;
@@ -388,6 +410,12 @@ function handleServerMessage(msg) {
     case 'update_failed':
       showToast('Update failed: ' + (msg.message || msg.code), 8000);
       if (typeof loadUpdateStatus === 'function') loadUpdateStatus();
+      break;
+    case 'cortex_warning':
+      // Surfaced by lib/runtime-warn.mjs after 3 consecutive failures from a
+      // local reason/plan runtime. Most common case: LM Studio's JIT loading
+      // is off so reason calls 404 silently. Toast is rate-limited server-side.
+      showToast(msg.message || 'Cortex runtime issue', 8000);
       break;
     case 'active_streams': {
       // Restore streaming state for agents that are still working

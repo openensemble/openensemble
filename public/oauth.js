@@ -1,4 +1,11 @@
 // ── OAuth / Connected Accounts ────────────────────────────────────────────────
+// Single retry timer so back-to-back calls (settings tab re-open, polling)
+// don't stack.
+let _oauthRetryTimer = null;
+let _oauthRetryAttempts = 0;
+const OAUTH_RETRY_MAX = 6;       // 6 × 5s = up to 30s of polling
+const OAUTH_RETRY_DELAY_MS = 5_000;
+
 async function loadOAuthStatus() {
   // Render the AI provider logins surface (Profile tab) every time the
   // Connected Accounts section refreshes — keeps connect/disconnect state
@@ -15,22 +22,43 @@ async function loadOAuthStatus() {
   if (!hasEmailAccess) return;
   try {
     // ── Email accounts ────────────────────────────────────────────────────────
-    const [accounts, oauthStatus, providerCfg] = await Promise.all([
+    const [accountsRaw, oauthStatusRaw, providerCfgRaw] = await Promise.all([
       fetch('/api/email-accounts', { cache: 'no-store' }).then(r => r.json()).catch(() => []),
       fetch('/api/oauth/status', {}).then(r => r.json()).catch(() => ({})),
       fetch('/api/provider-config').then(r => r.json()).catch(() => ({})),
     ]);
-    const { gcal, gmailHealth, msHealth } = oauthStatus;
+    // Bulletproof shape coercion. The fetch().catch() chain only catches the
+    // promise rejection path — if any of these endpoints quietly resolves to
+    // a non-shape (a redirect-followed HTML error body that happened to
+    // parse, an upstream proxy injecting an envelope, an error JSON
+    // {error:"..."}), .map / object property access downstream blows up.
+    const accounts    = Array.isArray(accountsRaw) ? accountsRaw : [];
+    const oauthStatus = (oauthStatusRaw && typeof oauthStatusRaw === 'object') ? oauthStatusRaw : {};
+    const providerCfg = (providerCfgRaw && typeof providerCfgRaw === 'object') ? providerCfgRaw : {};
+    const { gcal, gmailHealth, msHealth, imapHealth } = oauthStatus;
     const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
     const msCreds = providerCfg.msClientIdSet && providerCfg.msClientSecretSet;
     const providerIcon = p => p === 'gmail' ? icon('mail', 13) : p === 'microsoft' ? icon('building', 13) : icon('globe', 13);
-    const accountRows = (accounts ?? []).map(a => {
+    // Account post-restart, the server's first health-check pass takes
+    // 10–20s (token refresh round-trips, IMAP STARTTLS handshake). During
+    // that window oauth/status returns no health value for the account, so
+    // we render a "Reconnecting…" badge instead of nothing AND queue a
+    // retry until everything reports a terminal state.
+    let pendingHealthCount = 0;
+    const accountRows = accounts.map(a => {
       const health = a.provider === 'gmail' ? (gmailHealth ?? {})[a.id]
                    : a.provider === 'microsoft' ? (msHealth ?? {})[a.id]
+                   : a.provider === 'imap' ? (imapHealth ?? {})[a.id]
                    : null;
       const needsReconnect = health === 'expired' || health === 'no_refresh' || health === 'missing' || health === 'error';
+      const isPending = health == null;
+      if (isPending) pendingHealthCount++;
+      // IMAP can't be "reconnected" via OAuth — the user must edit/replace the
+      // account, so label the failure differently to point at the right action.
+      const failBadgeText = a.provider === 'imap' ? 'Auth failed' : 'Token expired';
       const statusBadge = health === 'ok' ? '<span style="font-size:10px;color:var(--green,#4caf50);margin-left:4px">Connected</span>'
-        : needsReconnect ? '<span style="font-size:10px;color:var(--red,#e05c5c);margin-left:4px">Token expired</span>'
+        : needsReconnect ? `<span style="font-size:10px;color:var(--red,#e05c5c);margin-left:4px">${failBadgeText}</span>`
+        : isPending ? '<span style="font-size:10px;color:var(--accent);margin-left:4px;font-style:italic">Reconnecting…</span>'
         : '';
       return `
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 0">
@@ -64,7 +92,7 @@ async function loadOAuthStatus() {
             : `<button onclick="connectGoogle('gcal')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:600">Connect</button>`}
         </div>
       </div>`;
-    const hasAnyAccount = (accounts ?? []).length > 0 || gcal;
+    const hasAnyAccount = accounts.length > 0 || gcal;
     el.innerHTML = `
       ${accountRows}
       ${gcalRow}
@@ -75,7 +103,21 @@ async function loadOAuthStatus() {
         ${isPriv && msCreds ? `<button onclick="clearMicrosoftCreds()" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer">Clear MS credentials</button>` : ''}
         <button onclick="showAddImapModal()" style="background:none;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">+ Add IMAP…</button>
       </div>`;
-  } catch { el.innerHTML = '<div style="color:var(--muted);font-size:12px">Not available</div>'; }
+    // Schedule a retry only when there are configured accounts whose health
+    // hasn't reported yet (typical right after a server restart). Skip the
+    // retry entirely when accounts.length === 0 — showing "Reconnecting…"
+    // for a stranger with no configured accounts would just be confusing.
+    if (_oauthRetryTimer) { clearTimeout(_oauthRetryTimer); _oauthRetryTimer = null; }
+    if (pendingHealthCount > 0 && _oauthRetryAttempts < OAUTH_RETRY_MAX) {
+      _oauthRetryAttempts++;
+      _oauthRetryTimer = setTimeout(() => loadOAuthStatus(), OAUTH_RETRY_DELAY_MS);
+    } else {
+      _oauthRetryAttempts = 0; // reset for next page open
+    }
+  } catch (e) {
+    console.error('[oauth] loadOAuthStatus failed', e);
+    el.innerHTML = `<div style="color:var(--red,#e05c5c);font-size:12px">Connected accounts failed to load: ${escHtml(e?.message ?? String(e))}</div>`;
+  }
 }
 
 async function connectMicrosoft() {

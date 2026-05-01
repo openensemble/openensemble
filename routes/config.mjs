@@ -107,6 +107,24 @@ export async function handle(req, res) {
     if (req.method === 'POST') {
       try {
         const body = JSON.parse(await readBody(req));
+        // Brave Search API key — validate against Brave before saving so a
+        // mistyped or wrong-vendor key fails loudly instead of silently
+        // breaking web search later. Empty string is an explicit clear.
+        if (body.braveApiKey !== undefined && body.braveApiKey) {
+          const probe = await fetch(
+            'https://api.search.brave.com/res/v1/web/search?q=ping&count=1',
+            { headers: { 'Accept': 'application/json', 'X-Subscription-Token': body.braveApiKey } },
+          ).catch(e => ({ ok: false, status: 0, _err: e.message }));
+          if (!probe.ok) {
+            const detail = probe._err ?? (await probe.text().catch(() => '')).slice(0, 300);
+            const hint = probe.status === 401 || probe.status === 403
+              ? `That doesn't look like a valid Brave Search key. Get one at api.search.brave.com (Subscriptions → API keys).`
+              : `Brave rejected the key (status ${probe.status}). ${detail}`;
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: hint }));
+            return true;
+          }
+        }
         await modifyConfig(cfg => {
           if (body.anthropicApiKey)   cfg.anthropicApiKey   = body.anthropicApiKey;
           if (body.fireworksApiKey)   cfg.fireworksApiKey   = body.fireworksApiKey;
@@ -114,7 +132,7 @@ export async function handle(req, res) {
 
           if (body.openrouterApiKey)  cfg.openrouterApiKey  = body.openrouterApiKey;
           // Brave Search API key — used by web/deep_research skills and news plugin.
-          // Accept empty string as an explicit clear.
+          // Validated above; empty string clears.
           if (body.braveApiKey !== undefined) {
             if (body.braveApiKey) cfg.braveApiKey = body.braveApiKey;
             else delete cfg.braveApiKey;

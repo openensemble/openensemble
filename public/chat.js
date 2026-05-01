@@ -69,6 +69,7 @@ function renderSession() {
     else if (m.role === 'user' && !m.hidden)        appendUserBubble(m.content, m.ts, false, m.attachment ?? null);
     else if (m.role === 'assistant' && m.image)    appendImageBubble(m.image, m.ts, false);
     else if (m.role === 'assistant' && m.video)    appendVideoBubble(m.video, m.ts, false);
+    else if (m.role === 'status' && m.status)     appendStatusBubble(m.status, m.ts, false);
     else if (m.role === 'assistant' && !m.hidden) appendAssistantBubble(m.content, m.ts, false);
   });
   const headers = $('messages').querySelectorAll('.task-header[data-ts]');
@@ -156,6 +157,163 @@ function appendImageBubble(image, ts = Date.now(), scroll = true) {
   if (scroll) scrollToBottom();
   return el;
 }
+// Watcher status updates — muted/italic, distinct from assistant bubbles.
+// Sourced from scheduler/watchers.mjs supervisor pushing WS type='status'
+// messages. The `📡` prefix marks these as poll-driven, not agent-spoken.
+//
+// Update-in-place: each watcher gets ONE bubble that mutates as new statuses
+// arrive. Looked up by data-watcher-id. New watchers append a fresh bubble;
+// repeat updates for the same watcherId rewrite the existing one in place.
+function appendStatusBubble(status, ts = Date.now(), scroll = true) {
+  const watcherId = status.watcherId || '';
+  let el = watcherId ? document.querySelector(`.msg.watcher-status[data-watcher-id="${CSS.escape(watcherId)}"]`) : null;
+  const isUpdate = !!el;
+
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'msg watcher-status';
+    el.dataset.watcherId = watcherId;
+    el.style.cssText = 'padding:6px 12px;margin:4px 0;font-size:12px;color:var(--muted);font-style:italic;border-left:2px solid var(--border);background:rgba(127,127,127,0.04);border-radius:4px;transition:background 200ms ease,border-color 200ms ease';
+  }
+
+  // Header (icon + label + latest text + expand caret) — rebuilt on every
+  // update. History panel is a sibling that survives across updates.
+  let header = el.querySelector('.watcher-header');
+  if (!header) {
+    header = document.createElement('div');
+    header.className = 'watcher-header';
+    header.style.cssText = 'display:flex;gap:8px;align-items:flex-start;cursor:pointer';
+    header.title = 'Click to view progress history';
+    if (watcherId) {
+      header.addEventListener('click', (ev) => {
+        if (window.getSelection?.().toString()) return; // don't toggle while user is selecting text
+        toggleWatcherHistory(el, watcherId);
+        ev.stopPropagation();
+      });
+    }
+    el.appendChild(header);
+  }
+  header.innerHTML = '';
+
+  const icon = document.createElement('span');
+  icon.textContent = status.final ? (status.finalStatus === 'done' ? '✓' : status.finalStatus === 'error' ? '⚠' : '⏰') : '📡';
+  icon.style.cssText = 'flex-shrink:0;font-style:normal';
+  header.appendChild(icon);
+
+  const body = document.createElement('div');
+  body.style.cssText = 'flex:1;min-width:0';
+  if (status.label) {
+    const labelEl = document.createElement('div');
+    labelEl.style.cssText = 'font-weight:500;font-style:normal;font-size:11px;opacity:0.7;margin-bottom:2px';
+    labelEl.textContent = status.label;
+    body.appendChild(labelEl);
+  }
+  const text = document.createElement('div');
+  text.textContent = status.text || '';
+  body.appendChild(text);
+  header.appendChild(body);
+
+  if (watcherId) {
+    const caret = document.createElement('span');
+    caret.className = 'watcher-caret';
+    caret.textContent = el.dataset.historyOpen === '1' ? '▾' : '▸';
+    caret.style.cssText = 'flex-shrink:0;font-style:normal;opacity:0.5;font-size:10px;align-self:center';
+    header.appendChild(caret);
+  }
+
+  // Final-state styling: brighten/dim per outcome so a finished bubble is
+  // visually distinct from a still-ticking one.
+  if (status.final) {
+    if (status.finalStatus === 'done') {
+      el.style.borderLeftColor = 'var(--green, #4caf50)';
+      el.style.background = 'rgba(76,175,80,0.06)';
+    } else if (status.finalStatus === 'error') {
+      el.style.borderLeftColor = 'var(--red, #f44336)';
+      el.style.background = 'rgba(244,67,54,0.06)';
+    } else {
+      el.style.borderLeftColor = 'var(--muted)';
+      el.style.opacity = '0.7';
+    }
+  }
+
+  if (!isUpdate) {
+    insertBefore(el);
+    if (scroll) scrollToBottom();
+  } else {
+    // Subtle flash so the user notices the update without yanking scroll.
+    el.style.background = 'rgba(127,127,127,0.12)';
+    setTimeout(() => {
+      // Restore the resting background unless we just set a final-state one.
+      if (!status.final) el.style.background = 'rgba(127,127,127,0.04)';
+    }, 200);
+    // If history panel is currently open, refresh it so the new update shows.
+    if (el.dataset.historyOpen === '1') refreshWatcherHistory(el, watcherId);
+  }
+  return el;
+}
+
+async function toggleWatcherHistory(el, watcherId) {
+  let panel = el.querySelector('.watcher-history');
+  if (panel && el.dataset.historyOpen === '1') {
+    panel.style.display = 'none';
+    el.dataset.historyOpen = '0';
+    const caret = el.querySelector('.watcher-caret'); if (caret) caret.textContent = '▸';
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'watcher-history';
+    panel.style.cssText = 'margin-top:6px;padding:6px 8px 4px 26px;border-top:1px dashed var(--border);font-size:11px;font-style:normal;max-height:240px;overflow-y:auto';
+    panel.textContent = 'Loading…';
+    el.appendChild(panel);
+  }
+  panel.style.display = 'block';
+  el.dataset.historyOpen = '1';
+  const caret = el.querySelector('.watcher-caret'); if (caret) caret.textContent = '▾';
+  await refreshWatcherHistory(el, watcherId);
+}
+
+async function refreshWatcherHistory(el, watcherId) {
+  const panel = el.querySelector('.watcher-history');
+  if (!panel) return;
+  try {
+    const r = await fetch(`/api/watchers/${encodeURIComponent(watcherId)}`, { credentials: 'same-origin' });
+    if (!r.ok) {
+      panel.textContent = r.status === 404 ? 'No history available (watcher reaped).' : `Failed to load history (${r.status}).`;
+      return;
+    }
+    const w = await r.json();
+    const entries = Array.isArray(w.history) ? w.history : [];
+    if (!entries.length) {
+      panel.textContent = 'No progress entries yet.';
+      return;
+    }
+    panel.innerHTML = '';
+    for (const entry of entries) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;padding:2px 0;line-height:1.4';
+      const t = new Date(entry.ts || 0);
+      const hh = String(t.getHours()).padStart(2,'0');
+      const mm = String(t.getMinutes()).padStart(2,'0');
+      const ss = String(t.getSeconds()).padStart(2,'0');
+      const time = document.createElement('span');
+      time.textContent = `${hh}:${mm}:${ss}`;
+      time.style.cssText = 'flex-shrink:0;opacity:0.55;font-variant-numeric:tabular-nums';
+      const txt = document.createElement('span');
+      txt.textContent = entry.text || '';
+      txt.style.cssText = 'flex:1;min-width:0;white-space:pre-wrap;word-break:break-word';
+      if (entry.final) {
+        if (entry.finalStatus === 'done') txt.style.color = 'var(--green, #4caf50)';
+        else if (entry.finalStatus === 'error') txt.style.color = 'var(--red, #f44336)';
+      }
+      row.appendChild(time); row.appendChild(txt);
+      panel.appendChild(row);
+    }
+  } catch (e) {
+    panel.textContent = `Failed to load history: ${e.message}`;
+  }
+}
+
 function appendVideoBubble(video, ts = Date.now(), scroll = true) {
   const el = msgEl('assistant');
   const bubble = el.querySelector('.msg-bubble');

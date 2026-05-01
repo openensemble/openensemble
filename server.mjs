@@ -12,6 +12,7 @@ import { listAgents } from './agents.mjs';
 import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
 import { loadDrawerManifests } from './plugins.mjs';
 import { startScheduler, stopScheduler, loadTasksForOwner, addTask, registerBuiltin } from './scheduler.mjs';
+import { startWatcherSupervisor, stopWatcherSupervisor } from './scheduler/watchers.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
 import { getRateLimit } from './rate-limit.mjs';
@@ -39,6 +40,8 @@ import { handle as handleMsOAuth }       from './routes/ms-oauth.mjs';
 import { handle as handleOpenAIOAuth }   from './routes/openai-oauth.mjs';
 import { handle as handleEmailAccounts } from './routes/email-accounts.mjs';
 import { handle as handleTelegram }      from './routes/telegram.mjs';
+import { handle as handleTunnel }        from './routes/tunnel.mjs';
+import { startTunnelSupervisor, stopTunnelSupervisor } from './lib/tunnel.mjs';
 import { handle as handleMemory }        from './routes/memory.mjs';
 import { handle as handleReasonRuntime } from './routes/reason-runtime.mjs';
 import { handle as handlePlanRuntime }   from './routes/plan-runtime.mjs';
@@ -46,10 +49,12 @@ import { handle as handleSharing }      from './routes/sharing.mjs';
 import { handle as handleNodes }        from './routes/nodes.mjs';
 import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
-import { sendTelegramToUser }             from './routes/telegram.mjs';
+import { handle as handleGuide }          from './routes/guide.mjs';
+import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn } from './background-tasks.mjs';
+import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
 import { startUpdateChecker } from './lib/update.mjs';
 
 // Shared helpers
@@ -172,8 +177,10 @@ const routeHandlers = [
   handleNodes,
   handleMisc,
   handleTelegram,
+  handleTunnel,
   handleTutor,
   handleCoder,
+  handleGuide,
 ];
 
 // CSP: inline script-src/style-src are required by index.html (149 inline
@@ -232,6 +239,7 @@ const httpServer = http.createServer(async (req, res) => {
     const html = fs.readFileSync(path.join(UI_DIR, 'index.html'));
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' }); res.end(html); return;
   }
+
 
   if (req.url === '/manifest.json') {
     const manifest = fs.readFileSync(path.join(UI_DIR, 'manifest.json'));
@@ -344,6 +352,7 @@ initWs(httpServer);
 setBroadcastFn(broadcastAgentList);
 setBackgroundBroadcastFn(broadcast);
 setUserBroadcastFn(broadcastToUsers);
+setRuntimeWarnBroadcast(broadcast);
 setRuntimeMetricsFn(() => ({
   wsClients: getWsClientCount(),
   nodeClients: getNodeClientCount(),
@@ -594,6 +603,27 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 
   seedSystemTasks();
   startScheduler(broadcast);
+
+  // Watcher supervisor: per-user polling for long-running async work
+  // (video gen, training, price alerts, etc.). Distinct from scheduler
+  // (one-shot/cron) — see scheduler/watchers.mjs for the design.
+  startWatcherSupervisor({
+    sendStatus: (userId, msg) => sendToUser(userId, msg),
+    showImage:  (userId, msg) => sendToUser(userId, { type: 'image', ...msg }),
+    showVideo:  (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
+  });
+
+  // Cloudflare tunnel supervisor — only re-spawns if a prior config marked
+  // it enabled. The onPublicUrlChange callback re-registers every user's
+  // Telegram webhook if the tunnel hostname changes (e.g. user switches
+  // their named tunnel to a different mapped hostname).
+  startTunnelSupervisor({
+    onPublicUrlChange: async (url, prevUrl) => {
+      if (url === prevUrl) return;
+      const result = await reregisterTelegramWebhooks(url);
+      log.info('tunnel', 'Telegram webhooks re-registered after URL change', { url, ...result });
+    },
+  }).catch(e => log.warn('tunnel', 'Supervisor boot failed', { err: e.message }));
   initAutoLabel(loadUsers());
   startDiscoveryBeacon(PORT);
   cortexHealthCheck();
@@ -721,7 +751,9 @@ async function shutdown(signal) {
 
   // 2. Stop scheduled tasks, gmail watchers, and the update checker
   stopScheduler();
+  stopWatcherSupervisor();
   stopAllWatchers();
+  stopTunnelSupervisor().catch(() => {});
   _stopUpdateChecker?.();
 
   // 3. Abort all in-flight chat streams

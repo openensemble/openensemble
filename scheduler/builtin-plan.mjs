@@ -15,6 +15,7 @@ import { USERS_DIR } from '../lib/paths.mjs';
 import { effectiveCpuCount } from '../lib/cpu-count.mjs';
 import { loadConfig } from '../routes/_helpers.mjs';
 import { ensureGguf, BUNDLED_PLAN_MODELS, DEFAULT_PLAN_TIER, planFileForTier, tierForPlanFile } from '../lib/model-fetch.mjs';
+import { reportRuntimeFailure, clearRuntimeFailure } from '../lib/runtime-warn.mjs';
 
 // The active plan model file is resolved at init time from config —
 // `scheduler.builtinPlanModel` may be a bare GGUF filename (one of the
@@ -368,11 +369,15 @@ async function _generateExternal({ provider, system, user, temperature, maxToken
         }),
       });
       if (!res.ok) {
-        console.warn('[plan] ollama HTTP', res.status);
+        console.warn('[plan] ollama HTTP', res.status, 'for model', model);
+        reportRuntimeFailure({ kind: 'plan', provider, status: res.status, model });
         return null;
       }
       const data = await res.json();
-      return (data?.message?.content ?? '').trim() || null;
+      const out = (data?.message?.content ?? '').trim() || null;
+      if (out != null) clearRuntimeFailure({ kind: 'plan', provider });
+      else             reportRuntimeFailure({ kind: 'plan', provider, status: res.status, model });
+      return out;
     }
 
     if (provider === 'lmstudio') {
@@ -391,14 +396,20 @@ async function _generateExternal({ provider, system, user, temperature, maxToken
         }),
       });
       if (!res.ok) {
-        console.warn('[plan] lmstudio HTTP', res.status);
+        // 404 here = model not loaded (JIT loading off in LM Studio Developer settings).
+        console.warn('[plan] lmstudio HTTP', res.status, 'for model', model);
+        reportRuntimeFailure({ kind: 'plan', provider, status: res.status, model });
         return null;
       }
       const data = await res.json();
-      return (data?.choices?.[0]?.message?.content ?? '').trim() || null;
+      const out = (data?.choices?.[0]?.message?.content ?? '').trim() || null;
+      if (out != null) clearRuntimeFailure({ kind: 'plan', provider });
+      else             reportRuntimeFailure({ kind: 'plan', provider, status: res.status, model });
+      return out;
     }
   } catch (e) {
     console.warn(`[plan] ${provider} generation failed:`, e.message);
+    reportRuntimeFailure({ kind: 'plan', provider, status: null, model, message: e.message });
     return null;
   }
   return null;

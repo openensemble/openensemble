@@ -469,6 +469,10 @@ export function getDefaultRoles() {
 
 // ── Executor loading ──────────────────────────────────────────────────────────
 
+// Cache the full module per skill so we can read named exports
+// (watcherHandlers, etc.) in addition to the default executor function.
+const _modules = new Map(); // internalKey -> imported module
+
 // Load executor lazily. `internalKey` identifies the wrapper; `dir` comes from it.
 async function getExecutorByKey(internalKey) {
   if (_executors.has(internalKey)) return _executors.get(internalKey);
@@ -482,11 +486,25 @@ async function getExecutorByKey(internalKey) {
     const mod = await import(url);
     const fn = mod.default ?? mod.executeSkillTool ?? mod.execute ?? null;
     _executors.set(internalKey, fn);
+    _modules.set(internalKey, mod);
     return fn;
   } catch (e) {
     console.warn(`[skills] Failed to load executor for ${internalKey}:`, e.message);
     return null;
   }
+}
+
+/**
+ * Return a watcher handler from the named skill, or null if not present.
+ * Used by the watcher supervisor to look up handlers lazily.
+ */
+export async function getWatcherHandler(skillId, userId, kind) {
+  const key = resolveKey(skillId, userId);
+  if (!key) return null;
+  // Trigger lazy load to populate _modules.
+  await getExecutorByKey(key);
+  const mod = _modules.get(key);
+  return mod?.watcherHandlers?.[kind] || null;
 }
 
 // Validate that every manifest tool name is actually handled by its executor.
@@ -548,18 +566,59 @@ async function _wsHandler() {
 // Build the per-call context object passed to skill executors as the 5th arg.
 // Skills that don't accept it (4-param signature) ignore it transparently.
 async function buildCtx(userId, agentId) {
+  // Providers pass the scoped `${userId}_${rawAgentId}` here, but the dashboard
+  // matches inbound bubbles against the raw agent id. Strip the prefix so
+  // ctx.showImage/showVideo land in the right chat thread.
+  const wsAgentId = (userId && typeof agentId === 'string' && agentId.startsWith(`${userId}_`))
+    ? agentId.slice(userId.length + 1)
+    : agentId;
   const ctx = { userId, agentId };
   ctx.showImage = async ({ base64, mimeType = 'image/png', filename, savedPath, prompt } = {}) => {
-    if (!agentId || !base64 || !filename) return 0;
+    if (!wsAgentId || !base64 || !filename) return 0;
     const mod = await _wsHandler();
     if (!mod?.sendToUser) return 0;
-    return mod.sendToUser(userId, { type: 'image', agent: agentId, base64, mimeType, filename, savedPath, prompt });
+    return mod.sendToUser(userId, { type: 'image', agent: wsAgentId, base64, mimeType, filename, savedPath, prompt });
   };
   ctx.showVideo = async ({ url, filename, savedPath } = {}) => {
-    if (!agentId || !url || !filename) return 0;
+    if (!wsAgentId || !url || !filename) return 0;
     const mod = await _wsHandler();
     if (!mod?.sendToUser) return 0;
-    return mod.sendToUser(userId, { type: 'video', agent: agentId, url, filename, savedPath });
+    return mod.sendToUser(userId, { type: 'video', agent: wsAgentId, url, filename, savedPath });
+  };
+
+  // Register a long-running poll/watcher. Supervisor in scheduler/watchers.mjs
+  // ticks each watcher's handler (defined via the skill's watcherHandlers
+  // export) on its cadence. Status updates land as muted/italic chat bubbles
+  // distinct from agent assistant turns.
+  //
+  // opts: { kind, state?, cadenceSec?, expiresAt, label?, skillId? }
+  // Returns the watcherId (string) or null if registration was rejected
+  // (per-user cap, missing fields).
+  //
+  // expiresAt should be set explicitly by the caller based on a realistic
+  // estimate of how long the work takes. Pass `null` for indefinite watchers
+  // (price alerts, "tell me when X" — supervisor never auto-reaps these,
+  // user must dismiss them from the tasks drawer).
+  ctx.watch = async (opts = {}) => {
+    try {
+      const watchers = await import('./scheduler/watchers.mjs');
+      return watchers.registerWatcher({
+        ...opts,
+        userId,
+        agentId: wsAgentId,
+        // If the caller didn't specify which skill owns this watcher, try to
+        // infer it. The agent in this ctx might not be a skill; an explicit
+        // skillId is best-effort and required only if the handler is not in
+        // the system registry.
+        skillId: opts.skillId || null,
+      });
+    } catch (e) { console.warn('[ctx.watch]', e.message); return null; }
+  };
+  ctx.unwatch = async (watcherId) => {
+    try {
+      const watchers = await import('./scheduler/watchers.mjs');
+      return watchers.unregisterWatcher(userId, watcherId);
+    } catch (e) { console.warn('[ctx.unwatch]', e.message); return false; }
   };
   return ctx;
 }

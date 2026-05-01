@@ -17,6 +17,8 @@ import { requireAuth, readBody, getUserDir, loadConfig } from './_helpers.mjs';
 import { seedGmailAccount } from './email-accounts.mjs';
 import { ensureFreshToken, resolveTokenPath, getClientCredentials, CREDS_PATH, GOOGLE_AUTH_BASE_DIR as BASE_DIR } from '../lib/google-auth.mjs';
 import { msTokenPath } from '../lib/ms-graph.mjs';
+import { testConnection as testImapConnection } from '../lib/imap-client.mjs';
+import { decrypt } from '../lib/email-crypto.mjs';
 
 // Resolve the redirect URI for this request. Preference order:
 //   1. config.json `externalUrl` (e.g. "https://oe.example.com") — for reverse-proxy deployments
@@ -196,6 +198,7 @@ export async function handle(req, res) {
     // Check per-account token health for Gmail and Microsoft accounts
     const gmailHealth = {};
     const msHealth = {};
+    const imapHealth = {};
     try {
       const accountsPath = path.join(getUserDir(userId), 'email-accounts.json');
       if (fs.existsSync(accountsPath)) {
@@ -220,6 +223,16 @@ export async function handle(req, res) {
             msHealth[a.id] = 'ok';
           } catch { msHealth[a.id] = 'error'; }
         }
+        // IMAP: live LOGIN test in parallel — no token to inspect, so the only
+        // way to tell the user "connected" vs "auth broken" is to actually try.
+        const imapAccts = accounts.filter(a => a.provider === 'imap' && a.encryptedPassword);
+        await Promise.all(imapAccts.map(async a => {
+          try {
+            const password = await decrypt(userId, a.encryptedPassword);
+            await testImapConnection({ host: a.host, port: a.port ?? 993, tls: a.tls !== false, username: a.username, password });
+            imapHealth[a.id] = 'ok';
+          } catch { imapHealth[a.id] = 'error'; }
+        }));
       }
     } catch {}
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -228,6 +241,7 @@ export async function handle(req, res) {
       gcal:  isConnected(userId, 'gcal'),
       gmailHealth,
       msHealth,
+      imapHealth,
     }));
     return true;
   }

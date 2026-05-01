@@ -174,7 +174,7 @@ function handleReadBlueprint() {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -222,6 +222,12 @@ async function handleCreate(args, userId) {
     createdAt: new Date().toISOString(),
     tools,
   };
+  if (Array.isArray(watchers) && watchers.length) {
+    manifest.watchers = watchers.map(w => ({
+      kind: String(w.kind || '').trim(),
+      description: String(w.description || '').trim(),
+    })).filter(w => w.kind);
+  }
 
   mkdirSync(skillDir, { recursive: true });
   writeFileSync(path.join(skillDir, 'manifest.json'), JSON.stringify(manifest, null, 2));

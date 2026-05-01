@@ -188,67 +188,6 @@ async function loadDashboard() {
     } catch {}
   }
 
-  for (const task of data.tasks.filter(t => t.type !== 'reminder')) {
-    const card = document.createElement('div');
-    card.className = 'dash-card';
-
-    const isOnce = task.repeat === 'once';
-    const isDone = isOnce && task.enabled === false;
-    const enabled = task.enabled !== false;
-
-    let schedDesc, noOutputMsg;
-    if (isOnce) {
-      const runAt = task.datetime
-        ? new Date(task.datetime).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })
-        : '?';
-      schedDesc = isDone ? `Ran once · ${runAt}` : `Runs once at ${runAt}`;
-      noOutputMsg = isDone ? 'Completed — no output captured' : `Pending · runs at ${runAt}`;
-    } else {
-      const cad = escHtml(formatTaskCadenceText(task));
-      schedDesc = `🔁 ${cad}`;
-      noOutputMsg = `No output yet — runs ${cad}`;
-    }
-
-    let badgeClass = '', badgeText;
-    if (isOnce && isDone)      { badgeClass = '';    badgeText = '✓ Done'; }
-    else if (isOnce && enabled){ badgeClass = 'on';  badgeText = '◷ Pending'; }
-    else if (enabled)          { badgeClass = 'on';  badgeText = '● Active'; }
-    else                       { badgeClass = '';    badgeText = '○ Paused'; }
-
-    const lastRun = task.lastRun
-      ? new Date(task.lastRun).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })
-      : null;
-
-    let outputSection;
-    if (task.lastOutput) {
-      outputSection = `<div class="dash-card-output" title="Click to expand" onclick="this.classList.toggle('expanded')">${renderMarkdown(task.lastOutput)}</div>
-        <div style="font-size:10px;color:var(--muted);text-align:right">click to expand</div>`;
-    } else {
-      outputSection = `<div style="font-size:13px;color:var(--muted);font-style:italic">${noOutputMsg}</div>`;
-    }
-
-    card.innerHTML = `
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
-        <div>
-          <div class="dash-card-title">📋 ${escHtml(task.label)}</div>
-          <div class="dash-card-meta">${escHtml(agents.find(a=>a.id===task.agent)?.name ?? task.agent)} · ${schedDesc}</div>
-        </div>
-        <span class="dash-card-badge ${badgeClass}">${badgeText}</span>
-      </div>
-      ${outputSection}
-      <div class="dash-card-footer">
-        <span style="font-size:11px;color:var(--muted)">${lastRun ? `Last run: ${lastRun}` : (isOnce && !isDone ? 'Not run yet' : '')}</span>
-        <button class="btn-dash-go" onclick="switchAgent('${escHtml(task.agent)}');closeDashboard()">View in Chat →</button>
-      </div>`;
-    body.appendChild(card);
-  }
-
-  if (!data.tasks.length) {
-    const empty = document.createElement('div');
-    empty.style.cssText = 'color:var(--muted);font-size:14px;padding:20px';
-    empty.textContent = 'No scheduled tasks yet. Add one via Tasks.';
-    body.appendChild(empty);
-  }
 }
 
 function handleTaskComplete(msg) {

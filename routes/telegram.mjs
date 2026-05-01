@@ -159,6 +159,46 @@ function clearUserTelegram(userId, opts = {}) {
 
 // ── Outbound (scheduler, background tasks) ────────────────────────────────────
 /**
+ * Re-register every user's Telegram webhook to point at a new public origin
+ * (e.g. when a Cloudflare Quick Tunnel produces a fresh trycloudflare URL on
+ * server restart). Only touches users with a configured bot token. Returns
+ * a summary {updated, failed, skipped}.
+ *
+ * The webhook URL written to Telegram is `<origin>/api/telegram/webhook/<userId>`
+ * — the same path the existing register-webhook route enforces.
+ */
+export async function reregisterAllWebhooks(origin) {
+  if (!origin) return { updated: 0, failed: 0, skipped: 0 };
+  const cleanOrigin = origin.replace(/\/+$/, '');
+  const users = loadUsers();
+  let updated = 0, failed = 0, skipped = 0;
+  for (const u of users) {
+    const tg = getUserTelegram(u);
+    if (!tg.botToken) { skipped++; continue; }
+    if (!tg.webhookSecret) {
+      // Auto-provision so the webhook isn't unauthenticated. Mirrors the
+      // logic in the /register-webhook route.
+      const sec = randomBytes(16).toString('hex');
+      patchUserTelegram(u.id, { webhookSecret: sec });
+      tg.webhookSecret = sec;
+    }
+    const url = `${cleanOrigin}/api/telegram/webhook/${u.id}`;
+    try {
+      const result = await callTelegram(tg.botToken, 'setWebhook', {
+        url,
+        allowed_updates: ['message'],
+        secret_token: tg.webhookSecret,
+      });
+      if (result?.ok) { updated++; } else { failed++; console.warn('[telegram] re-register failed for', u.id, result?.description); }
+    } catch (e) {
+      failed++;
+      console.warn('[telegram] re-register threw for', u.id, e.message);
+    }
+  }
+  return { updated, failed, skipped };
+}
+
+/**
  * Send a plain message to a user's linked Telegram chat using *their* bot.
  * Best-effort: returns false if the user has no bot, no linked chat, or
  * Telegram rejects the call.

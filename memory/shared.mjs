@@ -12,6 +12,7 @@ import {
   OPENAI_COMPAT_PROVIDERS, getCompatKey,
   getAnthropicKey, getFireworksKey, getGrokKey, getOpenRouterKey, getOllamaKey,
 } from '../chat/providers/_shared.mjs';
+import { reportRuntimeFailure, clearRuntimeFailure } from '../lib/runtime-warn.mjs';
 
 export const VECTOR_DIM = 768;
 
@@ -326,6 +327,13 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
   let output = null;
   let rawResponse = null;
 
+  // Local runtimes (lmstudio/ollama) get loud failure surfacing — see
+  // lib/runtime-warn.mjs. Cloud providers can fail too, but their error
+  // surfaces are usually about API keys / quotas, not model-load state.
+  const isLocal = provider === 'lmstudio' || provider === 'ollama';
+  let httpStatus = null;
+  let networkError = null;
+
   try {
     if (spec.apiStyle === 'builtin') {
       const { builtinGenerate } = await import('./builtin-reason.mjs');
@@ -341,9 +349,16 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
         options: { temperature, num_ctx: 512 },
       });
       const res = await fetch(`${spec.baseUrl}/api/chat`, { method: 'POST', headers: spec.headers, body, signal });
-      const data = await res.json();
-      rawResponse = data;
-      output = data.message?.content?.trim() ?? null;
+      httpStatus = res.status;
+      if (!res.ok) {
+        console.warn(`[cortex] ollama HTTP ${res.status} for model "${model}"`);
+        rawResponse = { error: `HTTP ${res.status}`, status: res.status };
+        output = null;
+      } else {
+        const data = await res.json();
+        rawResponse = data;
+        output = data.message?.content?.trim() ?? null;
+      }
     } else if (spec.apiStyle === 'openai') {
       const body = JSON.stringify({
         model, temperature, stream: false,
@@ -353,9 +368,17 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
         ],
       });
       const res = await fetch(`${spec.baseUrl}/chat/completions`, { method: 'POST', headers: spec.headers, body, signal });
-      const data = await res.json();
-      rawResponse = data;
-      output = data.choices?.[0]?.message?.content?.trim() ?? null;
+      httpStatus = res.status;
+      if (!res.ok) {
+        // 404 from LM Studio = model not loaded (JIT off). See lib/runtime-warn.mjs.
+        console.warn(`[cortex] ${provider} HTTP ${res.status} for model "${model}"`);
+        rawResponse = { error: `HTTP ${res.status}`, status: res.status };
+        output = null;
+      } else {
+        const data = await res.json();
+        rawResponse = data;
+        output = data.choices?.[0]?.message?.content?.trim() ?? null;
+      }
     } else if (spec.apiStyle === 'anthropic') {
       const body = JSON.stringify({
         model, max_tokens: 512, temperature,
@@ -363,6 +386,7 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
         messages: [{ role: 'user', content: user }],
       });
       const res = await fetch(`${spec.baseUrl}/messages`, { method: 'POST', headers: spec.headers, body, signal });
+      httpStatus = res.status;
       const data = await res.json();
       rawResponse = data;
       output = data.content?.map(c => c.text).filter(Boolean).join('').trim() || null;
@@ -370,7 +394,22 @@ async function _chatCall({ system, user, temperature = 0.1 }, meta = {}) {
   } catch (e) {
     console.warn('[cortex] Chat call failed (' + provider + '):', e.message);
     output = null;
+    networkError = e.message;
     rawResponse = { error: e.message };
+  }
+
+  if (isLocal) {
+    if (output != null) {
+      clearRuntimeFailure({ kind: 'reason', provider });
+    } else {
+      reportRuntimeFailure({
+        kind: 'reason',
+        provider,
+        status: httpStatus,
+        model,
+        message: networkError ?? '',
+      });
+    }
   }
 
   // Dev-only training capture — undocumented, gated by cortex._devCapture.

@@ -49,10 +49,12 @@ function renderTelegramSection(s) {
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
       <input type="text" id="tgWebhookUrl" value="${escHtml(s.webhookUrl || defaultWebhook)}"
         style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;font-family:monospace">
+      <button onclick="autofillTelegramWebhookFromTunnel()" id="tgAutofillBtn" title="Use the Cloudflare Tunnel URL configured in Public Access"
+        style="background:none;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Use tunnel</button>
       <button onclick="registerTelegramWebhook()"
         style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Register</button>
     </div>
-    ${webhookIsHttps ? '' : `<div style="font-size:11px;color:#e0a35c;margin-bottom:8px">⚠ Your OpenEnsemble origin isn't HTTPS. Telegram rejects non-HTTPS webhooks — put OE behind a reverse proxy (nginx, Caddy, Tailscale Funnel) and paste the public HTTPS URL here.</div>`}
+    ${webhookIsHttps ? '' : `<div style="font-size:11px;color:#e0a35c;margin-bottom:8px">⚠ Your OpenEnsemble origin isn't HTTPS. Telegram rejects non-HTTPS webhooks — set up a Cloudflare Tunnel (Settings → Public Access) or put OE behind your own reverse proxy and paste the public HTTPS URL here.</div>`}
   `;
 
   // Status/summary line
@@ -149,6 +151,31 @@ async function registerTelegramWebhook() {
     showToast('Webhook registered');
     await loadTelegramUser();
   } catch (e) { showToast(`Register failed: ${e.message}`); }
+}
+
+async function autofillTelegramWebhookFromTunnel() {
+  const input = $('tgWebhookUrl');
+  if (!input) return;
+  try {
+    // Use the server's canonical webhook path rather than guessing the userId
+    // from _currentUser — guarantees the suffix the server-side validator
+    // expects, and avoids races where _currentUser hasn't populated yet.
+    const [tunnelRes, tgRes] = await Promise.all([
+      fetch('/api/tunnel/public-url').then(r => r.json()).catch(() => ({})),
+      fetch('/api/telegram/me').then(r => r.json()).catch(() => ({})),
+    ]);
+    if (!tunnelRes.publicUrl) {
+      showToast('No tunnel URL — start the Cloudflare Tunnel in Settings → Public Access first', 5000);
+      return;
+    }
+    if (!tgRes.webhookPath) {
+      showToast('Could not determine webhook path — try refreshing the page');
+      return;
+    }
+    const url = `${String(tunnelRes.publicUrl).replace(/\/+$/, '')}${tgRes.webhookPath}`;
+    input.value = url;
+    showToast('Tunnel URL filled in — click Register to save', 4000);
+  } catch (e) { showToast('Tunnel lookup failed: ' + e.message); }
 }
 
 async function removeTelegramBot() {

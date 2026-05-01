@@ -333,6 +333,13 @@ function reasonRuntimeRow({ runtime, label, hint, selected }) {
   const hintLine = hint
     ? `<span style="font-size:11px;color:var(--muted);display:block;line-height:1.2">${escHtml(hint)}</span>`
     : '';
+  // LM Studio's Just-In-Time loading is off by default — without it, our model
+  // 404s silently and reason degrades. Inline tip when the user picks lmstudio.
+  const jitTip = (runtime === 'lmstudio' && selected)
+    ? `<div style="font-size:11px;color:var(--muted);margin:0 0 4px 22px;line-height:1.3">
+         💡 In LM Studio, enable <strong>Just-In-Time Model Loading</strong> (Developer settings) so the model auto-loads on demand — otherwise reason calls fail until you load it manually.
+       </div>`
+    : '';
   return `
     <label for="${id}" style="display:flex;align-items:center;gap:8px;padding:6px 0;opacity:${disabled ? 0.55 : 1};cursor:${disabled ? 'not-allowed' : 'pointer'}">
       <input type="radio" name="reasonRuntime" id="${id}" value="${runtime}"
@@ -344,7 +351,8 @@ function reasonRuntimeRow({ runtime, label, hint, selected }) {
       </span>
       ${note}
       ${installBtn}
-    </label>`;
+    </label>
+    ${jitTip}`;
 }
 
 function renderCortexModelRows() {
@@ -427,6 +435,12 @@ async function installReasonRuntime(runtime) {
     if (runtime === 'lmstudio') {
       alert('Installed. If LM Studio is running, click the 🔄 Refresh button in its "My Models" tab (or restart LM Studio) so it picks up the new model.');
     }
+    // Surface the post-install smoke-call result. Catches the most common
+    // silent-failure path: LM Studio JIT loading off → model file on disk
+    // but not loaded → reason 404s. See lib/runtime-warn.mjs for the runtime
+    // detection of the same case.
+    if (body.smoke && !body.smoke.ok) alert(body.smoke.message);
+    else if (body.smoke?.ok) showToast(body.smoke.message, 4000);
     await loadReasonRuntimeStatus();
     await loadCortexConfig();
     renderCortexModelRows();
@@ -502,6 +516,11 @@ function planRuntimeRow({ runtime, label, hint, selected }) {
   const hintLine = hint
     ? `<span style="font-size:11px;color:var(--muted);display:block;line-height:1.2">${escHtml(hint)}</span>`
     : '';
+  const jitTip = (runtime === 'lmstudio' && selected)
+    ? `<div style="font-size:11px;color:var(--muted);margin:0 0 4px 22px;line-height:1.3">
+         💡 In LM Studio, enable <strong>Just-In-Time Model Loading</strong> (Developer settings) so the plan model auto-loads on demand — otherwise scheduling calls fail until you load it manually.
+       </div>`
+    : '';
   return `
     <label for="${id}" style="display:flex;align-items:center;gap:8px;padding:6px 0;opacity:${disabled ? 0.55 : 1};cursor:${disabled ? 'not-allowed' : 'pointer'}">
       <input type="radio" name="planRuntime" id="${id}" value="${runtime}"
@@ -513,7 +532,8 @@ function planRuntimeRow({ runtime, label, hint, selected }) {
       </span>
       ${note}
       ${installBtn}
-    </label>`;
+    </label>
+    ${jitTip}`;
 }
 
 function planHealthFor(current) {
@@ -668,6 +688,8 @@ async function installPlanRuntime(runtime) {
     if (runtime === 'lmstudio') {
       alert('Installed. If LM Studio is running, click the 🔄 Refresh button in its "My Models" tab (or restart LM Studio) so it picks up the new model.');
     }
+    if (body.smoke && !body.smoke.ok) alert(body.smoke.message);
+    else if (body.smoke?.ok) showToast(body.smoke.message, 4000);
     await loadPlanRuntimeStatus();
     renderPlanModelRows();
   } finally {
@@ -692,6 +714,7 @@ function switchSettingsTab(name) {
     refreshLogs();
     loadReminderChannel();
     loadPlanRuntimeStatus().then(renderPlanModelRows);
+    if (typeof loadTunnelStatus === 'function') loadTunnelStatus();
   }
 }
 
@@ -951,7 +974,11 @@ async function saveBraveApiKey() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ braveApiKey: key }),
     });
-    if (!r.ok) { showToast('Failed to save Brave key'); return; }
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      showToast(error || `Failed to save Brave key (${r.status})`);
+      return;
+    }
     input.value = '';
     showToast('Brave API key saved');
     loadBraveApiKeyStatus();
@@ -969,6 +996,205 @@ async function clearBraveApiKey() {
     showToast('Brave API key cleared');
     loadBraveApiKeyStatus();
   } catch { showToast('Failed to clear Brave key'); }
+}
+
+// ── Public Access (Cloudflare Tunnel) — owner/admin only ─────────────────────
+let _tunnelPollTimer = null;
+
+async function loadTunnelStatus() {
+  const section = $('publicAccessSection');
+  const body    = $('publicAccessBody');
+  if (!section || !body) return;
+  const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+  if (!isPriv) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  try {
+    const s = await fetch('/api/tunnel/status').then(r => r.json());
+    renderTunnelStatus(s);
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red,#e05c5c);font-size:12px">Failed to load tunnel status: ${e.message}</div>`;
+  }
+}
+
+function renderTunnelStatus(s) {
+  const body = $('publicAccessBody');
+  if (!body) return;
+  const stateColor = {
+    running:  'var(--green, #4caf50)',
+    starting: 'var(--accent)',
+    stopped:  'var(--muted)',
+    crashed:  'var(--red, #e05c5c)',
+    error:    'var(--red, #e05c5c)',
+  }[s.state] || 'var(--muted)';
+  const stateText = {
+    running:  '✓ Running',
+    starting: '… Starting',
+    stopped:  'Stopped',
+    crashed:  '⚠ Crashed (give-up after 5 retries — click Start to retry)',
+    error:    '⚠ Error',
+  }[s.state] || s.state;
+  const urlBlock = s.publicUrl
+    ? `<div style="margin-top:8px;font-size:12px"><span style="opacity:0.6">Public URL:</span> <a href="${s.publicUrl}" target="_blank" style="color:var(--accent);word-break:break-all">${s.publicUrl}</a> <button onclick="copyToClipboard('${s.publicUrl}')" title="Copy" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;margin-left:6px">copy</button></div>`
+    : '';
+  const errBlock = s.lastError && s.state !== 'running'
+    ? renderTunnelErrorBlock(s.lastError)
+    : '';
+  const binNote = !s.binaryPresent
+    ? `<div style="margin-top:6px;font-size:11px;color:var(--muted);font-style:italic">cloudflared binary not present yet — will auto-download (~30 MB) on first start.</div>`
+    : '';
+  const isRunning = s.state === 'running' || s.state === 'starting';
+  body.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:${stateColor}">●&nbsp;${stateText}</span>
+      <span style="opacity:0.4;font-size:11px">|</span>
+      <span style="font-size:11px;opacity:0.7">mode: <b>${s.mode}</b></span>
+      ${s.pid ? `<span style="opacity:0.4;font-size:11px">|</span><span style="font-size:11px;opacity:0.7">pid: ${s.pid}</span>` : ''}
+    </div>
+    ${urlBlock}
+    ${errBlock}
+    ${binNote}
+
+    <div style="margin-top:14px;border:1px solid var(--border);border-radius:8px;padding:10px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:8px">Mode</div>
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;margin-bottom:6px;cursor:pointer">
+        <input type="radio" name="tunnelMode" value="off" ${s.mode === 'off' ? 'checked' : ''} style="margin-top:2px">
+        <span><b>Off</b> — no public exposure (default).</span>
+      </label>
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;margin-bottom:8px;cursor:pointer">
+        <input type="radio" name="tunnelMode" value="cloudflare" ${s.mode === 'cloudflare' ? 'checked' : ''} style="margin-top:2px">
+        <span><b>Cloudflare Tunnel</b> — stable hostname via your own Cloudflare account. Create a tunnel in your <a href="https://one.dash.cloudflare.com/" target="_blank" style="color:var(--accent)">Zero Trust dashboard</a>, add a public hostname routed to <code>http://localhost:${s.localPort}</code>, then paste token + hostname below.</span>
+      </label>
+
+      <div id="tunnelCloudflareFields" style="margin-top:8px;${s.mode === 'cloudflare' ? '' : 'display:none'}">
+        <label style="display:block;font-size:11px;opacity:0.7;margin-bottom:4px">CF Tunnel Token</label>
+        <input type="password" id="tunnelTokenInput" autocomplete="new-password"
+          placeholder="${s.hasToken ? '••••••••  (token saved — paste a new one to replace)' : 'eyJhIjoi…'}"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+        <label style="display:block;font-size:11px;opacity:0.7;margin-bottom:4px">Public hostname (the one you mapped to this tunnel)</label>
+        <input type="text" id="tunnelHostnameInput" placeholder="oe.example.com" value="${escHtml(s.hostname || '')}"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+      </div>
+
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button onclick="saveTunnelConfig()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+        <button onclick="tunnelStart()" ${isRunning ? 'disabled' : ''} style="background:${isRunning ? 'var(--bg3)' : 'var(--green,#4caf50)'};border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:${isRunning ? 'not-allowed' : 'pointer'};font-weight:600;opacity:${isRunning ? '0.5' : '1'}">Start</button>
+        <button onclick="tunnelStop()" ${!isRunning ? 'disabled' : ''} style="background:${!isRunning ? 'var(--bg3)' : 'var(--red,#e05c5c)'};border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:${!isRunning ? 'not-allowed' : 'pointer'};font-weight:600;opacity:${!isRunning ? '0.5' : '1'}">Stop</button>
+      </div>
+    </div>
+  `;
+  // Show/hide CF fields when the radio toggles between off and cloudflare.
+  body.querySelectorAll('input[name="tunnelMode"]').forEach(r => {
+    r.addEventListener('change', (ev) => {
+      const cf = $('tunnelCloudflareFields'); if (cf) cf.style.display = ev.target.value === 'cloudflare' ? '' : 'none';
+    });
+  });
+  // Re-render Lucide icons if the framework is mounted.
+  if (window.lucide?.createIcons) window.lucide.createIcons();
+  // While running/starting, poll status every 5 s so the UI shows the URL
+  // showing up after Quick-mode startup completes.
+  if (_tunnelPollTimer) { clearTimeout(_tunnelPollTimer); _tunnelPollTimer = null; }
+  // Poll only while transitioning. Once running/stopped/errored, stop —
+  // re-rendering the panel every 5s wipes any input the user is typing
+  // into the token field.
+  if (s.state === 'starting') {
+    _tunnelPollTimer = setTimeout(() => loadTunnelStatus(), 5000);
+  }
+}
+
+async function saveTunnelConfig() {
+  const mode  = document.querySelector('input[name="tunnelMode"]:checked')?.value || 'off';
+  const token = $('tunnelTokenInput')?.value || undefined;
+  const host  = $('tunnelHostnameInput')?.value || undefined;
+  const body  = { mode };
+  if (mode === 'cloudflare') {
+    if (token) body.token = token;
+    if (host !== undefined) body.hostname = host;
+  }
+  try {
+    const r = await fetch('/api/tunnel/configure', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      showToast(error || `Save failed (${r.status})`);
+      return;
+    }
+    if ($('tunnelTokenInput')) $('tunnelTokenInput').value = '';
+    showToast('Tunnel configuration saved');
+    loadTunnelStatus();
+  } catch (e) { showToast('Save failed: ' + e.message); }
+}
+
+// Render a persistent error panel for tunnel failures. Toasts disappear in
+// 3s, but tunnel errors sometimes carry an actionable URL the user needs
+// to copy/click — those have to live on screen until the user takes action.
+function renderTunnelErrorBlock(rawError) {
+  const text = String(rawError || '');
+  const urlRe = /https?:\/\/[^\s<>"']+/g;
+  const urls = text.match(urlRe) ?? [];
+  // Linkify by splitting on URLs and reassembling.
+  let html = '';
+  let last = 0;
+  for (const m of text.matchAll(urlRe)) {
+    html += escHtml(text.slice(last, m.index));
+    const u = m[0];
+    html += `<a href="${escHtml(u)}" target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all">${escHtml(u)}</a>`;
+    last = m.index + u.length;
+  }
+  html += escHtml(text.slice(last));
+  // If there's at least one URL, surface a prominent Copy button beneath the
+  // text so the user can grab the link without having to highlight it.
+  const copyRow = urls.length
+    ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${urls.map(u =>
+        `<button onclick="copyToClipboard('${escHtml(u).replace(/'/g, "\\'")}')" title="Copy ${escHtml(u)}"
+          style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;display:inline-flex;align-items:center;gap:4px">📋 Copy link</button>`
+      ).join('')}</div>`
+    : '';
+  return `
+    <div style="margin-top:10px;padding:10px 12px;background:rgba(244,67,54,0.06);border:1px solid var(--red,#e05c5c);border-radius:8px;color:var(--text);font-size:12px;line-height:1.5">
+      <div style="font-weight:600;color:var(--red,#e05c5c);margin-bottom:4px">⚠ Last error</div>
+      <div style="white-space:pre-wrap;word-break:break-word">${html}</div>
+      ${copyRow}
+    </div>`;
+}
+
+async function tunnelStart() {
+  // Save first if the user changed mode but didn't click Save.
+  await saveTunnelConfig();
+  try {
+    const r = await fetch('/api/tunnel/start', { method: 'POST' });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      // Surface a brief toast pointer, then refresh status so the persistent
+      // error block (with linkified URL + Copy button) is rendered. Toasts
+      // disappear in 3s — actionable URLs must live on screen.
+      showToast(error ? 'Start failed — see error below for details' : `Start failed (${r.status})`, 5000);
+      loadTunnelStatus();
+      return;
+    }
+    showToast('Tunnel starting…');
+    loadTunnelStatus();
+  } catch (e) {
+    showToast('Start failed: ' + e.message);
+    loadTunnelStatus();
+  }
+}
+
+async function tunnelStop() {
+  if (!confirm('Stop the tunnel? The install will no longer be reachable from the public internet.')) return;
+  try {
+    const r = await fetch('/api/tunnel/stop', { method: 'POST' });
+    if (!r.ok) { showToast(`Stop failed (${r.status})`); return; }
+    showToast('Tunnel stopped');
+    loadTunnelStatus();
+  } catch (e) { showToast('Stop failed: ' + e.message); }
+}
+
+function copyToClipboard(text) {
+  if (!text) return;
+  try { navigator.clipboard.writeText(text); showToast('Copied'); }
+  catch { showToast('Copy failed'); }
 }
 
 // ── Drawers ───────────────────────────────────────────────────────────────────

@@ -65,6 +65,9 @@ scripts/smoke-plan-*.mjs
 
 # --- Runtime artifacts ---
 server.pid
+tunnel.json
+tunnel.pid
+/bin/
 
 # --- Logs ---
 *.log

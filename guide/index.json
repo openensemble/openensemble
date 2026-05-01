@@ -1,0 +1,42 @@
+{
+  "sections": [
+    {
+      "title": "Start here",
+      "pages": [
+        { "slug": "welcome",         "title": "Welcome to OpenEnsemble" },
+        { "slug": "getting-started", "title": "Getting started" },
+        { "slug": "providers",       "title": "LLM providers" }
+      ]
+    },
+    {
+      "title": "Working with agents",
+      "pages": [
+        { "slug": "agents",        "title": "Agents" },
+        { "slug": "roles",         "title": "Roles" },
+        { "slug": "coordinator",   "title": "The Coordinator" },
+        { "slug": "skills",        "title": "Skills" },
+        { "slug": "skill-builder", "title": "Building custom skills" }
+      ]
+    },
+    {
+      "title": "Built-in features",
+      "pages": [
+        { "slug": "tasks",      "title": "Tasks & scheduler" },
+        { "slug": "documents",  "title": "Documents & sharing" },
+        { "slug": "expenses",   "title": "Expenses" },
+        { "slug": "nodes",      "title": "Remote nodes" },
+        { "slug": "cortex",     "title": "Cortex (local models)" }
+      ]
+    },
+    {
+      "title": "Setup & administration",
+      "pages": [
+        { "slug": "users",         "title": "Users & access" },
+        { "slug": "public-access", "title": "Public access (tunnel & Telegram)" },
+        { "slug": "backup-update", "title": "Backup, restore, auto-update" },
+        { "slug": "security",      "title": "Security model" },
+        { "slug": "shortcuts",     "title": "Tips & shortcuts" }
+      ]
+    }
+  ]
+}

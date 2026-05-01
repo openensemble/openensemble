@@ -1,5 +1,8 @@
 // ── Init ──────────────────────────────────────────────────────────────────────
 let _initDone = false;
+// Multi-step input recall state (terminal-style, last 10 user messages)
+let _recallIdx = -1;
+let _lastRecallText = null;
 
 async function init() {
   // Check for invite URL first
@@ -64,6 +67,14 @@ async function init() {
       resizeTextarea();
       if ($('input').value.startsWith('/')) { slashMenuIdx = 0; updateSlashMenu(); }
       else hideSlashMenu();
+      // If we're in recall mode and the user just typed (current value diverges
+      // from what we set), exit recall so the next ArrowUp restarts at newest.
+      // Programmatic .value sets do NOT fire 'input', so this only catches
+      // genuine user edits.
+      if (_recallIdx >= 0 && $('input').value !== _lastRecallText) {
+        _recallIdx = -1;
+        _lastRecallText = null;
+      }
     });
     $('input').addEventListener('keydown', e => {
       if (slashMenuItems.length) {
@@ -72,6 +83,62 @@ async function init() {
         if (e.key === 'Escape')    { e.preventDefault(); hideSlashMenu();   return; }
         if (e.key === 'Tab')       { e.preventDefault(); slashMenuItems[slashMenuIdx]?.action(); return; }
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); slashMenuItems[slashMenuIdx]?.action(); return; }
+      }
+      // Terminal-style multi-step recall: ArrowUp walks back through the last
+      // 10 user messages in this agent's session (newest first); ArrowDown
+      // walks back toward the most recent / blank. Per-agent — switching
+      // agents wipes recall state. Skips if user has typed something we
+      // didn't recall (preserves their in-progress text).
+      //
+      // State machine:
+      //   _recallIdx = -1  → not in recall mode (input is empty or user-typed)
+      //   _recallIdx = 0   → showing newest user message
+      //   _recallIdx = N   → showing N+1-th newest
+      //   _lastRecallText  → last value we wrote into the textarea, used to
+      //                      detect whether the user has edited the recalled
+      //                      message (in which case we exit recall and
+      //                      preserve their text).
+      if (e.key === 'ArrowUp') {
+        const cur = $('input').value;
+        const continuing = _recallIdx >= 0 && cur === _lastRecallText;
+        if (!continuing) {
+          if (cur !== '') return;       // user-typed text — leave alone
+          _recallIdx = -1;              // restart from newest
+        }
+        const userMsgs = (sessions[activeAgent] || [])
+          .filter(m => m.role === 'user' && !m.hidden && m.content)
+          .slice(-10).reverse();        // last 10, newest first
+        if (!userMsgs.length) return;    // session wiped or no user msgs
+        const nextIdx = Math.min(userMsgs.length - 1, _recallIdx + 1);
+        if (nextIdx === _recallIdx) return; // already at oldest available
+        _recallIdx = nextIdx;
+        _lastRecallText = userMsgs[_recallIdx].content;
+        e.preventDefault();
+        $('input').value = _lastRecallText;
+        resizeTextarea();
+        $('input').setSelectionRange(_lastRecallText.length, _lastRecallText.length);
+        return;
+      }
+      if (e.key === 'ArrowDown' && _recallIdx >= 0 && $('input').value === _lastRecallText) {
+        const userMsgs = (sessions[activeAgent] || [])
+          .filter(m => m.role === 'user' && !m.hidden && m.content)
+          .slice(-10).reverse();
+        const nextIdx = _recallIdx - 1;
+        if (nextIdx < 0) {
+          // Walked back past the newest — exit recall + clear input.
+          _recallIdx = -1; _lastRecallText = null;
+          e.preventDefault();
+          $('input').value = '';
+          resizeTextarea();
+          return;
+        }
+        _recallIdx = nextIdx;
+        _lastRecallText = userMsgs[_recallIdx].content;
+        e.preventDefault();
+        $('input').value = _lastRecallText;
+        resizeTextarea();
+        $('input').setSelectionRange(_lastRecallText.length, _lastRecallText.length);
+        return;
       }
       if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 640) { e.preventDefault(); send(); }
     });
@@ -84,6 +151,51 @@ async function init() {
     });
     $('btnAttach').addEventListener('click', () => $('chatFileInput').click());
     $('chatFileInput').addEventListener('change', e => handleChatFileSelect(e.target.files[0]));
+
+    // Drop a file anywhere on the page to attach it to the current chat.
+    // Uses an enter/leave depth counter so leaving a child element doesn't
+    // flicker the overlay off mid-drag.
+    let _dropDepth = 0;
+    let _dropOverlay = null;
+    const _hasFiles = e => Array.from(e.dataTransfer?.types ?? []).includes('Files');
+    const _ensureDropOverlay = () => {
+      if (_dropOverlay) return _dropOverlay;
+      _dropOverlay = document.createElement('div');
+      _dropOverlay.style.cssText = 'position:fixed;inset:12px;border:3px dashed var(--accent);border-radius:14px;background:rgba(94,160,255,0.12);display:none;align-items:center;justify-content:center;z-index:9998;pointer-events:none;font-size:18px;font-weight:600;color:var(--text);letter-spacing:.3px;backdrop-filter:blur(2px)';
+      _dropOverlay.textContent = 'Drop to attach to chat';
+      document.body.appendChild(_dropOverlay);
+      return _dropOverlay;
+    };
+    document.addEventListener('dragenter', e => {
+      if (!_hasFiles(e)) return;
+      _dropDepth++;
+      _ensureDropOverlay().style.display = 'flex';
+    });
+    document.addEventListener('dragover', e => { if (_hasFiles(e)) e.preventDefault(); });
+    document.addEventListener('dragleave', e => {
+      if (!_hasFiles(e)) return;
+      _dropDepth = Math.max(0, _dropDepth - 1);
+      if (!_dropDepth && _dropOverlay) _dropOverlay.style.display = 'none';
+    });
+    document.addEventListener('drop', e => {
+      if (!_hasFiles(e)) return;
+      e.preventDefault();
+      _dropDepth = 0;
+      if (_dropOverlay) _dropOverlay.style.display = 'none';
+      const file = e.dataTransfer.files?.[0];
+      if (file) handleChatFileSelect(file);
+    });
+
+    // Paste an image (or any file) directly into the chat input.
+    $('input').addEventListener('paste', e => {
+      const items = e.clipboardData?.items ?? [];
+      for (const it of items) {
+        if (it.kind === 'file') {
+          const file = it.getAsFile();
+          if (file) { e.preventDefault(); handleChatFileSelect(file); return; }
+        }
+      }
+    });
   }
 
   connect();

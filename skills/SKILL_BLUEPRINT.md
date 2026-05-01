@@ -186,6 +186,122 @@ Always check with optional chaining (`ctx?.showImage?.(...)`). If the skill is i
 
 ---
 
+## Background work — watchers (polling)
+
+For anything that takes more than a few seconds — video generation, training runs, price alerts, "tell me when X" conditions, long syncs, remote pod lifecycle — register a **watcher** with the per-user supervisor. The supervisor ticks your handler on a cadence, pushes status updates to chat as muted-italic 📡 bubbles, and surfaces the watcher in the user's tasks drawer where they can see ETA, extend the expiry, or cancel.
+
+**Tasks vs watchers** — pick the right primitive:
+
+| | Task | Watcher |
+|---|---|---|
+| Purpose | Fire scheduled action | Monitor evolving state |
+| Cadence | Once / cron | Every N seconds |
+| Output | Single result | Stream of status updates |
+| Lifecycle | Runs to completion | Reaps on `done` / expiry / cancel |
+| API | scheduler/tasks system | `ctx.watch / ctx.unwatch` |
+
+### How to register a watcher
+
+From any tool handler, call `ctx.watch({...})`. Returns a `watcherId` (string).
+
+```js
+const watcherId = await ctx?.watch?.({
+  kind:        'mywatcher_kind',          // must match a key in watcherHandlers
+  skillId:     'usr_myskill',             // your skill's id
+  label:       'Friendly name for tasks drawer',
+  cadenceSec:  30,                        // tick interval (min 5s)
+  expiresAt:   Date.now() + 30 * 60_000,  // wall-clock ms; null = indefinite
+  state:       { /* opaque, kind-specific */ },
+});
+```
+
+**Always set `expiresAt` based on a realistic estimate of the work.** The framework falls back to 1h with a WARN if you omit it, but skills should compute their own ceiling. Examples:
+
+- Video gen: `numSteps * estSecPerStep * numPrompts * 1.5 (safety) + 5min (post-encode buffer)`
+- Training: `numEpochs * stepsPerEpoch * estSecPerStep + 15min (checkpoint save)`
+- Pod startup: `15min` (provider queue ceiling)
+- Indefinite (price alert, "PR turns green"): `expiresAt: null` — explicit opt-out, never auto-reaps; user dismisses via the tasks drawer (they'll see a colored dot indicating the indefinite state)
+
+### How to define a handler
+
+Add a `watcherHandlers` named export at the bottom of `execute.mjs`. The supervisor looks up the handler by `kind` when the watcher is due to tick:
+
+```js
+export const watcherHandlers = {
+  // state: whatever was passed to ctx.watch({ state })
+  // helpers: { userId, agentId, watcherId, postStatus(text), showImage(...), showVideo(...) }
+  async mywatcher_kind(state, helpers) {
+    // 1. Poll the underlying resource
+    const data = await fetchLatestState(state);
+
+    // 2. Terminal: error
+    if (data.failed) {
+      return { done: true, textUpdate: `❌ My job failed: ${data.errorMsg}` };
+    }
+
+    // 3. Terminal: success — do the final work, then signal done
+    if (data.complete) {
+      await helpers.showVideo({ url: '/api/desktop/videos/foo.mp4', filename: 'foo.mp4', savedPath: '/abs/path' });
+      return { done: true, textUpdate: `✓ My job complete.` };
+    }
+
+    // 4. Active: report progress. The framework dedupes consecutive identical
+    //    textUpdates so you can compute the same line every tick safely.
+    return {
+      textUpdate: `📡 My job: ${data.percent}% — ETA ${data.etaText}`,
+      // Optional: extend the watcher's deadline if work is taking longer than
+      // your initial estimate. The framework adds this to the existing expiresAt.
+      extendExpiryBy: data.runningLong ? 5 * 60_000 : 0,
+      // Optional: change cadence dynamically.
+      nextCadenceSec: data.almostDone ? 5 : 30,
+      // Optional: persist updated state for the next tick.
+      newState: { ...state, lastSeenStep: data.step },
+    };
+  },
+};
+```
+
+### Critical handler rules (avoid the common pitfalls)
+
+- **Report ALL phases of work, not just the headline counter.** If your job has a "post-processing" tail (e.g. encoding, uploading, persisting), the headline counter plateaus while the work continues. Tell the user explicitly: `"diffusion done — encoding video…"`, not `"step 50/50"` repeated. Otherwise it looks stuck.
+- **Be tolerant of transient failures.** SSH blip, API 503 — return a soft `textUpdate` describing the retry, *don't* return `done: true`. The supervisor cancels the watcher after 3 *consecutive* handler exceptions; one-off blips that you handle inside the handler don't count.
+- **Be idempotent across server restarts.** Watchers are disk-persisted and resume on boot. Your handler runs against `state` — make sure the state alone is enough to recover the situation (e.g. a `jobId` to query, not a JS-object reference that died with the previous process).
+- **Dedup natively.** The supervisor drops consecutive identical `textUpdate` strings, so you can return the same string when nothing has changed without spamming chat.
+- **Handle "underlying resource is gone".** Pod terminated externally, file deleted, etc. Return `{ done: true, textUpdate: 'pod terminated externally' }` — the watcher gets reaped cleanly.
+- **Do final work in the handler, not in a separate tool.** When the watcher reaches `done`, the handler should call `helpers.showImage` / `helpers.showVideo` itself rather than asking the agent to invoke another tool. The whole point is the user shouldn't have to nudge the agent.
+
+### Declaring watchers in your manifest
+
+Skills that register watchers should declare the kinds they support so the skill-builder and tooling can introspect:
+
+```json
+{
+  "id": "usr_mygenerator",
+  "name": "My Generator",
+  "tools": [ ... ],
+  "watchers": [
+    {
+      "kind": "mygenerator_progress",
+      "description": "Polls the remote job, posts progress, downloads the result on completion."
+    }
+  ]
+}
+```
+
+The `kind` strings must match the keys in your `watcherHandlers` export.
+
+### Cancelling
+
+- Programmatically: `await ctx.unwatch(watcherId)`.
+- User: clicks the ✕ in the tasks drawer or clicks the indefinite-watcher dot.
+- Auto: handler returns `done: true`, `expiresAt` passes, or 3 consecutive failures.
+
+### Per-user cap
+
+Soft cap of 10 active watchers per user. If a registration would exceed it, `ctx.watch` returns `null` and logs a warning — so always check the return.
+
+---
+
 ## Importing app internals
 
 If you need app internals (e.g. `roles.mjs`, `_helpers.mjs`), use **dynamic imports inside the function body** — never at the top level. This avoids circular initialization (roles.mjs loads your executor; if your executor imports roles.mjs at module load time, it creates a circular init).
