@@ -153,10 +153,10 @@ server.mjs              entry point
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). In plain English:
+[GNU Affero General Public License v3.0 or later](https://www.gnu.org/licenses/agpl-3.0.html). In plain English:
 
-- **Allowed:** running OpenEnsemble yourself, modifying it, and sharing your modifications — for personal, hobby, research, educational, nonprofit, or government use.
-- **Not allowed:** any commercial use. This explicitly includes selling the code, selling a modified version, offering it as a paid service, or bundling it into a paid product.
-- **Required:** anyone you share the code (or a modification) with must also receive this license and the `Required Notice:` attribution line from the top of `LICENSE`. You can't strip the attribution and redistribute it as your own work.
+- **Allowed:** running OpenEnsemble yourself or for any commercial purpose, modifying it, redistributing it, and offering it as a hosted service.
+- **Required:** if you modify OpenEnsemble and let anyone else use it (including over a network — hosting it for users counts), you must offer them the source of your modifications under the same AGPL-3.0 license.
+- **Required:** preserve the copyright and license notices.
 
-See `LICENSE` for the full text. Commercial use requires a separate written license from the author.
+See `LICENSE` for the full text. For organizations that want to embed OpenEnsemble without the AGPL's copyleft obligation, a separate commercial license is available — get in touch.
