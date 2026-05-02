@@ -544,6 +544,22 @@ registerBuiltin('tutorWeekWrap', async (task) => {
   return `WeekWrap: ${recap.minutesStudied}min/${recap.daysStudied}d, goalMet=${recap.goalMet}, granted=${granted?.id || 'none'}`;
 });
 
+// ── Builtin task: hard-delete soft-forgotten cortex memories ────────────────
+// Walks every users/<id>/cortex/*.lance table and drops rows where
+// `forgotten = true` and the row was created more than 30 days ago. Soft-
+// deletes are kept that long so users can recover from an accidental forget.
+registerBuiltin('cortexCleanup', async () => {
+  try {
+    const { cleanupAllUsers } = await import('./memory/cleanup.mjs');
+    const result = await cleanupAllUsers(30);
+    return result.totalDeleted
+      ? `Dropped ${result.totalDeleted} forgotten memory row(s) across ${result.users} user(s).`
+      : 'No forgotten rows older than 30 days.';
+  } catch (e) {
+    return `Error: ${e.message}`;
+  }
+});
+
 // ── Builtin task: clean old uploads ──────────────────────────────────────────
 registerBuiltin('cleanUploads', () => {
   try {
@@ -576,6 +592,18 @@ async function seedSystemTasks() {
       ownerId: null,
     });
     console.log('[scheduler] Seeded cleanUploads task');
+  }
+  if (!existing.find(t => t.type === 'builtin' && t.handler === 'cortexCleanup')) {
+    await addTask({
+      label: 'Cortex memory cleanup',
+      type: 'builtin',
+      handler: 'cortexCleanup',
+      agent: 'system',
+      repeat: 'daily',
+      time: '03:30',
+      ownerId: null,
+    });
+    console.log('[scheduler] Seeded cortexCleanup task');
   }
 }
 

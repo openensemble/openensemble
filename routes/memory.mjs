@@ -5,12 +5,14 @@
  *   GET    /api/memory?q=...&type=...&agent=...  — search or list memories
  *   GET    /api/memory/stats                     — memory statistics
  *   DELETE /api/memory/:id?type=...&agent=...    — soft-delete a memory
+ *   POST   /api/memory/cleanup                   — hard-delete soft-forgotten rows
  */
 
 import {
   requireAuth, getAuthToken, getSessionUserId, safeError,
 } from './_helpers.mjs';
 import { recall, forget, getMemoryStats } from '../memory.mjs';
+import { cleanupForgottenForUser } from '../memory/cleanup.mjs';
 
 export async function handle(req, res) {
   // ── GET /api/memory/stats ─────────────────────────────────────────────────
@@ -67,6 +69,28 @@ export async function handle(req, res) {
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(safe));
+    } catch (e) { safeError(res, e); }
+    return true;
+  }
+
+  // ── POST /api/memory/cleanup ──────────────────────────────────────────────
+  // Hard-delete the calling user's soft-forgotten memories. Body: optional
+  // { graceDays: number }. Default 0 = drop everything currently flagged.
+  if (req.url?.startsWith('/api/memory/cleanup') && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    let graceDays = 0;
+    if (body) {
+      try {
+        const j = JSON.parse(body);
+        if (typeof j.graceDays === 'number' && j.graceDays >= 0) graceDays = j.graceDays;
+      } catch {}
+    }
+    try {
+      const result = await cleanupForgottenForUser(authId, graceDays);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     } catch (e) { safeError(res, e); }
     return true;
   }

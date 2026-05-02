@@ -74,6 +74,12 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     addToSessionBuffer(agent.id, 'user', sessionText, userId);
     addToSessionBuffer(agent.id, 'assistant', assistantContent, userId);
   }
+  // Action-tool turns (set_reminder, schedule_task, send_telegram_message,
+  // web search, email send, etc.) are imperative actions, not preference
+  // statements. Running the signals head on the user message would routinely
+  // misclassify "i need to drink water in 5 minutes" or "send X to telegram"
+  // as a durable fact/preference. Episodes still write above for context recall.
+  if (toolsUsed.length) return;
   const runSignals = withSignalWordsGate
     ? (!skipEpisodes || SIGNAL_WORDS_RE.test(sessionText))
     : true;
