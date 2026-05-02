@@ -1,5 +1,9 @@
 # Tasks & scheduler
 
+> **Note:** the scheduler relies on a small bundled local model to parse intent — it isn't 100% accurate. Bare-time forms ("at 0230"), unusual phrasings, or compound requests can occasionally slip past it. When that happens, your agent's own model now has `set_reminder` and `schedule_task` tools as a fallback — so the larger model picks up where the local one missed. If a reminder still doesn't show up where you expected, check **Sidebar → Tasks**; if it isn't there, re-state it more explicitly ("remind me at 2:30 AM today to..."). Both paths get better as the cortex/plan models are retrained.
+
+<br>
+
 OpenEnsemble has a built-in scheduler that runs agent prompts on a schedule. Use it for daily briefings, recurring sweeps, or one-shot reminders — anything you'd otherwise have to remember to ask for.
 
 ## Two flavours
@@ -16,6 +20,15 @@ Two ways:
 **2. Settings → Tasks.** Manual editor for the cron expression, the prompt, and the agent that runs it. Good for fine-tuning what the chat parser created.
 
 You can see all your tasks in **Sidebar → Tasks**. The tasks badge counts upcoming runs.
+
+### Two-stage parsing
+
+There are two layers between you and a created task:
+
+1. **Server interceptor** — runs *before* the LLM on every chat. The bundled local plan model parses the request and creates the task directly. Fast, free, private.
+2. **Agent-tool fallback** — when the interceptor misses (regex doesn't recognize the phrasing, or the local model fails to parse), your agent's own model receives the raw message and can call `set_reminder` or `schedule_task` itself. Whatever model you've assigned to that agent (Claude, GPT-5.5, a local one) handles the parsing in this case.
+
+The two paths produce slightly different titles right now — interceptor-created reminders use a terse label ("Drink water"), agent-tool-created ones get an LLM-polished title ("Drink Water Reminder"). Same firing behavior, different label producer. Cleanup of that inconsistency is on the roadmap.
 
 ## What runs
 
@@ -53,10 +66,13 @@ The System tab itself is owner/admin only — regular users don't see it. If you
 
 ## Reminder delivery
 
-Notifications from tasks go through whichever channels you've set up:
+Reminders fire through the channel you pick under **Settings → System → Reminder Delivery**:
 
-- **In-app** — chat bubble from the running agent (always on).
-- **Telegram** — if you've connected a bot (see **Public access**).
-- **Email** — if you've connected an outbound mailbox.
+- **In-app** — banner + chime in the chat UI (default).
+- **Telegram** — DM through the bot you've linked.
+- **Email** — sent from one of your connected mailboxes (Gmail OAuth, Microsoft OAuth, or any IMAP account with SMTP). If you have multiple mailboxes, a second selector appears so you can pick which one sends. Defaults to the oldest connected account; falls back to the next sendable one if the chosen mailbox isn't usable when the reminder fires.
+- **All channels** — fan out to every channel above that you've configured. Anything not configured is silently skipped (no error in chat).
 
-Configure default delivery in **Settings → System → Reminder Delivery**.
+Reminders fail open: if your preferred channel can't deliver (e.g. you picked Email but no mailbox is sendable), the system falls back to in-app so the reminder isn't silently lost. Check the server log for a `[reminder]` line if you expected delivery and didn't get it.
+
+> Reminder delivery only applies to **reminder-type** tasks (the simple "remind me to X at Y" kind, fired by the built-in `fireReminder` handler). For agent-run scheduled tasks — like a daily news briefing — the agent itself decides what to do; if you want it pushed to Telegram or email, say so in the prompt ("…and email it to me", "…send via telegram") and the agent will use the matching tool.

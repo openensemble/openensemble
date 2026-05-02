@@ -1,6 +1,5 @@
 // ── Models (Settings drawer) ───────────────────────────────────────────────────
 let allModels = [];
-let customModels = JSON.parse(localStorage.getItem('oe_custom_models') || '[]');
 let drawers = [];
 
 async function loadModels() {
@@ -100,7 +99,7 @@ function _isSystemInternalModel(m) {
 function allAvailableModels({ unfiltered = false } = {}) {
   const seen = new Set(), merged = [];
   const compatModels = getCompatProviderModels();
-  for (const m of [...anthropicModels, ...allModels, ...customModels, ...fireworksModels, ...getGrokModels(), ...openrouterModels, ...compatModels]) {
+  for (const m of [...anthropicModels, ...allModels, ...fireworksModels, ...getGrokModels(), ...openrouterModels, ...compatModels]) {
     // Dedupe on provider+name so the same model ID from different providers coexists
     const key = `${m.provider}::${m.name}`;
     if (!seen.has(key)) { seen.add(key); merged.push(m); }
@@ -810,6 +809,12 @@ async function saveStripThinkingTags(checked) {
 }
 
 // ── Reminder delivery channel (per-user) ──────────────────────────────────────
+function _toggleReminderEmailRow(channel) {
+  const row = $('reminderEmailRow');
+  if (!row) return;
+  row.style.display = (channel === 'email' || channel === 'all') ? '' : 'none';
+}
+
 async function loadReminderChannel() {
   const sel = $('reminderChannelSelect');
   const status = $('reminderChannelStatus');
@@ -818,8 +823,11 @@ async function loadReminderChannel() {
     const r = await fetch(`/api/users/${_currentUser.id}`);
     if (!r.ok) return;
     const u = await r.json();
-    sel.value = u.reminderChannel || 'websocket';
+    const channel = u.reminderChannel || 'websocket';
+    sel.value = channel;
     if (status) status.textContent = '';
+    _toggleReminderEmailRow(channel);
+    await loadReminderEmail(u.reminderEmailId);
   } catch {}
 }
 
@@ -839,6 +847,59 @@ async function saveReminderChannel(channel) {
     }
     if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saved'; setTimeout(() => status.textContent = '', 1500); }
     showToast(`Reminder delivery: ${channel}`, 2000);
+    _toggleReminderEmailRow(channel);
+    if (channel === 'email' || channel === 'all') await loadReminderEmail();
+  } catch {
+    if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Network error.'; }
+  }
+}
+
+async function loadReminderEmail(currentSelection) {
+  const sel = $('reminderEmailSelect');
+  if (!sel || !_currentUser) return;
+  try {
+    const r = await fetch('/api/email-accounts');
+    if (!r.ok) {
+      sel.innerHTML = '<option value="">No accounts available</option>';
+      return;
+    }
+    const accts = await r.json();
+    if (!Array.isArray(accts) || !accts.length) {
+      sel.innerHTML = '<option value="">No accounts connected</option>';
+      return;
+    }
+    if (currentSelection === undefined) {
+      const u = await fetch(`/api/users/${_currentUser.id}`).then(r => r.ok ? r.json() : null).catch(() => null);
+      currentSelection = u?.reminderEmailId;
+    }
+    sel.innerHTML = accts.map(a => {
+      const label = a.label || a.username || a.id;
+      return `<option value="${a.id}">${label}${a.username ? ` (${a.username})` : ''}</option>`;
+    }).join('');
+    // Default to first by createdAt order if user hasn't chosen.
+    const defaultId = currentSelection || accts.slice().sort((a, b) =>
+      new Date(a.createdAt || 0) - new Date(b.createdAt || 0))[0]?.id;
+    if (defaultId) sel.value = defaultId;
+  } catch {
+    sel.innerHTML = '<option value="">Failed to load</option>';
+  }
+}
+
+async function saveReminderEmail(accountId) {
+  const status = $('reminderEmailStatus');
+  if (!_currentUser || !accountId) return;
+  if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saving…'; }
+  try {
+    const r = await fetch(`/api/users/${_currentUser.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reminderEmailId: accountId }),
+    });
+    if (!r.ok) {
+      if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Failed to save.'; }
+      return;
+    }
+    if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saved'; setTimeout(() => status.textContent = '', 1500); }
   } catch {
     if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Network error.'; }
   }

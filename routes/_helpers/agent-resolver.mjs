@@ -231,7 +231,8 @@ export function getAgentsForUser(userId) {
     // in any URL you share points at the user's own computer and fails with
     // connection refused. Always use the server's LAN IP when sharing URLs.
     const serverUrlGuidance = `## Server URLs\n\nThis OpenEnsemble server's LAN address is \`${serverIp}\`. When you share any URL that points at this server (dev servers, preview links, running processes, etc.), always use \`http://${serverIp}:<port>\` — NEVER \`http://localhost:<port>\` or \`http://127.0.0.1:<port>\`. The user's browser runs on a different machine than this server, so localhost resolves to their own computer and fails with "connection refused".`;
-    const promptParts = [expandedPrompt, skillPromptAdditions, parallelToolsGuidance, serverUrlGuidance].filter(Boolean);
+    const selfReferenceGuidance = `## Speaking about yourself\n\nSpeak in the first person — "I", "me", "my". Do not refer to yourself in the third person by your own name (e.g. don't say "${agentName} sees that..." — say "I see that..."). You may refer to OTHER agents by their name when delegating or quoting them (e.g. "I asked Gina and she found...").`;
+    const promptParts = [expandedPrompt, skillPromptAdditions, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance].filter(Boolean);
     const systemPrompt = promptParts.join('\n\n');
 
     // Patch ask_agent description with the real agent list

@@ -5,7 +5,43 @@
   "icon": "⏰",
   "category": "utility",
   "enabled_by_default": true,
+  "systemPromptAddition": "## Scheduling fallback tools\n\nThe server normally intercepts scheduling requests *before* you see them and prepends a `[scheduler] ...` outcome line to the user message. **If you see `[scheduler]` in the user's message, the task was already created (or rejected) — confirm naturally to the user and DO NOT call `set_reminder` or `schedule_task`.**\n\nYou have `set_reminder` and `schedule_task` for the cases the interceptor missed. Use them when:\n- The user clearly wants something scheduled, AND\n- No `[scheduler]` line appears in this turn's user message.\n\nWhen calling, parse the time yourself from the user's phrasing using the `<current_time>` block injected at the top of the chat. Resolve relative phrases like \"in five minutes\", \"tomorrow at 8\", \"every weekday at 7am\" into either a full ISO-8601 datetime (one-shots) or HH:MM 24-hour (daily). Echo the actual time back to the user when you confirm — never just say \"reminder set\" without naming when it'll fire.\n\n**Choose between the two:**\n- `set_reminder` — for \"remind me to drink water at 3pm\" / \"set an alarm for 7am\". Fires a banner + chime; no agent runs. Just a notification.\n- `schedule_task` — for \"every morning email me a news briefing\" / \"at 5pm summarize my inbox\". The task fires a fresh agent run with a prompt you write — you'll be the agent answering, with no human present, so write the prompt as a self-contained instruction.",
   "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "set_reminder",
+        "description": "Create a notification-only reminder (banner + chime). Use ONLY when no `[scheduler]` outcome was prepended this turn — the server intercepts most scheduling requests automatically. Parse the time from the user's phrasing using the <current_time> block.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "label":    { "type": "string", "description": "Short label shown in the notification, e.g. 'Drink water'." },
+            "datetime": { "type": "string", "description": "ISO 8601 timestamp for one-shot reminders, e.g. '2026-05-02T15:00:00-04:00'. Required when repeat is 'once' or omitted." },
+            "time":     { "type": "string", "description": "HH:MM 24-hour clock time for daily reminders, e.g. '07:30'. Required when repeat is 'daily'." },
+            "repeat":   { "type": "string", "enum": ["once", "daily"], "description": "Defaults to 'once'." }
+          },
+          "required": ["label"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "schedule_task",
+        "description": "Schedule THIS agent to run a prompt at a specific time. Use ONLY when no `[scheduler]` outcome was prepended this turn. The user is NOT present at fire time — write `prompt` as a self-contained instruction the agent can act on directly.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "label":    { "type": "string", "description": "Short label for the task, e.g. 'Daily news briefing'." },
+            "prompt":   { "type": "string", "description": "What you (the agent) should do when this fires. Must be self-contained — no 'as we discussed', no follow-up questions." },
+            "datetime": { "type": "string", "description": "ISO 8601 timestamp for one-shot tasks. Required when repeat is 'once' or omitted." },
+            "time":     { "type": "string", "description": "HH:MM 24-hour for daily tasks. Required when repeat is 'daily'." },
+            "repeat":   { "type": "string", "enum": ["once", "daily"], "description": "Defaults to 'once'." }
+          },
+          "required": ["label", "prompt"]
+        }
+      }
+    },
     {
       "type": "function",
       "function": {

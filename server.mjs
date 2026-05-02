@@ -389,23 +389,42 @@ registerBuiltin('fireReminder', async (task) => {
 
   if (wantEm) {
     try {
-      // Read the user's email accounts and pick the first one with SMTP configured.
-      // The email skill stores these at users/<id>/email-accounts.json; keeping the
-      // read inline here avoids pulling the whole email-accounts route module in.
       const { USERS_DIR } = await import('./lib/paths.mjs');
       const fs = await import('fs');
       const path = await import('path');
       const p = path.join(USERS_DIR, task.ownerId, 'email-accounts.json');
-      if (fs.existsSync(p)) {
-        const accts = JSON.parse(fs.readFileSync(p, 'utf8'));
-        const sender = accts.find(a => a.smtpHost && a.encryptedPassword);
-        if (sender) {
-          const { sendSmtpEmail } = await import('./lib/smtp-client.mjs');
-          await sendSmtpEmail(task.ownerId, sender, {
-            to: sender.username,
-            subject: `Reminder: ${task.label}`,
-            body: `This is your reminder:\n\n${task.label}\n\nFired at ${new Date().toLocaleString()}.`,
+      const accts = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : [];
+      const isSendable = (a) => a.provider === 'gmail' || a.provider === 'microsoft' || (a.smtpHost && a.encryptedPassword);
+      // User-selected account wins; otherwise first sendable account by createdAt order.
+      const preferredId = user?.reminderEmailId;
+      const preferred = preferredId ? accts.find(a => a.id === preferredId) : null;
+      const sender = (preferred && isSendable(preferred)) ? preferred : accts.find(isSendable);
+      if (!sender) {
+        console.warn(`[reminder] email skipped — no sendable account for ${task.ownerId} (need Gmail OAuth, Microsoft OAuth, or SMTP-configured account)`);
+      } else {
+        const subject = `Reminder: ${task.label}`;
+        const body = `This is your reminder:\n\n${task.label}\n\nFired at ${new Date().toLocaleString()}.`;
+        const to = sender.username || user?.email;
+        if (!to) {
+          console.warn(`[reminder] email skipped — sender account "${sender.label}" has no username/recipient address`);
+        } else if (sender.provider === 'gmail') {
+          const { getAccessToken } = await import('./lib/google-auth.mjs');
+          const token = await getAccessToken('gmail', task.ownerId, sender.id);
+          const raw = [`To: ${to}`, `Subject: ${subject}`, `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, ``, body].join('\r\n');
+          const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw: Buffer.from(raw).toString('base64url') }),
           });
+          if (!r.ok) throw new Error(`Gmail send ${r.status}: ${await r.text()}`);
+          delivered.push('email');
+        } else if (sender.provider === 'microsoft') {
+          const { composeMsMessage } = await import('./lib/ms-graph.mjs');
+          await composeMsMessage(task.ownerId, sender.id, { to, subject, body });
+          delivered.push('email');
+        } else {
+          const { sendSmtpEmail } = await import('./lib/smtp-client.mjs');
+          await sendSmtpEmail(task.ownerId, sender, { to, subject, body });
           delivered.push('email');
         }
       }

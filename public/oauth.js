@@ -230,16 +230,18 @@ const IMAP_PRESETS = {
   '': { host: '', port: 993, tls: true, note: '' },
   'office365': {
     host: 'outlook.office365.com', port: 993, tls: true,
+    smtpHost: 'smtp.office365.com', smtpPort: 587, smtpTls: true,
     note: 'Office 365 / Exchange Online disabled basic passwords in 2022. You need an <strong>app password</strong>: go to <em>account.microsoft.com → Security → Advanced security options → App passwords</em> and generate one, then use it here instead of your normal password.',
   },
   'gmail': {
     host: 'imap.gmail.com', port: 993, tls: true,
+    smtpHost: 'smtp.gmail.com', smtpPort: 587, smtpTls: true,
     note: 'Gmail requires an <strong>app password</strong> (not your regular password). Go to <em>myaccount.google.com → Security → 2-Step Verification → App passwords</em> to generate one.',
   },
-  'yahoo': { host: 'imap.mail.yahoo.com', port: 993, tls: true, note: 'Yahoo requires an app password. Go to <em>Yahoo Account Security → Generate app password</em>.' },
-  'fastmail': { host: 'imap.fastmail.com', port: 993, tls: true, note: '' },
-  'icloud': { host: 'imap.mail.me.com', port: 993, tls: true, note: 'iCloud requires an app-specific password from <em>appleid.apple.com → Sign-In and Security → App-Specific Passwords</em>.' },
-  'custom': { host: '', port: 993, tls: true, note: '' },
+  'yahoo':    { host: 'imap.mail.yahoo.com', port: 993, tls: true, smtpHost: 'smtp.mail.yahoo.com', smtpPort: 587, smtpTls: true, note: 'Yahoo requires an app password. Go to <em>Yahoo Account Security → Generate app password</em>.' },
+  'fastmail': { host: 'imap.fastmail.com',   port: 993, tls: true, smtpHost: 'smtp.fastmail.com',   smtpPort: 465, smtpTls: true, note: '' },
+  'icloud':   { host: 'imap.mail.me.com',    port: 993, tls: true, smtpHost: 'smtp.mail.me.com',    smtpPort: 587, smtpTls: true, note: 'iCloud requires an app-specific password from <em>appleid.apple.com → Sign-In and Security → App-Specific Passwords</em>.' },
+  'custom':   { host: '', port: 993, tls: true, note: '' },
 };
 
 function imapPresetChanged() {
@@ -309,10 +311,18 @@ async function submitImapAccount() {
   if (errEl) errEl.style.display = 'none';
 
   try {
+    const presetKey = $('imapPreset')?.value ?? '';
+    const preset = IMAP_PRESETS[presetKey] ?? {};
+    const payload = { provider: 'imap', label, host, port, tls, username, password };
+    if (preset.smtpHost) {
+      payload.smtpHost = preset.smtpHost;
+      payload.smtpPort = preset.smtpPort;
+      payload.smtpTls  = preset.smtpTls;
+    }
     const res = await fetch('/api/email-accounts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: 'imap', label, host, port, tls, username, password }),
+      body: JSON.stringify(payload),
     }).then(r => r.json());
     if (res.error) throw new Error(res.error);
     $('imapModal')?.remove();
@@ -599,14 +609,14 @@ async function openSettingsDrawer(openIt = true) {
       if (tog) { tog.checked = fullCfg.stripThinkingTags !== false; setStripThinkingTrack(tog.checked); }
     }).catch(() => {});
     // Show admin-only system sections
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = '';
     });
     if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus();
     if (typeof loadUpdateStatus === 'function') loadUpdateStatus();
   } else {
     // Hide admin-only sections for regular users
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','customModelRow','braveApiKeyRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = 'none';
     });
   }

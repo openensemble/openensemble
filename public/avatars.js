@@ -49,10 +49,12 @@ function renderAvatarPicker(container) {
         <div style="font-size:10px;color:var(--muted)">JPG, PNG, WebP, or GIF. Max 2MB.</div>
       </div>
 
-      <div class="avatar-section-title">Built-in Avatars</div>
-      <div class="avatar-builtin-grid">
-        ${BUILTIN_AVATARS.map(e => `<button class="avatar-builtin-item${user.emoji === e && !hasCustomAvatar(user) ? ' active' : ''}" onclick="selectEmojiAvatar('${e}')">${e}</button>`).join('')}
-      </div>
+      <details class="avatar-builtin-details">
+        <summary class="avatar-section-title" style="cursor:pointer">Built-in Avatars</summary>
+        <div class="avatar-builtin-grid" style="margin-top:8px">
+          ${BUILTIN_AVATARS.map(e => `<button class="avatar-builtin-item${user.emoji === e && !hasCustomAvatar(user) ? ' active' : ''}" onclick="selectEmojiAvatar('${e}')">${e}</button>`).join('')}
+        </div>
+      </details>
     </div>`;
 }
 

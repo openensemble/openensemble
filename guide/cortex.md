@@ -1,5 +1,7 @@
 # Cortex (local models)
 
+> **Note:** these are small local models (135M–360M params) — fast and free, but not 100% accurate. Expect occasional misfires: a memory saved when it shouldn't have been, a paraphrase missed by the dedup head, a contradiction flagged on agreeing statements. You can correct any of them in chat ("forget that", "that wasn't a preference") and the heads keep improving as the models are retrained.
+
 Cortex is the bundled set of local models OpenEnsemble runs in-process. They handle small, frequent reasoning tasks so the install works offline and doesn't burn cloud tokens for every internal decision.
 
 ## What it includes

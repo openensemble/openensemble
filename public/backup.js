@@ -99,14 +99,3 @@ $('btnRefreshModels').addEventListener('click', async () => {
     checkCortexHealth().then(renderCortexModelRows);
   } catch {}
 });
-$('btnAddCustomModel').addEventListener('click', () => {
-  const name = $('customModelName').value.trim(), provider = $('customModelProvider').value;
-  if (!name) return;
-  if (!customModels.find(m => m.name === name)) {
-    customModels.push({ name, provider });
-    localStorage.setItem('oe_custom_models', JSON.stringify(customModels));
-  }
-  $('customModelName').value = '';
-  renderModelBrowser(); renderAgentModelRows();
-});
-
