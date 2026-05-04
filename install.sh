@@ -293,8 +293,6 @@ EXCLUDES=(
   --exclude='CLAUDE.md'
   --exclude='WORKSPACE_LOG.md'
   --exclude='server.log'
-  --exclude='install.sh'
-  --exclude='config.template.json'
 )
 
 mkdir -p "$INSTALL_DIR"
@@ -311,7 +309,7 @@ else
     ! -name 'cortex-lancedb' ! -name 'memory-db' ! -name 'expenses' \
     ! -name 'tasks' ! -name 'agents' ! -name 'shared-docs' \
     ! -name 'sharing.json' ! -name 'sessions' ! -name 'lancedb' ! -name 'activity' ! -name 'tools' \
-    ! -name '*.log' ! -name '*.bak' ! -name 'install.sh' ! -name 'CLAUDE.md' ! -name 'config.template.json' \
+    ! -name '*.log' ! -name '*.bak' ! -name 'CLAUDE.md' \
     -exec cp -r {} "$INSTALL_DIR/" \;
   # Remove any user-created plugins that slipped through (rsync has --exclude for this)
   find "$INSTALL_DIR/plugins" -mindepth 1 -maxdepth 1 -type d ! -name 'markets' ! -name 'news' -exec rm -rf {} + 2>/dev/null
@@ -379,6 +377,20 @@ info "Running npm install (this may take a minute)..."
 cd "$INSTALL_DIR"
 npm install --prefer-offline 2>&1 | grep -v '^npm warn\|^npm notice' || npm install
 success "Dependencies installed"
+
+# `npm install` often rewrites package-lock.json on a fresh install (different
+# npm version, platform-specific deps, peer-dep resolution drift). The
+# committed lockfile is authoritative for what gets shipped; the on-disk
+# rewrite just dirtied a tracked file and would block the in-app "Software
+# Update" button for non-developers. Discard the rewrite so the working tree
+# stays clean. node_modules is unaffected — npm only reads the lockfile at
+# install time, not at runtime.
+if [ -d "$INSTALL_DIR/.git" ] && command -v git &>/dev/null; then
+  if ! git -C "$INSTALL_DIR" diff --quiet -- package-lock.json 2>/dev/null; then
+    git -C "$INSTALL_DIR" checkout -- package-lock.json 2>/dev/null && \
+      info "Reverted post-install package-lock.json rewrite (working tree stays clean)"
+  fi
+fi
 
 # ─── Create start.sh ─────────────────────────────────────────────────────────
 cat > "$INSTALL_DIR/start.sh" << STARTSH

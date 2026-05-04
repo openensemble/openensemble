@@ -22,7 +22,7 @@ import { listLogFiles, readLog } from '../logger.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import {
   getCachedState as getUpdateState, checkForUpdate, isCleanForUpdate,
-  applyUpdate, restartProcess,
+  applyUpdate, forceApplyUpdate, restartProcess,
 } from '../lib/update.mjs';
 import { broadcastToUsers } from '../ws-handler.mjs';
 import { encryptBackup, decryptBackup, isEncryptedBackup } from '../lib/backup-crypto.mjs';
@@ -514,6 +514,39 @@ export async function handle(req, res) {
         // On success, applyUpdate() already triggered restart — no further broadcast.
       } catch (e) {
         broadcastUpdate({ type: 'update_failed', code: 'INTERNAL', message: e.message, ts: Date.now() });
+      }
+    });
+    return true;
+  }
+
+  // Force-update path: discards local modifications to tracked files
+  // (`git reset --hard` + `git clean -fd`) before pulling. Recovery for
+  // installs where postinstall dirtied a tracked file (npm package-lock
+  // rewrites, line-ending normalization, etc.).
+  if (req.url === '/api/admin/update/apply-force' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const cfg = loadConfig();
+    const remote = cfg.updateRemote || 'origin';
+
+    const adminIds = loadUsers()
+      .filter(u => u.role === 'owner' || u.role === 'admin').map(u => u.id);
+    const broadcastUpdate = (msg) => broadcastToUsers(adminIds, msg);
+
+    res.writeHead(202, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ applying: true, forced: true }));
+
+    setImmediate(async () => {
+      broadcastUpdate({ type: 'update_applying', stage: 'force_starting', forced: true, ts: Date.now() });
+      try {
+        const result = await forceApplyUpdate({ remote, broadcast: broadcastUpdate });
+        if (!result.ok) {
+          broadcastUpdate({
+            type: 'update_failed',
+            code: result.code, message: result.message, forced: true, ts: Date.now(),
+          });
+        }
+      } catch (e) {
+        broadcastUpdate({ type: 'update_failed', code: 'INTERNAL', message: e.message, forced: true, ts: Date.now() });
       }
     });
     return true;

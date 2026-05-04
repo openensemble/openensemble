@@ -54,6 +54,29 @@ function renderUpdateRow() {
 
   const canApply = s.enabled && s.available && !s.dirty && s.unpushed === 0;
 
+  // When dirty, render the modified-files list inline so users can see what
+  // got touched (typical culprit on fresh installs: package-lock.json rewritten
+  // by `npm install`, or line-ending normalization on a tracked text file).
+  // Pair it with a "Force update" button that resets the tree.
+  let dirtyBlock = '';
+  if (s.enabled && s.dirty && Array.isArray(s.dirtyFiles) && s.dirtyFiles.length) {
+    const STATUS_LABELS = { 'M': 'modified', 'A': 'added', 'D': 'deleted', 'R': 'renamed', 'C': 'copied', '??': 'untracked' };
+    const fileList = s.dirtyFiles.slice(0, 20).map(f => {
+      const lbl = STATUS_LABELS[f.status] || f.status;
+      return `<li style="font-family:monospace;font-size:11px"><span style="color:var(--muted);min-width:60px;display:inline-block">${escHtml(lbl)}</span> ${escHtml(f.path)}</li>`;
+    }).join('');
+    const more = s.dirtyFiles.length > 20 ? `<li style="font-size:11px;color:var(--muted)">…and ${s.dirtyFiles.length - 20} more</li>` : '';
+    dirtyBlock = `
+      <details style="margin-top:8px;background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.3);border-radius:6px;padding:8px 10px">
+        <summary style="cursor:pointer;font-size:12px;color:#f5a623">⚠ ${s.dirtyFiles.length} tracked file${s.dirtyFiles.length === 1 ? '' : 's'} changed locally — click to review</summary>
+        <ul style="margin:8px 0 4px 0;padding-left:16px;list-style:none">${fileList}${more}</ul>
+        <div style="margin-top:6px;font-size:11px;color:var(--muted)">
+          Most likely caused by <code>npm install</code> rewriting <code>package-lock.json</code> on a fresh install, or line-ending normalization on a text file. If you didn't make these changes intentionally, use <strong>Force update</strong> to discard them and pull the latest code.
+        </div>
+      </details>`;
+  }
+  const canForce = s.enabled && s.available && (s.dirty || s.unpushed > 0);
+
   host.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
       <div style="flex:1;min-width:200px">
@@ -64,8 +87,10 @@ function renderUpdateRow() {
       <div style="display:flex;gap:6px;flex-wrap:wrap">
         <button id="btnUpdateCheck" onclick="runUpdateCheck()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Check now</button>
         <button id="btnUpdateApply" onclick="runUpdateApply()" style="background:${canApply ? '#43b89c' : 'var(--bg3)'};border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:${canApply ? 'pointer' : 'not-allowed'};font-weight:600;opacity:${canApply ? '1' : '0.5'}" ${canApply ? '' : 'disabled'}>Update &amp; restart</button>
+        ${canForce ? `<button id="btnUpdateForce" onclick="runUpdateForce()" style="background:#c44;border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Force update</button>` : ''}
       </div>
     </div>
+    ${dirtyBlock}
     <div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--muted)">
       <label style="position:relative;display:inline-block;width:36px;height:20px">
         <input type="checkbox" id="updateAutoToggle" ${polling ? 'checked' : ''} onchange="saveUpdateAutoToggle(this.checked)" style="opacity:0;width:0;height:0">
@@ -132,6 +157,36 @@ async function runUpdateApply() {
       } catch (e) {
         showToast('Apply failed: ' + e.message);
         if (btn) { btn.disabled = false; btn.textContent = 'Update & restart'; }
+      }
+    },
+  });
+}
+
+async function runUpdateForce() {
+  if (!_updateState?.available) return;
+  const target = shortSha(_updateState.remoteSha);
+  const fileCount = _updateState.dirtyFiles?.length ?? 0;
+  showNodeConfirmModal({
+    title: 'Force update — discard local changes',
+    message: `This will run \`git reset --hard\` and \`git clean -fd\` to throw away ${fileCount} local file change${fileCount === 1 ? '' : 's'}, then pull ${target} from origin and restart.\n\nUser data (config, sessions, users/, models/, expenses/, etc.) is protected by .gitignore and stays intact. Only modifications inside the OpenEnsemble code tree are discarded.\n\nThis cannot be undone.`,
+    confirmLabel: 'Discard & update',
+    cancelLabel: 'Cancel',
+    confirmClass: 'cdraw-btn-danger',
+    onConfirm: async () => {
+      const btn = document.getElementById('btnUpdateForce');
+      if (btn) { btn.disabled = true; btn.textContent = 'Forcing…'; }
+      try {
+        const r = await fetch('/api/admin/update/apply-force', { method: 'POST' });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          showToast('Force update failed: ' + (body.error || `HTTP ${r.status}`));
+          if (btn) { btn.disabled = false; btn.textContent = 'Force update'; }
+          return;
+        }
+        showToast('Force update in progress…', 5000);
+      } catch (e) {
+        showToast('Force update failed: ' + e.message);
+        if (btn) { btn.disabled = false; btn.textContent = 'Force update'; }
       }
     },
   });

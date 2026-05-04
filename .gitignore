@@ -80,6 +80,9 @@ skills/temp/
 # --- Build artifacts ---
 public/styles.css
 
+# --- Installer-generated (path-baked, varies per install dir) ---
+/start.sh
+
 # --- Node ---
 node_modules/
 npm-debug.log*
