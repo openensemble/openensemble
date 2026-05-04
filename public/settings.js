@@ -390,7 +390,7 @@ function renderCortexModelRows() {
     <div class="agent-model-row" style="align-items:flex-start;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:center;gap:10px;width:100%">
         <span class="agent-name" title="Our fine-tuned multi-task adapter: salience/contradiction/signals/friction/summary">🧠 Reason</span>
-        <span style="flex:1;font-weight:500">OpenEnsemble Reason v3
+        <span style="flex:1;font-weight:500">OpenEnsemble Reason
           <span style="font-size:11px;color:var(--muted);margin-left:6px;font-weight:400">pick where to run it</span>
         </span>
         ${cortexStatusDot(cortexHealth.reason)}
@@ -754,10 +754,9 @@ function switchSettingsTab(name) {
     $('stAgent').innerHTML = agents.map(a => `<option value="${a.id}">${a.emoji} ${a.name}</option>`).join('');
     loadTaskList();
     loadGmailAutoLabel();
+    loadReminderChannel();
   }
   if (name === 'system') {
-    refreshLogs();
-    loadReminderChannel();
     loadPlanRuntimeStatus().then(renderPlanModelRows);
     if (typeof loadTunnelStatus === 'function') loadTunnelStatus();
   }

@@ -109,3 +109,57 @@
 }
 .agent-report-time { color: var(--muted); font-weight: 400; }
 .agent-report-body { border-radius: 0 0 8px 8px; margin: 0; border: none; }
+
+/* ── Collapsible <details> chevron ───────────────────────────────────────── */
+details > summary::-webkit-details-marker { display: none; }
+details[open] > summary .details-chevron { transform: rotate(90deg); }
+
+/* ── Settings collapsible group ──────────────────────────────────────────── */
+.settings-group > .settings-group-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  border-radius: 6px;
+  transition: background .12s;
+}
+.settings-group > .settings-group-summary:hover { background: var(--bg3); }
+.settings-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-group-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+  font-weight: 400;
+}
+.settings-group-body {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--bg2, rgba(255,255,255,0.02));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.settings-subsection + .settings-subsection {
+  border-top: 1px dashed var(--border);
+  padding-top: 14px;
+}
+.settings-subsection-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.settings-subsection-title i { color: var(--muted); }

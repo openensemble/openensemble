@@ -892,7 +892,29 @@
 
         <!-- ── Tasks tab ── -->
         <div class="stab-panel" id="stab-panel-tasks">
-          <div class="settings-section-title" style="margin-bottom:8px">Scheduled Tasks</div>
+          <div id="reminderChannelRow" style="margin-bottom:16px">
+            <div class="settings-section-title"><i data-lucide="bell" style="width:14px;height:14px"></i> Reminder Delivery</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">Where your scheduled reminders get delivered when they fire. "All" sends to every channel you have set up.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="reminderChannelSelect" onchange="saveReminderChannel(this.value)" style="flex:0 0 auto;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+                <option value="websocket">In-app (banner + chime)</option>
+                <option value="telegram">Telegram</option>
+                <option value="email">Email</option>
+                <option value="all">All channels</option>
+              </select>
+              <span id="reminderChannelStatus" style="font-size:11px;color:var(--muted)"></span>
+            </div>
+            <div id="reminderEmailRow" style="display:none;margin-top:10px">
+              <div class="settings-section-desc" style="margin-bottom:6px">Send reminder emails from:</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <select id="reminderEmailSelect" onchange="saveReminderEmail(this.value)" style="flex:0 0 auto;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+                  <option value="">Loading…</option>
+                </select>
+                <span id="reminderEmailStatus" style="font-size:11px;color:var(--muted)"></span>
+              </div>
+            </div>
+          </div>
+          <div class="settings-section-title" style="margin-bottom:8px;border-top:1px solid var(--border);padding-top:14px">Scheduled Tasks</div>
           <div class="task-list" id="settingsTaskList"><em style="color:var(--muted);font-size:13px">No tasks yet.</em></div>
           <div class="task-form" style="margin-top:10px">
             <label>Agent<select id="stAgent"></select></label>
@@ -979,11 +1001,56 @@
 
         <!-- ── System tab ── -->
         <div class="stab-panel" id="stab-panel-system">
-          <div id="publicAccessSection" style="margin-bottom:16px;display:none">
-            <div class="settings-section-title" style="margin-bottom:4px"><i data-lucide="globe" style="width:14px;height:14px"></i> Public Access (Cloudflare Tunnel)</div>
-            <div class="settings-section-desc" style="margin-bottom:10px">Expose this install to the public internet so webhooks (Telegram), OAuth callbacks, and sharing links work without a static IP. Server-wide setting — owner/admin only.</div>
-            <div id="publicAccessBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
+          <div id="updateRow" style="margin-bottom:16px"></div>
+
+          <div id="restartServerRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <div style="flex:1;min-width:200px">
+                <div class="settings-section-title" style="margin-bottom:2px"><i data-lucide="refresh-cw" style="width:14px;height:14px"></i> Restart Server</div>
+                <div class="settings-section-desc">Fully shut down and respawn OpenEnsemble. All in-flight chats and WebSocket connections will be dropped.</div>
+              </div>
+              <button id="btnRestartServer" onclick="restartServer()" style="background:#f44336;border:none;color:#fff;border-radius:6px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Restart</button>
+            </div>
+            <div id="restartServerStatus" style="font-size:11px;color:var(--muted);margin-top:8px;display:none"></div>
           </div>
+
+          <details id="publicAccessSection" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px;display:none">
+            <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px">
+              <i data-lucide="chevron-right" style="width:14px;height:14px;transition:transform .15s" class="details-chevron"></i>
+              <span class="settings-section-title" style="margin:0"><i data-lucide="globe" style="width:14px;height:14px"></i> Public Access (Cloudflare Tunnel)</span>
+            </summary>
+            <div class="settings-section-desc" style="margin:8px 0 10px">Expose this install to the public internet so webhooks (Telegram), OAuth callbacks, and sharing links work without a static IP. Server-wide setting — owner/admin only.</div>
+            <div id="publicAccessBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
+          </details>
+          <details class="settings-group" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <summary class="settings-group-summary">
+              <i data-lucide="chevron-right" style="width:14px;height:14px;flex-shrink:0" class="details-chevron"></i>
+              <i data-lucide="layers" style="width:14px;height:14px;flex-shrink:0;color:var(--muted)"></i>
+              <span class="settings-group-title">OpenEnsemble Models</span>
+              <span class="settings-group-hint">Cortex • Scheduler</span>
+            </summary>
+            <div class="settings-group-body">
+              <div class="settings-subsection">
+                <div class="settings-subsection-title"><i data-lucide="brain" style="width:13px;height:13px"></i> Cortex Memory</div>
+                <div class="settings-section-desc" style="margin-bottom:8px">Models used to embed memories and score importance. Any provider you have enabled is available here.</div>
+                <div id="cortexModelRows" style="display:flex;flex-direction:column;gap:8px"></div>
+              </div>
+              <div class="settings-subsection">
+                <div class="settings-subsection-title"><i data-lucide="calendar-clock" style="width:13px;height:13px"></i> Scheduler</div>
+                <div class="settings-section-desc" style="margin-bottom:8px">Fine-tuned model that interprets scheduling requests ("remind me to…", "every morning…"). Picking Ollama or LM Studio pushes our model into that runtime.</div>
+                <div id="planModelRows" style="display:flex;flex-direction:column;gap:8px"></div>
+              </div>
+            </div>
+          </details>
+
+          <div id="visionProviderRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
+            <div class="settings-section-title"><i data-lucide="eye" style="width:14px;height:14px"></i> Expense Receipt Model</div>
+            <div class="settings-section-desc" style="margin-bottom:8px">Parses receipts, invoices, and statements uploaded directly through the Expenses drawer. Chat attachments use the agent's own model and ignore this setting.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" id="visionModelSelectRow">
+              <div style="color:var(--muted);font-size:12px">Loading…</div>
+            </div>
+          </div>
+
           <div id="braveApiKeyRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px;display:none">
             <div class="settings-section-title" style="margin-bottom:4px"><i data-lucide="search" style="width:14px;height:14px"></i> Brave Search API</div>
             <div class="settings-section-desc" style="margin-bottom:10px">API key used by the Web and Deep Research skills and the News drawer. Server-wide setting — changes apply to all users. Get a key at <a href="https://api-dashboard.search.brave.com/" target="_blank" style="color:var(--accent)">api-dashboard.search.brave.com</a>.</div>
@@ -996,47 +1063,6 @@
                 style="display:none;background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Clear</button>
             </div>
             <div id="braveApiKeyStatus" style="font-size:11px;color:var(--muted);margin-top:4px">Loading…</div>
-          </div>
-          <div style="margin-bottom:16px;border-top:1px solid var(--border);padding-top:14px">
-            <div class="settings-section-title"><i data-lucide="brain" style="width:14px;height:14px"></i> Cortex Memory Models</div>
-            <div class="settings-section-desc" style="margin-bottom:8px">Models used to embed memories and score importance. Any provider you have enabled is available here.</div>
-            <div id="cortexModelRows" style="display:flex;flex-direction:column;gap:8px"></div>
-          </div>
-
-          <div style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
-            <div class="settings-section-title"><i data-lucide="calendar-clock" style="width:14px;height:14px"></i> Scheduler Model</div>
-            <div class="settings-section-desc" style="margin-bottom:8px">Fine-tuned model that interprets scheduling requests ("remind me to...", "every morning..."). Picking Ollama or LM Studio pushes our model into that runtime.</div>
-            <div id="planModelRows" style="display:flex;flex-direction:column;gap:8px"></div>
-          </div>
-
-          <div id="visionProviderRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
-            <div class="settings-section-title"><i data-lucide="eye" style="width:14px;height:14px"></i> Expense Receipt Model</div>
-            <div class="settings-section-desc" style="margin-bottom:8px">Parses receipts, invoices, and statements uploaded directly through the Expenses drawer. Chat attachments use the agent's own model and ignore this setting.</div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" id="visionModelSelectRow">
-              <div style="color:var(--muted);font-size:12px">Loading…</div>
-            </div>
-          </div>
-          <div id="reminderChannelRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
-            <div class="settings-section-title"><i data-lucide="bell" style="width:14px;height:14px"></i> Reminder Delivery</div>
-            <div class="settings-section-desc" style="margin-bottom:8px">Where your scheduled reminders get delivered when they fire. "All" sends to every channel you have set up.</div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <select id="reminderChannelSelect" onchange="saveReminderChannel(this.value)" style="flex:0 0 auto;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
-                <option value="websocket">In-app (banner + chime)</option>
-                <option value="telegram">Telegram</option>
-                <option value="email">Email</option>
-                <option value="all">All channels</option>
-              </select>
-              <span id="reminderChannelStatus" style="font-size:11px;color:var(--muted)"></span>
-            </div>
-            <div id="reminderEmailRow" style="display:none;margin-top:10px">
-              <div class="settings-section-desc" style="margin-bottom:6px">Send reminder emails from:</div>
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <select id="reminderEmailSelect" onchange="saveReminderEmail(this.value)" style="flex:0 0 auto;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
-                  <option value="">Loading…</option>
-                </select>
-                <span id="reminderEmailStatus" style="font-size:11px;color:var(--muted)"></span>
-              </div>
-            </div>
           </div>
           <div id="sessionExpiryRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
             <div class="settings-section-title"><i data-lucide="timer" style="width:14px;height:14px"></i> Session Expiry</div>
@@ -1058,42 +1084,36 @@
               </label>
             </div>
           </div>
-          <div id="updateRow" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px"></div>
-
-          <div id="restartServerRow" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
-              <div style="flex:1;min-width:200px">
-                <div class="settings-section-title" style="margin-bottom:2px"><i data-lucide="refresh-cw" style="width:14px;height:14px"></i> Restart Server</div>
-                <div class="settings-section-desc">Fully shut down and respawn OpenEnsemble. All in-flight chats and WebSocket connections will be dropped.</div>
+          <details id="logsViewerRow" class="settings-group" ontoggle="if(this.open) refreshLogs()" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px">
+            <summary class="settings-group-summary">
+              <i data-lucide="chevron-right" style="width:14px;height:14px;flex-shrink:0" class="details-chevron"></i>
+              <i data-lucide="file-text" style="width:14px;height:14px;flex-shrink:0;color:var(--muted)"></i>
+              <span class="settings-group-title">Server Logs</span>
+              <span class="settings-group-hint">recent events</span>
+            </summary>
+            <div class="settings-group-body">
+              <div class="settings-section-desc" style="margin-bottom:8px">View recent server events. Logs rotate automatically at ~5 MB.</div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                <select id="logFileSelect" onchange="refreshLogs()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
+                  <option value="app">app.log</option>
+                  <option value="error">error.log</option>
+                </select>
+                <select id="logLevelSelect" onchange="refreshLogs()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
+                  <option value="">All levels</option>
+                  <option value="info">Info</option>
+                  <option value="warn">Warn</option>
+                  <option value="error">Error</option>
+                </select>
+                <input type="text" id="logSearchInput" placeholder="search…" oninput="debounceLogs()" style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
+                <input type="number" id="logTailInput" value="200" min="10" max="5000" step="50" onchange="refreshLogs()" style="width:76px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px" title="Number of lines to show">
+                <button onclick="refreshLogs()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;font-weight:600">Refresh</button>
               </div>
-              <button id="btnRestartServer" onclick="restartServer()" style="background:#f44336;border:none;color:#fff;border-radius:6px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Restart</button>
+              <div id="logFileMeta" style="font-size:10px;color:var(--muted);margin-bottom:6px">—</div>
+              <div id="logEntries" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:320px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word">
+                <div style="color:var(--muted)">Loading…</div>
+              </div>
             </div>
-            <div id="restartServerStatus" style="font-size:11px;color:var(--muted);margin-top:8px;display:none"></div>
-          </div>
-
-          <div id="logsViewerRow" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px">
-            <div class="settings-section-title"><i data-lucide="file-text" style="width:14px;height:14px"></i> Server Logs</div>
-            <div class="settings-section-desc" style="margin-bottom:8px">View recent server events. Logs rotate automatically at ~5 MB.</div>
-            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-              <select id="logFileSelect" onchange="refreshLogs()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
-                <option value="app">app.log</option>
-                <option value="error">error.log</option>
-              </select>
-              <select id="logLevelSelect" onchange="refreshLogs()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
-                <option value="">All levels</option>
-                <option value="info">Info</option>
-                <option value="warn">Warn</option>
-                <option value="error">Error</option>
-              </select>
-              <input type="text" id="logSearchInput" placeholder="search…" oninput="debounceLogs()" style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
-              <input type="number" id="logTailInput" value="200" min="10" max="5000" step="50" onchange="refreshLogs()" style="width:76px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px" title="Number of lines to show">
-              <button onclick="refreshLogs()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;font-weight:600">Refresh</button>
-            </div>
-            <div id="logFileMeta" style="font-size:10px;color:var(--muted);margin-bottom:6px">—</div>
-            <div id="logEntries" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:320px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word">
-              <div style="color:var(--muted)">Loading…</div>
-            </div>
-          </div>
+          </details>
         </div>
 
         <!-- ── Backup & Restore tab (admin/owner only) ── -->
