@@ -23,9 +23,9 @@ import { modifyConfig, loadConfig } from '../routes/_helpers.mjs';
 
 // Derive a size-prefixed version suffix from the active GGUF file name so
 // the Ollama tag / LM Studio dir match the bytes being pushed AND the two
-// tiers (135M v5 and 360M v1) don't collide on the same name. Examples:
+// tiers (135M and 360M) don't collide on the same name. Examples:
 //   openensemble-plan-v5.q8_0.gguf        → "135-v5"
-//   openensemble-plan-360m-v1.q8_0.gguf   → "360-v1"
+//   openensemble-plan-360m-v2.q8_0.gguf   → "360-v2"
 // Computed per-call instead of cached at module load so a runtime tier
 // switch (Settings → Plan model) is reflected on the next install push.
 function _planTagSuffix() {
@@ -309,6 +309,10 @@ export async function getPlanRuntimeStatus() {
   );
   return {
     current: cfg?.scheduler?.planProvider ?? 'builtin',
+    // Default to true (built-in plan model intercepts scheduling) so existing
+    // installs are unaffected. When false, the interceptor short-circuits and
+    // scheduling routes through the agent's set_reminder/schedule_task tools.
+    useBuiltinPlan: cfg?.scheduler?.useBuiltinPlan !== false,
     builtin: {
       ggufPresent: fs.existsSync(modelPath),
       modelFile: getBuiltinPlanModelId(),

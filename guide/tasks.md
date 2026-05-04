@@ -54,7 +54,7 @@ Schedule parsing is handled by a small bundled local model. It runs on CPU and d
 Two tiers ship out of the box:
 
 - **fast** — `openensemble-plan-v5` (SmolLM2-135M, ~140 MB). Lower latency and RAM, slightly lower accuracy.
-- **accurate** — `openensemble-plan-360m-v1` (SmolLM2-360M, ~370 MB). The default; better at edge-case phrasing.
+- **accurate** — `openensemble-plan-360m-v2` (SmolLM2-360M, ~370 MB). The default; better at edge-case phrasing, with natural-language scheduling, reschedule/cancel coverage, and anchored-arithmetic ("30 min before my 11am meeting") all working.
 
 **Owner/admin** can change which tier and which runtime hosts the model under **Settings → System → Scheduler Model**:
 
@@ -62,7 +62,26 @@ Two tiers ship out of the box:
 - **Ollama** — pushes our model into your local Ollama and calls it from there. Faster on a GPU box.
 - **LM Studio** — same idea, via LM Studio's local server.
 
-The System tab itself is owner/admin only — regular users don't see it. If you're a regular user and the schedule parser is misbehaving, your owner is the one who'd switch it.
+### Disabling the plan model
+
+Above the runtime picker is a toggle: **Use the built-in plan model**. Uncheck it to skip the bundled model entirely — every scheduling request then routes through your agent's own LLM (Claude, GPT-5.5, whatever you've assigned), which calls the `set_reminder` / `schedule_task` / `delete_task` tools.
+
+When this might be the right choice:
+
+- You're on a CPU-only machine and the bundled model's latency feels sluggish. The agent path adds ~2 seconds (its cloud round-trip), but you skip the local parse cost.
+- Your phrasings consistently confuse the bundled parser ("friday, sat, and sunday at 12 I need to meditate") and you'd rather rely on the bigger model.
+- You want a single model in charge of every chat decision, scheduling included.
+
+Trade-offs to know about:
+
+- **Cloud tokens** — every scheduling turn now pays for an agent LLM call.
+- **Latency** — typical scheduling turn goes from ~400 ms (plan model + DB write) to ~2.5 s (agent round-trip + tool call + DB write). Still fast enough to feel snappy, but noticeable.
+- **No offline path** — if the agent's provider is down, you can't schedule.
+- The cancel/reschedule fast paths ("cancel that", "actually make it 3pm") also stop firing — the agent has to interpret those itself.
+
+When the toggle is off, the runtime/tier rows below dim out (they have no effect). Re-enable any time without restarting the server.
+
+The System tab itself is owner/admin only — regular users don't see it. If you're a regular user and the schedule parser is misbehaving, your owner is the one who'd switch it or flip the toggle.
 
 ## Reminder delivery
 

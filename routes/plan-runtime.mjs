@@ -134,6 +134,21 @@ export async function handle(req, res) {
       return true;
     }
 
+    // Toggle whether the built-in plan model intercepts scheduling messages.
+    // When disabled, lib/scheduler-intent.mjs returns {matched:false} and the
+    // user message passes to the agent untouched — the agent then calls its
+    // own set_reminder / schedule_task / delete_task tools (skills/tasks).
+    if (url.pathname === '/api/plan-runtime/use-builtin-plan' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      const enabled = !!body?.enabled;
+      await modifyConfig(x => {
+        x.scheduler = x.scheduler ?? {};
+        x.scheduler.useBuiltinPlan = enabled;
+      });
+      sendJSON(res, 200, { ok: true, useBuiltinPlan: enabled });
+      return true;
+    }
+
     sendJSON(res, 404, { error: 'Not found' });
     return true;
   } catch (e) {

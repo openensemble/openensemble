@@ -365,7 +365,12 @@ async function _generateExternal({ provider, system, user, temperature, maxToken
             { role: 'system', content: system },
             { role: 'user', content: user ?? '' },
           ],
-          options: { temperature, num_predict: maxTokens },
+          // num_ctx=2048 covers ~110 prompt + 512 output with headroom; the
+          // 8192 default in our Modelfile was wasteful for plan-task prompts
+          // and bloated KV cache on every call. keep_alive=24h prevents
+          // Ollama's 5-min idle unload (cold reload costs 2-3s on next call).
+          options: { temperature, num_predict: maxTokens, num_ctx: 2048 },
+          keep_alive: '24h',
         }),
       });
       if (!res.ok) {

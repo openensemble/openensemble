@@ -548,16 +548,41 @@ function renderPlanModelRows() {
   const container = $('planModelRows');
   if (!container) return;
   const current = planRuntimeStatus?.current ?? 'builtin';
+  const useBuiltin = planRuntimeStatus?.useBuiltinPlan !== false;
   const health = planHealthFor(current);
 
   const runtimeLabel = current === 'ollama' ? 'Ollama'
                       : current === 'lmstudio' ? 'LM Studio'
                       : 'built-in runtime';
-  const warning = health === false
+  const warning = (useBuiltin && health === false)
     ? `<div style="background:#f443361a;border:1px solid #f4433640;border-radius:6px;padding:8px 10px;font-size:12px;color:#f44336;margin-top:6px">
         ⚠ Scheduler model is unreachable via ${escHtml(runtimeLabel)}.
         Scheduling requests (reminders, recurring tasks) will fail until it's back online.
        </div>` : '';
+
+  // Toggle to bypass the plan model entirely. When off, scheduling routes
+  // through the agent's set_reminder/schedule_task tools (~2s extra latency,
+  // costs cloud tokens, but handles phrasings the plan model misses).
+  const toggleId = 'usebuiltinplan-toggle';
+  const toggleBlock = `
+    <div style="margin:0 0 10px 0;padding:8px 10px;border:1px solid var(--border-subtle);border-radius:6px;background:rgba(0,0,0,0.02)">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.4">
+        Fine-tuned model that interprets scheduling requests
+        (&ldquo;remind me to&hellip;&rdquo;, &ldquo;every morning&hellip;&rdquo;).
+        Picking Ollama or LM Studio pushes our model into that runtime.
+      </div>
+      <label for="${toggleId}" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="${toggleId}" ${useBuiltin ? 'checked' : ''} onchange="setUseBuiltinPlan(this.checked)">
+        <span style="flex:1;display:flex;flex-direction:column;gap:1px">
+          <span style="font-weight:500">Use the built-in plan model</span>
+          <span style="font-size:11px;color:var(--muted)">
+            ${useBuiltin
+              ? 'On — fast structured parse, runs locally. Recommended. Disable to use agent&rsquo;s LLM for scheduling.'
+              : 'Off — scheduling goes through the agent&rsquo;s LLM. Slower (~2s extra), uses cloud tokens, but more tolerant of unusual phrasings.'}
+          </span>
+        </span>
+      </label>
+    </div>`;
 
   const externalHeader =
     `<div style="font-size:11px;color:var(--muted);margin:8px 0 2px 0;padding-top:6px;border-top:1px dashed var(--border-subtle)">
@@ -566,13 +591,17 @@ function renderPlanModelRows() {
   // Tier picker is always visible — it controls which GGUF gets used across
   // all three runtimes. Switching tier while on an external runtime auto-
   // reinstalls the new GGUF into that runtime.
+  // When useBuiltin is off, gray out the runtime/tier rows since they have no
+  // effect (interceptor is bypassed entirely).
+  const dimWrap = useBuiltin ? '' : 'opacity:0.4;pointer-events:none;';
   const tierBlock = planTierPicker(current);
-  const rows =
-      tierBlock
+  const rows = `<div style="${dimWrap}">`
+    + tierBlock
     + planRuntimeRow({ runtime: 'builtin',  label: 'Built-in (CPU)', hint: 'in-process via llama.cpp — no external runtime', selected: current === 'builtin' })
     + externalHeader
     + planRuntimeRow({ runtime: 'ollama',   label: 'Via Ollama',     hint: '',                                                selected: current === 'ollama' })
-    + planRuntimeRow({ runtime: 'lmstudio', label: 'Via LM Studio',  hint: '',                                                selected: current === 'lmstudio' });
+    + planRuntimeRow({ runtime: 'lmstudio', label: 'Via LM Studio',  hint: '',                                                selected: current === 'lmstudio' })
+    + '</div>';
 
   const headerLabel = (() => {
     const t = planRuntimeStatus?.builtin?.tier;
@@ -588,9 +617,26 @@ function renderPlanModelRows() {
         </span>
         ${cortexStatusDot(health)}
       </div>
-      <div style="width:100%;padding-left:90px">${rows}</div>
+      <div style="width:100%;padding-left:90px">${toggleBlock}${rows}</div>
     </div>
     ${warning}`;
+}
+
+async function setUseBuiltinPlan(enabled) {
+  try {
+    const res = await fetch('/api/plan-runtime/use-builtin-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (planRuntimeStatus) planRuntimeStatus.useBuiltinPlan = enabled;
+    renderPlanModelRows();
+  } catch (e) {
+    alert(`Failed to update setting: ${e.message}`);
+    // Re-render to revert the checkbox state on failure.
+    renderPlanModelRows();
+  }
 }
 
 // Tier picker (Fast vs Accurate). Indented under the Built-in row when
