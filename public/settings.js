@@ -577,8 +577,8 @@ function renderPlanModelRows() {
           <span style="font-weight:500">Use the built-in plan model</span>
           <span style="font-size:11px;color:var(--muted)">
             ${useBuiltin
-              ? 'On — fast structured parse, runs locally. Recommended. Disable to use agent&rsquo;s LLM for scheduling.'
-              : 'Off — scheduling goes through the agent&rsquo;s LLM. Slower (~2s extra), uses cloud tokens, but more tolerant of unusual phrasings.'}
+              ? 'On — scheduling runs locally. Faster, free, and private. Disable to route scheduling through the agent&rsquo;s LLM instead.'
+              : 'Off — scheduling routes through the agent&rsquo;s LLM. Slower (~2s extra), uses cloud tokens, but handles unusual phrasings better.'}
           </span>
         </span>
       </label>
@@ -1015,17 +1015,26 @@ async function restartServer() {
     }
     if (status) status.textContent = 'Server is shutting down. Waiting for it to come back up…';
 
-    // Poll /health until the server responds again, then reload.
-    // The respawn script waits ~2s before starting node, so give it time.
+    // Poll /health until the server responds again, then reload. The poll
+    // tolerates network errors AND non-200 responses (e.g., a 502 from the
+    // tunnel during the brief gap, or a 503 if the server is still booting).
+    // Important: many tunnels return slow / hung connections during the
+    // restart window, so each poll has its own short timeout — without
+    // that, a single hung connection blocks the whole loop.
     const deadline = Date.now() + 60_000;
     let up = false;
-    await new Promise(r => setTimeout(r, 3000));
+    // Initial wait — restart cycle is ~3-4s under systemd. Start polling
+    // sooner than before so we catch the come-back as quickly as possible.
+    await new Promise(r => setTimeout(r, 1500));
     while (Date.now() < deadline) {
       try {
-        const h = await fetch('/health', { cache: 'no-store' });
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 1500);
+        const h = await fetch('/health', { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(t);
         if (h.ok) { up = true; break; }
-      } catch {}
-      await new Promise(r => setTimeout(r, 1000));
+      } catch { /* network error / abort / timeout — keep polling */ }
+      await new Promise(r => setTimeout(r, 800));
     }
     if (up) {
       if (status) status.textContent = 'Server is back up. Reloading…';

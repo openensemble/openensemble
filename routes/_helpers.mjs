@@ -21,6 +21,7 @@ import {
   getUserDir,
 } from './_helpers/paths.mjs';
 import { withLock, atomicWriteSync, makeModify } from './_helpers/io-lock.mjs';
+import { encryptConfigSecrets, decryptedConfigView } from '../lib/config-secrets.mjs';
 import { listAgents, getAgent, getAgentScope, loadCustomAgents, updateAgentMeta, invalidateModelOverridesCache } from '../agents.mjs';
 import { getDefaultRoles, listRoles, getRoleAssignments } from '../roles.mjs';
 import { log } from '../logger.mjs';
@@ -34,6 +35,7 @@ export {
   BODY_LIMIT,
 } from './_helpers/paths.mjs';
 export { withLock, atomicWriteSync } from './_helpers/io-lock.mjs';
+export { getSecret, decryptedConfigView, inspectSecrets } from '../lib/config-secrets.mjs';
 
 // ── Parse a multipart/form-data body and return the first file part ──────────
 export function parseMultipart(raw, boundary) {
@@ -97,7 +99,18 @@ export function loadConfig() {
     const stat = fs.statSync(CFG_PATH);
     if (_cfgCache && stat.mtimeMs === _cfgMtime) cfg = _cfgCache;
     else {
-      cfg = JSON.parse(fs.readFileSync(CFG_PATH, 'utf8'));
+      const raw = JSON.parse(fs.readFileSync(CFG_PATH, 'utf8'));
+      // Decrypt registered secret paths into the in-memory cache so existing
+      // call sites that do `cfg.anthropicApiKey` keep working without code
+      // changes. Encryption-on-write happens in saveConfig (encryptConfigSecrets).
+      // Disk stays encrypted; RAM is plaintext (same as it always was).
+      // Decryption failures fall back to '' so a missing/rotated system key
+      // doesn't crash the server — the affected provider just acts unconfigured.
+      try { cfg = decryptedConfigView(raw); }
+      catch (e) {
+        console.warn('[config] decrypt-on-load failed; using raw config:', e.message);
+        cfg = raw;
+      }
       _cfgCache = cfg;
       _cfgMtime = stat.mtimeMs;
     }
@@ -113,7 +126,21 @@ export function loadConfig() {
 }
 
 export function saveConfig(cfg) {
-  atomicWriteSync(CFG_PATH, JSON.stringify(cfg, null, 2));
+  // Disk side: clone, encrypt secrets, write. Memory side: keep `cfg` (with
+  // plaintext secrets) as the cache so the next loadConfig hit doesn't have
+  // to round-trip through decrypt. Disk stays encrypted; RAM stays plaintext.
+  let toWrite = cfg;
+  try {
+    toWrite = JSON.parse(JSON.stringify(cfg));
+    encryptConfigSecrets(toWrite);
+  } catch (e) {
+    // Don't block the save on a crypto-side failure — fall back to writing
+    // the unencrypted JSON. Plaintext values stay plaintext until the next
+    // successful save touches them. Old behavior, no regression.
+    console.warn('[config] secret encryption failed; writing plaintext:', e.message);
+    toWrite = cfg;
+  }
+  atomicWriteSync(CFG_PATH, JSON.stringify(toWrite, null, 2));
   _cfgCache = cfg;
   try { _cfgMtime = fs.statSync(CFG_PATH).mtimeMs; } catch (e) { console.warn('[config] stat after save failed:', e.message); }
 }

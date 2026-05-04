@@ -78,10 +78,18 @@ async function restoreBackup() {
       }
       return;
     }
-    status.textContent = `Restored ${data.restored} file(s). Restart the server to apply changes.`;
-    status.style.color = 'var(--green,#43b89c)';
-    showToast(`Backup restored (${data.restored} files)`);
-    if (pwInput) pwInput.value = '';
+    if (data.restarting) {
+      status.textContent = `Restored ${data.restored} file(s). Restarting server…`;
+      status.style.color = 'var(--green,#43b89c)';
+      showToast(`Backup restored — server restarting`);
+      if (pwInput) pwInput.value = '';
+      _waitForServerAfterRestore(status);
+    } else {
+      status.textContent = `Restored ${data.restored} file(s). Restart the server to apply changes.`;
+      status.style.color = 'var(--green,#43b89c)';
+      showToast(`Backup restored (${data.restored} files)`);
+      if (pwInput) pwInput.value = '';
+    }
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
     status.style.color = 'var(--red,#e05c5c)';
@@ -90,6 +98,32 @@ async function restoreBackup() {
     btn.disabled = false; btn.textContent = 'Restore';
     fileInput.value = '';
   }
+}
+
+// After the server restarts post-restore, poll /health until it's reachable
+// then full-reload the page so the SPA boots against the restored state.
+// Mirrors the auto-update flow in update.js:_waitForServerBack().
+function _waitForServerAfterRestore(statusEl) {
+  const deadline = Date.now() + 90_000; // 90s — restore + restart can be slow
+  const tick = async () => {
+    if (Date.now() > deadline) {
+      if (statusEl) {
+        statusEl.style.color = 'var(--red,#e05c5c)';
+        statusEl.textContent = 'Server didn\'t come back within 90s. Reload the page manually.';
+      }
+      return;
+    }
+    try {
+      const h = await fetch('/health', { cache: 'no-store' });
+      if (h.ok) {
+        if (statusEl) statusEl.textContent = 'Server back — reloading…';
+        setTimeout(() => location.reload(), 600);
+        return;
+      }
+    } catch {}
+    setTimeout(tick, 1000);
+  };
+  setTimeout(tick, 3000);
 }
 
 $('btnRefreshModels').addEventListener('click', async () => {

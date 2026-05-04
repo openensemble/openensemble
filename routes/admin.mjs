@@ -426,9 +426,14 @@ export async function handle(req, res) {
   if (req.url === '/api/admin/restart' && req.method === 'POST') {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ restarting: true }));
-    // Shared with applyUpdate(); fires after the response is flushed.
-    setImmediate(() => restartProcess());
+    // Wait for the response to actually flush to the kernel socket buffer
+    // before scheduling the restart — `res.end()`'s callback fires when
+    // data is fully written to the socket. Without this, a slow tunnel
+    // could see SIGTERM kill the process while the response is still
+    // queued, and the SPA gets a network error instead of `{restarting:true}`.
+    res.end(JSON.stringify({ restarting: true }), () => {
+      setImmediate(() => restartProcess());
+    });
     return true;
   }
 
@@ -635,6 +640,11 @@ export async function handle(req, res) {
   }
 
   // ── Restore endpoint ──────────────────────────────────────────────────────
+  // After a successful restore the server auto-restarts so newly-restored
+  // assets (users, sessions, encrypted config secrets that need the freshly-
+  // restored users/_system/.master-key, scheduler tasks, etc.) load cleanly.
+  // The response signals `restarting: true` so the SPA polls /health for the
+  // server to come back, then reloads.
   if (req.url === '/api/admin/restore' && req.method === 'POST') {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
@@ -642,14 +652,18 @@ export async function handle(req, res) {
       raw = await maybeDecryptRestore(raw, req, res); if (!raw) return true;
       const restored = await performRestore(raw);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, restored }));
+      res.end(JSON.stringify({ ok: true, restored, restarting: true }));
+      // Detached respawn — fires after the response flushes.
+      setImmediate(() => restartProcess());
     } catch (e) { safeError(res, e); }
     return true;
   }
 
   // ── First-run restore — no auth, only when no users exist yet. Lets a user
   // land on a fresh install and restore their backup *before* creating a dummy
-  // profile that would then conflict with the archive's owner user.
+  // profile that would then conflict with the archive's owner user. Also
+  // triggers an auto-restart so the restored users load and (in the encrypted-
+  // secrets case) the system key under users/_system/.master-key takes effect.
   if (req.url === '/api/admin/restore-initial' && req.method === 'POST') {
     try {
       if (loadUsers().length > 0) {
@@ -661,7 +675,8 @@ export async function handle(req, res) {
       raw = await maybeDecryptRestore(raw, req, res); if (!raw) return true;
       const restored = await performRestore(raw, { clearOwnerConfig: true });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, restored }));
+      res.end(JSON.stringify({ ok: true, restored, restarting: true }));
+      setImmediate(() => restartProcess());
     } catch (e) { safeError(res, e); }
     return true;
   }

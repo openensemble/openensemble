@@ -431,8 +431,8 @@ WorkingDirectory=$INSTALL_DIR
 ExecStartPre=-/bin/sh -c 'if [ -f $INSTALL_DIR/server.pid ]; then OLDPID=\$(cat $INSTALL_DIR/server.pid 2>/dev/null); if [ -n "\$OLDPID" ] && kill -0 "\$OLDPID" 2>/dev/null; then kill -TERM "\$OLDPID" 2>/dev/null; for i in 1 2 3 4 5; do kill -0 "\$OLDPID" 2>/dev/null || break; sleep 1; done; kill -KILL "\$OLDPID" 2>/dev/null || true; fi; rm -f $INSTALL_DIR/server.pid; fi; pkill -TERM -f "node .*server.mjs" 2>/dev/null || true; sleep 1; pkill -KILL -f "node .*server.mjs" 2>/dev/null || true; fuser -k -TERM 3737/tcp 2>/dev/null || true; sleep 1; fuser -k -KILL 3737/tcp 2>/dev/null || true; true'
 ExecStartPre=-$NODE_BIN $INSTALL_DIR/scripts/ensure-deps.mjs
 ExecStart=$NODE_BIN $INSTALL_DIR/server.mjs
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=10

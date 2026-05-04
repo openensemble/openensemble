@@ -204,8 +204,33 @@ async function doInitialRestore() {
       throw new Error(data.error || `Restore failed (${r.status})`);
     }
     status.style.color = 'var(--green,#43b89c)';
-    status.textContent = `Restored ${data.restored} item(s). Reloading…`;
-    setTimeout(() => location.reload(), 800);
+    if (data.restarting) {
+      // Server is auto-restarting — poll /health until it's back, then reload.
+      // The 800ms delay-and-reload approach raced the restart and often
+      // showed an "unreachable" page for ~15s before the SPA recovered.
+      status.textContent = `Restored ${data.restored} item(s). Restarting server…`;
+      const deadline = Date.now() + 90_000;
+      const tick = async () => {
+        if (Date.now() > deadline) {
+          status.style.color = 'var(--red,#e05c5c)';
+          status.textContent = 'Server didn\'t come back within 90s. Reload the page manually.';
+          return;
+        }
+        try {
+          const h = await _origFetch('/health', { cache: 'no-store' });
+          if (h.ok) {
+            status.textContent = 'Server back — reloading…';
+            setTimeout(() => location.reload(), 600);
+            return;
+          }
+        } catch {}
+        setTimeout(tick, 1000);
+      };
+      setTimeout(tick, 3000);
+    } else {
+      status.textContent = `Restored ${data.restored} item(s). Reloading…`;
+      setTimeout(() => location.reload(), 800);
+    }
   } catch (e) {
     status.style.color = 'var(--red,#e05c5c)';
     status.textContent = 'Error: ' + e.message;

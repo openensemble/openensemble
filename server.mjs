@@ -616,6 +616,36 @@ loadDrawerManifests();
 reconcileRoleDrawers();
 loadPersistedSessions();
 
+// One-shot encryption migration for any plaintext API keys that survive a
+// pre-encryption build of OE. Idempotent — no-op once everything is
+// encrypted. Uses users/_system/.master-key (in OE backups) so reinstall +
+// restore works without manual key handling.
+(async () => {
+  try {
+    const { bootstrapEncryption } = await import('./lib/config-secrets.mjs');
+    const { atomicWriteSync } = await import('./routes/_helpers/io-lock.mjs');
+    const { CFG_PATH } = await import('./routes/_helpers/paths.mjs');
+    const { log } = await import('./logger.mjs');
+    await bootstrapEncryption({ cfgPath: CFG_PATH, atomicWriteSync, log });
+  } catch (e) {
+    console.warn('[config-secrets] bootstrap migration failed:', e.message);
+  }
+})();
+
+// One-shot systemd unit self-repair. Old installs shipped with
+// Restart=on-failure, which doesn't fire when the server SIGTERMs itself
+// to restart — net effect was "shut down, never come back". Patches the
+// unit to Restart=always if needed; takes effect on next restart, doesn't
+// disrupt the current session.
+(async () => {
+  try {
+    const { repairSystemdUnit } = await import('./lib/systemd-repair.mjs');
+    await repairSystemdUnit();
+  } catch (e) {
+    console.warn('[systemd-repair] failed:', e.message);
+  }
+})();
+
 // Timeouts to mitigate slowloris / slow-body attacks without cutting off
 // long LLM streaming responses (those go through WS, not HTTP).
 httpServer.headersTimeout = 30_000;  // 30s to receive request headers
