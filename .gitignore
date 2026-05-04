@@ -116,3 +116,4 @@ scripts/*.failures.jsonl
 # --- Local revert references (not for public repo) ---
 REVERT_*.md
 REVERT_*.patch
+MIGRATION_per-user-encryption.md
