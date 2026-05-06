@@ -36,7 +36,11 @@ Owner/admin creates a group in Expenses → Shared Group → New Group. Add memb
 
 ## Where it's stored
 
-`users/{userId}/expenses/` for personal books; group state is shared and lives in `expenses/` at the install root. Backups capture both.
+`users/{userId}/expenses/` for personal books; group state is shared and lives in `expenses/` at the install root. Each transaction now also carries a `sourceFileId` pointing back to the original receipt in your profile-files (`users/{userId}/documents/`). Receipts are kept indefinitely — tap a transaction to see (or re-export) the original image or PDF later. Backups capture both ledgers and receipts.
+
+## Choosing the vision model
+
+Receipt extraction needs a vision-capable model. Pick yours under **Settings → Profile → Vision model** — the dropdown is filtered to *only* models that accept image input, grouped by provider (Anthropic Claude 3+, ChatGPT, OpenAI GPT-4o/5, Gemini 1.5+, Llava / Qwen-VL / Gemma 3 on Ollama, vision-flagged LM Studio models, OpenRouter vision models). If the dropdown is empty, you don't have a vision-capable model available — pull one (`ollama pull llama3.2-vision`) or enable a cloud provider that has one (Anthropic / OpenAI). If your previously-saved pick disappears, the picker shows it with a warning so you know to re-pick.
 
 ## Tips
 

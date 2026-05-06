@@ -74,7 +74,7 @@ The variables OE recognises:
 ## Special-purpose providers
 
 - **Brave Search** — needed by the `web` skill. API key from brave.com/search/api.
-- **Vision** — set `OE_VISION_PROVIDER` and `OE_VISION_MODEL` if you want a specific model used for image analysis (`OE_VISION_PROVIDER=openai`, `OE_VISION_MODEL=gpt-4o`, etc.).
+- **Vision** — set `OE_VISION_PROVIDER` and `OE_VISION_MODEL` if you want a specific model used for image analysis (`OE_VISION_PROVIDER=openai`, `OE_VISION_MODEL=gpt-4o`, etc.). Easier path: pick from the dropdown under **Settings → Profile → Vision model**, which filters every enabled provider's catalog down to models that actually accept image input. The same `supportsVision` annotation flows through every model-list endpoint, so future agent-side vision pickers reuse it.
 - **Text-to-Speech** — toggleable in **Settings → Providers**, used by the Tutor and read-aloud features.
 
 ## Choosing what to enable first

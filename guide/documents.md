@@ -25,7 +25,9 @@ OpenEnsemble doesn't generate public download URLs by default — sharing is int
 
 ## How agents use documents
 
-The `shared-docs` skill lets an agent read uploaded docs by reference. *"Summarise the PDF I uploaded yesterday"* works because the agent can list and open everything in your Docs drawer.
+The `profile_files` skill is the single tool every agent uses to list and read your files: *"Summarise the PDF I uploaded yesterday"* works because the agent can list and open everything in your Docs drawer. (Earlier versions had a separate `shared-docs` skill — that's been folded into `profile_files`. Cross-user shares show up annotated with the sharing user's name.)
+
+Anything you drop into chat — paperclip, paste, drag — now persists with a stable `file_id` (e.g. `documents:doc_abc123`). Earlier versions kept chat uploads only for the immediate turn; they're now first-class files you can reference in later sessions, attach to email by id, or list via `list_profile_files`.
 
 Agents can also *add* to your Docs drawer:
 - Image agent → AI images tab

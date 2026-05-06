@@ -34,9 +34,34 @@ The two paths produce slightly different titles right now — interceptor-create
 
 Each task is essentially: *"send this prompt to this agent on this schedule"*. The agent runs the prompt as if you'd typed it yourself, with all the same skills available. If the prompt asks for an email to be sent, it's sent. If it asks for a research doc, the doc is created and shows up in **Documents**.
 
-## Watching for conditions (planned)
+Scheduled tasks always use the agent's **current** model — there's no model snapshot at schedule time. If you change Sydney from gpt-5.5 to claude-sonnet-4.6 today, tomorrow's morning briefing fires on the new model. Same applies if you swap providers entirely.
 
-A condition-triggered task type is on the roadmap — *"tell me when SOL hits $100"*, *"ping me when this PR turns green"*. For now, you can fake it with a recurring task that polls.
+If a scheduled run fails (transient network blip, provider 5xx, etc.), it retries 3 times with a 30-second gap before giving up. Final failures leave a visible **⚠️ Scheduled task failed** message in the agent's chat with the underlying error — no more silent orphan headers. The task stays scheduled and tries again at its next normal time.
+
+## Watch tasks — fire on a condition, not a clock
+
+Sometimes you don't want a clock — you want *"tell me when X happens."* Watches handle that. Ask in chat naturally: *"tell me when SOL hits $100"*, *"ping me when /tmp/build.log says BUILD OK"*, *"alert me if `df` shows the root volume above 90%."* Your agent picks the right shape and registers a watch.
+
+Four sources cover most needs:
+
+- **`http_jsonpath`** — fetch a URL, walk a JSON path, compare. *"alert me when this API returns `status: error`"*, *"watch the SOL price."*
+- **`exec`** — run a shell command, parse stdout, compare. *"watch the disk fill"*, *"poll `gh pr view` until it merges."*
+- **`file_stat`** — watch a file's existence, size, mtime, or content change. *"ping me when `/tmp/build-done` appears."*
+- **`event_subscription`** — listen for an in-process event. Combine with `POST /api/watchers/event` to wire external webhooks (GitHub, CI, Telegram bot replies).
+
+Each watch has a polling cadence (default 60 s) and an `on_fire` action: just notify (status bubble in chat) or run an agent (e.g., *"when the deploy log says READY, post a confirmation to Slack"*).
+
+Active watches show in **Sidebar → Tasks** alongside scheduled tasks. Click any to expand history; cancel from the same row. Each watch is owned by the agent that created it; conversations preserve their bubbles across browser refresh.
+
+## Friction proposals — the bubble that asks "make this recurring?"
+
+If you ask for the same thing three times in a row in the same agent (the cortex same-instruction head decides what counts), a small bubble appears in chat: *"Make this a recurring task?"* with **Schedule daily** and **No, just this once** buttons. It's an offer, never an automatic action.
+
+- **Accept** runs the agent in the background and sets up the right scheduled task or watch using sensible defaults (daily at the time you mentioned, or 09:00 if no time was specified). The bubble flips to *"Setting it up…"* immediately, then *"✓ Accepted"* when the agent finishes.
+- **Dismiss** silences the same pattern for 24 hours so it doesn't immediately re-propose.
+- **Destructive verbs** (delete, remove, wipe, format, drop, purge, rm, uninstall, reset, etc.) are filtered out — they never auto-propose, even when repeated. You can still set up a destructive recurring task explicitly via your agent; friction-as-proposer just won't escalate ad-hoc deletes into a daily one.
+
+The bubble persists across reloads. Pending proposals can also be inspected via `/api/proposals` if you want to see what's outstanding.
 
 ## Editing & disabling
 

@@ -31,6 +31,8 @@ That distinction matters: when you ask the Coordinator to "have the researcher l
 
 In the agent list, hover the agent and click the edit icon (or right-click → Edit). You can change name, emoji, model, system prompt, role, and tool selection without losing chat history. Switching role swaps the persona without rebuilding the agent.
 
+Scheduled tasks owned by an agent always use that agent's **current** model — the model isn't snapshotted at schedule time. So if you swap an agent from gpt-5.5 to claude-sonnet-4.6 today, every future fire of every scheduled task that agent owns runs on the new model. Same for watch on-fire actions.
+
 Expand the **Advanced** dropdown in the edit panel for the less-touched knobs:
 
 - **Context window** — how many prior tokens of conversation to include each turn. Lower it if responses are slow or you're getting close to the model's limit; raise it if the agent forgets things mid-task.
