@@ -11,8 +11,10 @@ import { fileURLToPath } from 'url';
 import { listAgents } from './agents.mjs';
 import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
 import { loadDrawerManifests } from './plugins.mjs';
-import { startScheduler, stopScheduler, loadTasksForOwner, addTask, registerBuiltin } from './scheduler.mjs';
+import { startScheduler, stopScheduler, loadTasksForOwner, addTask, removeTask, registerBuiltin } from './scheduler.mjs';
 import { startWatcherSupervisor, stopWatcherSupervisor } from './scheduler/watchers.mjs';
+import { registerSystemWatchHandlers } from './scheduler/watch-handlers.mjs';
+import { setProposalBroadcastFn, bootLoadProposals } from './lib/proposals.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
 import { getRateLimit } from './rate-limit.mjs';
@@ -60,7 +62,7 @@ import { startUpdateChecker } from './lib/update.mjs';
 // Shared helpers
 import {
   loadConfig, loadUsers, loadPersistedSessions, setBroadcastFn, setUserBroadcastFn,
-  EXPENSES_UPLOADS, CFG_PATH,
+  CFG_PATH,
 } from './routes/_helpers.mjs';
 import { log, configureLogger } from './logger.mjs';
 
@@ -560,38 +562,21 @@ registerBuiltin('cortexCleanup', async () => {
   }
 });
 
-// ── Builtin task: clean old uploads ──────────────────────────────────────────
-registerBuiltin('cleanUploads', () => {
-  try {
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    const files = fs.readdirSync(EXPENSES_UPLOADS);
-    let deleted = 0;
-    for (const f of files) {
-      const fp = path.join(EXPENSES_UPLOADS, f);
-      try {
-        const { mtimeMs } = fs.statSync(fp);
-        if (mtimeMs < cutoff) { fs.unlinkSync(fp); deleted++; }
-      } catch (e) { console.warn('[cleanUploads] Failed to process', f + ':', e.message); }
-    }
-    return deleted ? `Deleted ${deleted} old upload file${deleted > 1 ? 's' : ''}.` : 'No old uploads to clean.';
-  } catch (e) {
-    return `Error: ${e.message}`;
-  }
-});
+// cleanUploads task removed 2026-05-06 — uploads now persist into the
+// profile-files registry (lib/profile-files.mjs) keyed by stable file_id.
+// Expense transactions reference sourceFileId instead of a raw filename, so
+// there's nothing to scrub at 24h. Old installs may still have a daily task
+// stub from the previous seed; seedSystemTasks below removes it on boot.
 
 async function seedSystemTasks() {
   const existing = loadTasksForOwner('system');
-  if (!existing.find(t => t.type === 'builtin' && t.handler === 'cleanUploads')) {
-    await addTask({
-      label: 'Clean uploads folder',
-      type: 'builtin',
-      handler: 'cleanUploads',
-      agent: 'system',
-      repeat: 'daily',
-      time: '03:00',
-      ownerId: null,
-    });
-    console.log('[scheduler] Seeded cleanUploads task');
+  // Remove the legacy cleanUploads task if a previous install seeded it.
+  // The handler is gone (uploads persist in the profile-files registry now)
+  // so the task would error daily if left in place.
+  const stale = existing.find(t => t.type === 'builtin' && t.handler === 'cleanUploads');
+  if (stale) {
+    await removeTask(stale.id);
+    console.log('[scheduler] Removed legacy cleanUploads task — uploads are now persistent in profile-files');
   }
   if (!existing.find(t => t.type === 'builtin' && t.handler === 'cortexCleanup')) {
     await addTask({
@@ -684,11 +669,19 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // Watcher supervisor: per-user polling for long-running async work
   // (video gen, training, price alerts, etc.). Distinct from scheduler
   // (one-shot/cron) — see scheduler/watchers.mjs for the design.
+  registerSystemWatchHandlers();
   startWatcherSupervisor({
     sendStatus: (userId, msg) => sendToUser(userId, msg),
     showImage:  (userId, msg) => sendToUser(userId, { type: 'image', ...msg }),
     showVideo:  (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
   });
+  // Friction-as-proposer needs the same per-user push channel as watchers
+  // for proposal bubbles + the task_complete broadcast on accept.
+  setProposalBroadcastFn((userId, msg) => sendToUser(userId, msg));
+  // Reap stranded 'running' proposals from a previous crash + restore the
+  // dismiss-cooldown map so a recently-dismissed pattern doesn't immediately
+  // re-propose post-restart.
+  bootLoadProposals();
 
   // Cloudflare tunnel supervisor — only re-spawns if a prior config marked
   // it enabled. The onPublicUrlChange callback re-registers every user's

@@ -10,9 +10,8 @@ import { withLock, isPrivileged, getExpBooksForUser, loadExpBooks, modifyExpBook
 
 import { fileURLToPath } from 'url';
 
-const BASE_DIR     = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const DB_PATH      = path.join(BASE_DIR, 'expenses/transactions.json');
-const UPLOADS_DIR  = path.join(BASE_DIR, 'expenses/uploads');
+const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const DB_PATH  = path.join(BASE_DIR, 'expenses/transactions.json');
 
 // ── AI extraction ─────────────────────────────────────────────────────────────
 export const EXPENSE_SYSTEM_MSG = `You are an expense extraction engine. Extract purchases and charges from the provided document and return ONLY a valid JSON array. No reasoning, no explanation, no markdown — output the raw JSON array and nothing else.

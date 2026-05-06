@@ -8,6 +8,7 @@ import path from 'path';
 import {
   requireAuth, requirePrivileged, loadConfig, modifyConfig, readBody, CFG_PATH, safeError,
 } from './_helpers.mjs';
+import { supportsVision } from '../lib/model-capabilities.mjs';
 
 // This is the default for the "Ollama (cloud)" provider field — the Ollama
 // (local) field has its own separate OLLAMA_LOCAL_DEFAULT below. Historically
@@ -205,7 +206,7 @@ export async function handle(req, res) {
       const data = await resp.json();
       const list = data.models ?? data.data ?? [];
       const models = list
-        .map(m => ({ id: m.id ?? m.name, displayName: m.id ?? m.name }))
+        .map(m => ({ id: m.id ?? m.name, displayName: m.id ?? m.name, supportsVision: supportsVision('grok', m.id ?? m.name) }))
         .filter(m => m.id)
         .sort((a, b) => a.id.localeCompare(b.id));
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -246,7 +247,12 @@ export async function handle(req, res) {
       } while (afterId);
 
       const models = allModels
-        .map(m => ({ id: m.id, displayName: m.display_name ?? m.id, createdAt: m.created_at ?? null }))
+        .map(m => ({
+          id: m.id,
+          displayName: m.display_name ?? m.id,
+          createdAt: m.created_at ?? null,
+          supportsVision: supportsVision('anthropic', m.id),
+        }))
         .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -284,19 +290,19 @@ export async function handle(req, res) {
         if (pagesFetched > 20) break;
       } while (pageToken);
 
-      // FLUMINA = Fireworks-native image models (Flux)
+      // FLUMINA = Fireworks-native image models (Flux). Image-generation, not vision input.
       const fluminaModels = allModels
         .filter(m => m.kind?.startsWith('FLUMINA'))
-        .map(m => ({ id: (m.name ?? '').split('/').pop(), displayName: m.displayName || m.name }));
+        .map(m => ({ id: (m.name ?? '').split('/').pop(), displayName: m.displayName || m.name, supportsVision: false }));
 
       // SD/Playground models exist in the web UI but aren't returned by the listing API
       // They use a different inference endpoint (/inference/v1/image_generation/...)
       const legacyImageModels = [
-        { id: 'stable-diffusion-xl-1024-v1-0',    displayName: 'Stable Diffusion XL' },
-        { id: 'playground-v2-1024px-aesthetic',    displayName: 'Playground v2 1024' },
-        { id: 'playground-v2-5-1024px-aesthetic',  displayName: 'Playground v2.5 1024' },
-        { id: 'SSD-1B',                            displayName: 'Segmind Stable Diffusion 1B' },
-        { id: 'japanese-stable-diffusion-xl',      displayName: 'Japanese Stable Diffusion XL' },
+        { id: 'stable-diffusion-xl-1024-v1-0',    displayName: 'Stable Diffusion XL',                supportsVision: false },
+        { id: 'playground-v2-1024px-aesthetic',    displayName: 'Playground v2 1024',                supportsVision: false },
+        { id: 'playground-v2-5-1024px-aesthetic',  displayName: 'Playground v2.5 1024',              supportsVision: false },
+        { id: 'SSD-1B',                            displayName: 'Segmind Stable Diffusion 1B',       supportsVision: false },
+        { id: 'japanese-stable-diffusion-xl',      displayName: 'Japanese Stable Diffusion XL',      supportsVision: false },
       ];
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -335,6 +341,10 @@ export async function handle(req, res) {
           contextLen:  m.context_length ?? null,
           inputPrice:  m.pricing?.prompt  != null ? parseFloat(m.pricing.prompt)  * 1_000_000 : null,
           outputPrice: m.pricing?.completion != null ? parseFloat(m.pricing.completion) * 1_000_000 : null,
+          // OpenRouter exposes input modality on each model — image input means vision-capable.
+          supportsVision: Array.isArray(m.architecture?.input_modalities)
+            ? m.architecture.input_modalities.includes('image')
+            : supportsVision('openrouter', m.id),
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -361,8 +371,9 @@ export async function handle(req, res) {
     const prov = req.url.slice('/api/provider-models/'.length).split('?')[0];
     // OAuth-backed ChatGPT provider: no key field, no /models endpoint — static list.
     if (prov === 'openai-oauth') {
+      const annotated = OPENAI_OAUTH_STATIC_MODELS.map(m => ({ ...m, supportsVision: supportsVision('openai-oauth', m.id ?? m.name) }));
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(OPENAI_OAUTH_STATIC_MODELS));
+      res.end(JSON.stringify(annotated));
       return true;
     }
     const provCfg = COMPAT_PROVIDERS[prov];
@@ -385,8 +396,9 @@ export async function handle(req, res) {
     }
     // Perplexity has no /models endpoint — return the hardcoded Sonar family.
     if (prov === 'perplexity') {
+      const annotated = PERPLEXITY_STATIC_MODELS.map(m => ({ ...m, supportsVision: supportsVision('perplexity', m.id ?? m.name) }));
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(PERPLEXITY_STATIC_MODELS));
+      res.end(JSON.stringify(annotated));
       return true;
     }
     try {
@@ -400,10 +412,11 @@ export async function handle(req, res) {
       // Handle both OpenAI shape ({ data: [...] }) and alternate ({ models: [...] })
       const raw = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
       const models = raw.map(m => ({
-        id:         m.id ?? m.name,
-        name:       m.id ?? m.name,
-        contextLen: m.context_length ?? m.context_window ?? null,
-        created:    m.created ?? null,
+        id:             m.id ?? m.name,
+        name:           m.id ?? m.name,
+        contextLen:     m.context_length ?? m.context_window ?? null,
+        created:        m.created ?? null,
+        supportsVision: supportsVision(prov, m.id ?? m.name, { capabilities: m.capabilities }),
       })).filter(m => m.id).sort((a, b) => String(a.name).localeCompare(String(b.name)));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(models));
@@ -441,6 +454,7 @@ export async function handle(req, res) {
         .then(r => r.json())
         .then(d => (d.models ?? []).map(m => ({
           name: m.name, provider: 'ollama', tier: classifyOllama(m, sourceIsCloud),
+          supportsVision: supportsVision('ollama', m.name),
         })));
 
     const ollamaFetches = [];
@@ -460,6 +474,7 @@ export async function handle(req, res) {
             contextLen:  m.max_context_length,
             loaded:      (m.loaded_instances?.length ?? 0) > 0,
             capabilities: Array.isArray(m.capabilities) ? m.capabilities : [],
+            supportsVision: supportsVision('lmstudio', m.key ?? m.id, { capabilities: m.capabilities }),
           }))
         ),
       ...ollamaFetches,
@@ -501,8 +516,8 @@ export async function handle(req, res) {
 
     const models = [
       // Bundled models — always available, no external runtime required.
-      { name: 'nomic-embed-text-v1', provider: 'builtin', displayName: 'Nomic Embed (built-in)', tier: 'bundled' },
-      { name: builtinReasonId, provider: 'builtin', displayName: 'OpenEnsemble Reason v1 (built-in)', tier: 'bundled' },
+      { name: 'nomic-embed-text-v1', provider: 'builtin', displayName: 'Nomic Embed (built-in)', tier: 'bundled', supportsVision: false },
+      { name: builtinReasonId, provider: 'builtin', displayName: 'OpenEnsemble Reason v1 (built-in)', tier: 'bundled', supportsVision: false },
       ...ollamaMerged,
       ...(lmRes.status === 'fulfilled' ? lmRes.value : []),
     ];

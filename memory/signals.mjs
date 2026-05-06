@@ -95,11 +95,46 @@ export async function detectAndStorePreference({ agentId, userMessage, userId = 
   return preference;
 }
 
-// ── Friction tracking — same instruction 3x → auto-pinned as immortal ────────
+// ── Friction tracking — same instruction 3x → propose automation ─────────────
+//
+// In-process map keyed by `${agentId}_${createdAt}` → { text, count, lastSeenAt }.
+// Two reaping forces keep it bounded:
+//   1. Age sweep — entries with no activity for >FRICTION_TTL_MS are dropped
+//      at the head of every trackFriction call.
+//   2. Per-agent cap — if more than FRICTION_MAX_PER_AGENT entries survive,
+//      the oldest are dropped. Bounds worst case even when traffic is heavy
+//      enough that the age sweep doesn't keep up.
+// Friction is a short-window pattern detector, not a long-term store, so a
+// 30-minute TTL is generous and matches user intuition for "I keep saying
+// this in this conversation."
 const _frictionCounters = {};
+const FRICTION_TTL_MS = 30 * 60 * 1000;
+const FRICTION_MAX_PER_AGENT = 50;
+
+function pruneFrictionCounters(agentId) {
+  const cutoff = Date.now() - FRICTION_TTL_MS;
+  const prefix = agentId + '_';
+  const live = [];
+  for (const [k, v] of Object.entries(_frictionCounters)) {
+    if (!k.startsWith(prefix)) continue;
+    if ((v.lastSeenAt ?? 0) < cutoff) {
+      delete _frictionCounters[k];
+    } else {
+      live.push([k, v]);
+    }
+  }
+  // If the agent still has too many, drop the oldest by lastSeenAt.
+  if (live.length > FRICTION_MAX_PER_AGENT) {
+    live.sort((a, b) => (a[1].lastSeenAt ?? 0) - (b[1].lastSeenAt ?? 0));
+    for (let i = 0; i < live.length - FRICTION_MAX_PER_AGENT; i++) {
+      delete _frictionCounters[live[i][0]];
+    }
+  }
+}
 
 export async function trackFriction({ agentId, userMessage, userId = 'default' }) {
   if (!await providerHealthy()) return { promoted: false };
+  pruneFrictionCounters(agentId);
   const safeMsg = userMessage.slice(0, 150).replace(/"/g, "'");
   const agentKeys = Object.keys(_frictionCounters).filter(k => k.startsWith(agentId + '_'));
 
@@ -114,17 +149,26 @@ export async function trackFriction({ agentId, userMessage, userId = 'default' }
 
     if (parsed?.same_instruction === true) {
       stored.count += 1;
+      stored.lastSeenAt = Date.now();
       if (stored.count >= 3) {
-        const pinnedText = `[AUTO-PINNED after ${stored.count} repetitions] ${userMessage}`;
-        await pin({ agentId, text: pinnedText, category: 'friction_promoted', userId });
+        // Friction-as-proposer (cortex automation #1): instead of pinning the
+        // literal repeated message (which over-promoted one-off commands —
+        // see `[AUTO-PINNED]` cleanup history), classify the message and
+        // surface a proposal bubble in chat. If the message isn't actionable
+        // (not task-shaped or watch-shaped), do nothing — strict improvement
+        // over verbatim auto-pinning since legitimate preferences are still
+        // captured by the signals head's processSignals path.
+        const { maybePropose } = await import('../lib/proposals.mjs');
+        const proposed = await maybePropose({ userId, agentId, message: userMessage });
         delete _frictionCounters[key];
-        return { promoted: true, count: stored.count };
+        return { promoted: false, proposed: !!proposed, count: stored.count };
       }
       return { promoted: false, count: stored.count };
     }
   }
 
-  _frictionCounters[`${agentId}_${Date.now()}`] = { text: userMessage, count: 1 };
+  const now = Date.now();
+  _frictionCounters[`${agentId}_${now}`] = { text: userMessage, count: 1, lastSeenAt: now };
   return { promoted: false, count: 1 };
 }
 
@@ -270,8 +314,9 @@ export async function processSignals({ agentId, userMessage, agentLastResponse =
   // One combined model call for all signals
   const { correction, preference } = await detectSignals({ agentId, userMessage, agentLastResponse, userId });
 
-  // Friction tracking runs separately (needs message similarity, not signal detection)
-  trackFriction({ agentId, userMessage, userId }).catch(e => console.warn('[cortex] Friction tracking failed:', e.message));
+  // Friction tracking is now called directly from chat.mjs persist() so it
+  // runs on action-tool turns too — see the comment block there. Don't call
+  // it here or it runs twice on no-tool turns.
 
   return { correction: !!correction, preference: !!preference };
 }

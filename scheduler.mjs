@@ -10,7 +10,6 @@ import { streamChat } from './chat.mjs';
 import { appendToSession } from './sessions.mjs';
 import { withLock, getAgentsForUser, getUser, isUserTimeBlocked } from './routes/_helpers.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
-import { scheduledContext } from './lib/scheduled-context.mjs';
 import { log } from './logger.mjs';
 
 const TASKS_DIR      = path.join(BASE_DIR, 'tasks'); // legacy fallback
@@ -335,45 +334,63 @@ async function runTask(task, broadcast) {
       `Use reasonable defaults for anything unspecified, complete the task, and report in your final message what you did (including a Message ID if a tool returned one).` +
       userEmailLine;
 
-    // Drain the stream with retries — cloud models can return empty on transient failures
+    // Run with shared retry helper. Failure shapes handled there:
+    //   1. streamChat yields {type:'error', message}
+    //   2. streamChat throws (fetch failed at network layer)
+    // Original gap that left an orphan header for "Check Proxmox Zpool"
+    // 2026-05-06 was the un-caught throw; the helper try/catches it.
+    const { runAgentWithRetry } = await import('./lib/run-agent-with-retry.mjs');
     const MAX_ATTEMPTS = 3;
-    const RETRY_DELAY_MS = 30_000;
-    let succeeded = false;
+    const { succeeded, lastError } = await runAgentWithRetry({
+      scopedAgent, userText: task.prompt, systemNote: scheduledNote, userId, streamChat,
+      maxAttempts: MAX_ATTEMPTS,
+      context: 'scheduler',
+    });
 
-    const runAttempt = async (attempt) => {
-      let failed = false;
-      for await (const event of streamChat(scopedAgent, task.prompt, new AbortController().signal, null, userId, null, scheduledNote)) {
-        if (event.type === 'error') {
-          console.error(`[scheduler] Task "${task.label}" attempt ${attempt}/${MAX_ATTEMPTS} error:`, event.message);
-          failed = true;
-          break;
-        }
-      }
-      if (!failed) return true;
-      if (attempt < MAX_ATTEMPTS) {
-        console.log(`[scheduler] Retrying "${task.label}" in ${RETRY_DELAY_MS / 1000}s…`);
-        return new Promise(resolve => setTimeout(() => resolve(runAttempt(attempt + 1)), RETRY_DELAY_MS));
-      }
-      return false;
-    };
-
-    // Wrap the entire run in AsyncLocalStorage so any ask_agent delegations
-    // nested under streamChat can read the systemNote and pass it down.
-    succeeded = await scheduledContext.run({ scheduledNote }, () => runAttempt(1));
     if (!succeeded) console.error(`[scheduler] Task "${task.label}" failed after ${MAX_ATTEMPTS} attempts`);
     else console.log(`[scheduler] Task "${task.label}" complete`);
     const durationMs = Date.now() - startedAt;
     if (succeeded) log.info('scheduler', 'task complete', { taskId: task.id, label: task.label, durationMs });
-    else           log.error('scheduler', 'task failed', { taskId: task.id, label: task.label, durationMs, attempts: MAX_ATTEMPTS });
+    else           log.error('scheduler', 'task failed', { taskId: task.id, label: task.label, durationMs, attempts: MAX_ATTEMPTS, err: lastError });
 
-    // One-shot tasks vanish after firing; recurring ones just stamp lastRun.
-    if (task.repeat === 'once') await removeTask(task.id);
-    else await updateTask(task.id, { lastRun: new Date().toISOString() });
+    // On failure, append a visible error message to the session so the chat
+    // shows what happened instead of an orphan header. Without this the user
+    // sees the scheduled-task pill and nothing under it (the bug that
+    // surfaced this whole fix). Use role:'assistant' so the chat treats it
+    // as part of the run's reply, not as scheduler scaffolding.
+    if (!succeeded) {
+      try {
+        appendToSession(sessionKey, {
+          role: 'assistant',
+          content: `⚠️ Scheduled task failed after ${MAX_ATTEMPTS} attempts. Last error: ${lastError || 'unknown'}.\n\nThe task is still scheduled and will retry on its next run.`,
+          scheduled: true,
+          taskId: task.id,
+          taskFailed: true,
+          ts: Date.now(),
+        });
+      } catch (e) {
+        console.warn('[scheduler] Failed to append failure message to session:', e.message);
+      }
+    }
+
+    // One-shot tasks vanish after firing; recurring ones stamp lastRun even
+    // on failure (with lastError) so the tasks drawer shows when it ran and
+    // why it failed instead of looking like it never ran today.
+    if (task.repeat === 'once') {
+      await removeTask(task.id);
+    } else {
+      const patch = { lastRun: new Date().toISOString() };
+      if (!succeeded) patch.lastError = lastError || 'unknown';
+      else            patch.lastError = null; // clear stale error on next success
+      await updateTask(task.id, patch);
+    }
 
     // Notify any connected WebSocket clients to reload this agent's session
+    // — applies to failures too so the user's chat refreshes and shows the
+    // ⚠️ message instead of the orphaned header.
     if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent });
   } catch (e) {
-    console.error(`[scheduler] Task "${task.label}" threw:`, e.message);
+    console.error(`[scheduler] Task "${task.label}" threw outside runAttempt:`, e.message);
     log.error('scheduler', 'task threw', { taskId: task.id, label: task.label, err: e.message });
   }
 }

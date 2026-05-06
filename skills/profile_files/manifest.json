@@ -1,7 +1,7 @@
 {
   "id": "profile_files",
   "name": "Profile Files",
-  "description": "Read-only access to everything in the user's profile folder: uploaded documents, saved research, generated images/videos, and coder workspace files.",
+  "description": "Read-only access to everything in the user's profile folder: uploaded documents, saved research, generated images/videos, coder workspace files, and any docs that other users have shared with them.",
   "icon": "🗂️",
   "category": "utility",
   "enabled_by_default": true,
@@ -10,14 +10,14 @@
       "type": "function",
       "function": {
         "name": "list_profile_files",
-        "description": "List files saved in the user's profile folders. Covers uploaded documents, saved research, generated images, generated videos, and coder workspace files. Returns ids, filenames, sizes, types, and timestamps. Use this when the user asks about their files, photos, videos, code, research, or anything 'in their profile' / 'in their folder' / 'that they have saved'.",
+        "description": "List files in the user's profile — uploaded documents, saved research, generated images, generated videos, coder workspace files, AND any docs other users have shared with them (annotated with `[shared by <userId>]`). Returns ids, filenames, sizes, types, timestamps, and sharing status. This is the single tool for ANY 'list my files' / 'show my docs' / 'what's been shared with me' question.\n\n**Default to folder='all' for fuzzy phrasings.** Phrases like 'list my documents', 'show my files', 'what do I have', 'my stuff' are user shorthand for the whole profile, NOT the literal documents subfolder. Only narrow to a specific folder when the user explicitly names a category (\"just images\", \"my videos\", \"the research markdowns\", \"code only\").",
         "parameters": {
           "type": "object",
           "properties": {
             "folder": {
               "type": "string",
               "enum": ["all", "documents", "research", "images", "videos", "code"],
-              "description": "Which folder to list. 'all' (default) returns everything. 'documents' = uploaded files. 'research' = saved research markdowns. 'images' / 'videos' = AI-generated media. 'code' = coder workspace files."
+              "description": "Which folder to list. 'all' (default — use this for any non-specific request including 'my documents'). 'documents' = uploaded files (use only when user explicitly says 'just docs' / 'only documents folder'). 'research' = saved research markdowns. 'images' / 'videos' = AI-generated media. 'code' = coder workspace files."
             },
             "query": {
               "type": "string",

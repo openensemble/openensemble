@@ -27,7 +27,8 @@ async function saveThreads(threads) {
 }
 import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
-import { listWatchers, unregisterWatcher, patchWatcher, getWatcher } from '../scheduler/watchers.mjs';
+import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
+import { acceptProposal, dismissProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
 import { getGmailAuthHeader } from './gmail.mjs';
@@ -170,6 +171,45 @@ export async function handle(req, res) {
       const ok = patchWatcher(authId, wMatch[1], body);
       res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok }));
+    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    return true;
+  }
+
+  // Friction-as-proposer endpoints — accept/dismiss proposals surfaced by
+  // the cortex friction tracker. Proposals are in-memory; ownership check
+  // matches the proposal's userId against the auth cookie.
+  if (req.url === '/api/proposals' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ pending: listUserProposals(authId, 'pending') }));
+    return true;
+  }
+  const propMatch = req.url.match(/^\/api\/proposals\/([^/?]+)\/(accept|dismiss)$/);
+  if (propMatch && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const id = propMatch[1];
+    const action = propMatch[2];
+    const existing = getProposal(id);
+    if (!existing) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not found' })); return true; }
+    if (existing.userId !== authId) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'forbidden' })); return true; }
+    const result = action === 'accept' ? await acceptProposal(id) : await dismissProposal(id);
+    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+
+  // Webhook: fire an arbitrary named event for the authenticated user. Any
+  // watcher with kind='event_subscription' and state.event matching is woken
+  // for the next supervisor tick. POST /api/watchers/event
+  // body: { event: string, payload?: any }
+  if (req.url === '/api/watchers/event' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      if (!body.event) { res.writeHead(400); res.end(JSON.stringify({ error: 'event name required' })); return true; }
+      const matched = emitEvent(authId, String(body.event), body.payload ?? {});
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, matched }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
     return true;
   }

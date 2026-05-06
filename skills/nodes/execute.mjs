@@ -3,7 +3,7 @@
  * Routes tool calls to the shared node registry.
  */
 
-import { getNodes, getNode, sendCommand, sendCommandStreaming } from './node-registry.mjs';
+import { getNodes, getNode, sendCommand, sendCommandStreaming, setReadableFolders, isPathAllowed } from './node-registry.mjs';
 import { getActiveProjectInfo } from '../coder/execute.mjs';
 import { generatePairingCode, PAIRING_CODE_TTL_SECONDS } from '../../routes/nodes/pairing.mjs';
 import { getLanAddress } from '../../discovery.mjs';
@@ -230,6 +230,85 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       yield { type: 'result', text: output || `Command completed with exit code ${cmdResult.exitCode}` };
       return;
     }
+  }
+
+  if (name === 'node_read_file') {
+    // Read a file from a remote node. Server-side allowlist check happens
+    // BEFORE the command is sent — if the path isn't under one of the
+    // node's readableFolders, this never reaches the agent. node_exec
+    // bypasses this allowlist by design (different privilege class).
+    const { node_id, path: filePath, max_bytes = 100_000 } = args;
+    if (!node_id)   { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!filePath)  { yield { type: 'result', text: 'Error: path is required.' }; return; }
+    if (typeof filePath !== 'string' || !filePath.startsWith('/')) {
+      yield { type: 'result', text: 'Error: path must be absolute Unix-style starting with "/".' }; return;
+    }
+
+    const node = getNode(node_id, userId);
+    if (!node) {
+      yield { type: 'result', text: `Node "${node_id}" not found or not connected.` };
+      return;
+    }
+
+    if (!isPathAllowed(node.nodeId, userId, filePath)) {
+      const folders = node.readableFolders || [];
+      yield { type: 'result', text: folders.length
+        ? `Error: "${filePath}" is not in the readable-folders allowlist for ${node.hostname}.\nAllowed folders: ${folders.join(', ')}\nUse node_set_readable_folders to expand the list.`
+        : `Error: ${node.hostname} has no readable folders configured. Use node_set_readable_folders first to whitelist a path prefix (e.g. "/home/${node.hostname === 'localhost' ? 'shawn' : 'user'}/Documents").`
+      };
+      return;
+    }
+
+    const cap = Math.min(Math.max(Number(max_bytes) || 100_000, 1024), 5 * 1024 * 1024);
+    // Single-quote the path; escape embedded single quotes the shell-safe way.
+    const quoted = "'" + String(filePath).replace(/'/g, "'\\''") + "'";
+    const isWindows = (node.platform || '').toLowerCase().startsWith('win');
+    const command = isWindows
+      ? `Get-Content -Raw -TotalCount ${cap} ${quoted}`
+      : `head -c ${cap} -- ${quoted}`;
+
+    let result;
+    try {
+      result = await sendCommand(node.nodeId, userId, { type: 'exec', command, timeout: 30 });
+    } catch (e) {
+      yield { type: 'result', text: `Error reading file: ${e.message}` };
+      return;
+    }
+    if (result.exitCode !== 0) {
+      yield { type: 'result', text: `Read failed (exit ${result.exitCode}):\n${(result.stderr || '').slice(0, 500) || '(no error message)'}` };
+      return;
+    }
+    const body = result.stdout || '';
+    const truncated = body.length === cap ? `\n\n[truncated at ${cap} bytes; pass max_bytes=N to read more]` : '';
+    yield { type: 'result', text: body ? `[${node.hostname}:${filePath}]\n\n${body}${truncated}` : `(empty file at ${filePath})` };
+    return;
+  }
+
+  if (name === 'node_set_readable_folders') {
+    // Configure the per-node read allowlist. Each call REPLACES the existing
+    // list (it doesn't append) — keeps the user's mental model simple. To
+    // remove all access, call with an empty array.
+    const { node_id, paths } = args;
+    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!Array.isArray(paths)) { yield { type: 'result', text: 'Error: paths must be an array of absolute paths.' }; return; }
+
+    const node = getNode(node_id, userId);
+    if (!node) {
+      yield { type: 'result', text: `Node "${node_id}" not found or not connected.` };
+      return;
+    }
+
+    const updated = setReadableFolders(node.nodeId, userId, paths);
+    if (!updated) {
+      yield { type: 'result', text: 'Could not update readable folders (node not owned by this user).' };
+      return;
+    }
+
+    yield { type: 'result', text: updated.readableFolders.length
+      ? `Set readable folders on ${updated.hostname}:\n${updated.readableFolders.map(f => `- ${f}`).join('\n')}`
+      : `Cleared readable folders on ${updated.hostname} — node_read_file will reject all reads until folders are configured again.`
+    };
+    return;
   }
 
   if (name === 'node_push_project') {

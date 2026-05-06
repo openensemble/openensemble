@@ -70,6 +70,8 @@ function renderSession() {
     else if (m.role === 'assistant' && m.image)    appendImageBubble(m.image, m.ts, false);
     else if (m.role === 'assistant' && m.video)    appendVideoBubble(m.video, m.ts, false);
     else if (m.role === 'status' && m.status)     appendStatusBubble(m.status, m.ts, false);
+    else if (m.role === 'proposal' && m.proposalId) appendProposalBubble(m, false);
+    else if (m.role === 'proposal_outcome' && m.proposalId) applyProposalOutcome(m.proposalId, m.status, m.outcome);
     else if (m.role === 'assistant' && !m.hidden) appendAssistantBubble(m.content, m.ts, false);
   });
   const headers = $('messages').querySelectorAll('.task-header[data-ts]');
@@ -250,6 +252,129 @@ function appendStatusBubble(status, ts = Date.now(), scroll = true) {
     if (el.dataset.historyOpen === '1') refreshWatcherHistory(el, watcherId);
   }
   return el;
+}
+
+// Friction-tracker proposal bubble — rendered when the cortex friction head
+// detects a 3rd repetition of an actionable phrasing and proposes an
+// automation (recurring task or watch). Two action buttons; click one and
+// the bubble mutates in place to the outcome. Transient — not persisted to
+// the session today, so reloading the chat removes pending bubbles.
+function appendProposalBubble(proposal, scroll = true) {
+  const id = proposal.proposalId;
+  if (!id) return;
+  // De-dupe: if a bubble already exists for this proposal id, leave it alone.
+  if (document.querySelector(`.msg.proposal[data-proposal-id="${CSS.escape(id)}"]`)) return;
+
+  const el = document.createElement('div');
+  el.className = 'msg proposal';
+  el.dataset.proposalId = id;
+  el.style.cssText = 'padding:10px 12px;margin:6px 0;font-size:13px;border-left:3px solid var(--accent, #6c8cff);background:rgba(108,140,255,0.06);border-radius:4px';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:4px';
+  const icon = document.createElement('span');
+  icon.textContent = '💡';
+  header.appendChild(icon);
+  const label = document.createElement('span');
+  label.style.cssText = 'font-weight:600';
+  label.textContent = proposal.kind === 'watch' ? 'Set up a monitor?' : 'Make this a recurring task?';
+  header.appendChild(label);
+  el.appendChild(header);
+
+  const body = document.createElement('div');
+  body.style.cssText = 'color:var(--muted);font-size:12px;margin-bottom:8px';
+  body.textContent = `You've asked this a few times: "${proposal.message}"`;
+  el.appendChild(body);
+
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;gap:8px';
+
+  const acceptBtn = document.createElement('button');
+  acceptBtn.textContent = proposal.accept_label || 'Set it up';
+  acceptBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--accent, #6c8cff);background:var(--accent, #6c8cff);color:#fff;border-radius:4px;cursor:pointer;font-size:12px';
+  acceptBtn.addEventListener('click', () => respondToProposal(el, id, 'accept', acceptBtn, dismissBtn));
+  actions.appendChild(acceptBtn);
+
+  const dismissBtn = document.createElement('button');
+  dismissBtn.textContent = proposal.dismiss_label || 'No thanks';
+  dismissBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;cursor:pointer;font-size:12px';
+  dismissBtn.addEventListener('click', () => respondToProposal(el, id, 'dismiss', acceptBtn, dismissBtn));
+  actions.appendChild(dismissBtn);
+
+  el.appendChild(actions);
+  insertBefore(el);
+  if (scroll) scrollToBottom();
+}
+
+// Apply a proposal_outcome event against an already-rendered proposal
+// bubble — mutates the bubble in place. Three sources call this:
+//   1. session-load render pass (replay of persisted proposal_outcome entries)
+//   2. WS push of type 'proposal_outcome' (live update from server)
+//   3. respondToProposal local optimism on click (best-effort — the WS push
+//      will overwrite with the authoritative server state)
+//
+// Status progression: pending → running → (accepted | dismissed | failed).
+// Idempotent within a status: re-applying the same status leaves the bubble
+// unchanged. Earlier statuses are also safe to apply but get overwritten on
+// the next call. Buttons are removed once the bubble leaves the pending
+// state — re-clicking would call /accept on a non-pending proposal.
+function applyProposalOutcome(proposalId, status, outcome) {
+  const el = document.querySelector(`.msg.proposal[data-proposal-id="${CSS.escape(proposalId)}"]`);
+  if (!el) return;
+  if (el.dataset.appliedStatus === status) return;
+  el.dataset.appliedStatus = status;
+
+  // Strip any previous footer (buttons or outcome line) and rebuild.
+  const footer = el.querySelector('.proposal-footer');
+  if (footer) footer.remove();
+  const buttonRow = [...el.children].find(c => c.querySelector?.('button'));
+  if (buttonRow && status !== 'pending') buttonRow.remove();
+
+  const outcomeEl = document.createElement('div');
+  outcomeEl.className = 'proposal-footer';
+  outcomeEl.style.cssText = 'font-size:12px;color:var(--muted);font-style:italic;margin-top:6px';
+
+  if (status === 'running') {
+    // Don't overwrite color — keep it the original accent so it reads as
+    // "in flight" rather than completed.
+    outcomeEl.textContent = `… ${outcome || 'Setting it up…'}`;
+  } else if (status === 'accepted') {
+    el.style.borderLeftColor = 'var(--green, #4caf50)';
+    el.style.background = 'rgba(76,175,80,0.06)';
+    outcomeEl.textContent = `✓ Accepted${outcome ? ` — ${outcome}` : ''}`;
+  } else if (status === 'dismissed') {
+    el.style.opacity = '0.6';
+    outcomeEl.textContent = '✕ Dismissed';
+  } else if (status === 'failed') {
+    el.style.borderLeftColor = 'var(--red, #f44336)';
+    el.style.background = 'rgba(244,67,54,0.06)';
+    outcomeEl.textContent = `⚠ ${outcome || 'Failed'}`;
+  } else {
+    outcomeEl.textContent = `· ${status}`;
+  }
+  el.appendChild(outcomeEl);
+}
+
+async function respondToProposal(el, id, action, acceptBtn, dismissBtn) {
+  acceptBtn.disabled = true; dismissBtn.disabled = true;
+  acceptBtn.style.opacity = '0.5'; dismissBtn.style.opacity = '0.5';
+  try {
+    const r = await fetch(`/api/proposals/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (action === 'accept') {
+      // Server accepted asynchronously — render the in-flight state. The
+      // authoritative final outcome arrives via WS 'proposal_outcome' push
+      // when the agent run completes (success or retry-exhausted failure).
+      applyProposalOutcome(id, data.ok ? 'running' : 'failed', data.ok ? 'Setting it up…' : `Couldn’t set it up: ${data.error || 'unknown'}`);
+    } else {
+      // Dismiss is fast (no agent run) — apply final state immediately.
+      applyProposalOutcome(id, 'dismissed', null);
+    }
+  } catch (e) {
+    acceptBtn.disabled = false; dismissBtn.disabled = false;
+    acceptBtn.style.opacity = '1'; dismissBtn.style.opacity = '1';
+    alert('Proposal action failed: ' + e.message);
+  }
 }
 
 async function toggleWatcherHistory(el, watcherId) {

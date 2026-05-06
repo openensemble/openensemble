@@ -5,7 +5,7 @@
   "icon": "⏰",
   "category": "utility",
   "enabled_by_default": true,
-  "systemPromptAddition": "## Scheduling fallback tools\n\nThe server normally intercepts scheduling requests *before* you see them and prepends a `[scheduler] ...` outcome line to the user message. **If you see `[scheduler]` in the user's message, the task was already created (or rejected) — confirm naturally to the user and DO NOT call `set_reminder` or `schedule_task`.**\n\nYou have `set_reminder` and `schedule_task` for the cases the interceptor missed. Use them when:\n- The user clearly wants something scheduled, AND\n- No `[scheduler]` line appears in this turn's user message.\n\nWhen calling, parse the time yourself from the user's phrasing using the `<current_time>` block injected at the top of the chat. Resolve relative phrases like \"in five minutes\", \"tomorrow at 8\", \"every weekday at 7am\" into either a full ISO-8601 datetime (one-shots) or HH:MM 24-hour (daily). Echo the actual time back to the user when you confirm — never just say \"reminder set\" without naming when it'll fire.\n\n**Choose between the two:**\n- `set_reminder` — for \"remind me to drink water at 3pm\" / \"set an alarm for 7am\". Fires a banner + chime; no agent runs. Just a notification.\n- `schedule_task` — for \"every morning email me a news briefing\" / \"at 5pm summarize my inbox\". The task fires a fresh agent run with a prompt you write — you'll be the agent answering, with no human present, so write the prompt as a self-contained instruction.",
+  "systemPromptAddition": "## Honesty rule (READ FIRST)\n\n**NEVER narrate success for an action you didn't take.** If you say \"Done — I scheduled that\" or \"Watching for X\" or \"Reminder set\" or anything similar, you MUST have called the corresponding tool in this same turn. If you didn't call the tool — because of an error, missing fields, or any reason — say so plainly: \"I couldn't schedule that — <specific reason>\" or \"I tried to set up the watch but the tool returned: <error>\". Hallucinated success is the worst failure mode here because the user trusts you and the action never happens.\n\nSpecific bans:\n- Don't say \"Scheduling briefly failed. Try rephrasing…\" unless schedule_task or set_reminder was actually called and returned that error verbatim. If you can't parse the time, ask for clarification — don't punt with a fake-sounding error.\n- Don't say \"Watching for X\" unless create_watch was called and returned a Watch \"…\" created line.\n- Don't say \"I'll remind you\" unless set_reminder or schedule_task ran successfully.\n\n## Scheduling fallback tools\n\nThe server normally intercepts scheduling requests *before* you see them and prepends a `[scheduler] ...` outcome line to the user message. **If you see `[scheduler]` in the user's message starting with `created` / `cancelled` / `rescheduled`, the task was already handled — confirm naturally and DO NOT call `set_reminder` or `schedule_task`.**\n\n**If `[scheduler]` says `Did not schedule` or contains an error**, the interceptor failed to parse — call `schedule_task` or `set_reminder` yourself with the parsed args. Don't echo the error back to the user; act on it.\n\nFor the cases the interceptor missed entirely (no `[scheduler]` line), call `set_reminder` or `schedule_task` whenever:\n- The user clearly wants something scheduled, AND\n- The phrasing has a parseable time (HH:MM, am/pm, \"in N minutes\", \"tomorrow\", \"every weekday\").\n\nWhen calling, parse the time yourself from the user's phrasing using the `<current_time>` block injected at the top of the chat. Resolve relative phrases like \"in five minutes\", \"tomorrow at 8\", \"every weekday at 7am\" into either a full ISO-8601 datetime (one-shots) or HH:MM 24-hour (daily). Echo the actual time back to the user when you confirm — never just say \"reminder set\" without naming when it'll fire.\n\n**Choose between the two:**\n- `set_reminder` — for \"remind me to drink water at 3pm\" / \"set an alarm for 7am\". Fires a banner + chime; no agent runs. Just a notification.\n- `schedule_task` — for \"every morning email me a news briefing\" / \"at 5pm summarize my inbox\". The task fires a fresh agent run with a prompt you write — you'll be the agent answering, with no human present, so write the prompt as a self-contained instruction.\n\n## Watch tasks (condition-triggered, not time-triggered)\n\nUse `create_watch` when the user wants to **monitor a condition** that should fire when something becomes true — not at a specific time. Examples:\n- \"tell me when SOL hits $100\"\n- \"ping me when GitHub PR #312 turns green\"\n- \"let me know when /var/log/build.log says BUILD OK\"\n- \"watch this URL and notify me if the price drops below 50\"\n- \"alert me when the deploy script finishes\"\n\nA watch ticks on a polling cadence and fires once when the predicate is satisfied. Pick the right `source`:\n- `http_jsonpath` — fetch a URL, walk a JSON path, compare. Best for prices, REST APIs, GitHub/CI checks.\n- `exec` — run a shell command, parse stdout, compare. Best for local-system signals (`df`, `gh pr view`, `systemctl is-active`).\n- `file_stat` — watch a file's existence/size/mtime. Best for \"when this file appears\" or \"when this log changes\".\n\nFor each source, fill `params` with the source-specific fields (see the `create_watch` tool description). `comparator` + `target` apply uniformly. Use `comparator: \"changed\"` when the user wants any change at all (\"tell me if my GitHub stars number changes\"). Default to no expiry for open-ended monitors; set `expires_at` when the user implies a deadline.\n\nWhen confirming a watch, name the predicate in plain English (\"watching SOL price, will fire when it crosses $100\") and the cadence (\"checking every 60 seconds\"). Don't echo raw URLs or shell commands unless asked.",
   "tools": [
     {
       "type": "function",
@@ -81,6 +81,57 @@
           "type": "object",
           "properties": {
             "id": { "type": "string", "description": "Reminder ID to cancel" }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_watch",
+        "description": "Create a condition-triggered monitor. Fires once when the predicate is satisfied (or every change, if comparator is 'changed'). Use for 'tell me when X' / 'ping me if Y'. NOT for 'at 5pm do Z' (use schedule_task) or 'every Monday do Z' (use schedule_task with repeat=daily).\n\n**Source-specific required keys live INSIDE `params`, not at the top level.** Top-level `comparator`/`target` apply uniformly across all sources.\n\n- `source: 'http_jsonpath'` — params: { url, json_path?, headers? }. Example for 'tell me when SOL hits $100': `{label:'SOL alert', source:'http_jsonpath', params:{url:'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', json_path:'$.solana.usd'}, comparator:'gte', target:100}`.\n- `source: 'exec'` — params: { command, parse? }. parse: 'string'|'numeric'|'first_number'|'lines' (default 'string'). Command runs as the OE server user with a 30s timeout. Example: `{label:'Disk full', source:'exec', params:{command:'df / | tail -1 | awk \\'{print $5}\\' | tr -d %', parse:'numeric'}, comparator:'gte', target:90}`.\n- `source: 'file_stat'` — params: { path, attribute? }. attribute: 'exists'|'size'|'mtime'|'content_changed' (default 'exists'). For 'exists', omit comparator/target — fires when the file appears. Example: `{label:'Build done', source:'file_stat', params:{path:'/tmp/build-done'}}`.\n- `source: 'event_subscription'` — params: { event, predicate? }. Subscribes to a named in-process event fired by POST /api/watchers/event. predicate optional: { json_path, comparator, target } over the payload. Example: `{label:'PR merged', source:'event_subscription', params:{event:'github_pr_merged', predicate:{json_path:'$.repo', comparator:'eq', target:'openensemble'}}}`.\n\n`comparator` + `target` values: 'gte', 'lte', 'gt', 'lt', 'eq', 'neq', 'matches' (regex), 'contains' (substring), 'changed' (any change from last value).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "label":      { "type": "string", "description": "Short human label, e.g. 'SOL price alert' or 'Build log watch'." },
+            "source":     { "type": "string", "enum": ["http_jsonpath", "exec", "file_stat", "event_subscription"], "description": "Where to read the value from each tick (or, for event_subscription, what event to listen for)." },
+            "params":     { "type": "object", "description": "Source-specific config — see source-by-source notes above. Required fields differ per source." },
+            "comparator": { "type": "string", "enum": ["gte", "lte", "gt", "lt", "eq", "neq", "matches", "contains", "changed"], "description": "How to compare the read value against target. Use 'changed' for 'tell me if X changes' (no target needed). For file_stat 'exists', leave omitted." },
+            "target":     { "description": "Value to compare against. Number for gte/lte/gt/lt, string for eq/neq/matches/contains. Omit for 'changed' or for file_stat 'exists'." },
+            "cadence_sec": { "type": "integer", "description": "Polling interval in seconds. Default 60. Minimum 5. Pick longer for slow-moving things (prices: 60-300s) and shorter for fast signals (build status: 30s)." },
+            "expires_at": { "type": "string", "description": "Optional ISO 8601 datetime — watcher auto-reaps if condition hasn't fired by then. Omit for open-ended monitors like 'tell me when SOL hits $100'." },
+            "on_fire": {
+              "type": "object",
+              "description": "What happens when the watch fires. Default {type:'notify'} = chat status bubble only. Use {type:'agent', prompt} when the user wants you to ACT on the trigger, not just be told about it (e.g. 'when the deploy finishes, post the URL to slack', 'when SOL hits $100 buy 5'). The agent runs with no human present at fire time, so write a self-contained prompt.",
+              "properties": {
+                "type":   { "type": "string", "enum": ["notify", "agent"], "description": "'notify' is just the status bubble. 'agent' kicks off an agent run on this same agent." },
+                "prompt": { "type": "string", "description": "When type='agent': what you (the agent) should do. Self-contained — assume no follow-up from the user. The trigger result is automatically appended for context." }
+              },
+              "required": ["type"]
+            }
+          },
+          "required": ["label", "source"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_watches",
+        "description": "List all active watch monitors for the current user, with current status.",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cancel_watch",
+        "description": "Cancel an active watch by its ID.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Watch ID to cancel" }
           },
           "required": ["id"]
         }

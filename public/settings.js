@@ -20,7 +20,7 @@ async function loadAnthropicModels() {
   try {
     const data = await fetch('/api/anthropic-models').then(r => r.json());
     if (Array.isArray(data) && data.length) {
-      anthropicModels = data.map(m => ({ name: m.id, provider: 'anthropic', displayName: m.displayName }));
+      anthropicModels = data.map(m => ({ name: m.id, provider: 'anthropic', displayName: m.displayName, supportsVision: m.supportsVision === true }));
     }
   } catch {}
 }
@@ -46,6 +46,7 @@ async function loadGrokModels() {
         name: m.id,
         provider: 'grok',
         displayName: `${m.displayName ?? m.id} (chat)`,
+        supportsVision: m.supportsVision === true,
       }));
     }
   } catch {}
@@ -61,7 +62,7 @@ function getCompatProviderModels() {
   const store = window._compatProviderModels ?? {};
   for (const p of COMPAT_PROVIDER_IDS) {
     for (const m of store[p] ?? []) {
-      out.push({ name: m.id, provider: p, displayName: m.name ?? m.id, contextLen: m.contextLen ?? null });
+      out.push({ name: m.id, provider: p, displayName: m.name ?? m.id, contextLen: m.contextLen ?? null, supportsVision: m.supportsVision === true });
     }
   }
   return out;
@@ -71,7 +72,7 @@ async function loadFireworksModels() {
   try {
     const data = await fetch('/api/fireworks-models').then(r => r.json());
     if (Array.isArray(data) && data.length) {
-      fireworksModels = data.map(m => ({ name: m.id, provider: 'fireworks', displayName: m.displayName }));
+      fireworksModels = data.map(m => ({ name: m.id, provider: 'fireworks', displayName: m.displayName, supportsVision: m.supportsVision === true }));
     }
   } catch {}
 }
@@ -80,7 +81,7 @@ async function loadOpenRouterModels() {
   try {
     const data = await fetch('/api/openrouter-models').then(r => r.json());
     if (Array.isArray(data) && data.length) {
-      openrouterModels = data.map(m => ({ name: m.id, provider: 'openrouter', displayName: m.name, contextLen: m.contextLen }));
+      openrouterModels = data.map(m => ({ name: m.id, provider: 'openrouter', displayName: m.name, contextLen: m.contextLen, supportsVision: m.supportsVision === true }));
     }
   } catch {}
 }

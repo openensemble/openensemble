@@ -39,6 +39,7 @@ const MAX_PER_USER = 10;
 const MAX_FAILURES = 3;
 const RECENT_KEEP_MS = 60 * 60 * 1000;          // Keep completed/errored watchers visible 1h
 const MAX_HISTORY_ENTRIES = 100;                // Per-watcher progress scrollback cap
+const STUCK_RATIO = 5;                          // No change for 5×cadence → annotate as "stuck"
 
 let _running = false;
 let _timer = null;
@@ -168,9 +169,14 @@ export function registerWatcher(opts) {
     ticks: 0,
     status: 'active', // active | done | error | expired | cancelled
     history: [],      // [{text, ts, final?, finalStatus?}] — bounded scrollback
+    onFire: opts.onFire || null, // { type: 'notify' | 'agent', prompt? } — see executeOnFire
   };
 
   data.active.push(record);
+  // event_subscription watchers register against the in-process bus so
+  // emitEvent() can pull their nextTickAt forward when their event arrives.
+  // Polling kinds skip this — the supervisor's regular sweep handles them.
+  if (kind === 'event_subscription') subscribeToEvent(record);
   persistUser(userId);
   return record.id;
 }
@@ -180,6 +186,7 @@ export function unregisterWatcher(userId, watcherId, reason = 'cancelled') {
   const idx = data.active.findIndex(w => w.id === watcherId);
   if (idx < 0) return false;
   const w = data.active.splice(idx, 1)[0];
+  if (w.kind === 'event_subscription') unsubscribeFromEvent(w);
   w.status = reason;
   w.endedAt = Date.now();
   data.recent.unshift(w);
@@ -256,6 +263,132 @@ export function registerSystemWatcherHandler(kind, fn) {
   _systemHandlers.set(kind, fn);
 }
 
+// ── event bus ────────────────────────────────────────────────────────────────
+//
+// In-process pub/sub for "an external thing happened" — webhook arrivals,
+// Telegram bot replies, file-change notifications, anything with a real
+// trigger source instead of a polled one.
+//
+// A watcher with kind='event_subscription' and state.event='<name>' subscribes
+// itself at registration time. emitEvent() finds matching watchers, stamps
+// the payload onto state, and pulls their nextTickAt forward so the
+// supervisor picks them up on the next 5s sweep. The handler then evaluates
+// any predicate and decides whether to fire.
+
+const _eventListeners = new Map(); // userId -> Map(eventName -> Set<watcherId>)
+
+function eventKey(record) {
+  return record?.state?.event || null;
+}
+
+function subscribeToEvent(record) {
+  const ev = eventKey(record);
+  if (!ev) return;
+  if (!_eventListeners.has(record.userId)) _eventListeners.set(record.userId, new Map());
+  const userMap = _eventListeners.get(record.userId);
+  if (!userMap.has(ev)) userMap.set(ev, new Set());
+  userMap.get(ev).add(record.id);
+}
+
+function unsubscribeFromEvent(record) {
+  const userMap = _eventListeners.get(record.userId);
+  if (!userMap) return;
+  const ev = eventKey(record);
+  if (!ev) return;
+  const set = userMap.get(ev);
+  if (set) {
+    set.delete(record.id);
+    if (!set.size) userMap.delete(ev);
+  }
+}
+
+/**
+ * Fire an event. Any watcher of kind='event_subscription' with a matching
+ * state.event will get its payload stamped and tick on the next supervisor
+ * sweep. Returns the count of matched watchers.
+ *
+ * Safe to call even when the supervisor is idle — just no-ops.
+ */
+export function emitEvent(userId, eventName, payload = {}) {
+  if (!userId || !eventName) return 0;
+  const userMap = _eventListeners.get(userId);
+  if (!userMap) return 0;
+  const watcherIds = userMap.get(eventName);
+  if (!watcherIds || !watcherIds.size) return 0;
+  const data = _byUser.get(userId);
+  if (!data) return 0;
+  let matched = 0;
+  for (const wid of watcherIds) {
+    const w = data.active.find(x => x.id === wid);
+    if (!w) continue;
+    w.state = { ...w.state, lastEventPayload: payload, lastEventAt: Date.now() };
+    w.nextTickAt = Date.now(); // tick on next supervisor sweep
+    matched++;
+  }
+  if (matched) persistUser(userId);
+  return matched;
+}
+
+// Built-in event_subscription handler. Runs whenever the supervisor ticks the
+// watcher — either after emitEvent() pulled nextTickAt forward, or once every
+// 24h as a sanity sweep. Without a fresh lastEventAt it just goes back to
+// sleep; with one, it evaluates the predicate and fires/declines.
+async function eventSubscriptionHandler(state) {
+  const { event, predicate } = state || {};
+  if (!event) return { done: true, textUpdate: '❌ event watcher missing event name' };
+  if (state.lastEventAt === undefined) {
+    return {}; // waiting for first event
+  }
+  // Each event fires the handler once. Mark consumed by clearing lastEventAt
+  // so a subsequent supervisor sweep doesn't re-evaluate the same payload.
+  const payload = state.lastEventPayload;
+  const consumedState = { ...state, lastEventAt: undefined, lastEventPayload: undefined };
+
+  if (predicate) {
+    let val;
+    try {
+      // Reuse the dotted-path logic from watch-handlers via a tiny inline
+      // walker — keeping watchers.mjs free of cross-file imports for the
+      // built-in handler.
+      val = walkPath(payload, predicate.jsonPath || '$');
+    } catch { val = undefined; }
+    let hit = false;
+    try { hit = comparePayload(val, predicate.comparator, predicate.target); }
+    catch (e) { return { done: true, textUpdate: `❌ ${e.message}` }; }
+    if (!hit) {
+      return { newState: consumedState }; // event came but didn't match
+    }
+  }
+  return { done: true, textUpdate: `🔔 event "${event}" fired` };
+}
+
+// Tiny duplicates of compare/jsonGet from scheduler/watch-handlers.mjs — kept
+// inline so this file doesn't depend on the handler module's load order.
+function walkPath(obj, path) {
+  if (!path || path === '$') return obj;
+  let cur = obj;
+  const tokens = path.replace(/^\$\.?/, '').match(/[^.[\]]+|\[\d+\]/g) || [];
+  for (const tok of tokens) {
+    if (cur == null) return undefined;
+    cur = tok.startsWith('[') ? cur[Number(tok.slice(1, -1))] : cur[tok];
+  }
+  return cur;
+}
+function comparePayload(value, comparator, target) {
+  switch (comparator) {
+    case 'gte':      return Number(value) >= Number(target);
+    case 'lte':      return Number(value) <= Number(target);
+    case 'gt':       return Number(value) >  Number(target);
+    case 'lt':       return Number(value) <  Number(target);
+    case 'eq':       return String(value) === String(target);
+    case 'neq':      return String(value) !== String(target);
+    case 'matches':  return new RegExp(String(target)).test(String(value));
+    case 'contains': return String(value).includes(String(target));
+    default: throw new Error(`unknown comparator "${comparator}"`);
+  }
+}
+_systemHandlers.set('event_subscription', eventSubscriptionHandler);
+
 // ── supervisor loop ──────────────────────────────────────────────────────────
 
 async function tickOne(record) {
@@ -306,7 +439,6 @@ async function tickOne(record) {
     if (result && typeof result === 'object') {
       if (result.newState !== undefined) {
         record.state = result.newState;
-        record.lastChangeAt = Date.now();
       }
       if (result.extendExpiryBy && record.expiresAt !== null) {
         record.expiresAt = (record.expiresAt || Date.now()) + Number(result.extendExpiryBy);
@@ -316,9 +448,13 @@ async function tickOne(record) {
       }
       if (result.textUpdate) {
         // Dedup consecutive identical updates so the chat doesn't fill with
-        // the same line tick after tick.
+        // the same line tick after tick. lastChangeAt tracks visible-text
+        // changes specifically — that's the signal stuck-detection uses,
+        // since handlers may update lastValue cosmetically every tick.
         if (result.textUpdate !== record.lastStatusText) {
           record.lastStatusText = result.textUpdate;
+          record.lastChangeAt = Date.now();
+          record.stuckAnnounced = false;
           pushHistory(record, { text: result.textUpdate, ts: Date.now() });
           if (_sendStatusFn) {
             _sendStatusFn(record.userId, {
@@ -336,6 +472,31 @@ async function tickOne(record) {
       if (result.done) {
         finalizeWatcher(record, 'done', result.textUpdate || `✓ ${record.label} done.`);
         return;
+      }
+    }
+
+    // Stuck detection — fire one synthetic status when N×cadence elapses
+    // with no visible change. Don't reap; long-running things like price
+    // alerts genuinely sit unchanged for hours. The user can read the
+    // annotation and decide whether to cancel.
+    const sinceChange = Date.now() - record.lastChangeAt;
+    const stuckThresholdMs = STUCK_RATIO * record.cadenceSec * 1000;
+    if (!record.stuckAnnounced && sinceChange > stuckThresholdMs) {
+      record.stuckAnnounced = true;
+      const minutes = Math.round(sinceChange / 60_000);
+      const stuckText = `${record.lastStatusText || record.label} — no change for ${minutes} min, may be stuck`;
+      pushHistory(record, { text: stuckText, ts: Date.now(), stuck: true });
+      if (_sendStatusFn) {
+        _sendStatusFn(record.userId, {
+          type: 'status',
+          agent: record.agentId,
+          watcherId: record.id,
+          kind: record.kind,
+          label: record.label,
+          text: stuckText,
+          ts: Date.now(),
+          stuck: true,
+        });
       }
     }
 
@@ -359,6 +520,7 @@ function finalizeWatcher(record, status, finalText) {
   if (!data) return;
   const idx = data.active.findIndex(w => w.id === record.id);
   if (idx >= 0) data.active.splice(idx, 1);
+  if (record.kind === 'event_subscription') unsubscribeFromEvent(record);
   record.status = status;
   record.endedAt = Date.now();
   record.lastStatusText = finalText || record.lastStatusText;
@@ -388,6 +550,128 @@ function finalizeWatcher(record, status, finalText) {
       finalStatus: status,
     });
   }
+  // Only fire the chained action on a successful predicate hit. Errors,
+  // expiries, and user-cancellations should not auto-run an agent — that
+  // would burn cloud tokens on a state the user didn't intend to act on.
+  if (status === 'done' && record.onFire && record.onFire.type && record.onFire.type !== 'notify') {
+    executeOnFire(record).catch(e =>
+      log.warn('watchers', 'on_fire failed', { id: record.id, type: record.onFire?.type, err: e.message })
+    );
+  }
+}
+
+// Run the watcher's onFire action. The supported shapes are:
+//
+//   { type: 'notify' }                 — status bubble only (default; not handled here)
+//   { type: 'agent', prompt? }         — kick off an agent run on the watcher's
+//                                        owning agentId, with an injected
+//                                        [WATCHER FIRED] system note that
+//                                        explains the trigger and tells the
+//                                        agent to act, not ask.
+//
+// agentId on the watcher record is the WS-scoped sessionKey (e.g.
+// "user_39ce139e_coordinator"). We need the unscoped registry id to resolve
+// the agent, then re-scope for streaming. The systemNote pattern mirrors
+// scheduler.mjs's [SCHEDULED RUN] note — same constraint (no human present).
+async function executeOnFire(record) {
+  const cfg = record.onFire;
+  if (!cfg || cfg.type !== 'agent') return;
+
+  const { getAgent } = await import('../agents.mjs');
+  const { streamChat } = await import('../chat.mjs');
+  const { appendToSession } = await import('../sessions.mjs');
+  const { getAgentsForUser, getUser } = await import('../routes/_helpers.mjs');
+  const { scheduledContext } = await import('../lib/scheduled-context.mjs');
+
+  const userId = record.userId;
+  const scoped = record.agentId || '';
+  const rawAgentId = scoped.startsWith(`${userId}_`) ? scoped.slice(userId.length + 1) : scoped;
+  if (!rawAgentId) {
+    log.warn('watchers', 'on_fire: no agent id on record', { id: record.id });
+    return;
+  }
+
+  const isChild = getUser(userId)?.role === 'child';
+  const resolved = getAgentsForUser(userId).find(a => a.id === rawAgentId)
+    ?? (isChild ? null : getAgent(rawAgentId));
+  if (!resolved) {
+    log.warn('watchers', 'on_fire: agent not resolvable', { id: record.id, agentId: rawAgentId });
+    return;
+  }
+
+  const sessionKey = `${userId}_${resolved.id}`;
+  const scopedAgent = { ...resolved, id: sessionKey };
+
+  const fireText = record.lastStatusText || `Watch "${record.label}" fired.`;
+  const userPrompt = (cfg.prompt && String(cfg.prompt).trim())
+    || `The watch you set ("${record.label}") just fired: ${fireText}. Act on this now.`;
+
+  appendToSession(sessionKey, {
+    role: 'system',
+    content: `[Watcher fired] ${record.label} — ${fireText}`,
+    watcherId: record.id,
+    ts: Date.now(),
+  });
+
+  const watcherNote =
+    `[WATCHER FIRED] You are reacting to a condition-triggered monitor that just fired. ` +
+    `The user is NOT present. The watch label is "${record.label}" and its result is: ${fireText}. ` +
+    `Use any ask_agent / tools needed and complete the action directly — do NOT show a draft, ask "are you sure?", or wait for confirmation. ` +
+    `Report what you did in your final message.`;
+
+  log.info('watchers', 'on_fire agent run', { id: record.id, agentId: sessionKey });
+
+  try {
+    await scheduledContext.run({ scheduledNote: watcherNote }, async () => {
+      const ac = new AbortController();
+      for await (const event of streamChat(scopedAgent, userPrompt, ac.signal, null, userId, null, watcherNote)) {
+        if (event.type === 'error') {
+          log.warn('watchers', 'on_fire stream error', { id: record.id, err: event.message });
+          break;
+        }
+      }
+    });
+    // Tell the user's connected client to reload the agent session so the
+    // streamed turns become visible. Without this, the UI keeps showing the
+    // pre-fire state and the user sees the trigger bubble but not the agent
+    // response — same shape as scheduled tasks broadcasting task_complete.
+    _sendStatusFn?.(record.userId, {
+      type: 'task_complete',
+      taskId: `watcher_${record.id}`,
+      agent: resolved.id,
+    });
+  } catch (e) {
+    log.warn('watchers', 'on_fire run threw', { id: record.id, err: e.message });
+  }
+}
+
+// Bulk-cancel watchers matching a predicate. Returns the count cancelled.
+// Used by skills that explicitly tear down the resource a watcher polls
+// (e.g. runpod_terminate_pod) so the chat doesn't keep showing "still
+// rendering" for a job the user just killed.
+export function unregisterMatchingWatchers(userId, predicate, reason = 'cancelled') {
+  if (!userId || typeof predicate !== 'function') return 0;
+  const data = loadUserWatchers(userId);
+  const remaining = [];
+  let cancelled = 0;
+  for (const w of data.active) {
+    let match = false;
+    try { match = !!predicate(w); } catch { match = false; }
+    if (match) {
+      if (w.kind === 'event_subscription') unsubscribeFromEvent(w);
+      w.status = reason;
+      w.endedAt = Date.now();
+      data.recent.unshift(w);
+      cancelled++;
+    } else {
+      remaining.push(w);
+    }
+  }
+  if (cancelled === 0) return 0;
+  data.active = remaining;
+  data.recent = data.recent.slice(0, 20);
+  persistUser(userId);
+  return cancelled;
 }
 
 function handlerHelpers(record) {
@@ -433,6 +717,15 @@ export function startWatcherSupervisor({ sendStatus, showImage, showVideo } = {}
   _showImageFn = showImage || null;
   _showVideoFn = showVideo || null;
   loadAllUsersFromDisk();
+  // Re-subscribe persisted event_subscription watchers to the in-process bus.
+  // The bus lives only in memory, so a restart that doesn't replay this leaves
+  // events firing into the void even though the watcher record on disk says
+  // it's listening.
+  for (const [, data] of _byUser) {
+    for (const w of data.active) {
+      if (w.kind === 'event_subscription') subscribeToEvent(w);
+    }
+  }
   _running = true;
   _timer = setInterval(tick, TICK_MS);
   const totalActive = [..._byUser.values()].reduce((n, d) => n + d.active.length, 0);

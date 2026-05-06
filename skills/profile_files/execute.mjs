@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const USERS_DIR = path.join(BASE_DIR, 'users');
+const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
 
 const TEXT_CAP = 50_000;
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
@@ -13,6 +14,21 @@ const EXCLUDED_TOPLEVEL = new Set(['sessions', 'cortex', 'skills', 'users', 'pro
 
 function userDir(uid) {
   return path.join(USERS_DIR, uid);
+}
+
+// Cross-user sharing — sharing.json is a flat list of share records:
+//   { ownerId, fileId, sharedWith: [userId, ...] }
+// listDocuments folds in docs OTHER users have shared TO this one (annotated
+// with `sharedBy`) and annotates the user's own docs with `sharedWith` when
+// they're sharing them outward. Empty list today (no live sharing); the
+// merge is future-proofing.
+function loadSharing() {
+  try { return JSON.parse(fs.readFileSync(SHARING_PATH, 'utf8')); } catch { return []; }
+}
+
+function loadOwnerDocsIndex(uid) {
+  const idx = path.join(userDir(uid), 'documents', 'docs-index.json');
+  try { return JSON.parse(fs.readFileSync(idx, 'utf8')); } catch { return []; }
 }
 
 function safeJoin(root, rel) {
@@ -41,10 +57,23 @@ function inferMime(ext) {
 
 // ── documents ────────────────────────────────────────────────────────────────
 function listDocuments(uid) {
-  const idx = path.join(userDir(uid), 'documents', 'docs-index.json');
-  let entries = [];
-  try { entries = JSON.parse(fs.readFileSync(idx, 'utf8')); } catch {}
-  return entries.map(d => ({
+  const own = loadOwnerDocsIndex(uid);
+  const shares = loadSharing();
+
+  // Build sharing annotations once: who has this user shared with, and who
+  // has shared what TO this user.
+  const sharedOutByDoc = new Map();   // docId -> sharedWith[] (user's own docs)
+  const sharedInRecords = [];          // shares targeting this user
+  for (const s of shares) {
+    if (!s || !s.fileId) continue;
+    if (s.ownerId === uid) {
+      sharedOutByDoc.set(s.fileId, Array.isArray(s.sharedWith) ? s.sharedWith : []);
+    } else if (Array.isArray(s.sharedWith) && s.sharedWith.includes(uid)) {
+      sharedInRecords.push(s);
+    }
+  }
+
+  const out = own.map(d => ({
     id: `documents:${d.id}`,
     folder: 'documents',
     filename: d.filename,
@@ -52,9 +81,35 @@ function listDocuments(uid) {
     size: d.size,
     createdAt: d.createdAt,
     description: d.description || '',
+    sharedWith: sharedOutByDoc.get(d.id) || null,
     _ext: d.ext,
     _internalId: d.id,
   }));
+
+  // Append docs shared INTO this user from other owners. Same id namespace —
+  // the consumer (read_profile_file) re-resolves which owner via sharing.json.
+  const seenIds = new Set(own.map(d => d.id));
+  for (const s of sharedInRecords) {
+    if (seenIds.has(s.fileId)) continue;
+    const ownerDocs = loadOwnerDocsIndex(s.ownerId);
+    const doc = ownerDocs.find(d => d.id === s.fileId);
+    if (!doc) continue;
+    seenIds.add(doc.id);
+    out.push({
+      id: `documents:${doc.id}`,
+      folder: 'documents',
+      filename: doc.filename,
+      mimeType: doc.mimeType,
+      size: doc.size,
+      createdAt: doc.createdAt,
+      description: doc.description || '',
+      sharedBy: s.ownerId,
+      _ext: doc.ext,
+      _internalId: doc.id,
+      _ownerId: s.ownerId,
+    });
+  }
+  return out;
 }
 
 // ── research ─────────────────────────────────────────────────────────────────
@@ -173,7 +228,10 @@ async function execList(args, userId) {
     const lines = list.map(i => {
       const when = new Date(i.createdAt).toLocaleString();
       const desc = i.description ? ` — ${i.description}` : '';
-      return `- [${i.id}] ${i.filename} (${i.mimeType}, ${fmtSize(i.size)}) — ${when}${desc}`;
+      const share = i.sharedBy ? ` [shared by ${i.sharedBy}]`
+                  : (Array.isArray(i.sharedWith) && i.sharedWith.length ? ` [shared with ${i.sharedWith.length}]`
+                  : '');
+      return `- [${i.id}] ${i.filename} (${i.mimeType}, ${fmtSize(i.size)}) — ${when}${desc}${share}`;
     });
     sections.push(`### ${f} (${list.length})\n${lines.join('\n')}`);
   }
@@ -181,13 +239,30 @@ async function execList(args, userId) {
 }
 
 // ── Read ─────────────────────────────────────────────────────────────────────
+//
+// Resolve to either the user's own doc OR a doc another user has shared with
+// them. Returns { ownerId, doc } or null. Looking in own index first means
+// shares can never shadow a file the user actually owns.
+function resolveDocOwner(internalId, userId) {
+  const own = loadOwnerDocsIndex(userId);
+  const ownDoc = own.find(d => d.id === internalId);
+  if (ownDoc) return { ownerId: userId, doc: ownDoc };
+  for (const s of loadSharing()) {
+    if (s.fileId !== internalId) continue;
+    if (s.ownerId === userId) continue; // own — already checked
+    if (!Array.isArray(s.sharedWith) || !s.sharedWith.includes(userId)) continue;
+    const ownerDocs = loadOwnerDocsIndex(s.ownerId);
+    const doc = ownerDocs.find(d => d.id === internalId);
+    if (doc) return { ownerId: s.ownerId, doc };
+  }
+  return null;
+}
+
 async function readDocument(internalId, userId) {
-  const idx = path.join(userDir(userId), 'documents', 'docs-index.json');
-  let entries = [];
-  try { entries = JSON.parse(fs.readFileSync(idx, 'utf8')); } catch {}
-  const doc = entries.find(d => d.id === internalId);
-  if (!doc) return `Document "${internalId}" not found.`;
-  const filePath = path.join(userDir(userId), 'documents', doc.id + doc.ext);
+  const resolved = resolveDocOwner(internalId, userId);
+  if (!resolved) return `Document "${internalId}" not found.`;
+  const { ownerId, doc } = resolved;
+  const filePath = path.join(userDir(ownerId), 'documents', doc.id + doc.ext);
   if (!fs.existsSync(filePath)) return `File "${doc.filename}" is missing from storage.`;
 
   const data = fs.readFileSync(filePath);

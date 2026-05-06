@@ -46,6 +46,12 @@ function persistNodes() {
         capabilities: entry.capabilities,
         accessLevel: entry.accessLevel,
         accessLocked: entry.accessLocked,
+        // Per-node file-read allowlist for node_read_file. Server-side check
+        // before dispatching to the agent. NOT enforced by node_exec —
+        // node_exec is a higher-privilege tool that bypasses this list by
+        // design. Agents that should be limited to allowlisted reads
+        // shouldn't have node_exec in their toolset.
+        readableFolders: entry.readableFolders || [],
         version: entry.version,
         registeredAt: entry.registeredAt,
         disconnectedAt: entry.ws ? null : (entry.disconnectedAt ?? Date.now()),
@@ -83,6 +89,7 @@ export function loadPersistedNodes() {
         capabilities: n.capabilities || [],
         accessLevel: n.accessLevel || 'unknown',
         accessLocked: !!n.accessLocked,
+        readableFolders: Array.isArray(n.readableFolders) ? n.readableFolders : [],
         version: n.version || 'unknown',
         registeredAt: n.registeredAt || now,
         lastHeartbeat: n.registeredAt || now,
@@ -215,6 +222,10 @@ export function registerNode(ws, userId, info) {
     capabilities: info.capabilities || [],
     accessLevel: info.accessLevel || 'unknown',
     accessLocked: !!info.accessLocked,
+    // Preserve user-configured readableFolders across reconnects — the agent
+    // doesn't know about this list, only the OE server does, so a fresh
+    // entry from a reconnecting agent would otherwise wipe it.
+    readableFolders: oldEntry?.readableFolders || [],
     version: info.version || 'unknown',
     registeredAt: now,
     lastHeartbeat: now,
@@ -359,6 +370,7 @@ function nodeToWire(entry) {
     capabilities: entry.capabilities,
     accessLevel: entry.accessLevel,
     accessLocked: entry.accessLocked,
+    readableFolders: entry.readableFolders || [],
     version: entry.version || 'unknown',
     registeredAt: entry.registeredAt,
     lastHeartbeat: entry.lastHeartbeat,
@@ -373,6 +385,62 @@ function nodeToWire(entry) {
       ? `${formatBytes(entry.stats.memUsed)}/${formatBytes(entry.stats.memTotal)}`
       : null,
   };
+}
+
+// ── readable-folder allowlist ────────────────────────────────────────────────
+//
+// Per-node allowlist for node_read_file. Updates persist to nodes.json and
+// survive reconnects. Returns the new wire-shape on success, or null if the
+// node isn't owned by this user / doesn't exist (so callers can't probe
+// other users' nodes).
+
+// Resolve a user-supplied node identifier (id or hostname) to the internal
+// entry. Match shape of getNode but returns the raw entry for mutation.
+function resolveNodeEntry(nodeId, userId) {
+  let entry = nodes.get(nodeId);
+  if (!entry || entry.userId !== userId) {
+    const needle = String(nodeId).toLowerCase();
+    entry = null;
+    for (const e of nodes.values()) {
+      if (e.userId === userId && e.hostname?.toLowerCase() === needle) { entry = e; break; }
+    }
+  }
+  return entry && entry.userId === userId ? entry : null;
+}
+
+export function setReadableFolders(nodeId, userId, paths) {
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return null;
+  // Normalize: trim, drop empties, require absolute paths, dedupe.
+  const norm = [...new Set((paths || [])
+    .map(p => String(p || '').trim())
+    .filter(p => p.length > 0 && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p))))];
+  entry.readableFolders = norm;
+  persistNodes();
+  return nodeToWire(entry);
+}
+
+// True if `path` is reachable under one of the allowlisted prefixes. We
+// require an exact match or a path-segment-aligned prefix match so a
+// `readableFolders=['/home/shawn/Documents']` setting does NOT permit reads
+// of `/home/shawn/Documents.bak/foo` or other accidental siblings.
+//
+// Also rejects paths containing `..` to keep the canonical form. Symlink
+// traversal beyond the allowlist is the agent's concern — defense in depth
+// belongs on the node, not the OE server.
+export function isPathAllowed(nodeId, userId, requestedPath) {
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return false;
+  const list = entry.readableFolders || [];
+  if (!list.length) return false;
+  const p = String(requestedPath || '');
+  if (!p || p.includes('/../') || p.endsWith('/..') || p.startsWith('../')) return false;
+  for (const allowed of list) {
+    if (p === allowed) return true;
+    const prefix = allowed.endsWith('/') ? allowed : allowed + '/';
+    if (p.startsWith(prefix)) return true;
+  }
+  return false;
 }
 
 // ── Command dispatch ─────────────────────────────────────────────────────────

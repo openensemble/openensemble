@@ -558,19 +558,47 @@ async function disconnectGoogle(service) {
 function renderVisionModelSelect(currentProvider, currentModel) {
   const row = $('visionModelSelectRow');
   if (!row) return;
-  const models = allAvailableModels();
-  const anthropicOpts = models.filter(m => m.provider === 'anthropic');
-  const ollamaOpts    = models.filter(m => m.provider === 'ollama');
-  const lmsOpts       = models.filter(m => m.provider === 'lmstudio');
-  const currentVal    = currentModel && currentProvider ? `${currentModel}||${currentProvider}` : '';
+  // Reuse the agent model catalog as the single source of truth, filtered to
+  // models that actually accept image input. supportsVision is annotated by
+  // the server (lib/model-capabilities.mjs) per-provider. New providers
+  // become available as soon as their entries flag supportsVision: true.
+  const visionModels = allAvailableModels().filter(m => m.supportsVision === true);
+  const currentVal   = currentModel && currentProvider ? `${currentModel}||${currentProvider}` : '';
+
+  // Group by provider, label local/cloud Ollama tiers separately for clarity.
+  const groups = {};
+  const labelFor = (m) => {
+    if (m.provider === 'ollama')   return m.tier === 'cloud' ? 'Ollama (cloud)' : 'Ollama (local)';
+    if (m.provider === 'lmstudio') return 'LM Studio (local)';
+    if (m.provider === 'anthropic')return 'Anthropic';
+    if (m.provider === 'openai-oauth') return 'ChatGPT (OAuth)';
+    if (m.provider === 'openai')   return 'OpenAI';
+    if (m.provider === 'openrouter') return 'OpenRouter';
+    if (m.provider === 'fireworks') return 'Fireworks';
+    if (m.provider === 'grok' || m.provider === 'xai') return 'Grok / xAI';
+    if (m.provider === 'gemini' || m.provider === 'google') return 'Google Gemini';
+    return m.provider || 'Other';
+  };
+  for (const m of visionModels) (groups[labelFor(m)] ||= []).push(m);
+
   const mkOpt = m => {
     const val = `${m.name}||${m.provider}`;
-    return `<option value="${escHtml(val)}" ${val === currentVal ? 'selected' : ''}>${escHtml(m.name)}</option>`;
+    const display = m.displayName || m.name;
+    return `<option value="${escHtml(val)}" ${val === currentVal ? 'selected' : ''}>${escHtml(display)}</option>`;
   };
+
+  const groupHtml = Object.entries(groups)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([label, list]) => `<optgroup label="${escHtml(label)}">${list.map(mkOpt).join('')}</optgroup>`)
+    .join('');
+
+  const empty = visionModels.length === 0
+    ? `<option value="" disabled selected>No vision-capable models found — pull a vision model (e.g. \`ollama pull llama3.2-vision\`) or enable a cloud provider with vision support.</option>`
+    : '';
+
   row.innerHTML = `<select id="visionModelSelect" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
-    ${anthropicOpts.length ? `<optgroup label="Anthropic">${anthropicOpts.map(mkOpt).join('')}</optgroup>` : ''}
-    ${ollamaOpts.length    ? `<optgroup label="Ollama">${ollamaOpts.map(mkOpt).join('')}</optgroup>`    : ''}
-    ${lmsOpts.length       ? `<optgroup label="LM Studio">${lmsOpts.map(mkOpt).join('')}</optgroup>`   : ''}
+    ${empty || (currentVal && !visionModels.some(m => `${m.name}||${m.provider}` === currentVal) ? `<option value="${escHtml(currentVal)}" selected>⚠ ${escHtml(currentModel)} (no longer available / not vision-capable)</option>` : '')}
+    ${groupHtml}
   </select>
   <button onclick="saveVisionProvider()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Save</button>`;
 }

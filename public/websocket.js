@@ -303,6 +303,23 @@ function handleServerMessage(msg) {
       }
       if (msg.agent && msg.agent !== activeAgent) break;
       setStreaming(false); appendError(msg.message); break;
+    case 'proposal':
+      // Friction-tracker proposal — actionable repeat detected, two-button
+      // bubble offering to set up the suggested automation. Persisted to
+      // the agent's session jsonl so it survives reload.
+      if (!msg.agent || msg.agent === activeAgent) {
+        appendProposalBubble(msg);
+      }
+      break;
+    case 'proposal_outcome':
+      // Server pushes this when an accepted proposal's agent run completes
+      // (success or retry-exhausted failure), or when dismiss persists.
+      // The bubble mutates in place via applyProposalOutcome — no reload
+      // needed. Status flow: pending → running → accepted | failed | dismissed.
+      if (!msg.agent || msg.agent === activeAgent) {
+        applyProposalOutcome(msg.proposalId, msg.status, msg.outcome);
+      }
+      break;
     case 'status':
       // Watcher supervisor pushes these — muted/italic bubble outside any
       // agent assistant turn. One bubble per watcherId, updated in place.

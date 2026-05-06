@@ -10,9 +10,10 @@ import {
   loadExpGroups, getExpGroupMemberIds,
   modifyExpGroups, withLock,
   loadExpBooks, getExpBooksForUser, modifyExpBooks,
-  EXPENSES_DB, EXPENSES_UPLOADS, safeError,
+  EXPENSES_DB, safeError,
 } from './_helpers.mjs';
 import { extractTransactions } from '../skills/expenses/execute.mjs';
+import { addDocument } from '../lib/profile-files.mjs';
 
 async function extractText(fileData, ext) {
   const isPdf = ext.toLowerCase() === '.pdf';
@@ -68,9 +69,19 @@ export async function handle(req, res) {
       const isCsv     = lowerMime.includes('csv') || ext.toLowerCase() === '.csv';
       const isFinanceFile = isPdf || isCsv || isImage;
       const extractedText = await extractText(fileData, ext);
+      // Persist into the user's profile-files registry so the file is
+      // reachable later via list_profile_files / read_profile_file and via
+      // file_id from email/sharing skills. Backwards-compat: still return
+      // base64 + extractedText for existing inline-vision dispatch in chat.
+      const saved = await addDocument(authId, {
+        fileData, fileName, mimeType,
+        kind: 'chat_upload',
+        description: `Uploaded from chat on ${new Date().toLocaleDateString()}`,
+      });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         name: fileName, mimeType, isImage, isFinanceFile,
+        file_id: saved.file_id,
         base64: isImage ? fileData.toString('base64') : null,
         extractedText: extractedText || null,
       }));
@@ -100,16 +111,24 @@ export async function handle(req, res) {
       if (!parsed) throw new Error('No file found in upload');
       const { fileData, fileName, mimeType } = parsed;
 
-      fs.mkdirSync(EXPENSES_UPLOADS, { recursive: true });
       const ext = path.extname(fileName) || '.bin';
-      const savedName = `${Date.now()}_${authId.slice(-6)}${ext}`;
-      fs.writeFileSync(path.join(EXPENSES_UPLOADS, savedName), fileData);
-
       const lowerMime = mimeType.toLowerCase();
       const isImage = lowerMime.includes('image') || ['.jpg','.jpeg','.png','.webp','.gif','.heic'].includes(ext.toLowerCase());
       const isPdf   = lowerMime.includes('pdf') || ext.toLowerCase() === '.pdf';
       const isCsv   = lowerMime.includes('csv') || ext.toLowerCase() === '.csv';
       const extractedText = await extractText(fileData, ext);
+
+      // Persist receipts/statements/CSVs into the user's profile-files
+      // registry instead of the legacy expenses/uploads/ scratch folder. This
+      // turns sourceFile references into permanent file_ids, which the user
+      // can later view via list_profile_files or attach to email — and
+      // removes the need for the cleanUploads task that was orphaning these
+      // references at 24h.
+      const saved = await addDocument(authId, {
+        fileData, fileName, mimeType,
+        kind: isPdf ? 'statement' : isImage ? 'receipt' : 'csv',
+        description: `Expense ${isPdf ? 'statement' : isImage ? 'receipt' : 'transactions CSV'} — ${new Date().toLocaleDateString()}`,
+      });
 
       // bookId may be passed as a query param (?bookId=xxx)
       const uploadUrl = new URL(req.url, 'http://x');
@@ -119,19 +138,19 @@ export async function handle(req, res) {
       const extracted = await extractTransactions(cfg, { isImage, mimeType, base64: isImage ? fileData.toString('base64') : null, extractedText });
 
       const newTxns = extracted.map(t => ({
-        id:          'txn_' + randomBytes(6).toString('hex'),
-        userId:      authId,
-        bookId:      bookId || undefined,
-        date:        t.date ?? new Date().toISOString().slice(0, 10),
-        amount:      parseFloat(t.amount) || 0,
-        currency:    'USD',
-        merchant:    t.merchant ?? '',
-        description: t.description ?? t.merchant ?? '',
-        category:    t.category ?? 'Other',
-        subcategory: t.subcategory ?? '',
-        source:      isPdf ? 'statement' : isImage ? 'receipt' : 'csv',
-        sourceFile:  savedName,
-        createdAt:   new Date().toISOString(),
+        id:           'txn_' + randomBytes(6).toString('hex'),
+        userId:       authId,
+        bookId:       bookId || undefined,
+        date:         t.date ?? new Date().toISOString().slice(0, 10),
+        amount:       parseFloat(t.amount) || 0,
+        currency:     'USD',
+        merchant:     t.merchant ?? '',
+        description:  t.description ?? t.merchant ?? '',
+        category:     t.category ?? 'Other',
+        subcategory:  t.subcategory ?? '',
+        source:       isPdf ? 'statement' : isImage ? 'receipt' : 'csv',
+        sourceFileId: saved.file_id,
+        createdAt:    new Date().toISOString(),
       })).filter(t => t.amount > 0);
 
       await withLock(EXPENSES_DB, () => {

@@ -620,6 +620,16 @@ async function buildCtx(userId, agentId) {
       return watchers.unregisterWatcher(userId, watcherId);
     } catch (e) { console.warn('[ctx.unwatch]', e.message); return false; }
   };
+  // Bulk-cancel watchers matching a predicate. Used by skills that tear down
+  // a resource a watcher polls (e.g. terminating a pod that has a render
+  // watcher attached) so we don't keep showing stale progress bubbles.
+  // predicate is a sync function (record) -> bool, evaluated in-process.
+  ctx.unwatchMatching = async (predicate) => {
+    try {
+      const watchers = await import('./scheduler/watchers.mjs');
+      return watchers.unregisterMatchingWatchers(userId, predicate);
+    } catch (e) { console.warn('[ctx.unwatchMatching]', e.message); return 0; }
+  };
   return ctx;
 }
 

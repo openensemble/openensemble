@@ -20,6 +20,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
 import { buildAgentContext, formatContext, addToSessionBuffer, processSignals } from './memory.mjs';
+import { trackFriction } from './memory/signals.mjs';
 import { loadSession, appendToSession, loadCrossAgentContext } from './sessions.mjs';
 import { BASE_DIR } from './lib/paths.mjs';
 import { log } from './logger.mjs';
@@ -49,6 +50,16 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     { role: 'user', content: sessionText, ts: Date.now() },
     { role: 'assistant', content: assistantContent, ts: Date.now() });
 
+  // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
+  // toolsUsed, before any other gate. It's about repeat-detection, not
+  // preference inference, so the existing signal-suppression rules don't
+  // apply. Powers friction-as-proposer (lib/proposals.mjs): a user who
+  // repeats "remind me to clean my desk at 5pm" three times triggers a
+  // proposal even though every repeat fires schedule_task and even though
+  // scheduler-intent intercepted the message before the agent saw it.
+  trackFriction({ agentId: agent.id, userMessage: sessionText, userId })
+    .catch(e => console.warn('[cortex] Friction tracking failed:', e.message));
+
   if (skipSignals) return;
 
   // Explicit memory-mutating tools — agent already recorded its intent.
@@ -74,6 +85,9 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     addToSessionBuffer(agent.id, 'user', sessionText, userId);
     addToSessionBuffer(agent.id, 'assistant', assistantContent, userId);
   }
+  // (trackFriction is called at the top of persist, before any skipSignals
+  // or toolsUsed gate — see comment block at the top of this function.)
+
   // Action-tool turns (set_reminder, schedule_task, send_telegram_message,
   // web search, email send, etc.) are imperative actions, not preference
   // statements. Running the signals head on the user message would routinely
@@ -189,10 +203,17 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${noteBlock}`
     : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${noteBlock}`;
 
-  // 2. Build message history (strip ts field — Ollama doesn't want it)
-  const history = loadSession(agent.id).map(({ role, content, name }) =>
-    name ? { role, content, name } : { role, content }
-  );
+  // 2. Build message history (strip ts field — Ollama doesn't want it).
+  // Filter out UI-only role types — `status` (watcher progress bubbles),
+  // `proposal` and `proposal_outcome` (friction-as-proposer bubbles),
+  // `notification`. Providers (OpenAI especially) reject unknown roles with
+  // a 400, and these entries carry no LLM-actionable content anyway.
+  const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
+  const history = loadSession(agent.id)
+    .filter(m => LLM_ROLES.has(m.role))
+    .map(({ role, content, name }) =>
+      name ? { role, content, name } : { role, content }
+    );
 
   // For session storage, store text only (no base64 — too large and not replayable)
   const sessionText = attachment ? `[Attached: ${attachment.name}]\n${userText}`.trim() : userText;
