@@ -3,7 +3,7 @@
  * Routes tool calls to the shared node registry.
  */
 
-import { getNodes, getNode, sendCommand, sendCommandStreaming, setReadableFolders, isPathAllowed } from './node-registry.mjs';
+import { getNodes, getNode, sendCommand, sendCommandStreaming, setReadableFolders, isPathAllowed, setParentHost, getParentHost, waitForNodeReconnect } from './node-registry.mjs';
 import { getActiveProjectInfo } from '../coder/execute.mjs';
 import { generatePairingCode, PAIRING_CODE_TTL_SECONDS } from '../../routes/nodes/pairing.mjs';
 import { getLanAddress } from '../../discovery.mjs';
@@ -479,6 +479,336 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     } catch (e) {
       yield { type: 'result', text: `Failed to get status: ${e.message}` };
     }
+    return;
+  }
+
+  if (name === 'node_set_parent_host') {
+    const { node_id, parent_host } = args || {};
+    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    try {
+      const updated = setParentHost(node_id, userId, parent_host ?? null);
+      if (!updated) { yield { type: 'result', text: `Node "${node_id}" not found.` }; return; }
+      if (parent_host == null) {
+        yield { type: 'result', text: `Cleared parent_host for "${updated.hostname}". Host-level rollback no longer available for high-risk ops here (surgical rollback still works).` };
+      } else {
+        let target;
+        let suffix = 'High-risk ops will now auto-snapshot the host before running.';
+        if (parent_host.type === 'proxmox') {
+          const memNote = parent_host.kind === 'qemu'
+            ? (parent_host.vmstate ? ' (with RAM/vmstate)' : ' (disk-only — set vmstate:true if you want exact mid-execution restore)')
+            : '';
+          target = `Proxmox ${parent_host.kind} ${parent_host.vmid} on ${parent_host.node}${memNote}`;
+        } else if (parent_host.type === 'zfs') {
+          target = `ZFS dataset ${parent_host.dataset} on ${parent_host.ssh_host}`;
+        } else if (parent_host.type === 'btrfs') {
+          target = `Btrfs subvolume ${parent_host.subvolume} (snapshots → ${parent_host.snapshot_dir})`;
+          suffix = 'High-risk ops will auto-snapshot. NOTE: btrfs auto-rollback is NOT applied automatically — OE preserves the snapshot and surfaces the manual recovery command if you ask to roll back.';
+        }
+        yield { type: 'result', text: `Wired "${updated.hostname}" → ${target}. ${suffix}` };
+      }
+    } catch (e) {
+      yield { type: 'result', text: `Error: ${e.message}` };
+    }
+    return;
+  }
+
+  if (name === 'node_grant_permission') {
+    const { node_id, type, name: permName, rationale } = args || {};
+    if (!node_id || !type || !permName) {
+      yield { type: 'result', text: 'Error: node_grant_permission requires node_id, type, name.' };
+      return;
+    }
+    const node = getNode(node_id, userId);
+    if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected.` }; return; }
+
+    // Validate type up front so we don't half-apply something unsupported.
+    if (!['group', 'sudoers', 'access_level'].includes(type)) {
+      yield { type: 'result', text: `Error: unsupported type "${type}". Use "group", "sudoers", or "access_level".` };
+      return;
+    }
+
+    // Without access_level=full the agent runs as a non-root user. Privilege
+    // changes (usermod, /etc/sudoers, systemctl restart) all need root, and
+    // sudo will prompt → hang. Bail with a clear next step.
+    if (node.accessLevel !== 'full') {
+      yield {
+        type: 'result',
+        text:
+          `Cannot grant permission: node "${node.hostname}" is running at access_level=${node.accessLevel ?? 'unknown'}. ` +
+          `Privilege changes need access_level=full (oe-agent runs as root). ` +
+          `Have ${'{{USER_NAME}}'} run \`sudo oe change-access full\` on the node, then try again.`,
+      };
+      return;
+    }
+
+    yield { type: 'tool_progress', name: 'node_grant_permission', text: `Granting ${type}=${permName} on ${node.hostname}…` };
+
+    if (type === 'group') {
+      // 1. Add to the group. usermod is idempotent; running it on a user
+      //    already in the group is a no-op.
+      const um = await sendCommand(node_id, userId, {
+        type: 'exec',
+        command: `usermod -a -G ${shellEscape(permName)} oe-agent`,
+        timeout: 15,
+      }).catch(e => ({ exitCode: 1, stderr: e.message }));
+      if (um.exitCode !== 0) {
+        yield { type: 'result', text: `usermod failed: ${(um.stderr || '').slice(0, 300)}` };
+        return;
+      }
+
+      // 2. Restart the node-agent so the new group is picked up. The exec
+      //    will not return cleanly because the agent process IS being killed;
+      //    we ignore the rejection and wait for reconnect.
+      sendCommand(node_id, userId, {
+        type: 'exec',
+        command: 'systemctl restart oe-node-agent',
+        timeout: 5,
+      }).catch(() => {});
+
+      const recon = await waitForNodeReconnect(node_id, userId, 60_000);
+      if (!recon.ok) {
+        yield { type: 'result', text: `oe-agent did not reconnect after restart: ${recon.reason}. Check the node manually.` };
+        return;
+      }
+
+      // 3. Verify the membership took.
+      const verify = await sendCommand(node_id, userId, {
+        type: 'exec',
+        command: 'id -Gn oe-agent',
+        timeout: 10,
+      }).catch(e => ({ exitCode: 1, stdout: '', stderr: e.message }));
+      const groups = (verify.stdout || '').trim().split(/\s+/);
+      if (verify.exitCode !== 0 || !groups.includes(permName)) {
+        yield {
+          type: 'result',
+          text: `Permission applied but verification could not confirm membership. \`id -Gn oe-agent\` returned: ${(verify.stdout || verify.stderr || '').slice(0, 300)}`,
+        };
+        return;
+      }
+
+      yield {
+        type: 'result',
+        text:
+          `Added oe-agent to group \`${permName}\` on ${node.hostname} (verified). ` +
+          `Service operations that needed this group should now work without sudo prompts.` +
+          (rationale ? ` (Reason: ${rationale}.)` : ''),
+      };
+      return;
+    }
+
+    if (type === 'sudoers') {
+      // Sudoers entries land in /etc/sudoers.d/oe-agent-<safe>. The filename
+      // must not contain dots or unsafe chars (sudoers.d ignores files with
+      // dots in the name). We sanitize from the binary path:
+      //   /usr/bin/systemctl  → systemctl
+      //   /usr/local/bin/pihole → pihole
+      // and require an absolute path so we're not granting NOPASSWD on
+      // ambiguous PATH lookups.
+      if (!permName.startsWith('/')) {
+        yield {
+          type: 'result',
+          text: `Error: sudoers grants require an ABSOLUTE binary path (e.g. /usr/bin/systemctl), got "${permName}". Use \`which <cmd>\` first.`,
+        };
+        return;
+      }
+      const safe = permName.split('/').pop().replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32);
+      const sudoersFile = `/etc/sudoers.d/oe-agent-${safe}`;
+      const line = `oe-agent ALL=(ALL) NOPASSWD: ${permName}`;
+      // 1. Verify the binary exists before granting NOPASSWD on it.
+      const exists = await sendCommand(node_id, userId, {
+        type: 'exec', command: `test -x ${shellEscape(permName)} && echo present || echo missing`, timeout: 10,
+      }).catch(e => ({ exitCode: 1, stdout: '', stderr: e.message }));
+      if ((exists.stdout || '').trim() !== 'present') {
+        yield { type: 'result', text: `Refusing to grant NOPASSWD: \`${permName}\` does not exist or is not executable on ${node.hostname}.` };
+        return;
+      }
+      // 2. Write the file. Use printf to avoid heredoc shell quoting issues.
+      //    Then chmod 0440 (sudoers requirement) and validate with visudo.
+      const escaped = line.replace(/'/g, `'\\''`);
+      const writeRes = await sendCommand(node_id, userId, {
+        type: 'exec',
+        command: `printf '%s\\n' '${escaped}' > ${sudoersFile} && chmod 0440 ${sudoersFile} && visudo -cf ${sudoersFile}`,
+        timeout: 15,
+      }).catch(e => ({ exitCode: 1, stdout: '', stderr: e.message }));
+      if (writeRes.exitCode !== 0) {
+        // visudo failed → file is invalid; clean up
+        await sendCommand(node_id, userId, {
+          type: 'exec', command: `rm -f ${sudoersFile}`, timeout: 5,
+        }).catch(() => {});
+        yield { type: 'result', text: `sudoers install failed: ${(writeRes.stderr || writeRes.stdout || '').slice(0, 300)}` };
+        return;
+      }
+      // 3. Verify with `sudo -ln` — should now show the new entry.
+      const verify = await sendCommand(node_id, userId, {
+        type: 'exec', command: `sudo -ln 2>&1`, timeout: 10,
+      }).catch(e => ({ exitCode: 1, stdout: '', stderr: e.message }));
+      const verified = (verify.stdout || '').includes(permName);
+      yield {
+        type: 'result',
+        text: verified
+          ? `Granted NOPASSWD sudo for \`${permName}\` on ${node.hostname} (sudoers file: ${sudoersFile}, verified).` + (rationale ? ` (Reason: ${rationale}.)` : '')
+          : `sudoers entry installed but \`sudo -ln\` did not list it. File at ${sudoersFile} — check manually.`,
+      };
+      return;
+    }
+
+    if (type === 'access_level') {
+      if (!['updates', 'full'].includes(permName)) {
+        yield { type: 'result', text: 'access_level must be "updates" or "full".' };
+        return;
+      }
+      // `oe change-access <level>` rewrites the systemd unit + restarts.
+      // It needs sudo on the node side; if access_level was already full,
+      // the agent runs as root and this is no-prompt.
+      sendCommand(node_id, userId, {
+        type: 'exec',
+        command: `oe change-access ${permName}`,
+        timeout: 30,
+      }).catch(() => {});
+      const recon = await waitForNodeReconnect(node_id, userId, 60_000);
+      if (!recon.ok) {
+        yield { type: 'result', text: `oe-agent did not reconnect after access-level change: ${recon.reason}.` };
+        return;
+      }
+      const after = getNode(node_id, userId);
+      yield {
+        type: 'result',
+        text: `Access level set to \`${permName}\` on ${node.hostname} (current: ${after?.accessLevel ?? '?'}).` +
+          (rationale ? ` (Reason: ${rationale}.)` : ''),
+      };
+      return;
+    }
+  }
+
+  if (name === 'node_check_agent_permissions') {
+    const { node_id } = args || {};
+    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    const node = getNode(node_id, userId);
+    if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected.` }; return; }
+
+    // Probe: who is oe-agent running as, what groups, what sudo can it use.
+    // `sudo -ln` lists allowed commands without prompting (returns "may run" lines).
+    // We swallow stderr from sudo since it'll print "user not allowed" or similar
+    // when the user has no sudo entitlement at all.
+    const probe = [
+      'echo "::user::"; id -un',
+      'echo "::uid::";  id -u',
+      'echo "::groups::"; id -Gn',
+      'echo "::sudo_n::"; sudo -ln 2>&1 | grep -E "may run|NOPASSWD|password required|not allowed" || echo "(no entries)"',
+    ].join(' && ');
+
+    let stdout;
+    try {
+      const r = await sendCommand(node_id, userId, { type: 'exec', command: probe, timeout: 15 });
+      stdout = r.stdout || '';
+    } catch (e) {
+      yield { type: 'result', text: `Probe failed: ${e.message}` };
+      return;
+    }
+
+    const sections = { user: '', uid: '', groups: '', sudo_n: '' };
+    let cur = null;
+    for (const line of stdout.split('\n')) {
+      const m = line.match(/^::(user|uid|groups|sudo_n)::$/);
+      if (m) { cur = m[1]; continue; }
+      if (cur != null) sections[cur] += (sections[cur] ? '\n' : '') + line;
+    }
+
+    const groupList = (sections.groups || '').trim().split(/\s+/).filter(Boolean);
+    const isRoot = sections.uid?.trim() === '0';
+    const sudoLines = (sections.sudo_n || '').split('\n').map(l => l.trim()).filter(Boolean);
+    const sudoNoPwd = sudoLines.filter(l => /NOPASSWD/i.test(l));
+    const sudoNeedsPwd = sudoLines.filter(l => !/NOPASSWD/i.test(l) && /(may run|password required)/i.test(l));
+    const noSudo = sudoLines.length === 0 || sudoLines.some(l => /not allowed/i.test(l));
+
+    const out = [
+      `**Agent permissions on ${node.hostname}:**`,
+      `- Running as: \`${(sections.user || 'unknown').trim()}\` (uid ${sections.uid?.trim() || '?'})${isRoot ? ' — **root**' : ''}`,
+      `- Groups: ${groupList.length ? groupList.map(g => `\`${g}\``).join(', ') : '(none)'}`,
+    ];
+    if (isRoot) {
+      out.push(`- sudo: not needed — already root`);
+    } else if (noSudo) {
+      out.push(`- sudo: **not configured** for this user`);
+    } else {
+      if (sudoNoPwd.length) out.push(`- sudo (no password): ${sudoNoPwd.map(l => `\`${l}\``).join('; ')}`);
+      if (sudoNeedsPwd.length) out.push(`- sudo (password required): ${sudoNeedsPwd.map(l => `\`${l}\``).join('; ')}`);
+    }
+    out.push('', '_Compare these to a profile\'s `agent_requirements`. Common gaps:_');
+    out.push('- Pi-hole v6 write ops → user must be in `pihole` group');
+    out.push('- Docker → user must be in `docker` group');
+    out.push('- libvirt/QEMU → user must be in `libvirt` group');
+    out.push('- Proxmox `pct`/`qm` → access_level must be `full` (runs as root)');
+    yield { type: 'result', text: out.join('\n') };
+    return;
+  }
+
+  if (name === 'node_detect_services') {
+    const { node_id } = args || {};
+    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    const node = getNode(node_id, userId);
+    if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected.` }; return; }
+
+    const probeScript = [
+      'echo "::ports::"',
+      "ss -tlnp 2>/dev/null | awk 'NR>1 {print $4}' | awk -F: '{print $NF}' | sort -un | head -30",
+      'echo "::binaries::"',
+      'for b in pihole home-assistant nginx caddy mariadbd mysqld postgres redis-server tailscale mosquitto vaultwarden bw; do command -v "$b" >/dev/null && echo "$b"; done',
+      'echo "::paths::"',
+      'for p in /etc/pihole /etc/nginx /etc/caddy /etc/dnsmasq.d /var/lib/mysql /var/lib/mariadb /var/lib/postgresql /etc/mosquitto /opt/vaultwarden /etc/tailscale; do test -d "$p" && echo "$p"; done',
+      'echo "::services::"',
+      "systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | awk '{print $1}' | head -40",
+    ].join(' && ');
+
+    let out;
+    try {
+      const r = await sendCommand(node_id, userId, { type: 'exec', command: probeScript, timeout: 30 });
+      out = r.stdout || '';
+    } catch (e) {
+      yield { type: 'result', text: `Probe failed: ${e.message}` };
+      return;
+    }
+
+    const sections = { ports: [], binaries: [], paths: [], services: [] };
+    let cur = null;
+    for (const line of out.split('\n').map(s => s.trim()).filter(Boolean)) {
+      const m = line.match(/^::(ports|binaries|paths|services)::$/);
+      if (m) { cur = m[1]; continue; }
+      if (cur) sections[cur].push(line);
+    }
+
+    const detected = [];
+    const has = (s, x) => sections[s].some(v => v.includes(x));
+
+    if (has('binaries', 'pihole') || has('paths', '/etc/pihole')) {
+      detected.push({ kind: 'pihole', evidence: ['binary: pihole', '/etc/pihole'].filter(e => has('binaries', 'pihole') || has('paths', '/etc/pihole')) });
+    }
+    if (has('binaries', 'home-assistant') || sections.services.some(s => s.startsWith('home-assistant'))) {
+      detected.push({ kind: 'home_assistant', evidence: ['HA service'] });
+    }
+    if (has('binaries', 'nginx') || has('paths', '/etc/nginx')) detected.push({ kind: 'nginx', evidence: ['nginx config'] });
+    if (has('binaries', 'caddy') || has('paths', '/etc/caddy')) detected.push({ kind: 'caddy', evidence: ['caddy'] });
+    if (has('binaries', 'mariadbd') || has('binaries', 'mysqld') || has('paths', '/var/lib/mysql') || has('paths', '/var/lib/mariadb')) {
+      detected.push({ kind: 'mariadb', evidence: ['mysql/mariadb'] });
+    }
+    if (has('binaries', 'postgres') || has('paths', '/var/lib/postgresql')) detected.push({ kind: 'postgresql', evidence: ['postgres'] });
+    if (has('binaries', 'redis-server')) detected.push({ kind: 'redis', evidence: ['redis-server'] });
+    if (has('binaries', 'tailscale') || has('paths', '/etc/tailscale')) detected.push({ kind: 'tailscale', evidence: ['tailscale'] });
+    if (has('binaries', 'mosquitto') || has('paths', '/etc/mosquitto')) detected.push({ kind: 'mosquitto', evidence: ['mosquitto'] });
+    if (has('binaries', 'vaultwarden') || has('binaries', 'bw') || has('paths', '/opt/vaultwarden')) {
+      detected.push({ kind: 'vaultwarden', evidence: ['vaultwarden'] });
+    }
+
+    if (detected.length === 0) {
+      yield { type: 'result', text: `No known services detected on "${node.hostname}".\n\nObserved listening ports: ${sections.ports.join(', ') || '(none)'}\nIf a service is here that the probe missed, you can still onboard it manually with profile_save.` };
+      return;
+    }
+
+    const lines = [`Detected on "${node.hostname}":`];
+    for (const d of detected) lines.push(`- **${d.kind}** — ${d.evidence.join(', ')}`);
+    if (sections.ports.length) lines.push(`\n_Listening ports: ${sections.ports.join(', ')}_`);
+    lines.push('\nNext: research each detected service, then call `profile_save` for it.');
+    yield { type: 'result', text: lines.join('\n') };
     return;
   }
 

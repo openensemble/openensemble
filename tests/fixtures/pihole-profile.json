@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "service_id": "pihole",
+  "node_id": "pihole-test",
+  "detected_version": "5.18.x",
+  "endpoint": "http://192.168.1.2/admin",
+  "detected_at": "2026-05-06T17:00:00.000Z",
+  "researched_at": "2026-05-06T17:05:00.000Z",
+  "profile_version": "2026-05-06_a1b2",
+  "identity": {
+    "what_it_is": "Network-wide DNS sinkhole that blocks ad/tracker/malware domains at the resolver layer.",
+    "primary_value": "Reduces ads + telemetry across every device on the network without per-device configuration.",
+    "related_capabilities": ["dns", "dhcp"]
+  },
+  "control_surface": {
+    "api": {
+      "base_url_template": "${endpoint}",
+      "auth_method": "api_key_query_param",
+      "auth_field": "auth",
+      "token_storage": "config_field:pihole_api_token"
+    },
+    "config_files": [
+      { "path": "/etc/pihole/setupVars.conf", "format": "shell-vars", "owner_user": "root" },
+      { "path": "/etc/pihole/pihole-FTL.conf", "format": "key-value", "owner_user": "pihole" },
+      { "path": "/etc/pihole/custom.list", "format": "hosts", "owner_user": "root" }
+    ],
+    "cli": ["pihole", "pihole-FTL"],
+    "services": ["pihole-FTL.service"],
+    "log_sources": [
+      { "path": "/var/log/pihole/pihole.log", "format": "syslog", "tail_cmd": "tail -n 200 /var/log/pihole/pihole.log" },
+      { "path": "/var/log/pihole/FTL.log", "format": "syslog", "tail_cmd": "tail -n 200 /var/log/pihole/FTL.log" },
+      { "systemd_unit": "pihole-FTL", "tail_cmd": "journalctl -u pihole-FTL -n 100 --no-pager" }
+    ]
+  },
+  "operations": [
+    {
+      "id": "list_blocked",
+      "capability": "dns",
+      "description": "List all domains in the blocklist.",
+      "mechanism": "http",
+      "risk": "low",
+      "readonly": true,
+      "parameters": [],
+      "http": {
+        "write": { "method": "GET", "url": "${endpoint}/api.php?list=black&auth=${auth}" }
+      },
+      "verified": false,
+      "last_tested": null,
+      "last_failure": null
+    },
+    {
+      "id": "status",
+      "capability": "dns",
+      "description": "Get the current blocking/enabled status.",
+      "mechanism": "http",
+      "risk": "low",
+      "readonly": true,
+      "parameters": [],
+      "http": {
+        "write": { "method": "GET", "url": "${endpoint}/api.php?status&auth=${auth}" }
+      },
+      "verified": false,
+      "last_tested": null,
+      "last_failure": null
+    },
+    {
+      "id": "dns_block",
+      "capability": "dns",
+      "description": "Add a domain to the Pi-hole blocklist.",
+      "mechanism": "http",
+      "risk": "low",
+      "readonly": false,
+      "parameters": [
+        { "name": "domain", "type": "string", "required": true, "example": "ads.example.com" }
+      ],
+      "http": {
+        "pre_capture": { "method": "GET", "url": "${endpoint}/api.php?list=black&auth=${auth}" },
+        "write":       { "method": "GET", "url": "${endpoint}/api.php?list=black&add=${domain}&auth=${auth}" },
+        "inverse":     { "method": "GET", "url": "${endpoint}/api.php?list=black&sub=${domain}&auth=${auth}" }
+      },
+      "verified": false,
+      "last_tested": null,
+      "last_failure": null
+    },
+    {
+      "id": "dns_unblock",
+      "capability": "dns",
+      "description": "Remove a domain from the Pi-hole blocklist.",
+      "mechanism": "http",
+      "risk": "low",
+      "readonly": false,
+      "parameters": [
+        { "name": "domain", "type": "string", "required": true, "example": "ads.example.com" }
+      ],
+      "http": {
+        "pre_capture": { "method": "GET", "url": "${endpoint}/api.php?list=black&auth=${auth}" },
+        "write":       { "method": "GET", "url": "${endpoint}/api.php?list=black&sub=${domain}&auth=${auth}" },
+        "inverse":     { "method": "GET", "url": "${endpoint}/api.php?list=black&add=${domain}&auth=${auth}" }
+      },
+      "verified": false,
+      "last_tested": null,
+      "last_failure": null
+    },
+    {
+      "id": "pihole_restart",
+      "capability": null,
+      "description": "Restart the pihole-FTL service.",
+      "mechanism": "cli",
+      "risk": "medium",
+      "readonly": false,
+      "parameters": [],
+      "cli": {
+        "write": { "command": "pihole restartdns" }
+      },
+      "verified": false,
+      "last_tested": null,
+      "last_failure": null
+    }
+  ],
+  "health_signals": [
+    {
+      "kind": "service_up",
+      "description": "pihole-FTL.service is active",
+      "check": { "mechanism": "cli", "command": "systemctl is-active pihole-FTL" },
+      "expect": "active",
+      "cadence_sec": 60,
+      "severity": "critical"
+    },
+    {
+      "kind": "blocking_enabled",
+      "description": "Blocking is on (Pi-hole API status=enabled)",
+      "check": { "mechanism": "http", "url": "${endpoint}/api.php?status&auth=${auth}", "parse_jsonpath": "status" },
+      "expect": "enabled",
+      "cadence_sec": 300,
+      "severity": "warn"
+    }
+  ],
+  "diagnostic_recipes": {
+    "service_up_failed": [
+      { "mechanism": "cli", "command": "systemctl status pihole-FTL --no-pager", "what_to_look_for": "active|failed|loaded; recent journal lines" },
+      { "mechanism": "cli", "command": "tail -n 100 /var/log/pihole/FTL.log", "what_to_look_for": "regex compile errors, gravity errors, port conflicts" },
+      { "mechanism": "cli", "command": "ss -tlnp | grep ':53'", "what_to_look_for": "another process bound to port 53" }
+    ]
+  },
+  "failure_modes": [
+    {
+      "id": "ftl_regex_compile_error",
+      "symptom": "pihole-FTL fails to start with regex compile error in custom blocklist",
+      "likely_causes": ["malformed regex added to /etc/pihole/regex.list"],
+      "diagnostic_recipe": "service_up_failed",
+      "fixes": [
+        { "op_id": "pihole_restart", "risk": "medium", "applies_when": "transient state" }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    { "symptom": "DNS resolves but ads still appear", "common_causes": ["DoH on client", "device using non-Pi-hole DNS"], "suggested_fix_op_ids": [] }
+  ],
+  "update_path": {
+    "mechanism": "cli",
+    "command_template": "pihole -up",
+    "requires_reboot": false,
+    "expected_downtime_sec": 30
+  },
+  "backup_before": ["/etc/pihole/", "/etc/dnsmasq.d/"],
+  "known_quirks": [
+    "Pi-hole v5 uses query-param auth (?auth=); v6 switched to bearer header — re-research after upgrade.",
+    "FTL.service exits on first regex compile failure — check FTL.log if status=inactive."
+  ],
+  "trust_state": "unverified",
+  "trust_state_changed_at": "2026-05-06T17:05:00.000Z",
+  "trust_state_changed_by": null,
+  "research_sources": [
+    { "url": "https://docs.pi-hole.net/api/", "title": "Pi-hole API", "fetched_at": "2026-05-06T17:04:00.000Z" },
+    { "url": "https://github.com/pi-hole/pi-hole", "title": "Pi-hole upstream repo", "fetched_at": "2026-05-06T17:04:30.000Z" }
+  ],
+  "detected_version_at_research": "5.18.x"
+}

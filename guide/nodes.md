@@ -22,6 +22,8 @@ Through the `nodes` skill:
 - **Pull tar** — pull a directory off the node back to the install.
 - **Read file** — read a file from a node, gated by a per-node allowlist (see below).
 - **List** — list connected nodes, with hostname and OS.
+- **Detect services** — `node_detect_services` runs a single probe (ports + binaries + paths + systemd units) and tells you what known services are running. Use before onboarding so the agent knows what to research.
+- **Wire to a hypervisor** — `node_set_parent_host` connects a node to its Proxmox host, ZFS dataset, or Btrfs subvolume so high-risk operations get a whole-system snapshot before running. See the **Service profiles** page for the substrate matrix.
 
 Each node command is scoped to the user who paired it. A user can't reach into another user's nodes.
 
@@ -45,6 +47,10 @@ For a server install (OE running on a Pi or NAS away from your daily-driver mach
 - **"Install X on my Pi"** — your coder/coordinator pushes a setup script and runs it.
 - **"Tail the logs of foo on my server"** — exec `journalctl -fu foo` and stream the result back.
 - **"Reboot the workshop machine"** — `sudo reboot` (you allowed this, right?).
+
+## Going beyond exec — managing services on a node
+
+`node_exec` is the right tool for one-off shell commands. For ongoing management of a *service* running on a node — Pi-hole, Home Assistant, nginx, MariaDB, etc. — use **service profiles**. They give you researched runbooks, automatic rollback, health monitoring, and incident tracking on top of the raw exec layer. See the **Service profiles** page.
 
 ## Security & trust
 

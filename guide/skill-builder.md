@@ -6,7 +6,7 @@ OpenEnsemble's `skill-builder` lets your coder/coordinator write new skills at r
 
 Talk to a coder or coordinator agent and ask for what you want, e.g.:
 
-> "Build me a skill that turns on the lights in my living room via Home Assistant. The HA URL is `http://192.168.1.20:8123` and my long-lived token is in `~/.config/ha-token`."
+> "Build me a skill that turns on the lights in my living room via Home Assistant. The HA URL is `http://homeassistant.local:8123` and my long-lived token is in `~/.config/ha-token`."
 
 The agent will:
 

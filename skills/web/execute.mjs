@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { getSecret } from '../../lib/config-secrets.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -9,7 +10,13 @@ function getBraveKey() {
   const cfgPath = path.join(BASE_DIR, 'config.json');
   if (existsSync(cfgPath)) {
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
-    if (cfg.braveApiKey) return cfg.braveApiKey;
+    // Go through getSecret so encrypted-at-rest values are decrypted.
+    // Reading cfg.braveApiKey directly returned the encrypted envelope
+    // object (which stringifies to "[object Object]" when sent as a
+    // header), making Brave reject every request with HTTP 422 /
+    // SUBSCRIPTION_TOKEN_INVALID even when the key was correctly stored.
+    const k = getSecret(cfg, 'braveApiKey');
+    if (k) return k;
   }
   return null;
 }

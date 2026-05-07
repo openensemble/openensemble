@@ -52,6 +52,10 @@ function persistNodes() {
         // design. Agents that should be limited to allowlisted reads
         // shouldn't have node_exec in their toolset.
         readableFolders: entry.readableFolders || [],
+        // parent_host: optional pointer to a hypervisor/storage host that owns
+        // this node's guest (Proxmox LXC/VM, ZFS dataset on TrueNAS, etc.).
+        // Enables host-level rollback for high-risk ops via lib/host-snapshot.mjs.
+        parentHost: entry.parentHost || null,
         version: entry.version,
         registeredAt: entry.registeredAt,
         disconnectedAt: entry.ws ? null : (entry.disconnectedAt ?? Date.now()),
@@ -90,6 +94,7 @@ export function loadPersistedNodes() {
         accessLevel: n.accessLevel || 'unknown',
         accessLocked: !!n.accessLocked,
         readableFolders: Array.isArray(n.readableFolders) ? n.readableFolders : [],
+        parentHost: n.parentHost || null,
         version: n.version || 'unknown',
         registeredAt: n.registeredAt || now,
         lastHeartbeat: n.registeredAt || now,
@@ -226,6 +231,8 @@ export function registerNode(ws, userId, info) {
     // doesn't know about this list, only the OE server does, so a fresh
     // entry from a reconnecting agent would otherwise wipe it.
     readableFolders: oldEntry?.readableFolders || [],
+    // Same for parent_host — agent never knows about this; preserve it.
+    parentHost: oldEntry?.parentHost || null,
     version: info.version || 'unknown',
     registeredAt: now,
     lastHeartbeat: now,
@@ -320,6 +327,33 @@ export function unregisterNode(nodeId) {
   console.log(`[nodes] Disconnected: ${nodeId} (${entry.hostname})`);
 }
 
+// Patterns that indicate a command is sitting at an interactive prompt with
+// no way to receive input over node_exec's non-interactive channel. We match
+// at the END of the stream buffer — a finished line would have a trailing
+// newline, so prompts (which keep cursor on the same line waiting for typing)
+// are detectable as "ends with a known phrase + no newline".
+const INTERACTIVE_PROMPT_PATTERNS = [
+  /\[sudo\] password for [^\s]+:\s*$/i,
+  /(^|\n)password:\s*$/i,
+  /Please enter your password:?\s*$/i,
+  /Sorry, try again\.\s*$/i,                         // sudo retry — we already failed once
+  /Are you sure you want to continue connecting[^?]*\?\s*$/i,
+  /\([yY]\/[nN]\)\??\s*$/,                           // common confirmation prompts
+  /\(yes\/no\)\??\s*$/i,
+];
+
+function looksLikeInteractivePrompt(text) {
+  if (!text) return null;
+  // Strip trailing whitespace except don't be fooled by control codes.
+  // Most prompts won't have a trailing newline; a finished line would.
+  const tail = text.replace(/[ -]/g, ' ').trimEnd();
+  for (const pat of INTERACTIVE_PROMPT_PATTERNS) {
+    const m = tail.match(pat);
+    if (m) return m[0];
+  }
+  return null;
+}
+
 function rejectPendingForNode(nodeId) {
   for (const [cmdId, cmd] of pendingCommands) {
     if (cmd.nodeId === nodeId) {
@@ -371,6 +405,7 @@ function nodeToWire(entry) {
     accessLevel: entry.accessLevel,
     accessLocked: entry.accessLocked,
     readableFolders: entry.readableFolders || [],
+    parentHost: entry.parentHost || null,
     version: entry.version || 'unknown',
     registeredAt: entry.registeredAt,
     lastHeartbeat: entry.lastHeartbeat,
@@ -406,6 +441,68 @@ function resolveNodeEntry(nodeId, userId) {
     }
   }
   return entry && entry.userId === userId ? entry : null;
+}
+
+// ── parent_host (hypervisor / storage backend pointer) ──────────────────────
+//
+// Per-node pointer to the host that can take a whole-guest snapshot of this
+// node. Enables `lib/host-snapshot.mjs` to provide an outer rollback layer
+// for high-risk ops. Shape:
+//
+//   { type: 'proxmox', api_url, api_token, node, vmid, kind: 'lxc'|'qemu' }
+//   { type: 'zfs',     ssh_host, ssh_user?, dataset }
+//
+// `api_token` may be a literal string OR a token-storage reference like
+// 'config_field:proxmox_api_token' / 'env:PROXMOX_TOKEN'; lib/host-snapshot
+// resolves it through lib/token-storage when used. Storing references is
+// preferred so secrets don't sit in nodes.json.
+
+const VALID_PARENT_HOST_TYPES = new Set(['proxmox', 'zfs', 'btrfs']);
+
+function validateParentHost(ph) {
+  if (ph === null) return null;
+  if (typeof ph !== 'object') throw new Error('parent_host must be object or null');
+  if (!VALID_PARENT_HOST_TYPES.has(ph.type)) {
+    throw new Error(`parent_host.type must be one of ${[...VALID_PARENT_HOST_TYPES].join(',')}`);
+  }
+  if (ph.type === 'proxmox') {
+    for (const k of ['api_url', 'api_token', 'node', 'vmid', 'kind']) {
+      if (ph[k] === undefined || ph[k] === null || ph[k] === '') {
+        throw new Error(`parent_host (proxmox) requires ${k}`);
+      }
+    }
+    if (!['lxc', 'qemu'].includes(ph.kind)) {
+      throw new Error('parent_host.kind must be "lxc" or "qemu"');
+    }
+    if (ph.vmstate !== undefined && typeof ph.vmstate !== 'boolean') {
+      throw new Error('parent_host.vmstate must be boolean');
+    }
+    if (ph.kind === 'lxc' && ph.vmstate) {
+      throw new Error('parent_host.vmstate only valid for kind:"qemu" (LXC has no separate memory state)');
+    }
+  } else if (ph.type === 'zfs') {
+    for (const k of ['ssh_host', 'dataset']) {
+      if (!ph[k]) throw new Error(`parent_host (zfs) requires ${k}`);
+    }
+  } else if (ph.type === 'btrfs') {
+    for (const k of ['subvolume', 'snapshot_dir']) {
+      if (!ph[k]) throw new Error(`parent_host (btrfs) requires ${k}`);
+    }
+  }
+  return ph;
+}
+
+export function setParentHost(nodeId, userId, parentHost) {
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return null;
+  entry.parentHost = validateParentHost(parentHost);
+  persistNodes();
+  return nodeToWire(entry);
+}
+
+export function getParentHost(nodeId, userId) {
+  const entry = resolveNodeEntry(nodeId, userId);
+  return entry?.parentHost || null;
 }
 
 export function setReadableFolders(nodeId, userId, paths) {
@@ -459,8 +556,13 @@ function countInflight(nodeId) {
 
 function dispatchCommand(nodeId, userId, payload, { onChunk } = {}) {
   return new Promise((resolve, reject) => {
-    const entry = nodes.get(nodeId);
-    if (!entry || entry.userId !== userId) {
+    // Match getNode/getNode-style resolution: try exact id first, then fall
+    // back to hostname match. The exact-id-only lookup was a hidden
+    // inconsistency — getNode tolerated hostnames but sendCommand didn't,
+    // so callers that resolved a node via getNode then dispatched against
+    // the same string sometimes got "not found" if they used a hostname.
+    const entry = resolveNodeEntry(nodeId, userId);
+    if (!entry) {
       return reject(new Error(`Node "${nodeId}" not found or not connected`));
     }
     if (!entry.ws || entry.ws.readyState !== entry.ws.OPEN) {
@@ -483,7 +585,11 @@ function dispatchCommand(nodeId, userId, payload, { onChunk } = {}) {
       reject(new Error(`Command timed out after ${timeout}s`));
     }, timeout * 1000);
 
-    const pending = { resolve, reject, timer, nodeId, chunks: [] };
+    // Track pending under the canonical nodeId (entry.nodeId), not the
+    // caller's possibly-hostname input. Otherwise rejectPendingForNode
+    // (called on disconnect with the canonical id) wouldn't match this
+    // pending and the op would hang until timeout.
+    const pending = { resolve, reject, timer, nodeId: entry.nodeId, chunks: [] };
     if (onChunk) pending.onChunk = onChunk;
     pendingCommands.set(cmdId, pending);
 
@@ -530,6 +636,32 @@ export function handleNodeMessage(nodeId, msg) {
       if (!cmd) return;
       cmd.chunks.push(msg.data);
       if (cmd.onChunk) cmd.onChunk(msg.stream, msg.data);
+
+      // Detect interactive-input prompts that would otherwise hang for the
+      // full timeout. node_exec runs commands via `bash -c` with no terminal,
+      // but tools like sudo open /dev/tty directly so they're not stopped by
+      // a closed stdin — they just sit there waiting for nothing.
+      // Heuristic: prompt-shaped ending (no trailing newline, ends with a
+      // known phrase) → reject immediately so the agent gets a real error.
+      // The remote process is still alive and will timeout naturally; we
+      // just don't make the user wait for it.
+      if (!cmd._promptDetected) {
+        cmd._streamBuf = ((cmd._streamBuf || '') + msg.data).slice(-2048);
+        const prompt = looksLikeInteractivePrompt(cmd._streamBuf);
+        if (prompt) {
+          cmd._promptDetected = true;
+          clearTimeout(cmd.timer);
+          pendingCommands.delete(msg.cmdId);
+          cmd.reject(new Error(
+            `Command is waiting for interactive input ("${prompt.trim()}"). ` +
+            `node_exec has no terminal so this would hang until timeout. ` +
+            `Try one of: (1) configure passwordless sudo for the node-agent user; ` +
+            `(2) onboard this service as a profile so operations go via API/managed paths instead of CLI ` +
+            `(see profile_save / dispatch_op in the profiles skill); ` +
+            `(3) re-run with non-interactive flags (e.g. add -y / --yes / --batch).`
+          ));
+        }
+      }
       break;
     }
 
@@ -665,6 +797,34 @@ export function pushUpdate(nodeId, userId, url = null) {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+// ── Wait for reconnect ──────────────────────────────────────────────────────
+//
+// After an action that restarts oe-node-agent (usermod + systemctl restart,
+// `oe change-access`, etc.), callers need to know when the agent's WS is back
+// before issuing the next command. This polls the registry until the entry
+// has a recoveredAt newer than start time, or times out. Polling rather than
+// event-driven so the function works without changes to the WS handler.
+
+export async function waitForNodeReconnect(nodeId, userId, timeoutMs = 60_000) {
+  const startMs = Date.now();
+  const deadline = startMs + timeoutMs;
+  // Wait at least one tick so the disconnect actually happens before we check
+  // recoveredAt — otherwise a still-connected node would falsely "succeed".
+  await new Promise(r => setTimeout(r, 800));
+  while (Date.now() < deadline) {
+    const entry = resolveNodeEntry(nodeId, userId);
+    if (entry && entry.ws && entry.ws.readyState === entry.ws.OPEN
+        && (entry.recoveredAt ?? 0) >= startMs) {
+      // Brief grace so the agent finishes its registration handshake before
+      // callers start sending commands.
+      await new Promise(r => setTimeout(r, 500));
+      return { ok: true, reconnectedAt: entry.recoveredAt };
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return { ok: false, reason: `node did not reconnect within ${timeoutMs}ms` };
 }
 
 // ── Stats for debugging ──────────────────────────────────────────────────────

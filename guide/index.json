@@ -25,6 +25,7 @@
         { "slug": "documents",  "title": "Documents & sharing" },
         { "slug": "expenses",   "title": "Expenses" },
         { "slug": "nodes",      "title": "Remote nodes" },
+        { "slug": "services",   "title": "Service profiles" },
         { "slug": "cortex",     "title": "Cortex (local models)" }
       ]
     },

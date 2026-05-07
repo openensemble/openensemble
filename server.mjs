@@ -14,6 +14,11 @@ import { loadDrawerManifests } from './plugins.mjs';
 import { startScheduler, stopScheduler, loadTasksForOwner, addTask, removeTask, registerBuiltin } from './scheduler.mjs';
 import { startWatcherSupervisor, stopWatcherSupervisor } from './scheduler/watchers.mjs';
 import { registerSystemWatchHandlers } from './scheduler/watch-handlers.mjs';
+import { startHealthMonitorHandlers } from './scheduler/health-monitor.mjs';
+import { pruneAllSnapshots } from './scheduler/snapshot-pruner.mjs';
+import { makeNodeExecFn } from './lib/node-exec-wrapper.mjs';
+import { resolveTokenStorage } from './lib/token-storage.mjs';
+import { loadProfile as loadServiceProfile } from './lib/service-profile.mjs';
 import { setProposalBroadcastFn, bootLoadProposals } from './lib/proposals.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
@@ -675,6 +680,33 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     showImage:  (userId, msg) => sendToUser(userId, { type: 'image', ...msg }),
     showVideo:  (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
   });
+
+  // Profile health monitor: per-service watchers fire the troubleshooting
+  // loop on healthy→unhealthy transitions. ctxResolver wires through the
+  // node registry (for CLI checks/diagnostics) and resolves auth from the
+  // profile's declared token_storage. Lazily reads the profile each tick —
+  // tolerable since checks are 60s+ cadence and the file is tiny.
+  startHealthMonitorHandlers({
+    ctxResolver: (state, helpers) => {
+      const profile = loadServiceProfile(helpers.userId, state.node_id, state.service_id);
+      const storageRef = profile?.control_surface?.api?.token_storage;
+      const auth = storageRef ? resolveTokenStorage(helpers.userId, storageRef) : null;
+      return {
+        fetchFn:        globalThis.fetch,
+        execFn:         makeNodeExecFn(helpers.userId, state.node_id),
+        auth_override:  auth || '',
+      };
+    },
+  });
+
+  // Snapshot pruner: daily sweep, deletes pre-state captures older than 30d
+  // unless their op_id is in pinned.json. Runs once at boot to clean any
+  // accumulated stale snapshots, then daily.
+  try { pruneAllSnapshots(); } catch (e) { log.warn('snapshot-pruner', 'boot prune failed', { err: e.message }); }
+  setInterval(() => {
+    try { pruneAllSnapshots(); }
+    catch (e) { log.warn('snapshot-pruner', 'daily prune failed', { err: e.message }); }
+  }, 24 * 60 * 60 * 1000).unref?.();
   // Friction-as-proposer needs the same per-user push channel as watchers
   // for proposal bubbles + the task_complete broadcast on accept.
   setProposalBroadcastFn((userId, msg) => sendToUser(userId, msg));
