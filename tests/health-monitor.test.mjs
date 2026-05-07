@@ -16,6 +16,7 @@ import {
   unregisterProfileHealthWatchers,
   startHealthMonitorHandlers,
   setHealthMonitorCtxResolver,
+  _runSignalCheckForTest as runSignalCheck,
 } from '../scheduler/health-monitor.mjs';
 import { saveProfile } from '../lib/service-profile.mjs';
 import { listWatchers, unregisterWatcher } from '../scheduler/watchers.mjs';
@@ -56,36 +57,147 @@ describe('startHealthMonitorHandlers', () => {
 describe('registerProfileHealthWatchers', () => {
   beforeEach(() => { saveProfile(USER, NODE, fresh()); });
 
-  it('creates one watcher per health_signal', () => {
+  it('creates one watcher carrying every signal', () => {
     const result = registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'test-agent' });
-    expect(result.registered).toBe(2); // pihole fixture has 2 health_signals
-    expect(result.watchers.map(w => w.signal_kind).sort()).toEqual(['blocking_enabled', 'service_up']);
+    expect(result.registered).toBe(1); // single coalesced watcher
+    expect(result.signal_count).toBe(2); // pihole fixture has 2 health_signals
+    expect(result.watcher_id).toBeTruthy();
   });
 
-  it('persists watcher state with correct shape', () => {
+  it('persists watcher state with the coalesced signals[] shape', () => {
     registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'test-agent' });
     const watchers = listWatchers(USER);
     const profileWatchers = watchers.active.filter(w => w.kind === 'profile_health');
-    expect(profileWatchers).toHaveLength(2);
-    for (const w of profileWatchers) {
-      expect(w.state.node_id).toBe(NODE);
-      expect(w.state.service_id).toBe('pihole');
-      expect(w.state.last_state).toBe('unknown');
-      expect(w.state.current_incident_id).toBeNull();
-      expect(w.expiresAt).toBeNull(); // health watchers are indefinite
+    expect(profileWatchers).toHaveLength(1);
+    const w = profileWatchers[0];
+    expect(w.state.node_id).toBe(NODE);
+    expect(w.state.service_id).toBe('pihole');
+    expect(w.expiresAt).toBeNull(); // indefinite
+    expect(w.state.signals).toHaveLength(2);
+    expect(w.state.signals.map(s => s.kind).sort()).toEqual(['blocking_enabled', 'service_up']);
+    for (const s of w.state.signals) {
+      expect(s.last_state).toBe('unknown');
+      expect(s.current_incident_id).toBeNull();
+      expect(s.last_checked_at).toBeNull();
     }
+  });
+
+  it('returns zero when profile has no health signals', () => {
+    const noSignals = fresh();
+    noSignals.health_signals = [];
+    saveProfile(USER, NODE, noSignals);
+    const result = registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'test-agent' });
+    expect(result.registered).toBe(0);
+    expect(result.signal_count).toBe(0);
+    expect(result.watcher_id).toBeNull();
   });
 
   it('throws cleanly when profile does not exist', () => {
     expect(() => registerProfileHealthWatchers(USER, NODE, 'nonexistent'))
       .toThrow(/no profile/);
   });
+
+  it('normalizes LLM-coined non-canonical signal shape', () => {
+    // LLM-saved profiles often spell `check.mechanism` as `check.type`, nest
+    // `expect` inside check, or use 'exec'/'shell' for the mechanism. Make
+    // sure the watcher state ends up canonical regardless.
+    const profile = fresh();
+    profile.health_signals = [{
+      kind: 'ports_listening',
+      check: { type: 'exec', command: 'ss -ltn', expect: 'LISTEN' },
+      severity: 'critical',
+      cadence_sec: 60,
+    }];
+    saveProfile(USER, NODE, profile);
+    registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'a' });
+    const w = listWatchers(USER).active.find(x => x.kind === 'profile_health');
+    const sig = w.state.signals[0];
+    expect(sig.check.mechanism).toBe('cli'); // exec → cli
+    expect(sig.check.type).toBeUndefined();  // dropped
+    expect(sig.expect).toBe('LISTEN');       // pulled up to signal level
+    expect(sig.check.expect).toBeUndefined();
+    expect(sig.check.command).toBe('ss -ltn');
+  });
+});
+
+describe('runSignalCheck — cli / exec mechanisms', () => {
+  // Helper to install a stub execFn for the duration of one assertion.
+  function withExecFn(execFn, fn) {
+    setHealthMonitorCtxResolver(() => ({ execFn }));
+    try { return fn(); } finally { setHealthMonitorCtxResolver(null); }
+  }
+
+  it("treats 'exec' as an alias for 'cli'", async () => {
+    const calls = [];
+    const execFn = async (cmd) => { calls.push(cmd); return { stdout: 'active', stderr: '', exitCode: 0 }; };
+    await withExecFn(execFn, async () => {
+      const result = await runSignalCheck(
+        { node_id: NODE, service_id: 'pihole', endpoint: '' },
+        { check: { mechanism: 'exec', command: 'systemctl is-active foo' }, expect: 'active' },
+        { userId: USER },
+      );
+      expect(result.ok).toBe(true);
+      expect(result.value).toBe('active');
+      expect(calls).toEqual(['systemctl is-active foo']);
+    });
+  });
+
+  it("'cli' mechanism passes through identically", async () => {
+    const execFn = async () => ({ stdout: 'enabled', stderr: '', exitCode: 0 });
+    await withExecFn(execFn, async () => {
+      const result = await runSignalCheck(
+        { node_id: NODE, service_id: 'pihole', endpoint: '' },
+        { check: { mechanism: 'cli', command: 'pihole status' }, expect: 'enabled' },
+        { userId: USER },
+      );
+      expect(result.ok).toBe(true);
+      expect(result.value).toBe('enabled');
+    });
+  });
+
+  it('returns unknown when execFn is not provided', async () => {
+    setHealthMonitorCtxResolver(null); // no execFn in ctx
+    const result = await runSignalCheck(
+      '',
+      { check: { mechanism: 'cli', command: 'whatever' } },
+      { userId: USER },
+    );
+    expect(result.unknown).toBe(true);
+    expect(result.ok).toBe(false);
+  });
+
+  it('returns unknown when node is offline (so disconnects do not flip signals unhealthy)', async () => {
+    const execFn = async () => ({ stdout: '', stderr: 'Node "abc" is offline', exitCode: 1 });
+    await withExecFn(execFn, async () => {
+      const result = await runSignalCheck(
+        { node_id: NODE, service_id: 'pihole', endpoint: '' },
+        { check: { mechanism: 'cli', command: 'foo' }, expect: 'bar' },
+        { userId: USER },
+      );
+      expect(result.unknown).toBe(true);
+      expect(result.ok).toBe(false);
+    });
+  });
+
+  it('returns ok=false (genuine unhealthy) when the command runs but produces wrong output', async () => {
+    const execFn = async () => ({ stdout: 'inactive', stderr: '', exitCode: 3 });
+    await withExecFn(execFn, async () => {
+      const result = await runSignalCheck(
+        { node_id: NODE, service_id: 'pihole', endpoint: '' },
+        { check: { mechanism: 'cli', command: 'systemctl is-active foo' }, expect: 'active' },
+        { userId: USER },
+      );
+      expect(result.unknown).toBeUndefined();
+      expect(result.ok).toBe(false);
+      expect(result.value).toBe('inactive');
+    });
+  });
 });
 
 describe('unregisterProfileHealthWatchers', () => {
   beforeEach(() => { saveProfile(USER, NODE, fresh()); });
 
-  it('removes only the matching service_id watchers', () => {
+  it('removes only the matching service_id watcher', () => {
     // Save a second profile + register both
     const second = fresh();
     second.service_id = 'home_assistant';
@@ -93,13 +205,13 @@ describe('unregisterProfileHealthWatchers', () => {
     saveProfile(USER, NODE, second);
     registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'a' });
     registerProfileHealthWatchers(USER, NODE, 'home_assistant', { agentId: 'a' });
-    expect(listWatchers(USER).active.filter(w => w.kind === 'profile_health')).toHaveLength(4);
+    expect(listWatchers(USER).active.filter(w => w.kind === 'profile_health')).toHaveLength(2);
 
     const removed = unregisterProfileHealthWatchers(USER, NODE, 'pihole');
-    expect(removed).toBe(2);
+    expect(removed).toBe(1);
     const left = listWatchers(USER).active.filter(w => w.kind === 'profile_health');
-    expect(left).toHaveLength(2);
-    expect(left.every(w => w.state.service_id === 'home_assistant')).toBe(true);
+    expect(left).toHaveLength(1);
+    expect(left[0].state.service_id).toBe('home_assistant');
   });
 
   it('returns 0 when nothing matches', () => {

@@ -155,17 +155,43 @@ const data = await res.json();
 
 ---
 
+## Saving file outputs
+
+**Never write to `~/Downloads`, `os.homedir()`, or any path outside the OpenEnsemble install.** Skills that produce files on disk must save them under the user's profile so they show up in the Profile Files UI and can be shared, attached, or read by other tools.
+
+Use the `getUserFilesDir(userId, kind)` helper. It returns `~/.openensemble/users/{userId}/{kind}/` and creates the directory:
+
+```js
+import { getUserFilesDir } from '../../lib/paths.mjs';
+
+const dir = getUserFilesDir(userId, 'videos'); // or 'images', 'documents', 'research', 'code'
+const savedPath = path.join(dir, `myskill-${Date.now()}.mp4`);
+fs.writeFileSync(savedPath, buffer);
+```
+
+Pick the `kind` that matches what you're saving:
+- `videos` — any video output (mp4, webm, …)
+- `images` — any image output (png, jpg, gif, …)
+- `documents` — pdfs, docx, csv, plain-text exports
+- `research` — markdown notes, summaries, research artifacts
+- `code` — generated/scaffolded source files
+
+If your skill is a per-user one (in `users/{userId}/skills/`), the relative import is `../../../../lib/paths.mjs`. Top-level skills (in `skills/`) use `../../lib/paths.mjs`.
+
+---
+
 ## Showing images and videos
 
 If your skill produces an image or video, return the file path *and* push an inline preview to the chat by accepting `ctx` as the 5th parameter:
 
 ```js
+import { getUserFilesDir } from '../../lib/paths.mjs';
+
 export async function executeSkillTool(name, args, userId, agentId, ctx) {
   if (name === 'myskill_make_image') {
     const base64 = await callSomeApiThatReturnsBase64Png(args.prompt);
     const filename = `myskill-${Date.now()}.png`;
-    const savedPath = path.join(process.env.OPENENSEMBLE_ROOT, 'users', userId, 'images', filename);
-    fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+    const savedPath = path.join(getUserFilesDir(userId, 'images'), filename);
     fs.writeFileSync(savedPath, Buffer.from(base64, 'base64'));
 
     // Push the inline preview bubble — same one Grok / Fireworks use.

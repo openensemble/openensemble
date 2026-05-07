@@ -54,7 +54,7 @@ export async function handle(req, res) {
       if (existing >= MAX_AGENTS_PER_USER) {
         res.writeHead(429); res.end(JSON.stringify({ error: `Agent limit reached (${MAX_AGENTS_PER_USER}). Delete some before creating more.` })); return true;
       }
-      let { name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, outputDir, maxTokens, contextSize } = JSON.parse(await readBody(req));
+      let { name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, maxTokens, contextSize } = JSON.parse(await readBody(req));
       if (contextSize != null) {
         contextSize = parseInt(contextSize, 10);
         if (!Number.isFinite(contextSize) || contextSize < 1024 || contextSize > 2_000_000) {
@@ -72,9 +72,8 @@ export async function handle(req, res) {
         // Child can't set a custom system prompt — it must use buildSystemPrompt
         // so the safety prefix and identity template apply cleanly.
         systemPrompt = undefined;
-        outputDir = undefined;
       }
-      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, outputDir, maxTokens, contextSize, ownerId: authId });
+      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, maxTokens, contextSize, ownerId: authId });
       if (skillCategory) {
         const { setRoleAssignment } = await import('../roles.mjs');
         setRoleAssignment(skillCategory, agent.id, authId);
@@ -98,7 +97,6 @@ export async function handle(req, res) {
       if (changes.emoji)    uiChanges.emoji    = changes.emoji;
       if (changes.model)     globalChanges.model     = changes.model;
       if (changes.provider)  globalChanges.provider  = changes.provider;
-      if ('outputDir' in changes) globalChanges.outputDir = changes.outputDir || null;
       if ('maxTokens' in changes) globalChanges.maxTokens = changes.maxTokens ? parseInt(changes.maxTokens, 10) : null;
       if ('contextSize' in changes) {
         const cs = changes.contextSize ? parseInt(changes.contextSize, 10) : null;

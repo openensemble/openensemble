@@ -315,3 +315,72 @@
   user-select: all;
   cursor: pointer;
 }
+
+/* ── Profile rollup inside each node card ───────────────────────────────── */
+.node-profiles-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.node-profiles-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.node-profile-row {
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: var(--bg2);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.node-profile-row:last-child { margin-bottom: 0; }
+.node-profile-row-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.node-profile-name {
+  font-weight: 600;
+}
+.node-profile-row-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  padding-left: 14px;
+}
+.node-profile-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.node-trust-unverified {
+  opacity: 0.6;
+}
+.node-profiles-empty {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+/* ── Sidebar nodes-button alert dot ──────────────────────────────────────── */
+.strip-btn-alert {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--red);
+  border: 2px solid var(--bg2);
+  box-shadow: 0 0 0 1px var(--red);
+  pointer-events: none;
+}

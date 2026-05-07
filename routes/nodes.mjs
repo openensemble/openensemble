@@ -21,6 +21,7 @@ import {
 } from '../skills/nodes/node-registry.mjs';
 import { requireAuth, readBody, getUser, getSessionUserId, getAuthToken } from './_helpers.mjs';
 import { getLanAddress } from '../discovery.mjs';
+import { getNodeProfilesSummary } from '../lib/node-profile-summary.mjs';
 import { handlePairingRoutes } from './nodes/pairing.mjs';
 import { initNodeWss, getNodeWss } from './nodes/websocket.mjs';
 import { initTerminalWss, getTerminalWss, handleTerminalPage, handleTerminalTicket } from './nodes/terminal.mjs';
@@ -129,6 +130,7 @@ export async function handle(req, res) {
       ...n,
       latestVersion,
       outdated: n.version && n.version !== 'unknown' && n.version !== latestVersion,
+      profiles: getNodeProfilesSummary(userId, n.nodeId, n.hostname),
     }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(annotated));

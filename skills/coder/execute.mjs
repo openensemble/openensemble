@@ -10,7 +10,6 @@ import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execFile, spawn, execSync } from 'child_process';
-import { broadcastToUsers } from '../../routes/_helpers/broadcast.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -142,54 +141,6 @@ function getProjectDir(userId) {
   return dir;
 }
 
-// Full file listing for a project — used by the client-side mirror to seed its
-// local folder on first open. Honors the same skip-list as live mirroring and
-// enforces a per-file + total size cap so the response stays bounded.
-export function getProjectSnapshot(userId, projectName) {
-  validateProjectName(projectName);
-  const ws = getWorkspace(userId);
-  const dir = path.join(ws, projectName);
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-    throw new Error(`Project "${projectName}" not found.`);
-  }
-
-  const FILE_CAP_BYTES = 5 * 1024 * 1024;
-  const TOTAL_CAP_BYTES = 50 * 1024 * 1024;
-
-  const files = [];
-  const skipped = [];
-  let total = 0;
-  let truncated = false;
-
-  const walk = (d) => {
-    if (truncated) return;
-    const entries = readdirSync(d, { withFileTypes: true });
-    for (const e of entries) {
-      const abs = path.join(d, e.name);
-      const rel = path.relative(dir, abs);
-      if (!_shouldMirrorPath(rel)) continue;
-      if (e.isDirectory()) { walk(abs); if (truncated) return; continue; }
-      if (!e.isFile()) continue;
-      let bytes;
-      try { bytes = readFileSync(abs); }
-      catch { continue; }
-      if (bytes.length > FILE_CAP_BYTES) {
-        skipped.push({ path: rel.split(path.sep).join('/'), size: bytes.length, reason: 'file_too_large' });
-        continue;
-      }
-      if (total + bytes.length > TOTAL_CAP_BYTES) { truncated = true; return; }
-      total += bytes.length;
-      files.push({
-        path: rel.split(path.sep).join('/'),
-        contentBase64: bytes.toString('base64'),
-      });
-    }
-  };
-  walk(dir);
-
-  return { project: projectName, files, skipped, truncated, totalBytes: total };
-}
-
 // Snapshot of the current coder state for a user — used by the nodes skill to
 // deploy whatever Ada is currently working on. Returns null if no project is
 // active yet. Never throws: callers handle the "nothing to push" case.
@@ -259,7 +210,7 @@ export function listUserProjects(userId) {
       try { children = readdirSync(d, { withFileTypes: true }); }
       catch { return; }
       for (const c of children) {
-        if (MIRROR_SKIP_SEGMENTS.has(c.name)) continue;
+        if (WALK_SKIP_SEGMENTS.has(c.name)) continue;
         const abs = path.join(d, c.name);
         if (c.isDirectory()) { walk(abs); continue; }
         if (!c.isFile()) continue;
@@ -326,66 +277,13 @@ function isCommandBlocked(command) {
   return false;
 }
 
-// ── Client-side mirror ───────────────────────────────────────────────────────
-// When the user has opted into a local folder mirror (File System Access API),
-// every file mutation here is echoed to their browser over WS so the browser
-// can write it into the user-picked folder. The browser is responsible for the
-// directory handle + permissions; the server just pushes the bytes.
-
-// Files that are pointless to mirror — bulky, regenerable, or noisy.
-const MIRROR_SKIP_SEGMENTS = new Set([
+// Directories the project-stat walker skips so size/file-count totals reflect
+// source — not node_modules, build output, virtualenvs, or runtime caches.
+const WALK_SKIP_SEGMENTS = new Set([
   'node_modules', '.git', '.venv', 'venv', '__pycache__', '.next',
   'dist', 'build', '.cache', '.turbo', '.parcel-cache', '.pytest_cache',
   '.run', // coder_start_server runtime state (pid/log/meta) — not source
 ]);
-
-function _shouldMirrorPath(relPath) {
-  if (!relPath) return false;
-  const parts = relPath.split(path.sep).filter(Boolean);
-  return !parts.some(p => MIRROR_SKIP_SEGMENTS.has(p));
-}
-
-function _mirrorWrite(userId, project, relPath, content) {
-  if (!project || !_shouldMirrorPath(relPath)) return;
-  try {
-    const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
-    // 5 MB per-file cap — larger files get skipped (client sees no update).
-    if (bytes.length > 5 * 1024 * 1024) return;
-    broadcastToUsers([userId], {
-      type: 'coder_mirror',
-      op: 'write',
-      project,
-      path: relPath.split(path.sep).join('/'),
-      contentBase64: bytes.toString('base64'),
-    });
-  } catch { /* mirror is best-effort — never fail the tool */ }
-}
-
-function _mirrorDelete(userId, project, relPath) {
-  if (!project) return;
-  try {
-    broadcastToUsers([userId], {
-      type: 'coder_mirror',
-      op: 'delete',
-      project,
-      path: relPath.split(path.sep).join('/'),
-    });
-  } catch {}
-}
-
-function _mirrorDeleteProject(userId, project) {
-  if (!project) return;
-  try {
-    broadcastToUsers([userId], { type: 'coder_mirror', op: 'delete_project', project });
-  } catch {}
-}
-
-function _mirrorResync(userId, project) {
-  if (!project) return;
-  try {
-    broadcastToUsers([userId], { type: 'coder_mirror', op: 'resync', project });
-  } catch {}
-}
 
 // ── Tool implementations ─────────────────────────────────────────────────────
 
@@ -420,7 +318,6 @@ async function createProject(name, userId) {
   writeFileSync(path.join(dir, 'PROJECT_LOG.md'), logContent);
   _activeProject.set(userId, name);
   appendWorkspaceLog(`Created project "${name}"`, userId);
-  _mirrorWrite(userId, name, 'PROJECT_LOG.md', logContent);
   return `Created project "${name}" and set it as active.\nWorkspace: ${dir}`;
 }
 
@@ -466,7 +363,6 @@ async function deleteProject(name, userId) {
   // Clear active project if it was the one deleted
   if (_activeProject.get(userId) === name) _activeProject.delete(userId);
   appendWorkspaceLog(`Deleted project "${name}"`, userId);
-  _mirrorDeleteProject(userId, name);
   return `Deleted project "${name}" and all its contents.`;
 }
 
@@ -490,7 +386,6 @@ async function writeProjectFile(filePath, content, userId) {
   mkdirSync(path.dirname(abs), { recursive: true });
   writeFileSync(abs, content);
   appendLog(dir, `Wrote \`${filePath}\` (${content.split('\n').length} lines)`);
-  _mirrorWrite(userId, _activeProject.get(userId), filePath, content);
   return `Wrote ${filePath}`;
 }
 
@@ -508,7 +403,6 @@ async function editProjectFile(filePath, oldStr, newStr, userId) {
   writeFileSync(abs, updated);
   const preview = oldStr.length > 60 ? oldStr.slice(0, 60) + '…' : oldStr;
   appendLog(dir, `Edited \`${filePath}\` — replaced "${preview}"`);
-  _mirrorWrite(userId, _activeProject.get(userId), filePath, updated);
   return `Edited ${filePath}`;
 }
 
@@ -523,12 +417,10 @@ async function deleteProjectFile(filePath, userId) {
     if (entries.length > 0) throw new Error(`Directory "${filePath}" is not empty. Remove its contents first.`);
     rmdirSync(abs);
     appendLog(dir, `Deleted empty directory \`${filePath}\``);
-    _mirrorDelete(userId, _activeProject.get(userId), filePath);
     return `Deleted directory ${filePath}`;
   }
   unlinkSync(abs);
   appendLog(dir, `Deleted file \`${filePath}\``);
-  _mirrorDelete(userId, _activeProject.get(userId), filePath);
   return `Deleted ${filePath}`;
 }
 
@@ -611,9 +503,6 @@ async function* runCommand(command, timeout, userId) {
   ].filter(Boolean).join('');
 
   appendLog(dir, `Ran \`${command.length > 80 ? command.slice(0, 80) + '…' : command}\` → exit ${finalCode}`);
-  // Shell commands can create/modify/delete arbitrary files inside the project.
-  // Tracking every change is infeasible — ask the client to re-snapshot.
-  _mirrorResync(userId, _activeProject.get(userId));
   yield { type: 'result', text: (full || '(no output)') + tail };
 }
 
@@ -803,7 +692,6 @@ async function multiEditProjectFile(filePath, edits, userId) {
   }
   writeFileSync(abs, content);
   appendLog(dir, `Multi-edited \`${filePath}\` (${edits.length} edits)`);
-  _mirrorWrite(userId, _activeProject.get(userId), filePath, content);
   return `Applied ${edits.length} edit${edits.length === 1 ? '' : 's'} to ${filePath}`;
 }
 

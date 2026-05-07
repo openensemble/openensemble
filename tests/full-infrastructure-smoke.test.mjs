@@ -161,7 +161,8 @@ describe('Full infrastructure smoke', () => {
       const pihealth = listWatchers(USER).active.filter(
         w => w.kind === 'profile_health' && w.state.service_id === 'pihole'
       );
-      expect(pihealth).toHaveLength(2);
+      expect(pihealth).toHaveLength(1);
+      expect(pihealth[0].state.signals).toHaveLength(2);
 
       // ── 6. simulate a failure: ftl crashed with regex error ──
       sim.fail();
@@ -210,9 +211,9 @@ describe('Full infrastructure smoke', () => {
       // either way nothing should be deleted (it's all recent).
       expect(pruneStats.deleted).toBe(0);
 
-      // ── cleanup: unregister watchers so we don't leak across tests ──
+      // ── cleanup: unregister watcher so we don't leak across tests ──
       const removed = unregisterProfileHealthWatchers(USER, NODE, 'pihole');
-      expect(removed).toBe(2);
+      expect(removed).toBe(1);
 
     } finally {
       globalThis.fetch = realFetch;

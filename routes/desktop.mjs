@@ -5,7 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { requireAuth, getAgentsForUser, safeId as safeIdFn, BASE_DIR, getUserDir, readBody, withLock } from './_helpers.mjs';
+import { requireAuth, safeId as safeIdFn, BASE_DIR, getUserDir, readBody, withLock } from './_helpers.mjs';
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
 const VIDEO_EXTS  = new Set(['.mp4', '.webm', '.mov']);
 
@@ -72,12 +72,10 @@ export async function handle(req, res) {
   // ── GET /api/desktop/images ── list all generated images across user's agents
   if (req.url === '/api/desktop/images' && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
-    const agents = getAgentsForUser(userId);
     const images = [];
 
     // User-scoped images dir (no agent required)
     const userImgDir = path.join(getUserDir(userId), 'images');
-    const dirsScanned = new Set([userImgDir]);
     try {
       for (const f of fs.readdirSync(userImgDir)) {
         const ext = path.extname(f).toLowerCase();
@@ -88,22 +86,6 @@ export async function handle(req, res) {
         } catch {}
       }
     } catch {}
-    // Agent outputDir images
-    for (const agent of agents) {
-      const dir = agent.outputDir;
-      if (!dir || dirsScanned.has(dir)) continue;
-      dirsScanned.add(dir);
-      try {
-        for (const f of fs.readdirSync(dir)) {
-          const ext = path.extname(f).toLowerCase();
-          if (!IMAGE_EXTS.has(ext)) continue;
-          try {
-            const stat = fs.statSync(path.join(dir, f));
-            images.push({ filename: f, agentId: agent.id, agentName: agent.name, agentEmoji: agent.emoji, createdAt: stat.mtime.toISOString(), size: stat.size });
-          } catch {}
-        }
-      } catch {}
-    }
 
     // Include images shared with this user from other users
     const seenFiles = new Set(images.map(i => i.filename));
@@ -139,24 +121,13 @@ export async function handle(req, res) {
   const imgMatch = req.url.match(/^\/api\/desktop\/images\/([^?]+)/);
   if (imgMatch && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
-    const url = new URL(req.url, 'http://x');
     const filename = decodeURIComponent(imgMatch[1]);
-    const agentId = url.searchParams.get('agent');
     const safeName = path.basename(filename);
 
-    // Resolve file path: check user-scoped dir first, then agent outputDir, then shared files
+    // Resolve file path: check user-scoped dir first, then shared files
     let filePath = null;
     const userImgPath = path.join(getUserDir(userId), 'images', safeName);
-    if (fs.existsSync(userImgPath)) {
-      filePath = userImgPath;
-    } else if (agentId) {
-      const agents = getAgentsForUser(userId);
-      const agent = agents.find(a => a.id === agentId && a.outputDir);
-      if (agent) {
-        const candidate = path.join(agent.outputDir, safeName);
-        if (fs.existsSync(candidate)) filePath = candidate;
-      }
-    }
+    if (fs.existsSync(userImgPath)) filePath = userImgPath;
     if (!filePath) filePath = resolveSharedFile(userId, safeName, 'image');
     if (!filePath) { res.writeHead(404); res.end('Not found'); return true; }
 
@@ -176,24 +147,12 @@ export async function handle(req, res) {
   const imgDelMatch = req.url.match(/^\/api\/desktop\/images\/([^?]+)/);
   if (imgDelMatch && req.method === 'DELETE') {
     const userId = requireAuth(req, res); if (!userId) return true;
-    const url = new URL(req.url, 'http://x');
     const safeName = path.basename(decodeURIComponent(imgDelMatch[1]));
     const ext = path.extname(safeName).toLowerCase();
     if (!IMAGE_EXTS.has(ext)) { res.writeHead(400); res.end('Invalid file type'); return true; }
-    const agentId = url.searchParams.get('agent');
 
-    let filePath = null;
     const userImgPath = path.join(getUserDir(userId), 'images', safeName);
-    if (fs.existsSync(userImgPath)) {
-      filePath = userImgPath;
-    } else if (agentId) {
-      const agents = getAgentsForUser(userId);
-      const agent = agents.find(a => a.id === agentId && a.outputDir);
-      if (agent) {
-        const candidate = path.join(agent.outputDir, safeName);
-        if (fs.existsSync(candidate)) filePath = candidate;
-      }
-    }
+    const filePath = fs.existsSync(userImgPath) ? userImgPath : null;
     if (!filePath) { res.writeHead(404); res.end('Not found'); return true; }
     fs.unlinkSync(filePath);
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -205,20 +164,17 @@ export async function handle(req, res) {
   if (req.url === '/api/desktop/videos' && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
     const videos = [];
-    const dirs = new Set([path.join(getUserDir(userId), 'videos')]);
-    for (const agent of getAgentsForUser(userId)) { if (agent.outputDir) dirs.add(agent.outputDir); }
-    for (const dir of dirs) {
-      try {
-        for (const f of fs.readdirSync(dir)) {
-          const ext = path.extname(f).toLowerCase();
-          if (!VIDEO_EXTS.has(ext)) continue;
-          try {
-            const stat = fs.statSync(path.join(dir, f));
-            videos.push({ filename: f, dir, createdAt: stat.mtime.toISOString(), size: stat.size });
-          } catch {}
-        }
-      } catch {}
-    }
+    const dir = path.join(getUserDir(userId), 'videos');
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        const ext = path.extname(f).toLowerCase();
+        if (!VIDEO_EXTS.has(ext)) continue;
+        try {
+          const stat = fs.statSync(path.join(dir, f));
+          videos.push({ filename: f, dir, createdAt: stat.mtime.toISOString(), size: stat.size });
+        } catch {}
+      }
+    } catch {}
     // Include videos shared with this user from other users
     const seenVids = new Set(videos.map(v => v.filename));
     const vidShares = loadSharing();
@@ -250,13 +206,8 @@ export async function handle(req, res) {
     const userId = requireAuth(req, res); if (!userId) return true;
 
     const safeName = path.basename(decodeURIComponent(vidMatch[1]));
-    // Search user-scoped video dir + all agent outputDirs + shared files
-    const dirs = [path.join(getUserDir(userId), 'videos'), ...getAgentsForUser(userId).map(a => a.outputDir).filter(Boolean)];
-    let filePath = null;
-    for (const dir of dirs) {
-      const candidate = path.join(dir, safeName);
-      if (fs.existsSync(candidate)) { filePath = candidate; break; }
-    }
+    const userVidPath = path.join(getUserDir(userId), 'videos', safeName);
+    let filePath = fs.existsSync(userVidPath) ? userVidPath : null;
     if (!filePath) filePath = resolveSharedFile(userId, safeName, 'video');
     if (!filePath) { res.writeHead(404); res.end('Not found'); return true; }
 
@@ -292,12 +243,8 @@ export async function handle(req, res) {
     const safeName = path.basename(decodeURIComponent(vidDelMatch[1]));
     const ext = path.extname(safeName).toLowerCase();
     if (!VIDEO_EXTS.has(ext)) { res.writeHead(400); res.end('Invalid file type'); return true; }
-    const dirs = [path.join(getUserDir(userId), 'videos'), ...getAgentsForUser(userId).map(a => a.outputDir).filter(Boolean)];
-    let filePath = null;
-    for (const dir of dirs) {
-      const candidate = path.join(dir, safeName);
-      if (fs.existsSync(candidate)) { filePath = candidate; break; }
-    }
+    const userVidPath = path.join(getUserDir(userId), 'videos', safeName);
+    const filePath = fs.existsSync(userVidPath) ? userVidPath : null;
     if (!filePath) { res.writeHead(404); res.end('Not found'); return true; }
     fs.unlinkSync(filePath);
     res.writeHead(200, { 'Content-Type': 'application/json' });

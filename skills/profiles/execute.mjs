@@ -12,6 +12,7 @@ import {
   listProfilesForNode,
   setTrustState,
   renderProfileMd,
+  patchProfile,
   ProfileValidationError,
 } from '../../lib/service-profile.mjs';
 import { verifyProfileReadonly, dispatchCapabilityCall } from '../../lib/capability-dispatcher.mjs';
@@ -69,6 +70,25 @@ async function execProfileSave(args, userId) {
   }
 }
 
+async function execProfilePatch(args, userId) {
+  const { node_id, service_id, edits } = args;
+  if (!node_id || !service_id) {
+    return 'Error: profile_patch requires node_id, service_id, and edits.';
+  }
+  if (!Array.isArray(edits) || !edits.length) {
+    return 'Error: edits must be a non-empty array of {op, path, value?} objects.';
+  }
+  try {
+    const updated = patchProfile(userId, node_id, service_id, edits);
+    return `Patched profile "${service_id}" on "${node_id}" — applied ${edits.length} edit${edits.length === 1 ? '' : 's'}. Trust state: ${updated.trust_state}.`;
+  } catch (e) {
+    if (e instanceof ProfileValidationError) {
+      return `Validation error after patch: ${e.message}. Original profile preserved.`;
+    }
+    return `Error patching profile: ${e.message}. Original profile preserved.`;
+  }
+}
+
 async function execProfileLoad(args, userId) {
   const { node_id, service_id, render } = args;
   if (!node_id || !service_id) return 'Error: profile_load requires node_id and service_id.';
@@ -118,11 +138,11 @@ async function execProfileSetTrustState(args, userId) {
         const reg = registerProfileHealthWatchers(userId, node_id, service_id, {
           agentId: `${userId}_coordinator`,
         });
-        watcherNote = ` Started ${reg.registered} health watcher${reg.registered === 1 ? '' : 's'}.`;
+        watcherNote = ` Started health monitor (${reg.signal_count} signal${reg.signal_count === 1 ? '' : 's'}).`;
       }
     } else if (state === 'unverified') {
       const removed = unregisterProfileHealthWatchers(userId, node_id, service_id);
-      if (removed > 0) watcherNote = ` Stopped ${removed} health watcher${removed === 1 ? '' : 's'}.`;
+      if (removed > 0) watcherNote = ` Stopped health monitor.`;
     }
   } catch (e) {
     watcherNote = ` (watcher management failed: ${e.message})`;
@@ -304,6 +324,7 @@ export default async function execute(name, args, userId, _agentId, _ctx) {
   const a = args || {};
   switch (name) {
     case 'profile_save':              return execProfileSave(a, userId);
+    case 'profile_patch':             return execProfilePatch(a, userId);
     case 'profile_load':              return execProfileLoad(a, userId);
     case 'profile_list':              return execProfileList(a, userId);
     case 'profile_set_trust_state':   return execProfileSetTrustState(a, userId);

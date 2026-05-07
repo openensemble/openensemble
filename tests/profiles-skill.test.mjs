@@ -44,6 +44,76 @@ describe('profile_save', () => {
   });
 });
 
+describe('profile_patch', () => {
+  beforeEach(async () => {
+    await execute('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER, null, {});
+  });
+
+  it('applies a single set edit to a nested array path', async () => {
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'pihole',
+      edits: [{ op: 'set', path: 'health_signals[0].expect', value: { contains: 'active' } }],
+    }, USER, null, {});
+    expect(result).toMatch(/applied 1 edit/);
+    const p = loadProfile(USER, NODE, 'pihole');
+    expect(p.health_signals[0].expect).toEqual({ contains: 'active' });
+  });
+
+  it('applies multiple edits in one call (set + remove)', async () => {
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'pihole',
+      edits: [
+        { op: 'set',    path: 'health_signals[0].cadence_sec', value: 30 },
+        { op: 'set',    path: 'known_quirks',                  value: ['quirk-a', 'quirk-b'] },
+        { op: 'remove', path: 'health_signals[1]' },
+      ],
+    }, USER, null, {});
+    expect(result).toMatch(/applied 3 edits/);
+    const p = loadProfile(USER, NODE, 'pihole');
+    expect(p.health_signals[0].cadence_sec).toBe(30);
+    expect(p.known_quirks).toEqual(['quirk-a', 'quirk-b']);
+    expect(p.health_signals).toHaveLength(1); // pihole fixture has 2; we removed [1]
+  });
+
+  it('rolls back atomically when an edit produces an invalid profile', async () => {
+    const before = loadProfile(USER, NODE, 'pihole');
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'pihole',
+      edits: [
+        { op: 'set', path: 'health_signals[0].cadence_sec', value: 99 }, // valid
+        { op: 'set', path: 'trust_state', value: 'totally-bogus' },       // invalid
+      ],
+    }, USER, null, {});
+    expect(result).toMatch(/Validation error/);
+    expect(result).toMatch(/Original profile preserved/);
+    const after = loadProfile(USER, NODE, 'pihole');
+    expect(after).toEqual(before); // unchanged on disk
+  });
+
+  it('errors on missing or empty edits', async () => {
+    expect(await execute('profile_patch', { node_id: NODE, service_id: 'pihole' }, USER, null, {})).toMatch(/Error/);
+    expect(await execute('profile_patch', { node_id: NODE, service_id: 'pihole', edits: [] }, USER, null, {})).toMatch(/Error/);
+  });
+
+  it('errors clearly on a bad path', async () => {
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'pihole',
+      edits: [{ op: 'set', path: 'health_signals[notanumber].expect', value: 'x' }],
+    }, USER, null, {});
+    expect(result).toMatch(/Error/);
+    expect(result).toMatch(/edit #1/);
+  });
+
+  it('errors when patching a profile that does not exist', async () => {
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'never-saved',
+      edits: [{ op: 'set', path: 'trust_state', value: 'reviewed' }],
+    }, USER, null, {});
+    expect(result).toMatch(/Error/);
+    expect(result).toMatch(/no profile/);
+  });
+});
+
 describe('profile_load', () => {
   it('returns JSON by default', async () => {
     await execute('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER, null, {});

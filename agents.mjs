@@ -28,22 +28,6 @@ function getUserAgentsPath(userId) {
   return path.join(USERS_DIR, userId, 'agents.json');
 }
 
-// outputDir, if set, must resolve inside the owner's own documents folder.
-// Prevents granting an agent access to /etc, /root, another user's data, or
-// anywhere outside the user's private scope.
-function validateOutputDir(userId, outputDir) {
-  if (!outputDir) return;
-  if (!userId || userId === 'shared') {
-    throw new Error('outputDir requires an owning user — shared agents cannot have an outputDir');
-  }
-  const allowedRoot = path.resolve(path.join(USERS_DIR, userId, 'documents'));
-  const resolved = path.resolve(outputDir);
-  const rel = path.relative(allowedRoot, resolved);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`outputDir must be inside your documents folder (${allowedRoot})`);
-  }
-}
-
 function loadUserAgents(userId) {
   const p = getUserAgentsPath(userId);
   if (!existsSync(p)) return [];
@@ -84,8 +68,7 @@ Be concise and direct. {{USER_NAME}} prefers short, focused answers over long ex
 You have access to persistent memory — relevant facts from past conversations may appear in your context. Use them naturally. When {{USER_NAME}} says "remember X", confirm briefly. When they say "forget X", confirm it's been removed.`;
 }
 
-export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, outputDir, maxTokens, contextSize, ownerId = null }) {
-  if (outputDir) validateOutputDir(ownerId, outputDir);
+export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, maxTokens, contextSize, ownerId = null }) {
   const id = 'agent_' + randomBytes(4).toString('hex');
   const agent = {
     id, name, emoji,
@@ -96,7 +79,6 @@ export function createCustomAgent({ name, emoji = '🤖', description, model, pr
     systemPrompt: systemPrompt ?? buildSystemPrompt(name, emoji, description),
     custom: true,
     ...(ownerId    ? { ownerId }    : {}),
-    ...(outputDir  ? { outputDir }  : {}),
     ...(maxTokens  ? { maxTokens }  : {}),
     ...(contextSize ? { contextSize } : {}),
   };
@@ -115,9 +97,6 @@ export function updateCustomAgent(id, changes) {
   const existing = all.find(a => a.id === id);
   if (!existing) return null;
   const userId = existing.ownerId ?? 'shared';
-  if (changes && 'outputDir' in changes && changes.outputDir) {
-    validateOutputDir(userId, changes.outputDir);
-  }
   const list = loadUserAgents(userId);
   const idx = list.findIndex(a => a.id === id);
   if (idx === -1) return null;

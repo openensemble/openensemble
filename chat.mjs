@@ -17,12 +17,12 @@
  * persists the session + runs memory signals.
  */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync } from 'fs';
 import path from 'path';
 import { buildAgentContext, formatContext, addToSessionBuffer, processSignals } from './memory.mjs';
 import { trackFriction } from './memory/signals.mjs';
 import { loadSession, appendToSession, loadCrossAgentContext } from './sessions.mjs';
-import { BASE_DIR } from './lib/paths.mjs';
+import { getUserFilesDir } from './lib/paths.mjs';
 import { log } from './logger.mjs';
 
 import {
@@ -321,10 +321,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       const slug = prompt.slice(0, 40).replace(/[^a-z0-9]+/gi, '_').toLowerCase().replace(/^_+|_+$/g, '');
       const filename = `${slug || 'video'}_${Date.now()}.mp4`;
 
-      const videoSaveDir = agent.outputDir || path.join(BASE_DIR, 'users', userId, 'videos');
       let savedPath = null;
       try {
-        mkdirSync(videoSaveDir, { recursive: true });
+        const videoSaveDir = getUserFilesDir(userId, 'videos');
         const vidRes = await fetch(videoUrl, { signal });
         writeFileSync(path.join(videoSaveDir, filename), Buffer.from(await vidRes.arrayBuffer()));
         savedPath = path.join(videoSaveDir, filename);
@@ -361,10 +360,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     const slug = prompt.slice(0, 40).replace(/[^a-z0-9]+/gi, '_').toLowerCase().replace(/^_+|_+$/g, '');
     const filename = `${slug || 'image'}_${Date.now()}.jpg`;
 
-    const grokImgDir = agent.outputDir || path.join(BASE_DIR, 'users', userId, 'images');
     let savedPath = null;
     try {
-      mkdirSync(grokImgDir, { recursive: true });
+      const grokImgDir = getUserFilesDir(userId, 'images');
       writeFileSync(path.join(grokImgDir, filename), Buffer.from(base64, 'base64'));
       savedPath = path.join(grokImgDir, filename);
     } catch (e) {
@@ -475,10 +473,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     const slug = prompt.slice(0, 40).replace(/[^a-z0-9]+/gi, '_').toLowerCase().replace(/^_+|_+$/g, '');
     const filename = `${slug || 'image'}_${Date.now()}.png`;
 
-    const fwImgDir = agent.outputDir || path.join(BASE_DIR, 'users', userId, 'images');
     let savedPath = null;
     try {
-      mkdirSync(fwImgDir, { recursive: true });
+      const fwImgDir = getUserFilesDir(userId, 'images');
       writeFileSync(path.join(fwImgDir, filename), Buffer.from(base64, 'base64'));
       savedPath = path.join(fwImgDir, filename);
     } catch (e) {

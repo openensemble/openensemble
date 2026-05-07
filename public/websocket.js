@@ -404,9 +404,11 @@ function handleServerMessage(msg) {
       break;
     case 'agent_notification':
       appendNotification(msg);
-      break;
-    case 'coder_mirror':
-      if (typeof applyMirrorMessage === 'function') applyMirrorMessage(msg);
+      // Profile health notifications also bump the nodes drawer's alert dot
+      // so the badge appears immediately, not on the next 15s refresh.
+      if (msg.event === 'profile_health_unhealthy' || msg.event === 'profile_health_recovered') {
+        if (typeof loadNodes === 'function') loadNodes();
+      }
       break;
     case 'task_update':
       if (typeof handleTaskUpdate === 'function') handleTaskUpdate(msg);

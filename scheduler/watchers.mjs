@@ -44,6 +44,7 @@ const STUCK_RATIO = 5;                          // No change for 5×cadence → 
 let _running = false;
 let _timer = null;
 let _sendStatusFn = null;
+let _sendNotificationFn = null;
 let _showImageFn = null;
 let _showVideoFn = null;
 
@@ -690,6 +691,23 @@ function handlerHelpers(record) {
         kind: record.kind, label: record.label, text, ts: Date.now(),
       });
     },
+    // Send a real notification (toast + persisted in agent session). Use for
+    // events that warrant the user's attention NOW even with the chat closed —
+    // a service going down, a deploy failing, a deadline missed. Routine
+    // progress updates should use postStatus instead.
+    notify: (content, opts = {}) => {
+      const ts = Date.now();
+      const fromName = opts.from || record.label || record.kind;
+      _sendNotificationFn?.(record.userId, {
+        type: 'agent_notification',
+        agent: record.agentId,
+        content,
+        from: { userName: fromName },
+        event: opts.event || record.kind,
+        data: opts.data || {},
+        ts,
+      });
+    },
   };
 }
 
@@ -711,9 +729,10 @@ async function tick() {
  * Start the supervisor. Pass it the WS push functions so handlers can post
  * status / image / video bubbles.
  */
-export function startWatcherSupervisor({ sendStatus, showImage, showVideo } = {}) {
+export function startWatcherSupervisor({ sendStatus, sendNotification, showImage, showVideo } = {}) {
   if (_running) return;
   _sendStatusFn = sendStatus || null;
+  _sendNotificationFn = sendNotification || null;
   _showImageFn = showImage || null;
   _showVideoFn = showVideo || null;
   loadAllUsersFromDisk();

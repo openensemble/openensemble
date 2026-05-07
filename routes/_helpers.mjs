@@ -263,7 +263,6 @@ export function agentToWire(a) {
            provider: a.provider ?? 'ollama', custom: !!a.custom,
            toolSet: a.toolSet ?? 'web', description: a.description ?? '',
            scope: a.scope ?? 'private', skillCategory: a.skillCategory ?? null,
-           outputDir: a.outputDir ?? null,
            maxTokens: a.maxTokens ?? null,
            contextSize: a.contextSize ?? 32768 };
 }

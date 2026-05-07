@@ -40,7 +40,7 @@ function profileWatchers(userId, nodeId, serviceId) {
 }
 
 describe('profile_set_trust_state auto-watcher management', () => {
-  it('registers watchers when transitioning to reviewed', async () => {
+  it('registers a single coalesced watcher when transitioning to reviewed', async () => {
     await profilesSkill('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER);
     expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(0);
 
@@ -49,28 +49,30 @@ describe('profile_set_trust_state auto-watcher management', () => {
     }, USER);
 
     expect(result).toMatch(/now \*\*reviewed\*\*/);
-    expect(result).toMatch(/Started 2 health watchers/);
-    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(2);
+    expect(result).toMatch(/Started health monitor \(2 signals\)/);
+    const w = profileWatchers(USER, NODE, 'pihole');
+    expect(w).toHaveLength(1);
+    expect(w[0].state.signals).toHaveLength(2);
   });
 
-  it('also registers watchers when transitioning to proven', async () => {
+  it('also registers when transitioning to proven', async () => {
     await profilesSkill('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER);
     const result = await profilesSkill('profile_set_trust_state', {
       node_id: NODE, service_id: 'pihole', state: 'proven',
     }, USER);
-    expect(result).toMatch(/Started 2 health watchers/);
-    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(2);
+    expect(result).toMatch(/Started health monitor \(2 signals\)/);
+    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(1);
   });
 
-  it('unregisters watchers when transitioning back to unverified', async () => {
+  it('unregisters when transitioning back to unverified', async () => {
     await profilesSkill('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER);
     await profilesSkill('profile_set_trust_state', { node_id: NODE, service_id: 'pihole', state: 'reviewed' }, USER);
-    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(2);
+    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(1);
 
     const result = await profilesSkill('profile_set_trust_state', {
       node_id: NODE, service_id: 'pihole', state: 'unverified',
     }, USER);
-    expect(result).toMatch(/Stopped 2 health watchers/);
+    expect(result).toMatch(/Stopped health monitor/);
     expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(0);
   });
 
@@ -78,11 +80,11 @@ describe('profile_set_trust_state auto-watcher management', () => {
     await profilesSkill('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER);
     await profilesSkill('profile_set_trust_state', { node_id: NODE, service_id: 'pihole', state: 'reviewed' }, USER);
     await profilesSkill('profile_set_trust_state', { node_id: NODE, service_id: 'pihole', state: 'reviewed' }, USER);
-    // Tear-down + re-register keeps the count at 2
-    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(2);
+    // Tear-down + re-register keeps the count at exactly 1
+    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(1);
   });
 
-  it('does not start watchers when profile has no health_signals', async () => {
+  it('does not start a watcher when profile has no health_signals', async () => {
     const noSignals = fresh();
     noSignals.health_signals = [];
     await profilesSkill('profile_save', { node_id: NODE, service_id: 'pihole', profile: noSignals }, USER);
@@ -91,7 +93,7 @@ describe('profile_set_trust_state auto-watcher management', () => {
       node_id: NODE, service_id: 'pihole', state: 'reviewed',
     }, USER);
     expect(result).toMatch(/now \*\*reviewed\*\*/);
-    expect(result).not.toMatch(/Started \d+ health watcher/);
+    expect(result).not.toMatch(/Started health monitor/);
     expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(0);
   });
 });

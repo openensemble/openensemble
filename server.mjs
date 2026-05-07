@@ -676,9 +676,10 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // (one-shot/cron) — see scheduler/watchers.mjs for the design.
   registerSystemWatchHandlers();
   startWatcherSupervisor({
-    sendStatus: (userId, msg) => sendToUser(userId, msg),
-    showImage:  (userId, msg) => sendToUser(userId, { type: 'image', ...msg }),
-    showVideo:  (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
+    sendStatus:       (userId, msg) => sendToUser(userId, msg),
+    sendNotification: (userId, msg) => sendToUser(userId, msg),
+    showImage:        (userId, msg) => sendToUser(userId, { type: 'image', ...msg }),
+    showVideo:        (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
   });
 
   // Profile health monitor: per-service watchers fire the troubleshooting

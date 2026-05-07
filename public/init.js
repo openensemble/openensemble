@@ -64,7 +64,6 @@ async function init() {
   loadModels().then(() => checkEmptyState()).catch(() => {});
   loadTaskList();
   startStatusBar();
-  if (typeof initMirror === 'function') initMirror();
 
   if (!_initDone) {
     _initDone = true;

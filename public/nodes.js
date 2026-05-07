@@ -149,6 +149,20 @@ async function loadNodes() {
   body.innerHTML = html;
   lucide.createIcons();
   startNodesRefresh();
+  refreshNodesAlertBadge();
+}
+
+// Toggle the small red dot on the sidebar Nodes button. Visible iff any
+// reachable node has at least one unhealthy profile signal — same signal that
+// triggers the toast notification — so the user notices something's wrong
+// even with the drawer closed.
+function refreshNodesAlertBadge() {
+  const dot = document.getElementById('sbtnNodesAlert');
+  if (!dot) return;
+  const anyUnhealthy = _nodesList.some(n =>
+    Array.isArray(n.profiles) && n.profiles.some(p => p.overall === 'unhealthy'),
+  );
+  dot.style.display = anyUnhealthy ? '' : 'none';
 }
 
 function renderNodeCard(node) {
@@ -218,7 +232,84 @@ function renderNodeCard(node) {
         <i data-lucide="trash-2" style="width:13px;height:13px"></i> Remove
       </button>
     </div>
+    ${renderProfilesSection(node)}
   </div>`;
+}
+
+// Compact per-profile rollup shown inside each node card. When no profiles
+// are saved yet, render a small "not onboarded" CTA so the user knows a node
+// is reachable but unmanaged — instead of looking identical to a node with a
+// hidden section.
+function renderProfilesSection(node) {
+  const profiles = Array.isArray(node.profiles) ? node.profiles : [];
+  if (!profiles.length) {
+    return `<div class="node-profiles-section">
+      <div class="node-profiles-empty">
+        <i data-lucide="info" style="width:12px;height:12px"></i>
+        Not yet onboarded — ask any agent to "onboard the services on ${escHtml(node.hostname)}" to start managing them.
+      </div>
+    </div>`;
+  }
+
+  const rows = profiles.map(p => {
+    const dot = profileOverallDot(p.overall);
+    const trustBadge = profileTrustBadge(p.trust_state);
+    const ver = p.detected_version ? ` <span style="color:var(--muted);font-size:11px">v${escHtml(p.detected_version)}</span>` : '';
+    let signalLine;
+    if (p.trust_state === 'unverified') {
+      signalLine = '<span style="color:var(--muted)">monitoring off (unverified)</span>';
+    } else if (p.signals_total === 0) {
+      signalLine = '<span style="color:var(--muted)">no health signals declared</span>';
+    } else {
+      const parts = [];
+      if (p.signals_healthy)   parts.push(`<span style="color:var(--green)">${p.signals_healthy} healthy</span>`);
+      if (p.signals_unhealthy) parts.push(`<span style="color:var(--red)">${p.signals_unhealthy} unhealthy</span>`);
+      if (p.signals_unknown)   parts.push(`<span style="color:var(--muted)">${p.signals_unknown} unknown</span>`);
+      signalLine = `${p.signals_total} signal${p.signals_total === 1 ? '' : 's'} · ${parts.join(' · ')}`;
+    }
+    const verifyLine = p.ops_total
+      ? `${p.ops_verified}/${p.ops_total} ops verified`
+      : 'no operations defined';
+    const incidentLine = p.open_incidents
+      ? ` · <span style="color:var(--red)">${p.open_incidents} open incident${p.open_incidents === 1 ? '' : 's'}</span>`
+      : '';
+    return `<div class="node-profile-row">
+      <div class="node-profile-row-header">
+        ${dot}
+        <span class="node-profile-name">${escHtml(p.service_id)}</span>${ver}
+        ${trustBadge}
+      </div>
+      <div class="node-profile-row-meta">${signalLine} · ${verifyLine}${incidentLine}</div>
+    </div>`;
+  }).join('');
+
+  return `<div class="node-profiles-section">
+    <div class="node-profiles-header">Service profiles (${profiles.length})</div>
+    ${rows}
+  </div>`;
+}
+
+function profileOverallDot(overall) {
+  const color =
+    overall === 'healthy'   ? 'var(--green)' :
+    overall === 'unhealthy' ? 'var(--red)' :
+    overall === 'monitoring' ? 'var(--yellow)' :
+    /* unverified */          'var(--muted)';
+  const title =
+    overall === 'healthy'   ? 'all signals healthy' :
+    overall === 'unhealthy' ? 'one or more signals unhealthy' :
+    overall === 'monitoring' ? 'monitoring (signals warming up or unknown)' :
+                              'unverified — monitoring off';
+  return `<span class="node-profile-dot" style="background:${color}" title="${title}"></span>`;
+}
+
+function profileTrustBadge(state) {
+  const label =
+    state === 'reviewed' ? 'reviewed' :
+    state === 'proven'   ? 'proven' :
+                           'unverified';
+  const cls = state === 'unverified' ? 'cdraw-badge node-trust-unverified' : 'cdraw-badge';
+  return `<span class="${cls}" style="margin-left:auto;font-size:10px">${label}</span>`;
 }
 
 // ── Popout Terminal ──────────────────────────────────────────────────────────

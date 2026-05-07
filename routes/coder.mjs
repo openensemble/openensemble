@@ -5,7 +5,6 @@
  *   GET    /api/coder/projects                  — list name/size/mtime/fileCount
  *   GET    /api/coder/projects/:name/download   — streams a zip archive
  *   DELETE /api/coder/projects/:name            — deletes the project
- *   GET    /api/coder/project-snapshot          — (legacy) seeds the client-side mirror
  *
  * All routes are scoped to the authenticated user's workspace
  * (`users/{userId}/documents/code/`). Ownership is enforced by
@@ -32,15 +31,14 @@ if (!ZIP_BIN) {
   console.warn('[coder] zip binary not found — code project downloads will fail. Install with: sudo apt install zip');
 }
 import {
-  getProjectSnapshot,
   listUserProjects,
   resolveUserProjectDir,
   deleteUserProject,
 } from '../skills/coder/execute.mjs';
 
-// Segments the zip archive should skip. Matches the client-side mirror skip
-// list so downloaded projects carry only source + small artifacts — no
-// node_modules, virtualenvs, or build output bloating the archive.
+// Segments the zip archive should skip so downloaded projects carry only
+// source + small artifacts — no node_modules, virtualenvs, or build output
+// bloating the archive.
 const ARCHIVE_SKIP = [
   'node_modules', '.git', '.venv', 'venv', '__pycache__', '.next',
   'dist', 'build', '.cache', '.turbo', '.parcel-cache', '.pytest_cache',
@@ -76,24 +74,6 @@ export async function handle(req, res) {
       const info = listUserProjects(userId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(info));
-    } catch (e) { safeError(res, e); }
-    return true;
-  }
-
-  // ── GET /api/coder/project-snapshot ── legacy mirror seed
-  if (req.url.startsWith('/api/coder/project-snapshot') && req.method === 'GET') {
-    const userId = requireAuth(req, res); if (!userId) return true;
-    try {
-      const url = new URL(req.url, 'http://x');
-      const project = url.searchParams.get('project');
-      if (!project) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'project query param required' }));
-        return true;
-      }
-      const snap = getProjectSnapshot(userId, project);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(snap));
     } catch (e) { safeError(res, e); }
     return true;
   }
