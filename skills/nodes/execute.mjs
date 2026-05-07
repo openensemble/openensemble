@@ -753,11 +753,17 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       'echo "::ports::"',
       "ss -tlnp 2>/dev/null | awk 'NR>1 {print $4}' | awk -F: '{print $NF}' | sort -un | head -30",
       'echo "::binaries::"',
-      'for b in pihole home-assistant nginx caddy mariadbd mysqld postgres redis-server tailscale mosquitto vaultwarden bw; do command -v "$b" >/dev/null && echo "$b"; done',
+      'for b in pihole home-assistant nginx caddy mariadbd mysqld postgres redis-server tailscale mosquitto vaultwarden bw dhcpd kea-dhcp4-server tftpd-hpa in.tftpd atftpd dnsmasq named unbound coredns kresd nsd rpc.nfsd exportfs rpcbind; do command -v "$b" >/dev/null && echo "$b"; done',
       'echo "::paths::"',
-      'for p in /etc/pihole /etc/nginx /etc/caddy /etc/dnsmasq.d /var/lib/mysql /var/lib/mariadb /var/lib/postgresql /etc/mosquitto /opt/vaultwarden /etc/tailscale; do test -d "$p" && echo "$p"; done',
+      'for p in /etc/pihole /etc/nginx /etc/caddy /etc/dnsmasq.d /var/lib/mysql /var/lib/mariadb /var/lib/postgresql /etc/mosquitto /opt/vaultwarden /etc/tailscale /etc/dhcp /etc/dnsmasq.conf /var/lib/tftpboot /srv/tftp /srv/tftpboot /srv/pxeboot /srv/pxe /etc/bind /etc/unbound /etc/coredns /etc/knot-resolver /etc/nsd /etc/exports /etc/exports.d /proc/fs/nfsd /var/lib/nfs; do test -e "$p" && echo "$p"; done',
       'echo "::services::"',
       "systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | awk '{print $1}' | head -40",
+      'echo "::flags::"',
+      // dnsmasq is a DHCP server iff one of its config files declares a dhcp-range.
+      // Pi-hole, libvirt, and bare dnsmasq all expose this the same way.
+      "grep -lq '^[[:space:]]*dhcp-range=' /etc/dnsmasq.conf /etc/dnsmasq.d/*.conf 2>/dev/null && echo dnsmasq_dhcp_enabled || true",
+      // dnsmasq with a tftp-root= line is acting as a TFTP server too.
+      "grep -lq '^[[:space:]]*tftp-root=' /etc/dnsmasq.conf /etc/dnsmasq.d/*.conf 2>/dev/null && echo dnsmasq_tftp_enabled || true",
     ].join(' && ');
 
     let out;
@@ -769,19 +775,25 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       return;
     }
 
-    const sections = { ports: [], binaries: [], paths: [], services: [] };
+    const sections = { ports: [], binaries: [], paths: [], services: [], flags: [] };
     let cur = null;
     for (const line of out.split('\n').map(s => s.trim()).filter(Boolean)) {
-      const m = line.match(/^::(ports|binaries|paths|services)::$/);
+      const m = line.match(/^::(ports|binaries|paths|services|flags)::$/);
       if (m) { cur = m[1]; continue; }
       if (cur) sections[cur].push(line);
     }
 
     const detected = [];
     const has = (s, x) => sections[s].some(v => v.includes(x));
+    const hasFlag = (f) => sections.flags.includes(f);
 
     if (has('binaries', 'pihole') || has('paths', '/etc/pihole')) {
-      detected.push({ kind: 'pihole', evidence: ['binary: pihole', '/etc/pihole'].filter(e => has('binaries', 'pihole') || has('paths', '/etc/pihole')) });
+      // Pi-hole always provides DNS. DHCP is opt-in via dnsmasq config —
+      // detected via the dnsmasq_dhcp_enabled flag the probe sets when any
+      // /etc/dnsmasq.d/*.conf has a dhcp-range= line.
+      const roles = ['DNS'];
+      if (hasFlag('dnsmasq_dhcp_enabled')) roles.push('DHCP');
+      detected.push({ kind: 'pihole', evidence: [`pi-hole providing: ${roles.join(' + ')}`] });
     }
     if (has('binaries', 'home-assistant') || sections.services.some(s => s.startsWith('home-assistant'))) {
       detected.push({ kind: 'home_assistant', evidence: ['HA service'] });
@@ -797,6 +809,87 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     if (has('binaries', 'mosquitto') || has('paths', '/etc/mosquitto')) detected.push({ kind: 'mosquitto', evidence: ['mosquitto'] });
     if (has('binaries', 'vaultwarden') || has('binaries', 'bw') || has('paths', '/opt/vaultwarden')) {
       detected.push({ kind: 'vaultwarden', evidence: ['vaultwarden'] });
+    }
+
+    // ── NFS ──────────────────────────────────────────────────────────────
+    // Emit even on boxes that also run Samba — letting it ride on a samba
+    // profile means a node that's NFS-only (e.g. a PXE root server) gets
+    // missed. The user / Sydney can decide whether to onboard one combined
+    // file-sharing profile or split nfs and samba.
+    const nfsServiceRunning = sections.services.some(s =>
+      s.startsWith('nfs-server') || s.startsWith('nfs-kernel-server') || s === 'nfsd.service',
+    );
+    const hasNfsExports = has('paths', '/etc/exports') || has('paths', '/etc/exports.d');
+    if (has('binaries', 'rpc.nfsd') || has('binaries', 'exportfs') || hasNfsExports || has('paths', '/proc/fs/nfsd') || nfsServiceRunning) {
+      const ev = [];
+      if (has('binaries', 'rpc.nfsd')) ev.push('rpc.nfsd binary');
+      if (hasNfsExports)               ev.push('/etc/exports');
+      if (nfsServiceRunning)           ev.push('nfs-server unit running');
+      detected.push({ kind: 'nfs', evidence: ev.length ? ev : ['NFS server present'] });
+    }
+
+    // ── DNS servers (standalone — pi-hole already handled above) ─────────
+    if (has('binaries', 'named') || has('paths', '/etc/bind')) {
+      detected.push({ kind: 'bind9', evidence: ['BIND9 (named)'] });
+    }
+    if (has('binaries', 'unbound') || has('paths', '/etc/unbound')) {
+      detected.push({ kind: 'unbound', evidence: ['Unbound recursive DNS resolver'] });
+    }
+    if (has('binaries', 'coredns') || has('paths', '/etc/coredns')) {
+      detected.push({ kind: 'coredns', evidence: ['CoreDNS'] });
+    }
+    if (has('binaries', 'kresd') || has('paths', '/etc/knot-resolver')) {
+      detected.push({ kind: 'knot_resolver', evidence: ['Knot Resolver (kresd)'] });
+    }
+    if (has('binaries', 'nsd') || has('paths', '/etc/nsd')) {
+      detected.push({ kind: 'nsd', evidence: ['NSD authoritative DNS'] });
+    }
+
+    // ── DHCP / TFTP / PXE stack ──────────────────────────────────────────
+    // dnsmasq covers DNS + DHCP + TFTP depending on config. We detect the
+    // active roles from /etc/dnsmasq.d/* via the probe's flags section.
+    // ISC dhcpd / Kea / standalone tftpd are detected by binary presence.
+    const dnsmasqIsDhcp  = hasFlag('dnsmasq_dhcp_enabled');
+    const dnsmasqIsTftp  = hasFlag('dnsmasq_tftp_enabled');
+    const hasIscDhcpd    = has('binaries', 'dhcpd') || has('binaries', 'kea-dhcp4-server');
+    const hasStandaloneTftp = ['tftpd-hpa', 'in.tftpd', 'atftpd'].some(b => has('binaries', b))
+      || ['/var/lib/tftpboot', '/srv/tftp', '/srv/tftpboot'].some(p => has('paths', p));
+    const hasNetbootDir  = ['/srv/pxe', '/srv/pxeboot', '/srv/tftpboot', '/var/lib/tftpboot'].some(p => has('paths', p));
+
+    const dhcpActive = hasIscDhcpd || dnsmasqIsDhcp;
+    const tftpActive = hasStandaloneTftp || dnsmasqIsTftp;
+
+    if (dhcpActive) {
+      const ev = [];
+      if (hasIscDhcpd) ev.push(has('binaries', 'kea-dhcp4-server') ? 'Kea DHCP server' : 'ISC dhcpd');
+      if (dnsmasqIsDhcp && !detected.some(d => d.kind === 'pihole')) ev.push('dnsmasq with dhcp-range= configured');
+      // Pi-hole's DHCP role is already noted on the pihole entry; only add a
+      // standalone dhcp_server kind when something OTHER than pihole is the
+      // DHCP authority on this node.
+      if (ev.length) detected.push({ kind: 'dhcp_server', evidence: ev });
+    }
+    if (tftpActive) {
+      const ev = [];
+      if (hasStandaloneTftp) ev.push('tftpd binary or /srv/tftp dir');
+      if (dnsmasqIsTftp) ev.push('dnsmasq with tftp-root= configured');
+      detected.push({ kind: 'tftp_server', evidence: ev });
+    }
+
+    // PXE meta-hint when this clearly is a netboot setup.
+    if ((dhcpActive && tftpActive) || (hasNetbootDir && (dhcpActive || tftpActive))) {
+      detected.push({
+        kind: 'pxe',
+        evidence: ['DHCP + TFTP / netboot dir present — consider one combined `pxe` profile that wraps the whole stack rather than separate dhcp/tftp profiles.'],
+      });
+    }
+
+    // Bare dnsmasq (not pi-hole, not playing a more specific role we already
+    // emitted) — flag as a DNS resolver since that's its default mode.
+    const dnsmasqPresent = has('binaries', 'dnsmasq') || has('paths', '/etc/dnsmasq.conf');
+    const dnsmasqAlreadyExplained =
+      detected.some(d => d.kind === 'pihole') || dnsmasqIsDhcp || dnsmasqIsTftp;
+    if (dnsmasqPresent && !dnsmasqAlreadyExplained) {
+      detected.push({ kind: 'dnsmasq', evidence: ['dnsmasq running as a DNS forwarder (no DHCP or TFTP role enabled)'] });
     }
 
     if (detected.length === 0) {

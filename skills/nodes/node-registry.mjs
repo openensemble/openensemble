@@ -251,6 +251,14 @@ export function registerNode(ws, userId, info) {
 
   console.log(`[nodes] ${isReconnect ? 'Reconnected' : 'Registered'}: ${nodeId} (${info.hostname}) for user ${userId}`);
 
+  // Auto-create the baseline 'system' health profile on first registration.
+  // Idempotent — re-running on every reconnect is fine (no-ops once the
+  // profile exists). Dynamic import to avoid circular deps with health-monitor
+  // / service-profile through the registry's many consumers.
+  import('../../lib/node-system-profile.mjs')
+    .then(({ ensureNodeSystemProfile }) => ensureNodeSystemProfile(userId, nodeId, { hostname: entry.hostname, platform: entry.platform }))
+    .catch(e => console.warn(`[nodes] system-profile bootstrap failed for ${nodeId}: ${e.message}`));
+
   if (isReconnect) {
     const downtime = oldEntry?.disconnectedAt ? now - oldEntry.disconnectedAt : 0;
     broadcastNodeEvent(userId, {

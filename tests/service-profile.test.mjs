@@ -21,6 +21,7 @@ import {
   ProfileValidationError,
 } from '../lib/service-profile.mjs';
 import { nodeDir } from '../lib/op-record.mjs';
+import { BASE_DIR } from '../lib/paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PIHOLE_FIXTURE = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'pihole-profile.json'), 'utf8'));
@@ -118,6 +119,31 @@ describe('saveProfile + loadProfile', () => {
     bad.trust_state = 'questionable';
     expect(() => saveProfile(USER, NODE, bad)).toThrow(ProfileValidationError);
   });
+
+  it('canonicalizes drifted health_signals on save (check.type → mechanism, nested expect lifted)', () => {
+    const drifted = fixture();
+    drifted.health_signals = [{
+      kind: 'exec', // legacy non-descriptive kind
+      check: { type: 'exec', command: 'systemctl is-active foo', expect: 'active' }, // type instead of mechanism, nested expect
+    }];
+    saveProfile(USER, NODE, drifted);
+    const reloaded = loadProfile(USER, NODE, 'pihole');
+    const sig = reloaded.health_signals[0];
+    expect(sig.check.mechanism).toBe('cli'); // exec → cli
+    expect(sig.check.type).toBeUndefined();
+    expect(sig.expect).toBe('active');       // lifted out of check
+    expect(sig.check.expect).toBeUndefined();
+    expect(sig.check.command).toBe('systemctl is-active foo');
+  });
+
+  it('auto-fills missing profile_version on save (no more "vundefined" surfaces)', () => {
+    const noVersion = fixture();
+    delete noVersion.profile_version;
+    saveProfile(USER, NODE, noVersion);
+    const reloaded = loadProfile(USER, NODE, 'pihole');
+    expect(reloaded.profile_version).toBeTruthy();
+    expect(reloaded.profile_version).toMatch(/\w/);
+  });
 });
 
 describe('listProfilesForNode', () => {
@@ -133,6 +159,24 @@ describe('listProfilesForNode', () => {
 
   it('returns empty for a node with no profiles dir', () => {
     expect(listProfilesForNode(USER, 'nope')).toEqual([]);
+  });
+
+  it('canonicalizes hostname → nodeId so list works regardless of which the caller passes', () => {
+    // Plant a fake nodes.json with a hostname/nodeId mismatch.
+    const nodesJsonPath = path.join(BASE_DIR, 'nodes.json');
+    const prevContent = fs.existsSync(nodesJsonPath) ? fs.readFileSync(nodesJsonPath, 'utf8') : null;
+    fs.writeFileSync(nodesJsonPath, JSON.stringify({ nodes: { [NODE]: { userId: USER, nodeId: NODE, hostname: 'pihole-host' } } }));
+    try {
+      saveProfile(USER, NODE, fixture()); // saves under canonical NODE
+      // Listing by hostname should still find the profile.
+      const byHost = listProfilesForNode(USER, 'pihole-host').map(p => p.service_id).sort();
+      const byCanonical = listProfilesForNode(USER, NODE).map(p => p.service_id).sort();
+      expect(byHost).toEqual(byCanonical);
+      expect(byHost).toContain('pihole');
+    } finally {
+      if (prevContent !== null) fs.writeFileSync(nodesJsonPath, prevContent);
+      else fs.unlinkSync(nodesJsonPath);
+    }
   });
 });
 

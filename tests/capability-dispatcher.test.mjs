@@ -234,6 +234,45 @@ describe('dispatchCapabilityCall: end-to-end', () => {
     expect(paramsJson).not.toContain('good-token');
     expect(paramsJson).toContain('"_redacted_auth":true');
   });
+
+  it('auto-flips verified=true on a successful run of an unverified op', async () => {
+    const { fetchFn } = makeMockPihole();
+    // dns_block starts as verified: false in the fixture; running it
+    // successfully should auto-mark it verified.
+    const before = findOperation(loadProfile(USER, NODE, 'pihole'), 'dns_block');
+    expect(before.verified).toBe(false);
+
+    await dispatchCapabilityCall({
+      userId: USER, nodeId: NODE, serviceId: 'pihole', opId: 'dns_block',
+      parameters: { domain: 'autoverify.example.com' },
+      intent: intent(),
+      ctx: { fetchFn, auth_override: 'good-token' },
+    });
+
+    const after = findOperation(loadProfile(USER, NODE, 'pihole'), 'dns_block');
+    expect(after.verified).toBe(true);
+  });
+
+  it('does NOT demote a verified op when a single run fails (transient blip)', async () => {
+    const { fetchFn } = makeMockPihole();
+    // First run: success → flips verified true.
+    await dispatchCapabilityCall({
+      userId: USER, nodeId: NODE, serviceId: 'pihole', opId: 'dns_block',
+      parameters: { domain: 'first.example.com' },
+      intent: intent(),
+      ctx: { fetchFn, auth_override: 'good-token' },
+    });
+    expect(findOperation(loadProfile(USER, NODE, 'pihole'), 'dns_block').verified).toBe(true);
+
+    // Second run: failure (wrong auth) — verified should STAY true.
+    await dispatchCapabilityCall({
+      userId: USER, nodeId: NODE, serviceId: 'pihole', opId: 'dns_block',
+      parameters: { domain: 'second.example.com' },
+      intent: intent(),
+      ctx: { fetchFn, auth_override: 'wrong-token' },
+    });
+    expect(findOperation(loadProfile(USER, NODE, 'pihole'), 'dns_block').verified).toBe(true);
+  });
 });
 
 // ── verifyProfileReadonly ────────────────────────────────────────────────────

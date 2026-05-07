@@ -219,3 +219,52 @@ describe('unregisterProfileHealthWatchers', () => {
     expect(removed).toBe(0);
   });
 });
+
+describe('registerProfileHealthWatchers — orphan incident cleanup', () => {
+  beforeEach(() => { saveProfile(USER, NODE, fresh()); });
+
+  it('abandons open incidents from prior watcher iterations on re-register', async () => {
+    const { openIncident, listIncidents, loadIncident } = await import('../lib/incident.mjs');
+
+    // Register, then simulate a watcher firing (open incident), then unregister
+    // and re-register — the new watcher has no link to the old incident.
+    registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'a' });
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'service_up', value: 'inactive', expected: 'active', fired_at: new Date().toISOString() },
+    });
+    expect(listIncidents(USER, NODE, { openOnly: true })).toHaveLength(1);
+
+    unregisterProfileHealthWatchers(USER, NODE, 'pihole');
+    const result = registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'a' });
+    expect(result.orphans_closed).toBe(1);
+    expect(listIncidents(USER, NODE, { openOnly: true })).toHaveLength(0);
+
+    // Verify the abandoned incident still exists with the right status + summary
+    const closed = loadIncident(USER, NODE, inc.id);
+    expect(closed.status).toBe('abandoned');
+    expect(closed.resolution_summary).toMatch(/watcher re-registered/);
+  });
+
+  it('does not touch incidents from other services on the same node', async () => {
+    const { openIncident, listIncidents } = await import('../lib/incident.mjs');
+    const second = fresh();
+    second.service_id = 'home_assistant';
+    saveProfile(USER, NODE, second);
+
+    const piIncident = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 's', value: 'v', expected: 'e', fired_at: new Date().toISOString() },
+    });
+    const haIncident = openIncident(USER, NODE, {
+      service_id: 'home_assistant',
+      triggering_signal: { kind: 's', value: 'v', expected: 'e', fired_at: new Date().toISOString() },
+    });
+    expect(listIncidents(USER, NODE, { openOnly: true })).toHaveLength(2);
+
+    registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'a' });
+    const open = listIncidents(USER, NODE, { openOnly: true });
+    expect(open).toHaveLength(1);
+    expect(open[0].id).toBe(haIncident.id);
+  });
+});

@@ -77,6 +77,35 @@ export function toResponsesTools(tools) {
   }));
 }
 
+// Network-blip patterns we'll retry once before giving up. Anything else
+// (4xx, 5xx, auth, malformed body) propagates immediately — we don't want
+// to mask real provider errors as transient network issues.
+const RETRIABLE_NETWORK_RE = /^fetch failed$|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR/i;
+function isRetriableNetworkError(e) {
+  if (!e) return false;
+  if (RETRIABLE_NETWORK_RE.test(e.message || '')) return true;
+  const causeMsg = e.cause?.message || '';
+  const causeCode = e.cause?.code || '';
+  return RETRIABLE_NETWORK_RE.test(causeMsg) || RETRIABLE_NETWORK_RE.test(causeCode);
+}
+
+async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000 } = {}) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      lastErr = e;
+      if (!isRetriableNetworkError(e) || i === attempts - 1) throw e;
+      const causeTag = e.cause?.code || e.cause?.message || e.message;
+      console.warn(`[openai-oauth] fetch attempt ${i + 1}/${attempts} failed (${causeTag}) — retrying in ${backoffMs}ms`);
+      await new Promise(r => setTimeout(r, backoffMs));
+    }
+  }
+  throw lastErr;
+}
+
 export async function* streamOpenAIResponses(agent, systemPrompt, messages, signal, userId = 'default') {
   let auth;
   try {
@@ -118,9 +147,24 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
 
     console.log(`[openai-oauth] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}`);
-    const res = await fetch(`${OPENAI_OAUTH_BASE}/responses`, {
-      method: 'POST', signal, headers, body: JSON.stringify(body),
-    });
+    // The Codex backend occasionally drops connections at handshake time
+    // (manifests as Node fetch's TypeError "fetch failed"). One quick retry
+    // with a small backoff resolves the vast majority of these without the
+    // user noticing. Only retried BEFORE the SSE stream emits — once tokens
+    // start flowing, replay would duplicate output.
+    let res;
+    try {
+      res = await postWithRetry(`${OPENAI_OAUTH_BASE}/responses`, {
+        method: 'POST', signal, headers, body: JSON.stringify(body),
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      const cause = e?.cause?.code || e?.cause?.message;
+      const tag = cause ? `${e.message} (${cause})` : e.message;
+      console.error(`[openai-oauth] POST failed after retry: ${tag}`);
+      yield { type: 'error', message: `OpenAI Codex: ${tag}` };
+      return;
+    }
     if (!res.ok) {
       const errText = await res.text();
       console.error(`[openai-oauth] error ${res.status}: ${errText.slice(0, 500)}`);

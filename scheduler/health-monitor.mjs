@@ -49,6 +49,7 @@ import {
   appendIncidentEvent,
   closeIncident,
   loadIncident,
+  listIncidents,
 } from '../lib/incident.mjs';
 import { runTroubleshootingLoop } from '../lib/troubleshooting-loop.mjs';
 
@@ -392,6 +393,16 @@ export function registerProfileHealthWatchers(userId, nodeId, serviceId, opts = 
     DEFAULT_CADENCE_SEC,
   );
 
+  // Abandon any open incidents from a previous watcher iteration for this
+  // (node, service). When we re-register, the new watcher has no link to the
+  // old incidents and the recovery path can never close them — they'd just
+  // accumulate. The new tick cycle will re-detect any genuinely open problem
+  // and open a fresh incident, so abandoning is safe. This intentionally
+  // does NOT run from unregisterProfileHealthWatchers, because a tear-down
+  // without re-register (trust_state→unverified, profile delete) wants those
+  // incidents preserved for review.
+  const orphansClosed = abandonOrphanIncidents(userId, nodeId, serviceId);
+
   const watcherId = registerWatcher({
     userId,
     agentId: opts.agentId || `${userId}_coordinator`,
@@ -407,7 +418,25 @@ export function registerProfileHealthWatchers(userId, nodeId, serviceId, opts = 
       signals: sigs.map(normalizeSignal),
     },
   });
-  return { registered: 1, signal_count: sigs.length, watcher_id: watcherId };
+  return { registered: 1, signal_count: sigs.length, watcher_id: watcherId, orphans_closed: orphansClosed };
+}
+
+function abandonOrphanIncidents(userId, nodeId, serviceId) {
+  let closed = 0;
+  try {
+    for (const inc of listIncidents(userId, nodeId, { openOnly: true })) {
+      if (inc.service_id !== serviceId) continue;
+      try {
+        closeIncident(userId, nodeId, inc.id, 'watcher re-registered — incident orphaned from prior iteration', 'abandoned');
+        closed++;
+      } catch (e) {
+        log.warn('health-monitor', 'failed to abandon orphan incident', { incidentId: inc.id, err: e.message });
+      }
+    }
+  } catch (e) {
+    log.warn('health-monitor', 'orphan-incident sweep failed', { err: e.message });
+  }
+  return closed;
 }
 
 export function unregisterProfileHealthWatchers(userId, nodeId, serviceId) {

@@ -162,6 +162,23 @@
           "required": ["node_id"]
         }
       }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "incident_resolve",
+        "description": "Close an incident manually. Use 'resolved' when the underlying problem has been fixed (the service is healthy again) and 'abandoned' for false positives, stale incidents from re-registered watchers, or incidents the user explicitly asked to drop. Always include a short summary so the incident log explains why it was closed. Closing an already-closed incident reports its prior status without changing it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "node_id":     { "type": "string" },
+            "incident_id": { "type": "string", "description": "Full incident id from incident_list (e.g. 'inc_2026-05-07T15-36-21-327Z_924abb')." },
+            "summary":     { "type": "string", "description": "Short note explaining why it's being closed (e.g. 'service recovered after profile patch', 'false positive from stale signal expect criteria')." },
+            "status":      { "type": "string", "enum": ["resolved", "abandoned"], "description": "'resolved' = fixed, 'abandoned' = closing without resolution. Defaults to 'resolved'." }
+          },
+          "required": ["node_id", "incident_id"]
+        }
+      }
     }
   ]
 }

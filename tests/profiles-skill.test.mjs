@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import execute from '../skills/profiles/execute.mjs';
 import { nodeDir, profilesDir } from '../lib/op-record.mjs';
 import { loadProfile } from '../lib/service-profile.mjs';
-import { openIncident } from '../lib/incident.mjs';
+import { openIncident, loadIncident } from '../lib/incident.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PIHOLE = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'pihole-profile.json'), 'utf8'));
@@ -112,6 +112,48 @@ describe('profile_patch', () => {
     expect(result).toMatch(/Error/);
     expect(result).toMatch(/no profile/);
   });
+
+  it('auto-refreshes the live watcher when health_signals are patched on a reviewed profile', async () => {
+    const { listWatchers, unregisterWatcher } = await import('../scheduler/watchers.mjs');
+    // Ensure we start clean so the watcher we observe came from this test.
+    for (const x of [...listWatchers(USER).active, ...listWatchers(USER).recent]) {
+      unregisterWatcher(USER, x.id, 'cleanup');
+    }
+    // Save + review so a watcher is registered, then patch.
+    await execute('profile_set_trust_state', { node_id: NODE, service_id: 'pihole', state: 'reviewed' }, USER, null, {});
+    const beforeWatchers = listWatchers(USER).active.filter(w => w.kind === 'profile_health' && w.state.service_id === 'pihole');
+    expect(beforeWatchers).toHaveLength(1);
+    const oldWatcherId = beforeWatchers[0].id;
+
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'pihole',
+      edits: [{ op: 'set', path: 'health_signals[0].cadence_sec', value: 30 }],
+    }, USER, null, {});
+    expect(result).toMatch(/Health monitor refreshed/);
+
+    const afterWatchers = listWatchers(USER).active.filter(w => w.kind === 'profile_health' && w.state.service_id === 'pihole');
+    expect(afterWatchers).toHaveLength(1);
+    expect(afterWatchers[0].id).not.toBe(oldWatcherId); // fresh watcher, not the stale one
+    expect(afterWatchers[0].state.signals[0].cadence_sec).toBe(30); // new value picked up
+  });
+
+  it('does NOT refresh the watcher when patching a non-signal field', async () => {
+    await execute('profile_set_trust_state', { node_id: NODE, service_id: 'pihole', state: 'reviewed' }, USER, null, {});
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'pihole',
+      edits: [{ op: 'set', path: 'detected_version', value: '6.0.0' }],
+    }, USER, null, {});
+    expect(result).not.toMatch(/Health monitor refreshed/);
+  });
+
+  it('does NOT refresh the watcher when profile is unverified (no monitoring active)', async () => {
+    // Save without setting trust state — defaults to unverified.
+    const result = await execute('profile_patch', {
+      node_id: NODE, service_id: 'pihole',
+      edits: [{ op: 'set', path: 'health_signals[0].cadence_sec', value: 30 }],
+    }, USER, null, {});
+    expect(result).not.toMatch(/Health monitor refreshed/);
+  });
 });
 
 describe('profile_load', () => {
@@ -208,6 +250,67 @@ describe('incident_list', () => {
 
     const openOnly = await execute('incident_list', { node_id: NODE, open_only: true }, USER, null, {});
     expect(openOnly).toMatch(/No open incidents/);
+  });
+});
+
+describe('incident_resolve', () => {
+  it('closes an open incident with default resolved status', async () => {
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'service_up', value: 'inactive', expected: 'active', fired_at: new Date().toISOString() },
+    });
+    const result = await execute('incident_resolve', {
+      node_id: NODE, incident_id: inc.id, summary: 'manual close',
+    }, USER, null, {});
+    expect(result).toMatch(/Closed incident/);
+    expect(result).toMatch(/resolved/);
+    const reloaded = loadIncident(USER, NODE, inc.id);
+    expect(reloaded.status).toBe('resolved');
+    expect(reloaded.ts_closed).toBeTruthy();
+  });
+
+  it('supports the abandoned status', async () => {
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'k', value: 'v', expected: 'e', fired_at: new Date().toISOString() },
+    });
+    const result = await execute('incident_resolve', {
+      node_id: NODE, incident_id: inc.id, summary: 'false positive', status: 'abandoned',
+    }, USER, null, {});
+    expect(result).toMatch(/abandoned/);
+    expect(loadIncident(USER, NODE, inc.id).status).toBe('abandoned');
+  });
+
+  it('rejects an invalid status', async () => {
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'k', value: 'v', expected: 'e', fired_at: new Date().toISOString() },
+    });
+    const result = await execute('incident_resolve', {
+      node_id: NODE, incident_id: inc.id, status: 'magic',
+    }, USER, null, {});
+    expect(result).toMatch(/Error/);
+    expect(loadIncident(USER, NODE, inc.id).status).toBe('open');
+  });
+
+  it('reports already-closed without changing the incident', async () => {
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'k', value: 'v', expected: 'e', fired_at: new Date().toISOString() },
+    });
+    await execute('incident_resolve', { node_id: NODE, incident_id: inc.id }, USER, null, {});
+    const result = await execute('incident_resolve', { node_id: NODE, incident_id: inc.id }, USER, null, {});
+    expect(result).toMatch(/already closed/);
+  });
+
+  it('errors when the incident does not exist', async () => {
+    expect(await execute('incident_resolve', {
+      node_id: NODE, incident_id: 'inc_nonexistent_xxx',
+    }, USER, null, {})).toMatch(/not found/);
+  });
+
+  it('errors on missing args', async () => {
+    expect(await execute('incident_resolve', { node_id: NODE }, USER, null, {})).toMatch(/Error/);
   });
 });
 

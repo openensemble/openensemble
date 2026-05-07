@@ -9,6 +9,7 @@ import { appendToSession, writeStreamBuffer, clearStreamBuffer, loadSession } fr
 import { extractTransactions, getPendingDelete, clearPendingDelete, executePendingDelete } from './skills/expenses/execute.mjs';
 import { getRoleManifest, getRoleAssignments, setRoleAssignment, listRoles } from './roles.mjs';
 import { interceptScheduling } from './lib/scheduler-intent.mjs';
+import { log } from './logger.mjs';
 import {
   loadConfig, loadUsers, saveUsers, getAgentsForUser, detectNewsPref, detectRenameCommand,
   saveUserAgentOverride, getUser, getUserCoordinatorAgentId, recordActivity, recordTokenUsage,
@@ -350,21 +351,39 @@ export async function handleChatMessage({
     }
   } catch (e) {
     if (e.name !== 'AbortError') {
+      // Surface the underlying network reason when present — bare "fetch failed"
+      // is useless to debug; "fetch failed (ECONNRESET)" is actionable.
+      const causeTag = e?.cause?.code || e?.cause?.message;
+      const enrichedMessage = causeTag && !e.message?.includes(causeTag)
+        ? `${e.message} (${causeTag})`
+        : e.message;
+      log.error('chat', 'turn threw', {
+        userId, agentId,
+        provider: scopedAgent.provider,
+        model: scopedAgent.model,
+        err: enrichedMessage,
+        causeCode: e?.cause?.code,
+      });
+
       // Attempt failover on thrown errors too (e.g. fetch failures)
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
       if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && RETRIABLE_RE.test(e.message ?? '')) {
-        console.log(`[failover] Primary threw: ${e.message} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
+        console.log(`[failover] Primary threw: ${enrichedMessage} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         onEvent({ type: 'token', text: `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
         try {
           const fallbackAgent = { ...scopedAgent, provider: fo.fallbackProvider, model: fo.fallbackModel };
           const fallbackError = await runStream(fallbackAgent);
           if (fallbackError) onEvent({ ...fallbackError, agent: agentId });
         } catch (e2) {
-          if (e2.name !== 'AbortError') onEvent({ type: 'error', message: e2.message, agent: agentId });
+          if (e2.name !== 'AbortError') {
+            const cause2 = e2?.cause?.code || e2?.cause?.message;
+            const msg2 = cause2 && !e2.message?.includes(cause2) ? `${e2.message} (${cause2})` : e2.message;
+            onEvent({ type: 'error', message: msg2, agent: agentId });
+          }
         }
       } else {
-        onEvent({ type: 'error', message: e.message, agent: agentId });
+        onEvent({ type: 'error', message: enrichedMessage, agent: agentId });
       }
     }
   } finally {

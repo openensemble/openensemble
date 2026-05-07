@@ -35,7 +35,12 @@ const TICK_MS = 5_000;
 const DEFAULT_CADENCE_SEC = 30;
 const DEFAULT_EXPIRY_MS = 60 * 60 * 1000;       // 1h fallback when caller forgets
 const SOFT_EXPIRY_WARN_MS = 30 * 24 * 60 * 60 * 1000; // 30d — long-but-finite is suspicious
-const MAX_PER_USER = 10;
+// 50 is the post-coalescence number — when watchers were 1-per-signal we ran
+// 10 because a few onboarded services would already swamp the budget. Now
+// each profile is 1 watcher (state.signals[] internal), so 50 covers 50
+// managed services + headroom for video gen, training runs, price alerts,
+// custom skills, etc. Bump again if it becomes load-bearing.
+const MAX_PER_USER = 50;
 const MAX_FAILURES = 3;
 const RECENT_KEEP_MS = 60 * 60 * 1000;          // Keep completed/errored watchers visible 1h
 const MAX_HISTORY_ENTRIES = 100;                // Per-watcher progress scrollback cap

@@ -18,7 +18,7 @@ import {
 import { verifyProfileReadonly, dispatchCapabilityCall } from '../../lib/capability-dispatcher.mjs';
 import { rollbackOperation, rollbackOperationHostLevel } from '../../lib/rollback.mjs';
 import { findOpRecord, getRollbackStatus } from '../../lib/op-record.mjs';
-import { listIncidents } from '../../lib/incident.mjs';
+import { listIncidents, closeIncident, loadIncident } from '../../lib/incident.mjs';
 import { resolveTokenStorage } from '../../lib/token-storage.mjs';
 import { makeNodeExecFn } from '../../lib/node-exec-wrapper.mjs';
 import {
@@ -78,15 +78,37 @@ async function execProfilePatch(args, userId) {
   if (!Array.isArray(edits) || !edits.length) {
     return 'Error: edits must be a non-empty array of {op, path, value?} objects.';
   }
+  let updated;
   try {
-    const updated = patchProfile(userId, node_id, service_id, edits);
-    return `Patched profile "${service_id}" on "${node_id}" — applied ${edits.length} edit${edits.length === 1 ? '' : 's'}. Trust state: ${updated.trust_state}.`;
+    updated = patchProfile(userId, node_id, service_id, edits);
   } catch (e) {
     if (e instanceof ProfileValidationError) {
       return `Validation error after patch: ${e.message}. Original profile preserved.`;
     }
     return `Error patching profile: ${e.message}. Original profile preserved.`;
   }
+
+  // Watcher state is frozen at registration time, so signal edits (cadence,
+  // command, expect, etc.) wouldn't take effect until the next trust-state
+  // toggle — easy to forget and a frequent foot-gun. If any edit touches
+  // health_signals AND the profile is in a monitoring trust state, refresh
+  // the watcher so the new signal config takes effect immediately.
+  let watcherNote = '';
+  const touchesSignals = edits.some(e => typeof e.path === 'string' && e.path.startsWith('health_signals'));
+  const isMonitoring = updated.trust_state === 'reviewed' || updated.trust_state === 'proven';
+  if (touchesSignals && isMonitoring) {
+    try {
+      unregisterProfileHealthWatchers(userId, node_id, service_id);
+      const r = registerProfileHealthWatchers(userId, node_id, service_id, {
+        agentId: `${userId}_coordinator`,
+      });
+      watcherNote = ` Health monitor refreshed (${r.signal_count} signal${r.signal_count === 1 ? '' : 's'}).`;
+    } catch (e) {
+      watcherNote = ` (watcher refresh failed: ${e.message} — patch saved, but the live watcher may be using stale signal config until you toggle trust state.)`;
+    }
+  }
+
+  return `Patched profile "${service_id}" on "${node_id}" — applied ${edits.length} edit${edits.length === 1 ? '' : 's'}. Trust state: ${updated.trust_state}.${watcherNote}`;
 }
 
 async function execProfileLoad(args, userId) {
@@ -318,6 +340,30 @@ async function execIncidentList(args, userId) {
   return lines.join('\n');
 }
 
+async function execIncidentResolve(args, userId) {
+  const { node_id, incident_id, summary, status } = args;
+  if (!node_id || !incident_id) {
+    return 'Error: incident_resolve requires node_id and incident_id.';
+  }
+  const finalStatus = status || 'resolved';
+  if (!['resolved', 'abandoned'].includes(finalStatus)) {
+    return `Error: status must be 'resolved' or 'abandoned' (got ${JSON.stringify(status)}).`;
+  }
+  const existing = loadIncident(userId, node_id, incident_id);
+  if (!existing) {
+    return `Error: incident "${incident_id}" not found on node "${node_id}".`;
+  }
+  if (existing.ts_closed) {
+    return `Incident "${incident_id}" was already closed at ${existing.ts_closed} (status: ${existing.status}).`;
+  }
+  try {
+    closeIncident(userId, node_id, incident_id, summary || `Closed by user via incident_resolve`, finalStatus);
+    return `Closed incident "${incident_id}" on "${node_id}" — status: ${finalStatus}.`;
+  } catch (e) {
+    return `Error closing incident: ${e.message}`;
+  }
+}
+
 // ── dispatch ─────────────────────────────────────────────────────────────────
 
 export default async function execute(name, args, userId, _agentId, _ctx) {
@@ -332,6 +378,7 @@ export default async function execute(name, args, userId, _agentId, _ctx) {
     case 'dispatch_op':               return execDispatchOp(a, userId);
     case 'rollback_op':               return execRollbackOp(a, userId);
     case 'incident_list':             return execIncidentList(a, userId);
+    case 'incident_resolve':          return execIncidentResolve(a, userId);
     default:                          return `Unknown tool: ${name}`;
   }
 }
