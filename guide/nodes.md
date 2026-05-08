@@ -52,6 +52,33 @@ For a server install (OE running on a Pi or NAS away from your daily-driver mach
 
 `node_exec` is the right tool for one-off shell commands. For ongoing management of a *service* running on a node — Pi-hole, Home Assistant, nginx, MariaDB, etc. — use **service profiles**. They give you researched runbooks, automatic rollback, health monitoring, and incident tracking on top of the raw exec layer. See the **Service profiles** page.
 
+## Checking node + service health
+
+Each row in the Nodes drawer shows two things:
+
+- **The node itself** — green/red dot for the WS connection (the oe-node-agent → server tunnel).
+- **The service profiles on it** — one line per profile, with the trust state and signal counts.
+
+A profile row like:
+
+> `vaultwarden v1.35.6 — proven — 3 signals · 2 healthy · 1 unhealthy · 6/6 ops verified`
+
+means: this profile is at trust state `proven`, declares 3 health signals, 2 of them are passing right now, 1 is failing, and OE has successfully run all 6 of the profile's operations at least once.
+
+The **system** profile is auto-created on every node and tracks generic Linux health: disk free, load, memory, the oe-node-agent itself. You don't need to onboard it — it's bootstrapped on first connection.
+
+To investigate a "1 unhealthy" badge, see the **Debugging an unhealthy signal** section in the **Service profiles** page.
+
+### Quick health commands
+
+| What you want | Command |
+|---|---|
+| List paired nodes + connection state | Ask your agent: *"list nodes"* (`node_list`) |
+| Force a status refresh on one node | Status icon in the drawer, or *"check status of `<node>`"* |
+| See system stats from a node | *"what's the disk and memory on `<node>`?"* — runs `df -h` + `free -h` via `node_exec` |
+| Check a specific service is up | *"is vaultwarden running on `<node>`?"* — runs `systemctl is-active …` |
+| Tail a service's log | *"tail nginx logs on `<node>`"* — `journalctl -fu nginx -n 100` |
+
 ## Security & trust
 
 `oe-node-agent` opens a persistent connection from the *node* to the *server* — not the other way around. So your nodes can be on a NAT or a different LAN as long as they can reach the server.

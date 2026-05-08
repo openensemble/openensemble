@@ -7,8 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from '
 import { randomBytes } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dns from 'dns/promises';
-import net from 'net';
+import { isUrlSafe as _isUrlSafe } from '../../lib/url-guard.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CFG_PATH = path.join(BASE_DIR, 'config.json');
@@ -26,55 +25,7 @@ function getUser(userId) {
   return null;
 }
 
-// ── SSRF guard ──────────────────────────────────────────────────────────────
-// Reject URLs whose resolved host is in a private / loopback / link-local
-// range before we fetch. Without this, a user could point the agent at
-// metadata services (169.254.169.254), localhost services, or LAN hosts.
-function _isBlockedIP(ip) {
-  if (!ip) return true;
-  // IPv4
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
-    if (a === 10) return true;                      // 10.0.0.0/8
-    if (a === 127) return true;                     // loopback
-    if (a === 169 && b === 254) return true;        // link-local (incl. AWS/GCP metadata)
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;        // 192.168.0.0/16
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
-    if (a === 0) return true;                       // 0.0.0.0/8
-    if (a >= 224) return true;                      // multicast + reserved
-    return false;
-  }
-  // IPv6
-  if (net.isIPv6(ip)) {
-    const v = ip.toLowerCase();
-    if (v === '::1') return true;                   // loopback
-    if (v === '::') return true;
-    if (v.startsWith('fc') || v.startsWith('fd')) return true; // unique local
-    if (v.startsWith('fe80:')) return true;         // link-local
-    if (v.startsWith('ff')) return true;            // multicast
-    return false;
-  }
-  return true; // unknown family → block
-}
-
-async function _isUrlSafe(urlStr) {
-  let u;
-  try { u = new URL(urlStr); } catch { return { ok: false, reason: 'invalid URL' }; }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, reason: `protocol ${u.protocol} not allowed` };
-  // Reject literal IPs that are private outright
-  if (net.isIP(u.hostname) && _isBlockedIP(u.hostname)) {
-    return { ok: false, reason: `blocked IP ${u.hostname}` };
-  }
-  // Resolve hostname; reject if any resolved IP is private
-  try {
-    const records = await dns.lookup(u.hostname, { all: true });
-    for (const r of records) {
-      if (_isBlockedIP(r.address)) return { ok: false, reason: `${u.hostname} resolves to private IP ${r.address}` };
-    }
-  } catch (e) { return { ok: false, reason: `DNS lookup failed: ${e.message}` }; }
-  return { ok: true };
-}
+// SSRF guard lives in lib/url-guard.mjs (shared with watchers + web fetch_url).
 
 function checkChildSafety(userId, topic) {
   const user = getUser(userId);

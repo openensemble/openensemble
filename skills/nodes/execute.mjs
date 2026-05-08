@@ -163,8 +163,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_exec') {
     const { node_id, command, timeout = 60 } = args;
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
-    if (!command) { yield { type: 'result', text: 'Error: command is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
+    if (!command) { yield { type: 'result', text: 'This tool needs a command. Call it again with command specified.' }; return; }
 
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list to see available nodes.` }; return; }
@@ -238,8 +238,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     // node's readableFolders, this never reaches the agent. node_exec
     // bypasses this allowlist by design (different privilege class).
     const { node_id, path: filePath, max_bytes = 100_000 } = args;
-    if (!node_id)   { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
-    if (!filePath)  { yield { type: 'result', text: 'Error: path is required.' }; return; }
+    if (!node_id)   { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
+    if (!filePath)  { yield { type: 'result', text: 'This tool needs a path. Call it again with path specified.' }; return; }
     if (typeof filePath !== 'string' || !filePath.startsWith('/')) {
       yield { type: 'result', text: 'Error: path must be absolute Unix-style starting with "/".' }; return;
     }
@@ -289,7 +289,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     // list (it doesn't append) — keeps the user's mental model simple. To
     // remove all access, call with an empty array.
     const { node_id, paths } = args;
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!Array.isArray(paths)) { yield { type: 'result', text: 'Error: paths must be an array of absolute paths.' }; return; }
 
     const node = getNode(node_id, userId);
@@ -313,8 +313,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_push_project') {
     const { node_id, dest_path, clean = false } = args;
-    if (!node_id)   { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
-    if (!dest_path) { yield { type: 'result', text: 'Error: dest_path is required.' }; return; }
+    if (!node_id)   { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
+    if (!dest_path) { yield { type: 'result', text: 'This tool needs a dest_path. Call it again with dest_path specified.' }; return; }
     if (typeof dest_path !== 'string' || !dest_path.startsWith('/')) {
       yield { type: 'result', text: 'Error: dest_path must be an absolute Unix-style path starting with "/".' }; return;
     }
@@ -355,8 +355,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_start_service') {
     const { node_id, command, cwd, name: svcName } = args;
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
-    if (!command) { yield { type: 'result', text: 'Error: command is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
+    if (!command) { yield { type: 'result', text: 'This tool needs a command. Call it again with command specified.' }; return; }
     if (cwd && (typeof cwd !== 'string' || !cwd.startsWith('/'))) {
       yield { type: 'result', text: 'Error: cwd must be an absolute path starting with "/".' }; return;
     }
@@ -400,7 +400,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_stop_service') {
     const { node_id, pid } = args;
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!Number.isInteger(pid) || pid < 2) { yield { type: 'result', text: 'Error: pid must be a positive integer.' }; return; }
 
     const node = getNode(node_id, userId);
@@ -448,7 +448,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_status') {
     const { node_id } = args;
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
 
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected.` }; return; }
@@ -484,7 +484,31 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_set_parent_host') {
     const { node_id, parent_host } = args || {};
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
+
+    // Several fields land in `lib/host-snapshot.mjs` interpolated into shell
+    // commands (zfs snapshot ${dataset}@${snap}, btrfs subvolume snapshot
+    // ${subvolume} ${snap_path}, etc.). Reject any value that contains shell
+    // metacharacters so a hallucinated or prompt-injected parent_host can't
+    // become RCE on the storage host. The allowed character class is the
+    // intersection of valid ZFS dataset names and valid filesystem paths.
+    if (parent_host && typeof parent_host === 'object') {
+      const SHELL_SAFE = /^[A-Za-z0-9._/@:+-]+$/;
+      const fields = ['dataset', 'subvolume', 'snapshot_dir', 'ssh_host', 'node', 'vmid', 'kind', 'type'];
+      for (const f of fields) {
+        const v = parent_host[f];
+        if (v == null) continue;
+        if (typeof v !== 'string' && typeof v !== 'number') {
+          yield { type: 'result', text: `Error: parent_host.${f} must be a string.` };
+          return;
+        }
+        if (!SHELL_SAFE.test(String(v))) {
+          yield { type: 'result', text: `Error: parent_host.${f} contains disallowed characters. Allowed: letters, digits, and ._/@:+-` };
+          return;
+        }
+      }
+    }
+
     try {
       const updated = setParentHost(node_id, userId, parent_host ?? null);
       if (!updated) { yield { type: 'result', text: `Node "${node_id}" not found.` }; return; }
@@ -515,7 +539,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
   if (name === 'node_grant_permission') {
     const { node_id, type, name: permName, rationale } = args || {};
     if (!node_id || !type || !permName) {
-      yield { type: 'result', text: 'Error: node_grant_permission requires node_id, type, name.' };
+      yield { type: 'result', text: 'node_grant_permission needs node_id, type, and name. Call this tool again with all three.' };
       return;
     }
     const node = getNode(node_id, userId);
@@ -682,7 +706,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_check_agent_permissions') {
     const { node_id } = args || {};
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected.` }; return; }
 
@@ -745,7 +769,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
   if (name === 'node_detect_services') {
     const { node_id } = args || {};
-    if (!node_id) { yield { type: 'result', text: 'Error: node_id is required.' }; return; }
+    if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected.` }; return; }
 

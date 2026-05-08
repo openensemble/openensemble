@@ -192,7 +192,9 @@ export async function handle(req, res) {
       tokens.client_id = clientId;
       tokens.tenant    = tenant;
       tokens.builtin   = !!builtin;
-      fs.writeFileSync(msTokenPath(userId, accountId), JSON.stringify(tokens, null, 2));
+      const _msTp = msTokenPath(userId, accountId);
+      fs.writeFileSync(_msTp, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+      try { fs.chmodSync(_msTp, 0o600); } catch {}
       res.writeHead(302, { Location: '/?oauth=success&service=microsoft' });
     } catch (e) {
       console.error('[ms-oauth] callback error:', e);

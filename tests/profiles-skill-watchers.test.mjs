@@ -55,10 +55,20 @@ describe('profile_set_trust_state auto-watcher management', () => {
     expect(w[0].state.signals).toHaveLength(2);
   });
 
-  it('also registers when transitioning to proven', async () => {
+  it('stages an APPROVE PROVEN confirmation before applying proven', async () => {
     await profilesSkill('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER);
     const result = await profilesSkill('profile_set_trust_state', {
       node_id: NODE, service_id: 'pihole', state: 'proven',
+    }, USER);
+    expect(result).toMatch(/APPROVE PROVEN/);
+    // Watcher must not register until the user confirms
+    expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(0);
+  });
+
+  it('registers when proven is applied via the confirmed path', async () => {
+    await profilesSkill('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER);
+    const result = await profilesSkill('profile_set_trust_state', {
+      node_id: NODE, service_id: 'pihole', state: 'proven', _userApproved: true,
     }, USER);
     expect(result).toMatch(/Started health monitor \(2 signals\)/);
     expect(profileWatchers(USER, NODE, 'pihole')).toHaveLength(1);

@@ -127,7 +127,7 @@ async function runSignalCheck(state, signal, helpers) {
       try { parsed = jsonGet(JSON.parse(text), check.parse_jsonpath); }
       catch { parsed = text; }
     }
-    return { ok: res.ok, value: parsed, raw: text.slice(0, 500) };
+    return { ok: res.ok, value: parsed, raw: text.slice(0, 500), httpStatus: res.status };
   }
 
   // 'cli' is the canonical mechanism; 'exec' is accepted as an alias because
@@ -174,7 +174,16 @@ async function evalSignal(state, signal, helpers, now) {
     };
   }
 
-  const isHealthy = matchesExpected(result.value, signal.expect);
+  // For http signals with `expect: { status: N }`, compare against the actual
+  // HTTP status code, not the body. The body is in `result.value`; the status
+  // is on `result.httpStatus`. Without this special-case, matchesExpected has
+  // no branch for `status` and falls through to undefined → always unhealthy.
+  let isHealthy;
+  if (signal.expect && typeof signal.expect === 'object' && 'status' in signal.expect && result.httpStatus !== undefined) {
+    isHealthy = Number(result.httpStatus) === Number(signal.expect.status);
+  } else {
+    isHealthy = matchesExpected(result.value, signal.expect);
+  }
   const prev = signal.last_state;
   const next = isHealthy ? 'healthy' : 'unhealthy';
 

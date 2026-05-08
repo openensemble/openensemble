@@ -73,10 +73,17 @@ function persistSessions() {
   } catch (e) { console.warn('[sessions] Failed to persist sessions:', e.message); }
 }
 
+// Hard ceiling on node-agent session lifetime. The sliding 7-day expiry below
+// extends a node session every time it authenticates, which means a stolen
+// node token would otherwise be valid forever. Capping at 90 days from
+// initial mint forces re-pairing periodically.
+const NODE_SESSION_HARD_CAP_MS = 90 * 24 * 60 * 60 * 1000;
+
 export function createSession(userId, { kind = 'browser' } = {}) {
   const token = randomBytes(32).toString('hex');
-  const expires = Date.now() + 7 * 24 * 60 * 60 * 1000;
-  sessions.set(token, { userId, expires, lastActivity: Date.now(), kind });
+  const now = Date.now();
+  const expires = now + 7 * 24 * 60 * 60 * 1000;
+  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now });
   persistSessions();
   return token;
 }
@@ -98,9 +105,17 @@ export function getSessionUserId(token) {
   s.lastActivity = Date.now();
   // Sliding expiry for node-agent sessions: each successful auth pushes the
   // hard 7-day expiry forward so long-lived agents don't die after a week.
-  // Browser sessions keep their fixed expiry.
+  // Capped at NODE_SESSION_HARD_CAP_MS from createdAt so a stolen node token
+  // cannot stay valid indefinitely. Browser sessions keep their fixed expiry.
   if (s.kind === 'node') {
-    s.expires = Date.now() + 7 * 24 * 60 * 60 * 1000;
+    const createdAt = s.createdAt ?? (s.expires - 7 * 24 * 60 * 60 * 1000);
+    const hardCap = createdAt + NODE_SESSION_HARD_CAP_MS;
+    if (Date.now() >= hardCap) {
+      sessions.delete(token); persistSessions();
+      console.log('[sessions] Node session hit 90-day hard cap, revoking. User must re-pair.');
+      return null;
+    }
+    s.expires = Math.min(Date.now() + 7 * 24 * 60 * 60 * 1000, hardCap);
     persistSessions();
   }
   return s.userId;
@@ -118,6 +133,24 @@ export function clearUserSessions(userId) {
     if (s.userId === userId && s.kind !== 'node') sessions.delete(token);
   }
   persistSessions();
+}
+/**
+ * Revoke every node-agent session this user owns. Caller (e.g. the
+ * "revoke all paired nodes" UI action) must also call removeNode for each
+ * registered node so reconnects are rejected — the session token alone is
+ * not sufficient to unauthenticate without that, since the agent could
+ * still try to redeem a fresh pairing code.
+ */
+export function clearUserNodeSessions(userId) {
+  let removed = 0;
+  for (const [token, s] of sessions) {
+    if (s.userId === userId && s.kind === 'node') {
+      sessions.delete(token);
+      removed++;
+    }
+  }
+  if (removed) persistSessions();
+  return removed;
 }
 /**
  * Clear all sessions for a user except the given token.

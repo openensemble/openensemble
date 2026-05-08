@@ -331,7 +331,7 @@ export {
 export {
   validatePassword, hashPassword, verifyPassword,
   loadPersistedSessions, createSession, getSessionUserId, deleteSession,
-  clearUserSessions, clearUserSessionsExcept, getUserSessions, revokeSessionByPrefix,
+  clearUserSessions, clearUserSessionsExcept, clearUserNodeSessions, getUserSessions, revokeSessionByPrefix,
   getAuthToken, getUrlToken,
   createMediaToken, consumeMediaToken,
   createTicket, consumeTicket,

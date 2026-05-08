@@ -230,7 +230,7 @@ async function interactiveSetup() {
   } else {
     console.log('\nStep 2: Pair with server');
     console.log('  In the OpenEnsemble web UI, open the Nodes drawer and click "Pair New Node".');
-    console.log('  Enter the 6-character code shown.\n');
+    console.log('  Enter the 8-character code shown.\n');
     code = await ask('Pairing code: ');
   }
 

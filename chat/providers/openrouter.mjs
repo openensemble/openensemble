@@ -110,7 +110,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
           yield { type: 'tool_call', name: block.name, args: toolArgs };
         }
         const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
-          const { text, _notify, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id);
+          const { text, _notify, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
           return { block, toolArgs, result: text, _notify, events };
         }));
         const assistantToolCalls = results.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
@@ -135,7 +135,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
         try { args = JSON.parse(block.argsJson || '{}'); } catch (e) { console.warn('[chat] Failed to parse OpenRouter tool args:', e.message); }
         yield { type: 'tool_call', name: block.name, args };
         let orToolResult = '';
-        for await (const chunk of executeToolStreaming(block.name, args, userId, agent.id)) {
+        for await (const chunk of executeToolStreaming(block.name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              orToolResult += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
           if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };

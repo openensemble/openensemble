@@ -170,7 +170,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
           toolCallsMade.push(name);
         }
         const batchResults = await Promise.all(batchParsed.map(async ({ name, args }) => {
-          const { text, _notify, events } = await drainToolWithEvents(name, args, userId, agent.id);
+          const { text, _notify, events } = await drainToolWithEvents(name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
           return { name, result: text, _notify, events };
         }));
         for (const { name, result, _notify, events } of batchResults) {
@@ -192,7 +192,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
         yield { type: 'tool_call', name, args };
 
         let toolResult = '';
-        for await (const chunk of executeToolStreaming(name, args, userId, agent.id)) {
+        for await (const chunk of executeToolStreaming(name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              toolResult += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
           if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };

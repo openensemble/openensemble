@@ -228,7 +228,7 @@ describe('profiles skill: dispatch_op + rollback_op', () => {
 describe('nodes skill: node_detect_services (input handling)', () => {
   it('requires node_id', async () => {
     const result = await collectGenerator(nodesSkill('node_detect_services', {}, USER));
-    expect(result.find(r => r.text)?.text).toMatch(/Error.*node_id/);
+    expect(result.find(r => r.text)?.text).toMatch(/needs a node_id/);
   });
 
   it('reports unknown node cleanly', async () => {

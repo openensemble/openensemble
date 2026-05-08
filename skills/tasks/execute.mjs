@@ -171,6 +171,14 @@ async function execCreateWatch(args, userId, agentId, ctx) {
   if (!label || typeof label !== 'string') return 'Error: label is required.';
   if (!source || !VALID_SOURCES.has(source)) return `Error: source must be one of ${[...VALID_SOURCES].join(', ')}.`;
 
+  // Agent-created exec watchers are a persistent shell-RCE vector if the
+  // watcher state survives across restarts. Refuse from the agent path. If a
+  // user genuinely needs to poll an exec, expose it through a UI route that
+  // can prove human approval (state._userConfirmed = true).
+  if (source === 'exec') {
+    return 'Error: exec watchers cannot be created from agent context. Use http_jsonpath, file_stat, or event_subscription instead.';
+  }
+
   // file_stat with attribute=exists is the one shape that legitimately has no
   // comparator (fires on appearance/disappearance). event_subscription has
   // its own optional predicate object; comparator/target at the top level

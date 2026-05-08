@@ -490,19 +490,22 @@ export async function handle(req, res) {
   }
 
   // ── GET /api/avatars/:userId/:file ── serve avatar images
+  // Public (login picker shows avatars before auth). Hardened with a strict basename
+  // allowlist — only `avatar.<ext>` is servable, no other files in the user dir leak.
   const avatarServe = req.url.match(/^\/api\/avatars\/([^/?]+)\/([^?]+)/);
   if (avatarServe && req.method === 'GET') {
     const userId = safeIdFn(decodeURIComponent(avatarServe[1]));
     const file = path.basename(decodeURIComponent(avatarServe[2]));
+    if (!/^avatar\.(jpg|jpeg|png|webp|gif)$/i.test(file)) { res.writeHead(404); res.end('Not found'); return true; }
+    const MIME = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' };
+    const ext = path.extname(file).toLowerCase();
+    if (!MIME[ext]) { res.writeHead(404); res.end('Not found'); return true; }
     const filePath = path.join(getUserDir(userId), file);
-    // Prevent path traversal — resolved path must stay within the users directory
     const USERS_DIR = path.join(BASE_DIR, 'users');
     if (!path.resolve(filePath).startsWith(USERS_DIR)) { res.writeHead(400); res.end(); return true; }
     if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return true; }
-    const MIME = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' };
-    const ext = path.extname(file).toLowerCase();
     const stat = fs.statSync(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Content-Length': stat.size, 'Cache-Control': 'public, max-age=3600' });
+    res.writeHead(200, { 'Content-Type': MIME[ext], 'Content-Length': stat.size, 'Cache-Control': 'public, max-age=3600' });
     fs.createReadStream(filePath).pipe(res);
     return true;
   }

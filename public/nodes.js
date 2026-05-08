@@ -123,8 +123,14 @@ async function loadNodes() {
   const countLabel = offlineCount > 0
     ? `${onlineCount} online &middot; <span style="color:var(--red)">${offlineCount} offline</span>`
     : `${onlineCount} node${onlineCount !== 1 ? 's' : ''} connected`;
-  const pairBtnHtml = `<div class="cdraw-toolbar" style="padding:10px 12px">
-    <span style="font-size:12px;color:var(--muted)">${countLabel}</span>
+  const revokeAllBtn = _nodesList.length
+    ? `<button class="cdraw-btn" onclick="revokeAllNodes()" style="font-size:11px;padding:5px 10px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)" title="Revoke every paired node + every node session for this account">
+        <i data-lucide="shield-off" style="width:12px;height:12px;margin-right:4px"></i> Revoke All
+      </button>`
+    : '';
+  const pairBtnHtml = `<div class="cdraw-toolbar" style="padding:10px 12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <span style="font-size:12px;color:var(--muted);flex:1">${countLabel}</span>
+    ${revokeAllBtn}
     <button class="cdraw-btn cdraw-btn-primary" onclick="pairNewNode()" style="font-size:11px;padding:5px 12px">
       <i data-lucide="plus" style="width:12px;height:12px;margin-right:4px"></i> Pair New Node
     </button>
@@ -444,6 +450,36 @@ function changeNodeAccess(nodeId) {
     onConfirm: () => {
       const cmd = 'sudo oe change-access';
       openNodeTerminal(nodeId, cmd);
+    },
+  });
+}
+
+function revokeAllNodes() {
+  const count = _nodesList.length;
+  if (!count) return;
+  showNodeConfirmModal({
+    title: `Revoke all ${count} paired node${count === 1 ? '' : 's'}?`,
+    message: `Use this if you see a node you don't recognize, or after a suspected token compromise.\n\nThis will:\n• Tell every paired node to uninstall itself\n• Remove every node from the server\n• Revoke every node-agent session token for your account\n\nReconnect attempts will be refused. You'll need to re-pair any nodes you want back.\n\nContinue?`,
+    confirmLabel: 'Revoke All',
+    cancelLabel: 'Cancel',
+    confirmClass: 'cdraw-btn-danger',
+    onConfirm: async () => {
+      try {
+        const res = await fetch('/api/nodes/revoke-all', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + localStorage.getItem('oe_token') },
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showNodeToast(`Failed: ${err.error || res.statusText}`, 'error');
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        showNodeToast(`Revoked ${data.removed ?? 0} node(s); ${data.sessionsRevoked ?? 0} session(s) cleared`, 'success');
+        loadNodes();
+      } catch (e) {
+        showNodeToast(`Error: ${e.message}`, 'error');
+      }
     },
   });
 }

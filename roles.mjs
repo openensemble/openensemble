@@ -685,9 +685,28 @@ function _readUserProfile(userId) {
 // Otherwise wraps the promise result in a single { type: 'result' } yield.
 // Yields: { type: 'token', text } | { type: 'tool_call', name, args }
 //         | { type: 'tool_result', name, text } | { type: 'result', text }
-export async function* executeToolStreaming(name, args, userId = 'default', agentId = null) {
+//
+// allowedTools: optional array of tool names (from agent.tools resolution).
+// When provided, any tool call outside that set is refused — defends against
+// LLM hallucinated calls and prompt-injected JSON tool_calls that try to
+// reach destructive tools (node_exec, dispatch_op, send_email, etc.) outside
+// the agent's declared toolset. Caller is responsible for resolving alias
+// names before passing the list (we re-check post-alias below).
+export async function* executeToolStreaming(name, args, userId = 'default', agentId = null, allowedTools = null) {
   // Resolve alias before lookup so models that drop the skill prefix still work.
   const resolvedName = TOOL_ALIASES[name] ?? name;
+
+  // Per-agent allowlist enforcement. Reject with a generic "Unknown tool"
+  // message so a probing model can't enumerate which tools exist on the box.
+  if (Array.isArray(allowedTools) && allowedTools.length) {
+    const allow = new Set(allowedTools.flatMap(n => [n, TOOL_ALIASES[n] ?? n]));
+    if (!allow.has(resolvedName)) {
+      log.warn('tool', 'tool call outside agent allowlist', { tool: resolvedName, userId, agentId });
+      yield { type: 'result', text: `Unknown tool: ${name}` };
+      return;
+    }
+  }
+
   let skillExec = null;
   let owningSkillId = null;
   for (const [key, wrap] of visibleEntries(userId)) {

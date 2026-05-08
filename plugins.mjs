@@ -98,8 +98,18 @@ export function getDrawersForUser(user) {
 
 // Route an incoming HTTP request to the matching drawer handler.
 // Returns true if a drawer handled it, false otherwise.
+//
+// Custom (skill-builder) drawers are scoped to their creator: their handler
+// only runs if the request's authenticated user matches `createdBy`. Without
+// this scope, user A's drawer manifest could intercept user B's HTTP requests
+// because every drawer is consulted for every URL. Built-in / non-custom
+// drawers (news, markets, tutor-today) remain global.
 export async function delegateDrawerRequest(req, res, cfg) {
-  for (const [id] of _manifests) {
+  const reqUserId = cfg?.userId ?? null;
+  for (const [id, manifest] of _manifests) {
+    if (manifest?.custom === true && manifest.createdBy && manifest.createdBy !== reqUserId) {
+      continue;
+    }
     // Lazy-load each plugin's server.mjs handler
     if (!_handlers.has(id)) {
       const hpath = path.join(PLUGINS_DIR, id, 'server.mjs');

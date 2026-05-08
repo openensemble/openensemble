@@ -461,6 +461,16 @@ async function handleList(userId) {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 export async function executeSkillTool(name, args, userId, agentId) {
+  // Skill code is import()'ed by the validator at create/update time, which
+  // runs any top-level code in the OE server process with full FS / secret /
+  // network privilege. Until validation is sandboxed (worker thread or static
+  // analysis), restrict authorship to owner/admin so a prompt-injected child
+  // or guest account can't write code-execution into the install.
+  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_delete']);
+  if (CODE_AUTHORING.has(name) && !isPrivileged(userId)) {
+    return 'Permission denied: skill authoring (create/update/patch/delete) is restricted to admin/owner accounts.';
+  }
+
   try {
     if (name === 'skill_read_blueprint') return handleReadBlueprint();
     if (name === 'skill_create')         return await handleCreate(args, userId);

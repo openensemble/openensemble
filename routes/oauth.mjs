@@ -181,7 +181,9 @@ export async function handle(req, res) {
       const tokens = await tokenRes.json();
       if (!tokens.access_token) throw new Error(tokens.error_description ?? 'Token exchange failed');
       tokens.expiry_date = Date.now() + tokens.expires_in * 1000;
-      fs.writeFileSync(tokenPath(userId, service, accountId), JSON.stringify(tokens, null, 2));
+      const _tp = tokenPath(userId, service, accountId);
+      fs.writeFileSync(_tp, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+      try { fs.chmodSync(_tp, 0o600); } catch {}
       if (service === 'gmail') { try { await seedGmailAccount(userId, accountId); } catch (_) {} }
       res.writeHead(302, { Location: `/?oauth=success&service=${service}` });
     } catch (e) {

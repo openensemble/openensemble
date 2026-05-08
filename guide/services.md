@@ -23,13 +23,23 @@ The output gets saved as plain files under `users/<you>/nodes/<nodeId>/profiles/
 
 ## Trust state
 
-Every profile has a trust state that gates what can auto-fire:
+Every profile has a trust state that gates what can auto-fire when the troubleshooter detects a problem:
 
-- **`unverified`** (default for newly-saved drafts) — every write operation requires your explicit confirmation per call. The agent can still run things, but you stay in the loop on each one.
-- **`reviewed`** — you've eyeballed the profile and approved it. Low-risk + verified write operations can auto-fire. Health watchers run.
-- **`proven`** — reserved for after a profile has accumulated successful operation history. Same auto-fire rules as reviewed; an extra signal of confidence.
+- **`unverified`** (default for newly-saved drafts) — the troubleshooter only ever **proposes** fixes; nothing auto-applies. Health watchers do **not** run. You can still run operations through the agent, but each one needs your per-call confirmation.
+- **`reviewed`** — you've eyeballed the profile and approved it. Health watchers run. **Low-risk** fixes on verified ops auto-apply when an incident matches a catalogued failure mode. Medium and high-risk still propose.
+- **`proven`** — elevated autonomy. Same as reviewed, plus **medium-risk** fixes (service restarts, reloads, reversible config changes) on verified ops also auto-apply. **High-risk** fixes always require confirmation, regardless of trust state. Promoting to `proven` is staged: OE asks you to type `APPROVE PROVEN` in chat to confirm — the agent can't promote on its own.
 
 Going *back* to `unverified` (e.g. "I want to make changes — disable monitoring temporarily") tears down the watchers. The state always reflects what's actually happening.
+
+### What's "low" vs "medium" vs "high" in practice?
+
+| Risk | Examples | At `reviewed`? | At `proven`? |
+|---|---|---|---|
+| **low** | `dns_block`, `disable_for_5min`, `reload_blocklists`, anything read-only | auto-applies on verified ops | auto-applies on verified ops |
+| **medium** | `service_restart`, `reload_config`, `apply_vhost_change`, anything with a clean inverse | proposes | auto-applies on verified ops |
+| **high** | `wipe_database`, `reset_to_defaults`, anything destructive or with no inverse | proposes | proposes |
+
+A "verified op" means OE has actually run that op (or its read-only twin) successfully at least once and `op.verified === true` — auto-apply never fires on an op that has never been exercised.
 
 ## Operating a service
 
@@ -45,11 +55,11 @@ Both records show up in the per-node `ACTIVITY.md` document so you have a human-
 
 ## Risk classes and rollback
 
-Every operation in a profile is tagged with a risk class:
+Every operation in a profile is tagged with a risk class. See the table in **Trust state** above for what auto-applies at each tier. Summary:
 
-- **low** — read-only or fully reversible writes (block a domain, list blocklists, query status). Auto-fires from `reviewed` profiles.
-- **medium** — restarts, reloads, config changes with a defined inverse. Always asks for confirmation.
-- **high** — destructive or unrecoverable. Always asks; never auto-fires.
+- **low** — read-only or fully reversible writes (block a domain, list blocklists, query status).
+- **medium** — restarts, reloads, config changes with a defined inverse.
+- **high** — destructive or unrecoverable.
 
 The runtime *automatically escalates* risk to `high` when no rollback path can be captured. The LLM can't lie about reversibility — declared `low` on an operation with no inverse becomes `high` at execution time.
 
@@ -106,6 +116,122 @@ When a signal goes from healthy to unhealthy, OE opens an **incident**. The trou
 4. When the health signal returns to healthy, the incident closes automatically.
 
 The incident record carries the full timeline: which signal fired, what diagnostics were collected, which failure mode matched, what fix was attempted and how it went, when the signal recovered. *"What happened with Pi-hole at 2am?"* — `incident_list` shows the answer.
+
+## Health signals — what they are and how they're checked
+
+A profile's `health_signals` array declares what "healthy" means for this service. Each signal is one cheap probe with an expected outcome. Examples from a typical profile:
+
+```jsonc
+{
+  "kind": "service_up",                                    // free-form label; appears in incidents
+  "description": "vaultwarden.service should be active.",
+  "check": {
+    "mechanism": "cli",                                    // cli or http (only those two)
+    "command": "systemctl is-active vaultwarden.service"
+  },
+  "expect": { "contains": "active" },                      // body-string match
+  "cadence_sec": 60,                                       // poll every minute
+  "severity": "critical"                                   // critical | warn
+},
+{
+  "kind": "api_ok",
+  "check": {
+    "mechanism": "http",
+    "url": "${endpoint}/alive"                             // ${endpoint} comes from profile.endpoint
+  },
+  "expect": { "status": 200 },                             // HTTP status-code match
+  "cadence_sec": 300,
+  "severity": "critical"
+},
+{
+  "kind": "port_listening",
+  "check": {
+    "mechanism": "cli",
+    "command": "ss -ltn | grep -q ':8000 ' && echo listening"
+  },
+  "expect": { "contains": "listening" },
+  "cadence_sec": 300,
+  "severity": "warn"
+}
+```
+
+### Mechanisms
+
+- `cli` — runs the command on the node via the existing oe-node-agent connection. Stdout is matched against `expect`. Exit code != 0 marks the signal unhealthy regardless of the body.
+- `http` — fetches the URL from the OE server (not from the node!). For services not exposed externally, point the URL at the node's IP on your LAN: `http://192.0.2.10:8000/alive`.
+
+> **Watch out:** tools like `nginx -t`, `apache2ctl configtest`, `pg_isready` write to *stderr*. Append `2>&1` to your CLI command so the matcher sees their output.
+
+### Match shapes (`expect`)
+
+The matcher recognises these keys:
+
+| Key | What it does | Example |
+|---|---|---|
+| `contains` | substring match against output (CLI) or body (HTTP) | `{ "contains": "active" }` |
+| `matches` | regex test against output/body | `{ "matches": "^v[0-9]+\\." }` |
+| `eq` / `neq` | strict equality (string) | `{ "eq": "enabled" }` |
+| `gt` / `gte` / `lt` / `lte` | numeric comparison | `{ "lt": 90 }` (e.g. disk-percent) |
+| `status` | **HTTP only** — compares against the response status code | `{ "status": 200 }` |
+
+If your HTTP signal needs to assert against the body (not just the status), drop the `status` key and use `contains`/`matches`/`eq` against `parse_jsonpath` output.
+
+### Cadence + severity guidance
+
+- `service_up` / `process_up` → 60s, critical
+- HTTP API health → 300s, critical (don't hammer with 60s polls)
+- Disk free / memory / load → 60–300s, warn (transient spikes are normal)
+- Config-validity (`nginx -t 2>&1`) → 300s, warn
+
+`critical` signals open incidents and trigger the troubleshooting loop. `warn` signals just transition state and surface in the UI badge — no incident, no recipe.
+
+## Debugging an unhealthy signal
+
+If a profile shows "1 unhealthy" in the nodes drawer, here's the workflow:
+
+1. **Find which signal it is.** Open the profile's row in the nodes drawer and click through, or ask your agent: *"What signal is unhealthy on `vaultwardenTrixie`'s vaultwarden profile?"* The watcher state surfaces `last_state: 'unhealthy'` for the affected signal.
+
+2. **Reproduce the check by hand.** Run the same command/URL the signal is using:
+
+   ```bash
+   # CLI signal — run on the node itself
+   ssh node 'systemctl is-active vaultwarden.service'
+
+   # HTTP signal — run from the OE server (where the watcher lives)
+   curl -i http://192.0.2.10:8000/alive
+   ```
+
+   If your manual probe disagrees with what the watcher says, the signal config is wrong (bad URL, wrong unit name, missing `2>&1`, wrong `expect` shape). If they agree, the service is actually unhealthy — proceed to step 3.
+
+3. **Check the open incident.** *"Show me the open incident for vaultwardenTrixie."* The incident record carries the diagnostic output the troubleshooter collected when the signal first fired. Often that's enough to see the cause.
+
+   ```bash
+   # On the OE server, raw incident files:
+   ls users/<you>/nodes/<nodeId>/incidents/
+   cat users/<you>/nodes/<nodeId>/incidents/inc_<id>.json | jq .
+   ```
+
+4. **If you've fixed it manually, force a recheck.** The watcher will recover on its next tick (within `cadence_sec`). To force it sooner, toggle the trust state — *"set vaultwarden trust_state to unverified, then back to reviewed"* — which tears down and re-registers the watchers in-process.
+
+5. **If the signal is misconfigured**, patch it instead of re-saving the whole profile:
+
+   > *"Patch the api_ok signal on vaultwarden — the expect should be `status: 200`, not `contains: 'OK'`."*
+
+   Behind the scenes: `profile_patch` with `[{op:'set', path:'health_signals[1].expect', value:{status:200}}]`. Watchers auto-refresh when health signals on a reviewed/proven profile are patched, so the new check goes live immediately.
+
+### Useful commands while troubleshooting
+
+| What you want | Command |
+|---|---|
+| Is the service running? | `systemctl is-active <unit>` |
+| What is it logging? | `journalctl -fu <unit> -n 100` |
+| Is the port listening? | `ss -ltn \| grep ':<port> '` |
+| Is the API responding? | `curl -i <url>` |
+| Recent incidents on this node | `ls users/<you>/nodes/<nodeId>/incidents/` |
+| Live watcher state | `cat users/<you>/watchers.json \| jq '.active[] \| select(.label \| contains("<service>"))'` |
+| Last-known-good snapshot of an op | `ls users/<you>/nodes/<nodeId>/snapshots/<YYYY-MM-DD>/` |
+
+> Don't edit `users/<you>/watchers.json` while the server is running — the supervisor's tick will overwrite your changes. Use `profile_patch` to mutate signals, or stop OE first.
 
 ## Sharing profiles
 

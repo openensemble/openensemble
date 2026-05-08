@@ -35,12 +35,12 @@ describe('profile_save', () => {
     const result = await execute('profile_save', {
       node_id: NODE, service_id: 'pihole', profile: bad,
     }, USER, null, {});
-    expect(result).toMatch(/Validation error/);
+    expect(result).toMatch(/didn't pass schema validation/);
     expect(result).toMatch(/trust_state/);
   });
 
   it('errors when required args missing', async () => {
-    expect(await execute('profile_save', { node_id: NODE }, USER, null, {})).toMatch(/Error/);
+    expect(await execute('profile_save', { node_id: NODE }, USER, null, {})).toMatch(/needs node_id/);
   });
 });
 
@@ -84,15 +84,18 @@ describe('profile_patch', () => {
         { op: 'set', path: 'trust_state', value: 'totally-bogus' },       // invalid
       ],
     }, USER, null, {});
-    expect(result).toMatch(/Validation error/);
-    expect(result).toMatch(/Original profile preserved/);
+    expect(result).toMatch(/didn't pass schema validation/);
+    expect(result).toMatch(/Original profile is unchanged/);
     const after = loadProfile(USER, NODE, 'pihole');
     expect(after).toEqual(before); // unchanged on disk
   });
 
   it('errors on missing or empty edits', async () => {
-    expect(await execute('profile_patch', { node_id: NODE, service_id: 'pihole' }, USER, null, {})).toMatch(/Error/);
-    expect(await execute('profile_patch', { node_id: NODE, service_id: 'pihole', edits: [] }, USER, null, {})).toMatch(/Error/);
+    // Missing edits entirely + present-but-empty edits both reject with the
+    // "non-empty array" guidance (the missing case skips the node_id+service_id
+    // gate because both are present).
+    expect(await execute('profile_patch', { node_id: NODE, service_id: 'pihole' }, USER, null, {})).toMatch(/non-empty array/);
+    expect(await execute('profile_patch', { node_id: NODE, service_id: 'pihole', edits: [] }, USER, null, {})).toMatch(/non-empty array/);
   });
 
   it('errors clearly on a bad path', async () => {
@@ -100,7 +103,7 @@ describe('profile_patch', () => {
       node_id: NODE, service_id: 'pihole',
       edits: [{ op: 'set', path: 'health_signals[notanumber].expect', value: 'x' }],
     }, USER, null, {});
-    expect(result).toMatch(/Error/);
+    expect(result).toMatch(/couldn't apply/);
     expect(result).toMatch(/edit #1/);
   });
 
@@ -109,7 +112,7 @@ describe('profile_patch', () => {
       node_id: NODE, service_id: 'never-saved',
       edits: [{ op: 'set', path: 'trust_state', value: 'reviewed' }],
     }, USER, null, {});
-    expect(result).toMatch(/Error/);
+    expect(result).toMatch(/couldn't apply/);
     expect(result).toMatch(/no profile/);
   });
 
@@ -310,7 +313,7 @@ describe('incident_resolve', () => {
   });
 
   it('errors on missing args', async () => {
-    expect(await execute('incident_resolve', { node_id: NODE }, USER, null, {})).toMatch(/Error/);
+    expect(await execute('incident_resolve', { node_id: NODE }, USER, null, {})).toMatch(/needs.*incident_id/);
   });
 });
 

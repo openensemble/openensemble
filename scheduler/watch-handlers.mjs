@@ -21,6 +21,7 @@ import { exec as cpExec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import { registerSystemWatcherHandler } from './watchers.mjs';
+import { isUrlSafe } from '../lib/url-guard.mjs';
 import { log } from '../logger.mjs';
 
 const execAsync = promisify(cpExec);
@@ -71,6 +72,13 @@ async function httpJsonpathHandler(state) {
   if (!url || !comparator) {
     return { done: true, textUpdate: '❌ http watcher misconfigured (url + comparator required)' };
   }
+  // SSRF guard — refuse private/loopback/link-local hosts so a watcher
+  // pointed at cloud metadata, LAN admin pages, Tailnet, or this server
+  // itself can't exfiltrate content back into agent context.
+  const safety = await isUrlSafe(url);
+  if (!safety.ok) {
+    return { done: true, textUpdate: `❌ url blocked: ${safety.reason}` };
+  }
   let body;
   try {
     const res = await fetch(url, { headers });
@@ -103,9 +111,18 @@ async function httpJsonpathHandler(state) {
 
 // ── exec ─────────────────────────────────────────────────────────────────────
 async function execHandler(state) {
-  const { command, parse = 'string', comparator, target } = state || {};
+  const { command, parse = 'string', comparator, target, _userConfirmed } = state || {};
   if (!command || !comparator) {
     return { done: true, textUpdate: '❌ exec watcher misconfigured (command + comparator required)' };
+  }
+  // Defense-in-depth: agent-created exec watchers are blocked at the create_watch
+  // tool, but if any unconfirmed exec watcher reaches this handler (legacy
+  // persisted record, future direct registration), refuse to run it. Only
+  // exec watchers explicitly registered with state._userConfirmed === true
+  // (via a UI/route that proves human approval) execute.
+  if (_userConfirmed !== true) {
+    log.warn('watchers', 'Refusing unconfirmed exec watcher', { command: String(command).slice(0, 80) });
+    return { done: true, textUpdate: '❌ exec watcher blocked (no user confirmation flag set)' };
   }
   let stdout;
   try {

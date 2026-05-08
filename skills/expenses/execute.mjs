@@ -430,6 +430,24 @@ export async function executePendingDelete(userId) {
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 export async function executeSkillTool(name, args, userId) {
+  // Trust only the dispatcher-supplied userId; ignore any LLM-supplied userId
+  // so prompt-injected content can't redirect operations to another tenant.
+  args = { ...args, userId };
+
+  // Verify bookId access against the trusted userId. Mutations that change
+  // sharing or delete a book require ownership, not just shared access.
+  if (args.bookId && name !== 'expense_create_book') {
+    const books = loadExpBooks();
+    const b = books.find(x => x.id === args.bookId);
+    if (!b) return `Book ${args.bookId} not found.`;
+    const isOwner  = b.ownerId === userId;
+    const isShared = (b.sharedWith ?? []).includes(userId);
+    if (!isOwner && !isShared) return `Book ${args.bookId} is not accessible to this user.`;
+    if ((name === 'expense_share_book' || name === 'expense_delete_book') && !isOwner) {
+      return `Only the owner can ${name === 'expense_share_book' ? 'share' : 'delete'} this book.`;
+    }
+  }
+
   const deleteOps = ['expense_delete', 'expense_delete_batch', 'expense_delete_all'];
   if (deleteOps.includes(name)) {
     if (!isPrivileged(userId)) {

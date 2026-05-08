@@ -91,11 +91,16 @@ function renderTelegramSection(s) {
   } else if (s.botUsername && s.webhookUrl) {
     linkBlock = `
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px">
-        <div style="font-weight:600;color:var(--text);margin-bottom:4px">Next: open your bot on Telegram and send /start</div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">The first chat to <code>/start</code> becomes your linked chat. It's your bot, so this is safe.</div>
-        <a href="https://t.me/${escHtml(s.botUsername)}" target="_blank"
-           style="display:inline-block;background:var(--accent);color:#fff;border-radius:6px;padding:8px 14px;font-size:12px;font-weight:600;text-decoration:none">Open @${escHtml(s.botUsername)}</a>
-      </div>`;
+        <div style="font-weight:600;color:var(--text);margin-bottom:4px">Next: link your Telegram chat</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Generate a one-time code, then send <code>/start CODE</code> from the chat you want linked. Required even for the first chat — protects against anyone who learns your bot's @username.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button onclick="generateTelegramLinkCode()"
+            style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer">Generate linking code</button>
+          <a href="https://t.me/${escHtml(s.botUsername)}" target="_blank"
+            style="display:inline-block;background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;text-decoration:none">Open @${escHtml(s.botUsername)}</a>
+        </div>
+      </div>
+      <div id="tgLinkBox"></div>`;
   }
 
   // Danger: remove everything

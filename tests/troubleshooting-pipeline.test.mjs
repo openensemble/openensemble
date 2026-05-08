@@ -212,7 +212,7 @@ describe('proposeFix', () => {
     expect(updated.events.find(e => e.type === 'fix_proposed')).toBeTruthy();
   });
 
-  it('does not auto-apply medium-risk fixes even on reviewed profiles', async () => {
+  it('does not auto-apply medium-risk fixes on reviewed profiles', async () => {
     saveProfile(USER, NODE, fresh());
     setTrustState(USER, NODE, 'pihole', 'reviewed');
     markOperationVerified(USER, NODE, 'pihole', 'pihole_restart', true);
@@ -222,11 +222,55 @@ describe('proposeFix', () => {
       triggering_signal: { kind: 'service_up_failed', value: 'x', expected: 'y', fired_at: new Date().toISOString() },
     });
     const matched = { mode: profile.failure_modes[0], score: 1.0 };
-    // pihole_restart is risk=medium; should not auto-apply
+    // pihole_restart is risk=medium; reviewed only auto-applies low → propose
     const result = await proposeFix({
       userId: USER, nodeId: NODE, incidentId: inc.id, profile, matchedMode: matched, ctx: {},
     });
     expect(result.action).toBe('proposed');
+    const updated = loadIncident(USER, NODE, inc.id);
+    const proposed = updated.events.find(e => e.type === 'fix_proposed');
+    expect(proposed.payload.reason_not_auto).toMatch(/medium-risk fix needs trust_state=proven/);
+  });
+
+  it('auto-applies medium-risk fixes on proven profiles', async () => {
+    saveProfile(USER, NODE, fresh());
+    setTrustState(USER, NODE, 'pihole', 'proven');
+    markOperationVerified(USER, NODE, 'pihole', 'pihole_restart', true);
+    const profile = loadProfile(USER, NODE, 'pihole');
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'service_up_failed', value: 'x', expected: 'y', fired_at: new Date().toISOString() },
+    });
+    const matched = { mode: profile.failure_modes[0], score: 1.0 };
+    const sim = buildSyntheticPihole({ ftlAlive: true, regexError: false });
+    const result = await proposeFix({
+      userId: USER, nodeId: NODE, incidentId: inc.id, profile, matchedMode: matched,
+      ctx: { fetchFn: sim.fetchFn, execFn: sim.execFn, auth_override: 'good' },
+    });
+    expect(result.action).toBe('auto_applied');
+    expect(result.fix.risk).toBe('medium');
+  });
+
+  it('still proposes high-risk fixes on proven profiles', async () => {
+    const profileBody = fresh();
+    // Inject a high-risk fix referencing a verified op
+    profileBody.failure_modes[0].fixes = [{ op_id: 'pihole_restart', risk: 'high' }];
+    saveProfile(USER, NODE, profileBody);
+    setTrustState(USER, NODE, 'pihole', 'proven');
+    markOperationVerified(USER, NODE, 'pihole', 'pihole_restart', true);
+    const profile = loadProfile(USER, NODE, 'pihole');
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'service_up_failed', value: 'x', expected: 'y', fired_at: new Date().toISOString() },
+    });
+    const matched = { mode: profile.failure_modes[0], score: 1.0 };
+    const result = await proposeFix({
+      userId: USER, nodeId: NODE, incidentId: inc.id, profile, matchedMode: matched, ctx: {},
+    });
+    expect(result.action).toBe('proposed');
+    const updated = loadIncident(USER, NODE, inc.id);
+    const proposed = updated.events.find(e => e.type === 'fix_proposed');
+    expect(proposed.payload.reason_not_auto).toMatch(/high-risk fixes always require user confirmation/);
   });
 
   it('returns no_op_for_fix when fix references missing operation', async () => {

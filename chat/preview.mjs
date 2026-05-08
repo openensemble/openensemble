@@ -102,10 +102,10 @@ export function normalizeToolResult(result) {
 }
 
 // Drain an async generator tool into a plain string — used for parallel execution
-export async function drainToolResult(name, args, userId, agentId) {
+export async function drainToolResult(name, args, userId, agentId, allowedTools = null) {
   let toolResult = '';
   try {
-    for await (const chunk of executeToolStreaming(name, args, userId, agentId)) {
+    for await (const chunk of executeToolStreaming(name, args, userId, agentId, allowedTools)) {
       if (chunk.type === 'token')  toolResult += chunk.text;
       if (chunk.type === 'result') toolResult = chunk.text;
     }
@@ -120,11 +120,11 @@ export async function drainToolResult(name, args, userId, agentId) {
 // nested tool_call, tool_result). Used by the parallel tool-dispatch path so mixed
 // tool types can run concurrently without losing events the sequential path would
 // have yielded mid-stream. Events are replayed in order after the tool completes.
-export async function drainToolWithEvents(name, args, userId, agentId) {
+export async function drainToolWithEvents(name, args, userId, agentId, allowedTools = null) {
   const events = [];
   let toolResult = '';
   try {
-    for await (const chunk of executeToolStreaming(name, args, userId, agentId)) {
+    for await (const chunk of executeToolStreaming(name, args, userId, agentId, allowedTools)) {
       if (chunk.type === 'token')              toolResult += chunk.text;
       if (chunk.type === 'permission_request') events.push(chunk);
       if (chunk.type === 'tool_call')          events.push({ type: 'tool_call', name: chunk.name, args: chunk.args });

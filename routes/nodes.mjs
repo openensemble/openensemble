@@ -19,7 +19,7 @@ import {
   removeNode, pushUpdate, pushUninstall, getNodes, getNode,
   sendCommand, sendCommandStreaming,
 } from '../skills/nodes/node-registry.mjs';
-import { requireAuth, readBody, getUser, getSessionUserId, getAuthToken } from './_helpers.mjs';
+import { requireAuth, readBody, getUser, getSessionUserId, getAuthToken, clearUserNodeSessions } from './_helpers.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import { getNodeProfilesSummary } from '../lib/node-profile-summary.mjs';
 import { handlePairingRoutes } from './nodes/pairing.mjs';
@@ -184,6 +184,27 @@ export async function handle(req, res) {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ pushed: true, nodeId }));
+    return true;
+  }
+
+  // POST /api/nodes/revoke-all — revoke every paired node + every node session
+  // owned by this user. Use when an unrecognized node appears or after a
+  // suspected token compromise. Idempotent.
+  if (p === '/api/nodes/revoke-all' && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeList = getNodes(userId);
+    let removed = 0;
+    for (const n of nodeList) {
+      // Best-effort uninstall, then revoke. If a node is offline the WS close
+      // is a no-op; isRevoked() prevents reconnect.
+      try { pushUninstall(n.nodeId, userId); } catch {}
+      const r = removeNode(n.nodeId, userId);
+      if (r.removed) removed++;
+    }
+    const sessionsRevoked = clearUserNodeSessions(userId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ removed, sessionsRevoked, total: nodeList.length }));
     return true;
   }
 

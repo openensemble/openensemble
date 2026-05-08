@@ -146,7 +146,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
           yield { type: 'tool_call', name: block.name, args: toolArgs };
         }
         const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
-          const { text, _notify, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id);
+          const { text, _notify, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
           return { block, toolArgs, result: text, _notify, events };
         }));
         for (const { block, result, _notify, events } of results) {
@@ -170,7 +170,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         yield { type: 'tool_call', name: block.name, args: toolArgs };
         let toolResult = '';
         try {
-          for await (const chunk of executeToolStreaming(block.name, toolArgs, userId, agent.id)) {
+          for await (const chunk of executeToolStreaming(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
             if (chunk.type === 'token')              toolResult += chunk.text;
             if (chunk.type === 'permission_request') yield chunk;
             if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };

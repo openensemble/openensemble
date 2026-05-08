@@ -7,6 +7,8 @@ import { getAgent, updateCustomAgent, loadCustomAgents } from './agents.mjs';
 import { streamChat } from './chat.mjs';
 import { appendToSession, writeStreamBuffer, clearStreamBuffer, loadSession } from './sessions.mjs';
 import { extractTransactions, getPendingDelete, clearPendingDelete, executePendingDelete } from './skills/expenses/execute.mjs';
+import { getPendingEmail, clearPendingEmail, executePendingEmail } from './skills/email/execute.mjs';
+import { getPendingProven, clearPendingProven, executePendingProven } from './skills/profiles/execute.mjs';
 import { getRoleManifest, getRoleAssignments, setRoleAssignment, listRoles } from './roles.mjs';
 import { interceptScheduling } from './lib/scheduler-intent.mjs';
 import { log } from './logger.mjs';
@@ -205,6 +207,34 @@ export async function handleChatMessage({
     return;
   }
   if (getPendingDelete(userId)) clearPendingDelete(userId);
+
+  // Intercept "APPROVE PURGE" — execute staged destructive email op
+  if (userText.toUpperCase() === 'APPROVE PURGE' && getPendingEmail(userId)) {
+    const result = await executePendingEmail(userId);
+    const text = typeof result === 'string' ? result : (result?.text ?? String(result));
+    appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: text, ts: Date.now() }
+    );
+    onEvent({ type: 'token', text, agent: agentId });
+    onEvent({ type: 'done', agent: agentId });
+    return;
+  }
+  if (getPendingEmail(userId)) clearPendingEmail(userId);
+
+  // Intercept "APPROVE PROVEN" — execute staged trust-state promotion to proven
+  if (userText.toUpperCase() === 'APPROVE PROVEN' && getPendingProven(userId)) {
+    const result = await executePendingProven(userId);
+    const text = typeof result === 'string' ? result : (result?.text ?? String(result));
+    appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: text, ts: Date.now() }
+    );
+    onEvent({ type: 'token', text, agent: agentId });
+    onEvent({ type: 'done', agent: agentId });
+    return;
+  }
+  if (getPendingProven(userId)) clearPendingProven(userId);
 
   // /claim <skillId> and /release <skillId>
   const claimMatch = userText.match(/^\/?(claim|release)\s+(\S+)/i);

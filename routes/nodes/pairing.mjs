@@ -17,12 +17,40 @@ const _pairingCodes = new Map(); // code → { userId, createdAt, nodeId? }
 const PAIRING_TTL = 10 * 60 * 1000; // 10 minutes
 
 // Per-IP lockout for /api/nodes/redeem. Global API rate-limit caps total
-// request rate, but a distributed attacker could still scan the 16.7M-code
-// keyspace across many IPs. This adds a per-IP failure cap as a second layer:
+// request rate, but a distributed attacker could still scan the keyspace
+// across many IPs. This adds a per-IP failure cap as a second layer:
 // if one IP racks up N wrong codes in the window, it gets 429 until reset.
 const _redeemFailures = new Map(); // ip → { count, firstFail }
 const REDEEM_WINDOW_MS = 10 * 60 * 1000;
 const REDEEM_MAX_FAILURES = 10;
+
+// Global fail counter — caps the *total* failure rate across all IPs so a
+// botnet can't trivially scan the keyspace by rotating addresses. When the
+// counter exceeds the threshold, redeem is disabled entirely until the
+// window resets. Legitimate redeem flow is one or two attempts per pairing,
+// so the threshold is far above any realistic legitimate signal.
+let _redeemGlobalFails = 0;
+let _redeemGlobalWindowStart = Date.now();
+const REDEEM_GLOBAL_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const REDEEM_GLOBAL_MAX_FAILURES = 200;
+
+function noteGlobalFail() {
+  const now = Date.now();
+  if (now - _redeemGlobalWindowStart > REDEEM_GLOBAL_WINDOW_MS) {
+    _redeemGlobalWindowStart = now;
+    _redeemGlobalFails = 0;
+  }
+  _redeemGlobalFails++;
+}
+function isGlobalRedeemLocked() {
+  const now = Date.now();
+  if (now - _redeemGlobalWindowStart > REDEEM_GLOBAL_WINDOW_MS) {
+    _redeemGlobalWindowStart = now;
+    _redeemGlobalFails = 0;
+    return false;
+  }
+  return _redeemGlobalFails >= REDEEM_GLOBAL_MAX_FAILURES;
+}
 
 setInterval(() => {
   const cutoff = Date.now() - REDEEM_WINDOW_MS;
@@ -53,7 +81,11 @@ export function generatePairingCode(userId) {
   for (const [code, entry] of _pairingCodes) {
     if (now - entry.createdAt > PAIRING_TTL) _pairingCodes.delete(code);
   }
-  const code = randomBytes(3).toString('hex').toUpperCase(); // 6-char hex
+  // 32-bit keyspace (4.3B codes). Earlier 24-bit (3 bytes / 6 hex chars) was
+  // brute-forceable across a botnet within a single 10-min TTL — bumping to
+  // 8 hex chars makes scanning the live keyspace infeasible without
+  // sustaining ~2M req/s, well above any rate-limit threshold.
+  const code = randomBytes(4).toString('hex').toUpperCase(); // 8-char hex
   _pairingCodes.set(code, { userId, createdAt: now });
   return code;
 }
@@ -95,6 +127,12 @@ export async function handlePairingRoutes(req, res, pathname) {
   // called by the node agent during setup).
   if (pathname === '/api/nodes/redeem' && req.method === 'POST') {
     const ip = getRedeemIp(req);
+    if (isGlobalRedeemLocked()) {
+      console.warn('[pairing] Global redeem lockout active — refusing redeem');
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Pairing temporarily disabled due to suspicious activity. Try again in an hour.' }));
+      return true;
+    }
     if (isRedeemLockedOut(ip)) {
       res.writeHead(429, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Too many failed attempts. Try again later.' }));
@@ -114,6 +152,7 @@ export async function handlePairingRoutes(req, res, pathname) {
     const entry = redeemPairingCode(body.code);
     if (!entry) {
       recordRedeemFailure(ip);
+      noteGlobalFail();
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid or expired pairing code' }));
       return true;

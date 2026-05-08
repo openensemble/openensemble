@@ -196,12 +196,13 @@ function buildFillBlankWidget(data) {
   const wid = newWidgetId();
   const reviewBadge = data.memoryId ? `<div class="tutor-widget-review-badge">Spaced Review</div>` : '';
   const prompt = esc(data.question || data.prompt || '');
-  return `<div class="tutor-widget" id="${wid}" data-kind="fill_blank">
+  const answersJson = JSON.stringify(data.answers || [data.answer]).replace(/"/g, '&quot;');
+  return `<div class="tutor-widget" id="${wid}" data-kind="fill_blank" data-answers="${answersJson}">
     ${reviewBadge}
     <div class="tutor-widget-question">${prompt}</div>
     <div class="tutor-widget-input-row">
-      <input type="text" class="tutor-widget-input" id="${wid}_input" placeholder="Your answer" onkeydown="if(event.key==='Enter'){handleFillBlankSubmit('${wid}','${esc(data.memoryId || '')}',${JSON.stringify(data.answers || [data.answer]).replace(/"/g,'&quot;')})}" />
-      <button class="tutor-widget-submit" onclick="handleFillBlankSubmit('${wid}','${esc(data.memoryId || '')}',${JSON.stringify(data.answers || [data.answer]).replace(/"/g,'&quot;')})">Submit</button>
+      <input type="text" class="tutor-widget-input" id="${wid}_input" placeholder="Your answer" onkeydown="if(event.key==='Enter'){handleFillBlankSubmit('${wid}','${esc(data.memoryId || '')}')}" />
+      <button class="tutor-widget-submit" onclick="handleFillBlankSubmit('${wid}','${esc(data.memoryId || '')}')">Submit</button>
     </div>
     <div class="tutor-widget-explanation" id="${wid}_expl">${esc(data.explanation)}</div>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
@@ -212,13 +213,13 @@ function normalizeForCompare(s) {
   return String(s ?? '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-function handleFillBlankSubmit(wid, memoryId, answersJson) {
+function handleFillBlankSubmit(wid, memoryId) {
   const input = document.getElementById(wid + '_input');
   if (!input || input.disabled) return;
   const widget = document.getElementById(wid);
   const user = input.value.trim();
   let answers = [];
-  try { answers = typeof answersJson === 'string' ? JSON.parse(answersJson) : answersJson; } catch {}
+  try { answers = JSON.parse((widget?.dataset.answers || '[]').replace(/&quot;/g, '"')); } catch {}
   if (!Array.isArray(answers)) answers = [answers];
   const isCorrect = answers.some(a => normalizeForCompare(a) === normalizeForCompare(user));
   input.disabled = true;
@@ -518,10 +519,13 @@ function buildHotspotWidget(data) {
   const regions = Array.isArray(data.regions) ? data.regions : [];
   const target = data.target || regions[0]?.id;
   const payload = JSON.stringify({ regions, target }).replace(/"/g, '&quot;');
+  const num = (v, d = 0) => Number.isFinite(Number(v)) ? Number(v) : d;
   const regionSvg = regions.map(r =>
-    `<circle cx="${r.x}" cy="${r.y}" r="${r.r || 16}" data-id="${esc(r.id)}" class="tutor-widget-hotspot-region" />`
+    `<circle cx="${num(r.x)}" cy="${num(r.y)}" r="${num(r.r, 16)}" data-id="${esc(r.id)}" class="tutor-widget-hotspot-region" />`
   ).join('');
-  const imgUrl = String(data.imageUrl || '').replace(/"/g, '');
+  const rawImg = String(data.imageUrl || '');
+  // Allow only http(s):// and same-origin relative URLs; anything else is dropped
+  const imgUrl = (/^https?:\/\//i.test(rawImg) || /^\/[^\/]/.test(rawImg)) ? esc(rawImg) : '';
   return `<div class="tutor-widget" id="${wid}" data-kind="hotspot" data-payload="${payload}">
     ${reviewBadge}
     <div class="tutor-widget-question">${esc(data.question || 'Click the correct region.')}</div>
@@ -649,7 +653,7 @@ async function handleSpeakRecord(wid, memoryId) {
 // ── Celebration widget (inline — no stream) ──────────────────────────────────
 function buildCelebrationWidget(data) {
   const wid = newWidgetId();
-  const icon = data.icon || '🎉';
+  const icon = esc(data.icon || '🎉');
   const label = esc(data.label || 'Nice work!');
   const kind = esc(data.kind || 'milestone');
   // Trigger overlay animation once on render

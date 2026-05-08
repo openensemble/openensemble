@@ -31,7 +31,7 @@ import {
 async function execProfileSave(args, userId) {
   const { node_id, service_id, profile } = args;
   if (!node_id || !service_id || !profile) {
-    return 'Error: profile_save requires node_id, service_id, and profile.';
+    return 'profile_save needs node_id, service_id, and profile. Call this tool again with all three.';
   }
   // Tool params authoritatively set service_id + node_id — the profile body
   // is identity-agnostic. (LLM drafts often carry the fixture's node_id; the
@@ -64,28 +64,28 @@ async function execProfileSave(args, userId) {
     return lines.join('\n');
   } catch (e) {
     if (e instanceof ProfileValidationError) {
-      return `Validation error: ${e.message}. Fix the profile and try again.`;
+      return `profile_save: the profile body didn't pass schema validation — ${e.message}. Adjust the profile and call profile_save again. Nothing was saved.`;
     }
-    return `Error saving profile: ${e.message}`;
+    return `profile_save couldn't save: ${e.message}`;
   }
 }
 
 async function execProfilePatch(args, userId) {
   const { node_id, service_id, edits } = args;
   if (!node_id || !service_id) {
-    return 'Error: profile_patch requires node_id, service_id, and edits.';
+    return 'profile_patch needs node_id, service_id, and edits. Call this tool again with all three.';
   }
   if (!Array.isArray(edits) || !edits.length) {
-    return 'Error: edits must be a non-empty array of {op, path, value?} objects.';
+    return 'profile_patch: `edits` must be a non-empty array of {op, path, value?} objects. Call this tool again with a valid edits array.';
   }
   let updated;
   try {
     updated = patchProfile(userId, node_id, service_id, edits);
   } catch (e) {
     if (e instanceof ProfileValidationError) {
-      return `Validation error after patch: ${e.message}. Original profile preserved.`;
+      return `profile_patch: the patched profile didn't pass schema validation — ${e.message}. Adjust the edits and call profile_patch again. Original profile is unchanged.`;
     }
-    return `Error patching profile: ${e.message}. Original profile preserved.`;
+    return `profile_patch couldn't apply: ${e.message}. Original profile is unchanged.`;
   }
 
   // Watcher state is frozen at registration time, so signal edits (cadence,
@@ -113,7 +113,7 @@ async function execProfilePatch(args, userId) {
 
 async function execProfileLoad(args, userId) {
   const { node_id, service_id, render } = args;
-  if (!node_id || !service_id) return 'Error: profile_load requires node_id and service_id.';
+  if (!node_id || !service_id) return 'profile_load needs node_id and service_id. Call this tool again with both.';
   const profile = loadProfile(userId, node_id, service_id);
   if (!profile) return `No profile found for "${service_id}" on node "${node_id}".`;
   if (render) return renderProfileMd(profile);
@@ -122,7 +122,7 @@ async function execProfileLoad(args, userId) {
 
 async function execProfileList(args, userId) {
   const { node_id } = args;
-  if (!node_id) return 'Error: profile_list requires node_id.';
+  if (!node_id) return 'profile_list needs a node_id. Call this tool again with node_id specified.';
   const profiles = listProfilesForNode(userId, node_id);
   if (!profiles.length) return `No profiles saved for node "${node_id}".`;
   const lines = [`Profiles for node "${node_id}":`];
@@ -136,10 +136,31 @@ async function execProfileList(args, userId) {
   return lines.join('\n');
 }
 
+// Stage `proven` transitions behind a typed user confirmation. The manifest
+// tells the LLM "Do NOT auto-set this — it must reflect a real user decision",
+// but agents periodically promote to proven on their own (e.g. right after
+// running verification). Code-enforce: stage the transition, ask the user to
+// type APPROVE PROVEN in chat, only then call setTrustState. unverified and
+// reviewed transitions still go through unchanged.
+const _pendingProven = new Map(); // userId -> { node_id, service_id }
+
+export function getPendingProven(userId)   { return _pendingProven.get(userId) ?? null; }
+export function clearPendingProven(userId) { _pendingProven.delete(userId); }
+export async function executePendingProven(userId) {
+  const pending = _pendingProven.get(userId);
+  if (!pending) return 'No pending trust-state transition.';
+  _pendingProven.delete(userId);
+  return execProfileSetTrustState({ ...pending, state: 'proven', _userApproved: true }, userId);
+}
+
 async function execProfileSetTrustState(args, userId) {
   const { node_id, service_id, state } = args;
   if (!node_id || !service_id || !state) {
-    return 'Error: profile_set_trust_state requires node_id, service_id, state.';
+    return 'profile_set_trust_state needs node_id, service_id, and state. Call this tool again with all three.';
+  }
+  if (state === 'proven' && !args._userApproved) {
+    _pendingProven.set(userId, { node_id, service_id });
+    return `⚠️ Promoting "${service_id}" on "${node_id}" to **proven** elevates autonomy: medium-risk fixes (service restarts, reloads, reversible config changes) on verified operations will auto-apply when troubleshooting fires, instead of being proposed. High-risk ops still always require confirmation. Type **APPROVE PROVEN** in chat to confirm, or say anything else to cancel.`;
   }
   let updated;
   try {
@@ -175,7 +196,7 @@ async function execProfileSetTrustState(args, userId) {
 
 async function execProfileVerifyReadonly(args, userId) {
   const { node_id, service_id, auth_token } = args;
-  if (!node_id || !service_id) return 'Error: profile_verify_readonly requires node_id and service_id.';
+  if (!node_id || !service_id) return 'profile_verify_readonly needs node_id and service_id. Call this tool again with both.';
 
   const profile = loadProfile(userId, node_id, service_id);
   if (!profile) return `No profile found for "${service_id}" on "${node_id}".`;
@@ -241,7 +262,7 @@ async function lookupParentHost(userId, nodeId) {
 async function execDispatchOp(args, userId) {
   const { node_id, service_id, op_id, parameters, user_text } = args;
   if (!node_id || !service_id || !op_id) {
-    return 'Error: dispatch_op requires node_id, service_id, op_id.';
+    return 'dispatch_op needs node_id, service_id, and op_id. Call this tool again with all three.';
   }
   const profile = loadProfile(userId, node_id, service_id);
   if (!profile) return `No profile found for "${service_id}" on "${node_id}". Save one first via profile_save.`;
@@ -290,7 +311,7 @@ async function execDispatchOp(args, userId) {
 
 async function execRollbackOp(args, userId) {
   const { node_id, op_id, host_level } = args;
-  if (!node_id || !op_id) return 'Error: rollback_op requires node_id and op_id.';
+  if (!node_id || !op_id) return 'rollback_op needs node_id and op_id. Call this tool again with both.';
 
   const orig = findOpRecord(userId, node_id, op_id);
   if (!orig) return `Op \`${op_id}\` not found on "${node_id}".`;
@@ -325,7 +346,7 @@ async function execRollbackOp(args, userId) {
 
 async function execIncidentList(args, userId) {
   const { node_id, open_only } = args;
-  if (!node_id) return 'Error: incident_list requires node_id.';
+  if (!node_id) return 'incident_list needs a node_id. Call this tool again with node_id specified.';
   const incidents = listIncidents(userId, node_id, { openOnly: !!open_only });
   if (!incidents.length) return `No${open_only ? ' open' : ''} incidents for node "${node_id}".`;
   const lines = [`${open_only ? 'Open i' : 'I'}ncidents for "${node_id}":`];
@@ -343,7 +364,7 @@ async function execIncidentList(args, userId) {
 async function execIncidentResolve(args, userId) {
   const { node_id, incident_id, summary, status } = args;
   if (!node_id || !incident_id) {
-    return 'Error: incident_resolve requires node_id and incident_id.';
+    return 'incident_resolve needs node_id and incident_id. Call this tool again with both.';
   }
   const finalStatus = status || 'resolved';
   if (!['resolved', 'abandoned'].includes(finalStatus)) {
