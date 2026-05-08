@@ -242,8 +242,13 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  // Serve the UI
-  if (req.url.startsWith('/invite/') || req.url === '/' || req.url === '/index.html') {
+  // Serve the UI. Match on the pathname (not raw req.url) so query strings
+  // like /?oauth=success or /?utm_source=email are treated as the root —
+  // the query string is metadata for the resource, not part of the path
+  // identity. Strict req.url === '/' was 404'ing OAuth-success redirects
+  // and any shared link with tracking params.
+  const _pathname = req.url.split('?', 1)[0];
+  if (_pathname.startsWith('/invite/') || _pathname === '/' || _pathname === '/index.html') {
     const html = fs.readFileSync(path.join(UI_DIR, 'index.html'));
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' }); res.end(html); return;
   }

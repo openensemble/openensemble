@@ -14,7 +14,12 @@ function connect() {
     } catch {}
   }
   clearTimeout(_pingTimer);
-  ws = new WebSocket(`ws://${location.host}`);
+  // Match the page's protocol — wss:// over HTTPS (tunnel deploys), ws://
+  // over plain HTTP (local dev). Hardcoding ws:// fails mixed-content when
+  // OE is served over a secure tunnel — the browser blocks the upgrade and
+  // every WS-dependent feature (chat send, streaming, drawers) goes silent.
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${wsProto}://${location.host}`);
   ws.onopen  = () => {
     // Authenticate via first message instead of URL query string
     ws.send(JSON.stringify({ type: 'auth', token: getToken() ?? '' }));
