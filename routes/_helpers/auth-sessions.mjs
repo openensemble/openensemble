@@ -191,12 +191,81 @@ export function revokeSessionByPrefix(userId, prefix) {
   return false;
 }
 
+// ── Cookie helpers ──────────────────────────────────────────────────────────
+// Browser sessions ride on an HttpOnly cookie so injected JS (XSS) cannot
+// read the token. Non-browser clients (oe-node-agent, CLI, scripts, the WS
+// first-message auth) continue to use Authorization: Bearer.
+const SESSION_COOKIE = 'oe_session';
+
+export function parseCookies(req) {
+  const header = req.headers?.cookie;
+  if (!header) return {};
+  const out = {};
+  for (const part of String(header).split(/;\s*/)) {
+    if (!part) continue;
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (!k) continue;
+    try { out[k] = decodeURIComponent(v); } catch { out[k] = v; }
+  }
+  return out;
+}
+
+function isRequestSecure(req) {
+  if (req.socket?.encrypted) return true;
+  const xfp = req.headers?.['x-forwarded-proto'];
+  if (typeof xfp === 'string' && xfp.split(',')[0].trim() === 'https') return true;
+  return false;
+}
+
+/** Set the HttpOnly session cookie on a response. Call alongside the JSON body
+ *  on /api/login + invite-redeem + switch-user paths. Mirrors the server-side
+ *  session expiry (7 days; node sessions slide so don't set a fixed expiry on
+ *  those — but only browser sessions ever get this cookie). */
+export function setSessionCookie(req, res, token) {
+  const parts = [
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=' + (7 * 24 * 60 * 60),
+  ];
+  if (isRequestSecure(req)) parts.push('Secure');
+  appendSetCookie(res, parts.join('; '));
+}
+
+export function clearSessionCookie(req, res) {
+  const parts = [
+    `${SESSION_COOKIE}=`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=0',
+  ];
+  if (isRequestSecure(req)) parts.push('Secure');
+  appendSetCookie(res, parts.join('; '));
+}
+
+function appendSetCookie(res, value) {
+  // Coexist with any Set-Cookie the route may have already added (none today,
+  // but be safe — replacing would silently drop them).
+  const existing = res.getHeader?.('Set-Cookie');
+  if (!existing) { res.setHeader('Set-Cookie', value); return; }
+  const arr = Array.isArray(existing) ? existing.slice() : [String(existing)];
+  arr.push(value);
+  res.setHeader('Set-Cookie', arr);
+}
+
 export function getAuthToken(req) {
-  // Session tokens must travel in the Authorization header. Previously we
-  // also accepted ?token= here for <img>/<video>/<iframe>, but session
-  // tokens in URLs leak via Referer, browser history, and access logs. URL
-  // callers should mint a short-lived media token (see createMediaToken /
-  // POST /api/media-token) and pass that instead.
+  // Cookie first (browser path), then Authorization: Bearer (non-browser:
+  // oe-node-agent, CLI, scripts, WebSocket first-message auth).
+  // Previously we also accepted ?token= here for <img>/<video>/<iframe>,
+  // but session tokens in URLs leak via Referer, browser history, and access
+  // logs — URL callers should mint a short-lived media token instead.
+  const cookies = parseCookies(req);
+  if (cookies[SESSION_COOKIE]) return cookies[SESSION_COOKIE];
   const auth = req.headers.authorization ?? '';
   if (auth.startsWith('Bearer ')) return auth.slice(7);
   return null;

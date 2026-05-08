@@ -5,6 +5,7 @@
 import {
   requireAuth, getAuthToken, getSessionUserId, getUser,
   createSession, createMediaToken, deleteSession, verifyPassword, readBody, isTimeBlocked,
+  setSessionCookie, clearSessionCookie,
 } from './_helpers.mjs';
 import { log } from '../logger.mjs';
 
@@ -81,6 +82,7 @@ export async function handle(req, res) {
         res.writeHead(403); res.end(JSON.stringify({ error: 'Access is restricted at this time' })); return true;
       }
       const token = createSession(userId);
+      setSessionCookie(req, res, token);
       const { passwordHash: _ph, ...safe } = user;
       log.info('auth', 'login ok', { ip, userId, role: user.role });
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ token, user: safe }));
@@ -101,6 +103,7 @@ export async function handle(req, res) {
     const userId = token ? getSessionUserId(token) : null;
     if (token) deleteSession(token);
     if (userId) log.info('auth', 'logout', { userId });
+    clearSessionCookie(req, res);
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}'); return true;
   }
 

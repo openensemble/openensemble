@@ -188,8 +188,20 @@ async function evalSignal(state, signal, helpers, now) {
   const next = isHealthy ? 'healthy' : 'unhealthy';
 
   if (prev === next) {
+    // If we still claim an active incident but the underlying record was
+    // already closed (manually via incident_resolve, or auto-reaped), drop
+    // the dangling reference. Without this, the signal can stay
+    // unhealthy-pointing-at-resolved-incident forever — and the next
+    // healthy→unhealthy transition would try to attach to a closed record.
+    let currentIncidentId = signal.current_incident_id || null;
+    if (next === 'unhealthy' && currentIncidentId) {
+      try {
+        const inc = loadIncident(helpers.userId, state.node_id, currentIncidentId);
+        if (!inc || inc.ts_closed) currentIncidentId = null;
+      } catch { currentIncidentId = null; }
+    }
     return {
-      newSignal: { ...signal, last_state: next, last_checked_at: now },
+      newSignal: { ...signal, last_state: next, last_checked_at: now, current_incident_id: currentIncidentId },
       transitionText: null,
     };
   }

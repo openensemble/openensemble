@@ -1,5 +1,6 @@
 // ── Migrate legacy localStorage keys ─────────────────────────────────────────
-for (const [o, n] of [['clawd_token','oe_token'],['clawd_user_id','oe_user_id'],
+// (Keys other than the session token; oe_token is no longer stored client-side.)
+for (const [o, n] of [['clawd_user_id','oe_user_id'],
   ['clawd_layout','oe_layout'],['clawd_custom_models','oe_custom_models'],
   ['clawd_reminder_board','oe_reminder_board']]) {
   const v = localStorage.getItem(o);
@@ -7,12 +8,22 @@ for (const [o, n] of [['clawd_token','oe_token'],['clawd_user_id','oe_user_id'],
     localStorage.setItem(n, v); localStorage.removeItem(o);
   }
 }
+// Drop any legacy oe_token / clawd_token left in storage from before the
+// HttpOnly-cookie migration. The cookie is the only token now; leaving the
+// stale localStorage value around just gives XSS a target.
+localStorage.removeItem('oe_token');
+localStorage.removeItem('clawd_token');
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
-function getToken() { return localStorage.getItem('oe_token'); }
+// Session auth lives in an HttpOnly cookie set by /api/login. JavaScript can't
+// read it (which is the point), so getToken/setToken are stubs kept only for
+// the few call sites that still reference them — they no-op safely. The fetch
+// wrapper below uses cookie credentials; the WS first-message auth sends an
+// empty token and lets the server's cookie-at-upgrade auth do the work.
+function getToken() { return null; }
 function setToken(t) {
-  if (t) localStorage.setItem('oe_token', t);
-  else { localStorage.removeItem('oe_token'); _mediaTok = null; _mediaTokExpiresAt = 0; }
+  if (!t) { _mediaTok = null; _mediaTokExpiresAt = 0; }
+  // intentionally no localStorage write
 }
 
 // Short-lived media tokens for <img>/<video>/<iframe> URLs — we never put the
@@ -51,16 +62,20 @@ async function ensureMediaToken() {
   return await refreshMediaToken();
 }
 
-// Intercept all fetch calls to add auth token and handle 401
+// Intercept all fetch calls to attach auth and handle 401.
+//
+// Auth is the HttpOnly cookie set by /api/login — `credentials: 'same-origin'`
+// makes the browser send it on every same-origin /api request. JavaScript
+// can't read or forge the cookie, so even an injected XSS payload can't
+// exfiltrate the session token (it can only call APIs as the user from
+// within the page it's already injected into).
 const _origFetch = window.fetch.bind(window);
 window.fetch = (url, opts = {}) => {
   if (typeof url === 'string' && url.startsWith('/api') && url !== '/api/login') {
-    const token = getToken();
-    if (token) opts = { ...opts, headers: { ...(opts.headers ?? {}), Authorization: `Bearer ${token}` } };
+    opts = { ...opts, credentials: opts.credentials ?? 'same-origin' };
   }
   return _origFetch(url, opts).then(r => {
     if (r.status === 401 && typeof url === 'string' && url !== '/api/login') {
-      setToken(null);
       showLoginScreen();
     }
     return r;

@@ -234,7 +234,7 @@ function resumeTutoring(subject) {
 
 async function deleteDesktopDoc(docId) {
   if (!confirm('Delete this document? This cannot be undone.')) return;
-  const res = await fetch(`/api/research/${docId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${getToken()}` } });
+  const res = await fetch(`/api/research/${docId}`, { method: 'DELETE' });
   if (!res.ok) { alert('Failed to delete document.'); return; }
   closeDesktopDetail();
   openDesktopCategory('documents');
@@ -245,7 +245,7 @@ async function deleteDesktopImage(idx) {
   if (!img) return;
   if (!confirm('Delete this image? This cannot be undone.')) return;
   const params = new URLSearchParams({ agent: img.agentId || '' });
-  const res = await fetch(`/api/desktop/images/${encodeURIComponent(img.filename)}?${params}`, { method: 'DELETE', headers: { Authorization: `Bearer ${getToken()}` } });
+  const res = await fetch(`/api/desktop/images/${encodeURIComponent(img.filename)}?${params}`, { method: 'DELETE' });
   if (!res.ok) { alert('Failed to delete image.'); return; }
   closeDesktopDetail();
   openDesktopCategory('images');
@@ -255,7 +255,7 @@ async function deleteDesktopVideo(idx) {
   const vid = _desktopVideoCache[idx];
   if (!vid) return;
   if (!confirm('Delete this video? This cannot be undone.')) return;
-  const res = await fetch(`/api/desktop/videos/${encodeURIComponent(vid.filename)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${getToken()}` } });
+  const res = await fetch(`/api/desktop/videos/${encodeURIComponent(vid.filename)}`, { method: 'DELETE' });
   if (!res.ok) { alert('Failed to delete video.'); return; }
   closeDesktopDetail();
   openDesktopCategory('videos');
@@ -365,7 +365,7 @@ function saveWidgetLayoutNow() {
   clearTimeout(_widgetSaveTimer);
   return fetch('/api/desktop/widgets', {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(_widgetLayout),
   }).catch(() => {});
 }

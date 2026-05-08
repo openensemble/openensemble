@@ -4,9 +4,8 @@ async function loadTutorToday() {
   const body = $('tutorTodayBody');
   if (!body) return;
   body.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Loading…</div>`;
-  const token = localStorage.getItem('oe_token');
   try {
-    const r = await fetch('/api/tutor/today', { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    const r = await fetch('/api/tutor/today');
     if (!r.ok) { body.innerHTML = renderTutorEmpty('Could not load tutor data.'); return; }
     const data = await r.json();
     body.innerHTML = renderTutorToday(data);
@@ -146,10 +145,9 @@ function startReview(subject) {
 async function openTutorPrefsPanel() {
   const body = $('tutorTodayBody');
   if (!body) return;
-  const token = localStorage.getItem('oe_token');
   let prefs = { enabled: false, channel: 'websocket', dailyTime: '19:30', streakAtRiskNudge: true };
   try {
-    const r = await fetch('/api/tutor/reminders', { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    const r = await fetch('/api/tutor/reminders');
     if (r.ok) prefs = await r.json();
   } catch {}
   body.innerHTML = `
@@ -184,7 +182,6 @@ async function openTutorPrefsPanel() {
 }
 
 async function saveTutorPrefs() {
-  const token = localStorage.getItem('oe_token');
   const payload = {
     enabled: $('tutor-pref-enabled').checked,
     channel: $('tutor-pref-channel').value,
@@ -193,10 +190,7 @@ async function saveTutorPrefs() {
   };
   const r = await fetch('/api/tutor/reminders', {
     method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
   if (r.ok) { if (typeof showToast === 'function') showToast('Reminder preferences saved'); loadTutorToday(); }

@@ -11,6 +11,7 @@ import {
   isPrivileged, loadUsers, modifyUsers, modifyUser, hashPassword, validatePassword, verifyPassword, readBody,
   createSession, clearUserSessions, clearUserSessionsExcept, modifyExpGroups, isTimeBlocked, parseMultipart,
   safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB,
+  setSessionCookie,
 } from './_helpers.mjs';
 import { migrateSharedCortexToUser } from '../memory.mjs';
 
@@ -426,6 +427,7 @@ export async function handle(req, res) {
       if (targetUser.locked) { res.writeHead(403); res.end(JSON.stringify({ error: 'Account is locked' })); return true; }
       if (isTimeBlocked(targetUser.accessSchedule)) { res.writeHead(403); res.end(JSON.stringify({ error: 'Access is restricted at this time' })); return true; }
       const token = createSession(targetId);
+      setSessionCookie(req, res, token);
       const { passwordHash: _ph, pinHash: _pin, ...safe } = targetUser;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ token, user: safe }));

@@ -17,7 +17,7 @@ import { loadSession, clearSession, appendToSession, getStreamBuffer } from './s
 import { initNodeWss, initTerminalWss } from './routes/nodes.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
-  getSessionUserId, resolveShareGroup,
+  getSessionUserId, getAuthToken, resolveShareGroup,
 } from './routes/_helpers.mjs';
 import { log } from './logger.mjs';
 
@@ -99,13 +99,26 @@ export function initWs(httpServer) {
 }
 
 function onConnection(ws, req) {
-  // Support both first-message auth (preferred) and legacy URL token auth
+  // Auth precedence:
+  //   1. Cookie via getAuthToken (browser path — cookie rides on the upgrade
+  //      request automatically same-origin). Preferred.
+  //   2. First-message auth — used by clients that can't carry the cookie
+  //      (oe-node-agent, the WS-auth fallback during transition while
+  //      localStorage holds a Bearer token).
+  //   3. Legacy ?token= URL — still accepted for backward-compat. Tokens in
+  //      URLs leak via Referer and proxy logs, but blocking it here would
+  //      break any tooling that relies on it.
+  const cookieOrHeaderToken = getAuthToken(req);
+  const cookieUserId = cookieOrHeaderToken ? getSessionUserId(cookieOrHeaderToken) : null;
   const wsUrl = new URL(req.url, 'http://x');
   const legacyToken = wsUrl.searchParams.get('token');
   const legacyUserId = legacyToken ? getSessionUserId(legacyToken) : null;
 
-  if (legacyUserId) {
-    // Legacy path: token in URL (still supported for backwards compat)
+  if (cookieUserId) {
+    ws._userId = cookieUserId;
+    ws._authenticated = true;
+    if (!enforceWsCap(ws)) return;
+  } else if (legacyUserId) {
     ws._userId = legacyUserId;
     ws._authenticated = true;
     if (!enforceWsCap(ws)) return;
@@ -148,6 +161,18 @@ function onConnection(ws, req) {
 
     // Handle auth message (first message for new-style auth)
     if (msg.type === 'auth') {
+      // Already cookie-authed at upgrade time — accept the first-message auth
+      // as a redundant idempotent re-auth and skip re-running sendInitialData.
+      // The client always sends this; we just ignore when the cookie already
+      // did the job.
+      if (ws._authenticated) {
+        const sameUserId = getSessionUserId(msg.token);
+        if (sameUserId && sameUserId !== ws._userId) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
+          ws.close(4001, 'Unauthorized');
+        }
+        return;
+      }
       const userId = getSessionUserId(msg.token);
       if (!userId) {
         ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));

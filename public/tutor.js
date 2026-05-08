@@ -615,12 +615,7 @@ async function handleSpeakRecord(wid, memoryId) {
         const form = new FormData();
         form.append('audio', blob, 'speech.webm');
         form.append('lang', widget.dataset.lang || 'en');
-        const token = localStorage.getItem('oe_token');
-        const resp = await fetch('/api/stt', {
-          method: 'POST',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-          body: form,
-        });
+        const resp = await fetch('/api/stt', { method: 'POST', body: form });
         if (!resp.ok) {
           const body = await resp.text();
           status.textContent = `STT error: ${resp.status}`;
@@ -751,11 +746,10 @@ function showCelebration(msg) {
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (!tz) return;
-    const token = localStorage.getItem('oe_token');
-    if (!token) { setTimeout(captureTz, 5_000); return; }
+    if (!_currentUser) { setTimeout(captureTz, 5_000); return; }
     fetch('/api/tutor/tz', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tz }),
     }).then(r => { if (r.ok) sessionStorage.setItem('oe_tutor_tz_sent', '1'); }).catch(() => {});
   } catch {}

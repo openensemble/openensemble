@@ -109,7 +109,7 @@ async function loadNodes() {
   if (!body) return;
 
   try {
-    const res = await fetch('/api/nodes', { headers: { 'Authorization': 'Bearer ' + localStorage.getItem('oe_token') } });
+    const res = await fetch('/api/nodes');
     if (!res.ok) throw new Error('Failed to load nodes');
     _nodesList = await res.json();
   } catch (e) {
@@ -334,14 +334,16 @@ async function openNodeTerminal(nodeId, initialCommand, commandOpts) {
   }
 
   // Mint a single-use page ticket. window.open() can't carry an Authorization
-  // header, so we pass this ticket in the URL instead of the session token —
-  // short-lived and scope-gated so it's useless after the terminal loads.
-  const token = localStorage.getItem('oe_token');
+  // header (and now that auth is cookie-based, can't carry the cookie either
+  // — popup origin sees the cookie automatically only for same-origin
+  // navigation, but the terminal page mounts a fresh WS that needs an
+  // explicit auth token). We pass this ticket in the URL instead — short-lived
+  // and scope-gated so it's useless after the terminal loads.
   let ticket;
   try {
     const resp = await fetch('/api/nodes/terminal-ticket', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodeId }),
     });
     if (!resp.ok) { alert(`Terminal auth failed: ${resp.status}`); return; }
@@ -467,7 +469,6 @@ function revokeAllNodes() {
       try {
         const res = await fetch('/api/nodes/revoke-all', {
           method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + localStorage.getItem('oe_token') },
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -497,7 +498,6 @@ function removeNodeFromUI(nodeId) {
       try {
         const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, {
           method: 'DELETE',
-          headers: { 'Authorization': 'Bearer ' + localStorage.getItem('oe_token') },
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -524,7 +524,6 @@ function pushAgentUpdate(nodeId) {
       try {
         const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/update`, {
           method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + localStorage.getItem('oe_token') },
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
@@ -544,9 +543,7 @@ async function nodeRefreshStatus(nodeId) {
   if (!node) return;
 
   try {
-    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/status`, {
-      headers: { 'Authorization': 'Bearer ' + localStorage.getItem('oe_token') },
-    });
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/status`);
     if (res.ok) loadNodes();
   } catch {}
 }
@@ -634,10 +631,7 @@ function showNodeToast(text, type) {
 // ── Pairing ──────────────────────────────────────────────────────────────────
 async function pairNewNode() {
   try {
-    const res = await fetch('/api/nodes/pair', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + localStorage.getItem('oe_token') },
-    });
+    const res = await fetch('/api/nodes/pair', { method: 'POST' });
     if (!res.ok) throw new Error('Failed to generate pairing code');
     const { code, expiresIn, installUrl } = await res.json();
     // Fallback in case server didn't return installUrl (older build)

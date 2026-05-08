@@ -9,20 +9,12 @@ async function init() {
   const inviteToken = window.location.pathname.match(/^\/invite\/([a-f0-9]+)$/)?.[1];
   if (inviteToken) { showInvitePage(inviteToken); return; }
 
-  // Auth check first
-  const token = getToken();
-  let authed = false;
-  if (token) {
-    const me = await _origFetch('/api/me', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.ok ? r.json() : null).catch(() => null);
-    if (me) { setCurrentUser(me); $('loginScreen').classList.add('hidden'); authed = true; }
-    // Stale token (e.g. from a prior install on the same hostname) — drop it so
-    // the visibilitychange/forceReconnect path doesn't keep opening a WS that
-    // the server immediately rejects, spamming "Unauthorized" bubbles into the
-    // chat area behind the login overlay.
-    else setToken(null);
-  }
-  if (!authed) { showLoginScreen(); return; }
+  // Auth check first. Cookie auth is automatic for same-origin requests.
+  const me = await _origFetch('/api/me', { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : null).catch(() => null);
+  if (!me) { showLoginScreen(); return; }
+  setCurrentUser(me);
+  $('loginScreen').classList.add('hidden');
   ensureMediaToken().catch(() => {});
 
   // Handle OAuth callback redirect (?oauth=success|error)

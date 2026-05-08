@@ -14,6 +14,7 @@ import {
   loadUsers, loadActivity, loadInvites, loadConfig, modifyConfig,
   modifyUsers, modifyInvites,
   hashPassword, validatePassword, createSession, clearUserSessions, readBody,
+  setSessionCookie,
   getDefaultChildSafetyPrompt, safeId, getUserDir, safeError,
   CFG_PATH, USERS_PATH, ACTIVITY_DIR, NOTES_PATH, EXPENSES_DB, EXPENSE_GROUPS_PATH,
 } from './_helpers.mjs';
@@ -413,6 +414,7 @@ export async function handle(req, res) {
       if (!fs.existsSync(agentsDir)) fs.mkdirSync(agentsDir, { recursive: true });
       fs.writeFileSync(path.join(agentsDir, `${id}.json`), '[]');
       const sessionToken = createSession(id);
+      setSessionCookie(req, res, sessionToken);
       const { passwordHash: _ph, pinHash: _pin, ...safeUser } = newUser;
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ token: sessionToken, user: { ...safeUser, hasPin: !!pinHash } }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }

@@ -5,9 +5,7 @@
 
 async function fetchCodeProjectCount() {
   try {
-    const r = await fetch('/api/coder/projects', {
-      headers: { Authorization: `Bearer ${getToken()}` },
-    });
+    const r = await fetch('/api/coder/projects');
     if (!r.ok) return { count: 0, items: [] };
     const d = await r.json();
     const items = Array.isArray(d.projects) ? d.projects : [];
@@ -52,10 +50,7 @@ function renderCodeProjectItems(grid, items) {
 async function deleteCodeProject(name) {
   if (!confirm(`Delete project "${name}"? This removes all its files and cannot be undone.`)) return;
   try {
-    const r = await fetch(`/api/coder/projects/${encodeURIComponent(name)}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${getToken()}` },
-    });
+    const r = await fetch(`/api/coder/projects/${encodeURIComponent(name)}`, { method: 'DELETE' });
     if (!r.ok) {
       let msg = 'Failed to delete project.';
       try { const j = await r.json(); if (j?.error) msg = j.error; } catch {}

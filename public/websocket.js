@@ -32,7 +32,10 @@ function connect() {
     setStatus('offline');
     const delay = _reconnectDelay;
     _reconnectDelay = Math.min(_reconnectDelay * 1.5, 15000);
-    setTimeout(() => { if (getToken()) connect(); }, delay);
+    // Reconnect whenever a current user is set in the page state. Cookie-based
+    // auth means there's no client-readable token to gate on; the server will
+    // accept or 401 on the upgrade based on the cookie.
+    setTimeout(() => { if (_currentUser) connect(); }, delay);
   };
   ws.onerror = () => {};
   ws.onmessage = ({ data }) => {
@@ -80,7 +83,7 @@ function forceReconnect() {
       }
     } catch {}
   }
-  if (getToken()) connect();
+  if (_currentUser) connect();
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -420,7 +423,8 @@ function handleServerMessage(msg) {
       if (typeof window._nodeHealthHandler === 'function') window._nodeHealthHandler(msg);
       break;
     case 'session_expired':
-      localStorage.removeItem('oe_token');
+      // Server clears the cookie via Set-Cookie on the next API hit; nothing
+      // to do client-side beyond returning the user to the login screen.
       showToast('Your session has expired. Please sign in again.');
       showLoginScreen();
       break;

@@ -332,7 +332,7 @@ export {
   validatePassword, hashPassword, verifyPassword,
   loadPersistedSessions, createSession, getSessionUserId, deleteSession,
   clearUserSessions, clearUserSessionsExcept, clearUserNodeSessions, getUserSessions, revokeSessionByPrefix,
-  getAuthToken, getUrlToken,
+  getAuthToken, getUrlToken, setSessionCookie, clearSessionCookie,
   createMediaToken, consumeMediaToken,
   createTicket, consumeTicket,
   requireAuth, requirePrivileged,

@@ -236,9 +236,7 @@ async function runSearch(query) {
   }
   $('searchResults').innerHTML = '<div style="text-align:center;opacity:.5;padding:24px">Searching...</div>';
   try {
-    const r = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-    });
+    const r = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
     const data = await r.json();
     if (!data.results?.length) {
       $('searchResults').innerHTML = '<div style="text-align:center;opacity:.5;padding:24px">No results found</div>';
