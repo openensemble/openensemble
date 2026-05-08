@@ -107,7 +107,7 @@ async function showLoginScreen() {
       const avatarInner = u.avatar
         ? `<div class="login-avatar"><img src="${u.avatar}" alt=""></div>`
         : `<div class="login-avatar" style="background:${u.color ?? 'var(--bg3)'}">${u.emoji ?? '🧑'}</div>`;
-      return `<button class="login-user-btn" data-id="${u.id}" onclick="selectLoginUser('${u.id}','${escHtml(u.name)}')">
+      return `<button class="login-user-btn" data-id="${u.id}" data-action="selectLoginUser" data-args='${JSON.stringify([u.id, u.name]).replace(/'/g, "&#39;")}'>
         ${avatarInner}
         <div class="login-user-name">${escHtml(u.name)}</div>
       </button>`;
@@ -346,9 +346,9 @@ async function loadSkillsList() {
         ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">${escHtml(owner.emoji ?? '')} ${escHtml(owner.name)}</div>`
         : `<div style="font-size:10px;color:var(--muted);margin-top:3px;font-style:italic">Unassigned</div>`;
       const deleteBtn = isPriv
-        ? `<button onclick="deleteRole('${escHtml(s.id)}')" title="Delete"
-             style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:4px 2px;flex-shrink:0;line-height:1"
-             onmouseover="this.style.color='var(--red,#e05c5c)'" onmouseout="this.style.color='var(--muted)'">✕</button>`
+        ? `<button data-action="deleteRole" data-args='${JSON.stringify([s.id]).replace(/'/g, "&#39;")}' title="Delete"
+             class="role-delete-btn"
+             style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:4px 2px;flex-shrink:0;line-height:1">✕</button>`
         : '';
       return `<div>
         <div style="display:flex;align-items:flex-start;gap:12px;background:var(--bg3);border-radius:8px;padding:10px 12px">
@@ -384,10 +384,9 @@ async function loadSkillsList() {
       } else {
         let html = `<div style="display:flex;flex-direction:column;gap:8px">` + roles.map(roleCard).join('') + `</div>`;
         if (isPriv) {
-          html += `<button onclick="openNewRoleModal()"
-            style="width:100%;background:var(--bg3);border:1px dashed var(--border);color:var(--muted);border-radius:8px;padding:9px;font-size:12px;cursor:pointer;margin-top:8px;font-weight:500"
-            onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
-            onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">+ New Role</button>`;
+          html += `<button data-action="openNewRoleModal"
+            class="new-role-btn"
+            style="width:100%;background:var(--bg3);border:1px dashed var(--border);color:var(--muted);border-radius:8px;padding:9px;font-size:12px;cursor:pointer;margin-top:8px;font-weight:500">+ New Role</button>`;
         }
         rolesEl.innerHTML = html;
       }
@@ -409,6 +408,8 @@ async function loadSkillsList() {
     if (skillsEl) skillsEl.innerHTML = msg;
   }
 }
+
+function _closeNewRoleModal() { $('newRoleModal')?.remove(); }
 
 async function deleteRole(id) {
   if (!confirm('Delete this role? This cannot be undone.')) return;
@@ -442,9 +443,9 @@ function openNewRoleModal() {
           style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;resize:vertical;font-family:inherit"></textarea>
         <div id="newRoleError" style="font-size:11px;color:var(--red,#e05c5c);min-height:14px"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button onclick="$('newRoleModal').remove()"
+          <button data-action="_closeNewRoleModal"
             style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 16px;font-size:12px;cursor:pointer">Cancel</button>
-          <button onclick="submitNewRole()"
+          <button data-action="submitNewRole"
             style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 16px;font-size:12px;cursor:pointer;font-weight:600">Create Role</button>
         </div>
       </div>`;

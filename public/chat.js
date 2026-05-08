@@ -24,7 +24,7 @@ async function handleChatFileSelect(file) {
     const thumb = data.isImage && data.base64
       ? `<img src="data:${data.mimeType};base64,${data.base64}" alt="">`
       : `<span style="font-size:20px">${data.mimeType.includes('pdf') ? icon('file-text', 20) : icon('bar-chart-2', 20)}</span>`;
-    p.innerHTML = `${thumb}<span class="attach-preview-name">${escHtml(data.name)}</span><button class="attach-preview-remove" onclick="clearAttachment()">✕</button>`;
+    p.innerHTML = `${thumb}<span class="attach-preview-name">${escHtml(data.name)}</span><button class="attach-preview-remove" data-action="clearAttachment">✕</button>`;
   } catch (e) {
     alert('Upload failed: ' + e.message);
   }
@@ -769,7 +769,7 @@ function _renderActivityRow(taskId, task) {
       ${content && status !== 'running' ? `<div class="activity-detail">${escHtml(content)}</div>` : ''}
     </div>
     <span class="activity-elapsed">${elapsed}</span>
-    <button class="activity-dismiss" title="Dismiss" onclick="event.stopPropagation();_dismissActivity('${escHtml(taskId)}')">×</button>
+    <button class="activity-dismiss" title="Dismiss" data-action="_dismissActivity" data-args='${JSON.stringify([taskId]).replace(/'/g, "&#39;")}' data-stop-propagation>×</button>
   `;
 }
 

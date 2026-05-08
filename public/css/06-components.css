@@ -163,3 +163,11 @@ details[open] > summary .details-chevron { transform: rotate(90deg); }
   letter-spacing: 0.04em;
 }
 .settings-subsection-title i { color: var(--muted); }
+
+/* Hover effects previously implemented as inline onmouseover/onmouseout. */
+.role-delete-btn:hover { color: var(--red, #e05c5c) !important; }
+.new-role-btn:hover { border-color: var(--accent) !important; color: var(--accent) !important; }
+
+/* Generic hover utility classes (replace inline onmouseover/onmouseout). */
+.hover-red:hover { color: var(--red, #e05c5c) !important; }
+.hover-border-accent:hover { border-color: var(--accent) !important; }

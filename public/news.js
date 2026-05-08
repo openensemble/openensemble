@@ -10,9 +10,9 @@ let newsTopic = 0;
 
 function newsToolbar() {
   const btns = NEWS_TOPICS.map((t, i) =>
-    `<button class="topic-btn${i===newsTopic?' active':''}" onclick="loadNews(${i})">${t.label}</button>`
+    `<button class="topic-btn${i===newsTopic?' active':''}" data-action="loadNews" data-args='[${i}]'>${t.label}</button>`
   ).join('');
-  return `<div class="drawer-toolbar"><div class="drawer-toolbar-topics">${btns}</div><button class="drawer-refresh" onclick="loadNews()">↻</button></div>`;
+  return `<div class="drawer-toolbar"><div class="drawer-toolbar-topics">${btns}</div><button class="drawer-refresh" data-action="loadNews">↻</button></div>`;
 }
 
 async function loadNews(topicIdx) {
@@ -30,7 +30,7 @@ async function loadNews(topicIdx) {
 
     const cards = articles.map(a => {
       const imgHtml = a.image
-        ? `<img class="news-card-img" src="${escHtml(a.image)}" onerror="this.style.display='none'" loading="lazy" alt="">`
+        ? `<img class="news-card-img" src="${escHtml(a.image)}" data-error-action="_hideElement" loading="lazy" alt="">`
         : '';
       return `<a class="news-card" href="${escHtml(a.url)}" target="_blank" rel="noopener">
         ${imgHtml}

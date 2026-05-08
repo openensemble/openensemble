@@ -37,13 +37,13 @@ function renderAvatarPicker(container) {
           <div style="font-size:14px;font-weight:600;color:var(--text)">${escHtml(user.name)}</div>
           <div style="font-size:11px;color:var(--muted);margin-top:2px">${hasCustomAvatar(user) ? 'Custom photo' : 'Emoji avatar'}</div>
         </div>
-        ${hasCustomAvatar(user) ? `<button class="avatar-remove-btn" onclick="removeAvatar()" title="Remove photo">✕</button>` : ''}
+        ${hasCustomAvatar(user) ? `<button class="avatar-remove-btn" data-action="removeAvatar" title="Remove photo">✕</button>` : ''}
       </div>
 
       <div class="avatar-section-title">Upload Photo</div>
       <div class="avatar-upload-row">
-        <input type="file" id="avatarFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="handleAvatarFileSelect(this.files[0])">
-        <button class="avatar-upload-btn" onclick="$('avatarFileInput').click()">
+        <input type="file" id="avatarFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" data-change-action="handleAvatarFileSelect" data-change-args='["$files0"]'>
+        <button class="avatar-upload-btn" data-action="_avatarChooseFile">
           <span style="font-size:16px">📷</span> Choose Image
         </button>
         <div style="font-size:10px;color:var(--muted)">JPG, PNG, WebP, or GIF. Max 2MB.</div>
@@ -52,11 +52,15 @@ function renderAvatarPicker(container) {
       <details class="avatar-builtin-details">
         <summary class="avatar-section-title" style="cursor:pointer">Built-in Avatars</summary>
         <div class="avatar-builtin-grid" style="margin-top:8px">
-          ${BUILTIN_AVATARS.map(e => `<button class="avatar-builtin-item${user.emoji === e && !hasCustomAvatar(user) ? ' active' : ''}" onclick="selectEmojiAvatar('${e}')">${e}</button>`).join('')}
+          ${BUILTIN_AVATARS.map(e => `<button class="avatar-builtin-item${user.emoji === e && !hasCustomAvatar(user) ? ' active' : ''}" data-action="selectEmojiAvatar" data-args='${JSON.stringify([e]).replace(/'/g, "&#39;")}'>${e}</button>`).join('')}
         </div>
       </details>
     </div>`;
 }
+
+// Wrapper for the file-picker-trigger button (delegation harness can't dispatch
+// a programmatic click on a sibling element via inline expression).
+function _avatarChooseFile() { $('avatarFileInput').click(); }
 
 // ── Crop modal state ─────────────────────────────────────────────────────────
 let _cropState = null;
@@ -91,8 +95,8 @@ function openAvatarCropper(dataUrl, file) {
         <span style="font-size:14px;color:var(--muted)">+</span>
       </div>
       <div class="avatar-crop-actions">
-        <button class="avatar-crop-cancel" onclick="closeAvatarCropper()">Cancel</button>
-        <button class="avatar-crop-save" onclick="saveAvatarCrop()">Save</button>
+        <button class="avatar-crop-cancel" data-action="closeAvatarCropper">Cancel</button>
+        <button class="avatar-crop-save" data-action="saveAvatarCrop">Save</button>
       </div>
     </div>`;
   document.body.appendChild(modal);

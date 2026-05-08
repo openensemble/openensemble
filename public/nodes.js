@@ -36,7 +36,7 @@ function accessBadge(level, nodeId, locked) {
   const title = locked
     ? 'Access level is LOCKED — change via SSH only'
     : 'Click to change access level';
-  return `<span class="cdraw-badge access-badge-click ${info.cls ? 'access-' + info.cls : ''}" onclick="changeNodeAccess('${nodeId}')" title="${title}">${info.label}${lockIcon}</span>`;
+  return `<span class="cdraw-badge access-badge-click ${info.cls ? 'access-' + info.cls : ''}" data-action="changeNodeAccess" data-args='${JSON.stringify([nodeId]).replace(/'/g, "&#39;")}' title="${title}">${info.label}${lockIcon}</span>`;
 }
 
 function versionBadge(version, latestVersion, outdated) {
@@ -124,14 +124,14 @@ async function loadNodes() {
     ? `${onlineCount} online &middot; <span style="color:var(--red)">${offlineCount} offline</span>`
     : `${onlineCount} node${onlineCount !== 1 ? 's' : ''} connected`;
   const revokeAllBtn = _nodesList.length
-    ? `<button class="cdraw-btn" onclick="revokeAllNodes()" style="font-size:11px;padding:5px 10px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)" title="Revoke every paired node + every node session for this account">
+    ? `<button class="cdraw-btn" data-action="revokeAllNodes" style="font-size:11px;padding:5px 10px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)" title="Revoke every paired node + every node session for this account">
         <i data-lucide="shield-off" style="width:12px;height:12px;margin-right:4px"></i> Revoke All
       </button>`
     : '';
   const pairBtnHtml = `<div class="cdraw-toolbar" style="padding:10px 12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
     <span style="font-size:12px;color:var(--muted);flex:1">${countLabel}</span>
     ${revokeAllBtn}
-    <button class="cdraw-btn cdraw-btn-primary" onclick="pairNewNode()" style="font-size:11px;padding:5px 12px">
+    <button class="cdraw-btn cdraw-btn-primary" data-action="pairNewNode" style="font-size:11px;padding:5px 12px">
       <i data-lucide="plus" style="width:12px;height:12px;margin-right:4px"></i> Pair New Node
     </button>
   </div>`;
@@ -213,28 +213,28 @@ function renderNodeCard(node) {
     ${statsLine ? `<div class="node-card-stats">${statsLine}</div>` : ''}
     ${recoveryLine}
     <div class="node-actions">
-      <button class="cdraw-btn" onclick="openNodeTerminal('${node.nodeId}')" title="Terminal">
+      <button class="cdraw-btn" data-action="openNodeTerminal" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Terminal">
         <i data-lucide="terminal" style="width:13px;height:13px"></i> Terminal
       </button>
-      ${canDo(node.accessLevel, 'update') ? `<button class="cdraw-btn" onclick="nodeQuickAction('${node.nodeId}','update')" title="Update packages">
+      ${canDo(node.accessLevel, 'update') ? `<button class="cdraw-btn" data-action="nodeQuickAction" data-args='${JSON.stringify([node.nodeId, "update"]).replace(/'/g, "&#39;")}' title="Update packages">
         <i data-lucide="download" style="width:13px;height:13px"></i> Update
       </button>` : ''}
-      ${canDo(node.accessLevel, 'restart') ? `<button class="cdraw-btn" onclick="nodeQuickAction('${node.nodeId}','restart')" title="Restart">
+      ${canDo(node.accessLevel, 'restart') ? `<button class="cdraw-btn" data-action="nodeQuickAction" data-args='${JSON.stringify([node.nodeId, "restart"]).replace(/'/g, "&#39;")}' title="Restart">
         <i data-lucide="rotate-ccw" style="width:13px;height:13px"></i> Restart
       </button>` : ''}
-      ${canDo(node.accessLevel, 'shutdown') ? `<button class="cdraw-btn" onclick="nodeQuickAction('${node.nodeId}','shutdown')" title="Shut Down">
+      ${canDo(node.accessLevel, 'shutdown') ? `<button class="cdraw-btn" data-action="nodeQuickAction" data-args='${JSON.stringify([node.nodeId, "shutdown"]).replace(/'/g, "&#39;")}' title="Shut Down">
         <i data-lucide="power" style="width:13px;height:13px"></i> Shut Down
       </button>` : ''}
-      ${canDo(node.accessLevel, 'install') ? `<button class="cdraw-btn" onclick="nodeQuickAction('${node.nodeId}','install')" title="Install package">
+      ${canDo(node.accessLevel, 'install') ? `<button class="cdraw-btn" data-action="nodeQuickAction" data-args='${JSON.stringify([node.nodeId, "install"]).replace(/'/g, "&#39;")}' title="Install package">
         <i data-lucide="package-plus" style="width:13px;height:13px"></i> Install
       </button>` : ''}
-      <button class="cdraw-btn" onclick="nodeRefreshStatus('${node.nodeId}')" title="Refresh status">
+      <button class="cdraw-btn" data-action="nodeRefreshStatus" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Refresh status">
         <i data-lucide="activity" style="width:13px;height:13px"></i> Status
       </button>
-      <button class="cdraw-btn" onclick="pushAgentUpdate('${node.nodeId}')" title="Push latest agent code and restart">
+      <button class="cdraw-btn" data-action="pushAgentUpdate" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Push latest agent code and restart">
         <i data-lucide="refresh-cw" style="width:13px;height:13px"></i> Upgrade Agent
       </button>
-      <button class="cdraw-btn node-remove-btn" onclick="removeNodeFromUI('${node.nodeId}')" title="Remove this node">
+      <button class="cdraw-btn node-remove-btn" data-action="removeNodeFromUI" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Remove this node">
         <i data-lucide="trash-2" style="width:13px;height:13px"></i> Remove
       </button>
     </div>
@@ -405,17 +405,23 @@ function nodeQuickAction(nodeId, action) {
   }
 }
 
+// Wrappers for the event-delegation harness — used by the pair-modal close
+// handlers that previously used `this.parentElement.remove()` and
+// `this.closest('.node-pair-modal').remove()`.
+function _nodePairModalClose(_event) { this.parentElement?.remove(); }
+function _nodePairModalCloseInner(_event) { this.closest('.node-pair-modal')?.remove(); }
+
 function showNodeConfirmModal({ title, message, confirmLabel, cancelLabel, confirmClass, onConfirm }) {
   const modal = document.createElement('div');
   modal.className = 'node-pair-modal';
   const msgHtml = escHtml(message).replace(/\n/g, '<br>');
   modal.innerHTML = `
-    <div class="node-pair-modal-bg" onclick="this.parentElement.remove()"></div>
+    <div class="node-pair-modal-bg" data-action="_nodePairModalClose"></div>
     <div class="node-pair-modal-box">
       <div style="font-weight:700;font-size:15px;margin-bottom:12px">&#x26A0;&#xFE0F; ${escHtml(title)}</div>
       <div style="font-size:13px;color:var(--muted);margin-bottom:20px;text-align:left;line-height:1.5">${msgHtml}</div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="cdraw-btn" onclick="this.closest('.node-pair-modal').remove()">${escHtml(cancelLabel || 'Cancel')}</button>
+        <button class="cdraw-btn" data-action="_nodePairModalCloseInner">${escHtml(cancelLabel || 'Cancel')}</button>
         <button class="cdraw-btn ${confirmClass || ''}" id="nodeConfirmBtn">${escHtml(confirmLabel)}</button>
       </div>
     </div>
@@ -641,7 +647,7 @@ async function pairNewNode() {
     const modal = document.createElement('div');
     modal.className = 'node-pair-modal';
     modal.innerHTML = `
-      <div class="node-pair-modal-bg" onclick="this.parentElement.remove()"></div>
+      <div class="node-pair-modal-bg" data-action="_nodePairModalClose"></div>
       <div class="node-pair-modal-box">
         <div style="font-weight:700;font-size:15px;margin-bottom:12px">Pair New Node</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:16px;text-align:left">
@@ -652,7 +658,7 @@ async function pairNewNode() {
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Enter this pairing code when prompted:</div>
         <div class="node-pair-code">${code}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:12px">Expires in ${Math.floor(expiresIn / 60)} minutes</div>
-        <button class="cdraw-btn" style="margin-top:16px;width:100%" onclick="this.closest('.node-pair-modal').remove()">Close</button>
+        <button class="cdraw-btn" style="margin-top:16px;width:100%" data-action="_nodePairModalCloseInner">Close</button>
       </div>
     `;
     document.body.appendChild(modal);

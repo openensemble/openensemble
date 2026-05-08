@@ -63,7 +63,7 @@ async function fetchTutorCount() {
 async function loadDesktopCategories() {
   const container = $('desktopCategories');
   container.innerHTML = DESKTOP_CATEGORIES.map(c =>
-    `<div class="desktop-cat-card" id="desktopCat_${c.type}" onclick="openDesktopCategory('${c.type}')">
+    `<div class="desktop-cat-card" id="desktopCat_${c.type}" data-action="openDesktopCategory" data-args='${JSON.stringify([c.type]).replace(/'/g, "&#39;")}'>
       <div class="desktop-cat-icon" style="background:${c.color}">${c.icon}</div>
       <div class="desktop-cat-info">
         <div class="desktop-cat-name">${c.label}</div>
@@ -136,7 +136,7 @@ function renderDocumentItems(grid, items) {
     const date = new Date(doc.updatedAt || doc.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
     const rawTags = Array.isArray(doc.tags) ? doc.tags : [];
     const tags = rawTags.slice(0, 4).map(t => `<span class="desktop-item-tag">${escHtml(t)}</span>`).join('');
-    return `<div class="desktop-item-row" onclick="openDesktopItem('documents','${escHtml(doc.id)}')">
+    return `<div class="desktop-item-row" data-action="openDesktopItem" data-args='${JSON.stringify(['documents', doc.id]).replace(/'/g, "&#39;")}'>
       <div class="desktop-item-icon">📄</div>
       <div class="desktop-item-info">
         <div class="desktop-item-title">${escHtml(doc.title)}</div>
@@ -155,7 +155,7 @@ function renderImageItems(grid, items) {
   grid.innerHTML = items.map((img, i) => {
     const src = `/api/desktop/images/${encodeURIComponent(img.filename)}?agent=${encodeURIComponent(img.agentId)}&token=${encodeURIComponent(getMediaTokenSync())}`;
     const label = img.filename.replace(/\.\w+$/, '').replace(/_\d+$/, '').replace(/_/g, ' ');
-    return `<div class="desktop-img-thumb" onclick="openDesktopItem('images',${i})">
+    return `<div class="desktop-img-thumb" data-action="openDesktopItem" data-args='["images",${i}]'>
       <img src="${src}" alt="${escHtml(img.filename)}" loading="lazy">
       <div class="desktop-img-label">${escHtml(label)}</div>
     </div>`;
@@ -171,7 +171,7 @@ function renderVideoItems(grid, items) {
   grid.innerHTML = items.map((vid, i) => {
     const src = `/api/desktop/videos/${encodeURIComponent(vid.filename)}?token=${encodeURIComponent(getMediaTokenSync())}`;
     const label = vid.filename.replace(/\.\w+$/, '').replace(/_\d+$/, '').replace(/_/g, ' ');
-    return `<div class="desktop-img-thumb" onclick="openDesktopItem('videos',${i})">
+    return `<div class="desktop-img-thumb" data-action="openDesktopItem" data-args='["videos",${i}]'>
       <video src="${src}" preload="metadata" style="width:100%;height:100%;object-fit:cover;border-radius:6px;pointer-events:none"></video>
       <div class="desktop-img-label">${escHtml(label)}</div>
     </div>`;
@@ -184,7 +184,7 @@ function renderTutorItems(grid, items) {
   grid.innerHTML = items.map(sub => {
     const date = sub.lastActivity ? new Date(sub.lastActivity).toLocaleDateString([], { month: 'short', day: 'numeric' }) : 'No activity';
     const name = sub.subject.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    return `<div class="desktop-item-row" onclick="openDesktopItem('tutoring','${escHtml(sub.subject)}')">
+    return `<div class="desktop-item-row" data-action="openDesktopItem" data-args='${JSON.stringify(['tutoring', sub.subject]).replace(/'/g, "&#39;")}'>
       <div class="desktop-item-icon">🎓</div>
       <div class="desktop-item-info">
         <div class="desktop-item-title">${escHtml(name)}</div>
@@ -273,8 +273,8 @@ async function renderDocDetail(el, docId) {
     ${tags ? `<div class="detail-tags">${tags}</div>` : ''}
     <div class="detail-body">${renderMarkdown(doc.content || '')}</div>
     <div class="detail-actions">
-      <button class="detail-delete-btn" onclick="deleteDesktopDoc('${escHtml(doc.id).replace(/'/g, '&#39;')}')">Delete</button>
-      <button onclick="closeDesktopDetail()">Close</button>
+      <button class="detail-delete-btn" data-action="deleteDesktopDoc" data-args='${JSON.stringify([doc.id]).replace(/'/g, "&#39;")}'>Delete</button>
+      <button data-action="closeDesktopDetail">Close</button>
     </div>`;
 }
 
@@ -293,8 +293,8 @@ function renderImageDetail(el, idx) {
       <a href="${src}" download="${escHtml(img.filename)}" style="text-decoration:none">
         <button>Download</button>
       </a>
-      <button class="detail-delete-btn" onclick="deleteDesktopImage(${idx})">Delete</button>
-      <button onclick="closeDesktopDetail()">Close</button>
+      <button class="detail-delete-btn" data-action="deleteDesktopImage" data-args='[${idx}]'>Delete</button>
+      <button data-action="closeDesktopDetail">Close</button>
     </div>`;
 }
 
@@ -312,8 +312,8 @@ function renderVideoDetail(el, idx) {
       <a href="${src}" download="${escHtml(vid.filename)}" style="text-decoration:none">
         <button>Download</button>
       </a>
-      <button class="detail-delete-btn" onclick="deleteDesktopVideo(${idx})">Delete</button>
-      <button onclick="closeDesktopDetail()">Close</button>
+      <button class="detail-delete-btn" data-action="deleteDesktopVideo" data-args='[${idx}]'>Delete</button>
+      <button data-action="closeDesktopDetail">Close</button>
     </div>`;
 }
 
@@ -497,7 +497,7 @@ function renderRemindersWidget(fired) {
           <div class="board-reminder-label">${escHtml(r.label)}</div>
           <div class="board-reminder-meta">Today at ${time}</div>
         </div>
-        <button class="board-reminder-dismiss" onclick="dismissBoardReminder('${escHtml(r.id)}')" title="Dismiss">✕</button>
+        <button class="board-reminder-dismiss" data-action="dismissBoardReminder" data-args='${JSON.stringify([r.id]).replace(/'/g, "&#39;")}' title="Dismiss">✕</button>
       </div>`;
     }).join('') + `</div>`;
 }
@@ -508,17 +508,17 @@ function renderUserWidget(w) {
   const typeDef = WIDGET_TYPES[w.type];
   const icon = typeDef?.icon || '📦';
   const sizeMenu = ['small', 'medium', 'large'].map(s =>
-    `<div class="widget-menu-item ${w.size === s ? 'active' : ''}" onclick="resizeWidget('${w.id}','${s}')">${s === 'small' ? '▪ Small' : s === 'medium' ? '▪▪ Medium' : '▪▪▪ Large'}</div>`
+    `<div class="widget-menu-item ${w.size === s ? 'active' : ''}" data-action="resizeWidget" data-args='${JSON.stringify([w.id, s]).replace(/'/g, "&#39;")}'>${s === 'small' ? '▪ Small' : s === 'medium' ? '▪▪ Medium' : '▪▪▪ Large'}</div>`
   ).join('');
 
   let header = `<div class="widget-header">
     <span class="widget-title" ondblclick="renameWidget('${w.id}', this)">${icon} ${escHtml(w.title || typeDef?.label || 'Widget')}</span>
     <div class="widget-header-actions">
-      <button class="widget-menu-btn" onclick="toggleWidgetMenu('${w.id}')">···</button>
+      <button class="widget-menu-btn" data-action="toggleWidgetMenu" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}'>···</button>
       <div class="widget-menu" id="widgetMenu_${w.id}">
         ${sizeMenu}
         <div class="widget-menu-divider"></div>
-        <div class="widget-menu-item widget-menu-danger" onclick="deleteWidget('${w.id}')">Delete</div>
+        <div class="widget-menu-item widget-menu-danger" data-action="deleteWidget" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}'>Delete</div>
       </div>
     </div>
   </div>`;
@@ -535,7 +535,7 @@ function renderUserWidget(w) {
 function renderNotesWidget(w) {
   return `<div class="widget-body widget-body-notes">
     <textarea class="widget-notes-area" placeholder="Type your notes here…"
-      oninput="updateWidgetContent('${w.id}', this.value)">${escHtml(w.content || '')}</textarea>
+      data-input-action="updateWidgetContent" data-input-args='${JSON.stringify([w.id, "$value"]).replace(/'/g, "&#39;")}'>${escHtml(w.content || '')}</textarea>
   </div>`;
 }
 
@@ -546,13 +546,13 @@ function renderLinksWidget(w) {
   const linksHtml = links.map((l, i) =>
     `<div class="widget-link-row">
       <a href="${escHtml(l.url)}" target="_blank" rel="noopener" class="widget-link-anchor">${escHtml(l.label || l.url)}</a>
-      <button class="widget-link-remove" onclick="removeWidgetLink('${w.id}', ${i})">✕</button>
+      <button class="widget-link-remove" data-action="removeWidgetLink" data-args='${JSON.stringify([w.id, i]).replace(/'/g, "&#39;")}'>✕</button>
     </div>`
   ).join('');
 
   return `<div class="widget-body">
     ${linksHtml}
-    <div class="widget-link-add" onclick="addWidgetLink('${w.id}')">+ Add link</div>
+    <div class="widget-link-add" data-action="addWidgetLink" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}'>+ Add link</div>
   </div>`;
 }
 
@@ -582,15 +582,15 @@ function renderChecklistWidget(w) {
   const items = w.content || [];
   const itemsHtml = items.map((item, i) =>
     `<div class="widget-check-row">
-      <input type="checkbox" ${item.done ? 'checked' : ''} onchange="toggleCheckItem('${w.id}', ${i})">
+      <input type="checkbox" ${item.done ? 'checked' : ''} data-change-action="toggleCheckItem" data-change-args='${JSON.stringify([w.id, i]).replace(/'/g, "&#39;")}'>
       <span class="widget-check-label ${item.done ? 'done' : ''}">${escHtml(item.text)}</span>
-      <button class="widget-link-remove" onclick="removeCheckItem('${w.id}', ${i})">✕</button>
+      <button class="widget-link-remove" data-action="removeCheckItem" data-args='${JSON.stringify([w.id, i]).replace(/'/g, "&#39;")}'>✕</button>
     </div>`
   ).join('');
 
   return `<div class="widget-body">
     ${itemsHtml}
-    <div class="widget-link-add" onclick="addCheckItem('${w.id}')">+ Add item</div>
+    <div class="widget-link-add" data-action="addCheckItem" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}'>+ Add item</div>
   </div>`;
 }
 
@@ -706,7 +706,7 @@ function openWidgetPicker() {
   const userTypes = Object.entries(WIDGET_TYPES).filter(([, v]) => !v.system);
 
   list.innerHTML = userTypes.map(([type, def]) =>
-    `<div class="widget-picker-item" onclick="addWidget('${type}')">
+    `<div class="widget-picker-item" data-action="addWidget" data-args='${JSON.stringify([type]).replace(/'/g, "&#39;")}'>
       <div class="widget-picker-icon">${def.icon}</div>
       <div class="widget-picker-info">
         <div class="widget-picker-name">${escHtml(def.label)}</div>
@@ -787,7 +787,7 @@ async function renderTutorDetail(el, subject) {
     ${data.roadmap ? `<div class="detail-body" style="margin-bottom:12px"><h3>Roadmap</h3>${renderMarkdown(data.roadmap)}</div>` : ''}
     ${notesHtml || '<div style="color:var(--muted)">No notes yet for this subject.</div>'}
     <div class="detail-actions">
-      <button class="desktop-resume-btn" onclick="resumeTutoring('${escHtml(subject)}')">Resume Learning</button>
-      <button onclick="closeDesktopDetail()">Close</button>
+      <button class="desktop-resume-btn" data-action="resumeTutoring" data-args='${JSON.stringify([subject]).replace(/'/g, "&#39;")}'>Resume Learning</button>
+      <button data-action="closeDesktopDetail">Close</button>
     </div>`;
 }

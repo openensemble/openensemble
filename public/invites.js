@@ -14,7 +14,7 @@ async function openConvViewer(userId, userName) {
     }
     $('convViewerBody').innerHTML = manifest.map(m => {
       const ts = m.lastTs ? new Date(m.lastTs).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-      return `<div style="background:var(--bg3);border-radius:8px;padding:10px 12px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px" onclick="loadConvMessages('${userId}','${escHtml(m.agent)}','${escHtml(userName)}')">
+      return `<div style="background:var(--bg3);border-radius:8px;padding:10px 12px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px" data-action="loadConvMessages" data-args='${JSON.stringify([userId, m.agent, userName]).replace(/'/g, "&#39;")}'>
         <div>
           <div style="font-size:13px;font-weight:600">${escHtml(agents.find(a=>a.id===m.agent)?.name ?? m.agent)}</div>
           <div style="font-size:11px;color:var(--muted)">${m.messageCount} messages${ts ? ' · ' + ts : ''}</div>
@@ -31,14 +31,14 @@ async function loadConvMessages(userId, agentId, userName) {
   const agentDisplayName = agents.find(a=>a.id===agentId)?.name ?? agentId;
   $('convViewerBody').innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <button onclick="openConvViewer('${userId}','${escHtml(userName)}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:2px 6px;line-height:1">←</button>
+      <button data-action="openConvViewer" data-args='${JSON.stringify([userId, userName]).replace(/'/g, "&#39;")}' style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:2px 6px;line-height:1">←</button>
       <span style="font-size:13px;font-weight:600">${escHtml(agentDisplayName)}</span>
     </div>
     <div style="color:var(--muted);font-size:13px">Loading messages…</div>`;
   try {
     const { messages } = await fetch(`/api/admin/sessions/${userId}?agent=${encodeURIComponent(agentId)}`).then(r => r.json());
     const backBtn = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <button onclick="openConvViewer('${userId}','${escHtml(userName)}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:2px 6px;line-height:1">←</button>
+      <button data-action="openConvViewer" data-args='${JSON.stringify([userId, userName]).replace(/'/g, "&#39;")}' style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:2px 6px;line-height:1">←</button>
       <span style="font-size:13px;font-weight:600">${escHtml(agentDisplayName)}</span>
     </div>`;
     if (!messages.length) {
@@ -80,7 +80,7 @@ async function loadInviteList() {
       const exp = new Date(i.expiresAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
       return `<div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border-radius:6px;padding:6px 10px;font-size:11px">
         <span style="flex:1">${escHtml(i.role)} · expires ${exp}</span>
-        <button onclick="revokeInvite('${escHtml(i.fullToken)}')" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer">Revoke</button>
+        <button data-action="revokeInvite" data-args='${JSON.stringify([i.fullToken]).replace(/'/g, "&#39;")}' style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer">Revoke</button>
       </div>`;
     }).join('');
   } catch { el.innerHTML = '<div style="color:var(--red);font-size:12px">Failed to load.</div>'; }

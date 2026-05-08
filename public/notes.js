@@ -87,7 +87,7 @@ function renderThreadList() {
     const preview = last ? escHtml(last.content.length > 60 ? last.content.slice(0, 60) + '…' : last.content) : '<i style="color:var(--muted)">No messages yet</i>';
     const when = last ? fmtRelTime(last.sentAt) : '';
     const hasUnread = t.unread > 0;
-    return `<div onclick="openThread('${t.id}')" style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .12s" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''">
+    return `<div data-action="openThread" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .12s" data-mouseover-action="_setBg" data-mouseover-args='["var(--bg3)"]' data-mouseout-action="_setBg" data-mouseout-args='[""]'>
       <div style="width:40px;height:40px;border-radius:50%;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">${escHtml(t.displayEmoji)}</div>
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
@@ -261,7 +261,7 @@ function renderNewPicker() {
   if (!others.length) { picker.innerHTML = '<span style="font-size:12px;color:var(--muted)">No other users</span>'; return; }
   picker.innerHTML = others.map(u => {
     const sel = _newPickerSelected.has(u.id);
-    return `<button onclick="toggleNewUser('${u.id}')" id="npick-${u.id}" style="background:${sel ? 'var(--accent)' : 'var(--bg3)'};border:1px solid ${sel ? 'var(--accent)' : 'var(--border)'};color:${sel ? '#fff' : 'var(--text)'};border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;transition:all .15s">${escHtml(u.emoji ?? '🧑')} ${escHtml(u.name)}</button>`;
+    return `<button data-action="toggleNewUser" data-args='${JSON.stringify([u.id]).replace(/'/g, "&#39;")}' id="npick-${u.id}" style="background:${sel ? 'var(--accent)' : 'var(--bg3)'};border:1px solid ${sel ? 'var(--accent)' : 'var(--border)'};color:${sel ? '#fff' : 'var(--text)'};border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;transition:all .15s">${escHtml(u.emoji ?? '🧑')} ${escHtml(u.name)}</button>`;
   }).join('');
 }
 

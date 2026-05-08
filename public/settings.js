@@ -197,9 +197,9 @@ function renderAgentModelRows() {
   const grokOpts         = models.filter(m => m.provider === 'grok');
   const openrouterOpts   = models.filter(m => m.provider === 'openrouter');
   function makeAgentModelSelect(a) {
-    if (!models.length) return `<select onchange="assignModelToAgentFromSelect('${a.id}', this.value)"><option value="${escHtml(a.model)}||${a.provider ?? 'ollama'}" selected>${escHtml(a.model)}</option></select>`;
+    if (!models.length) return `<select data-change-action="assignModelToAgentFromSelect" data-change-args='${JSON.stringify([a.id, "$value"]).replace(/'/g, "&#39;")}'><option value="${escHtml(a.model)}||${a.provider ?? 'ollama'}" selected>${escHtml(a.model)}</option></select>`;
     const mkOpt = m => `<option value="${escHtml(m.name)}||${m.provider}" ${m.name === a.model && m.provider === a.provider ? 'selected' : ''}>${escHtml(m.displayName ?? m.name)}</option>`;
-    return `<select onchange="assignModelToAgentFromSelect('${a.id}', this.value)">
+    return `<select data-change-action="assignModelToAgentFromSelect" data-change-args='${JSON.stringify([a.id, "$value"]).replace(/'/g, "&#39;")}'>
       ${anthropicOpts.length  ? `<optgroup label="Anthropic">${anthropicOpts.map(mkOpt).join('')}</optgroup>`          : ''}
       ${openaiOpts.length     ? `<optgroup label="OpenAI ✨">${openaiOpts.map(mkOpt).join('')}</optgroup>`             : ''}
       ${openaiOauthOpts.length? `<optgroup label="OpenAI (ChatGPT login) 🔐">${openaiOauthOpts.map(mkOpt).join('')}</optgroup>` : ''}
@@ -325,7 +325,7 @@ function reasonRuntimeRow({ runtime, label, hint, selected }) {
   const disabled = !st.available;
   const id = `reasonrt-${runtime}`;
   const installBtn = (runtime !== 'builtin' && st.available && !st.installed)
-    ? `<button type="button" onclick="installReasonRuntime('${runtime}')" style="font-size:11px;padding:3px 8px">Install our model</button>`
+    ? `<button type="button" data-action="installReasonRuntime" data-args='${JSON.stringify([runtime]).replace(/'/g, "&#39;")}' style="font-size:11px;padding:3px 8px">Install our model</button>`
     : '';
   const note = st.note
     ? `<span style="font-size:11px;color:var(--muted)">${escHtml(st.note)}</span>`
@@ -344,7 +344,7 @@ function reasonRuntimeRow({ runtime, label, hint, selected }) {
     <label for="${id}" style="display:flex;align-items:center;gap:8px;padding:6px 0;opacity:${disabled ? 0.55 : 1};cursor:${disabled ? 'not-allowed' : 'pointer'}">
       <input type="radio" name="reasonRuntime" id="${id}" value="${runtime}"
              ${selected ? 'checked' : ''} ${disabled ? 'disabled' : ''}
-             onchange="selectReasonRuntime('${runtime}')">
+             data-change-action="selectReasonRuntime" data-change-args='${JSON.stringify([runtime]).replace(/'/g, "&#39;")}'>
       <span style="flex:1;display:flex;flex-direction:column;gap:2px">
         ${hintLine}
         <span style="font-weight:500">${escHtml(label)}</span>
@@ -508,7 +508,7 @@ function planRuntimeRow({ runtime, label, hint, selected }) {
   const disabled = !st.available;
   const id = `planrt-${runtime}`;
   const installBtn = (runtime !== 'builtin' && st.available && !st.installed)
-    ? `<button type="button" onclick="installPlanRuntime('${runtime}')" style="font-size:11px;padding:3px 8px">Install our model</button>`
+    ? `<button type="button" data-action="installPlanRuntime" data-args='${JSON.stringify([runtime]).replace(/'/g, "&#39;")}' style="font-size:11px;padding:3px 8px">Install our model</button>`
     : '';
   const note = st.note
     ? `<span style="font-size:11px;color:var(--muted)">${escHtml(st.note)}</span>`
@@ -525,7 +525,7 @@ function planRuntimeRow({ runtime, label, hint, selected }) {
     <label for="${id}" style="display:flex;align-items:center;gap:8px;padding:6px 0;opacity:${disabled ? 0.55 : 1};cursor:${disabled ? 'not-allowed' : 'pointer'}">
       <input type="radio" name="planRuntime" id="${id}" value="${runtime}"
              ${selected ? 'checked' : ''} ${disabled ? 'disabled' : ''}
-             onchange="selectPlanRuntime('${runtime}')">
+             data-change-action="selectPlanRuntime" data-change-args='${JSON.stringify([runtime]).replace(/'/g, "&#39;")}'>
       <span style="flex:1;display:flex;flex-direction:column;gap:2px">
         ${hintLine}
         <span style="font-weight:500">${escHtml(label)}</span>
@@ -573,7 +573,7 @@ function renderPlanModelRows() {
         Picking Ollama or LM Studio pushes our model into that runtime.
       </div>
       <label for="${toggleId}" style="display:flex;align-items:center;gap:8px;cursor:pointer">
-        <input type="checkbox" id="${toggleId}" ${useBuiltin ? 'checked' : ''} onchange="setUseBuiltinPlan(this.checked)">
+        <input type="checkbox" id="${toggleId}" ${useBuiltin ? 'checked' : ''} data-change-action="setUseBuiltinPlan" data-change-args='["$checked"]'>
         <span style="flex:1;display:flex;flex-direction:column;gap:1px">
           <span style="font-weight:500">Use the built-in plan model</span>
           <span style="font-size:11px;color:var(--muted)">
@@ -654,7 +654,7 @@ function planTierPicker(currentRuntime) {
     return `
       <label for="${id}" style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer">
         <input type="radio" name="planTier" id="${id}" value="${tier}" ${tier === active ? 'checked' : ''}
-               onchange="selectPlanTier('${tier}')">
+               data-change-action="selectPlanTier" data-change-args='${JSON.stringify([tier]).replace(/'/g, "&#39;")}'>
         <span style="flex:1;display:flex;flex-direction:column;gap:1px">
           <span style="font-weight:500">${escHtml(meta.name)} <span style="font-size:11px;color:var(--muted);font-weight:400">— ${escHtml(meta.base)}, ${escHtml(meta.desc)}</span></span>
           <span style="font-size:11px;color:var(--muted)">${escHtml(sizeNote)} · ${escHtml(stats)}</span>
@@ -1150,7 +1150,7 @@ function renderTunnelStatus(s) {
     error:    '⚠ Error',
   }[s.state] || s.state;
   const urlBlock = s.publicUrl
-    ? `<div style="margin-top:8px;font-size:12px"><span style="opacity:0.6">Public URL:</span> <a href="${s.publicUrl}" target="_blank" style="color:var(--accent);word-break:break-all">${s.publicUrl}</a> <button onclick="copyToClipboard('${s.publicUrl}')" title="Copy" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;margin-left:6px">copy</button></div>`
+    ? `<div style="margin-top:8px;font-size:12px"><span style="opacity:0.6">Public URL:</span> <a href="${s.publicUrl}" target="_blank" style="color:var(--accent);word-break:break-all">${s.publicUrl}</a> <button data-action="copyToClipboard" data-args='${JSON.stringify([s.publicUrl]).replace(/'/g, "&#39;")}' title="Copy" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;margin-left:6px">copy</button></div>`
     : '';
   const errBlock = s.lastError && s.state !== 'running'
     ? renderTunnelErrorBlock(s.lastError)
@@ -1192,9 +1192,9 @@ function renderTunnelStatus(s) {
       </div>
 
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        <button onclick="saveTunnelConfig()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
-        <button onclick="tunnelStart()" ${isRunning ? 'disabled' : ''} style="background:${isRunning ? 'var(--bg3)' : 'var(--green,#4caf50)'};border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:${isRunning ? 'not-allowed' : 'pointer'};font-weight:600;opacity:${isRunning ? '0.5' : '1'}">Start</button>
-        <button onclick="tunnelStop()" ${!isRunning ? 'disabled' : ''} style="background:${!isRunning ? 'var(--bg3)' : 'var(--red,#e05c5c)'};border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:${!isRunning ? 'not-allowed' : 'pointer'};font-weight:600;opacity:${!isRunning ? '0.5' : '1'}">Stop</button>
+        <button data-action="saveTunnelConfig" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+        <button data-action="tunnelStart" ${isRunning ? 'disabled' : ''} style="background:${isRunning ? 'var(--bg3)' : 'var(--green,#4caf50)'};border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:${isRunning ? 'not-allowed' : 'pointer'};font-weight:600;opacity:${isRunning ? '0.5' : '1'}">Start</button>
+        <button data-action="tunnelStop" ${!isRunning ? 'disabled' : ''} style="background:${!isRunning ? 'var(--bg3)' : 'var(--red,#e05c5c)'};border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:${!isRunning ? 'not-allowed' : 'pointer'};font-weight:600;opacity:${!isRunning ? '0.5' : '1'}">Stop</button>
       </div>
     </div>
   `;
@@ -1263,7 +1263,7 @@ function renderTunnelErrorBlock(rawError) {
   // text so the user can grab the link without having to highlight it.
   const copyRow = urls.length
     ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${urls.map(u =>
-        `<button onclick="copyToClipboard('${escHtml(u).replace(/'/g, "\\'")}')" title="Copy ${escHtml(u)}"
+        `<button data-action="copyToClipboard" data-args='${JSON.stringify([u]).replace(/'/g, "&#39;")}' title="Copy ${escHtml(u)}"
           style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;display:inline-flex;align-items:center;gap:4px">📋 Copy link</button>`
       ).join('')}</div>`
     : '';
@@ -1376,7 +1376,7 @@ function mountCustomDrawers() {
         <div class="desk-drawer-hdr">
           ${hdrIconMarkup}
           <span class="drawer-label">${escHtml(p.name)}</span>
-          <button class="btn-drawer-x" onclick="closeAllDrawers()">✕</button>
+          <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
         </div>
         <div class="desk-drawer-body">${p.html ?? ''}</div>
       `;
@@ -1448,7 +1448,7 @@ function renderDrawersSettings() {
           ${p.description ? `<div style="font-size:11px;color:var(--muted)">${escHtml(p.description)}</div>` : ''}
         </div>
         <label style="display:flex;align-items:center;gap:6px;flex-shrink:0;cursor:pointer">
-          <input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="toggleDrawerPlugin('${p.id}',this.checked)"
+          <input type="checkbox" ${p.enabled ? 'checked' : ''} data-change-action="toggleDrawerPlugin" data-change-args='${JSON.stringify([p.id, "$checked"]).replace(/'/g, "&#39;")}'
             style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent)">
         </label>
       </div>
@@ -1466,28 +1466,33 @@ function renderNewsTopicsEditor(p) {
     <div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">
       <input value="${escHtml(t.label)}" placeholder="Label"
         style="width:80px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px"
-        onchange="updateDrawerTopic('news',${i},'label',this.value)">
+        data-change-action="updateDrawerTopic" data-change-args='${JSON.stringify(['news', i, 'label', "$value"]).replace(/'/g, "&#39;")}'>
       <input value="${escHtml(t.q)}" placeholder="Search query"
         style="flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px"
-        onchange="updateDrawerTopic('news',${i},'q',this.value)">
-      <button onclick="removeDrawerTopic('news',${i})"
+        data-change-action="updateDrawerTopic" data-change-args='${JSON.stringify(['news', i, 'q', "$value"]).replace(/'/g, "&#39;")}'>
+      <button data-action="removeDrawerTopic" data-args='${JSON.stringify(['news', i]).replace(/'/g, "&#39;")}'
         style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 4px">×</button>
     </div>`).join('');
   return `
     <div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <span style="font-size:11px;color:var(--muted);width:100px;flex-shrink:0">Default tab</span>
-        <select id="newsDefaultTopicSelect" onchange="saveNewsTopicPref(parseInt(this.value))"
+        <select id="newsDefaultTopicSelect" data-change-action="_saveNewsTopicPrefInt" data-change-args='["$value"]'
           style="flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px">
           ${topicOpts}
         </select>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Topics</div>
       <div id="newsTopicsRows">${rows}</div>
-      <button onclick="addDrawerTopic('news')"
+      <button data-action="addDrawerTopic" data-args='["news"]'
         style="margin-top:8px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">+ Add Topic</button>
     </div>`;
 }
+
+// Wrapper for the news default-topic select — original inline handler did
+// `saveNewsTopicPref(parseInt(this.value))`, but data-args resolves $value
+// to a string. parseInt at the boundary keeps the called fn unchanged.
+function _saveNewsTopicPrefInt(value) { saveNewsTopicPref(parseInt(value, 10)); }
 
 async function toggleDrawerPlugin(drawerId, enabled) {
   try {

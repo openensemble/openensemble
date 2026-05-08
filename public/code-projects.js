@@ -32,7 +32,7 @@ function renderCodeProjectItems(grid, items) {
       ? new Date(p.mtime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
       : '—';
     const fileWord = p.fileCount === 1 ? 'file' : 'files';
-    const nameAttr = escHtml(p.name).replace(/'/g, '&#39;');
+    const argsJson = JSON.stringify([p.name]).replace(/"/g, '&quot;');
     return `<div class="desktop-item-row" style="cursor:default">
       <div class="desktop-item-icon">💻</div>
       <div class="desktop-item-info">
@@ -40,8 +40,8 @@ function renderCodeProjectItems(grid, items) {
         <div class="desktop-item-meta">${p.fileCount} ${fileWord} · ${_formatProjectSize(p.size)} · ${date}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
-        <button onclick="downloadCodeProject('${nameAttr}')">Download</button>
-        <button class="detail-delete-btn" onclick="deleteCodeProject('${nameAttr}')">Delete</button>
+        <button data-action="downloadCodeProject" data-args="${argsJson}">Download</button>
+        <button class="detail-delete-btn" data-action="deleteCodeProject" data-args="${argsJson}">Delete</button>
       </div>
     </div>`;
   }).join('');

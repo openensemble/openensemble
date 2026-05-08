@@ -157,7 +157,7 @@ function buildQuizWidget(data) {
   const wid = newWidgetId();
   const reviewBadge = data.memoryId ? `<div class="tutor-widget-review-badge">Spaced Review</div>` : '';
   const options = (data.options || []).map(o => {
-    return `<div class="tutor-widget-option" data-wid="${wid}" data-label="${esc(o.label)}" onclick="handleQuizAnswer(this,'${wid}','${esc(data.correct || '')}','${esc(data.memoryId || '')}')">
+    return `<div class="tutor-widget-option" data-wid="${wid}" data-label="${esc(o.label)}" data-action="handleQuizAnswer" data-args='${JSON.stringify(["$el", wid, data.correct || '', data.memoryId || '']).replace(/'/g, "&#39;")}'>
       <span class="opt-label">${esc(o.label)}</span>
       <span>${esc(o.text)}</span>
     </div>`;
@@ -201,8 +201,8 @@ function buildFillBlankWidget(data) {
     ${reviewBadge}
     <div class="tutor-widget-question">${prompt}</div>
     <div class="tutor-widget-input-row">
-      <input type="text" class="tutor-widget-input" id="${wid}_input" placeholder="Your answer" onkeydown="if(event.key==='Enter'){handleFillBlankSubmit('${wid}','${esc(data.memoryId || '')}')}" />
-      <button class="tutor-widget-submit" onclick="handleFillBlankSubmit('${wid}','${esc(data.memoryId || '')}')">Submit</button>
+      <input type="text" class="tutor-widget-input" id="${wid}_input" placeholder="Your answer" data-keydown-action="_actionIf" data-keydown-args='${JSON.stringify([{ key: 'Enter', action: 'handleFillBlankSubmit', args: [wid, data.memoryId || ''] }]).replace(/'/g, "&#39;")}' />
+      <button class="tutor-widget-submit" data-action="handleFillBlankSubmit" data-args='${JSON.stringify([wid, data.memoryId || '']).replace(/'/g, "&#39;")}'>Submit</button>
     </div>
     <div class="tutor-widget-explanation" id="${wid}_expl">${esc(data.explanation)}</div>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
@@ -250,7 +250,7 @@ function buildClozeWidget(data) {
   return `<div class="tutor-widget" id="${wid}" data-kind="cloze" data-blanks="${blanksJson}">
     ${reviewBadge}
     <div class="tutor-widget-cloze-body">${template}</div>
-    <button class="tutor-widget-submit" onclick="handleClozeSubmit('${wid}','${esc(data.memoryId || '')}')">Check</button>
+    <button class="tutor-widget-submit" data-action="handleClozeSubmit" data-args='${JSON.stringify([wid, data.memoryId || '']).replace(/'/g, "&#39;")}'>Check</button>
     <div class="tutor-widget-explanation" id="${wid}_expl">${esc(data.explanation)}</div>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
   </div>`;
@@ -290,12 +290,12 @@ function buildFlashcardWidget(data) {
     <div class="tutor-widget-flashcard-front">${esc(data.front || data.question)}</div>
     <div class="tutor-widget-flashcard-back" id="${wid}_back" hidden>${esc(data.back || data.answer)}</div>
     <div class="tutor-widget-flashcard-actions">
-      <button class="tutor-widget-submit" id="${wid}_reveal" onclick="handleFlashcardReveal('${wid}')">Reveal</button>
+      <button class="tutor-widget-submit" id="${wid}_reveal" data-action="handleFlashcardReveal" data-args='${JSON.stringify([wid]).replace(/'/g, "&#39;")}'>Reveal</button>
       <div class="tutor-widget-flashcard-ratings" id="${wid}_ratings" hidden>
-        <button data-rating="again" onclick="handleFlashcardRate('${wid}','${esc(data.memoryId || '')}','again')">Again</button>
-        <button data-rating="hard"  onclick="handleFlashcardRate('${wid}','${esc(data.memoryId || '')}','hard')">Hard</button>
-        <button data-rating="good"  onclick="handleFlashcardRate('${wid}','${esc(data.memoryId || '')}','good')">Good</button>
-        <button data-rating="easy"  onclick="handleFlashcardRate('${wid}','${esc(data.memoryId || '')}','easy')">Easy</button>
+        <button data-rating="again" data-action="handleFlashcardRate" data-args='${JSON.stringify([wid, data.memoryId || '', 'again']).replace(/'/g, "&#39;")}'>Again</button>
+        <button data-rating="hard"  data-action="handleFlashcardRate" data-args='${JSON.stringify([wid, data.memoryId || '', 'hard']).replace(/'/g, "&#39;")}'>Hard</button>
+        <button data-rating="good"  data-action="handleFlashcardRate" data-args='${JSON.stringify([wid, data.memoryId || '', 'good']).replace(/'/g, "&#39;")}'>Good</button>
+        <button data-rating="easy"  data-action="handleFlashcardRate" data-args='${JSON.stringify([wid, data.memoryId || '', 'easy']).replace(/'/g, "&#39;")}'>Easy</button>
       </div>
     </div>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
@@ -339,7 +339,7 @@ function buildFreeResponseWidget(data) {
     <div class="tutor-widget-question">${esc(data.question || data.prompt)}</div>
     <textarea class="tutor-widget-textarea" id="${wid}_text" rows="4" placeholder="Write your answer…"></textarea>
     ${rubricBlock}
-    <button class="tutor-widget-submit" onclick="handleFreeResponseSubmit('${wid}','${esc(data.memoryId || '')}')">Submit for grading</button>
+    <button class="tutor-widget-submit" data-action="handleFreeResponseSubmit" data-args='${JSON.stringify([wid, data.memoryId || '']).replace(/'/g, "&#39;")}'>Submit for grading</button>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
   </div>`;
 }
@@ -374,8 +374,8 @@ function buildOrderingWidget(data) {
   return `<div class="tutor-widget" id="${wid}" data-kind="ordering" data-payload="${dataJson}">
     ${reviewBadge}
     <div class="tutor-widget-question">${esc(data.instruction || data.question || 'Put in correct order:')}</div>
-    <ul class="tutor-widget-order-list" id="${wid}_list" ondragover="event.preventDefault()">${lis}</ul>
-    <button class="tutor-widget-submit" onclick="handleOrderingSubmit('${wid}','${esc(data.memoryId || '')}')">Submit</button>
+    <ul class="tutor-widget-order-list" id="${wid}_list" data-dragover-action="_preventDefault">${lis}</ul>
+    <button class="tutor-widget-submit" data-action="handleOrderingSubmit" data-args='${JSON.stringify([wid, data.memoryId || '']).replace(/'/g, "&#39;")}'>Submit</button>
     <div class="tutor-widget-explanation" id="${wid}_expl">${esc(data.explanation)}</div>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
   </div>`;
@@ -441,8 +441,8 @@ function buildMatchingWidget(data) {
   // Shuffle right side for the user
   const shuffledRight = right.map((_, i) => i).sort(() => Math.random() - 0.5);
   const payload = JSON.stringify({ pairs, left, right }).replace(/"/g, '&quot;');
-  const leftHtml = left.map((t, i) => `<button class="tutor-widget-match-left" data-idx="${i}" onclick="handleMatchingPick('${wid}','left',${i})">${esc(t)}</button>`).join('');
-  const rightHtml = shuffledRight.map(i => `<button class="tutor-widget-match-right" data-idx="${i}" onclick="handleMatchingPick('${wid}','right',${i})">${esc(right[i])}</button>`).join('');
+  const leftHtml = left.map((t, i) => `<button class="tutor-widget-match-left" data-idx="${i}" data-action="handleMatchingPick" data-args='${JSON.stringify([wid, 'left', i]).replace(/'/g, "&#39;")}'>${esc(t)}</button>`).join('');
+  const rightHtml = shuffledRight.map(i => `<button class="tutor-widget-match-right" data-idx="${i}" data-action="handleMatchingPick" data-args='${JSON.stringify([wid, 'right', i]).replace(/'/g, "&#39;")}'>${esc(right[i])}</button>`).join('');
   return `<div class="tutor-widget" id="${wid}" data-kind="matching" data-payload="${payload}">
     ${reviewBadge}
     <div class="tutor-widget-question">${esc(data.instruction || 'Match the pairs:')}</div>
@@ -529,13 +529,23 @@ function buildHotspotWidget(data) {
   return `<div class="tutor-widget" id="${wid}" data-kind="hotspot" data-payload="${payload}">
     ${reviewBadge}
     <div class="tutor-widget-question">${esc(data.question || 'Click the correct region.')}</div>
-    <div class="tutor-widget-hotspot-wrap" onclick="handleHotspotClick(event, '${wid}', '${esc(data.memoryId || '')}')">
-      <img src="${imgUrl}" class="tutor-widget-hotspot-img" onload="this.parentElement.querySelector('svg').setAttribute('viewBox','0 0 ' + this.naturalWidth + ' ' + this.naturalHeight)" />
+    <div class="tutor-widget-hotspot-wrap" data-action="_handleHotspotClickWrap" data-args='${JSON.stringify([wid, data.memoryId || '']).replace(/'/g, "&#39;")}'>
+      <img src="${imgUrl}" class="tutor-widget-hotspot-img" data-load-action="_hotspotImgLoad" />
       <svg class="tutor-widget-hotspot-svg" preserveAspectRatio="xMidYMid meet">${regionSvg}</svg>
     </div>
     <div class="tutor-widget-explanation" id="${wid}_expl">${esc(data.explanation)}</div>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
   </div>`;
+}
+
+// Wrappers for the event-delegation harness — handlers below originally
+// took `event`/`this` as first arg, but the harness binds element as `this`
+// and appends event last. These shims preserve the original signatures.
+function _handleHotspotClickWrap(wid, memoryId, event) {
+  return handleHotspotClick(event, wid, memoryId);
+}
+function _hotspotImgLoad(_event) {
+  this.parentElement.querySelector('svg').setAttribute('viewBox', '0 0 ' + this.naturalWidth + ' ' + this.naturalHeight);
 }
 
 function handleHotspotClick(event, wid, memoryId) {
@@ -582,7 +592,7 @@ function buildSpeakWidget(data) {
     <div class="tutor-widget-question">${esc(data.prompt || data.question || 'Say this phrase:')}</div>
     <div class="tutor-widget-speak-target">${target}</div>
     <div class="tutor-widget-speak-actions">
-      <button class="tutor-widget-submit" id="${wid}_rec" onclick="handleSpeakRecord('${wid}','${esc(data.memoryId || '')}')">🎙 Record</button>
+      <button class="tutor-widget-submit" id="${wid}_rec" data-action="handleSpeakRecord" data-args='${JSON.stringify([wid, data.memoryId || '']).replace(/'/g, "&#39;")}'>🎙 Record</button>
       <span class="tutor-widget-speak-status" id="${wid}_status"></span>
     </div>
     <div class="tutor-widget-response" id="${wid}_resp"><div class="tutor-response-inner"></div></div>
@@ -672,7 +682,7 @@ function renderPronounceButtons(html) {
     const safeLang = lang.replace(/['"\\]/g, '');
     const safeText = text.replace(/['"\\]/g, '');
     const display = text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-    return `<button class="pronounce-btn" onclick="pronounceWord('${safeText}','${safeLang}')" title="Listen to pronunciation"><span class="pronounce-icon">🔊</span> ${display}</button>`;
+    return `<button class="pronounce-btn" data-action="pronounceWord" data-args='${JSON.stringify([safeText, safeLang]).replace(/'/g, "&#39;")}' title="Listen to pronunciation"><span class="pronounce-icon">🔊</span> ${display}</button>`;
   });
 }
 
@@ -701,7 +711,7 @@ function showTutorNudge(msg) {
       </div>
     </div>
     <button class="reminder-dismiss" data-tutor-start="${subjectAttr}">Start</button>
-    <button class="reminder-dismiss" onclick="this.parentElement.remove()">Later</button>
+    <button class="reminder-dismiss" data-action="_dismissReminder">Later</button>
   `;
   document.body.appendChild(banner);
   requestAnimationFrame(() => banner.classList.add('visible'));

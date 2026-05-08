@@ -81,17 +81,17 @@ function renderWatcherRow(w) {
   const isOpen = expandedWatcherId === w.id;
   const expandToggle = isOpen ? '▾' : '▸';
   const isIndefinite = w.expiresAt === null || w.expiresAt === undefined;
-  const dot = isIndefinite ? `<span class="watcher-dot" title="Indefinite — click to dismiss" onclick="event.stopPropagation(); cancelWatcher('${escHtml(w.id)}')" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:6px;cursor:pointer"></span>` : '';
+  const dot = isIndefinite ? `<span class="watcher-dot" title="Indefinite — click to dismiss" data-action="cancelWatcher" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}' data-stop-propagation style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:6px;cursor:pointer"></span>` : '';
   const status = w.lastStatusText || 'waiting for first tick…';
   const meta = `${escHtml(w.kind)} · ${_watcherEtaText(w)}${w.ticks ? ' · tick ' + w.ticks : ''}`;
   const header = `
     <div class="task-item${isOpen ? ' task-item-open' : ''}" data-watcher="${escHtml(w.id)}">
-      <div class="task-item-info" onclick="toggleWatcherExpanded('${escHtml(w.id)}')" title="Click to view / adjust" style="cursor:pointer">
+      <div class="task-item-info" data-action="toggleWatcherExpanded" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}' title="Click to view / adjust" style="cursor:pointer">
         <div class="task-item-label">${dot}${expandToggle} 📡 ${escHtml(w.label || w.kind)}</div>
         <div class="task-item-meta" style="font-style:italic">${escHtml(status)}</div>
         <div class="task-item-meta">${meta}</div>
       </div>
-      <button class="btn-task-del" onclick="cancelWatcher('${escHtml(w.id)}')" title="Cancel watcher">✕</button>
+      <button class="btn-task-del" data-action="cancelWatcher" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}' title="Cancel watcher">✕</button>
     </div>`;
   if (!isOpen) return header;
   const presets = [
@@ -99,10 +99,10 @@ function renderWatcherRow(w) {
     { label: '1 hour', ms: 60*60*1000 },
     { label: '4 hours', ms: 4*60*60*1000 },
     { label: '24 hours', ms: 24*60*60*1000 },
-  ].map(p => `<button onclick="extendWatcher('${escHtml(w.id)}', ${p.ms})" style="margin-right:6px">${p.label}</button>`).join('');
+  ].map(p => `<button data-action="extendWatcher" data-args='${JSON.stringify([w.id, p.ms]).replace(/'/g, "&#39;")}' style="margin-right:6px">${p.label}</button>`).join('');
   const indefBtn = isIndefinite
     ? ''
-    : `<button onclick="setWatcherIndefinite('${escHtml(w.id)}')" style="margin-right:6px">make indefinite</button>`;
+    : `<button data-action="setWatcherIndefinite" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}' style="margin-right:6px">make indefinite</button>`;
   const editor = `
     <div class="task-edit-panel">
       <div class="task-edit-meta">Started: ${new Date(w.createdAt).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })}</div>
@@ -166,12 +166,12 @@ function renderTaskRow(t) {
   // Edit/toggle/delete buttons remain accessible without expanding first.
   const header = `
     <div class="task-item${isOpen ? ' task-item-open' : ''}">
-      <div class="task-item-info" onclick="toggleTaskExpanded('${escHtml(t.id)}')" title="Click to view / edit details" style="cursor:pointer">
+      <div class="task-item-info" data-action="toggleTaskExpanded" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' title="Click to view / edit details" style="cursor:pointer">
         <div class="task-item-label">${expandToggle} ${escHtml(t.label)}</div>
         <div class="task-item-meta">${schedStr} · ${runner}${statusSuffix}</div>
       </div>
-      ${t.repeat === 'once' && !t.enabled ? '<span style="font-size:11px;color:var(--green)">✓</span>' : `<input type="checkbox" class="task-toggle" ${t.enabled ? 'checked' : ''} onchange="toggleTask('${escHtml(t.id)}', this.checked)">`}
-      <button class="btn-task-del" onclick="deleteTask('${escHtml(t.id)}')">✕</button>
+      ${t.repeat === 'once' && !t.enabled ? '<span style="font-size:11px;color:var(--green)">✓</span>' : `<input type="checkbox" class="task-toggle" ${t.enabled ? 'checked' : ''} data-change-action="toggleTask" data-change-args='${JSON.stringify([t.id, "$checked"]).replace(/'/g, "&#39;")}'>`}
+      <button class="btn-task-del" data-action="deleteTask" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>✕</button>
     </div>`;
   if (!isOpen) return header;
 
@@ -196,8 +196,8 @@ function renderTaskRow(t) {
       ${agentBlock}
       ${lastOutput}
       <div class="task-edit-actions">
-        <button class="btn-task-save" onclick="saveTaskEdits('${escHtml(t.id)}')">Save</button>
-        <button class="btn-task-cancel" onclick="toggleTaskExpanded('${escHtml(t.id)}')">Cancel</button>
+        <button class="btn-task-save" data-action="saveTaskEdits" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>Save</button>
+        <button class="btn-task-cancel" data-action="toggleTaskExpanded" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>Cancel</button>
       </div>
     </div>`;
   return header + editor;

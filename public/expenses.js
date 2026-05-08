@@ -79,10 +79,13 @@ function expShowCreateBook() {
     <div style="font-size:14px;font-weight:600;margin-bottom:12px">Create Expense Book</div>
     <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Create a separate portfolio to track expenses independently (e.g. Household, Business).</div>
     <input id="expNewBookName" placeholder="Book name (e.g. Household)" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:10px">
-    <button onclick="expCreateBook()" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600;width:100%">Create</button>`;
+    <button data-action="expCreateBook" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600;width:100%">Create</button>`;
   document.getElementById('expBookOverlay').style.display = 'flex';
   setTimeout(() => document.getElementById('expNewBookName')?.focus(), 100);
 }
+
+// Wrapper for the multi-statement Cancel button in the delete-book overlay.
+function _expDeleteCancel() { expCloseBookOverlay(); expShowManageBook(); }
 
 async function expCreateBook() {
   const name = document.getElementById('expNewBookName')?.value?.trim();
@@ -109,7 +112,7 @@ function expShowManageBook() {
     `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
       <span>${escHtml(m.emoji || '🧑')}</span>
       <span style="flex:1;font-size:13px">${escHtml(m.name)}</span>
-      ${isOwner ? `<button onclick="expBookRemoveShare('${escHtml(m.id)}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px">✕</button>` : ''}
+      ${isOwner ? `<button data-action="expBookRemoveShare" data-args='${JSON.stringify([m.id]).replace(/'/g, "&#39;")}' style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px">✕</button>` : ''}
     </div>`
   ).join('') || '<div style="font-size:12px;color:var(--muted);padding:6px 0">Not shared with anyone yet.</div>';
 
@@ -122,7 +125,7 @@ function expShowManageBook() {
         <label style="font-size:12px;color:var(--muted)">Rename</label>
         <div style="display:flex;gap:6px;margin-top:4px">
           <input id="expBookRename" value="${escHtml(book.name)}" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
-          <button onclick="expRenameBook()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Save</button>
+          <button data-action="expRenameBook" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Save</button>
         </div>
       </div>
       <div style="margin-bottom:12px">
@@ -130,10 +133,10 @@ function expShowManageBook() {
         <div style="margin-top:4px">${membersHtml}</div>
         <div style="display:flex;gap:6px;margin-top:8px">
           <select id="expBookShareSel" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px"></select>
-          <button onclick="expBookAddShare()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Share</button>
+          <button data-action="expBookAddShare" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Share</button>
         </div>
       </div>
-      <button onclick="expDeleteBook()" style="background:none;border:1px solid #e05c5c;color:#e05c5c;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;width:100%">Delete Book</button>
+      <button data-action="expDeleteBook" style="background:none;border:1px solid #e05c5c;color:#e05c5c;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;width:100%">Delete Book</button>
     ` : ''}`;
   document.getElementById('expBookOverlay').style.display = 'flex';
 
@@ -208,12 +211,12 @@ function expDeleteBook() {
       <select id="expMoveToBook" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:13px">${moveOptions}</select>
     </div>` : ''}
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:16px;cursor:pointer">
-      <input type="checkbox" id="expDeleteTxnsCheck" style="width:14px;height:14px" ${otherBooks.length ? '' : 'checked'} onchange="expDeleteBookToggle(this)">
+      <input type="checkbox" id="expDeleteTxnsCheck" style="width:14px;height:14px" ${otherBooks.length ? '' : 'checked'} data-change-action="expDeleteBookToggle" data-change-args='["$el"]'>
       Delete all transactions in this book
     </label>
     <div style="display:flex;gap:8px">
-      <button onclick="expCloseBookOverlay();expShowManageBook()" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px;font-size:12px;cursor:pointer">Cancel</button>
-      <button onclick="expConfirmDeleteBook()" style="flex:1;background:#e05c5c;border:none;color:#fff;border-radius:8px;padding:7px;font-size:12px;font-weight:600;cursor:pointer">Delete</button>
+      <button data-action="_expDeleteCancel" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px;font-size:12px;cursor:pointer">Cancel</button>
+      <button data-action="expConfirmDeleteBook" style="flex:1;background:#e05c5c;border:none;color:#fff;border-radius:8px;padding:7px;font-size:12px;font-weight:600;cursor:pointer">Delete</button>
     </div>`;
 }
 
@@ -320,11 +323,11 @@ function renderExpChartPeriods() {
   const months = Object.keys(byMonth).sort();
   const el = document.getElementById('expChartPeriods');
   if (!el) return;
-  let btns = `<button class="exp-period-btn${_expChartPeriod === 'ytd' ? ' active' : ''}" onclick="setExpChartPeriod('ytd')">YTD</button>`;
+  let btns = `<button class="exp-period-btn${_expChartPeriod === 'ytd' ? ' active' : ''}" data-action="setExpChartPeriod" data-args='["ytd"]'>YTD</button>`;
   for (const mo of months) {
     const [, mm] = mo.split('-');
     const label = monthNames[parseInt(mm) - 1];
-    btns += `<button class="exp-period-btn${_expChartPeriod === mo ? ' active' : ''}" onclick="setExpChartPeriod('${mo}')">${label}</button>`;
+    btns += `<button class="exp-period-btn${_expChartPeriod === mo ? ' active' : ''}" data-action="setExpChartPeriod" data-args='${JSON.stringify([mo]).replace(/'/g, "&#39;")}'>${label}</button>`;
   }
   el.innerHTML = btns;
 }
@@ -405,7 +408,7 @@ function renderExpChart() {
   // Legend
   document.getElementById('expChartLegend').innerHTML = sorted.map(([cat, amt], i) => {
     const pct = total > 0 ? ((amt / total) * 100).toFixed(1) : 0;
-    return `<div class="exp-legend-item" onclick="expChartHighlight(${i})" onmouseenter="expChartHighlight(${i})" onmouseleave="expChartHighlight(-1)">
+    return `<div class="exp-legend-item" data-action="expChartHighlight" data-args='[${i}]' data-mouseover-action="expChartHighlight" data-mouseover-args='[${i}]' data-mouseout-action="expChartHighlight" data-mouseout-args='[-1]'>
       <div class="exp-legend-dot" style="background:${bgColors[i]}"></div>
       <span class="exp-legend-name">${escHtml(cat)}</span>
       <span class="exp-legend-amt">$${amt.toFixed(0)}</span>
@@ -511,9 +514,9 @@ function expTxnHtml(t, editable = false) {
     <td class="exp-td-date">${escHtml(t.date)}</td>
     <td class="exp-td-merchant">${escHtml(t.merchant || '')}${uploader}</td>
     <td class="exp-td-desc">${desc}</td>
-    <td><span class="exp-cat-badge" onclick="expEditCat('${escHtml(t.id)}',this)">${escHtml(t.category || 'Other')}</span></td>
+    <td><span class="exp-cat-badge" data-action="expEditCat" data-args='${JSON.stringify([t.id, "$el"]).replace(/'/g, "&#39;")}'>${escHtml(t.category || 'Other')}</span></td>
     <td class="exp-td-amt">$${parseFloat(t.amount).toFixed(2)}</td>
-    <td class="exp-td-act">${editable ? `<button onclick="expDeleteTxn('${escHtml(t.id)}',this)" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:2px 6px" title="Delete">✕</button>` : ''}</td>
+    <td class="exp-td-act">${editable ? `<button data-action="expDeleteTxn" data-args='${JSON.stringify([t.id, "$el"]).replace(/'/g, "&#39;")}' style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:2px 6px" title="Delete">✕</button>` : ''}</td>
   </tr>`;
 }
 
@@ -713,7 +716,7 @@ async function loadExpGroup() {
             <div style="font-size:13px;font-weight:600">${escHtml(m.name)}</div>
             <div style="font-size:11px;color:var(--muted)">${escHtml(m.role)}</div>
           </div>
-          ${isPriv && myGroup.members.length > 1 ? `<button onclick="expGroupRemoveMember('${escHtml(m.id)}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px" title="Remove">✕</button>` : ''}
+          ${isPriv && myGroup.members.length > 1 ? `<button data-action="expGroupRemoveMember" data-args='${JSON.stringify([m.id]).replace(/'/g, "&#39;")}' style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px" title="Remove">✕</button>` : ''}
         </div>`).join('');
       infoEl.innerHTML = `
         <div style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Shared Group</div>

@@ -85,15 +85,15 @@ function renderUpdateRow() {
         <div style="font-size:11px;color:var(--muted);margin-top:6px">Last checked: ${last} · ${polling ? `auto every ${intervalMin}m` : 'auto-check off'}</div>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button id="btnUpdateCheck" onclick="runUpdateCheck()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Check now</button>
-        <button id="btnUpdateApply" onclick="runUpdateApply()" style="background:${canApply ? '#43b89c' : 'var(--bg3)'};border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:${canApply ? 'pointer' : 'not-allowed'};font-weight:600;opacity:${canApply ? '1' : '0.5'}" ${canApply ? '' : 'disabled'}>Update &amp; restart</button>
-        ${canForce ? `<button id="btnUpdateForce" onclick="runUpdateForce()" style="background:#c44;border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Force update</button>` : ''}
+        <button id="btnUpdateCheck" data-action="runUpdateCheck" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Check now</button>
+        <button id="btnUpdateApply" data-action="runUpdateApply" style="background:${canApply ? '#43b89c' : 'var(--bg3)'};border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:${canApply ? 'pointer' : 'not-allowed'};font-weight:600;opacity:${canApply ? '1' : '0.5'}" ${canApply ? '' : 'disabled'}>Update &amp; restart</button>
+        ${canForce ? `<button id="btnUpdateForce" data-action="runUpdateForce" style="background:#c44;border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Force update</button>` : ''}
       </div>
     </div>
     ${dirtyBlock}
     <div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--muted)">
       <label style="position:relative;display:inline-block;width:36px;height:20px">
-        <input type="checkbox" id="updateAutoToggle" ${polling ? 'checked' : ''} onchange="saveUpdateAutoToggle(this.checked)" style="opacity:0;width:0;height:0">
+        <input type="checkbox" id="updateAutoToggle" ${polling ? 'checked' : ''} data-change-action="saveUpdateAutoToggle" data-change-args='["$checked"]' style="opacity:0;width:0;height:0">
         <span style="position:absolute;cursor:pointer;inset:0;background:${polling ? 'var(--accent)' : 'var(--bg3)'};border:1px solid var(--border);border-radius:11px;transition:.2s"></span>
       </label>
       <span>Check origin automatically</span>

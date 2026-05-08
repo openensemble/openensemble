@@ -18,7 +18,7 @@ function renderTutorEmpty(msg) {
   return `<div class="tutor-today-empty">
     <div style="font-size:48px;margin-bottom:8px">🎓</div>
     <div style="color:var(--muted);font-size:13px">${escHtml(msg || 'Start a tutor session to build your streak.')}</div>
-    <button class="tutor-today-cta" onclick="startTutorSession()">Start a session</button>
+    <button class="tutor-today-cta" data-action="startTutorSession">Start a session</button>
   </div>`;
 }
 
@@ -59,7 +59,7 @@ function renderTutorToday({ stats, level, intoLevel, nextLevelAt, recap, subject
     ? `<ul class="tutor-due-list">${dueReviews.map(r => `
         <li>
           <div class="tutor-due-text">${escHtml(r.subject || 'Review')} · ${escHtml((r.text || '').slice(0, 80))}</div>
-          <button class="tutor-due-start" onclick="startReview('${escHtml(r.subject || '')}')">Start</button>
+          <button class="tutor-due-start" data-action="startReview" data-args='${JSON.stringify([r.subject || '']).replace(/'/g, "&#39;")}'>Start</button>
         </li>`).join('')}</ul>`
     : `<div style="color:var(--muted);font-size:12px;padding:8px 0">Nothing due right now.</div>`;
 
@@ -122,8 +122,8 @@ function renderTutorToday({ stats, level, intoLevel, nextLevelAt, recap, subject
       </div>
 
       <div class="tutor-today-actions">
-        <button class="tutor-today-cta" onclick="startTutorSession()">Start session</button>
-        <button class="tutor-today-link" onclick="openTutorPrefsPanel()">⚙ Reminders</button>
+        <button class="tutor-today-cta" data-action="startTutorSession">Start session</button>
+        <button class="tutor-today-link" data-action="openTutorPrefsPanel">⚙ Reminders</button>
       </div>
     </div>
   `;
@@ -152,7 +152,7 @@ async function openTutorPrefsPanel() {
   } catch {}
   body.innerHTML = `
     <div class="tutor-today">
-      <button class="tutor-today-link" onclick="loadTutorToday()">← Back</button>
+      <button class="tutor-today-link" data-action="loadTutorToday">← Back</button>
       <h3>Reminders</h3>
       <label class="tutor-prefs-row">
         <span>Enabled</span>
@@ -176,7 +176,7 @@ async function openTutorPrefsPanel() {
         <input type="checkbox" id="tutor-pref-atrisk" ${prefs.streakAtRiskNudge ? 'checked' : ''} />
       </label>
       <div class="tutor-today-actions">
-        <button class="tutor-today-cta" onclick="saveTutorPrefs()">Save</button>
+        <button class="tutor-today-cta" data-action="saveTutorPrefs">Save</button>
       </div>
     </div>`;
 }

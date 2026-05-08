@@ -2,13 +2,13 @@
 function makeDrawerToolbar(label, refreshFn) {
   const q = _activeInboxQuery ?? '';
   const clearBtn = q
-    ? `<button class="drawer-refresh" title="Clear search" onclick="clearInboxSearch()" style="padding:0 8px">✕</button>`
+    ? `<button class="drawer-refresh" title="Clear search" data-action="clearInboxSearch" style="padding:0 8px">✕</button>`
     : '';
   return `<div class="drawer-toolbar" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
     <span style="font-size:11px;color:var(--muted)">${label}</span>
-    <input id="inboxSearch" type="text" placeholder="Search…" value="${escHtml(q)}" onkeydown="if(event.key==='Enter')searchInbox(this.value)" style="flex:1;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text);min-width:0">
+    <input id="inboxSearch" type="text" placeholder="Search…" value="${escHtml(q)}" data-keydown-action="_actionIf" data-keydown-args='[{"key":"Enter","action":"searchInbox","args":["$value"]}]' style="flex:1;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11px;color:var(--text);min-width:0">
     ${clearBtn}
-    <button class="drawer-refresh" onclick="${refreshFn}()">↻</button>
+    <button class="drawer-refresh" data-action="${refreshFn}">↻</button>
   </div>`;
 }
 
@@ -53,7 +53,7 @@ function _inboxCardHtml(e) {
   const from = e.from.replace(/<[^>]+>/, '').replace(/"/g, '').trim() || e.from;
   const date = e.date ? new Date(e.date).toLocaleDateString(undefined, { month:'short', day:'numeric' }) : '';
   const id = escHtml(e.id);
-  return `<div class="news-card email-card-row" onclick="openEmailDetail('${id}')">
+  return `<div class="news-card email-card-row" data-action="openEmailDetail" data-args='${JSON.stringify([e.id]).replace(/'/g, "&#39;")}'>
     <div class="news-card-body">
       <div class="news-card-meta">
         <span class="news-card-source">${escHtml(from)}</span>
@@ -62,7 +62,7 @@ function _inboxCardHtml(e) {
       <div class="news-card-title">${escHtml(e.subject)}</div>
       <div class="news-card-desc">${escHtml(e.snippet)}</div>
     </div>
-    <button class="email-card-delete" title="Delete" aria-label="Delete email" onclick="inboxQuickDelete('${id}', event)">
+    <button class="email-card-delete" title="Delete" aria-label="Delete email" data-action="inboxQuickDelete" data-args='${JSON.stringify([e.id]).replace(/'/g, "&#39;")}' data-stop-propagation>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>
     </button>
   </div>`;
@@ -118,7 +118,7 @@ async function loadEmailAccountTabs() {
   tabBar.innerHTML = _inboxAccounts.map(a => {
     const tabIcon = a.provider === 'gmail' ? icon('mail', 13) : a.provider === 'microsoft' ? icon('building', 13) : icon('globe', 13);
     const active = a.id === _activeInboxAccountId;
-    return `<button onclick="switchInboxTab('${escHtml(a.id)}')" style="
+    return `<button data-action="switchInboxTab" data-args='${JSON.stringify([a.id]).replace(/'/g, "&#39;")}' style="
       background:none;border:none;cursor:pointer;padding:8px 14px;font-size:12px;font-weight:600;
       color:${active ? 'var(--accent)' : 'var(--muted)'};
       border-bottom:2px solid ${active ? 'var(--accent)' : 'transparent'};
@@ -273,14 +273,14 @@ async function openEmailDetail(msgId) {
   const dateDisplay = meta.date ? new Date(meta.date).toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
 
   const actionBtns = _inboxEmailActions.map(a =>
-    `<button class="btn-email-action${a.id === 'trash' ? ' danger' : ''}" onclick="emailActionClick('${a.id}', '${escHtml(msgId)}')">
+    `<button class="btn-email-action${a.id === 'trash' ? ' danger' : ''}" data-action="emailActionClick" data-args='${JSON.stringify([a.id, msgId]).replace(/'/g, "&#39;")}'>
       <span class="action-icon">${a.icon}</span>${escHtml(a.label)}
     </button>`
   ).join('');
 
   el.innerHTML = `<div class="email-detail">
     <div class="email-detail-hdr">
-      <button class="btn-email-back" onclick="loadInboxPreview()" title="Back">←</button>
+      <button class="btn-email-back" data-action="loadInboxPreview" title="Back">←</button>
       <div class="email-detail-subject">${escHtml(meta.subject)}</div>
     </div>
     <div class="email-detail-meta">
@@ -295,9 +295,9 @@ async function openEmailDetail(msgId) {
       <input id="emailForwardTo" type="email" placeholder="Forward to (email address)" style="display:none;width:100%;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;color:var(--text);font-family:inherit;margin-bottom:6px;box-sizing:border-box">
       <textarea id="emailReplyText" style="width:100%;min-height:80px;max-height:200px;resize:vertical;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;color:var(--text);font-family:inherit" placeholder="Type your reply…"></textarea>
       <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
-        <button onclick="closeReplyComposer()" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer">Cancel</button>
-        <button id="emailReplyDraft" onclick="draftWithEmailAgent()" style="background:none;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">Draft with AI</button>
-        <button id="emailReplySend" onclick="sendInlineReply()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">Send</button>
+        <button data-action="closeReplyComposer" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer">Cancel</button>
+        <button id="emailReplyDraft" data-action="draftWithEmailAgent" style="background:none;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">Draft with AI</button>
+        <button id="emailReplySend" data-action="sendInlineReply" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">Send</button>
       </div>
     </div>
     ${_inboxEmailActions.length ? `<div class="email-action-bar">${actionBtns}</div>` : ''}

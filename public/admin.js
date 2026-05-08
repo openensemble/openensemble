@@ -49,12 +49,12 @@ async function loadUserManagement() {
 
       const lockChecked = u.skillsLocked ? 'checked' : '';
       const roleSelect = (myRole === 'owner' && !isSelf && !isOwner) ? `
-        <select onchange="adminSetRole('${u.id}',this.value)" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">
+        <select data-change-action="adminSetRole" data-change-args='${JSON.stringify([u.id, "$value"]).replace(/'/g, "&#39;")}' style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">
           <option value="user" ${u.role==='user'?'selected':''}>👤 User</option>
           <option value="child" ${u.role==='child'?'selected':''}>🧒 Child</option>
           <option value="admin" ${u.role==='admin'?'selected':''}>🔑 Admin</option>
         </select>` : `<span style="font-size:11px;padding:2px 7px;border-radius:20px;background:var(--bg2);color:${roleColor};border:1px solid ${roleColor}">${roleLabel}</span>`;
-      const deleteBtn = (!isSelf && !isOwner) ? `<button onclick="adminDeleteUser('${u.id}','${escHtml(u.name)}')" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Delete</button>` : '';
+      const deleteBtn = (!isSelf && !isOwner) ? `<button data-action="adminDeleteUser" data-args='${JSON.stringify([u.id, u.name]).replace(/'/g, "&#39;")}' style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Delete</button>` : '';
 
       // Child safety prompt (editable per child account) — saved via global Save
       const childSafetySection = (u.role === 'child' && !isSelf) ? `
@@ -199,13 +199,13 @@ async function loadUserManagement() {
           <i data-lucide="send" style="width:12px;height:12px"></i> Allow Telegram bot setup
         </label>` : ''}
         <div style="margin-top:12px">
-          <button onclick="adminSaveUser('${u.id}')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 16px;font-size:12px;cursor:pointer;font-weight:600">Save changes</button>
+          <button data-action="adminSaveUser" data-args='${JSON.stringify([u.id]).replace(/'/g, "&#39;")}' style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 16px;font-size:12px;cursor:pointer;font-weight:600">Save changes</button>
         </div>
         <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
-          <button onclick="openConvViewer('${u.id}','${escHtml(u.name)}')" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">💬 Conversations</button>
-          ${!isSelf ? `<button onclick="adminResetSessions('${u.id}','${escHtml(u.name)}')" style="background:none;border:1px solid var(--yellow,#ffc107);color:var(--yellow,#ffc107);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">🔄 Reset Sessions</button>` : ''}
-          ${!isSelf && !isOwner ? `<button onclick="adminResetPassword('${u.id}','${escHtml(u.name)}')" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">🔑 Reset Password</button>` : ''}
-          ${!isSelf && !isOwner ? `<button onclick="adminToggleLock('${u.id}',${!!u.locked})" style="background:none;border:1px solid ${u.locked ? 'var(--green,#4caf50)' : 'var(--red,#e05c5c)'};color:${u.locked ? 'var(--green,#4caf50)' : 'var(--red,#e05c5c)'};border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">${u.locked ? '🔓 Unlock Account' : '🔒 Lock Account'}</button>` : ''}
+          <button data-action="openConvViewer" data-args='${JSON.stringify([u.id, u.name]).replace(/'/g, "&#39;")}' style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">💬 Conversations</button>
+          ${!isSelf ? `<button data-action="adminResetSessions" data-args='${JSON.stringify([u.id, u.name]).replace(/'/g, "&#39;")}' style="background:none;border:1px solid var(--yellow,#ffc107);color:var(--yellow,#ffc107);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">🔄 Reset Sessions</button>` : ''}
+          ${!isSelf && !isOwner ? `<button data-action="adminResetPassword" data-args='${JSON.stringify([u.id, u.name]).replace(/'/g, "&#39;")}' style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">🔑 Reset Password</button>` : ''}
+          ${!isSelf && !isOwner ? `<button data-action="adminToggleLock" data-args='${JSON.stringify([u.id, !!u.locked]).replace(/'/g, "&#39;")}' style="background:none;border:1px solid ${u.locked ? 'var(--green,#4caf50)' : 'var(--red,#e05c5c)'};color:${u.locked ? 'var(--green,#4caf50)' : 'var(--red,#e05c5c)'};border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer">${u.locked ? '🔓 Unlock Account' : '🔒 Lock Account'}</button>` : ''}
         </div>
         </div>`;
       card.addEventListener('toggle', () => {
@@ -499,7 +499,7 @@ async function openUserPicker() {
       const avatarHtml = u.avatar
         ? `<div class="user-avatar"><img src="${u.avatar}" alt=""></div>`
         : `<div class="user-avatar" style="background:${u.color ?? 'var(--bg3)'}">${u.emoji ?? '🧑'}</div>`;
-      return `<div class="user-card${u.id === currentId ? ' active' : ''}" onclick="switchToUser('${u.id}')">
+      return `<div class="user-card${u.id === currentId ? ' active' : ''}" data-action="switchToUser" data-args='${JSON.stringify([u.id]).replace(/'/g, "&#39;")}'>
         ${avatarHtml}
         <div><div class="user-card-name">${escHtml(u.name)} ${roleLabel}</div></div>
       </div>`;

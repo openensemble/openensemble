@@ -100,7 +100,7 @@ function buildAgentDrawer() {
         <div class="ag-model">${agRole ? escHtml(agRole) + ' · ' : ''}${escHtml(a.model ?? '')}</div>
       </div>
       ${busy}
-      ${a.custom ? `<button class="ag-edit" title="Edit ${escHtml(a.name)}" onclick="event.stopPropagation();openNewAgentModal(agents.find(x=>x.id==='${escHtml(a.id)}'))">✏️</button><button class="ag-del" title="Delete ${escHtml(a.name)}" onclick="event.stopPropagation();deleteAgent('${escHtml(a.id)}','${escHtml(a.name)}')">✕</button>` : ''}
+      ${a.custom ? `<button class="ag-edit" title="Edit ${escHtml(a.name)}" data-action="_editAgentById" data-args='${JSON.stringify([a.id]).replace(/'/g, "&#39;")}' data-stop-propagation>✏️</button><button class="ag-del" title="Delete ${escHtml(a.name)}" data-action="deleteAgent" data-args='${JSON.stringify([a.id, a.name]).replace(/'/g, "&#39;")}' data-stop-propagation>✕</button>` : ''}
     `;
     item.addEventListener('click', () => switchAgent(a.id));
     if (a.custom) {
@@ -243,6 +243,13 @@ const EMOJI_PICKS = ['🤖','🔬','📧','📈','🎯','🛠','📝','🎓','�
   '💻','⌨️','🖥️','🐛','🔧','⚙️','🧬','🔮','🦊','🐙','🦉','👾','🥷','🧙‍♂️','🌙','🔥'];
 
 let editingAgentId = null;
+
+// Wrapper for the event-delegation harness — looks up the agent record by id
+// and forwards to openNewAgentModal. Replaces inline `agents.find(x=>x.id==='id')`.
+function _editAgentById(id) {
+  const agent = agents.find(x => x.id === id);
+  if (agent) openNewAgentModal(agent);
+}
 
 async function openNewAgentModal(agent = null) {
   // Refresh provider model lists in the background, then re-populate if already open

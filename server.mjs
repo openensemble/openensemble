@@ -190,13 +190,14 @@ const routeHandlers = [
   handleGuide,
 ];
 
-// CSP: inline script-src/style-src are required by index.html (149 inline
-// on* handlers, 398 inline style= attributes). Whitelisted CDNs are the ones
-// actually loaded in index.html. This isn't airtight against XSS but does
-// block attacker-controlled 3rd-party script/frame/object sources.
+// CSP. Inline event handlers are no longer used — the public/event-delegation.js
+// harness routes data-action attributes to global functions, so script-src
+// drops 'unsafe-inline' and any XSS that injects HTML can't execute scripts
+// or on* handlers. Inline style= attributes still exist on lots of elements
+// so style-src keeps 'unsafe-inline' for now (lower risk class — no JS exec).
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net",
+  "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data: blob: https: http:",
   "font-src 'self' data: https://fonts.gstatic.com",

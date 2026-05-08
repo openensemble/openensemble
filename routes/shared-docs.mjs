@@ -28,7 +28,26 @@ function getUserIndexPath(userId) {
 }
 
 function loadUserIndex(userId) {
-  try { return JSON.parse(fs.readFileSync(getUserIndexPath(userId), 'utf8')); } catch { return []; }
+  let docs;
+  try { docs = JSON.parse(fs.readFileSync(getUserIndexPath(userId), 'utf8')); } catch { return []; }
+  if (!Array.isArray(docs)) return [];
+  // One-shot backfill: pre-migration records have uploadedBy=null because
+  // they were stored before the per-user migration. They live in this user's
+  // documents/ dir, so the requesting user IS the owner — set it once and
+  // persist so future reads (and isOwn checks, and the delete flow that
+  // mutates the owner's index) work normally.
+  let dirty = false;
+  for (const d of docs) {
+    if (d && (d.uploadedBy === null || d.uploadedBy === undefined)) {
+      d.uploadedBy = userId;
+      dirty = true;
+    }
+  }
+  if (dirty) {
+    try { saveUserIndex(userId, docs); }
+    catch (e) { console.warn('[shared-docs] backfill uploadedBy failed:', e.message); }
+  }
+  return docs;
 }
 
 function saveUserIndex(userId, docs) {
@@ -57,11 +76,21 @@ const modifySharing = fn => withLock(SHARING_PATH + '.lock', () => {
   saveSharing(shares);
 });
 
-// Resolve the file path on disk — checks owner's documents dir, falls back to legacy shared-docs/
-function resolveFilePath(doc) {
-  const userPath = path.join(getUserDocsDir(doc.uploadedBy), doc.id + doc.ext);
-  if (fs.existsSync(userPath)) return userPath;
-  // Legacy fallback
+// Resolve the file path on disk. Tries, in order:
+//   1. The owner's documents dir (when doc.uploadedBy is set)
+//   2. The requesting user's documents dir (covers pre-migration records that
+//      have uploadedBy=null but the file is in the current user's dir)
+//   3. The legacy global shared-docs/ directory (oldest unmigrated layout)
+function resolveFilePath(doc, requesterId = null) {
+  if (!doc) return null;
+  if (doc.uploadedBy) {
+    const ownerPath = path.join(getUserDocsDir(doc.uploadedBy), doc.id + doc.ext);
+    if (fs.existsSync(ownerPath)) return ownerPath;
+  }
+  if (requesterId) {
+    const requesterPath = path.join(getUserDocsDir(requesterId), doc.id + doc.ext);
+    if (fs.existsSync(requesterPath)) return requesterPath;
+  }
   const legacyPath = path.join(LEGACY_DOCS_DIR, doc.id + doc.ext);
   if (fs.existsSync(legacyPath)) return legacyPath;
   return null;
@@ -327,7 +356,7 @@ export async function handle(req, res) {
       return true;
     }
 
-    const filePath = resolveFilePath(doc);
+    const filePath = resolveFilePath(doc, userId);
     if (!filePath) { res.writeHead(404); res.end(); return true; }
 
     const lower    = doc.ext.toLowerCase();
@@ -391,7 +420,7 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Not found' }));
       return true;
     }
-    const filePath = resolveFilePath(doc);
+    const filePath = resolveFilePath(doc, userId);
     if (!filePath) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'File missing on disk' }));
@@ -418,7 +447,7 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Not found' }));
       return true;
     }
-    const filePath = resolveFilePath(doc);
+    const filePath = resolveFilePath(doc, userId);
     if (!filePath) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'File missing on disk' }));
@@ -443,7 +472,7 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Not found' }));
       return true;
     }
-    const filePath = resolveFilePath(doc);
+    const filePath = resolveFilePath(doc, userId);
     if (!filePath) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'File missing on disk' }));
@@ -531,7 +560,7 @@ export async function handle(req, res) {
       if (idx !== -1) shares.splice(idx, 1);
     });
     // Delete file from disk
-    const filePath = resolveFilePath(doc);
+    const filePath = resolveFilePath(doc, userId);
     if (filePath) try { fs.unlinkSync(filePath); } catch {}
     // Clean up thumbnail
     const thumbPath = path.join(getUserDocsDir(doc.uploadedBy), 'thumbs', doc.id + '.jpg');

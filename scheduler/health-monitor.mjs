@@ -138,11 +138,18 @@ async function runSignalCheck(state, signal, helpers) {
     let out;
     try { out = await ctx.execFn(cmd); }
     catch (e) { return { ok: false, value: null, raw: e.message, unknown: true }; }
+    const stderr = String(out.stderr || '');
+    // Concurrency cap rejection ("Node X is busy ..."). Not a real failure —
+    // the node is fine, we just lost a race against a tick-aligned burst of
+    // other signal checks. Treat as "couldn't determine" + retry soon, so
+    // the signal doesn't flap to unknown on every burst.
+    if (out.exitCode !== 0 && /\bis busy\b/i.test(stderr) && !out.stdout) {
+      return { ok: false, value: null, raw: stderr.slice(0, 500), deferred: true };
+    }
     // Distinguish "node unreachable" from "command says service is down" — a
     // disconnected node should not flip every signal unhealthy and spam the
     // troubleshooting loop on every network blip.
-    const stderr = String(out.stderr || '');
-    if (out.exitCode !== 0 && /not connected|offline|not found|busy|timed out/i.test(stderr) && !out.stdout) {
+    if (out.exitCode !== 0 && /not connected|offline|not found|timed out/i.test(stderr) && !out.stdout) {
       return { ok: false, value: null, raw: stderr.slice(0, 500), unknown: true };
     }
     const value = (out.stdout || '').trim();
@@ -163,6 +170,18 @@ async function evalSignal(state, signal, helpers, now) {
       newSignal: { ...signal, last_state: 'unknown', last_checked_at: now },
       transitionText: null,
       _checkErr: e.message,
+    };
+  }
+
+  if (result.deferred) {
+    // Couldn't actually run the check (node was busy with other commands).
+    // Keep last_state and current_incident_id as-is — we have no new info.
+    // Bump last_checked_at so the next attempt is in ~30s rather than on
+    // every 5s supervisor sweep, but don't wait the full cadence either.
+    const cadenceMs = (signal.cadence_sec || DEFAULT_CADENCE_SEC) * 1000;
+    return {
+      newSignal: { ...signal, last_checked_at: now - cadenceMs + 30_000 },
+      transitionText: null,
     };
   }
 

@@ -125,7 +125,7 @@ function showReminder(msg) {
         <div class="reminder-time">Reminder · ${new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
       </div>
     </div>
-    <button class="reminder-dismiss" onclick="this.parentElement.remove()">Dismiss</button>
+    <button class="reminder-dismiss" data-action="_dismissReminder">Dismiss</button>
   `;
   document.body.appendChild(banner);
   requestAnimationFrame(() => banner.classList.add('visible'));
@@ -229,6 +229,12 @@ function openSearch() {
 }
 function closeSearch() { $('searchModal').style.display = 'none'; }
 
+// Wrappers for the event-delegation harness — the harness routes
+// data-action="<name>" to window[name], so multi-statement inline handlers
+// move into named functions here. Keeps the call sites declarative.
+function _searchResultClick(agent) { closeSearch(); switchAgent(agent); }
+function _dismissReminder(_event) { this.parentElement?.remove(); }
+
 async function runSearch(query) {
   if (query.trim().length < 2) {
     $('searchResults').innerHTML = '<div style="text-align:center;opacity:.5;padding:24px">Type at least 2 characters</div>';
@@ -250,7 +256,7 @@ async function runSearch(query) {
       const emoji = agent?.emoji ?? '🤖';
       const date = r.ts ? new Date(r.ts).toLocaleDateString() : '';
       const snippet = escHtml(r.content).replace(new RegExp(`(${escHtml(query)})`, 'gi'), '<mark>$1</mark>');
-      return `<div class="search-result" onclick="closeSearch();switchAgent('${escHtml(r.agent)}')" style="padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:4px;border:1px solid var(--border)">
+      return `<div class="search-result" data-action="_searchResultClick" data-args='${JSON.stringify([r.agent]).replace(/'/g, "&#39;")}' style="padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:4px;border:1px solid var(--border)">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
           <span>${emoji}</span><strong style="font-size:13px">${escHtml(name)}</strong>
           <span style="margin-left:auto;font-size:11px;opacity:.5">${date}</span>

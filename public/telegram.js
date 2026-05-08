@@ -40,7 +40,7 @@ function renderTelegramSection(s) {
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
       <input type="password" id="tgBotToken" placeholder="${s.botTokenSet ? '•••• already saved — paste a new one to replace' : '123456789:ABC-..'}" autocomplete="new-password"
         style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
-      <button onclick="saveTelegramBotToken()"
+      <button data-action="saveTelegramBotToken"
         style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
     </div>`;
 
@@ -49,9 +49,9 @@ function renderTelegramSection(s) {
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
       <input type="text" id="tgWebhookUrl" value="${escHtml(s.webhookUrl || defaultWebhook)}"
         style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;font-family:monospace">
-      <button onclick="autofillTelegramWebhookFromTunnel()" id="tgAutofillBtn" title="Use the Cloudflare Tunnel URL configured in Public Access"
+      <button data-action="autofillTelegramWebhookFromTunnel" id="tgAutofillBtn" title="Use the Cloudflare Tunnel URL configured in Public Access"
         style="background:none;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Use tunnel</button>
-      <button onclick="registerTelegramWebhook()"
+      <button data-action="registerTelegramWebhook"
         style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Register</button>
     </div>
     ${webhookIsHttps ? '' : `<div style="font-size:11px;color:#e0a35c;margin-bottom:8px">⚠ Your OpenEnsemble origin isn't HTTPS. Telegram rejects non-HTTPS webhooks — set up a Cloudflare Tunnel (Settings → Public Access) or put OE behind your own reverse proxy and paste the public HTTPS URL here.</div>`}
@@ -81,9 +81,9 @@ function renderTelegramSection(s) {
           <div style="font-size:11px;color:var(--muted)">Chat ID: <code>${escHtml(s.chatId ?? '—')}</code></div>
         </div>
         <div style="display:flex;gap:6px">
-          <button onclick="generateTelegramLinkCode()" title="Generate a code to link another chat"
+          <button data-action="generateTelegramLinkCode" title="Generate a code to link another chat"
             style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:11px;cursor:pointer">+ Code</button>
-          <button onclick="unlinkTelegramChat()"
+          <button data-action="unlinkTelegramChat"
             style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">Unlink chat</button>
         </div>
       </div>
@@ -94,7 +94,7 @@ function renderTelegramSection(s) {
         <div style="font-weight:600;color:var(--text);margin-bottom:4px">Next: link your Telegram chat</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Generate a one-time code, then send <code>/start CODE</code> from the chat you want linked. Required even for the first chat — protects against anyone who learns your bot's @username.</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button onclick="generateTelegramLinkCode()"
+          <button data-action="generateTelegramLinkCode"
             style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer">Generate linking code</button>
           <a href="https://t.me/${escHtml(s.botUsername)}" target="_blank"
             style="display:inline-block;background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 14px;font-size:12px;font-weight:600;text-decoration:none">Open @${escHtml(s.botUsername)}</a>
@@ -106,7 +106,7 @@ function renderTelegramSection(s) {
   // Danger: remove everything
   const removeRow = s.botTokenSet ? `
     <div style="margin-top:10px;display:flex;justify-content:flex-end">
-      <button onclick="removeTelegramBot()" title="Remove bot token, secret, and chat link"
+      <button data-action="removeTelegramBot" title="Remove bot token, secret, and chat link"
         style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:6px 12px;font-size:11px;cursor:pointer">Remove bot</button>
     </div>` : '';
 
@@ -116,6 +116,11 @@ function renderTelegramSection(s) {
     ${s.botTokenSet ? webhookRow : ''}
     ${statusHtml}
     ${removeRow}`;
+}
+
+// Wrapper for the Copy button — clipboard write + toast.
+function _copyTelegramStart(code) {
+  navigator.clipboard.writeText('/start ' + code).then(() => showToast('Copied')).catch(() => {});
 }
 
 // ── Mutations ─────────────────────────────────────────────────────────────────
@@ -215,7 +220,7 @@ async function generateTelegramLinkCode() {
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Send from the new chat · expires in ${mins} min</div>
         <div style="display:flex;align-items:center;gap:8px">
           <code style="flex:1;background:var(--bg2);padding:8px 12px;border-radius:6px;font-size:14px;letter-spacing:2px;font-weight:600;text-align:center">/start ${escHtml(data.code)}</code>
-          <button onclick="navigator.clipboard.writeText('/start ${escHtml(data.code)}').then(() => showToast('Copied'))"
+          <button data-action="_copyTelegramStart" data-args='${JSON.stringify([data.code]).replace(/'/g, "&#39;")}'
             style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px 10px;font-size:12px;cursor:pointer">Copy</button>
         </div>
       </div>`;

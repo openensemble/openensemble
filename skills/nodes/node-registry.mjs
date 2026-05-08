@@ -551,8 +551,11 @@ export function isPathAllowed(nodeId, userId, requestedPath) {
 // ── Command dispatch ─────────────────────────────────────────────────────────
 // Per-node concurrency guard — prevents LLM retry storms from hammering a node
 // with simultaneous exec calls. Commands beyond the limit are rejected
-// immediately with a clear error so the model sees the backpressure.
-const MAX_CONCURRENT_PER_NODE = 3;
+// immediately with a clear error so the model sees the backpressure. Sized
+// to absorb a tick-aligned burst of profile-health signals (system + 1-2
+// service profiles, ~8 signals total) plus a couple of LLM-driven exec calls
+// without flapping signals into "is busy" rejections.
+const MAX_CONCURRENT_PER_NODE = 10;
 
 function countInflight(nodeId) {
   let n = 0;

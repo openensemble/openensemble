@@ -14,7 +14,8 @@ function saveMarketWatchlist(wl) {
   localStorage.setItem('mkt_watchlist', JSON.stringify(wl));
 }
 
-function marketRowHtml(name, sym, price, chgStr, chgCls, delFn) {
+function marketRowHtml(name, sym, price, chgStr, chgCls, delType, delSym) {
+  const args = JSON.stringify([delType, delSym]).replace(/"/g, '&quot;');
   return `<div class="market-row">
     <div style="flex:1;min-width:0">
       <div class="market-name">${escHtml(name)}</div>
@@ -24,7 +25,7 @@ function marketRowHtml(name, sym, price, chgStr, chgCls, delFn) {
       <div class="market-price">${price}</div>
       ${chgStr ? `<div class="market-change ${chgCls}">${chgStr}</div>` : ''}
     </div>
-    <button class="market-del" onclick="${delFn}" title="Remove">✕</button>
+    <button class="market-del" data-action="removeMarket" data-args="${args}" title="Remove">✕</button>
   </div>`;
 }
 
@@ -56,7 +57,7 @@ async function loadMarkets() {
       const chg = d?.CHANGEPCT24HOUR;
       const chgStr = chg != null ? (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%' : '';
       const chgCls = chg != null ? (chg >= 0 ? 'up' : 'down') : '';
-      html += marketRowHtml(sym.toUpperCase(), '', price, chgStr, chgCls, `removeMarket('crypto','${escHtml(sym)}')`);
+      html += marketRowHtml(sym.toUpperCase(), '', price, chgStr, chgCls, 'crypto', sym);
     }
   }
 
@@ -81,7 +82,7 @@ async function loadMarkets() {
       } catch { return { ticker, price: '—', chgStr: '', chgCls: '' }; }
     }));
     for (const s of stockResults) {
-      html += marketRowHtml(s.ticker, '', s.price, s.chgStr, s.chgCls, `removeMarket('stocks','${escHtml(s.ticker)}')`);
+      html += marketRowHtml(s.ticker, '', s.price, s.chgStr, s.chgCls, 'stocks', s.ticker);
     }
   }
 
@@ -101,14 +102,14 @@ async function loadMarkets() {
       <option value="MSTR"><option value="SMCI"><option value="RIVN"><option value="LCID">
     </datalist>
     <div class="markets-add-row">
-      <input class="markets-add-input" id="mktAddInput" placeholder="e.g. BTC" list="mktCryptoList" onkeydown="if(event.key==='Enter')addMarket()">
-      <select class="markets-add-select" id="mktAddType" onchange="updateMktSuggestions()">
+      <input class="markets-add-input" id="mktAddInput" placeholder="e.g. BTC" list="mktCryptoList" data-keydown-action="_actionIf" data-keydown-args='[{"key":"Enter","action":"addMarket"}]'>
+      <select class="markets-add-select" id="mktAddType" data-change-action="updateMktSuggestions">
         <option value="crypto">Crypto</option>
         <option value="stocks">Stock</option>
       </select>
-      <button class="markets-add-btn" onclick="addMarket()">Add</button>
+      <button class="markets-add-btn" data-action="addMarket">Add</button>
     </div>
-    <button class="btn-refresh-markets" onclick="loadMarkets()">↻ Refresh</button>`;
+    <button class="btn-refresh-markets" data-action="loadMarkets">↻ Refresh</button>`;
   body.innerHTML = html;
 
   if (cryptoData && layoutMode === 'B') updateStatusBarCrypto(cryptoData);

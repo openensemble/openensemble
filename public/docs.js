@@ -269,9 +269,9 @@ function renderDocList(docs, filter) {
       sharedLabel = `From ${escHtml(doc.uploadedByName)}`;
       sharedColor = 'var(--muted)';
     } else if (doc.isOwn) {
-      if (doc.sharedWith.includes('*')) { sharedLabel = 'Everyone'; sharedColor = 'var(--accent)'; }
-      else if (doc.sharedWith.length)  { sharedLabel = `${doc.sharedWith.length} user${doc.sharedWith.length > 1 ? 's' : ''}`; sharedColor = 'var(--accent)'; }
-      else                             { sharedLabel = 'Private'; sharedColor = 'var(--muted)'; }
+      if (doc.sharedWith?.includes('*'))  { sharedLabel = 'Everyone'; sharedColor = 'var(--accent)'; }
+      else if (doc.sharedWith?.length)    { sharedLabel = `${doc.sharedWith.length} user${doc.sharedWith.length > 1 ? 's' : ''}`; sharedColor = 'var(--accent)'; }
+      else                                { sharedLabel = 'Private'; sharedColor = 'var(--muted)'; }
     } else {
       sharedLabel = `From ${escHtml(doc.uploadedByName)}`;
       sharedColor = 'var(--muted)';
@@ -280,13 +280,13 @@ function renderDocList(docs, filter) {
     const safeName = escHtml(doc.filename).replace(/'/g, '&#39;');
     const safeMime = escHtml(doc.mimeType).replace(/'/g, '&#39;');
     const safeSource = escHtml(doc._source ?? '');
-    const clickAttr = `onclick="openDocViewer('${safeId}','${safeName}','${safeMime}','${safeSource}')"`;
+    const clickAttr = `data-action="openDocViewer" data-args='${JSON.stringify([doc.id, doc.filename, doc.mimeType, doc._source ?? '']).replace(/'/g, "&#39;")}'`;
 
     let thumbHtml;
     if (isImage) {
       thumbHtml = `<div ${clickAttr} style="width:100%;aspect-ratio:4/3;overflow:hidden;cursor:pointer;background:var(--bg2);display:flex;align-items:center;justify-content:center">
         <img src="${viewUrl}" style="width:100%;height:100%;object-fit:cover" loading="lazy"
-          onerror="this.parentElement.innerHTML='<span style=\\'font-size:36px\\'>🖼️</span>'">
+          data-error-action="_imgFallbackEmoji">
       </div>`;
     } else if (isVideo) {
       thumbHtml = `<div ${clickAttr} style="width:100%;aspect-ratio:4/3;overflow:hidden;cursor:pointer;background:#000;position:relative;display:flex;align-items:center;justify-content:center">
@@ -316,35 +316,40 @@ function renderDocList(docs, filter) {
       } else {
         thumbHtml = `<div ${clickAttr} style="width:100%;aspect-ratio:4/3;overflow:hidden;cursor:pointer;background:var(--bg2);display:flex;align-items:center;justify-content:center;position:relative">
           <img src="${thumbUrl}" style="width:100%;height:100%;object-fit:cover" loading="lazy"
-            onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+            data-error-action="_imgShowFallbackSibling">
           <div style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:40px">${icon}</div>
         </div>`;
       }
     }
 
     // Action buttons — all items get share; download/delete/ask vary by source
-    const shareBtn = doc.isOwn ? `<button onclick="openDocShareModal('${safeId}')" title="Share" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🔗</button>` : '';
+    const argsId      = JSON.stringify([doc.id]).replace(/'/g, "&#39;");
+    const argsName    = JSON.stringify([doc.filename]).replace(/'/g, "&#39;");
+    const argsAi      = JSON.stringify([doc.filename]).replace(/'/g, "&#39;");
+    const argsAsk     = JSON.stringify([doc.id, doc.filename, doc.mimeType]).replace(/'/g, "&#39;");
+    const argsIdName  = JSON.stringify([doc.id, doc.filename]).replace(/'/g, "&#39;");
+    const shareBtn = doc.isOwn ? `<button data-action="openDocShareModal" data-args='${argsId}' title="Share" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🔗</button>` : '';
     let actions;
     if (doc._source === 'ai-image') {
-      actions = `<button onclick="downloadAiFile('images','${safeName}')" title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
+      actions = `<button data-action="downloadAiFile" data-args='${JSON.stringify(['images', doc.filename]).replace(/'/g, "&#39;")}' title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
         ${shareBtn}
-        <button onclick="deleteAiImage('${safeName}')" title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
+        <button data-action="deleteAiImage" data-args='${argsAi}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
     } else if (doc._source === 'ai-video') {
-      actions = `<button onclick="downloadAiFile('videos','${safeName}')" title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
+      actions = `<button data-action="downloadAiFile" data-args='${JSON.stringify(['videos', doc.filename]).replace(/'/g, "&#39;")}' title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
         ${shareBtn}
-        <button onclick="deleteAiVideo('${safeName}')" title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
+        <button data-action="deleteAiVideo" data-args='${argsAi}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
     } else if (doc._source === 'research') {
-      actions = `<button onclick="openDocAskModal('${safeId}','${safeName}','${safeMime}')" title="Ask Agent" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🤖</button>
+      actions = `<button data-action="openDocAskModal" data-args='${argsAsk}' title="Ask Agent" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🤖</button>
         ${shareBtn}
-        <button onclick="deleteResearchDoc('${safeId}','${safeName}')" title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
+        <button data-action="deleteResearchDoc" data-args='${argsIdName}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
     } else if (doc._source === 'code') {
-      actions = `<button onclick="downloadCodeProject('${safeName}')" title="Download zip" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
-        <button onclick="deleteCodeProjectFromDocs('${safeName}')" title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
+      actions = `<button data-action="downloadCodeProject" data-args='${argsName}' title="Download zip" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
+        <button data-action="deleteCodeProjectFromDocs" data-args='${argsName}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
     } else {
-      actions = `<button onclick="downloadDoc('${safeId}','${safeName}')" title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
-        <button onclick="openDocAskModal('${safeId}','${safeName}','${safeMime}')" title="Ask Agent" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🤖</button>
+      actions = `<button data-action="downloadDoc" data-args='${argsIdName}' title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
+        <button data-action="openDocAskModal" data-args='${argsAsk}' title="Ask Agent" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🤖</button>
         ${shareBtn}
-        ${doc.isOwn ? `<button onclick="deleteDoc('${safeId}','${safeName}')" title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>` : ''}`;
+        ${doc.isOwn ? `<button data-action="deleteDoc" data-args='${argsIdName}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>` : ''}`;
     }
 
     return `<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--bg3);display:flex;flex-direction:column">
@@ -359,23 +364,25 @@ function renderDocList(docs, filter) {
 
   list.innerHTML = `<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">${cards}</div>`;
 
-  // Populate text previews after render
-  list.querySelectorAll('[data-text-preview]').forEach(async el => {
-    try {
-      const data = await fetch(`/api/shared-docs/${el.dataset.textPreview}/content`).then(r => r.json());
-      const pre = el.querySelector('pre');
-      if (pre) pre.textContent = data.text?.slice(0, 400) ?? '(empty)';
-    } catch {}
-  });
-
-  // Populate research doc previews after render
-  list.querySelectorAll('[data-research-preview]').forEach(async el => {
-    try {
-      const data = await fetch(`/api/research/${el.dataset.researchPreview}`).then(r => r.json());
-      const pre = el.querySelector('pre');
-      if (pre) pre.textContent = (data.content ?? '').replace(/^#+ /gm, '').slice(0, 400) || '(empty)';
-    } catch {}
-  });
+  // Populate previews after render. Run sequentially so a drawer with many
+  // docs (10+ text + research items rendered together) doesn't fan out a burst
+  // that hits the 120-req/min per-IP rate limit.
+  (async () => {
+    for (const el of list.querySelectorAll('[data-text-preview]')) {
+      try {
+        const data = await fetch(`/api/shared-docs/${el.dataset.textPreview}/content`).then(r => r.json());
+        const pre = el.querySelector('pre');
+        if (pre) pre.textContent = data.text?.slice(0, 400) ?? '(empty)';
+      } catch {}
+    }
+    for (const el of list.querySelectorAll('[data-research-preview]')) {
+      try {
+        const data = await fetch(`/api/research/${el.dataset.researchPreview}`).then(r => r.json());
+        const pre = el.querySelector('pre');
+        if (pre) pre.textContent = (data.content ?? '').replace(/^#+ /gm, '').slice(0, 400) || '(empty)';
+      } catch {}
+    }
+  })();
 }
 
 // ── Upload ────────────────────────────────────────────────────────────────────
@@ -431,7 +438,7 @@ function cancelDocUpload() {
   $('docUploadForm').style.display = 'none';
   $('docUploadTrigger').style.display = '';
   $('docUploadDesc').value = '';
-  const btn = $('docUploadForm').querySelector('button[onclick="uploadDoc()"]');
+  const btn = $('docUploadForm').querySelector('button[data-action="uploadDoc"]');
   if (btn) { btn.textContent = 'Upload'; btn.disabled = false; }
   _docShareSel.clear();
 }
@@ -445,10 +452,10 @@ function renderDocSharePicker() {
   }
   const everyoneSel = _docShareSel.has('*');
   picker.innerHTML =
-    `<button onclick="toggleDocShare('*')" style="background:${everyoneSel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${everyoneSel ? 'var(--accent)' : 'var(--border)'};color:${everyoneSel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">🌐 Everyone</button>` +
+    `<button data-action="toggleDocShare" data-args='["*"]' style="background:${everyoneSel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${everyoneSel ? 'var(--accent)' : 'var(--border)'};color:${everyoneSel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">🌐 Everyone</button>` +
     others.map(u => {
       const sel = _docShareSel.has(u.id);
-      return `<button onclick="toggleDocShare('${escHtml(u.id)}')" style="background:${sel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${sel ? 'var(--accent)' : 'var(--border)'};color:${sel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">${escHtml(u.emoji ?? '🧑')} ${escHtml(u.name)}</button>`;
+      return `<button data-action="toggleDocShare" data-args='${JSON.stringify([u.id]).replace(/'/g, "&#39;")}' style="background:${sel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${sel ? 'var(--accent)' : 'var(--border)'};color:${sel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">${escHtml(u.emoji ?? '🧑')} ${escHtml(u.name)}</button>`;
     }).join('');
 }
 
@@ -466,7 +473,7 @@ function toggleDocShare(id) {
 
 async function uploadDoc() {
   if (!_docPendingFile) return;
-  const btn = $('docUploadForm').querySelector('button[onclick="uploadDoc()"]');
+  const btn = $('docUploadForm').querySelector('button[data-action="uploadDoc"]');
   const origText = btn.textContent;
   btn.textContent = 'Uploading…';
   btn.disabled = true;
@@ -577,13 +584,13 @@ function openDocViewer(id, filename, mimeType, source) {
       <div style="font-size:52px;margin-bottom:12px">💻</div>
       <div style="font-size:15px;font-weight:600;margin-bottom:6px">${escHtml(filename)}</div>
       <div style="font-size:13px;color:var(--muted);margin-bottom:18px">${doc2?._fileCount ?? 0} ${fileWord} · ${_fmtSize(doc2?.size ?? 0)}</div>
-      <button onclick="downloadCodeProject('${safeNameJs}')" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer">⬇ Download as zip</button>
+      <button data-action="downloadCodeProject" data-args='${JSON.stringify([filename]).replace(/'/g, "&#39;")}' style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer">⬇ Download as zip</button>
     </div>`;
   } else {
     content.innerHTML = `<div style="text-align:center;padding:20px 0">
       <div style="font-size:52px;margin-bottom:12px">${_docIcon(mimeType, filename)}</div>
       <div style="font-size:14px;color:var(--muted);margin-bottom:18px">No preview available for this file type</div>
-      <button onclick="downloadDoc('${escHtml(id)}','${escHtml(filename).replace(/'/g,"&#39;")}')" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer">⬇ Download</button>
+      <button data-action="downloadDoc" data-args='${JSON.stringify([id, filename]).replace(/'/g, "&#39;")}' style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer">⬇ Download</button>
     </div>`;
   }
 
@@ -623,7 +630,7 @@ async function submitDocAsk() {
   const agentId = $('docAskAgent').value;
   const prompt  = $('docAskPrompt').value.trim();
   if (!agentId || !prompt) return;
-  const btn = $('docAskModal').querySelector('button[onclick="submitDocAsk()"]');
+  const btn = $('docAskModal').querySelector('button[data-action="submitDocAsk"]');
   const origText = btn.textContent;
   btn.textContent = 'Loading…';
   btn.disabled = true;
@@ -667,7 +674,7 @@ function closeDocShareModal() {
   $('docShareModal').style.display = 'none';
   _docShareModalId  = null;
   _docShareModalSel = new Set();
-  const btn = $('docShareModal').querySelector('button[onclick="saveDocShare()"]');
+  const btn = $('docShareModal').querySelector('button[data-action="saveDocShare"]');
   if (btn) { btn.textContent = 'Save'; btn.disabled = false; }
 }
 
@@ -680,10 +687,10 @@ function renderDocShareModalPicker() {
   }
   const everyoneSel = _docShareModalSel.has('*');
   picker.innerHTML =
-    `<button onclick="toggleDocShareModal('*')" style="background:${everyoneSel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${everyoneSel ? 'var(--accent)' : 'var(--border)'};color:${everyoneSel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">🌐 Everyone</button>` +
+    `<button data-action="toggleDocShareModal" data-args='["*"]' style="background:${everyoneSel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${everyoneSel ? 'var(--accent)' : 'var(--border)'};color:${everyoneSel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">🌐 Everyone</button>` +
     others.map(u => {
       const sel = _docShareModalSel.has(u.id);
-      return `<button onclick="toggleDocShareModal('${escHtml(u.id)}')" style="background:${sel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${sel ? 'var(--accent)' : 'var(--border)'};color:${sel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">${escHtml(u.emoji ?? '🧑')} ${escHtml(u.name)}</button>`;
+      return `<button data-action="toggleDocShareModal" data-args='${JSON.stringify([u.id]).replace(/'/g, "&#39;")}' style="background:${sel ? 'var(--accent)' : 'var(--bg2)'};border:1px solid ${sel ? 'var(--accent)' : 'var(--border)'};color:${sel ? '#fff' : 'var(--text)'};border-radius:20px;padding:4px 11px;font-size:12px;cursor:pointer;transition:all .15s">${escHtml(u.emoji ?? '🧑')} ${escHtml(u.name)}</button>`;
     }).join('');
 }
 
@@ -701,7 +708,7 @@ function toggleDocShareModal(id) {
 
 async function saveDocShare() {
   if (!_docShareModalId) return;
-  const btn = $('docShareModal').querySelector('button[onclick="saveDocShare()"]');
+  const btn = $('docShareModal').querySelector('button[data-action="saveDocShare"]');
   const origText = btn.textContent;
   btn.textContent = 'Saving…';
   btn.disabled = true;

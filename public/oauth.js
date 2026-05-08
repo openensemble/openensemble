@@ -69,10 +69,10 @@ async function loadOAuthStatus() {
           ${statusBadge}
         </div>
         <div style="display:flex;gap:6px;flex-shrink:0">
-          ${a.provider === 'gmail' ? `<button onclick="reconnectGmail('${escHtml(a.id)}')" style="background:${needsReconnect ? 'var(--accent)' : 'none'};border:1px solid ${needsReconnect ? 'transparent' : 'var(--border)'};color:${needsReconnect ? '#fff' : 'var(--text)'};border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:${needsReconnect ? '600' : '400'}">${needsReconnect ? 'Reconnect' : 'Re-auth'}</button>` : ''}
-          ${a.provider === 'microsoft' ? `<button onclick="reconnectMicrosoft('${escHtml(a.id)}')" style="background:${needsReconnect ? 'var(--accent)' : 'none'};border:1px solid ${needsReconnect ? 'transparent' : 'var(--border)'};color:${needsReconnect ? '#fff' : 'var(--text)'};border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:${needsReconnect ? '600' : '400'}">${needsReconnect ? 'Reconnect' : 'Re-auth'}</button>` : ''}
-          <button onclick="renameEmailAccount('${escHtml(a.id)}','${escHtml(a.label.replace(/'/g,"\\'"))}')" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Rename</button>
-          <button onclick="deleteEmailAccount('${escHtml(a.id)}')" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Delete</button>
+          ${a.provider === 'gmail' ? `<button data-action="reconnectGmail" data-args='${JSON.stringify([a.id]).replace(/'/g, "&#39;")}' style="background:${needsReconnect ? 'var(--accent)' : 'none'};border:1px solid ${needsReconnect ? 'transparent' : 'var(--border)'};color:${needsReconnect ? '#fff' : 'var(--text)'};border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:${needsReconnect ? '600' : '400'}">${needsReconnect ? 'Reconnect' : 'Re-auth'}</button>` : ''}
+          ${a.provider === 'microsoft' ? `<button data-action="reconnectMicrosoft" data-args='${JSON.stringify([a.id]).replace(/'/g, "&#39;")}' style="background:${needsReconnect ? 'var(--accent)' : 'none'};border:1px solid ${needsReconnect ? 'transparent' : 'var(--border)'};color:${needsReconnect ? '#fff' : 'var(--text)'};border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:${needsReconnect ? '600' : '400'}">${needsReconnect ? 'Reconnect' : 'Re-auth'}</button>` : ''}
+          <button data-action="renameEmailAccount" data-args='${JSON.stringify([a.id, a.label]).replace(/'/g, "&#39;")}' style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Rename</button>
+          <button data-action="deleteEmailAccount" data-args='${JSON.stringify([a.id]).replace(/'/g, "&#39;")}' style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Delete</button>
         </div>
       </div>`;
     }).join('');
@@ -88,8 +88,8 @@ async function loadOAuthStatus() {
         </div>
         <div style="display:flex;gap:6px;flex-shrink:0">
           ${gcal
-            ? `<button onclick="disconnectGoogle('gcal')" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Disconnect</button>`
-            : `<button onclick="connectGoogle('gcal')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:600">Connect</button>`}
+            ? `<button data-action="disconnectGoogle" data-args='["gcal"]' style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer">Disconnect</button>`
+            : `<button data-action="connectGoogle" data-args='["gcal"]' style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:600">Connect</button>`}
         </div>
       </div>`;
     const hasAnyAccount = accounts.length > 0 || gcal;
@@ -98,10 +98,10 @@ async function loadOAuthStatus() {
       ${gcalRow}
       ${!hasAnyAccount ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">No accounts connected.</div>' : ''}
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <button onclick="connectGoogle('gmail')" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">+ Connect Gmail</button>
-        <button onclick="connectMicrosoft()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">+ Connect Microsoft</button>
-        ${isPriv && msCreds ? `<button onclick="clearMicrosoftCreds()" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer">Clear MS credentials</button>` : ''}
-        <button onclick="showAddImapModal()" style="background:none;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">+ Add IMAP…</button>
+        <button data-action="connectGoogle" data-args='["gmail"]' style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">+ Connect Gmail</button>
+        <button data-action="connectMicrosoft" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">+ Connect Microsoft</button>
+        ${isPriv && msCreds ? `<button data-action="clearMicrosoftCreds" style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer">Clear MS credentials</button>` : ''}
+        <button data-action="showAddImapModal" style="background:none;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">+ Add IMAP…</button>
       </div>`;
     // Schedule a retry only when there are configured accounts whose health
     // hasn't reported yet (typical right after a server restart). Skip the
@@ -147,12 +147,17 @@ function showMicrosoftCredsModal() {
         style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
       <div id="msCrError" style="color:var(--red,#e05c5c);font-size:11px;display:none"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button onclick="$('msCredsModal').remove()" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer">Cancel</button>
-        <button id="msCrSubmitBtn" onclick="submitMicrosoftCreds()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">Save &amp; Connect</button>
+        <button data-action="_closeMsCredsModal" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer">Cancel</button>
+        <button id="msCrSubmitBtn" data-action="submitMicrosoftCreds" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">Save &amp; Connect</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
 }
+
+// Wrappers for the event-delegation harness — simple modal-close shortcuts
+// previously inlined as `$('msCredsModal').remove()` etc.
+function _closeMsCredsModal() { $('msCredsModal')?.remove(); }
+function _closeImapModal()    { $('imapModal')?.remove(); }
 
 async function submitMicrosoftCreds() {
   const clientId     = $('msCrClientId')?.value.trim();
@@ -265,7 +270,7 @@ function showAddImapModal() {
       <div style="font-size:14px;font-weight:700">Add IMAP Account</div>
       <div style="display:flex;flex-direction:column;gap:4px">
         <label style="font-size:11px;color:var(--muted)">Provider</label>
-        <select id="imapPreset" onchange="imapPresetChanged()" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
+        <select id="imapPreset" data-change-action="imapPresetChanged" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
           <option value="">— Select a provider —</option>
           <option value="office365">Office 365 / Exchange Online</option>
           <option value="gmail">Gmail (IMAP)</option>
@@ -286,8 +291,8 @@ function showAddImapModal() {
       <input id="imapPassword" type="password" placeholder="Password or app password" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
       <div id="imapError" style="color:var(--red,#e05c5c);font-size:11px;display:none"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button onclick="$('imapModal').remove()" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer">Cancel</button>
-        <button onclick="submitImapAccount()" id="imapSubmitBtn" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">Connect</button>
+        <button data-action="_closeImapModal" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer">Cancel</button>
+        <button data-action="submitImapAccount" id="imapSubmitBtn" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600">Connect</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
@@ -483,11 +488,11 @@ function loadAiProviderLogins() {
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${p.blurb}</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button id="oauthConnect_${p.id}" onclick="connectOpenAIOAuth()"
+        <button id="oauthConnect_${p.id}" data-action="connectOpenAIOAuth"
           style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Connect ChatGPT account</button>
-        <button id="oauthDisconnect_${p.id}" onclick="disconnectOpenAIOAuth()"
+        <button id="oauthDisconnect_${p.id}" data-action="disconnectOpenAIOAuth"
           style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Disconnect</button>
-        <button onclick="refreshOpenAIOAuthStatus()"
+        <button data-action="refreshOpenAIOAuthStatus"
           style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Check status</button>
       </div>
       <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px">Checking…</div>
@@ -600,7 +605,7 @@ function renderVisionModelSelect(currentProvider, currentModel) {
     ${empty || (currentVal && !visionModels.some(m => `${m.name}||${m.provider}` === currentVal) ? `<option value="${escHtml(currentVal)}" selected>⚠ ${escHtml(currentModel)} (no longer available / not vision-capable)</option>` : '')}
     ${groupHtml}
   </select>
-  <button onclick="saveVisionProvider()" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Save</button>`;
+  <button data-action="saveVisionProvider" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Save</button>`;
 }
 
 async function openSettingsDrawer(openIt = true) {
@@ -698,7 +703,7 @@ function renderCompatProviderCards(cfg) {
     const header = `
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <div class="settings-section-title" style="margin:0"><i data-lucide="${p.icon}" style="width:14px;height:14px"></i> ${p.label}</div>
-        <label class="provider-toggle"><input type="checkbox" id="providerToggle_${p.id}" ${cfg.enabledProviders?.[p.id] !== false ? 'checked' : ''} onchange="toggleProvider('${p.id}',this.checked)"><span class="provider-toggle-slider"></span></label>
+        <label class="provider-toggle"><input type="checkbox" id="providerToggle_${p.id}" ${cfg.enabledProviders?.[p.id] !== false ? 'checked' : ''} data-change-action="toggleProvider" data-change-args='${JSON.stringify([p.id, "$checked"]).replace(/'/g, "&#39;")}'><span class="provider-toggle-slider"></span></label>
       </div>`;
     if (p.connectMode === 'oauth') {
       return `
@@ -707,11 +712,11 @@ function renderCompatProviderCards(cfg) {
           <div id="providerBody_${p.id}">
             <div class="settings-section-desc" style="margin-bottom:8px">${p.blurb}</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button id="oauthConnect_${p.id}" onclick="connectOpenAIOAuth()"
+              <button id="oauthConnect_${p.id}" data-action="connectOpenAIOAuth"
                 style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Connect ChatGPT account</button>
-              <button id="oauthDisconnect_${p.id}" onclick="disconnectOpenAIOAuth()"
+              <button id="oauthDisconnect_${p.id}" data-action="disconnectOpenAIOAuth"
                 style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Disconnect</button>
-              <button onclick="refreshOpenAIOAuthStatus()"
+              <button data-action="refreshOpenAIOAuthStatus"
                 style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Check status</button>
             </div>
             <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:4px">Checking…</div>
@@ -732,9 +737,9 @@ function renderCompatProviderCards(cfg) {
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <input type="password" id="providerKey_${p.id}" placeholder="${p.placeholder}" autocomplete="new-password"
               style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
-            <button onclick="saveCompatProviderKey('${p.id}','${p.keyField}')"
+            <button data-action="saveCompatProviderKey" data-args='${JSON.stringify([p.id, p.keyField]).replace(/'/g, "&#39;")}'
               style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
-            <button onclick="loadCompatProviderModels('${p.id}')"
+            <button data-action="loadCompatProviderModels" data-args='${JSON.stringify([p.id]).replace(/'/g, "&#39;")}'
               style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Fetch models</button>
           </div>
           <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:4px">${cfg[`${p.id}KeySet`] ? 'API key is set.' : 'No API key configured.'}</div>

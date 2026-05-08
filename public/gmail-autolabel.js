@@ -34,7 +34,7 @@ function renderAutoLabelPanel(panel, enabled, selectedAccountId) {
   const accountSelector = accounts.length > 0 ? `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <span style="font-size:11px;color:var(--muted);flex-shrink:0">Account:</span>
-      <select id="alAccountId" onchange="renderAutoLabelPanel(document.getElementById('autoLabelContent'),_autoLabelData?.enabled??false,this.value)"
+      <select id="alAccountId" data-change-action="_alAccountChanged" data-change-args='["$value"]'
         style="font-size:11px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);flex:1">
         ${accounts.map(a =>
           `<option value="${escHtml(a.id)}" ${a.id === selectedAccountId ? 'selected' : ''}>${escHtml(a.label)}</option>`
@@ -52,7 +52,7 @@ function renderAutoLabelPanel(panel, enabled, selectedAccountId) {
             <span style="color:var(--muted)">→</span>
             <span style="color:var(--accent)">${escHtml(r.label)}</span>
           </span>
-          <button onclick="deleteAutoLabelRule('${r.id}')"
+          <button data-action="deleteAutoLabelRule" data-args='${JSON.stringify([r.id]).replace(/'/g, "&#39;")}'
             style="background:none;border:none;color:var(--red,#e05c5c);cursor:pointer;font-size:16px;line-height:1;padding:0 2px">×</button>
         </div>`).join('')
     : '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">No rules yet.</div>';
@@ -73,7 +73,7 @@ function renderAutoLabelPanel(panel, enabled, selectedAccountId) {
       <input id="alValue" placeholder="value" style="font-size:11px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);width:110px">
       <span style="font-size:11px;color:var(--muted)">→</span>
       <input id="alLabel" placeholder="label" style="font-size:11px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);width:90px">
-      <button onclick="addAutoLabelRule()" style="font-size:11px;padding:3px 10px;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Add</button>
+      <button data-action="addAutoLabelRule" style="font-size:11px;padding:3px 10px;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Add</button>
     </div>`;
 }
 
@@ -103,6 +103,12 @@ async function addAutoLabelRule() {
     _autoLabelData.rulesByAccount[key] = res.rules;
   }
   renderAutoLabelPanel(document.getElementById('autoLabelContent'), true, accountId);
+}
+
+// Wrapper for the event-delegation harness — passing the resolved $value
+// (the chosen accountId) through.
+function _alAccountChanged(accountId) {
+  renderAutoLabelPanel(document.getElementById('autoLabelContent'), _autoLabelData?.enabled ?? false, accountId);
 }
 
 async function deleteAutoLabelRule(id) {
