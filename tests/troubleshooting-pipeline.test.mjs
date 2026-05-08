@@ -76,7 +76,7 @@ function buildSyntheticPihole({ ftlAlive = true, regexError = false } = {}) {
       return {
         stdout: regexError
           ? 'FTL: malformed regex added to /etc/pihole/regex.list line 47\nFTL: aborting startup'
-          : 'FTL: query for example.com from 192.168.1.50',
+          : 'FTL: query for example.com from 192.0.2.50',
         stderr: '', exitCode: 0,
       };
     }

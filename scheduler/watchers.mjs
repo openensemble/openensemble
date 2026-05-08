@@ -576,7 +576,7 @@ function finalizeWatcher(record, status, finalText) {
 //                                        agent to act, not ask.
 //
 // agentId on the watcher record is the WS-scoped sessionKey (e.g.
-// "user_39ce139e_coordinator"). We need the unscoped registry id to resolve
+// "user_<uid>_coordinator"). We need the unscoped registry id to resolve
 // the agent, then re-scope for streaming. The systemNote pattern mirrors
 // scheduler.mjs's [SCHEDULED RUN] note — same constraint (no human present).
 async function executeOnFire(record) {

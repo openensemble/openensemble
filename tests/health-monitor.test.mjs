@@ -201,7 +201,7 @@ describe('unregisterProfileHealthWatchers', () => {
     // Save a second profile + register both
     const second = fresh();
     second.service_id = 'home_assistant';
-    second.endpoint = 'http://192.168.1.20:8123';
+    second.endpoint = 'http://192.0.2.20:8123';
     saveProfile(USER, NODE, second);
     registerProfileHealthWatchers(USER, NODE, 'pihole', { agentId: 'a' });
     registerProfileHealthWatchers(USER, NODE, 'home_assistant', { agentId: 'a' });

@@ -3,7 +3,7 @@
   "service_id": "pihole",
   "node_id": "pihole-test",
   "detected_version": "5.18.x",
-  "endpoint": "http://192.168.1.2/admin",
+  "endpoint": "http://192.0.2.10/admin",
   "detected_at": "2026-05-06T17:00:00.000Z",
   "researched_at": "2026-05-06T17:05:00.000Z",
   "profile_version": "2026-05-06_a1b2",

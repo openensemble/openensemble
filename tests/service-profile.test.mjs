@@ -100,7 +100,7 @@ describe('saveProfile + loadProfile', () => {
     const loaded = loadProfile(USER, NODE, 'pihole');
     expect(loaded.service_id).toBe('pihole');
     expect(loaded.operations).toHaveLength(PIHOLE_FIXTURE.operations.length);
-    expect(loaded.endpoint).toBe('http://192.168.1.2/admin');
+    expect(loaded.endpoint).toBe('http://192.0.2.10/admin');
   });
 
   it('writes a sibling Markdown file', () => {
@@ -330,7 +330,7 @@ describe('renderProfileMd', () => {
     expect(md).toContain('## Known failure modes');
     expect(md).toContain('## Log sources');
     expect(md).toContain('## Research sources');
-    expect(md).toContain('http://192.168.1.2/admin');
+    expect(md).toContain('http://192.0.2.10/admin');
   });
 
   it('shows trust badge', () => {
