@@ -1,10 +1,9 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { userSkillsDir } from '../../lib/paths.mjs';
-
-const BASE_DIR  = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const USERS_DIR = path.join(BASE_DIR, 'users');
+import {
+  USERS_DIR, SKILLS_DIR, CFG_PATH,
+  userSkillsDir, userRoleRulesDir, userRoleRulesPath,
+} from '../../lib/paths.mjs';
 
 function getUserById(userId) {
   try {
@@ -28,30 +27,34 @@ function autoEnableSkillForUser(userId, skillId) {
   } catch {}
 }
 
-const SKILLS_DIR = path.join(BASE_DIR, 'skills');
-
 function loadSkillManifest(skillId) {
   const p = path.join(SKILLS_DIR, skillId, 'manifest.json');
   if (!existsSync(p)) return null;
   try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; }
 }
 
-function rulesPath(skillId) {
-  return path.join(SKILLS_DIR, skillId, 'rules.md');
+// Per-user rules: live under users/<uid>/role-rules/<skillId>.md so one user's
+// standing instructions don't leak into another user's agents. Globals at
+// skills/<skillId>/rules.md are still read by agent-resolver as a shipped
+// baseline (e.g. coder + coordinator ship rules.md in the repo) but
+// role_add/remove/list_rules below only ever touch user scope.
+function rulesPath(userId, skillId) {
+  return userRoleRulesPath(userId, skillId);
 }
 
-function loadRules(skillId) {
-  const p = rulesPath(skillId);
+function loadRules(userId, skillId) {
+  const p = rulesPath(userId, skillId);
   if (!existsSync(p)) return [];
   return readFileSync(p, 'utf8').split('\n').map(l => l.trim()).filter(Boolean);
 }
 
-function saveRules(skillId, rules) {
+function saveRules(userId, skillId, rules) {
+  const p = rulesPath(userId, skillId);
   if (rules.length === 0) {
-    const p = rulesPath(skillId);
     if (existsSync(p)) unlinkSync(p);
   } else {
-    writeFileSync(rulesPath(skillId), rules.join('\n') + '\n', 'utf8');
+    mkdirSync(userRoleRulesDir(userId), { recursive: true });
+    writeFileSync(p, rules.join('\n') + '\n', 'utf8');
   }
 }
 
@@ -60,24 +63,26 @@ export default async function execute(name, args, userId, agentId) {
     const { roleId, rule } = args;
     const skillId = roleId;
     if (!skillId || !rule) return 'roleId and rule are required.';
+    if (!userId) return 'userId is required for per-user rules.';
     const manifest = loadSkillManifest(skillId);
     if (!manifest) return `No role found with id "${skillId}".`;
-    const rules = loadRules(skillId);
+    const rules = loadRules(userId, skillId);
     rules.push(`- ${rule.trim()}`);
-    saveRules(skillId, rules);
-    return `Rule added to ${manifest.name}. It will apply to any agent handling this role from the next conversation.`;
+    saveRules(userId, skillId, rules);
+    return `Rule added to ${manifest.name} for your account. It will apply to any of your agents handling this role from the next conversation.`;
   }
 
   if (name === 'role_remove_rule') {
     const { roleId, index } = args;
     const skillId = roleId;
     if (!skillId || index == null) return 'roleId and index are required.';
+    if (!userId) return 'userId is required.';
     const manifest = loadSkillManifest(skillId);
     if (!manifest) return `No role found with id "${skillId}".`;
-    const rules = loadRules(skillId);
+    const rules = loadRules(userId, skillId);
     if (index < 0 || index >= rules.length) return `Index ${index} is out of range. There are ${rules.length} rule(s).`;
     const removed = rules.splice(index, 1)[0];
-    saveRules(skillId, rules);
+    saveRules(userId, skillId, rules);
     return `Removed rule: ${removed}`;
   }
 
@@ -85,9 +90,10 @@ export default async function execute(name, args, userId, agentId) {
     const { roleId } = args;
     const skillId = roleId;
     if (!skillId) return 'roleId is required.';
+    if (!userId) return 'userId is required.';
     const manifest = loadSkillManifest(skillId);
     if (!manifest) return `No role found with id "${skillId}".`;
-    const rules = loadRules(skillId);
+    const rules = loadRules(userId, skillId);
     if (rules.length === 0) return `No custom rules set for ${manifest.name}.`;
     return `Rules for ${manifest.name}:\n${rules.map((r, i) => `[${i}] ${r}`).join('\n')}`;
   }
@@ -161,7 +167,6 @@ export default async function execute(name, args, userId, agentId) {
     }
     rmSync(skillDir, { recursive: true, force: true });
     removeRoleManifest(role.id, userId);
-    const CFG_PATH = path.join(BASE_DIR, 'config.json');
     try {
       const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
       if (cfg.skillAssignments) { delete cfg.skillAssignments[role.id]; writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2)); }

@@ -7,7 +7,7 @@
 import {
   assertId, queuedWrite, generateCombined, safeParseJSON, providerHealthy,
 } from './shared.mjs';
-import { getTable, remember, pin } from './lance.mjs';
+import { getTable, remember, pin, searchSimilar } from './lance.mjs';
 import { forgetByText } from './recall.mjs';
 
 // Cortex was trained on the bare `User: "..." Agent: "..."` wrapper (per
@@ -55,6 +55,14 @@ async function detectSignals({ agentId, userMessage, agentLastResponse, userId =
     const text = `CORRECTION: ${s.correction}`;
     correctionRecord = await remember({ agentId, type: 'params', source: 'correction',
       confidence: 0.99, text, metadata: { category: 'correction' }, userId });
+
+    // Cortex automation #2: corrections-to-rules promotion. If the same
+    // correction has fired before (vector-similarity match in this agent's
+    // _params), surface a proposal to promote it to a per-user standing rule
+    // on the agent's role. Fire-and-forget — the proposal flow handles
+    // dismissal cooldown, role auto-detection, and the rule write itself.
+    maybePromoteCorrection({ agentId, userId, correctionRecord, correctionText: s.correction })
+      .catch(e => console.warn('[cortex] Correction promotion check failed:', e.message));
   }
 
   // Handle preference — strength determines confidence and immortality
@@ -82,6 +90,73 @@ async function detectSignals({ agentId, userMessage, agentLastResponse, userId =
   }
 
   return { correction: correctionRecord, preference: preferenceRecord };
+}
+
+// ── Correction-to-rule promotion (cortex automation #2) ─────────────────────
+//
+// After a correction is stored, look back at this agent's prior CORRECTION
+// rows. If we find at least one semantically-similar earlier correction (i.e.
+// the user is correcting the same thing twice) AND the agent holds exactly
+// one service role, surface a proposal to promote the correction into a
+// per-user standing rule on that role. Per-user rules go to
+// users/<uid>/role-rules/<roleId>.md and get injected unconditionally into
+// the system prompt — escaping cortex recall flakiness.
+//
+// Why exactly one role:
+//   - 0 service roles → no clear promotion target (agent is a generalist).
+//   - 2+ service roles → ambiguous which role's prompt should carry the rule.
+// Both cases fall through to the existing correction-storage behavior, which
+// continues to work fine via cortex recall.
+//
+// Threshold reasoning:
+//   - lance.mjs's immortal-dedup uses 0.12 — too tight for this use case.
+//     That threshold answers "is this an exact paraphrase about to be
+//     deduped on write?". Empirically, "never use semicolons in JavaScript"
+//     vs "no semicolons in JS please" lands at ~0.30 in nomic-embed-text-v1
+//     space — clearly the same correction but lexically distant.
+//   - recall.mjs:forgetByText uses 0.35 for "semantically close enough to
+//     act on" — that's the right range for our "same correction topic"
+//     question. We err slightly tighter (0.30) since false-fires here
+//     create user-facing proposal bubbles, not silent forgets.
+
+const CORRECTION_SIMILARITY_THRESHOLD = 0.30;
+
+export async function maybePromoteCorrection({ agentId, userId, correctionRecord, correctionText }) {
+  if (!correctionRecord?.id || !correctionText) return null;
+
+  // Search this agent's _params table for prior correction-source rows
+  // semantically similar to the new one. searchSimilar already filters
+  // forgotten=false; we filter the rest in JS since LanceDB SQL `WHERE` and
+  // the vector pipeline don't compose cleanly through this helper.
+  const tableName = `${agentId}_params`;
+  const hits = await searchSimilar(tableName, correctionRecord.text, 8, userId).catch(() => []);
+  const priors = hits.filter(r =>
+    r.id !== correctionRecord.id &&
+    r.source === 'correction' &&
+    typeof r._distance === 'number' &&
+    r._distance < CORRECTION_SIMILARITY_THRESHOLD
+  );
+  if (priors.length === 0) return null;
+
+  // Determine which role to attach the rule to. Service-role-only filtering
+  // is already inside getAgentRoles.
+  const { getAgentRoles, getRoleManifest } = await import('../roles.mjs');
+  const roles = getAgentRoles(agentId, userId);
+  if (roles.length !== 1) return null;
+  const roleId = roles[0];
+  const manifest = getRoleManifest(roleId, userId);
+  const roleName = manifest?.name ?? roleId;
+
+  // Strip the "CORRECTION: " prefix (which is internal cortex bookkeeping)
+  // before turning the correction into a user-facing rule line.
+  const ruleText = correctionText.replace(/^CORRECTION:\s*/i, '').trim();
+  if (!ruleText) return null;
+
+  const { proposeRulePromotion } = await import('../lib/proposals.mjs');
+  return proposeRulePromotion({
+    userId, agentId, roleId, roleName, ruleText,
+    sourceCorrectionIds: [correctionRecord.id, ...priors.map(p => p.id)],
+  });
 }
 
 // Keep old exports in place for any direct callers — they now delegate to detectSignals

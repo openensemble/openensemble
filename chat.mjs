@@ -69,11 +69,20 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
   // naturally contains the offending phrase. Use tool result text to skip
   // toasts on no-op outcomes (dedup hit, no-match forget) so the badge
   // reflects what actually changed in the DB.
-  const forgets   = toolsUsed.filter(t => t.name === 'forget_fact');
-  const remembers = toolsUsed.filter(t => t.name === 'remember_fact');
+  //
+  // role_add_rule / role_remove_rule write to users/<uid>/role-rules/<id>.md
+  // rather than cortex tables, but from the user's POV they're the same kind
+  // of mutation ("you saved this" / "you forgot that") — reuse the same WS
+  // events so the existing client-side ✦ pill fires uniformly.
+  const forgets   = toolsUsed.filter(t => t.name === 'forget_fact' || t.name === 'role_remove_rule');
+  const remembers = toolsUsed.filter(t => t.name === 'remember_fact' || t.name === 'role_add_rule');
   if (forgets.length || remembers.length) {
-    const wroteForget   = forgets.some(t => /^Forgot \d+ memor/i.test(t.text));
-    const wroteRemember = remembers.some(t => /^Pinned fact/i.test(t.text));
+    const wroteForget   = forgets.some(t =>
+      /^Forgot \d+ memor/i.test(t.text) ||      // forget_fact success
+      /^Removed rule:/i.test(t.text));          // role_remove_rule success
+    const wroteRemember = remembers.some(t =>
+      /^Pinned fact/i.test(t.text) ||           // remember_fact success
+      /^Rule added to /i.test(t.text));         // role_add_rule success
     if (emit) {
       if (wroteForget)   emit({ type: 'memory_forgotten' });
       if (wroteRemember) emit({ type: 'memory_stored' });

@@ -12,6 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import { BASE_DIR, USERS_DIR } from './paths.mjs';
+import { userRoleRulesPath } from '../../lib/paths.mjs';
 import { listAgents } from '../../agents.mjs';
 import {
   resolveAgentTools, getDefaultRoles, listRoles, getRoleAssignments, getRoleManifest,
@@ -187,10 +188,19 @@ export function getAgentsForUser(userId) {
           }
           parts.push(spa);
         }
-        const rulesPath = path.join(BASE_DIR, 'skills', skillId, 'rules.md');
-        if (fs.existsSync(rulesPath)) {
-          const rules = fs.readFileSync(rulesPath, 'utf8').trim();
+        // Global rules.md = shipped admin baseline (e.g. coder, coordinator).
+        // Per-user role-rules/<skillId>.md = this user's personal rules,
+        // including any auto-promoted from repeated corrections. Both layer
+        // into the prompt with global first so user rules can override.
+        const globalRulesPath = path.join(BASE_DIR, 'skills', skillId, 'rules.md');
+        if (fs.existsSync(globalRulesPath)) {
+          const rules = fs.readFileSync(globalRulesPath, 'utf8').trim();
           if (rules) parts.push(rules);
+        }
+        const userRulesPath = userRoleRulesPath(userId, skillId);
+        if (fs.existsSync(userRulesPath)) {
+          const rules = fs.readFileSync(userRulesPath, 'utf8').trim();
+          if (rules) parts.push(`## Your standing instructions for ${getRoleManifest(skillId, userId)?.name ?? skillId}\n${rules}`);
         }
         return parts.join('\n\n');
       })
