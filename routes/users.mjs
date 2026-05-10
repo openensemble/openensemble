@@ -22,17 +22,35 @@ const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
 const _authAttempts = new Map();
 const AUTH_RATE_WINDOW = 60_000;
 const AUTH_RATE_MAX = 5;
+// Hard cap defends against burst attacks that cycle distinct IPs/userIds
+// inside the 5-minute prune interval below.
+const AUTH_RATE_MAP_CAP = 10000;
 
 function isAuthRateLimited(key) {
   const now = Date.now();
   const entry = _authAttempts.get(key);
   if (!entry || now - entry.firstAttempt > AUTH_RATE_WINDOW) {
+    if (_authAttempts.size >= AUTH_RATE_MAP_CAP) {
+      // Drop expired entries first; if still full, evict the oldest 10%.
+      const cutoff = now - AUTH_RATE_WINDOW;
+      for (const [k, v] of _authAttempts) if (v.firstAttempt < cutoff) _authAttempts.delete(k);
+      if (_authAttempts.size >= AUTH_RATE_MAP_CAP) {
+        const sorted = [..._authAttempts.entries()].sort((a, b) => a[1].firstAttempt - b[1].firstAttempt);
+        for (let i = 0; i < Math.ceil(sorted.length / 10); i++) _authAttempts.delete(sorted[i][0]);
+      }
+    }
     _authAttempts.set(key, { count: 1, firstAttempt: now });
     return false;
   }
   entry.count++;
   return entry.count > AUTH_RATE_MAX;
 }
+
+// Periodic prune so expired entries don't sit in the map until the cap kicks in.
+setInterval(() => {
+  const cutoff = Date.now() - AUTH_RATE_WINDOW;
+  for (const [k, v] of _authAttempts) if (v.firstAttempt < cutoff) _authAttempts.delete(k);
+}, 5 * 60_000).unref?.();
 
 export async function handle(req, res) {
   if (req.url === '/api/users' && req.method === 'GET') {

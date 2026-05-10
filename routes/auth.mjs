@@ -17,11 +17,23 @@ const loginAttempts = new Map(); // key → { count, firstAttempt }
 const RATE_LIMIT_WINDOW = 60_000; // 1 minute
 const RATE_LIMIT_MAX = 5;         // per (ip, userId)
 const RATE_LIMIT_IP_MAX = 20;     // per ip across all userIds
+// Hard cap defends against burst attacks that cycle distinct IPs/userIds
+// inside the 5-minute prune interval. 10k entries ≈ a few MB of state.
+const RATE_LIMIT_MAP_CAP = 10000;
 
 function isRateLimited(key, max) {
   const now = Date.now();
   const entry = loginAttempts.get(key);
   if (!entry || now - entry.firstAttempt > RATE_LIMIT_WINDOW) {
+    if (loginAttempts.size >= RATE_LIMIT_MAP_CAP) {
+      // Drop expired entries first; if still full, evict the oldest 10%.
+      const cutoff = now - RATE_LIMIT_WINDOW;
+      for (const [k, v] of loginAttempts) if (v.firstAttempt < cutoff) loginAttempts.delete(k);
+      if (loginAttempts.size >= RATE_LIMIT_MAP_CAP) {
+        const sorted = [...loginAttempts.entries()].sort((a, b) => a[1].firstAttempt - b[1].firstAttempt);
+        for (let i = 0; i < Math.ceil(sorted.length / 10); i++) loginAttempts.delete(sorted[i][0]);
+      }
+    }
     loginAttempts.set(key, { count: 1, firstAttempt: now });
     return false;
   }

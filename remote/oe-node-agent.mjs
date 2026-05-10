@@ -31,7 +31,7 @@
  *   }
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn, spawnSync, execSync } from 'child_process';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
@@ -1313,8 +1313,40 @@ async function handlePushTar(msg, ws) {
   const isWindows = process.platform === 'win32';
   const tarBin = isWindows ? 'tar.exe' : 'tar'; // Windows 10+ ships tar.exe
 
+  // Pre-scan: list every entry in the tarball and reject the whole push if any
+  // path is absolute or contains a `..` component. A compromised server (or
+  // anyone who can reach the WS as the server) would otherwise be able to
+  // overwrite arbitrary files on the node — handlePushTar runs as root for
+  // service installs.
+  const listed = spawnSync(tarBin, ['-tzf', tmpFile], { encoding: 'utf8' });
+  if (listed.status !== 0) {
+    try { fs.unlinkSync(tmpFile); } catch {}
+    throw new Error(`tar listing failed: ${listed.stderr || 'unknown error'}`);
+  }
+  const entries = (listed.stdout || '').split('\n').filter(Boolean);
+  for (const raw of entries) {
+    const entry = raw.replace(/^\.?\//, '').replace(/\\/g, '/');
+    if (path.isAbsolute(raw) || /^[A-Za-z]:[\\/]/.test(raw)) {
+      try { fs.unlinkSync(tmpFile); } catch {}
+      throw new Error(`refusing tar with absolute path entry: ${raw}`);
+    }
+    if (entry.split('/').some(seg => seg === '..')) {
+      try { fs.unlinkSync(tmpFile); } catch {}
+      throw new Error(`refusing tar with path-traversal entry: ${raw}`);
+    }
+  }
+
+  // Extract flags:
+  //   --no-same-owner       — don't honor uid/gid baked into the tar
+  //   (GNU only) --no-same-permissions / --no-absolute-names — extra defense
+  // bsdtar (Windows tar.exe) strips leading slashes by default and rejects
+  // unknown long flags; keep its arg list minimal.
+  const extractArgs = isWindows
+    ? ['xzf', tmpFile, '-C', destPath]
+    : ['xzf', tmpFile, '-C', destPath, '--no-same-owner', '--no-same-permissions', '--no-absolute-names'];
+
   const { stdout, stderr, exitCode } = await new Promise((resolve, reject) => {
-    const proc = spawn(tarBin, ['xzf', tmpFile, '-C', destPath]);
+    const proc = spawn(tarBin, extractArgs);
     let out = '', err = '';
     proc.stdout.on('data', c => { out += c.toString(); });
     proc.stderr.on('data', c => { err += c.toString(); });
@@ -1356,7 +1388,26 @@ async function handleUpdateMessage(msg, ws, config) {
   // Build http URL from ws:// server
   const m = (config?.server || '').match(/^wss?:\/\/([^/:]+)(?::(\d+))?/);
   if (!m) throw new Error(`Cannot parse server URL: ${config?.server}`);
-  const httpUrl = msg.url || `http://${m[1]}:${m[2] || '3737'}/nodes/agent`;
+  const expectedHost = m[1];
+  const expectedPort = m[2] || '3737';
+  let httpUrl = `http://${expectedHost}:${expectedPort}/nodes/agent`;
+  // msg.url is server-supplied; only honor it when it points back at the
+  // same host:port we're already paired with. Otherwise a poisoned/MITM'd
+  // message could redirect the agent to fetch arbitrary code.
+  if (msg.url) {
+    try {
+      const u = new URL(msg.url);
+      if ((u.protocol === 'http:' || u.protocol === 'https:')
+          && u.hostname === expectedHost
+          && (u.port || (u.protocol === 'https:' ? '443' : '80')) === expectedPort) {
+        httpUrl = u.href;
+      } else {
+        log(`[update] ignoring msg.url ${msg.url}: host/port doesn't match paired server`);
+      }
+    } catch (e) {
+      log(`[update] ignoring malformed msg.url ${msg.url}: ${e.message}`);
+    }
+  }
 
   // Determine where to write. Service install runs from /opt/oe-node-agent;
   // manual runs live wherever __filename points.
@@ -1448,17 +1499,18 @@ async function updateAgent() {
   const dest = path.join(OE_INSTALL_DIR, 'oe-node-agent.mjs');
   const tmp = `${dest}.new`;
   console.log(`Downloading latest agent from ${httpUrl}...`);
-  try {
-    execSync(`curl -fsSL "${httpUrl}" -o "${tmp}"`, { stdio: 'inherit' });
-  } catch {
-    try { execSync(`wget -q "${httpUrl}" -O "${tmp}"`, { stdio: 'inherit' }); }
-    catch { console.error('Download failed (neither curl nor wget worked).'); return; }
+  // Array-form spawn: no shell, so a poisoned config.server URL can't break out
+  // via quoted-string injection.
+  const curl = spawnSync('curl', ['-fsSL', httpUrl, '-o', tmp], { stdio: 'inherit' });
+  if (curl.status !== 0) {
+    const wget = spawnSync('wget', ['-q', httpUrl, '-O', tmp], { stdio: 'inherit' });
+    if (wget.status !== 0) { console.error('Download failed (neither curl nor wget worked).'); return; }
   }
   const size = fs.statSync(tmp).size;
   if (size < 1000) { console.error(`Downloaded file looks wrong (${size} bytes). Aborting.`); try { fs.unlinkSync(tmp); } catch {} return; }
 
   fs.renameSync(tmp, dest);
-  try { execSync(`chown ${OE_USER}:${OE_USER} ${dest}`); } catch {}
+  try { spawnSync('chown', [`${OE_USER}:${OE_USER}`, dest]); } catch {}
   console.log(`Updated ${dest} (${size} bytes).`);
   // Refresh the CLI wrapper so pre-rename installs (that have
   // /usr/local/bin/openensemble) migrate to /usr/local/bin/oe on update.

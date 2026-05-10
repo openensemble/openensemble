@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { userSkillsDir } from '../../lib/paths.mjs';
 
 const BASE_DIR  = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const USERS_DIR = path.join(BASE_DIR, 'users');
@@ -114,7 +115,11 @@ export default async function execute(name, args, userId, agentId) {
     if (!confirmed) return 'You must present the draft system prompt to the user and get their explicit approval before creating the role. Show them the responsibilities text and ask if they want any changes, then call create_role again with confirmed=true.';
     const id = 'role_' + roleName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const { getRoleManifest, addRoleManifest } = await import('../../roles.mjs');
-    if (getRoleManifest(id)) return `A role named "${roleName}" already exists. Use assign_role_to_agent to assign it to an agent instead of creating a new one.`;
+    // Look up under this user's scope first; if a global role of the same id
+    // exists we still refuse, so creating users can't shadow built-ins.
+    if (getRoleManifest(id, userId) || getRoleManifest(id)) {
+      return `A role named "${roleName}" already exists. Use assign_role_to_agent to assign it to an agent instead of creating a new one.`;
+    }
     const manifest = {
       id, name: roleName.trim(), icon: icon?.trim() || '🎯',
       description: description?.trim() || '',
@@ -122,24 +127,40 @@ export default async function execute(name, args, userId, agentId) {
       systemPromptAddition: responsibilities.trim(),
       tools: [], enabled_by_default: false,
     };
-    const skillDir = path.join(SKILLS_DIR, id);
+    // Custom roles are user-owned: they live under users/<uid>/skills/<id>/ so
+    // they survive `oe update` (the install tree gets git-pull-clobbered) and
+    // don't pollute other users. Mirrors skill-builder's pattern.
+    const skillDir = path.join(userSkillsDir(userId), id);
     mkdirSync(skillDir, { recursive: true });
     writeFileSync(path.join(skillDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    addRoleManifest(manifest);
+    addRoleManifest(manifest, userId);
     return `Role "${roleName.trim()}" created. You can assign it to an agent by saying "assign ${roleName.trim()} to [agent name]".`;
   }
 
   if (name === 'delete_role') {
     const user = getUserById(userId);
     if (!user || (user.role !== 'admin' && user.role !== 'owner')) return 'Deleting roles requires admin privileges.';
-    const { listRoles, getRoleManifest, removeRoleManifest } = await import('../../roles.mjs');
+    const { listRoles, removeRoleManifest } = await import('../../roles.mjs');
     const roleName = args.name?.trim().toLowerCase();
-    const role = listRoles().find(s => s.service && s.name.toLowerCase() === roleName);
+    // Restrict the lookup to roles visible to this user (own + globals).
+    // The custom check below ensures we never touch built-ins, and the path
+    // resolution always points into THIS user's skills dir, so a name match
+    // against another user's role won't reach across users.
+    const role = listRoles(userId).find(s => s.service && s.name.toLowerCase() === roleName);
     if (!role) return `No role named "${args.name}" found.`;
     if (!role.custom) return `"${role.name}" is a built-in role and cannot be deleted.`;
-    const skillDir = path.join(SKILLS_DIR, role.id);
+    // Always resolve the on-disk dir within the requesting user's scope.
+    // Belt-and-suspenders: refuse if the resolved path somehow escapes the
+    // user's skills dir (shouldn't be possible given the id sanitizer, but a
+    // misbuilt manifest with a `..` id would otherwise let us rm outside).
+    const userRoot = userSkillsDir(userId);
+    const skillDir = path.join(userRoot, role.id);
+    const rel = path.relative(userRoot, skillDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      return `Refusing to delete role "${role.name}" — resolved path escapes the user skills directory.`;
+    }
     rmSync(skillDir, { recursive: true, force: true });
-    removeRoleManifest(role.id);
+    removeRoleManifest(role.id, userId);
     const CFG_PATH = path.join(BASE_DIR, 'config.json');
     try {
       const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));

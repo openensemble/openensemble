@@ -28,6 +28,42 @@ import {
 import { broadcastToUsers } from '../ws-handler.mjs';
 import { encryptBackup, decryptBackup, isEncryptedBackup } from '../lib/backup-crypto.mjs';
 
+// ── Rate limiting for invite redemption ────────────────────────────────────
+// Same pattern as routes/auth.mjs login limiter. Two buckets:
+//   (ip+token) caps brute attempts against a known token,
+//   (ip alone) caps token-rotation attempts so an attacker can't bypass the
+//   per-token cap by trying a different invite each request.
+const inviteAttempts = new Map(); // key → { count, firstAttempt }
+const INVITE_RATE_WINDOW = 60_000;
+const INVITE_RATE_MAX = 5;
+const INVITE_RATE_IP_MAX = 20;
+const INVITE_MAP_CAP = 10000;
+
+function isInviteRateLimited(key, max) {
+  const now = Date.now();
+  const entry = inviteAttempts.get(key);
+  if (!entry || now - entry.firstAttempt > INVITE_RATE_WINDOW) {
+    if (inviteAttempts.size >= INVITE_MAP_CAP) {
+      // Drop expired first; if still full, evict oldest 10%.
+      const cutoff = now - INVITE_RATE_WINDOW;
+      for (const [k, v] of inviteAttempts) if (v.firstAttempt < cutoff) inviteAttempts.delete(k);
+      if (inviteAttempts.size >= INVITE_MAP_CAP) {
+        const sorted = [...inviteAttempts.entries()].sort((a, b) => a[1].firstAttempt - b[1].firstAttempt);
+        for (let i = 0; i < Math.ceil(sorted.length / 10); i++) inviteAttempts.delete(sorted[i][0]);
+      }
+    }
+    inviteAttempts.set(key, { count: 1, firstAttempt: now });
+    return false;
+  }
+  entry.count++;
+  return entry.count > max;
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - INVITE_RATE_WINDOW;
+  for (const [k, v] of inviteAttempts) if (v.firstAttempt < cutoff) inviteAttempts.delete(k);
+}, 5 * 60_000).unref?.();
+
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 // Throttle for /api/admin/update/check — protects origin from refresh-spamming.
@@ -351,6 +387,13 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
       const { role = 'user', allowedSkills, emailTo } = JSON.parse(await readBody(req));
+      // Owner is the first-run-only role; redemption already rejects it, but
+      // refuse at creation too so it can't sit in invites.json as a tripwire.
+      if (role === 'owner') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Owner role cannot be granted via invite' }));
+        return true;
+      }
       const token = randomBytes(32).toString('hex');
       const invite = { token, role, allowedSkills: allowedSkills ?? [], createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 48 * 3600000).toISOString(), createdBy: authId };
       await modifyInvites(invites => { invites.push(invite); });
@@ -393,11 +436,24 @@ export async function handle(req, res) {
 
   if (req.url.match(/^\/api\/invite\/[a-f0-9]+$/) && req.method === 'POST') {
     const token = req.url.split('/').pop();
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+    if (isInviteRateLimited(`${ip}:${token}`, INVITE_RATE_MAX) || isInviteRateLimited(`ip:${ip}`, INVITE_RATE_IP_MAX)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Too many attempts. Try again in a minute.' }));
+      return true;
+    }
     const invites = loadInvites();
     const invIdx = invites.findIndex(i => i.token === token);
     if (invIdx === -1) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid invite' })); return true; }
     const invite = invites[invIdx];
     if (new Date(invite.expiresAt) < new Date()) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Invite expired' })); return true; }
+    // Owner accounts can only be created at first-run via /api/users; never via
+    // invite. Refuse even if a malformed/admin-edited invite carries role=owner.
+    if (invite.role === 'owner') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Owner role cannot be granted via invite' }));
+      return true;
+    }
     try {
       const { name, emoji = '🙂', password, pin } = JSON.parse(await readBody(req));
       if (!name?.trim()) throw new Error('Name required');

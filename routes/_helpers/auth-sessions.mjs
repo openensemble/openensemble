@@ -338,10 +338,15 @@ export function consumeTicket(token, scope) {
 }
 
 export function requireAuth(req, res) {
-  // Primary path: Authorization: Bearer <session-token>
+  // Primary path: cookie / Authorization: Bearer <session-token>
   let userId = getSessionUserId(getAuthToken(req));
-  // Fallback for browser-native media: ?token=<short-lived-media-token>
-  if (!userId) userId = consumeMediaToken(getUrlToken(req));
+  // Fallback for browser-native media: ?token=<short-lived-media-token>.
+  // Only honored for safe methods — accepting it on POST/PUT/DELETE turns
+  // any leaked media URL into a CSRF write vector. Media tokens exist for
+  // <img>/<video>/<iframe> which never need anything beyond GET/HEAD.
+  if (!userId && (req.method === 'GET' || req.method === 'HEAD')) {
+    userId = consumeMediaToken(getUrlToken(req));
+  }
   if (!userId) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Unauthorized' })); return null; }
   return userId;
 }

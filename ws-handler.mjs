@@ -103,23 +103,16 @@ function onConnection(ws, req) {
   //   1. Cookie via getAuthToken (browser path — cookie rides on the upgrade
   //      request automatically same-origin). Preferred.
   //   2. First-message auth — used by clients that can't carry the cookie
-  //      (oe-node-agent, the WS-auth fallback during transition while
-  //      localStorage holds a Bearer token).
-  //   3. Legacy ?token= URL — still accepted for backward-compat. Tokens in
-  //      URLs leak via Referer and proxy logs, but blocking it here would
-  //      break any tooling that relies on it.
+  //      (oe-node-agent, scripts).
+  // The legacy `?token=` query-string upgrade path was removed: tokens in
+  // upgrade URLs leak via Referer headers, browser history, and reverse-proxy
+  // access logs. Browser WS opens at `/` (no token) so the cookie path works;
+  // node-agent / CLI / scripts must use first-message auth.
   const cookieOrHeaderToken = getAuthToken(req);
   const cookieUserId = cookieOrHeaderToken ? getSessionUserId(cookieOrHeaderToken) : null;
-  const wsUrl = new URL(req.url, 'http://x');
-  const legacyToken = wsUrl.searchParams.get('token');
-  const legacyUserId = legacyToken ? getSessionUserId(legacyToken) : null;
 
   if (cookieUserId) {
     ws._userId = cookieUserId;
-    ws._authenticated = true;
-    if (!enforceWsCap(ws)) return;
-  } else if (legacyUserId) {
-    ws._userId = legacyUserId;
     ws._authenticated = true;
     if (!enforceWsCap(ws)) return;
   } else {

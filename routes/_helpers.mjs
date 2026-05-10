@@ -129,16 +129,14 @@ export function saveConfig(cfg) {
   // Disk side: clone, encrypt secrets, write. Memory side: keep `cfg` (with
   // plaintext secrets) as the cache so the next loadConfig hit doesn't have
   // to round-trip through decrypt. Disk stays encrypted; RAM stays plaintext.
-  let toWrite = cfg;
+  // Fail closed: if encryption fails (missing/corrupt master key, etc.),
+  // refuse to write rather than silently downgrading secrets to plaintext.
+  const toWrite = JSON.parse(JSON.stringify(cfg));
   try {
-    toWrite = JSON.parse(JSON.stringify(cfg));
     encryptConfigSecrets(toWrite);
   } catch (e) {
-    // Don't block the save on a crypto-side failure — fall back to writing
-    // the unencrypted JSON. Plaintext values stay plaintext until the next
-    // successful save touches them. Old behavior, no regression.
-    console.warn('[config] secret encryption failed; writing plaintext:', e.message);
-    toWrite = cfg;
+    log.error('config', 'secret encryption failed; refusing to save', { err: e.message });
+    throw new Error(`Refusing to save config — secret encryption failed: ${e.message}`);
   }
   atomicWriteSync(CFG_PATH, JSON.stringify(toWrite, null, 2));
   _cfgCache = cfg;

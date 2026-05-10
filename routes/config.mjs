@@ -5,10 +5,39 @@
 
 import fs from 'fs';
 import path from 'path';
+import net from 'net';
 import {
   requireAuth, requirePrivileged, loadConfig, modifyConfig, readBody, CFG_PATH, safeError,
 } from './_helpers.mjs';
 import { supportsVision } from '../lib/model-capabilities.mjs';
+import { log } from '../logger.mjs';
+
+// Tailored URL gate for admin-writable provider endpoints (LM Studio, local
+// Ollama). Looser than lib/url-guard.mjs:isUrlSafe — loopback and LAN ranges
+// must remain valid (LM Studio normally runs on 127.0.0.1; Ollama may live on
+// another box on the same VLAN). We do block link-local / cloud-metadata
+// (169.254.x — IMDSv1, GCP metadata, etc.) and refuse non-http(s) schemes /
+// malformed input so a typo can't end up in the config.
+function validateProviderUrl(field, raw) {
+  const v = String(raw ?? '').trim();
+  if (!v) return ''; // empty = clear
+  let u;
+  try { u = new URL(v); } catch { throw new Error(`${field} is not a valid URL`); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`${field} protocol ${u.protocol} not allowed (use http or https)`);
+  }
+  const host = u.hostname.toLowerCase();
+  if (net.isIPv4(host)) {
+    const [a, b] = host.split('.').map(Number);
+    if (a === 169 && b === 254) throw new Error(`${field} points at link-local / cloud-metadata range`);
+    if (a === 0)               throw new Error(`${field} points at unspecified-address range`);
+    if (a >= 224)              throw new Error(`${field} points at multicast / reserved range`);
+  } else if (net.isIPv6(host)) {
+    if (host.startsWith('fe80:')) throw new Error(`${field} points at IPv6 link-local range`);
+    if (host.startsWith('ff'))    throw new Error(`${field} points at IPv6 multicast range`);
+  }
+  return v;
+}
 
 // This is the default for the "Ollama (cloud)" provider field — the Ollama
 // (local) field has its own separate OLLAMA_LOCAL_DEFAULT below. Historically
@@ -108,6 +137,15 @@ export async function handle(req, res) {
     if (req.method === 'POST') {
       try {
         const body = JSON.parse(await readBody(req));
+        // Validate admin-writable provider URLs *before* the modifyConfig
+        // transaction so a bad value 400s loudly instead of half-writing.
+        // (POST is already gated to requirePrivileged at the dispatch above.)
+        if (body.lmstudioUrl !== undefined) {
+          body.lmstudioUrl = validateProviderUrl('lmstudioUrl', body.lmstudioUrl);
+        }
+        if (body.ollamaLocalUrl !== undefined) {
+          body.ollamaLocalUrl = validateProviderUrl('ollamaLocalUrl', body.ollamaLocalUrl);
+        }
         // Brave Search API key — validate against Brave before saving so a
         // mistyped or wrong-vendor key fails loudly instead of silently
         // breaking web search later. Empty string is an explicit clear.
@@ -147,10 +185,18 @@ export async function handle(req, res) {
           // Cloud Ollama endpoint is fixed (OLLAMA_DEFAULT) and not user-editable;
           // ignore any ollamaUrl the client sends and keep the canonical value.
           cfg.cortex.ollamaUrl = OLLAMA_DEFAULT;
-          if (body.lmstudioUrl    !== undefined) cfg.cortex.lmstudioUrl    = body.lmstudioUrl;
+          if (body.lmstudioUrl !== undefined) {
+            const prev = cfg.cortex.lmstudioUrl ?? '';
+            if (body.lmstudioUrl !== prev) log.warn('config', 'lmstudioUrl changed', { from: prev, to: body.lmstudioUrl, by: authId });
+            cfg.cortex.lmstudioUrl = body.lmstudioUrl;
+          }
           if (body.ollamaApiKey)                 cfg.cortex.ollamaApiKey   = body.ollamaApiKey;
           if (body.lmstudioApiKey)               cfg.cortex.lmstudioApiKey = body.lmstudioApiKey;
-          if (body.ollamaLocalUrl    !== undefined) cfg.cortex.ollamaLocalUrl    = body.ollamaLocalUrl;
+          if (body.ollamaLocalUrl !== undefined) {
+            const prev = cfg.cortex.ollamaLocalUrl ?? '';
+            if (body.ollamaLocalUrl !== prev) log.warn('config', 'ollamaLocalUrl changed', { from: prev, to: body.ollamaLocalUrl, by: authId });
+            cfg.cortex.ollamaLocalUrl = body.ollamaLocalUrl;
+          }
           if (body.ollamaLocalApiKey)               cfg.cortex.ollamaLocalApiKey = body.ollamaLocalApiKey;
           if (body.ttsApiKey)                      cfg.ttsApiKey   = body.ttsApiKey;
           if (body.ttsApiUrl   !== undefined)      cfg.ttsApiUrl   = body.ttsApiUrl;
