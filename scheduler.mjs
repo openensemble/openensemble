@@ -15,6 +15,12 @@ import { log } from './logger.mjs';
 const TASKS_DIR      = path.join(BASE_DIR, 'tasks'); // legacy fallback
 const TASKS_LOCK_KEY = path.join(BASE_DIR, 'tasks.lock');
 
+// Auto-disable a recurring task after this many consecutive failed fires.
+// Each fire already retries MAX_ATTEMPTS=3 times internally, so 5 consecutive
+// failures = 15 attempts before we stop. Tasks are re-enabled by the user
+// from the tasks drawer once they've fixed whatever was wrong.
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 // ── Task storage ──────────────────────────────────────────────────────────────
 
 function taskPath(ownerId) {
@@ -307,14 +313,18 @@ async function runTask(task, broadcast) {
     const sessionKey = `${userId}_${resolved.id}`;
     const scopedAgent = { ...resolved, id: sessionKey };
 
-    // Write a visible task header into the session before running
-    appendToSession(sessionKey, {
-      role: 'system',
-      content: task.label || task.prompt,
-      scheduled: true,
-      taskId: task.id,
-      ts: Date.now(),
-    });
+    // Write a visible task header into the session before running. Silent
+    // tasks skip this — they leave no chat trail at all; the user sees
+    // confirmation as a "Last run" line in the tasks drawer instead.
+    if (!task.silent) {
+      appendToSession(sessionKey, {
+        role: 'system',
+        content: task.label || task.prompt,
+        scheduled: true,
+        taskId: task.id,
+        ts: Date.now(),
+      });
+    }
 
     // The agent is firing on a schedule with no human present. Without this
     // note, "send me an email" makes the agent ask "what address?" or show a
@@ -341,10 +351,11 @@ async function runTask(task, broadcast) {
     // 2026-05-06 was the un-caught throw; the helper try/catches it.
     const { runAgentWithRetry } = await import('./lib/run-agent-with-retry.mjs');
     const MAX_ATTEMPTS = 3;
-    const { succeeded, lastError } = await runAgentWithRetry({
+    const { succeeded, lastError, assistantContent } = await runAgentWithRetry({
       scopedAgent, userText: task.prompt, systemNote: scheduledNote, userId, streamChat,
       maxAttempts: MAX_ATTEMPTS,
       context: 'scheduler',
+      silent: !!task.silent,
     });
 
     if (!succeeded) console.error(`[scheduler] Task "${task.label}" failed after ${MAX_ATTEMPTS} attempts`);
@@ -358,7 +369,9 @@ async function runTask(task, broadcast) {
     // sees the scheduled-task pill and nothing under it (the bug that
     // surfaced this whole fix). Use role:'assistant' so the chat treats it
     // as part of the run's reply, not as scheduler scaffolding.
-    if (!succeeded) {
+    // Silent tasks skip this — failure surfaces as lastError in the tasks
+    // drawer; injecting a chat message would break the silent contract.
+    if (!succeeded && !task.silent) {
       try {
         appendToSession(sessionKey, {
           role: 'assistant',
@@ -380,8 +393,43 @@ async function runTask(task, broadcast) {
       await removeTask(task.id);
     } else {
       const patch = { lastRun: new Date().toISOString() };
-      if (!succeeded) patch.lastError = lastError || 'unknown';
-      else            patch.lastError = null; // clear stale error on next success
+      // Cross-fire failure tracking. Per-fire retry (MAX_ATTEMPTS) handles
+      // transient blips; this counter handles the broken-forever case — a
+      // cron task whose handler can never succeed shouldn't keep burning
+      // tokens every cycle. Resets to 0 on any successful fire.
+      const prevStreak = Number(task.consecutiveFailures) || 0;
+      if (!succeeded) {
+        patch.lastError = lastError || 'unknown';
+        patch.consecutiveFailures = prevStreak + 1;
+        if (patch.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          patch.enabled = false;
+          patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${lastError || 'unknown'}`;
+          // Surface the disable to the user. Without this the task just
+          // silently stops appearing in the schedule — same failure mode the
+          // per-fire ⚠️ message was added to fix, but at the schedule level.
+          if (!task.silent) {
+            try {
+              appendToSession(sessionKey, {
+                role: 'assistant',
+                content: `⛔ Scheduled task "${task.label}" auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires. Last error: ${lastError || 'unknown'}.\n\nRe-enable it from the tasks drawer once the underlying issue is fixed.`,
+                scheduled: true,
+                taskId: task.id,
+                taskAutoDisabled: true,
+                ts: Date.now(),
+              });
+            } catch (e) {
+              console.warn('[scheduler] Failed to append auto-disable message:', e.message);
+            }
+          }
+          log.warn('scheduler', 'task auto-disabled', { taskId: task.id, label: task.label, streak: patch.consecutiveFailures, lastError });
+        }
+      } else {
+        patch.lastError = null; // clear stale error on next success
+        if (prevStreak) patch.consecutiveFailures = 0;
+        // Capture the agent's final reply as lastOutput so the tasks drawer
+        // can show what happened — the only feedback channel for silent runs.
+        patch.lastOutput = (assistantContent || '').trim().slice(0, 280);
+      }
       await updateTask(task.id, patch);
     }
 

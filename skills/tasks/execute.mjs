@@ -284,7 +284,7 @@ async function execCancelWatch(id, userId) {
   return ok ? `Watch ${id} cancelled.` : `No active watch with id "${id}".`;
 }
 
-async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once' }, userId, agentId) {
+async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once', silent = false }, userId, agentId) {
   if (!userId) return 'Error: no user context.';
   if (!label || typeof label !== 'string') return 'Error: label is required.';
   if (!prompt || typeof prompt !== 'string') return 'Error: prompt is required.';
@@ -292,7 +292,8 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
   if (!rawAgent) return 'Error: no agent context — cannot schedule.';
 
   const { addTask, scheduleNewTask } = await import('../../scheduler.mjs');
-  const base = { label: label.trim(), prompt: prompt.trim(), ownerId: userId, agent: rawAgent };
+  const base = { label: label.trim(), prompt: prompt.trim(), ownerId: userId, agent: rawAgent, ...(silent && { silent: true }) };
+  const silentTag = silent ? ' (silent — no chat output)' : '';
 
   if (repeat === 'daily') {
     if (!time || !/^\d{1,2}:\d{2}$/.test(time)) return 'Error: daily task needs a time in HH:MM 24-hour format.';
@@ -301,7 +302,7 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
     const hhmm = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
     const task = await addTask({ ...base, repeat: 'daily', time: hhmm });
     scheduleNewTask(task);
-    return `Task "${task.label}" scheduled daily at ${hhmm} via agent ${rawAgent}. id=${task.id}`;
+    return `Task "${task.label}" scheduled daily at ${hhmm} via agent ${rawAgent}${silentTag}. id=${task.id}`;
   }
 
   if (!datetime) return 'Error: one-shot task needs a `datetime` (ISO 8601).';
@@ -310,7 +311,7 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
   if (when.getTime() - Date.now() < 5000) return `Error: datetime ${when.toLocaleString()} is in the past or too soon.`;
   const task = await addTask({ ...base, repeat: 'once', datetime: when.toISOString() });
   scheduleNewTask(task);
-  return `Task "${task.label}" scheduled for ${when.toLocaleString()} via agent ${rawAgent}. id=${task.id}`;
+  return `Task "${task.label}" scheduled for ${when.toLocaleString()} via agent ${rawAgent}${silentTag}. id=${task.id}`;
 }
 
 export default async function execute(name, args, userId, agentId, ctx) {

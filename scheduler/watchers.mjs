@@ -587,7 +587,7 @@ async function executeOnFire(record) {
   const { streamChat } = await import('../chat.mjs');
   const { appendToSession } = await import('../sessions.mjs');
   const { getAgentsForUser, getUser } = await import('../routes/_helpers.mjs');
-  const { scheduledContext } = await import('../lib/scheduled-context.mjs');
+  const { runAgentWithRetry } = await import('../lib/run-agent-with-retry.mjs');
 
   const userId = record.userId;
   const scoped = record.agentId || '';
@@ -627,28 +627,56 @@ async function executeOnFire(record) {
 
   log.info('watchers', 'on_fire agent run', { id: record.id, agentId: sessionKey });
 
-  try {
-    await scheduledContext.run({ scheduledNote: watcherNote }, async () => {
-      const ac = new AbortController();
-      for await (const event of streamChat(scopedAgent, userPrompt, ac.signal, null, userId, null, watcherNote)) {
-        if (event.type === 'error') {
-          log.warn('watchers', 'on_fire stream error', { id: record.id, err: event.message });
-          break;
-        }
-      }
-    });
-    // Tell the user's connected client to reload the agent session so the
-    // streamed turns become visible. Without this, the UI keeps showing the
-    // pre-fire state and the user sees the trigger bubble but not the agent
-    // response — same shape as scheduled tasks broadcasting task_complete.
+  // Retry on stream errors, fetch throws, and LoopGuard stalls — all surfaced
+  // through the shared helper. Single attempt by default keeps the previous
+  // single-shot behavior; bump if a watcher class proves to need more.
+  const { succeeded, lastError } = await runAgentWithRetry({
+    scopedAgent, userText: userPrompt, systemNote: watcherNote, userId, streamChat,
+    maxAttempts: 1,
+    context: 'watchers',
+  });
+
+  if (!succeeded) {
+    log.warn('watchers', 'on_fire run failed', { id: record.id, err: lastError });
+    // Append a visible message to the session so the user sees something under
+    // the [Watcher fired] header instead of a bare trigger with no follow-up.
+    // Same role:'assistant' shape the scheduler uses for failed scheduled tasks.
+    try {
+      appendToSession(sessionKey, {
+        role: 'assistant',
+        content: `⚠️ Watcher fired but the agent's response failed: ${lastError || 'unknown error'}.`,
+        watcherId: record.id,
+        watcherFailed: true,
+        ts: Date.now(),
+      });
+    } catch (e) {
+      log.warn('watchers', 'on_fire failure-message append threw', { id: record.id, err: e.message });
+    }
+    // Surface as a status bubble too — the watcher itself already finalized
+    // 'done' (predicate hit), so the user has a green check next to a failed
+    // chained run unless we say otherwise.
     _sendStatusFn?.(record.userId, {
-      type: 'task_complete',
-      taskId: `watcher_${record.id}`,
-      agent: resolved.id,
+      type: 'status',
+      agent: record.agentId,
+      watcherId: record.id,
+      kind: record.kind,
+      label: record.label,
+      text: `⚠️ Agent run after watcher fired failed: ${lastError || 'unknown error'}`,
+      ts: Date.now(),
+      onFireFailed: true,
     });
-  } catch (e) {
-    log.warn('watchers', 'on_fire run threw', { id: record.id, err: e.message });
   }
+
+  // Tell the user's connected client to reload the agent session so the
+  // streamed turns become visible. Without this, the UI keeps showing the
+  // pre-fire state and the user sees the trigger bubble but not the agent
+  // response — same shape as scheduled tasks broadcasting task_complete.
+  // Fires on both success and failure so the failure message above renders.
+  _sendStatusFn?.(record.userId, {
+    type: 'task_complete',
+    taskId: `watcher_${record.id}`,
+    agent: resolved.id,
+  });
 }
 
 // Bulk-cancel watchers matching a predicate. Returns the count cancelled.

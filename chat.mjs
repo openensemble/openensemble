@@ -127,7 +127,7 @@ async function* consumeProvider(providerGen) {
 }
 
 // ── Main chat generator ───────────────────────────────────────────────────────
-export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null) {
+export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false) {
   // Finance/email agents handle transactions and actions — skip memory signal processing.
   // Ephemeral agents (deep_research_parallel workers) are stateless one-shots — skip all memory ops.
   // Scheduler intercepts: when chat-dispatch.mjs's interceptScheduling fired and
@@ -331,7 +331,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         console.warn('[grok-video] Failed to save video:', e.message);
       }
 
-      appendToSession(agent.id,
+      if (!silent) appendToSession(agent.id,
         { role: 'user', content: userText, ts: Date.now() },
         { role: 'assistant', video: { url: videoUrl, filename }, content: `[Video: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
       );
@@ -369,7 +369,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       console.warn('[grok] Failed to save image:', e.message);
     }
 
-    appendToSession(agent.id,
+    if (!silent) appendToSession(agent.id,
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', image: { base64, mimeType, filename }, content: `[Image: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
     );
@@ -482,7 +482,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       console.warn('[fireworks] Failed to save image:', e.message);
     }
 
-    appendToSession(agent.id,
+    if (!silent) appendToSession(agent.id,
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', image: { base64, mimeType, filename }, content: `[Image: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
     );
@@ -531,7 +531,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
   log.info('chat', 'llm turn complete', _llmMeta);
   if (assistantContent) {
-    persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed });
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed });
+    yield { type: '__content', content: assistantContent };
   }
   yield { type: 'done' };
 }

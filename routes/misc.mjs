@@ -304,6 +304,15 @@ export async function handle(req, res) {
     if (!t) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
     try {
       const patch = JSON.parse(await readBody(req));
+      // Re-enabling a task that was auto-disabled by the consecutive-failure
+      // counter must clear the streak — otherwise the very next failure
+      // bumps it from 5 to 6 and auto-disables again immediately. The user's
+      // re-enable gesture says "I fixed it, try again," which is the same
+      // semantic as a successful fire from the counter's perspective.
+      if (patch.enabled === true && (t.consecutiveFailures || t.disabledReason)) {
+        patch.consecutiveFailures = 0;
+        patch.disabledReason = null;
+      }
       await updateTask(taskMatch[1], patch);
       // Any field that affects firing needs the timer re-registered. For a
       // once-task that already ran, revising the datetime should also reopen

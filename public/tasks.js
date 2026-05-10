@@ -157,9 +157,16 @@ function renderTaskRow(t) {
   const schedStr = t.repeat === 'once'
     ? (t.datetime ? '1× ' + new Date(t.datetime).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '1× (no time set)')
     : `🔁 ${formatTaskCadenceText(t)}`;
-  const statusSuffix = (t.repeat === 'once' && !t.enabled && t.lastRun) ? ' · ✓ done' : (t.lastRun ? ' · ' + new Date(t.lastRun).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '');
+  const statusSuffix = (t.repeat === 'once' && !t.enabled && t.lastRun) ? ' · ✓ done' : (t.lastRun ? ' · last run ' + new Date(t.lastRun).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '');
   const isReminder = t.type === 'reminder';
   const runner = isReminder ? '🔔 Reminder' : (agents.find(a=>a.id===t.agent)?.name ?? t.agent);
+  const silentBadge = t.silent ? '🔕 ' : '';
+  // For silent tasks the tasks drawer is the only feedback channel — surface
+  // last run's reply (lastOutput) or error (lastError) so the user knows the
+  // run actually did something.
+  const silentTail = t.silent && (t.lastOutput || t.lastError)
+    ? `<div class="task-item-meta" style="color:${t.lastError ? 'var(--red)' : 'var(--muted)'};font-style:italic;margin-top:2px">${t.lastError ? '⚠ ' + escHtml(t.lastError) : escHtml(t.lastOutput)}</div>`
+    : '';
   const isOpen = expandedTaskId === t.id;
   const expandToggle = isOpen ? '▾' : '▸';
   // The header row: clicking the info area toggles the expanded view.
@@ -167,8 +174,9 @@ function renderTaskRow(t) {
   const header = `
     <div class="task-item${isOpen ? ' task-item-open' : ''}">
       <div class="task-item-info" data-action="toggleTaskExpanded" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' title="Click to view / edit details" style="cursor:pointer">
-        <div class="task-item-label">${expandToggle} ${escHtml(t.label)}</div>
+        <div class="task-item-label">${expandToggle} ${silentBadge}${escHtml(t.label)}</div>
         <div class="task-item-meta">${schedStr} · ${runner}${statusSuffix}</div>
+        ${silentTail}
       </div>
       ${t.repeat === 'once' && !t.enabled ? '<span style="font-size:11px;color:var(--green)">✓</span>' : `<input type="checkbox" class="task-toggle" ${t.enabled ? 'checked' : ''} data-change-action="toggleTask" data-change-args='${JSON.stringify([t.id, "$checked"]).replace(/'/g, "&#39;")}'>`}
       <button class="btn-task-del" data-action="deleteTask" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>✕</button>
@@ -187,6 +195,10 @@ function renderTaskRow(t) {
       </label>
       <label>Prompt (what to ask the agent at fire time)
         <textarea id="te-pr-${escHtml(t.id)}" rows="3">${escHtml(t.prompt||'')}</textarea>
+      </label>
+      <label style="flex-direction:row;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;align-self:flex-start">
+        <input type="checkbox" id="te-si-${escHtml(t.id)}" ${t.silent ? 'checked' : ''} style="margin:0;padding:0;width:auto;background:transparent;border:none;appearance:auto">
+        Silent — run without showing in chat
       </label>`;
   const lastOutput = t.lastOutput ? `<div class="task-edit-meta">Last run: ${escHtml(String(t.lastOutput).slice(0, 200))}</div>` : '';
   const editor = `
@@ -267,6 +279,8 @@ async function saveTaskEdits(id) {
     if (ag && ag.value && ag.value !== t.agent) patch.agent = ag.value;
     const pr = document.getElementById(`te-pr-${id}`);
     if (pr && pr.value !== (t.prompt||'')) patch.prompt = pr.value;
+    const si = document.getElementById(`te-si-${id}`);
+    if (si && !!si.checked !== !!t.silent) patch.silent = !!si.checked;
   }
   if (!Object.keys(patch).length) { expandedTaskId = null; renderTasks(); return; }
   const r = await fetch(`/api/tasks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });

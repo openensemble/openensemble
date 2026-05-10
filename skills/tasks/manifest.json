@@ -36,7 +36,8 @@
             "prompt":   { "type": "string", "description": "What you (the agent) should do when this fires. Must be self-contained — no 'as we discussed', no follow-up questions." },
             "datetime": { "type": "string", "description": "ISO 8601 timestamp for one-shot tasks. Required when repeat is 'once' or omitted." },
             "time":     { "type": "string", "description": "HH:MM 24-hour for daily tasks. Required when repeat is 'daily'." },
-            "repeat":   { "type": "string", "enum": ["once", "daily"], "description": "Defaults to 'once'." }
+            "repeat":   { "type": "string", "enum": ["once", "daily"], "description": "Defaults to 'once'." },
+            "silent":   { "type": "boolean", "description": "If true, the task fires without writing anything to chat — no header, no prompt, no agent reply. Confirmation appears as a 'Last run' line in the tasks drawer with a short summary of what the agent did. Use when the user asks for the task to run silently / quietly / in the background, or when the task delivers via side effects (telegram, email) and chat clutter is unwanted. Defaults to false." }
           },
           "required": ["label", "prompt"]
         }

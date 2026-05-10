@@ -38,6 +38,21 @@ Scheduled tasks always use the agent's **current** model — there's no model sn
 
 If a scheduled run fails (transient network blip, provider 5xx, etc.), it retries 3 times with a 30-second gap before giving up. Final failures leave a visible **⚠️ Scheduled task failed** message in the agent's chat with the underlying error — no more silent orphan headers. The task stays scheduled and tries again at its next normal time.
 
+## Silent runs
+
+By default a scheduled fire writes three things to the agent's chat: a 📋 task header, the prompt itself as a user bubble, and the agent's reply. That's useful while you're tuning a new task. Once a task is running cleanly and delivers via side effects (Telegram, email, a doc that lands in **Documents**), the chat echo is just clutter.
+
+Mark any agent task **silent** to suppress the entire run from chat — header, prompt, and reply all skipped. The task still fires, the agent still calls its tools, the email still gets sent. Confirmation comes from the tasks drawer instead: the row gets a 🔕 badge, an updated `last run` timestamp, and a one-line italic summary of what the agent reported (or the error if it failed).
+
+Two ways to turn it on:
+
+- **In chat** — drop an adverb into the request: *"silently send my news briefing at 10am"*, *"every morning at 7 quietly run my inbox sweep"*, *"at 5pm post the weekly metrics — don't show this in chat"*. The interceptor recognises *silently / quietly / in the background / without putting it in chat / don't show in chat* and creates the task with silent already on.
+- **In the editor** — open Settings → Tasks (or the sidebar drawer), expand a task, and tick **Silent — run without showing in chat**. Same effect for tasks created loud that you've decided are noisy.
+
+Silent failures don't escape into chat either — the **⚠️ Scheduled task failed** message is suppressed and the failure shows as a red line under the task row in the drawer. The task still retries on its next normal fire.
+
+This is for **scheduled agent tasks** specifically. Reminder-type tasks (the chime + banner kind) ignore the flag — silencing a reminder just means turning it off. Watch tasks ignore it too.
+
 ## Watch tasks — fire on a condition, not a clock
 
 Sometimes you don't want a clock — you want *"tell me when X happens."* Watches handle that. Ask in chat naturally: *"tell me when SOL hits $100"*, *"ping me when /tmp/build.log says BUILD OK"*, *"alert me if `df` shows the root volume above 90%."* Your agent picks the right shape and registers a watch.
