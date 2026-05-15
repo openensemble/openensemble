@@ -226,7 +226,15 @@ function onConnection(ws, req) {
       if (!enforceWsCap(ws)) return;
       sendInitialData();
       maybePushVoiceConfig(ws);
-      if (ws._deviceId) touchDevice(ws._userId, ws._deviceId);
+      if (ws._deviceId) {
+        // Firmware reports its running version on auth (since 0.2.3). Store
+        // it on the device record so the UI can show "Update available"
+        // when manifest.version > device.fw_version.
+        const fwReported = typeof msg.firmware_version === 'string' &&
+          msg.firmware_version.length > 0 && msg.firmware_version.length < 32
+            ? msg.firmware_version : null;
+        touchDevice(ws._userId, ws._deviceId, fwReported ? { fw_version: fwReported } : {});
+      }
       return;
     }
 
@@ -249,6 +257,34 @@ function onConnection(ws, req) {
     if (msg.type === 'ww_upload_ack') {
       if (ws._deviceId && Number.isInteger(msg.slot)) {
         handleWwUploadAck(ws._deviceId, msg.slot, !!msg.ok, msg.err);
+      }
+      return;
+    }
+
+    // Voice-device OTA progress stream. Fan out to the device-owner's other
+    // open WSes so any open Settings → Voice devices tab can show a progress
+    // bar without polling. The originating WS is the device itself; we don't
+    // echo it back. Phase strings come from oe_ota.c: "checking" |
+    // "downloading" | "applying" | "rebooting" | "up_to_date" | "error".
+    if (msg.type === 'ota_progress') {
+      if (!ws._deviceId) return;
+      const payload = {
+        type: 'ota_progress',
+        device_id: ws._deviceId,
+        phase: typeof msg.phase === 'string' ? msg.phase : '',
+        bytes_done: Number.isFinite(msg.bytes_done) ? msg.bytes_done : 0,
+        total: Number.isFinite(msg.total) ? msg.total : 0,
+        target_version: typeof msg.target_version === 'string' ? msg.target_version : null,
+        err: typeof msg.err === 'string' ? msg.err : null,
+      };
+      const wire = JSON.stringify(payload);
+      for (const client of _wss.clients) {
+        if (client === ws) continue;
+        if (client.readyState !== client.OPEN) continue;
+        if (client._userId !== ws._userId) continue;
+        // Skip other voice devices — they don't need each other's OTA status.
+        if (client._deviceId) continue;
+        try { client.send(wire); } catch {}
       }
       return;
     }

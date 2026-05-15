@@ -40,6 +40,25 @@ let _elevenlabsVoices = [];
 // slot_assignments shape as of 2026-05-13.
 let _voiceConfig = { version: 0, slot_assignments: {} };
 
+// Cached firmware manifest from /firmware/voice-device/manifest.json.
+// Loaded once per drawer open so the per-device row can render an Update
+// button when manifest.version > device.fw_version. Null until the fetch
+// resolves; we just skip the Update affordance until then.
+let _firmwareManifest = null;
+
+// Compare two dotted-version strings "MAJOR.MINOR.PATCH". Returns >0 if a>b,
+// <0 if a<b, 0 if equal. Mirrors firmware-side version_cmp in oe_ota.c.
+function versionCmp(a, b) {
+  const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const da = pa[i] || 0, db = pb[i] || 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
 // Caches for the multi-user slot assignment UI.
 //   _usersRoster — list of all OE-install users (from /api/users); seeded on
 //                  first device-drawer render. Privileged users get the full
@@ -102,7 +121,7 @@ async function loadDevices() {
     // refs, OE user roster, AND the per-user voice-config (sole source
     // of truth for slot routing since 2026-05-13 — applies to all of
     // this user's voice devices).
-    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg] = await Promise.all([
+    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw] = await Promise.all([
       fetch('/api/devices'),
       fetch('/api/devices/incoming-slots'),
       fetch('/api/wakewords'),
@@ -110,7 +129,16 @@ async function loadDevices() {
       fetch('/api/voice-refs'),
       ensureUsersRoster(),
       fetch('/api/voice-config'),
+      fetch('/firmware/voice-device/manifest.json'),
     ]);
+    // Firmware manifest is best-effort — if it's missing (no flash wizard
+    // bundled, etc.) the Update button just doesn't appear. Don't fail the
+    // drawer over it.
+    if (rFw.ok) {
+      try { _firmwareManifest = await rFw.json(); } catch { _firmwareManifest = null; }
+    } else {
+      _firmwareManifest = null;
+    }
     if (rTts.ok) {
       const info = await rTts.json();
       _ttsProvider = info.provider || 'openai';
@@ -334,19 +362,31 @@ function renderDevices() {
       ? '<span title="Connected" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3cc36f;margin-right:6px;vertical-align:middle"></span>'
       : '<span title="Offline" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted,#888);margin-right:6px;vertical-align:middle"></span>';
     const status = d.online ? 'connected' : `seen ${escHtml(lastSeen)}`;
+    // Firmware row: current version + an Update button when an upgrade is
+    // available and the device is online. _firmwareManifest is the cached
+    // /firmware/voice-device/manifest.json fetched on drawer open.
+    const manifestVer = _firmwareManifest?.version || null;
+    const fwBehind = manifestVer && d.fw_version && versionCmp(manifestVer, d.fw_version) > 0;
+    const fwLabel = d.fw_version
+      ? `fw ${escHtml(d.fw_version)}` + (manifestVer ? ` (server: ${escHtml(manifestVer)})` : '')
+      : 'fw unknown';
+    const updateBtn = (fwBehind && d.online)
+      ? `<button class="cdraw-btn" data-action="updateDeviceFirmware" data-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:2px 8px;margin-left:6px" title="Download and apply firmware ${escHtml(manifestVer)} over the air">Update</button>`
+      : (manifestVer && d.fw_version && !fwBehind ? '<span style="font-size:11px;color:var(--muted);margin-left:6px">up to date</span>' : '');
     const metaBits = [
-      d.fw_version ? `fw ${escHtml(d.fw_version)}` : null,
       `${dot}${status}`,
       d.mute_state ? '<span style="color:var(--red,#e05c5c);font-weight:600">muted</span>' : null,
     ].filter(Boolean).join(' · ');
     return `
-      <div class="cdraw-row" style="display:block;padding:14px 14px;border-bottom:1px solid var(--border);background:transparent;border-radius:0;margin-bottom:0">
+      <div class="cdraw-row" data-device-row="${escHtml(d.id)}" style="display:block;padding:14px 14px;border-bottom:1px solid var(--border);background:transparent;border-radius:0;margin-bottom:0">
         <div style="position:relative;text-align:center;margin-bottom:4px">
           <input type="text" class="cdraw-input device-name" value="${escHtml(d.name)}" data-action="renameDevice" data-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}' placeholder="(unnamed device)" style="display:inline-block;font-weight:700;font-size:16px;text-align:center;color:#fff;background:transparent;border:1px dashed transparent;padding:4px 10px;border-radius:4px;min-width:60%;max-width:75%" title="Click to rename">
           <button class="cdraw-btn" data-action="playTestMp3" data-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}' style="position:absolute;left:0;top:50%;transform:translateY(-50%);font-size:11px;padding:3px 8px" title="Upload a local MP3 and play it on this device (audio-quality test)">▶ Test MP3</button>
           <button class="cdraw-btn" data-action="revokeDevice" data-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}' style="position:absolute;right:0;top:50%;transform:translateY(-50%);font-size:11px;padding:3px 8px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)" title="Drop this device and revoke its session token">Revoke</button>
         </div>
         <div style="text-align:center;font-size:11px;color:var(--muted)">${metaBits}</div>
+        <div style="text-align:center;font-size:11px;color:var(--muted);margin-top:4px"><span>${fwLabel}</span>${updateBtn}</div>
+        <div data-ota-status="${escHtml(d.id)}" style="text-align:center;font-size:11px;color:var(--muted);margin-top:4px;display:none"></div>
       </div>
     `;
   }).join('');
@@ -510,6 +550,50 @@ async function patchDevice(id, patch) {
     showDeviceToast(`Update failed: ${e.message}`, { variant: 'error' });
   }
 }
+
+// Voice-device firmware OTA: nudge the device to check the bundled manifest.
+// Server fans ota_progress events back to this browser tab over WS; the
+// _handleOtaProgress receiver below updates the per-device status row.
+window.updateDeviceFirmware = async function (id) {
+  const row = document.querySelector(`[data-ota-status="${CSS.escape(id)}"]`);
+  if (row) { row.style.display = 'block'; row.textContent = 'Requesting update…'; }
+  try {
+    const r = await fetch(`/api/devices/${encodeURIComponent(id)}/ota`, { method: 'POST' });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      throw new Error(`HTTP ${r.status} ${txt}`);
+    }
+  } catch (e) {
+    if (row) row.textContent = `Update failed to start: ${e.message}`;
+    showDeviceToast(`OTA nudge failed: ${e.message}`, { variant: 'error' });
+  }
+};
+
+// WS dispatch lands here (see public/websocket.js 'ota_progress' case).
+// Updates the per-device status row in place; refetches the device list
+// when the device reboots so fw_version flips to the new value.
+window._handleOtaProgress = function (msg) {
+  const row = document.querySelector(`[data-ota-status="${CSS.escape(msg.device_id || '')}"]`);
+  if (!row) return;
+  row.style.display = 'block';
+  switch (msg.phase) {
+    case 'checking':    row.textContent = 'Checking for updates…'; break;
+    case 'up_to_date':  row.textContent = `Already on ${msg.target_version || 'current'} — nothing to do.`; break;
+    case 'downloading': {
+      if (msg.total > 0) {
+        const pct = Math.round((msg.bytes_done / msg.total) * 100);
+        row.textContent = `Downloading ${msg.target_version || ''} — ${pct}%`;
+      } else {
+        row.textContent = `Downloading ${msg.target_version || ''}…`;
+      }
+      break;
+    }
+    case 'applying':  row.textContent = 'Writing flash…'; break;
+    case 'rebooting': row.textContent = `Rebooting into ${msg.target_version || 'new firmware'}…`; setTimeout(loadDevices, 8000); break;
+    case 'error':     row.textContent = `Update failed: ${msg.err || 'unknown error'}`; break;
+    default:          row.textContent = msg.phase || '';
+  }
+};
 
 // data-action handlers — global so event-delegation can call them
 window.renameDevice = function (id, ev) {

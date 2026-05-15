@@ -453,6 +453,11 @@ function handleServerMessage(msg) {
       showToast('Update failed: ' + (msg.message || msg.code), 8000);
       if (typeof loadUpdateStatus === 'function') loadUpdateStatus();
       break;
+    case 'ota_progress':
+      // Voice-device firmware OTA status. Hand to devices.js if Settings →
+      // Voice devices is open so it can update the in-place progress row.
+      if (typeof window._handleOtaProgress === 'function') window._handleOtaProgress(msg);
+      break;
     case 'cortex_warning':
       // Surfaced by lib/runtime-warn.mjs after 3 consecutive failures from a
       // local reason/plan runtime. Most common case: LM Studio's JIT loading

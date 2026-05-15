@@ -226,6 +226,34 @@ export async function handle(req, res) {
     return true;
   }
 
+  // POST /api/devices/:id/ota — ask the device to check for + apply a
+  // firmware update. Fires a single ota_check WS message; the device
+  // streams ota_progress events back over the same socket which we fan
+  // out to the user's browser tabs (see ws-handler.mjs). Manifest at
+  // public/firmware/voice-device/manifest.json drives the version
+  // decision device-side; this endpoint is just the nudge.
+  const otaMatch = p.match(/^\/api\/devices\/([^/]+)\/ota$/);
+  if (otaMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const id = decodeURIComponent(otaMatch[1]);
+    const device = getDevice(userId, id);
+    if (!device) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+      return true;
+    }
+    if (!isDeviceOnline(id)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'device_offline' }));
+      return true;
+    }
+    const sent = sendToDevice(id, { type: 'ota_check' });
+    res.writeHead(sent ? 202 : 502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ nudged: !!sent }));
+    return true;
+  }
+
   // DELETE /api/devices/:id — drop from registry + revoke its session token
   if (idMatch && req.method === 'DELETE') {
     const userId = requireAuth(req, res);
