@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

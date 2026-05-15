@@ -328,9 +328,17 @@ function onConnection(ws, req) {
           }
           for (const client of _wss.clients) {
             if (client === ws) continue;
-            if (client._userId === effectiveUserId && client.readyState === client.OPEN) {
-              try { client.send(typeof e === 'string' ? e : JSON.stringify(e)); } catch {}
-            }
+            if (client._userId !== effectiveUserId) continue;
+            if (client.readyState !== client.OPEN) continue;
+            // Never fan chat events out to a voice device that didn't
+            // originate the chat. Without this, typing into a browser tab
+            // streams tokens to every paired speaker, which accumulates
+            // them into sentences and plays TTS — see 2026-05-15 report.
+            // Voice devices only speak replies to their own wake-triggered
+            // chats; the originating device already received the event via
+            // the ws.send above.
+            if (client._deviceId) continue;
+            try { client.send(typeof e === 'string' ? e : JSON.stringify(e)); } catch {}
           }
         },
         onBroadcast: broadcastAgentList,
