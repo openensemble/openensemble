@@ -210,9 +210,14 @@ function renderDevices() {
   // OTA push to any device slot. Always rendered (even when empty) so the
   // upload button is visible. Library is per-user; each device's slot
   // picker shows the device-OWNER's library entries.
-  // Library list mixes stock entries (shipped with OE, read-only) and the
-  // user's uploads. Stock entries are tagged `stock: true` by the server
-  // and get a "stock" pill instead of a Delete button.
+  //
+  // This library section shows ONLY the user's custom uploads. OE-shipped
+  // stock wake words (sydney, athena, etc.) are not listed here — they're
+  // available in the per-slot wake-word dropdown below alongside any
+  // custom entries the user has uploaded. The intent: this section is
+  // for "what have I personally added", while slot pickers show "what
+  // can I assign". renderRow still has a stock-pill branch as defensive
+  // code in case any caller invokes it on a stock entry.
   const renderRow = (w) => {
     const phrase = escHtml(w.wake_word || '(no phrase)');
     const size = (w.size_bytes / 1024).toFixed(1) + ' KB';
@@ -227,21 +232,20 @@ function renderDevices() {
       </div>
     `;
   };
-  const libRows = (_wakewordLibrary && _wakewordLibrary.length)
-    ? _wakewordLibrary.map(renderRow).join('')
-    : '<div style="font-size:11px;color:var(--muted);padding:4px 0">No custom wake words uploaded yet.</div>';
-  // Library cap mirrors MAX_LIBRARY_ENTRIES on the server (10) — it bounds
-  // user uploads only, not the OE-shipped stock entries. UI surfaces the
-  // count so the user sees how close they are; uploads beyond the cap
-  // return 409 and the toast tells the user to delete one first.
+  const customWakewords = (_wakewordLibrary || []).filter(w => !w.stock);
+  const libRows = customWakewords.length
+    ? customWakewords.map(renderRow).join('')
+    : '<div style="font-size:11px;color:var(--muted);padding:4px 0">No custom wake words uploaded yet. Use the dropdown below each slot to pick one of OE\'s bundled wake words, or upload your own here.</div>';
+  // Library cap mirrors MAX_LIBRARY_ENTRIES on the server (10) — bounds
+  // user uploads only; OE-shipped stock wake words don't count against it.
   const LIBRARY_CAP = 10;
-  const libCount = _wakewordLibrary.filter(w => !w.stock).length;
+  const libCount = customWakewords.length;
   const atCap = libCount >= LIBRARY_CAP;
   const libraryHtml = `
     <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
-          Wake-word library
+          Your custom wake words
           <span style="text-transform:none;letter-spacing:0;margin-left:6px;opacity:.7">${libCount} / ${LIBRARY_CAP}</span>
         </div>
         <button class="cdraw-btn cdraw-btn-primary" data-action="openWakewordUpload" style="font-size:11px;padding:4px 10px${atCap ? ';opacity:.4;pointer-events:none' : ''}" title="${atCap ? 'Library full — delete an entry first' : 'Upload a custom-trained .tflite + .json pair'}">+ Upload wake word</button>
