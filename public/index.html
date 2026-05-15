@@ -150,6 +150,10 @@
       <span class="strip-tooltip">Nodes</span>
       <span class="strip-btn-alert" id="sbtnNodesAlert" style="display:none" title="One or more nodes report unhealthy"></span>
     </button>
+    <button class="strip-btn" id="sbtnDevices" data-action="toggleDrawer" data-args="[&quot;drawerDevices&quot;, &quot;sbtnDevices&quot;]" title="Voice devices">
+      <i data-lucide="mic"></i>
+      <span class="strip-tooltip">Voice devices</span>
+    </button>
     <button class="strip-btn" id="sbtnGuide" data-action="toggleDrawer" data-args="[&quot;drawerGuide&quot;, &quot;sbtnGuide&quot;]" title="Guide">
       <i data-lucide="book-open"></i>
       <span class="strip-tooltip">Guide</span>
@@ -853,22 +857,70 @@
               <label class="provider-toggle"><input type="checkbox" id="providerToggle_tts" checked data-change-action="toggleProvider" data-change-args="[&quot;tts&quot;, &quot;$checked&quot;]"><span class="provider-toggle-slider"></span></label>
             </div>
             <div id="providerBody_tts">
-              <div class="settings-section-desc" style="margin-bottom:8px">Optional external TTS for pronunciation audio. Uses OpenAI-compatible API format. Leave blank to use browser built-in speech.</div>
-              <input type="text" id="providerTtsUrl" placeholder="https://api.openai.com/v1/audio/speech"
+              <div class="settings-section-desc" style="margin-bottom:8px">Pick the TTS provider. Local options (F5-TTS, Piper) run via systemd services on this box; remote options need an API key.</div>
+              <select id="providerTtsProvider" data-change-action="updateTtsProviderFields" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+                <option value="openai">OpenAI-compatible (remote, API key)</option>
+                <option value="elevenlabs">ElevenLabs (remote, API key — voice cloning)</option>
+                <option value="piper">Piper (local, libritts_r multi-speaker)</option>
+              </select>
+
+              <div id="providerTtsFields_openai">
+                <input type="text" id="providerTtsUrl" placeholder="https://api.openai.com/v1/audio/speech"
+                  style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                  <input type="password" id="providerTtsKey" placeholder="OpenAI-compat API key" autocomplete="new-password"
+                    style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                  <input type="text" id="providerTtsModel" placeholder="Model (e.g. tts-1)"
+                    style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                  <input type="text" id="providerTtsVoice" placeholder="Default voice (e.g. alloy / 0 / ref id)"
+                    style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                </div>
+              </div>
+
+              <div id="providerTtsFields_elevenlabs" style="display:none">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                  <input type="password" id="providerElevenlabsKey" placeholder="ElevenLabs API key (xi-api-key)" autocomplete="new-password"
+                    style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                </div>
+                <div id="providerElevenlabsStatus" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+              </div>
+
+              <div id="providerTtsFields_piper" style="display:none">
+                <div id="providerPiperStatus" class="settings-section-desc" style="font-size:11px;color:var(--muted);margin-bottom:8px">Piper runs locally — no API key required. Checking service…</div>
+                <button id="providerPiperInstallBtn" data-action="installPiper" type="button" style="display:none;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600;margin-bottom:8px">Install Piper (~80 MB)</button>
+                <pre id="providerPiperLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:200px;overflow:auto;margin:0 0 8px;white-space:pre-wrap"></pre>
+              </div>
+
+              <div style="display:flex;gap:8px;align-items:center">
+                <button data-action="saveProviderTts"
+                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+                <div id="providerTtsStatus" style="font-size:11px;color:var(--muted)"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="provider-card" id="providerCard_stt">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="mic" style="width:14px;height:14px"></i> Speech-to-Text</div>
+              <label class="provider-toggle"><input type="checkbox" id="providerToggle_stt" checked data-change-action="toggleProvider" data-change-args="[&quot;stt&quot;, &quot;$checked&quot;]"><span class="provider-toggle-slider"></span></label>
+            </div>
+            <div id="providerBody_stt">
+              <div class="settings-section-desc" style="margin-bottom:8px">Required for voice devices (XVF3800 etc.) to transcribe captured speech. Uses OpenAI-compatible /audio/transcriptions API format.</div>
+              <input type="text" id="providerSttUrl" placeholder="https://api.openai.com/v1/audio/transcriptions"
                 style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-                <input type="password" id="providerTtsKey" placeholder="API key" autocomplete="new-password"
+                <input type="password" id="providerSttKey" placeholder="API key" autocomplete="new-password"
                   style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <input type="text" id="providerTtsModel" placeholder="Model (e.g. tts-1)"
+                <input type="text" id="providerSttModel" placeholder="Model (e.g. whisper-1)"
                   style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
-                <input type="text" id="providerTtsVoice" placeholder="Voice (e.g. alloy)"
-                  style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
-                <button data-action="saveProviderTts"
+                <button data-action="saveProviderStt"
                   style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
               </div>
-              <div id="providerTtsStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+              <div id="providerSttStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
             </div>
           </div>
         </div>
@@ -1169,6 +1221,18 @@
         <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
       </div>
       <div class="desk-drawer-body" id="drawerNodesBody" style="padding:0">
+        <div class="cdraw-empty">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Voice devices drawer -->
+    <div class="desk-drawer" id="drawerDevices">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="mic"></i></span>
+        <span class="drawer-label">Voice devices</span>
+        <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
+      </div>
+      <div class="desk-drawer-body" id="drawerDevicesBody" style="padding:0">
         <div class="cdraw-empty">Loading…</div>
       </div>
     </div>
@@ -1474,6 +1538,8 @@
 <script src="/code-projects.js"></script>
 <script src="/desktop.js"></script>
 <script src="/nodes.js"></script>
+<script src="/devices.js"></script>
+<script src="/flash-wizard.js"></script>
 <script src="/guide.js"></script>
 <script src="/init.js"></script>
 </body>

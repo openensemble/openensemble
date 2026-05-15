@@ -30,6 +30,15 @@
       ]
     },
     {
+      "title": "Voice devices",
+      "pages": [
+        { "slug": "voice-devices",         "title": "Voice devices" },
+        { "slug": "voice-device-flashing", "title": "Flashing voice devices" },
+        { "slug": "tts",                   "title": "Text-to-speech" },
+        { "slug": "stt",                   "title": "Speech-to-text" }
+      ]
+    },
+    {
       "title": "Setup & administration",
       "pages": [
         { "slug": "users",         "title": "Users & access" },

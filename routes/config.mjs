@@ -6,11 +6,37 @@
 import fs from 'fs';
 import path from 'path';
 import net from 'net';
+import { spawn } from 'child_process';
+import os from 'os';
 import {
-  requireAuth, requirePrivileged, loadConfig, modifyConfig, readBody, CFG_PATH, safeError,
+  requireAuth, requirePrivileged, loadConfig, modifyConfig, readBody, readBodyBuffer, CFG_PATH, safeError,
+  getAuthToken,
 } from './_helpers.mjs';
+import { getSessionMeta } from './_helpers/auth-sessions.mjs';
+import { getSlotAssignment } from '../lib/voice-devices.mjs';
+import { getVoiceRef } from '../lib/voice-refs.mjs';
+import { takeTestMp3 } from './devices.mjs';
 import { supportsVision } from '../lib/model-capabilities.mjs';
 import { log } from '../logger.mjs';
+
+/**
+ * Quick liveness probe for the local Piper TTS service. Used by GET
+ * /api/provider-config to populate `piperAvailable` so the Settings UI
+ * can hide the install button when Piper is already running and surface
+ * it otherwise. 500 ms timeout keeps the config endpoint snappy.
+ */
+async function probePiperAvailable(cfg) {
+  const url = cfg.piperUrl || 'http://127.0.0.1:5151/';
+  try {
+    const r = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(500) });
+    // Piper's http_server responds with 405 to GET on /, 200 on /v1/info,
+    // and 200/400 on POST /. Anything in 2xx-5xx means *something* is
+    // listening on the port. Connection-refused throws.
+    return r.status >= 200 && r.status < 600;
+  } catch {
+    return false;
+  }
+}
 
 // Tailored URL gate for admin-writable provider endpoints (LM Studio, local
 // Ollama). Looser than lib/url-guard.mjs:isUrlSafe — loopback and LAN ranges
@@ -101,6 +127,9 @@ export async function handle(req, res) {
       for (const [prov, { keyField }] of Object.entries(COMPAT_PROVIDERS)) {
         compatFlags[`${prov}KeySet`] = !!cfg[keyField];
       }
+      // Probe local Piper service (500 ms cap) so the UI can show "install"
+      // vs "running" status without a separate round-trip.
+      const piperAvailable = await probePiperAvailable(cfg);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         anthropicKeySet:   !!cfg.anthropicApiKey,
@@ -122,6 +151,10 @@ export async function handle(req, res) {
         ttsApiUrl:    cfg.ttsApiUrl   ?? '',
         ttsModel:     cfg.ttsModel    ?? '',
         ttsVoice:     cfg.ttsVoice    ?? '',
+        ttsProvider:  cfg.ttsProvider ?? 'openai',
+        piperAvailable,
+        elevenlabsKeySet: !!cfg.elevenlabsApiKey,
+        elevenlabsModel:  cfg.elevenlabsModel ?? '',
         sttKeySet:    !!cfg.sttApiKey,
         sttApiUrl:    cfg.sttApiUrl   ?? '',
         sttModel:     cfg.sttModel    ?? '',
@@ -202,6 +235,16 @@ export async function handle(req, res) {
           if (body.ttsApiUrl   !== undefined)      cfg.ttsApiUrl   = body.ttsApiUrl;
           if (body.ttsModel    !== undefined)      cfg.ttsModel    = body.ttsModel;
           if (body.ttsVoice    !== undefined)      cfg.ttsVoice    = body.ttsVoice;
+          if (body.ttsProvider !== undefined) {
+            // f5-tts was removed 2026-05-15 — the UI no longer offers it and
+            // the server-side handler below silently falls back to openai if
+            // an old config still has it. The handler block for f5-tts is
+            // kept as dead code for now in case we re-add it.
+            const allowed = ['openai', 'piper', 'elevenlabs'];
+            if (allowed.includes(body.ttsProvider)) cfg.ttsProvider = body.ttsProvider;
+          }
+          if (body.elevenlabsApiKey)               cfg.elevenlabsApiKey = body.elevenlabsApiKey;
+          if (body.elevenlabsModel !== undefined)  cfg.elevenlabsModel  = body.elevenlabsModel;
           if (body.sttApiKey)                      cfg.sttApiKey   = body.sttApiKey;
           if (body.sttApiUrl   !== undefined)      cfg.sttApiUrl   = body.sttApiUrl;
           if (body.sttModel    !== undefined)      cfg.sttModel    = body.sttModel;
@@ -219,6 +262,73 @@ export async function handle(req, res) {
       } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
       return true;
     }
+  }
+
+  // POST /api/provider-config/install-piper
+  // Admin-only. Spawns scripts/install-piper.sh, streams its stdout/stderr
+  // to the client as Server-Sent Events so the UI can show live progress
+  // ("Downloading model 40%…"). The same script is invoked non-interactively
+  // by install.sh on fresh install, so the install path is identical for
+  // CLI-bootstrapped users and post-install "Install Piper" UI clicks.
+  if (req.url === '/api/provider-config/install-piper' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res);
+    if (!authId) return true;
+
+    // Resolve the install script path relative to this file (works whether
+    // OE is run from /opt, ~/.openensemble, or a dev checkout).
+    const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
+                                    '..', 'scripts', 'install-piper.sh');
+    if (!fs.existsSync(scriptPath)) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `install-piper.sh not found at ${scriptPath}` }));
+      return true;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const child = spawn('/usr/bin/env', ['bash', scriptPath], {
+      // Run as the OE process owner so systemctl --user targets the right
+      // user manager (whoever runs OE is the user Piper installs for).
+      env: { ...process.env, HOME: os.homedir() },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const send = (event, data) => {
+      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+
+    send('start', { script: scriptPath });
+
+    const onLine = (kind) => (chunk) => {
+      // SSE doesn't tolerate raw newlines mid-event, so split and emit one
+      // event per line. Empty trailing line from the final chunk is dropped.
+      const lines = chunk.toString('utf8').split(/\r?\n/);
+      for (const line of lines) {
+        if (line) send('log', { kind, line });
+      }
+    };
+    child.stdout.on('data', onLine('stdout'));
+    child.stderr.on('data', onLine('stderr'));
+
+    child.on('exit', (code, signal) => {
+      send('done', { code, signal: signal ?? null, ok: code === 0 });
+      try { res.end(); } catch {}
+    });
+    child.on('error', (err) => {
+      send('done', { code: -1, error: err.message, ok: false });
+      try { res.end(); } catch {}
+    });
+
+    // Best-effort: kill the install if the client disconnects mid-stream.
+    // Idempotent re-run from the UI picks up wherever the previous run left
+    // off (venv exists / pip cached / model already downloaded).
+    req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
+    return true;
   }
 
 
@@ -685,18 +795,282 @@ export async function handle(req, res) {
     return true;
   }
 
+  // Lightweight read-only info about the configured TTS provider. Used by
+  // the Voice devices drawer to render the right voice-picker control
+  // (numeric speaker ID for piper, named voice for openai). No secrets
+  // returned; cheaper than re-fetching the full /api/config blob.
+  if (req.url === '/api/tts/info' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const cfg = loadConfig();
+    const ALLOWED = ['openai', 'piper', 'elevenlabs'];
+    const provider = ALLOWED.includes(cfg.ttsProvider) ? cfg.ttsProvider : 'openai';
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      provider,
+      defaultVoice: cfg.ttsVoice ?? null,
+      ...(provider === 'piper' ? { speakerCount: 904 } : {}),
+      ...(provider === 'elevenlabs' ? { keySet: !!cfg.elevenlabsApiKey } : {}),
+    }));
+    return true;
+  }
+
+  // List ElevenLabs voices (pre-made + user-cloned). Proxies the EL
+  // /v1/voices endpoint so the API key stays server-side; UI populates
+  // its per-slot dropdown from the response. Cached in-memory for 60 s
+  // to avoid hammering EL on every drawer reopen.
+  if (req.url === '/api/tts/elevenlabs/voices' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const cfg = loadConfig();
+    if (!cfg.elevenlabsApiKey) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'ElevenLabs API key not configured' }));
+      return true;
+    }
+    try {
+      const elRes = await fetch('https://api.elevenlabs.io/v1/voices', {
+        headers: { 'xi-api-key': cfg.elevenlabsApiKey },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!elRes.ok) throw new Error(`ElevenLabs returned ${elRes.status}`);
+      const data = await elRes.json();
+      const voices = (data.voices || []).map(v => ({
+        id: v.voice_id,
+        label: v.name,
+        category: v.category,  // 'premade' / 'cloned' / 'generated' / 'professional'
+        description: v.description ?? null,
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ voices }));
+    } catch (e) { safeError(res, e); }
+    return true;
+  }
+
   // TTS endpoint — generates audio from text using configured TTS provider
   if (req.url === '/api/tts' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
-    if (!cfg.ttsApiKey || !cfg.ttsApiUrl) {
+    // Three providers supported (f5-tts was removed 2026-05-15 — kept as
+    // dead-code branch below for revert convenience; selecting it is no
+    // longer possible from the UI and the config validator rejects it):
+    //   'openai'      — remote OpenAI-compatible (named voice)
+    //   'elevenlabs'  — remote ElevenLabs (voice_id, including user-cloned)
+    //   'piper'       — local libritts_r multi-speaker via piper-tts.service:5151
+    const ALLOWED = ['openai', 'piper', 'elevenlabs'];
+    const provider = ALLOWED.includes(cfg.ttsProvider) ? cfg.ttsProvider : 'openai';
+    if (provider === 'openai' && (!cfg.ttsApiKey || !cfg.ttsApiUrl)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'TTS provider not configured' }));
       return true;
     }
+    if (provider === 'elevenlabs' && !cfg.elevenlabsApiKey) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'ElevenLabs API key not configured' }));
+      return true;
+    }
     try {
-      const { text, lang } = JSON.parse(await readBody(req));
+      const { text, lang, wake_slot, voice: explicitVoice } = JSON.parse(await readBody(req));
       if (!text) throw new Error('text is required');
+      // Test-audio short-circuit: when the device echoes back a
+      // `__test_audio_XXX__` marker (planted by POST /api/devices/<id>/play-mp3),
+      // we return the cached MP3 directly without going through any TTS
+      // provider. The cache entry is one-shot (deleted on first read).
+      const trimmedText = text.trim();
+      if (/^__test_audio_[a-f0-9]+__$/.test(trimmedText)) {
+        const cached = takeTestMp3(trimmedText);
+        if (cached) {
+          console.log(`[tts] test-audio hit marker=${trimmedText} bytes=${cached.length}`);
+          // Stream raw audio/mpeg — libhelix on the device decodes chunks
+          // as they arrive over the wire. No JSON wrap, no base64 in
+          // either direction; firmware oe_tts feeds HTTP_EVENT_ON_DATA
+          // bytes straight into mp3_dec.
+          res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': cached.length });
+          res.end(cached);
+          return true;
+        }
+        console.warn(`[tts] test-audio marker=${trimmedText} missed cache, falling through to TTS`);
+        // Marker recognized but cache miss (expired or already consumed) —
+        // fall through to normal TTS so the device still gets something
+        // rather than hanging.
+      }
+      // Voice resolution order:
+      //   1. explicit `voice` body param (used by Settings → voice preview
+      //      to audition an unsaved value before committing it)
+      //   2. slot_assignments[wake_slot].ttsVoice for the device making
+      //      the request (voice-device + slot in body)
+      //   3. cfg.ttsVoice (server-global default)
+      //   4. 'alloy' for openai / '0' for piper (hardcoded fallback)
+      const defaultVoice =
+        provider === 'f5-tts' ? 'default-en' :
+        provider === 'piper' ? '0' :
+        provider === 'elevenlabs' ? '21m00Tcm4TlvDq8ikWAM' : // Rachel — EL stock voice id
+        'alloy';
+      let voice = cfg.ttsVoice || defaultVoice;
+      if (Number.isInteger(wake_slot)) {
+        const meta = getSessionMeta(getAuthToken(req));
+        if (meta?.deviceId) {
+          const a = getSlotAssignment(authId, meta.deviceId, wake_slot);
+          if (a?.ttsVoice) voice = a.ttsVoice;
+        }
+      }
+      if (typeof explicitVoice === 'string' && explicitVoice) voice = explicitVoice;
+      if (provider === 'elevenlabs') {
+        // ElevenLabs returns MP3 directly — no conversion step. voice is a
+        // voice_id (UUID-ish string). Default model 'eleven_turbo_v2_5' is
+        // their low-latency option; users can override via cfg.elevenlabsModel.
+        const elModel = cfg.elevenlabsModel || 'eleven_turbo_v2_5';
+        const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}`, {
+          method: 'POST',
+          headers: {
+            'xi-api-key': cfg.elevenlabsApiKey,
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text,
+            model_id: elModel,
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+          }),
+          signal: AbortSignal.timeout(30000),
+        });
+        if (!elRes.ok) {
+          const errBody = await elRes.text().catch(() => '');
+          throw new Error(`ElevenLabs ${elRes.status}: ${errBody.slice(0, 200)}`);
+        }
+        const elMp3 = Buffer.from(await elRes.arrayBuffer());
+        // ElevenLabs returns MP3 at 22050 or 44100 Hz. The device's I²S
+        // playback runs at 16 kHz (audio_io.h AUDIO_BUS_SAMPLE_RATE), so
+        // anything higher plays slow + pitched-down. Resample via ffmpeg
+        // before sending. Browser-side previews don't suffer this because
+        // <audio> handles arbitrary sample rates; only the on-device
+        // playback path needs the conversion. Could short-circuit when
+        // the request is from a browser-auth session, but the savings
+        // (~30 ms ffmpeg pass) aren't worth the branching.
+        const { spawn: spawnEl } = await import('child_process');
+        const ffEl = spawnEl('ffmpeg', [
+          '-loglevel', 'error',
+          '-f', 'mp3', '-i', 'pipe:0',
+          '-ac', '1', '-ar', '16000', '-b:a', '48k',
+          '-f', 'mp3', 'pipe:1',
+        ]);
+        const elChunks = [];
+        ffEl.stdout.on('data', c => elChunks.push(c));
+        const ffElPromise = new Promise((resolve, reject) => {
+          ffEl.on('error', reject);
+          ffEl.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
+        });
+        ffEl.stdin.end(elMp3);
+        await ffElPromise;
+        const elMp3_16k = Buffer.concat(elChunks);
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': elMp3_16k.length });
+        res.end(elMp3_16k);
+        return true;
+      }
+      if (provider === 'f5-tts') {
+        // Resolve `voice` (a refId string) to the WAV path + transcript.
+        // The built-in 'default-en' lives under models/tts/refs/; user
+        // uploads live under users/<owner>/voice-refs/. The owner for
+        // refId lookup is the AUTH user, not the slot's effective user —
+        // the device-paired user manages all voices for their device.
+        let refPath, refText;
+        if (voice === 'default-en') {
+          refPath = '/home/shawn/.openensemble/models/tts/refs/default-en.wav';
+          refText = 'Some call me nature, others call me mother nature.';
+        } else {
+          const ref = getVoiceRef(authId, voice);
+          if (!ref) {
+            // Fall back to default rather than 500 the device — better to
+            // hear *some* voice than nothing.
+            console.warn(`[tts] f5-tts: refId ${voice} not found, using default-en`);
+            refPath = '/home/shawn/.openensemble/models/tts/refs/default-en.wav';
+            refText = 'Some call me nature, others call me mother nature.';
+          } else {
+            refPath = ref.wavPath;
+            refText = ref.transcript;
+          }
+        }
+        const f5Url = cfg.f5ttsUrl || 'http://127.0.0.1:5152/tts';
+        // F5-TTS clones cleanly on most short prompts but >40s of generation
+        // gets slow on CPU; OE's voice replies are short so this is fine.
+        const f5Res = await fetch(f5Url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, ref_path: refPath, ref_text: refText }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!f5Res.ok) {
+          const errBody = await f5Res.text().catch(() => '');
+          throw new Error(`F5-TTS returned ${f5Res.status}: ${errBody.slice(0, 200)}`);
+        }
+        const wavBuf = Buffer.from(await f5Res.arrayBuffer());
+        const { spawn } = await import('child_process');
+        const ff = spawn('ffmpeg', [
+          '-loglevel', 'error',
+          '-f', 'wav', '-i', 'pipe:0',
+          // Device I²S is fixed at 16 kHz (audio_io.h AUDIO_BUS_SAMPLE_RATE).
+          // Sending higher-rate MP3 → libhelix decodes at source rate →
+          // played into a 16 kHz I²S pipeline → audio is slower + pitched
+          // down. Resample server-side to match the bus.
+          '-ac', '1', '-ar', '16000', '-b:a', '48k',
+          '-f', 'mp3', 'pipe:1',
+        ]);
+        const chunks = [];
+        ff.stdout.on('data', c => chunks.push(c));
+        const ffPromise = new Promise((resolve, reject) => {
+          ff.on('error', reject);
+          ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
+        });
+        ff.stdin.end(wavBuf);
+        await ffPromise;
+        const mp3Buf = Buffer.concat(chunks);
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': mp3Buf.length });
+        res.end(mp3Buf);
+        return true;
+      }
+      if (provider === 'piper') {
+        // Piper HTTP server speaks {text, speaker_id} → WAV. We translate
+        // OpenAI-shape, run through ffmpeg to get MP3 (matches the device's
+        // existing decode path), and return base64 + audio/mpeg.
+        const speakerId = Number.parseInt(voice, 10);
+        const piperUrl = cfg.piperUrl || 'http://127.0.0.1:5151/';
+        const pRes = await fetch(piperUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            speaker_id: Number.isFinite(speakerId) ? speakerId : 0,
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!pRes.ok) throw new Error(`Piper returned ${pRes.status}`);
+        const wavBuf = Buffer.from(await pRes.arrayBuffer());
+        // WAV → MP3 via ffmpeg subprocess. Pipe in, pipe out. Avoids any
+        // disk I/O. 64 kbps mono is fine for speech and keeps the base64
+        // payload roughly the same size as OpenAI's tts-1 output.
+        const { spawn } = await import('child_process');
+        const ff = spawn('ffmpeg', [
+          '-loglevel', 'error',
+          '-f', 'wav', '-i', 'pipe:0',
+          // Device I²S is fixed at 16 kHz (audio_io.h AUDIO_BUS_SAMPLE_RATE).
+          // Sending higher-rate MP3 → libhelix decodes at source rate →
+          // played into a 16 kHz I²S pipeline → audio is slower + pitched
+          // down. Resample server-side to match the bus.
+          '-ac', '1', '-ar', '16000', '-b:a', '48k',
+          '-f', 'mp3', 'pipe:1',
+        ]);
+        const chunks = [];
+        ff.stdout.on('data', c => chunks.push(c));
+        const ffPromise = new Promise((resolve, reject) => {
+          ff.on('error', reject);
+          ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
+        });
+        ff.stdin.end(wavBuf);
+        await ffPromise;
+        const mp3Buf = Buffer.concat(chunks);
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': mp3Buf.length });
+        res.end(mp3Buf);
+        return true;
+      }
+      // OpenAI provider (default / legacy)
       const ttsRes = await fetch(cfg.ttsApiUrl, {
         method: 'POST',
         headers: {
@@ -705,7 +1079,7 @@ export async function handle(req, res) {
         },
         body: JSON.stringify({
           model: cfg.ttsModel || 'tts-1',
-          voice: cfg.ttsVoice || 'alloy',
+          voice,
           input: text,
           ...(lang ? { language: lang } : {}),
         }),
@@ -713,9 +1087,9 @@ export async function handle(req, res) {
       });
       if (!ttsRes.ok) throw new Error(`TTS API returned ${ttsRes.status}`);
       const audioBuffer = Buffer.from(await ttsRes.arrayBuffer());
-      const mimeType = ttsRes.headers.get('content-type') || 'audio/mp3';
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ audio: audioBuffer.toString('base64'), mimeType }));
+      const mimeType = ttsRes.headers.get('content-type') || 'audio/mpeg';
+      res.writeHead(200, { 'Content-Type': mimeType, 'Content-Length': audioBuffer.length });
+      res.end(audioBuffer);
     } catch (e) { safeError(res, e); }
     return true;
   }
@@ -732,7 +1106,8 @@ export async function handle(req, res) {
       const ctype = req.headers['content-type'] || '';
       const match = ctype.match(/boundary=(?:"?)([^";]+)/);
       if (!match) throw new Error('Expected multipart/form-data with a boundary');
-      const raw = await readBody(req);
+      // Binary-safe read — readBody() would UTF-8-mangle the WAV bytes.
+      const raw = await readBodyBuffer(req);
       // Walk parts, pick the first file part named audio/* or the first audio part
       const boundary = match[1];
       const sep = Buffer.from('--' + boundary);
@@ -764,6 +1139,15 @@ export async function handle(req, res) {
         }
       }
       if (!audioBuf) throw new Error('No audio part in request');
+
+      // Debug dump: save the most recent upload so we can inspect malformed
+      // WAVs / silence / clipped audio when STT rejects with "could not
+      // process file". Overwrites previous /tmp/oe-stt-last.* every call.
+      try {
+        const fs = await import('fs');
+        fs.writeFileSync(`/tmp/oe-stt-last-${audioName.replace(/[^\w.-]/g, '_')}`, audioBuf);
+        console.log(`[stt] dump: ${audioBuf.length} bytes (${audioMime}) → /tmp/oe-stt-last-*`);
+      } catch (e) { console.warn('[stt] dump failed:', e.message); }
 
       // Send to configured STT provider (OpenAI-compatible multipart)
       const form = new FormData();

@@ -90,11 +90,11 @@ export async function handle(req, res) {
   if (req.url === '/api/sessions' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const currentToken = getAuthToken(req);
-    // Node-agent tokens (kind: 'node') represent long-lived remote machine
-    // registrations. They're managed by the Nodes UI; revoking one from the
-    // Profile page would silently break the remote node. Hide them here.
+    // Persistent-device tokens (nodes, voice devices) represent long-lived
+    // hardware registrations. They're managed by their own Settings pages;
+    // revoking one from the Profile page would silently break the device.
     const sessions = getUserSessions(authId)
-      .filter(s => s.kind !== 'node')
+      .filter(s => s.kind !== 'node' && s.kind !== 'voice-device')
       .map(s => ({
         ...s,
         current: currentToken?.startsWith(s.tokenPrefix.replace('…', '')) ?? false,

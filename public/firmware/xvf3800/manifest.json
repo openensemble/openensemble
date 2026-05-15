@@ -1,0 +1,14 @@
+{
+  "chip": "xvf3800",
+  "version": "1.0.7",
+  "variant": "ha_inthost_lr48_sqr_i2c",
+  "acceptedVendorIds": [8369, 10374],
+  "acceptedVendorIdsHex": ["0x20b1 (XMOS DFU recovery)", "0x2886 (Seeed XVF3800 runtime — DFU-while-running)"],
+  "transport": "dfu",
+  "preferInterface": "Upgrade",
+  "forceAlt": 1,
+  "transferSize": 4096,
+  "file": "xvf_ha_v1_0_7.bin",
+  "size": 888832,
+  "notes": "formatBCE HA variant: XVF is I²S master at 48 kHz stereo, ESP is slave. Matches the audio_io config in main firmware. The previously-served plain i2s_v1.0.7 was the wrong variant for this carrier (XVF expects ESP-master at 16 kHz; ESP firmware is configured slave-48k). Mute-button-hold DFU mode works for recovery; runtime DFU is preferred."
+}

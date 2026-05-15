@@ -42,6 +42,7 @@ training-data/
 training/
 models/
 vendor/
+!public/vendor/
 unsloth_compiled_cache/
 venv/
 *.safetensors

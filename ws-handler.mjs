@@ -10,7 +10,16 @@
  */
 
 import { WebSocketServer } from 'ws';
+import { randomBytes } from 'crypto';
 import { getAgentScope } from './agents.mjs';
+
+// Boot identity — fresh random value every server start. Sent to clients on
+// pong + agent_list so they can detect server restart unambiguously even
+// when their TCP socket appears healthy. Required for the voice-device:
+// esp_websocket_client_is_connected() returns cached state and doesn't
+// notice a server restart on its own.
+const BOOT_ID = randomBytes(8).toString('hex');
+console.log(`[ws] boot_id: ${BOOT_ID}`);
 import { handleChatMessage, abortChat, getActiveStreams } from './chat-dispatch.mjs';
 import { getActiveTasks as getActiveBgTasks } from './background-tasks.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer } from './sessions.mjs';
@@ -19,6 +28,23 @@ import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
   getSessionUserId, getAuthToken, resolveShareGroup,
 } from './routes/_helpers.mjs';
+import { getSessionMeta, setSessionDeviceId } from './routes/_helpers/auth-sessions.mjs';
+import { getSlotAssignment, findDeviceByTokenPrefix, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice } from './lib/voice-devices.mjs';
+import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
+
+// Backfill ws._deviceId for voice-device sessions that were created before
+// the deviceId was stored on the session record (pre-2026-05-12). Looks up
+// the device by 8-char token prefix and writes the result back into the
+// session so subsequent auths skip this. Returns the deviceId or null.
+function resolveDeviceId(token, meta) {
+  if (!meta || meta.kind !== 'voice-device') return null;
+  if (meta.deviceId) return meta.deviceId;
+  if (!token) return null;
+  const dev = findDeviceByTokenPrefix(meta.userId, token.slice(0, 8));
+  if (!dev) return null;
+  setSessionDeviceId(token, dev.id);
+  return dev.id;
+}
 import { log } from './logger.mjs';
 
 // maxPayload: cap each frame at 2 MiB so a malicious client can't force the
@@ -69,6 +95,29 @@ export function initWs(httpServer) {
   _nodeWss = initNodeWss();
   _termWss = initTerminalWss();
 
+  attachWsUpgrade(httpServer);
+
+  // Server-side heartbeat — keeps mobile connections alive across NAT/proxy
+  const heartbeat = setInterval(() => {
+    for (const client of _wss.clients) {
+      if (client._alive === false) { client.terminate(); continue; }
+      client._alive = false;
+      client.ping();
+    }
+  }, WS_PING_INTERVAL);
+  _wss.on('close', () => clearInterval(heartbeat));
+
+  _wss.on('connection', onConnection);
+}
+
+/**
+ * Attach the WS upgrade handler to a second (HTTP or HTTPS) server, sharing
+ * the WebSocketServer instances created in initWs(). Used by server.mjs to
+ * wire the HTTPS listener (port 3739, self-signed cert) into the same WS
+ * routing as the HTTP listener (3737). Call initWs() first, then call this
+ * for each additional server you want to share WS routing.
+ */
+export function attachWsUpgrade(httpServer) {
   httpServer.on('upgrade', (req, socket, head) => {
     if (!isSameOriginWs(req)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -84,18 +133,6 @@ export function initWs(httpServer) {
       _wss.handleUpgrade(req, socket, head, ws => _wss.emit('connection', ws, req));
     }
   });
-
-  // Server-side heartbeat — keeps mobile connections alive across NAT/proxy
-  const heartbeat = setInterval(() => {
-    for (const client of _wss.clients) {
-      if (client._alive === false) { client.terminate(); continue; }
-      client._alive = false;
-      client.ping();
-    }
-  }, WS_PING_INTERVAL);
-  _wss.on('close', () => clearInterval(heartbeat));
-
-  _wss.on('connection', onConnection);
 }
 
 function onConnection(ws, req) {
@@ -109,10 +146,16 @@ function onConnection(ws, req) {
   // access logs. Browser WS opens at `/` (no token) so the cookie path works;
   // node-agent / CLI / scripts must use first-message auth.
   const cookieOrHeaderToken = getAuthToken(req);
-  const cookieUserId = cookieOrHeaderToken ? getSessionUserId(cookieOrHeaderToken) : null;
+  const cookieMeta = cookieOrHeaderToken ? getSessionMeta(cookieOrHeaderToken) : null;
+  const cookieUserId = cookieMeta?.userId ?? null;
 
   if (cookieUserId) {
     ws._userId = cookieUserId;
+    // Voice-device sessions stash the source device-id so chat messages can
+    // resolve slot_assignments[wake_slot] without a per-message token lookup.
+    // Backfilled for pre-2026-05-12 voice-device sessions that didn't capture
+    // deviceId at creation time. Null for browser sessions.
+    ws._deviceId = resolveDeviceId(cookieOrHeaderToken, cookieMeta);
     ws._authenticated = true;
     if (!enforceWsCap(ws)) return;
   } else {
@@ -130,7 +173,7 @@ function onConnection(ws, req) {
     console.log('[ws] client connected, user:', ws._userId);
     log.info('ws', 'client connected', { userId: ws._userId });
     const userAgents = getAgentsForUser(ws._userId);
-    ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire) }));
+    ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire), boot_id: BOOT_ID }));
     for (const agent of userAgents) {
       const messages = loadSession(sessionKey(ws._userId, agent.id), 60);
       const pendingStream = getStreamBuffer(sessionKey(ws._userId, agent.id));
@@ -144,7 +187,11 @@ function onConnection(ws, req) {
     }
   }
 
-  if (ws._authenticated) sendInitialData();
+  if (ws._authenticated) {
+    sendInitialData();
+    maybePushVoiceConfig(ws);
+    if (ws._deviceId) touchDevice(ws._userId, ws._deviceId);
+  }
 
   ws.on('message', async (raw) => {
    try {
@@ -166,16 +213,20 @@ function onConnection(ws, req) {
         }
         return;
       }
-      const userId = getSessionUserId(msg.token);
+      const meta = getSessionMeta(msg.token);
+      const userId = meta?.userId ?? null;
       if (!userId) {
         ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
         ws.close(4001, 'Unauthorized');
         return;
       }
       ws._userId = userId;
+      ws._deviceId = resolveDeviceId(msg.token, meta);
       ws._authenticated = true;
       if (!enforceWsCap(ws)) return;
       sendInitialData();
+      maybePushVoiceConfig(ws);
+      if (ws._deviceId) touchDevice(ws._userId, ws._deviceId);
       return;
     }
 
@@ -187,7 +238,18 @@ function onConnection(ws, req) {
     }
 
     if (msg.type === 'ping') {
-      ws.send(JSON.stringify({ type: 'pong' }));
+      ws.send(JSON.stringify({ type: 'pong', boot_id: BOOT_ID }));
+      return;
+    }
+
+    // Voice-device ack for a server-pushed ww_upload. Routed by deviceId
+    // because slot indexes aren't unique across devices. handleWwUploadAck
+    // resolves the matching pending entry in lib/voice-config.mjs so
+    // pushConfigToDevice can proceed to the next slot.
+    if (msg.type === 'ww_upload_ack') {
+      if (ws._deviceId && Number.isInteger(msg.slot)) {
+        handleWwUploadAck(ws._deviceId, msg.slot, !!msg.ok, msg.err);
+      }
       return;
     }
 
@@ -228,12 +290,49 @@ function onConnection(ws, req) {
       }
       const textPreview = typeof msg.text === 'string' ? msg.text.slice(0, 50) : '(no text)';
       console.log('[chat] received, agent:', msg.agent, 'user:', ws._userId, 'text:', textPreview);
+      const wakeSlot = Number.isInteger(msg.wake_slot) ? msg.wake_slot : null;
+      // Resolve the effective user upfront so onEvent can broadcast chat
+      // events to that user's WS connections (their browser tabs). Without
+      // this, a wake-slot bound to user B routes the chat through B's
+      // account server-side but the events still go only to A's WSes,
+      // leaving B's UI silently empty.
+      let effectiveUserId = ws._userId;
+      if (ws._deviceId && wakeSlot !== null) {
+        const a = getSlotAssignment(ws._userId, ws._deviceId, wakeSlot);
+        if (a) effectiveUserId = a.ownerUserId;
+      }
       await handleChatMessage({
         userId:     ws._userId,
         agentId:    msg.agent,
         text:       msg.text,
         attachment: msg.attachment,
-        onEvent: (e) => sendToUser(ws._userId, e),
+        // Source hint — voice-device chats get a slim tool subset for low
+        // latency. See chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST.
+        source:     typeof msg.source === 'string' ? msg.source : null,
+        // Voice-device routing context: deviceId comes from the auth session;
+        // wakeSlot is set on the chat message by the firmware when a wake
+        // word fires. chat-dispatch resolves slot_assignments and dispatches
+        // as the slot's owner user (running their cortex memory + agents).
+        deviceId:   ws._deviceId,
+        wakeSlot:   wakeSlot,
+        // Chat events fan out two ways:
+        //   (1) Back to the originating ws — the device gets TTS chunks,
+        //       status updates, etc. regardless of whose user is "acting."
+        //   (2) Broadcast to all of the EFFECTIVE user's other WSes so the
+        //       chat history shows up in their browser tabs.
+        // When effectiveUserId == ws._userId (single-user case), step (2)
+        // delivers to admin's other browser tabs the same way as before.
+        onEvent: (e) => {
+          if (ws.readyState === ws.OPEN) {
+            try { ws.send(JSON.stringify(e)); } catch {}
+          }
+          for (const client of _wss.clients) {
+            if (client === ws) continue;
+            if (client._userId === effectiveUserId && client.readyState === client.OPEN) {
+              try { client.send(typeof e === 'string' ? e : JSON.stringify(e)); } catch {}
+            }
+          }
+        },
         onBroadcast: broadcastAgentList,
         onNotify: (fromUserId, agentId, notify) => {
           if (ws.readyState === ws.OPEN) emitAgentNotification(fromUserId, agentId, notify);
@@ -297,6 +396,72 @@ export function sendToUser(userId, msg) {
     }
   }
   return delivered;
+}
+
+/**
+ * Send a message to a specific voice-device's WS connection. Returns
+ * the count of frames sent — 0 means the device is offline or unknown.
+ * Used for OTA wake-word delivery (ww_upload) and any future device-
+ * scoped pushes.
+ */
+export function sendToDevice(deviceId, msg) {
+  if (!_wss || !deviceId) return 0;
+  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  let delivered = 0;
+  for (const client of _wss.clients) {
+    if (client.readyState === client.OPEN && client._deviceId === deviceId) {
+      try { client.send(data); delivered++; } catch {}
+    }
+  }
+  return delivered;
+}
+
+/**
+ * True if this voice-device id has at least one OPEN WS client right now.
+ * Source of truth for the live "connected" indicator in the Voice Devices UI.
+ * Cheap — iterates the WS client set, no per-call DB read.
+ */
+export function isDeviceOnline(deviceId) {
+  if (!_wss || !deviceId) return false;
+  for (const client of _wss.clients) {
+    if (client.readyState === client.OPEN && client._deviceId === deviceId) return true;
+  }
+  return false;
+}
+
+/**
+ * If this client is a voice-device WS and the user's voice-config has
+ * advanced since the last push to this device, OTA-resend the wake words
+ * for every configured slot. Skips silently for browser sessions and for
+ * voice devices already on the current version (avoids unnecessary
+ * SPIFFS writes on every reconnect).
+ *
+ * Async because pushConfigToDevice serializes per-slot sends and awaits
+ * the device's ww_upload_ack between them. Only marks the version pushed
+ * if EVERY configured slot acked ok — a single offline/timeout/failure
+ * leaves the version stale so the next reconnect retries the rest.
+ */
+async function maybePushVoiceConfig(ws) {
+  if (!ws?._deviceId || !ws?._userId) return;
+  try {
+    const cfg = readVoiceConfig(ws._userId);
+    const lastPushed = getDeviceVoiceConfigVersion(ws._userId, ws._deviceId);
+    if (lastPushed === cfg.version) return;
+    const r = await pushConfigToDevice(ws._deviceId, ws._userId);
+    const fullySucceeded =
+      r.pushedSlots.length > 0 &&
+      r.offlineSlots.length === 0 &&
+      r.failedSlots.length === 0 &&
+      r.ackedSlots.length === r.pushedSlots.length;
+    if (fullySucceeded) {
+      markVoiceConfigPushed(ws._userId, ws._deviceId, cfg.version);
+      console.log(`[ws] voice-config v${cfg.version} pushed+acked by ${ws._deviceId} (slots ${r.ackedSlots.join(',')})`);
+    } else if (r.pushedSlots.length > 0) {
+      console.warn(`[ws] voice-config v${cfg.version} partial push to ${ws._deviceId}: acked=${r.ackedSlots.join(',') || '-'} failed=${r.failedSlots.map(f=>f.slot+':'+f.err).join(',') || '-'} offline=${r.offlineSlots.join(',') || '-'}`);
+    }
+  } catch (e) {
+    console.warn(`[ws] voice-config push to ${ws._deviceId} failed: ${e.message}`);
+  }
 }
 
 // ── Cross-user agent notifications ───────────────────────────────────────────

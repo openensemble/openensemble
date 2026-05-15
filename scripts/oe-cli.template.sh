@@ -11,6 +11,15 @@ set -euo pipefail
 INSTALL_DIR="__INSTALL_DIR__"
 SERVICE="openensemble.service"
 
+# Make `systemctl --user` work even when invoked from a shell that started
+# before lingering was enabled (e.g. the same SSH session that ran
+# install.sh). Without these env vars, systemctl --user has no D-Bus to
+# talk to and is-active returns empty stdout — which the status branch
+# below interprets as "not installed" and confuses brand-new users.
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+[ -S "$XDG_RUNTIME_DIR/bus" ] && : "${DBUS_SESSION_BUS_ADDRESS:=unix:path=$XDG_RUNTIME_DIR/bus}" && export DBUS_SESSION_BUS_ADDRESS
+
 cmd="${1:-status}"
 shift || true
 

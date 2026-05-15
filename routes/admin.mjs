@@ -17,6 +17,7 @@ import {
   setSessionCookie,
   getDefaultChildSafetyPrompt, safeId, getUserDir, safeError,
   CFG_PATH, USERS_PATH, ACTIVITY_DIR, NOTES_PATH, EXPENSES_DB, EXPENSE_GROUPS_PATH,
+  getAgentsForUser, getUserCoordinatorAgentId,
 } from './_helpers.mjs';
 import { getDefaultRoles } from '../roles.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
@@ -744,6 +745,28 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ prompt: getDefaultChildSafetyPrompt() }));
+    return true;
+  }
+
+  // ── GET /api/admin/users/:id/agents — admin-only, lists another user's agents
+  // Used by the voice-device slot-assignment UI: when the admin picks user B
+  // as the owner of a wake-word slot, the UI needs user B's agent roster
+  // (not admin's) to populate the "which agent" dropdown.
+  const agentsForUserMatch = req.url.match(/^\/api\/admin\/users\/(user_[\w-]+)\/agents$/);
+  if (agentsForUserMatch && req.method === 'GET') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const targetId = agentsForUserMatch[1];
+    if (!loadUsers().find(u => u.id === targetId)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'User not found' }));
+      return true;
+    }
+    const agents = getAgentsForUser(targetId).map(a => ({
+      id: a.id, name: a.name, role: a.role ?? null,
+    }));
+    const coordinatorId = getUserCoordinatorAgentId(targetId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ agents, coordinatorId }));
     return true;
   }
 

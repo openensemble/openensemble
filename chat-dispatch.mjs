@@ -11,6 +11,8 @@ import { getPendingEmail, clearPendingEmail, executePendingEmail } from './skill
 import { getPendingProven, clearPendingProven, executePendingProven } from './skills/profiles/execute.mjs';
 import { getRoleManifest, getRoleAssignments, setRoleAssignment, listRoles } from './roles.mjs';
 import { interceptScheduling } from './lib/scheduler-intent.mjs';
+import { getSlotAssignment } from './lib/voice-devices.mjs';
+import { sendToDevice } from './ws-handler.mjs';
 import { log } from './logger.mjs';
 import {
   loadConfig, loadUsers, saveUsers, getAgentsForUser, detectNewsPref, detectRenameCommand,
@@ -89,16 +91,189 @@ export function abortAllChats() {
  * @param {function} [opts.onBroadcast] - Called when agent list may have changed (e.g. rename)
  * @param {function} [opts.onNotify]  - Called for __notify cross-user events
  */
+// Slim tool subset used when source === 'voice-device'. The voice-device
+// firmware (XVF3800 + ESP32-S3) chats over WS and waits synchronously for
+// the agent reply — with the full ~80-tool web role catalog and gpt-5.5,
+// a "what time is it" round-trip takes 60+ seconds because the model
+// reasons through every tool. Voice queries are short and shouldn't need
+// the full surface, so we clamp to a minimal allowlist: web search, memory
+// recall, agent delegation, basic notes.
+//
+// LONGER-TERM REPLACEMENT (see project_smart_tool_selection memory):
+// run the Cortex plan classifier on rawText, map intent → tool subset, and
+// drop this hardcoded allowlist. Until then, voice-device chats use this
+// to stay snappy.
+const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
+  'web_search',
+  'web_fetch',
+  'memory_search',
+  'memory_save',
+  'ask_agent',
+  'list_tasks',
+  'create_task',
+]);
+
+/**
+ * Fast-path regex router for voice-device control intents. Runs BEFORE the
+ * full LLM dispatch so common commands like "volume up" / "pause" / "stop"
+ * complete in ~1 ms with no token cost.
+ *
+ * Returns null when nothing matches → caller falls through to the normal
+ * chat pipeline. Returns an intent object on match; the executor below
+ * acts on it and tells the caller whether to `replaces` the in-flight
+ * agent reply (stop) or leave it alone (volume / pause / resume).
+ *
+ * Keep the regex set small and obvious — if natural-phrasing misses
+ * become a real problem, layer a tiny LLM classifier on top, don't
+ * inflate the regex set into something unreadable.
+ */
+function classifyVoiceIntent(text) {
+  if (typeof text !== 'string') return null;
+  const t = text.toLowerCase().trim().replace(/[.,!?]+$/, '');
+  if (!t) return null;
+
+  // Absolute "volume N%" / "set volume to N" — match before the bare
+  // up/down regex so "volume 50" doesn't get swallowed as "volume … up".
+  const setM = t.match(/^(?:set\s+)?volume(?:\s+to)?\s+(\d{1,3})\s*%?$/);
+  if (setM) {
+    const pct = Math.max(0, Math.min(100, Number(setM[1])));
+    return { type: 'volume_set', pct };
+  }
+  if (/^(volume\s+up|louder|turn\s+(it\s+)?up)\b/.test(t))   return { type: 'volume_up' };
+  if (/^(volume\s+down|quieter|softer|turn\s+(it\s+)?down)\b/.test(t)) return { type: 'volume_down' };
+
+  if (/^(mute|be\s+quiet)\b/.test(t))     return { type: 'mute' };
+  if (/^unmute\b/.test(t))                return { type: 'unmute' };
+
+  if (/^pause\b/.test(t))                 return { type: 'pause' };
+  if (/^(resume|continue|unpause)\b/.test(t)) return { type: 'resume' };
+
+  // Stop / cancel — barge-in firmware has already killed local audio; we
+  // mark this `replaces` so the chat pipeline doesn't generate a reply.
+  if (/^(stop|cancel|never\s*mind|shut\s+up|that('s|s)\s+enough)\b/.test(t)) {
+    return { type: 'stop' };
+  }
+
+  return null;
+}
+
+/**
+ * Execute a matched voice intent against the device. Returns
+ * { replaces: bool } — true means short-circuit the chat pipeline (don't
+ * run the LLM, don't generate a reply); false means we already handled
+ * the side effect but the caller can continue if desired (in practice
+ * we still short-circuit for all of these because they're terminal).
+ */
+function executeVoiceIntent(intent, deviceId) {
+  if (!deviceId) return { replaces: false };
+  switch (intent.type) {
+    case 'volume_up':
+      sendToDevice(deviceId, { type: 'set_volume', delta: 10 });
+      return { replaces: true };
+    case 'volume_down':
+      sendToDevice(deviceId, { type: 'set_volume', delta: -10 });
+      return { replaces: true };
+    case 'volume_set':
+      sendToDevice(deviceId, { type: 'set_volume', pct: intent.pct });
+      return { replaces: true };
+    case 'mute':
+      sendToDevice(deviceId, { type: 'set_volume', pct: 0 });
+      return { replaces: true };
+    case 'unmute':
+      // 80% matches the firmware default; if the user had a custom level
+      // before muting we lose it. Acceptable for v1 — next iteration
+      // could track pre-mute volume per device.
+      sendToDevice(deviceId, { type: 'set_volume', pct: 80 });
+      return { replaces: true };
+    case 'pause':
+      sendToDevice(deviceId, { type: 'pause_playback' });
+      return { replaces: true };
+    case 'resume':
+      sendToDevice(deviceId, { type: 'resume_playback' });
+      return { replaces: true };
+    case 'stop':
+      // Local audio was already stopped by the barge-in handler in
+      // firmware when the wake fired. Nothing else to do; just suppress
+      // generating a reply.
+      return { replaces: true };
+  }
+  return { replaces: false };
+}
+
 export async function handleChatMessage({
   userId,
   agentId: rawAgentId,
   text: rawText,
   attachment: rawAttachment,
+  source = null,
+  deviceId = null,
+  wakeSlot = null,
   onEvent,
   onBroadcast = () => {},
   onNotify    = () => {},
 }) {
-  const agentId = rawAgentId ?? getUserCoordinatorAgentId(userId);
+  // Wake-slot routing — household-shared voice device.
+  //
+  // When a voice device fires a wake word, the slot index identifies which
+  // *user* the resulting chat belongs to. slot 0 might be the admin saying
+  // "Sydney" → admin's coordinator; slot 1 might be a roommate saying
+  // "Hey Ensemble" → roommate's coordinator. Per-user data isolation comes
+  // for free because every downstream call (memory, sessions, agents,
+  // persist) is keyed off `userId`, so swapping it here is enough.
+  //
+  // Security: the assignment is set by the device-owner (admin) and lives
+  // in their voice-devices.json. ownerUserId in the assignment can be any
+  // user on this OE install. Trust model: same-install household admin.
+  //
+  // Fallback: when the slot is unassigned, run as the WS-authed user (the
+  // device's pairing user) and use the message's agent field.
+  let effectiveUserId = userId;
+  let agentId = rawAgentId ?? null;
+  if (deviceId && Number.isInteger(wakeSlot)) {
+    const assignment = getSlotAssignment(userId, deviceId, wakeSlot);
+    if (assignment) {
+      effectiveUserId = assignment.ownerUserId;
+      agentId = assignment.agentId ?? null;
+      console.log(`[chat] voice-device slot=${wakeSlot} device=${deviceId} auth_user=${userId} acting_as=${effectiveUserId} agent=${agentId ?? '(coordinator)'}`);
+    }
+  }
+  userId = effectiveUserId;
+  agentId = agentId ?? getUserCoordinatorAgentId(userId);
+
+  // Fast-path: voice-device control intents bypass the LLM entirely.
+  // "sydney, volume up" / "pause" / "stop" → regex match → WS message
+  // sent to the device, no chat dispatched. Runs only for source ===
+  // 'voice-device' so a typed "stop" in a browser chat is still treated
+  // as a normal message. Returns immediately on match.
+  if (source === 'voice-device' && typeof rawText === 'string') {
+    const intent = classifyVoiceIntent(rawText);
+    if (intent) {
+      const { replaces } = executeVoiceIntent(intent, deviceId);
+      console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);
+      if (replaces) {
+        // Short audible confirmation so the user hears that the device
+        // got it. Without this, "sydney stop" / "sydney volume 50" applies
+        // silently and the user can't tell if anything happened. Routes
+        // through the standard chat-event path → accumulator → sentence
+        // queue → tts_worker_task → MP3 over the same /api/tts pipeline
+        // a normal reply uses.
+        //
+        // Pause is the one place this is slightly awkward: the pause WS
+        // message arrives at the device on a separate path and may apply
+        // before the "okay" TTS finishes — accept the rough edge for v1
+        // rather than reordering or per-intent confirmation strings.
+        const confirmation = intent.type === 'pause' || intent.type === 'resume'
+          ? null  // self-evident audio cue — no spoken confirmation needed
+          : 'okay.';
+        if (confirmation) {
+          onEvent({ type: 'token', text: confirmation, agent: agentId });
+        }
+        onEvent({ type: 'done', agent: agentId });
+        return;
+      }
+    }
+  }
+
   const chatUser = getUser(userId);
   const isChild = chatUser?.role === 'child';
 
@@ -113,10 +288,22 @@ export async function handleChatMessage({
   // fallback — that path let any authed user chat with another user's agents so
   // long as the model passed their allowedModels gate, consuming the agent
   // owner's API credits. getAgentsForUser is the canonical visibility list.
-  const agent = getAgentsForUser(userId).find(a => a.id === agentId);
+  let agent = getAgentsForUser(userId).find(a => a.id === agentId);
   if (!agent) {
     onEvent({ type: 'error', message: `Unknown agent: ${agentId}`, agent: agentId });
     return;
+  }
+
+  // Voice-device source → slim tool subset. Reasoning effort kept at the
+  // agent default (typically 'high' for gpt-5.x — required for reliable
+  // custom tool calling). The tool reduction alone trimmed a "what time
+  // is it" round-trip from 61 s to ~3 s on sydney; dropping reasoning to
+  // low was tested but caused the model to skip useful tool calls.
+  if (source === 'voice-device' && Array.isArray(agent.tools) && agent.tools.length) {
+    const originalCount = agent.tools.length;
+    const slim = agent.tools.filter(t => VOICE_DEVICE_TOOL_ALLOWLIST.has(t.function?.name));
+    agent = { ...agent, tools: slim };
+    console.log(`[chat] voice-device source: tools ${originalCount} → ${slim.length}`);
   }
 
   // Model restriction check

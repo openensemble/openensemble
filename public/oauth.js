@@ -814,6 +814,36 @@ async function loadProviderConfig() {
     $('providerTtsModel').value = cfg.ttsModel  ?? '';
     $('providerTtsVoice').value = cfg.ttsVoice  ?? '';
     _ttsConfigured = !!cfg.ttsKeySet;
+    if ($('providerTtsProvider')) $('providerTtsProvider').value = cfg.ttsProvider ?? 'openai';
+    if ($('providerElevenlabsStatus')) $('providerElevenlabsStatus').textContent = cfg.elevenlabsKeySet ? 'ElevenLabs key is set.' : '';
+
+    // Piper local-service detection. piperAvailable comes from the server's
+    // GET /api/provider-config probe of 127.0.0.1:5151. Update the Piper
+    // field block's status line + install-button visibility before we
+    // call updateTtsProviderFields() (which only handles show/hide of the
+    // whole block by provider).
+    const piperStatus = $('providerPiperStatus');
+    const piperBtn    = $('providerPiperInstallBtn');
+    if (piperStatus && piperBtn) {
+      if (cfg.piperAvailable) {
+        piperStatus.textContent = 'Piper is running on 127.0.0.1:5151 — no further setup needed.';
+        piperStatus.style.color = 'var(--success, #4caf50)';
+        piperBtn.style.display = 'none';
+      } else {
+        piperStatus.textContent = 'Piper is not installed on this server. Install it locally (~80 MB download, no API key).';
+        piperStatus.style.color = 'var(--muted)';
+        piperBtn.style.display = '';
+      }
+    }
+
+    // Render only the input fields relevant to the selected TTS provider.
+    window.updateTtsProviderFields?.();
+
+    if ($('providerSttUrl')) {
+      $('providerSttStatus').textContent = cfg.sttKeySet ? 'STT configured.' : '';
+      $('providerSttUrl').value   = cfg.sttApiUrl ?? '';
+      $('providerSttModel').value = cfg.sttModel  ?? '';
+    }
 
     // Render the dynamic OpenAI-compat provider cards and auto-load their
     // model lists for any provider that has a key configured. Card rendering
@@ -1004,23 +1034,147 @@ async function saveProviderMicrosoftCreds() {
   } catch { showToast('Failed to save credentials'); }
 }
 
+// Show the input block for the currently-selected TTS provider, hide the
+// rest. Wired up via data-change-action on #providerTtsProvider in
+// index.html and called once on initial config load to sync with the
+// persisted ttsProvider value. Provider ids must match the field div
+// suffixes: providerTtsFields_<provider>.
+function updateTtsProviderFields() {
+  const sel = document.getElementById('providerTtsProvider');
+  if (!sel) return;
+  const active = sel.value || 'openai';
+  for (const p of ['openai', 'elevenlabs', 'piper']) {
+    const block = document.getElementById(`providerTtsFields_${p}`);
+    if (block) block.style.display = (p === active) ? '' : 'none';
+  }
+}
+window.updateTtsProviderFields = updateTtsProviderFields;
+
+// Install-Piper button handler. Posts to /api/provider-config/install-piper,
+// reads the SSE response, appends progress lines into the log pane.
+// On `done` with ok=true, refreshes provider config so the status line
+// flips to "running" and the button hides.
+async function installPiper() {
+  const btn = document.getElementById('providerPiperInstallBtn');
+  const log = document.getElementById('providerPiperLog');
+  const status = document.getElementById('providerPiperStatus');
+  if (!btn || !log) return;
+  btn.disabled = true;
+  btn.textContent = 'Installing…';
+  log.style.display = '';
+  log.textContent = '';
+  if (status) status.textContent = 'Installing Piper…';
+
+  let resp;
+  try {
+    resp = await fetch('/api/provider-config/install-piper', { method: 'POST' });
+  } catch (e) {
+    log.textContent += `\n[error] ${e.message}\n`;
+    btn.disabled = false;
+    btn.textContent = 'Install Piper (~80 MB)';
+    return;
+  }
+  if (!resp.ok || !resp.body) {
+    log.textContent += `\n[error] HTTP ${resp.status}\n`;
+    btn.disabled = false;
+    btn.textContent = 'Install Piper (~80 MB)';
+    return;
+  }
+
+  // Parse SSE: events look like "event: log\ndata: {...}\n\n".
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let success = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // Each event is terminated by a blank line.
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let evName = 'message';
+      const dataLines = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event: ')) evName = line.slice(7).trim();
+        else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+      }
+      let data = {};
+      try { data = JSON.parse(dataLines.join('\n')); } catch {}
+      if (evName === 'log') {
+        log.textContent += data.line + '\n';
+        log.scrollTop = log.scrollHeight;
+      } else if (evName === 'done') {
+        success = !!data.ok;
+        log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`;
+      }
+    }
+  }
+
+  if (success) {
+    if (status) {
+      status.textContent = 'Piper installed and running.';
+      status.style.color = 'var(--success, #4caf50)';
+    }
+    btn.style.display = 'none';
+    showToast?.('Piper installed');
+    // Re-fetch config so piperAvailable + UI block stay in sync if the
+    // user navigates away and comes back.
+    loadConfig?.();
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Retry install';
+    if (status) status.textContent = 'Piper install failed — see log below.';
+  }
+}
+window.installPiper = installPiper;
+
 async function saveProviderTts() {
+  const provider = $('providerTtsProvider')?.value || 'openai';
   const url   = $('providerTtsUrl').value.trim();
   const key   = $('providerTtsKey').value.trim();
   const model = $('providerTtsModel').value.trim();
   const voice = $('providerTtsVoice').value.trim();
+  const elKey = $('providerElevenlabsKey')?.value.trim() || '';
+  const elModel = $('providerElevenlabsModel')?.value.trim() || '';
   const body = {
+    ttsProvider: provider,
     ...(url && { ttsApiUrl: url }),
     ...(key && { ttsApiKey: key }),
     ttsModel: model, ttsVoice: voice,
+    ...(elKey && { elevenlabsApiKey: elKey }),
+    ...(elModel && { elevenlabsModel: elModel }),
   };
   try {
     await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body) });
     if (key) { $('providerTtsKey').value = ''; }
-    $('providerTtsStatus').textContent = key ? 'TTS configured.' : (url ? 'Settings saved.' : '');
-    _ttsConfigured = !!(key || url);
+    if (elKey && $('providerElevenlabsKey')) { $('providerElevenlabsKey').value = ''; }
+    $('providerTtsStatus').textContent = `Saved (provider: ${provider}).`;
+    if (elKey && $('providerElevenlabsStatus')) $('providerElevenlabsStatus').textContent = 'ElevenLabs key is set.';
+    _ttsConfigured = !!(key || url || elKey);
     showToast('TTS settings saved');
   } catch { showToast('Failed to save TTS settings'); }
 }
+
+async function saveProviderStt() {
+  const url   = $('providerSttUrl').value.trim();
+  const key   = $('providerSttKey').value.trim();
+  const model = $('providerSttModel').value.trim();
+  const body = {
+    ...(url && { sttApiUrl: url }),
+    ...(key && { sttApiKey: key }),
+    sttModel: model,
+  };
+  try {
+    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+    if (key) { $('providerSttKey').value = ''; }
+    $('providerSttStatus').textContent = key ? 'STT configured.' : (url ? 'Settings saved.' : '');
+    showToast('STT settings saved');
+  } catch { showToast('Failed to save STT settings'); }
+}
+window.saveProviderStt = saveProviderStt;
 

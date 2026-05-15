@@ -12,68 +12,17 @@
 import { randomBytes } from 'crypto';
 import { createSession, requireAuth, readBody } from '../_helpers.mjs';
 import { getLanAddress } from '../../discovery.mjs';
+import {
+  getRedeemIp,
+  isRedeemLockedOut,
+  recordRedeemFailure,
+  clearRedeemFailures,
+  noteGlobalFail,
+  isGlobalRedeemLocked,
+} from '../_helpers/pairing-ratelimit.mjs';
 
 const _pairingCodes = new Map(); // code → { userId, createdAt, nodeId? }
 const PAIRING_TTL = 10 * 60 * 1000; // 10 minutes
-
-// Per-IP lockout for /api/nodes/redeem. Global API rate-limit caps total
-// request rate, but a distributed attacker could still scan the keyspace
-// across many IPs. This adds a per-IP failure cap as a second layer:
-// if one IP racks up N wrong codes in the window, it gets 429 until reset.
-const _redeemFailures = new Map(); // ip → { count, firstFail }
-const REDEEM_WINDOW_MS = 10 * 60 * 1000;
-const REDEEM_MAX_FAILURES = 10;
-
-// Global fail counter — caps the *total* failure rate across all IPs so a
-// botnet can't trivially scan the keyspace by rotating addresses. When the
-// counter exceeds the threshold, redeem is disabled entirely until the
-// window resets. Legitimate redeem flow is one or two attempts per pairing,
-// so the threshold is far above any realistic legitimate signal.
-let _redeemGlobalFails = 0;
-let _redeemGlobalWindowStart = Date.now();
-const REDEEM_GLOBAL_WINDOW_MS = 60 * 60 * 1000; // 1 hour
-const REDEEM_GLOBAL_MAX_FAILURES = 200;
-
-function noteGlobalFail() {
-  const now = Date.now();
-  if (now - _redeemGlobalWindowStart > REDEEM_GLOBAL_WINDOW_MS) {
-    _redeemGlobalWindowStart = now;
-    _redeemGlobalFails = 0;
-  }
-  _redeemGlobalFails++;
-}
-function isGlobalRedeemLocked() {
-  const now = Date.now();
-  if (now - _redeemGlobalWindowStart > REDEEM_GLOBAL_WINDOW_MS) {
-    _redeemGlobalWindowStart = now;
-    _redeemGlobalFails = 0;
-    return false;
-  }
-  return _redeemGlobalFails >= REDEEM_GLOBAL_MAX_FAILURES;
-}
-
-setInterval(() => {
-  const cutoff = Date.now() - REDEEM_WINDOW_MS;
-  for (const [k, v] of _redeemFailures) if (v.firstFail < cutoff) _redeemFailures.delete(k);
-}, 60_000).unref?.();
-
-function getRedeemIp(req) {
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
-}
-
-function isRedeemLockedOut(ip) {
-  const entry = _redeemFailures.get(ip);
-  if (!entry) return false;
-  if (Date.now() - entry.firstFail > REDEEM_WINDOW_MS) { _redeemFailures.delete(ip); return false; }
-  return entry.count >= REDEEM_MAX_FAILURES;
-}
-
-function recordRedeemFailure(ip) {
-  const now = Date.now();
-  const entry = _redeemFailures.get(ip);
-  if (!entry || now - entry.firstFail > REDEEM_WINDOW_MS) _redeemFailures.set(ip, { count: 1, firstFail: now });
-  else entry.count++;
-}
 
 export function generatePairingCode(userId) {
   // Clean expired codes
@@ -157,7 +106,7 @@ export async function handlePairingRoutes(req, res, pathname) {
       res.end(JSON.stringify({ error: 'Invalid or expired pairing code' }));
       return true;
     }
-    _redeemFailures.delete(ip);
+    clearRedeemFailures(ip);
     const token = createSession(entry.userId, { kind: 'node' });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ token, userId: entry.userId }));

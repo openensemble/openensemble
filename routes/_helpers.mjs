@@ -255,6 +255,27 @@ export function readBody(req) {
   });
 }
 
+/**
+ * Binary-safe body reader. The default readBody() concatenates chunks into a
+ * string (`body += chunk`), which UTF-8-decodes them and replaces any byte
+ * >= 0x80 outside a valid multi-byte sequence with U+FFFD (0xEF 0xBF 0xBD).
+ * That destroys WAV/MP3/image uploads. Use this for any endpoint accepting
+ * application/octet-stream or multipart/form-data with binary parts.
+ */
+export function readBodyBuffer(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > BODY_LIMIT) { req.destroy(); reject(new Error('Request too large')); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 // ── Wire format ──────────────────────────────────────────────────────────────
 export function agentToWire(a) {
   return { id: a.id, name: a.name, emoji: a.emoji, model: a.model,
@@ -328,8 +349,9 @@ export {
 
 export {
   validatePassword, hashPassword, verifyPassword,
-  loadPersistedSessions, createSession, getSessionUserId, deleteSession,
-  clearUserSessions, clearUserSessionsExcept, clearUserNodeSessions, getUserSessions, revokeSessionByPrefix,
+  loadPersistedSessions, createSession, getSessionUserId, deleteSession, deleteSessionByToken,
+  clearUserSessions, clearUserSessionsExcept, clearUserNodeSessions, clearUserVoiceDeviceSessions,
+  getUserSessions, revokeSessionByPrefix, isPersistentDeviceKind,
   getAuthToken, getUrlToken, setSessionCookie, clearSessionCookie,
   createMediaToken, consumeMediaToken,
   createTicket, consumeTicket,

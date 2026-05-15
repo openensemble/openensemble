@@ -4,6 +4,7 @@
  */
 
 import http       from 'http';
+import https      from 'https';
 import fs         from 'fs';
 import path       from 'path';
 import os         from 'os';
@@ -24,7 +25,7 @@ import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
 import { getRateLimit } from './rate-limit.mjs';
 import {
-  initWs, broadcast, broadcastAgentList, broadcastToUsers, sendToUser,
+  initWs, attachWsUpgrade, broadcast, broadcastAgentList, broadcastToUsers, sendToUser,
   getWsClientCount, getNodeClientCount, closeAllWsClients,
 } from './ws-handler.mjs';
 
@@ -54,6 +55,10 @@ import { handle as handleReasonRuntime } from './routes/reason-runtime.mjs';
 import { handle as handlePlanRuntime }   from './routes/plan-runtime.mjs';
 import { handle as handleSharing }      from './routes/sharing.mjs';
 import { handle as handleNodes }        from './routes/nodes.mjs';
+import { handle as handleDevices }      from './routes/devices.mjs';
+import { handle as handleWakewords }    from './routes/wakewords.mjs';
+import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
+import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
 import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
@@ -77,7 +82,8 @@ try {
   if (_cfg?.logs) configureLogger(_cfg.logs);
 } catch {}
 
-const PORT    = 3737;
+const PORT     = 3737;
+const HTTPS_PORT = 3739;  // adjacent to 3737; 3738 reserved for the node-agent UDP discovery broadcast
 const UI_DIR  = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 const BASE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -182,6 +188,10 @@ const routeHandlers = [
   handleResearch,
   handleDesktop,
   handleNodes,
+  handleDevices,
+  handleWakewords,
+  handleVoiceRefs,
+  handleVoiceConfig,
   handleMisc,
   handleTelegram,
   handleTunnel,
@@ -201,6 +211,10 @@ const CSP = [
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data: blob: https: http:",
   "font-src 'self' data: https://fonts.gstatic.com",
+  // TTS audio previews + reminder chimes use data:audio/mp3 URIs. Without
+  // an explicit media-src this falls back to default-src 'self', which
+  // blocks data: schemes and silently breaks <audio> playback.
+  "media-src 'self' data: blob:",
   "connect-src 'self' ws: wss: https://unpkg.com https://cdn.jsdelivr.net",
   // Allow OE pages to frame OE resources — PDF viewer in the Documents
    // drawer mounts /api/shared-docs/<id>/view in an iframe. Foreign origins
@@ -261,13 +275,40 @@ const httpServer = http.createServer(async (req, res) => {
 
   // Serve static assets from public/ (css, js)
   const STATIC_TYPES = { '.css': 'text/css', '.js': 'text/javascript' };
-  const ext = path.extname(req.url);
+  const ext = path.extname(_pathname);
   if (STATIC_TYPES[ext]) {
-    const safeName = path.basename(req.url);
+    const safeName = path.basename(_pathname);
     const filePath = path.join(UI_DIR, safeName);
     if (fs.existsSync(filePath)) {
       const data = fs.readFileSync(filePath);
       res.writeHead(200, { 'Content-Type': STATIC_TYPES[ext], 'Cache-Control': 'public, max-age=3600' }); res.end(data); return;
+    }
+  }
+
+  // Nested static trees for the browser flash wizard: firmware bins +
+  // vendored libs (esptool-js + webdfu). Constrained to two prefixes and
+  // path-normalised so a request can't escape the public/ root.
+  {
+    const NESTED_TYPES = {
+      '.js':   'text/javascript',
+      '.json': 'application/json',
+      '.bin':  'application/octet-stream',
+      '.css':  'text/css',
+      '.map':  'application/json',
+    };
+    const url = _pathname;
+    if (NESTED_TYPES[ext] && (url.startsWith('/firmware/') || url.startsWith('/vendor/'))) {
+      const decoded = decodeURIComponent(url).replace(/^\/+/, '');
+      const filePath = path.resolve(UI_DIR, decoded);
+      if (filePath.startsWith(UI_DIR + path.sep) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+        const data = fs.readFileSync(filePath);
+        // No-cache: this tree is being actively iterated on (flash wizard
+        // bring-up). Browsers were holding stale webdfu.js + manifests
+        // across reloads. Revisit once the wizard stabilises.
+        res.writeHead(200, { 'Content-Type': NESTED_TYPES[ext], 'Cache-Control': 'no-cache' });
+        res.end(data);
+        return;
+      }
     }
   }
 
@@ -670,6 +711,36 @@ function _detectLanIp() {
 httpServer.listen(PORT, '0.0.0.0', () => {
   const lanIp = _detectLanIp();
   console.log(`\n🎵 OpenEnsemble running at http://${lanIp}:${PORT}\n`);
+
+  // HTTPS listener (port 3739) for browser features that need a secure
+  // context — WebUSB / Web Serial for the voice-device flash wizard.
+  // Self-signed cert lives at tls/{cert,key}.pem and is generated by
+  // install.sh; absence is non-fatal (HTTPS just doesn't come up). To
+  // use a real cert, drop your own pair into tls/ and restart.
+  try {
+    const certPath = path.join(BASE_DIR, 'tls', 'cert.pem');
+    const keyPath  = path.join(BASE_DIR, 'tls', 'key.pem');
+    if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+      const httpsServer = https.createServer(
+        { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) },
+        httpServer.listeners('request')[0],  // reuse the same request handler
+      );
+      attachWsUpgrade(httpsServer);
+      httpsServer.headersTimeout  = httpServer.headersTimeout;
+      httpsServer.requestTimeout  = httpServer.requestTimeout;
+      httpsServer.keepAliveTimeout = httpServer.keepAliveTimeout;
+      httpsServer.on('error', err => log.error('startup', 'HTTPS error', { err: err.message }));
+      httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
+        console.log(`🔒 HTTPS at https://${lanIp}:${HTTPS_PORT}  (self-signed — browser shows warning on first visit)`);
+        log.info('startup', 'HTTPS listening', { port: HTTPS_PORT });
+      });
+    } else {
+      log.info('startup', 'TLS cert not found — HTTPS disabled', { certPath });
+    }
+  } catch (e) {
+    log.warn('startup', 'HTTPS setup failed', { err: e.message });
+  }
+
   console.log('Agents:', listAgents().map(a => `${a.emoji} ${a.name}`).join('  '));
   console.log('Press Ctrl+C to stop\n');
   log.info('startup', 'Server listening', { port: PORT, agents: listAgents().length });

@@ -24,6 +24,7 @@ function toggleDrawer(drawerId, btnId) {
   if (drawerId === 'drawerExpenses') openExpensesDrawer();
   if (drawerId === 'drawerDashboard') loadDashboard();
   if (drawerId === 'drawerNodes') loadNodes();
+  if (drawerId === 'drawerDevices' && typeof loadDevices === 'function') loadDevices();
   if (drawerId === 'drawerGuide') openGuideDrawer();
 
   // Custom (skill-builder) drawers: run the manifest's initJs once per session.

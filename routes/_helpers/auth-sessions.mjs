@@ -73,19 +73,59 @@ function persistSessions() {
   } catch (e) { console.warn('[sessions] Failed to persist sessions:', e.message); }
 }
 
-// Hard ceiling on node-agent session lifetime. The sliding 7-day expiry below
-// extends a node session every time it authenticates, which means a stolen
-// node token would otherwise be valid forever. Capping at 90 days from
-// initial mint forces re-pairing periodically.
+// Hard ceiling on persistent-device session lifetime (nodes, voice devices).
+// The sliding 7-day expiry below extends these sessions every time they
+// authenticate, which means a stolen token would otherwise be valid forever.
+// Capping at 90 days from initial mint forces re-pairing periodically.
 const NODE_SESSION_HARD_CAP_MS = 90 * 24 * 60 * 60 * 1000;
 
-export function createSession(userId, { kind = 'browser' } = {}) {
+// Long-lived device kinds that get sliding-expiry renewal, survive password
+// changes, and aren't shown on the user's active-sessions list. Each has its
+// own UI surface (Nodes page, Voice Devices page) where the user revokes
+// them explicitly — the generic session-management flows must not touch them.
+export function isPersistentDeviceKind(kind) {
+  return kind === 'node' || kind === 'voice-device';
+}
+
+export function createSession(userId, { kind = 'browser', deviceId = null } = {}) {
   const token = randomBytes(32).toString('hex');
   const now = Date.now();
   const expires = now + 7 * 24 * 60 * 60 * 1000;
-  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now });
+  // deviceId is captured for voice-device + node sessions so the WS handler
+  // can route per-device behavior (e.g. slot_agent_map lookup on wake events)
+  // without re-querying the device registry by token prefix every message.
+  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now, deviceId });
   persistSessions();
   return token;
+}
+
+/**
+ * Bind a deviceId onto an already-created session. Used by the device-pairing
+ * route after registerDevice() generates the id — we want the deviceId in the
+ * session so the WS handler can resolve it cheaply, but we also need the
+ * device record to know its token_prefix, so the two-step creation is
+ * unavoidable. No-op if the token doesn't exist (expired or never created).
+ */
+export function setSessionDeviceId(token, deviceId) {
+  const s = sessions.get(token);
+  if (!s) return;
+  s.deviceId = deviceId;
+  persistSessions();
+}
+
+/**
+ * Returns the session's userId + kind + deviceId (or null if invalid/expired).
+ * Used by the WS handler to attach device context at auth time. The expiry
+ * + sliding-window logic mirrors getSessionUserId — call this when you need
+ * more than just the userId so we touch the session exactly once.
+ */
+export function getSessionMeta(token) {
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  const userId = getSessionUserId(token);  // also bumps lastActivity + handles expiry
+  if (!userId) return null;
+  return { userId, kind: s.kind || 'browser', deviceId: s.deviceId || null };
 }
 
 export function getSessionUserId(token) {
@@ -103,16 +143,17 @@ export function getSessionUserId(token) {
     }
   } catch (e) { console.warn('[sessions] Idle check error:', e.message); }
   s.lastActivity = Date.now();
-  // Sliding expiry for node-agent sessions: each successful auth pushes the
-  // hard 7-day expiry forward so long-lived agents don't die after a week.
-  // Capped at NODE_SESSION_HARD_CAP_MS from createdAt so a stolen node token
-  // cannot stay valid indefinitely. Browser sessions keep their fixed expiry.
-  if (s.kind === 'node') {
+  // Sliding expiry for persistent-device sessions (nodes + voice devices):
+  // each successful auth pushes the hard 7-day expiry forward so long-lived
+  // devices don't die after a week. Capped at NODE_SESSION_HARD_CAP_MS from
+  // createdAt so a stolen device token cannot stay valid indefinitely.
+  // Browser sessions keep their fixed expiry.
+  if (isPersistentDeviceKind(s.kind)) {
     const createdAt = s.createdAt ?? (s.expires - 7 * 24 * 60 * 60 * 1000);
     const hardCap = createdAt + NODE_SESSION_HARD_CAP_MS;
     if (Date.now() >= hardCap) {
       sessions.delete(token); persistSessions();
-      console.log('[sessions] Node session hit 90-day hard cap, revoking. User must re-pair.');
+      console.log(`[sessions] ${s.kind} session hit 90-day hard cap, revoking. User must re-pair.`);
       return null;
     }
     s.expires = Math.min(Date.now() + 7 * 24 * 60 * 60 * 1000, hardCap);
@@ -123,14 +164,15 @@ export function getSessionUserId(token) {
 
 export function deleteSession(token) { sessions.delete(token); persistSessions(); }
 /**
- * Clear all browser sessions for a user. Node-agent sessions (kind: 'node')
- * are preserved — they represent long-lived remote machine registrations and
- * should only be revoked by the explicit DELETE /api/nodes/:nodeId flow, not
- * by browser-session management (password change, role change, lock, etc.).
+ * Clear all browser sessions for a user. Persistent-device sessions (nodes,
+ * voice devices) are preserved — they represent long-lived hardware
+ * registrations and should only be revoked by their explicit per-device
+ * remove flows, not by browser-session management (password change, role
+ * change, lock, etc.).
  */
 export function clearUserSessions(userId) {
   for (const [token, s] of sessions) {
-    if (s.userId === userId && s.kind !== 'node') sessions.delete(token);
+    if (s.userId === userId && !isPersistentDeviceKind(s.kind)) sessions.delete(token);
   }
   persistSessions();
 }
@@ -153,13 +195,43 @@ export function clearUserNodeSessions(userId) {
   return removed;
 }
 /**
+ * Revoke every voice-device session this user owns. Parallel to
+ * clearUserNodeSessions — kept strict (only kind === 'voice-device') so that
+ * "revoke all voice devices" doesn't accidentally nuke node-agent sessions.
+ * Caller is also responsible for removing the device from voice-devices.json
+ * so re-pairing requires a fresh code.
+ */
+export function clearUserVoiceDeviceSessions(userId) {
+  let removed = 0;
+  for (const [token, s] of sessions) {
+    if (s.userId === userId && s.kind === 'voice-device') {
+      sessions.delete(token);
+      removed++;
+    }
+  }
+  if (removed) persistSessions();
+  return removed;
+}
+/**
+ * Revoke a single persistent-device session by token. Used by per-device
+ * remove flows (DELETE /api/devices/:id, DELETE /api/nodes/:id) to drop just
+ * that one token without affecting the user's other devices.
+ */
+export function deleteSessionByToken(token) {
+  if (!token || !sessions.has(token)) return false;
+  sessions.delete(token);
+  persistSessions();
+  return true;
+}
+/**
  * Clear all sessions for a user except the given token.
  * Used on self-initiated password change so the acting browser stays logged in.
- * Node-agent sessions (kind: 'node') are preserved — see clearUserSessions.
+ * Persistent-device sessions (nodes, voice devices) are preserved — see
+ * clearUserSessions.
  */
 export function clearUserSessionsExcept(userId, exceptToken) {
   for (const [token, s] of sessions) {
-    if (s.userId === userId && token !== exceptToken && s.kind !== 'node') sessions.delete(token);
+    if (s.userId === userId && token !== exceptToken && !isPersistentDeviceKind(s.kind)) sessions.delete(token);
   }
   persistSessions();
 }

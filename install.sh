@@ -96,14 +96,23 @@ ensure_build_tools() {
   # silently returns "No matches found". psmisc provides `fuser`, used by
   # the systemd unit's prestart cleanup to free port 3737 if a stale process
   # still holds it (without fuser, the unit falls back to pkill matching).
-  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 zip bubblewrap git poppler-utils ripgrep psmisc
-  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc
-  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc
-  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils ripgrep psmisc
-  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler ripgrep psmisc
-  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep psmisc
+  # ffmpeg is needed by every TTS provider branch (resample to 16 kHz for
+  # voice devices) — without it, voice-device replies fail silently with
+  # "ffmpeg ENOENT". python3-full is needed for the optional Piper TTS
+  # install: Debian/Ubuntu split venv + ensurepip + pip from the python3
+  # core, and on Debian 13 (Python 3.13) the bare `python3-venv` virtual
+  # package didn't reliably pull in `python3.13-venv`. python3-full is
+  # the official meta-package that always includes the matching
+  # version-specific venv + ensurepip + pip; works on Debian 11+, Ubuntu
+  # 22.04+. RPM/Arch/Alpine ship `python -m venv` as part of base python.
+  if   command -v apt-get &>/dev/null; then $SUDO apt-get update && $SUDO apt-get install -y build-essential python3 python3-full zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
+  elif command -v dnf     &>/dev/null; then $SUDO dnf groupinstall -y "Development Tools" && $SUDO dnf install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
+  elif command -v yum     &>/dev/null; then $SUDO yum groupinstall -y "Development Tools" && $SUDO yum install -y python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
+  elif command -v apk     &>/dev/null; then $SUDO apk add --no-cache build-base python3 zip bubblewrap git poppler-utils ripgrep psmisc ffmpeg openssl
+  elif command -v pacman  &>/dev/null; then $SUDO pacman -Sy --noconfirm base-devel python zip bubblewrap git poppler ripgrep psmisc ffmpeg openssl
+  elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep psmisc ffmpeg openssl
   else
-    error "No supported package manager found. Install build-essential, python3, zip, bubblewrap, git, poppler-utils, ripgrep, and psmisc manually and re-run."
+    error "No supported package manager found. Install build-essential, python3, python3-full (or python3 + python3-venv + python3-pip), zip, bubblewrap, git, poppler-utils, ripgrep, psmisc, and ffmpeg manually and re-run."
     exit 1
   fi
   success "Build tools installed"
@@ -323,6 +332,39 @@ for d in users agents tasks expenses shared-docs; do
 done
 success "Data directories initialized"
 
+# ─── Self-signed TLS cert ─────────────────────────────────────────────────────
+# Provides HTTPS on port 3739 (alongside HTTP on 3737) so browser features
+# that require a secure context — WebUSB / Web Serial for the voice-device
+# flash wizard — work from any LAN browser, not just behind a reverse proxy
+# with a real cert. Self-signed → users click through the "Not Secure"
+# warning the first time. Browsers treat the post-click-through session
+# as a secure context and grant WebUSB/Web Serial access. Cert is 10-year
+# so we don't ship renewal headaches.
+#
+# Skip if a cert already exists (upgrade case — don't churn the user's
+# accepted cert). If the user wants a real cert, drop their own
+# cert.pem + key.pem into $INSTALL_DIR/tls/ and restart; the same
+# auto-detect logic in server.mjs will pick them up.
+TLS_DIR="$INSTALL_DIR/tls"
+mkdir -p "$TLS_DIR"
+if [[ ! -s "$TLS_DIR/cert.pem" || ! -s "$TLS_DIR/key.pem" ]]; then
+  if command -v openssl &>/dev/null; then
+    LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [[ -z "$LAN_IP" ]] && LAN_IP="127.0.0.1"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -subj "/CN=openensemble" \
+      -addext "subjectAltName=DNS:localhost,DNS:openensemble,DNS:openensemble.local,IP:127.0.0.1,IP:${LAN_IP}" \
+      -keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
+      >/dev/null 2>&1 \
+      && chmod 600 "$TLS_DIR/key.pem" \
+      && success "Self-signed TLS cert generated (HTTPS on port 3739)"
+  else
+    warn "openssl not found — skipping HTTPS setup. Install openssl and re-run if you want browser features that require a secure context (WebUSB flash wizard)."
+  fi
+else
+  success "Existing TLS cert preserved"
+fi
+
 # ─── Config Setup ─────────────────────────────────────────────────────────────
 header "Configuration"
 
@@ -518,6 +560,32 @@ SERVICE
   fi
 else
   HAVE_SERVICE=false
+fi
+
+# ─── Optional: install Piper local TTS ────────────────────────────────────────
+# Piper is the local, no-API-key TTS option for voice devices. We ask here
+# rather than auto-installing because the model + venv adds ~80 MB and a
+# bunch of Python deps that not every user wants; the same install path is
+# reachable later from Settings → Providers if the user skips now.
+if [[ "$HAVE_SERVICE" == "true" ]] && [ -t 0 ] && [ -t 1 ]; then
+  header "Optional: install Piper local TTS"
+  info "Piper is a local text-to-speech engine for voice devices."
+  info "  Alternatives: OpenAI / ElevenLabs require API keys."
+  info "  Download: ~80 MB.  You can also install later from Settings → Providers."
+  echo
+  read -r -p "  Install Piper now? [y/N] " _piper_yn
+  case "${_piper_yn:-}" in
+    [Yy]|[Yy][Ee][Ss])
+      if bash "$INSTALL_DIR/scripts/install-piper.sh"; then
+        success "Piper installed and running on 127.0.0.1:5151"
+      else
+        warn "Piper install did not complete — retry later from Settings → Providers"
+      fi
+      ;;
+    *)
+      info "Skipping Piper install (selectable later in Settings → Providers)"
+      ;;
+  esac
 fi
 
 # ─── oe CLI Wrapper ───────────────────────────────────────────────────────────
