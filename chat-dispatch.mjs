@@ -9,7 +9,7 @@ import { appendToSession, writeStreamBuffer, clearStreamBuffer, loadSession } fr
 import { extractTransactions, getPendingDelete, clearPendingDelete, executePendingDelete } from './skills/expenses/execute.mjs';
 import { getPendingEmail, clearPendingEmail, executePendingEmail } from './skills/email/execute.mjs';
 import { getPendingProven, clearPendingProven, executePendingProven } from './skills/profiles/execute.mjs';
-import { getRoleManifest, getRoleAssignments, setRoleAssignment, listRoles } from './roles.mjs';
+import { getRoleManifest, getRoleAssignments, setRoleAssignment, listRoles, getRoleTools } from './roles.mjs';
 import { interceptScheduling } from './lib/scheduler-intent.mjs';
 import {
   classifyTimerIntent, createVoiceTimer,
@@ -117,6 +117,11 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   'ask_agent',
   'list_tasks',
   'create_task',
+  'ha_list_devices',
+  'ha_get_state',
+  'ha_call_service',
+  'ha_list_areas',
+  'ha_list_services',
 ]);
 
 /**
@@ -206,6 +211,118 @@ function executeVoiceIntent(intent, deviceId) {
   return { replaces: false };
 }
 
+// ── HA fast-path (pre-LLM) ────────────────────────────────────────────────────
+// "turn on hall front left" / "turn off X" / "toggle X" / "activate movie night"
+// → matched against the HA entity-name cache → direct HA HTTP call. Skips
+// Sydney → Helen delegation entirely (~28s → ~200ms).
+//
+// Returns null when nothing matches → caller falls through to the normal
+// LLM/agent pipeline. Multi-match (ambiguous phrase) also returns null so
+// the LLM can disambiguate. Works for both voice devices and typed chat
+// because it runs before the source === 'voice-device' tool-set trim.
+const HA_INTENT_RE = /^(turn\s+on|turn\s+off|toggle|activate|run)\s+(.+?)\s*$/i;
+
+async function classifyHaIntent(text) {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim().replace(/[.,!?]+$/, '');
+  const m = trimmed.match(HA_INTENT_RE);
+  if (!m) return null;
+  const verb = m[1].toLowerCase().replace(/\s+/g, ' ');
+  const phrase = m[2];
+  const { lookupEntity } = await import('./lib/ha-cache.mjs');
+  const hit = await lookupEntity(phrase);
+  if (!hit) return null;
+  const { entity_id, domain, friendly_name } = hit;
+
+  // Verb → service mapping. "activate"/"run" only make sense for scene/script;
+  // refuse on other domains so we don't silently turn on a light when the user
+  // said "run pomodoro" expecting a script.
+  let service, serviceDomain = domain;
+  if (verb === 'activate' || verb === 'run') {
+    if (domain !== 'scene' && domain !== 'script') return null;
+    service = 'turn_on';
+  } else if (verb === 'toggle') {
+    service = 'toggle';
+  } else if (verb === 'turn on') {
+    service = 'turn_on';
+  } else if (verb === 'turn off') {
+    service = 'turn_off';
+  } else {
+    return null;
+  }
+  return { entity_id, domain: serviceDomain, service, friendly_name, verb };
+}
+
+// Runtime toggle for the specialist router's tool-surface trim.
+// Default OFF: A/B testing on 2026-05-16 ("give me my last 10 emails") showed
+// no measurable speedup from trimming 85 → 13 tools (22.4s vs 22.8s). The
+// bottleneck is reasoning/output, not tool-schema overhead — at least for
+// gpt-5.5 on typical specialist queries. Kept toggleable via `/trim on|off`
+// so future experiments (different models, simpler queries) can re-test.
+let _specialistTrimEnabled = false;
+
+// ── Specialist router (pre-LLM) ───────────────────────────────────────────────
+// Skip the coordinator's reasoning turn when the user's message clearly
+// belongs to one specialist. Each skill manifest can declare `intent_patterns`
+// (array of regex strings, case-insensitive); a single unique match against an
+// ASSIGNED role triggers a direct delegation to that specialist's agent.
+// Multi-match or no-match → null → falls through to the normal LLM pipeline so
+// the coordinator can disambiguate or handle general queries.
+//
+// Only fires when the user is chatting with their coordinator. If they
+// intentionally opened a specialist chat, leave them alone — they want that
+// specific agent to handle everything in that session.
+function classifySpecialistIntent(text, userId, currentAgentId) {
+  if (!text) return null;
+  // Normalize for matching: lowercase, strip apostrophes, collapse whitespace.
+  // Lets patterns be written once for "what's"/"whats"/"what is" rather than
+  // every author re-encoding the apostrophe variants in every regex.
+  const t = String(text).trim().toLowerCase()
+    .replace(/[‘’']/g, '')
+    .replace(/\s+/g, ' ');
+  if (!t) return null;
+  const assignments = getRoleAssignments(userId);
+  const coordAgentId = assignments?.coordinator;
+  if (!coordAgentId || currentAgentId !== coordAgentId) return null;
+  const matches = [];
+  for (const m of listRoles(userId)) {
+    if (!m.service || !Array.isArray(m.intent_patterns) || m.intent_patterns.length === 0) continue;
+    const rawOwner = assignments[m.id];
+    if (!rawOwner) continue;
+    // The literal "coordinator" string is an alias meaning "whoever holds the
+    // coordinator role" — resolve it before comparing so we don't try to
+    // delegate to a phantom agentId nor accidentally bypass the
+    // self-delegation guard below.
+    const owner = rawOwner === 'coordinator' ? coordAgentId : rawOwner;
+    if (owner === coordAgentId) continue;
+    for (const pat of m.intent_patterns) {
+      try {
+        if (new RegExp(pat, 'i').test(t)) {
+          matches.push({ skillId: m.id, agentId: owner, name: m.name });
+          break; // one pattern per skill is enough
+        }
+      } catch (e) {
+        console.warn(`[router] bad regex in ${m.id}: ${pat} — ${e.message}`);
+      }
+    }
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+async function executeHaIntent(intent) {
+  const { getHaConfig, haRequest } = await import('./lib/ha-client.mjs');
+  const haCfg = getHaConfig();
+  if (!haCfg) return { error: 'Home Assistant is not configured.' };
+  const res = await haRequest(haCfg, `/services/${intent.domain}/${intent.service}`, 'POST', { entity_id: intent.entity_id });
+  if (res?.__err) return { error: res.__err };
+  let confirm;
+  if (intent.service === 'turn_on') confirm = `${intent.friendly_name} on.`;
+  else if (intent.service === 'turn_off') confirm = `${intent.friendly_name} off.`;
+  else if (intent.service === 'toggle') confirm = `${intent.friendly_name} toggled.`;
+  else confirm = `Done.`;
+  return { text: confirm };
+}
+
 export async function handleChatMessage({
   userId,
   agentId: rawAgentId,
@@ -246,6 +363,11 @@ export async function handleChatMessage({
   userId = effectiveUserId;
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
 
+  // Fast-path: voice-device control intents bypass the LLM entirely.
+  // "sydney, volume up" / "pause" / "stop" → regex match → WS message
+  // sent to the device, no chat dispatched. Runs only for source ===
+  // 'voice-device' so a typed "stop" in a browser chat is still treated
+  // as a normal message. Returns immediately on match.
   // Fast-path: voice-device countdown timers ("set a 5 minute timer") bypass
   // both the LLM and the scheduler-intent plan model. Targets the originating
   // device so the chime + "Your X timer is done" TTS fires there, not on
@@ -307,11 +429,6 @@ export async function handleChatMessage({
     }
   }
 
-  // Fast-path: voice-device control intents bypass the LLM entirely.
-  // "sydney, volume up" / "pause" / "stop" → regex match → WS message
-  // sent to the device, no chat dispatched. Runs only for source ===
-  // 'voice-device' so a typed "stop" in a browser chat is still treated
-  // as a normal message. Returns immediately on match.
   if (source === 'voice-device' && typeof rawText === 'string') {
     const intent = classifyVoiceIntent(rawText);
     if (intent) {
@@ -490,6 +607,57 @@ export async function handleChatMessage({
   }
   if (getPendingProven(userId)) clearPendingProven(userId);
 
+  // /trim on|off|status — runtime toggle of specialist-router tool trimming.
+  // Lets you A/B latency the same query without restarting the server.
+  const trimMatch = userText.match(/^\/trim(?:\s+(on|off|status))?\s*$/i);
+  if (trimMatch) {
+    const arg = (trimMatch[1] || 'status').toLowerCase();
+    if (arg === 'on')  _specialistTrimEnabled = true;
+    if (arg === 'off') _specialistTrimEnabled = false;
+    console.log(`[chat] /trim ${arg} → enabled=${_specialistTrimEnabled}`);
+    const state = _specialistTrimEnabled
+      ? 'Tool-trim ON — router-fired turns use role-only tools (~5-13 each).'
+      : 'Tool-trim OFF — router-fired turns use the specialist\'s full tool surface (~70-85 each).';
+    appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: state, ts: Date.now() }
+    );
+    onEvent({ type: 'token', text: state, agent: agentId });
+    onEvent({ type: 'done', agent: agentId });
+    abortControllers.delete(scopedSessionKey);
+    activeStreams.delete(scopedSessionKey);
+    clearStreamBuffer(scopedSessionKey);
+    busySlot.release();
+    return;
+  }
+
+  // /threshold N — tune the embed-router cosine threshold live (default 0.72).
+  // Higher = stricter (fewer paraphrases routed); lower = more permissive.
+  // /threshold alone reports the current value.
+  const thrMatch = userText.match(/^\/threshold(?:\s+(\d+(?:\.\d+)?))?\s*$/i);
+  if (thrMatch) {
+    const { getEmbedThreshold, setEmbedThreshold } = await import('./lib/specialist-embed-router.mjs');
+    let reply;
+    if (thrMatch[1] !== undefined) {
+      const n = Number(thrMatch[1]);
+      if (setEmbedThreshold(n)) reply = `Embed-router threshold set to ${n.toFixed(3)} (cosine similarity).`;
+      else reply = 'Threshold must be a number between 0 and 1.';
+    } else {
+      reply = `Embed-router threshold is ${getEmbedThreshold().toFixed(3)} (cosine similarity). Use /threshold 0.7 to change.`;
+    }
+    appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: reply, ts: Date.now() }
+    );
+    onEvent({ type: 'token', text: reply, agent: agentId });
+    onEvent({ type: 'done', agent: agentId });
+    abortControllers.delete(scopedSessionKey);
+    activeStreams.delete(scopedSessionKey);
+    clearStreamBuffer(scopedSessionKey);
+    busySlot.release();
+    return;
+  }
+
   // /claim <skillId> and /release <skillId>
   const claimMatch = userText.match(/^\/?(claim|release)\s+(\S+)/i);
   if (claimMatch) {
@@ -557,6 +725,170 @@ export async function handleChatMessage({
       userText = (userText || '') + `\n\n[File upload: ${attachment.name} — extraction failed: ${e.message}]`;
     }
     attachment = null;
+  }
+
+  // ── Home Assistant fast-path ─────────────────────────────────────────────
+  // Runs before the LLM regardless of agent assignment. Matches "turn on/off
+  // X", "toggle X", "activate/run <scene/script>" against the cached HA
+  // entity-name index and executes the HA service directly. Multi-match or
+  // miss → null → falls through to the LLM so "turn off all lights" etc.
+  // still benefit from disambiguation. Recorded to the session like any
+  // other reply so the chat UI shows it.
+  if (userText) {
+    try {
+      const haIntent = await classifyHaIntent(userText);
+      if (haIntent) {
+        const result = await executeHaIntent(haIntent);
+        if (!result.error) {
+          appendToSession(`${userId}_${agentId}`,
+            { role: 'user', content: userText, ts: Date.now() },
+            { role: 'assistant', content: result.text, ts: Date.now() }
+          );
+          onEvent({ type: 'token', text: result.text, agent: agentId });
+          onEvent({ type: 'done', agent: agentId });
+          console.log(`[chat] ha-fastpath: ${haIntent.verb} ${haIntent.entity_id}`);
+          // Release the busy slot / abort / active-stream tracking so the
+          // next message doesn't queue behind this turn forever.
+          abortControllers.delete(scopedSessionKey);
+          activeStreams.delete(scopedSessionKey);
+          clearStreamBuffer(scopedSessionKey);
+          busySlot.release();
+          return;
+        }
+        // Tool errored — log and fall through to LLM, which can try a
+        // different approach (list_devices to find the right entity, etc.)
+        console.log(`[chat] ha-fastpath miss-then-error: ${result.error} — falling through to LLM`);
+      }
+    } catch (e) {
+      console.warn('[chat] ha-fastpath threw, falling through:', e.message);
+    }
+  }
+
+  // ── Trivia fast-path (clock) ─────────────────────────────────────────────
+  // "what time is it", "what's the date", "what day is it" — answered
+  // straight from the user-local clock with no LLM round-trip. Strict
+  // end-anchored regex set, so "what time is it in tokyo" falls through.
+  if (userText) {
+    try {
+      const { classifyTriviaIntent, executeTriviaIntent } = await import('./lib/trivia-fastpath.mjs');
+      const triviaIntent = classifyTriviaIntent(userText);
+      if (triviaIntent) {
+        const result = executeTriviaIntent(triviaIntent, userId);
+        if (result?.text) {
+          appendToSession(`${userId}_${agentId}`,
+            { role: 'user', content: userText, ts: Date.now() },
+            { role: 'assistant', content: result.text, ts: Date.now() }
+          );
+          onEvent({ type: 'token', text: result.text, agent: agentId });
+          onEvent({ type: 'done', agent: agentId });
+          console.log(`[chat] trivia-fastpath: ${triviaIntent.kind}`);
+          abortControllers.delete(scopedSessionKey);
+          activeStreams.delete(scopedSessionKey);
+          clearStreamBuffer(scopedSessionKey);
+          busySlot.release();
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('[chat] trivia-fastpath threw, falling through:', e.message);
+    }
+  }
+
+  // ── Specialist router (pre-LLM) ──────────────────────────────────────────
+  // When the user is on their coordinator and the message clearly belongs to
+  // one specialist (via that role's intent_patterns), run the specialist
+  // directly and skip the coordinator's reasoning turns. Saves ~3-5s per
+  // turn vs Sydney's "decide → call list_roles → call ask_agent" path.
+  if (userText) {
+    try {
+      let route = classifySpecialistIntent(userText, userId, agentId);
+      // Embedding fallback: when regex misses, try semantic similarity against
+      // the loaded intent_examples. Catches paraphrases regex can't enumerate.
+      // ~20ms added cost only when we'd otherwise fall through to Sydney.
+      if (!route && userText.length >= 6) {
+        try {
+          const { classifyByEmbedding } = await import('./lib/specialist-embed-router.mjs');
+          const emb = await classifyByEmbedding(userText, userId, agentId);
+          if (emb) {
+            route = { skillId: emb.skillId, agentId: emb.agentId, name: emb.name, strategy: 'embed', sim: emb.sim };
+            console.log(`[chat] embed-router: → ${emb.name} (${emb.skillId}) sim=${emb.sim.toFixed(3)} via "${emb.phrase}"`);
+          }
+        } catch (e) {
+          console.warn('[chat] embed-router threw, falling through:', e.message);
+        }
+      }
+      if (route) {
+        const target = getAgentsForUser(userId).find(a => a.id === route.agentId);
+        if (target) {
+          // Ephemeral scoped agent for the specialist run — same pattern as
+          // skills/delegate/execute.mjs so the specialist's own persistent
+          // session isn't polluted with a one-shot coordinator delegation.
+          const delegId = `ephemeral_router_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${route.agentId}`;
+          const scopedSpec = { ...target, id: delegId, ephemeral: true };
+          // Tool-surface reduction: a router-fired turn is a single intent
+          // matched to one specialist — we know which skill should answer.
+          // Trim the specialist's tool surface to that skill's own tools so
+          // gpt-5.x doesn't reason through 70-80 unrelated tools per turn.
+          // Toggleable at runtime via `/trim on|off` for A/B latency tests.
+          const fullToolCount = target.tools?.length ?? 0;
+          let usedToolCount = fullToolCount;
+          if (_specialistTrimEnabled) {
+            const skillTools = getRoleTools(route.skillId, userId);
+            if (skillTools.length) {
+              scopedSpec.tools = skillTools;
+              usedToolCount = skillTools.length;
+            }
+          }
+          console.log(`[chat] specialist-router: trim=${_specialistTrimEnabled ? 'on' : 'off'} tools=${usedToolCount} (full=${fullToolCount})`);
+          const routerStart = Date.now();
+          {
+            const now = new Date();
+            const todayStr   = now.toISOString().slice(0, 10);
+            const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+            const yearStart  = `${now.getFullYear()}-01-01`;
+            scopedSpec.systemPrompt = `${target.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}`;
+          }
+          console.log(`[chat] specialist-router: → ${route.name} (${route.skillId}) agent=${route.agentId}`);
+          let routerBuf = '';
+          try {
+            for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
+              onEvent({ ...e, agent: agentId });
+            }, userId, attachment)) {
+              if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
+              if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
+              if (event.type === 'token')    routerBuf += event.text;
+              if (event.type === 'replace')  routerBuf = event.text;
+              onEvent({ ...event, agent: agentId });
+            }
+            // Persist the turn under the coordinator's session so the user
+            // sees it in the chat they actually typed into. The specialist
+            // ran ephemerally, so this is the only durable record.
+            appendToSession(`${userId}_${agentId}`,
+              { role: 'user', content: userText, ts: Date.now() },
+              { role: 'assistant', content: routerBuf, ts: Date.now() }
+            );
+            console.log(`[chat] specialist-router done: skill=${route.skillId} trim=${_specialistTrimEnabled ? 'on' : 'off'} tools=${usedToolCount} durationMs=${Date.now() - routerStart} bytes=${routerBuf.length}`);
+          } catch (e) {
+            if (e.name !== 'AbortError') {
+              console.error('[chat] specialist-router stream failed:', e.message);
+              onEvent({ type: 'error', message: e.message, agent: agentId });
+            }
+          } finally {
+            // Mirror the main dispatch finally so the busy slot / abort /
+            // active-stream tracking doesn't leak just because we took the
+            // fast-path.
+            recordActivity(userId, agentId, { apiCall: true });
+            abortControllers.delete(scopedSessionKey);
+            activeStreams.delete(scopedSessionKey);
+            clearStreamBuffer(scopedSessionKey);
+            busySlot.release();
+          }
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('[chat] specialist-router threw, falling through:', e.message);
+    }
   }
 
   // ── Scheduler-intent interceptor ─────────────────────────────────────────

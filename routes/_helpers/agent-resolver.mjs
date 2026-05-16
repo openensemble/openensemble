@@ -117,8 +117,12 @@ export function getAgentsForUser(userId) {
   const delegateAgentDesc = visibleBase
     .map(a => ({ a, cat: effectiveSkillCategory(a) }))
     .filter(({ cat }) => cat && cat !== 'general' && cat !== 'web' && cat !== 'coordinator')
-    .map(({ a, cat }) => `'${a.id}' (${a.name}${a.emoji ? ' ' + a.emoji : ''}, role: ${cat})`)
-    .join(', ') || 'none configured';
+    .map(({ a, cat }) => {
+      const m = getRoleManifest(cat, userId);
+      const roleLabel = m ? `${m.name}${m.description ? ` — ${m.description}` : ''}` : cat;
+      return `'${a.id}' (${a.name}${a.emoji ? ' ' + a.emoji : ''}) handles: ${roleLabel}`;
+    })
+    .join(' | ') || 'none configured';
 
   const skillAssignments = getRoleAssignments(userId);
   const toolOwnerIndex = buildToolOwnerIndex(userId);
@@ -221,9 +225,16 @@ export function getAgentsForUser(userId) {
           const desc = other.description || '';
           const skills = Object.entries(skillAssignments)
             .filter(([, owner]) => owner === other.id)
-            .map(([skillId]) => getRoleManifest(skillId, userId)?.name)
+            .map(([skillId]) => getRoleManifest(skillId, userId))
             .filter(Boolean);
-          const info = [desc, skills.length ? `Roles: ${skills.join(', ')}` : ''].filter(Boolean).join('. ');
+          // Include each role's description so the coordinator can infer when
+          // to delegate without anyone editing its system prompt. Without this,
+          // newly-added roles (custom ones, freshly-shipped ones like
+          // role_home_assistant) are invisible-by-purpose to the LLM.
+          const roleSummary = skills.length
+            ? skills.map(m => m.description ? `${m.name} — ${m.description}` : m.name).join('; ')
+            : '';
+          const info = [desc, roleSummary && `Handles: ${roleSummary}`].filter(Boolean).join('. ');
           return `- **${other.name}** (use ask_agent with id="${other.id}") — ${info || 'general assistant'}`;
         })
         .join('\n');

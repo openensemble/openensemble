@@ -8,5 +8,21 @@
   "custom": true,
   "systemPromptAddition": "Generate videos from text descriptions provided by users\n- Support various video styles, durations, and aspect ratios\n- Provide guidance on prompt engineering for better video outputs\n- Handle video generation requests efficiently and return downloadable video files",
   "tools": [],
-  "enabled_by_default": false
+  "enabled_by_default": false,
+  "intent_patterns": [
+    "^(?:generate|make|create|render)\\s+(?:me\\s+)?(?:an?\\s+|a\\s+)?(?:short\\s+)?(?:video|clip|animation)\\b",
+    "^(?:make|create)\\s+(?:me\\s+)?(?:an?\\s+)?\\d+\\s*-?\\s*second\\s+(?:video|clip)\\b"
+  ],
+  "intent_examples": [
+    "make a 10 second video of a dog running",
+    "generate a video of waves crashing on a beach",
+    "create a short clip of a cat playing",
+    "render a 5 second animation of a logo spinning",
+    "make me a video of clouds moving",
+    "generate a slow motion video of a flower blooming",
+    "create an animation of text fading in",
+    "make a video clip of fireworks",
+    "render a timelapse of a sunset",
+    "generate a video showing a robot waving"
+  ]
 }

@@ -14,6 +14,8 @@ import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles
 import { loadDrawerManifests } from './plugins.mjs';
 import { startScheduler, stopScheduler, loadTasksForOwner, addTask, removeTask, registerBuiltin } from './scheduler.mjs';
 import { startWatcherSupervisor, stopWatcherSupervisor } from './scheduler/watchers.mjs';
+import { startBackgroundRefresh as startHaCacheRefresh } from './lib/ha-cache.mjs';
+import { loadIntentEmbeddings } from './lib/specialist-embed-router.mjs';
 import { registerSystemWatchHandlers } from './scheduler/watch-handlers.mjs';
 import { startHealthMonitorHandlers } from './scheduler/health-monitor.mjs';
 import { pruneAllSnapshots } from './scheduler/snapshot-pruner.mjs';
@@ -62,6 +64,7 @@ import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
 import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
+import { handle as handleHomeAssistant }  from './routes/home-assistant.mjs';
 import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
 import { speakReminder, pickReminderDevices } from './lib/voice-reminder.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
@@ -199,6 +202,7 @@ const routeHandlers = [
   handleTutor,
   handleCoder,
   handleGuide,
+  handleHomeAssistant,
 ];
 
 // CSP. Inline event handlers are no longer used — the public/event-delegation.js
@@ -763,6 +767,16 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 
   seedSystemTasks();
   startScheduler(broadcast);
+
+  // HA entity-name cache: powers the chat-dispatch fast-path so "turn on X"
+  // skips the LLM. Lazy load on first use, plus a periodic refresh so newly
+  // added HA devices show up without a server restart.
+  startHaCacheRefresh();
+
+  // Specialist intent-example embeddings — warm the embed-router cache so the
+  // first user query doesn't pay the ~1-3s "embed N example phrases" cost.
+  // Runs async; chat works without it (just falls through to regex/Sydney).
+  loadIntentEmbeddings().catch(e => log.warn?.('embed-router', 'load failed', { err: e.message }));
 
   // Watcher supervisor: per-user polling for long-running async work
   // (video gen, training, price alerts, etc.). Distinct from scheduler

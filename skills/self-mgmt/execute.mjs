@@ -118,6 +118,7 @@ export default async function execute(name, args, userId, agentId) {
     if (!user || (user.role !== 'admin' && user.role !== 'owner')) return 'Creating roles requires admin privileges.';
     const { name: roleName, icon, description, responsibilities, confirmed } = args;
     if (!roleName?.trim() || !responsibilities?.trim()) return 'name and responsibilities are required.';
+    if (!description?.trim()) return 'description is required — the coordinator uses it to decide when to delegate to this role. Write one short sentence describing what kinds of requests this role handles.';
     if (!confirmed) return 'You must present the draft system prompt to the user and get their explicit approval before creating the role. Show them the responsibilities text and ask if they want any changes, then call create_role again with confirmed=true.';
     const id = 'role_' + roleName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const { getRoleManifest, addRoleManifest } = await import('../../roles.mjs');

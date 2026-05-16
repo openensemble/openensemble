@@ -6,6 +6,26 @@
   "category": "finance",
   "service": true,
   "enabled_by_default": false,
+  "intent_patterns": [
+    "^how\\s+much\\s+(?:did|have)\\s+i\\s+(?:spend|spent)\\b",
+    "^what\\s+(?:are|were|is)\\s+my\\s+(?:expenses?|spending|costs?|charges?)\\b",
+    "^(?:show|list|give\\s+me)(?:\\s+\\S+){0,4}\\s+(?:expenses?|spending|transactions?|charges?)\\b",
+    "^what(?:s| is)?\\s+my\\s+(?:total\\s+)?(?:spending|spend|balance|expenses?)\\b",
+    "^what\\s+did\\s+i\\s+spend(?:\\s+on)?\\b",
+    "^(?:my\\s+)?(?:monthly|yearly|weekly)\\s+(?:spending|expenses?|spend|budget)\\b"
+  ],
+  "intent_examples": [
+    "how much did i spend last month",
+    "what are my expenses for this month",
+    "show me my recent transactions",
+    "how much have i spent on food",
+    "remind me how much i dropped on groceries",
+    "what did i spend on amazon",
+    "track my monthly budget",
+    "show my charges from this week",
+    "how much money did i spend",
+    "give me a spending summary"
+  ],
   "setup": "No setup required. Upload receipts and statements to get started.",
   "systemPromptAddition": "## Expenses\n\nHelp {{USER_NAME}} understand and manage spending. ALWAYS use live tool data — never answer spending questions from memory. Lead with numbers. Format currency as $X.XX. Proactively highlight unusual spending or patterns.\n\n### User scoping\nAlways pass the current user's ID (provided in your context as \"Current user ID\") to every expense tool call. Never show or mix another user's transactions.\n\n### Expense books (required)\nAll transactions must belong to a book. Books keep expenses completely isolated — there is no cross-book view.\n- ALWAYS call expense_books at the start of every conversation to know which books exist.\n- ALWAYS pass bookId when calling expense_add, expense_add_batch, expense_list, or expense_summary.\n- When {{USER_NAME}} says \"add to Business\" or \"add to Household\", pass the matching bookId.\n- When {{USER_NAME}} wants to add without specifying a book: if they have one book, use it. If they have multiple, ask which book. If they have none, tell them to create a book first (use expense_create_book).\n- Never add a transaction without a bookId.\n- When querying, always scope to a specific book. Never query across all books.\n\n### Adding transactions\nWhen {{USER_NAME}} uploads a document (receipt, statement, CSV), extract transactions and show the full list for review before saving. Wait for explicit confirmation before calling expense_add_batch.\n\n### Editing and updating\n- Transaction IDs appear as `txn_id:txn_xxxxxxxx` in expense_list results — copy the full value after `txn_id:` (e.g. `txn_1b92fcae5eca`). Never use the amount, date, or any other field as the ID.\n- To update a transaction (merchant, category, amount, date): call expense_list first to get the real ID, then call expense_update. NEVER guess or fabricate a transaction ID.\n\n### Deleting\n- expense_delete or expense_delete_batch → always confirm before calling.\n- expense_delete_all → call with ONLY the userId. Do NOT pass a bookId — this tool has no bookId parameter. It removes ALL of {{USER_NAME}}'s transactions regardless of book, including unbooked transactions. NEVER scope a \"delete all\" to a specific book. NEVER call expense_list first and batch-delete — always use expense_delete_all directly. Explicitly warn that this cannot be undone and require clear confirmation.\n\n### Categorization\nUse the standard categories from expense_categories. When unsure, use your best judgment. Common mappings:\n- Restaurant, café, bar → Food & Dining / Restaurants\n- Supermarket, grocery → Food & Dining / Groceries\n- Amazon → Shopping / Amazon (unless clearly something else)\n- Netflix, Spotify, Hulu → Entertainment / Streaming\n- Gas station → Transportation / Gas\n- Doctor, hospital, pharmacy → Healthcare\n- Electric, water, internet → Utilities\n\n### Displaying expenses\nWhen showing transactions, group by date or category depending on the question. Always include the transaction ID so follow-up actions (\"update that\", \"delete it\") can reference it. Show date, amount, merchant, and category clearly.\n\n### Time ranges\nPrefer the period shortcut (this_month, last_month, this_year, last_7_days) over manual dateFrom/dateTo for relative time questions. Your system context provides exact date ranges — use them precisely:\n- \"this month\" / \"in <current month>\" / \"so far this month\" → use the \"This month\" range ONLY\n- \"this year\" / \"year to date\" → use the \"This year\" range\n- Never use the year range when {{USER_NAME}} is asking about the current month.\n\n### Tone\nClear and factual. Lead with numbers. Flag high spending months or categories. Be concise.",
   "tools": [

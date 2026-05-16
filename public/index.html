@@ -923,6 +923,7 @@
               <div id="providerSttStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
             </div>
           </div>
+
         </div>
 
         <!-- ── Drawers tab ── -->
@@ -1131,6 +1132,32 @@
                 style="display:none;background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Clear</button>
             </div>
             <div id="braveApiKeyStatus" style="font-size:11px;color:var(--muted);margin-top:4px">Loading…</div>
+          </div>
+
+          <div id="homeAssistantRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px;display:none">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+              <div class="settings-section-title" style="margin:0"><i data-lucide="home" style="width:14px;height:14px"></i> Home Assistant</div>
+              <span id="providerHaConnected" style="font-size:11px;color:var(--muted)"></span>
+            </div>
+            <div class="settings-section-desc" style="margin-bottom:10px">One household connection. Any user who enables the Home Assistant role on an agent can control your smart home through it. Create a Long-Lived Access Token in Home Assistant (Profile → Security → Long-Lived Access Tokens).</div>
+            <input type="text" id="providerHaUrl" placeholder="https://homeassistant.local:8123"
+              style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+            <input type="password" id="providerHaToken" placeholder="Long-Lived Access Token" autocomplete="new-password"
+              style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);margin-bottom:8px;cursor:pointer">
+              <input type="checkbox" id="providerHaAllowSelfSigned" style="margin:0">
+              Allow self-signed certificate
+              <span style="color:var(--muted);font-size:11px">(local HA with its own cert)</span>
+            </label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button data-action="saveProviderHa"
+                style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+              <button data-action="testProviderHa"
+                style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Test connection</button>
+              <button data-action="clearProviderHa"
+                style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Disconnect</button>
+              <div id="providerHaStatus" style="font-size:11px;color:var(--muted);flex:1"></div>
+            </div>
           </div>
           <div id="sessionExpiryRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
             <div class="settings-section-title"><i data-lucide="timer" style="width:14px;height:14px"></i> Session Expiry</div>

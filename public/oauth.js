@@ -642,14 +642,14 @@ async function openSettingsDrawer(openIt = true) {
       if (tog) { tog.checked = fullCfg.stripThinkingTags !== false; setStripThinkingTrack(tog.checked); }
     }).catch(() => {});
     // Show admin-only system sections
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow','homeAssistantRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = '';
     });
     if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus();
     if (typeof loadUpdateStatus === 'function') loadUpdateStatus();
   } else {
     // Hide admin-only sections for regular users
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow','homeAssistantRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = 'none';
     });
   }
@@ -888,6 +888,9 @@ async function loadProviderConfig() {
 
     if (typeof checkEmptyState === 'function') checkEmptyState();
   } catch {}
+  // Home Assistant lives behind its own admin-only endpoint; populates only
+  // for owner/admin sessions, silent 401 for everyone else.
+  loadProviderHa().catch(() => {});
 }
 
 async function toggleProvider(provider, enabled) {
@@ -1157,6 +1160,94 @@ async function saveProviderTts() {
     _ttsConfigured = !!(key || url || elKey);
     showToast('TTS settings saved');
   } catch { showToast('Failed to save TTS settings'); }
+}
+
+async function loadProviderHa() {
+  const urlEl = $('providerHaUrl');
+  if (!urlEl) return;
+  try {
+    const r = await fetch('/api/home-assistant');
+    if (!r.ok) return; // non-admin users get 401 silently; nothing to populate
+    const cfg = await r.json();
+    urlEl.value = cfg.url || '';
+    if ($('providerHaAllowSelfSigned')) $('providerHaAllowSelfSigned').checked = !!cfg.allowSelfSigned;
+    if ($('providerHaConnected')) {
+      $('providerHaConnected').textContent = cfg.configured ? 'Connected' : '';
+      $('providerHaConnected').style.color = cfg.configured ? 'var(--success, #4caf50)' : 'var(--muted)';
+    }
+    if ($('providerHaToken')) {
+      $('providerHaToken').placeholder = cfg.hasToken
+        ? '••••••••  (saved — leave blank to keep)'
+        : 'Long-Lived Access Token';
+    }
+    if ($('providerHaStatus')) $('providerHaStatus').textContent = '';
+  } catch {}
+}
+
+async function saveProviderHa() {
+  const url   = $('providerHaUrl').value.trim();
+  const token = $('providerHaToken').value;
+  const allowSelfSigned = !!$('providerHaAllowSelfSigned')?.checked;
+  const status = $('providerHaStatus');
+  if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saving…'; }
+  try {
+    const r = await fetch('/api/home-assistant', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, token, allowSelfSigned }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      if (status) { status.style.color = 'var(--red, #e05c5c)'; status.textContent = e.error || 'Save failed.'; }
+      return;
+    }
+    if ($('providerHaToken')) $('providerHaToken').value = '';
+    if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saved.'; }
+    showToast('Home Assistant settings saved');
+    await loadProviderHa();
+  } catch {
+    if (status) { status.style.color = 'var(--red, #e05c5c)'; status.textContent = 'Network error.'; }
+  }
+}
+
+async function testProviderHa() {
+  const url   = $('providerHaUrl').value.trim();
+  const token = $('providerHaToken').value;
+  const allowSelfSigned = !!$('providerHaAllowSelfSigned')?.checked;
+  const status = $('providerHaStatus');
+  if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Testing…'; }
+  try {
+    const r = await fetch('/api/home-assistant/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, token, allowSelfSigned }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (j.ok) {
+      if (status) { status.style.color = 'var(--success, #4caf50)'; status.textContent = j.message || 'Connected.'; }
+    } else {
+      if (status) { status.style.color = 'var(--red, #e05c5c)'; status.textContent = j.error || 'Connection failed.'; }
+    }
+  } catch (e) {
+    if (status) { status.style.color = 'var(--red, #e05c5c)'; status.textContent = 'Network error.'; }
+  }
+}
+
+async function clearProviderHa() {
+  if (!confirm('Disconnect Home Assistant? Saved URL and token will be removed.')) return;
+  const status = $('providerHaStatus');
+  try {
+    await fetch('/api/home-assistant', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: '', token: '' }),
+    });
+    if ($('providerHaUrl')) $('providerHaUrl').value = '';
+    if ($('providerHaToken')) $('providerHaToken').value = '';
+    if ($('providerHaAllowSelfSigned')) $('providerHaAllowSelfSigned').checked = false;
+    if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Disconnected.'; }
+    showToast('Home Assistant disconnected');
+    await loadProviderHa();
+  } catch {
+    if (status) { status.style.color = 'var(--red, #e05c5c)'; status.textContent = 'Failed to disconnect.'; }
+  }
 }
 
 async function saveProviderStt() {

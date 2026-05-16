@@ -853,6 +853,8 @@ const SLASH_COMMANDS = [
   { cmd: '/agent',     icon: 'bot',        desc: 'Switch to a different agent' },
   { cmd: '/claim',     icon: 'wrench',     desc: 'Claim a role for this agent' },
   { cmd: '/release',   icon: 'unlock',     desc: 'Release a role from this agent' },
+  { cmd: '/trim',      icon: 'scissors',   desc: 'Toggle specialist-router tool trimming (on/off/status)' },
+  { cmd: '/threshold', icon: 'sliders',    desc: 'Tune embed-router cosine threshold (e.g. /threshold 0.7)' },
   { cmd: '/new-agent', icon: 'sparkles',   desc: 'Create a new agent',
     action: () => { hideSlashMenu(); $('input').value = ''; openNewAgentModal(); } },
 ];

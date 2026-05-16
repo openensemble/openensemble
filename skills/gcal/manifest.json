@@ -6,6 +6,29 @@
   "category": "utility",
   "service": true,
   "enabled_by_default": false,
+  "intent_patterns": [
+    "^what(?:s| is)?\\s+(?:next\\s+)?(?:on|in)\\s+(?:my\\s+)?(?:calendar|schedule|agenda)\\b",
+    "^what(?:s| is)?\\s+(?:my\\s+)?next\\s+(?:meeting|event|appointment|call)\\b",
+    "^(?:my\\s+)?next\\s+(?:meeting|event|appointment|call)\\??\\s*$",
+    "^do\\s+i\\s+have\\s+(?:any\\s+)?(?:meetings?|events?|appointments?|calls?|free\\s+time)\\b",
+    "^(?:am\\s+i|are\\s+we)\\s+free\\s+(?:at|on|today|tomorrow|this|next)\\b",
+    "^when\\s+is\\s+(?:my|the)\\s+next\\b",
+    "^what(?:s| is)?\\s+my\\s+(?:day|week|schedule)\\s+look(?:ing)?\\s+like\\b",
+    "^anything\\s+(?:on|in)\\s+(?:my\\s+)?(?:calendar|schedule|agenda)\\b"
+  ],
+  "intent_examples": [
+    "what's on my calendar today",
+    "what's my next meeting",
+    "do i have anything tomorrow",
+    "am i free at 3pm",
+    "show my agenda for this week",
+    "what's happening today",
+    "when is my next call",
+    "do i have any meetings tomorrow morning",
+    "what does my afternoon look like",
+    "remind me what's on my schedule",
+    "can you tell me how my schedule looks"
+  ],
   "setup": "Enable to start Google Calendar authorization in your browser.",
   "systemPromptAddition": "## Google Calendar\n\n### Core Rule: Always use live data\nNever answer scheduling questions from memory. Always call gcal_list for current events. \"What am I doing tomorrow?\" = call gcal_list with tomorrow's date range, every time.\n\n\"Recheck\", \"check again\", \"look again\" \u2014 call the tool again immediately. Never restate a previous answer.\n\n### Displaying events\nFormat each event as:\n  \ud83d\udcc5 **[Title]** \u2014 Day, Month Date \u00b7 Time \u2013 Time (timezone)\n  ID: <eventId>\n  \u2192 Location (if set) \u00b7 Attendees (if any) \u00b7 Notes (if any)\n\nAlways include the raw event ID \u2014 needed for follow-up actions like \"update that\" or \"delete it\".\n\nGroup by day when showing multiple events.\n\n### Confirmation rules\n- {{USER_NAME}} directly commands a delete (\"delete that\", \"cancel that meeting\", \"remove it\") after you showed the event \u2192 call gcal_delete immediately. His command IS the confirmation.\n- Creating or updating an event \u2192 always show the full event details first and wait for explicit approval before calling the tool.\n- Quick add \u2192 call it, then show {{USER_NAME}} what Google parsed so he can verify the time and title were understood correctly.\n- NEVER say an action was completed unless you called the tool and received a successful response. If you did not call a tool, the action did not happen.\n\n### Moving events\n\"Move [event] to [day/time]\" always means call gcal_update with the existing eventId and new start/end \u2014 never gcal_delete + gcal_create. Moving preserves the event ID, description, attendees, and all metadata.\n\n### Conflict checking\nBefore creating or moving an event into a time slot, call gcal_list for that window. If a conflict exists, flag it: \"You already have [X] at that time \u2014 still want to create this?\"\n\n### Recurring events\nWhen updating or deleting a recurring event, always clarify scope before acting:\n\"This will affect just this occurrence. Should it apply to all future occurrences, or every instance of this event?\"\nWait for the answer before calling the tool.\n\n### Time zones\nAlways use explicit timezones in ISO 8601 format. Never leave a time ambiguous. If a time is given without a timezone, use America/Los_Angeles unless told otherwise.\n\n### Scheduling workflows\nWhen asked to \"schedule X\" or \"find time for X\":\n1. Call gcal_list for the relevant window to see what's already booked\n2. Propose specific open slots based on what you find\n3. Show the full draft event (title, time, location if provided) and wait for confirmation\n4. Then call gcal_create\n\nWhen asked \"what's on my calendar [period]\":\n1. Call gcal_list with that time range\n2. Group by day, format each event as above\n3. Proactively flag conflicts, back-to-back meetings, or unusually long gaps\n\n### Multiple calendars\nOn first use each session, call gcal_list_calendars to learn what calendars exist. Reference them by name in responses (\"your Work calendar\", \"your Personal calendar\").\n\n### Tone\nConcise. Lead with the schedule. Flag conflicts and time-sensitive items proactively. Suggest optimizations (\"You have a 3-hour gap Tuesday \u2014 good time for that call?\") but only act on your own suggestions after explicit confirmation.",
   "tools": [

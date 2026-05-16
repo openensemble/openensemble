@@ -180,6 +180,37 @@ If your skill is a per-user one (in `users/{userId}/skills/`), the relative impo
 
 ---
 
+## Semantic search (optional — only when fuzzy lookup actually helps)
+
+OpenEnsemble ships a bundled embedding model (nomic-embed, 768-dim, normalized vectors). It runs in-process — no HTTP, no API key, ~20ms per call. Skills can reuse it to add fuzzy/semantic lookup over their own stored data.
+
+```js
+import { embed } from '../../memory/embedding.mjs';   // top-level skill
+// import { embed } from '../../../../memory/embedding.mjs'; // per-user skill
+
+const qVec = await embed('snack deals at kroger');    // Float32Array, length 768
+// rows[i] = { ...record, vec: [...] }  ← embedded at write time
+const ranked = rows
+  .map(r => ({ r, sim: dot(qVec, r.vec) }))           // dot = cosine sim (already normalized)
+  .sort((a, b) => b.sim - a.sim);
+
+function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+```
+
+**Reach for it when:**
+- The skill stores >50 rows of text-y data the user will query with natural language.
+- Keyword matching would miss obvious paraphrases ("snacks" ↔ "chips/crackers", "cheap dairy" ↔ "milk on sale").
+- You want dedup ("is this new entry essentially the same as one we already saved?") — embed both, threshold the dot product.
+
+**Skip it when:**
+- The data is structured and the user filters by fields (store name, expires-after, price ≤ X) — plain `.filter()` is faster and clearer.
+- The dataset has <50 rows — linear keyword `.includes()` is fine.
+- Queries are exact-match by nature (IDs, dates, slugs).
+
+Pattern: embed each row at write time, store the vector alongside it in the JSON record, then at query time embed the user's query once and rank by dot product. No external vector DB needed up to thousands of rows.
+
+---
+
 ## Showing images and videos
 
 If your skill produces an image or video, return the file path *and* push an inline preview to the chat by accepting `ctx` as the 5th parameter:

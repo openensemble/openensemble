@@ -219,7 +219,7 @@ function renderAgentModelRows() {
     </select>`;
   }
   const roleLabel = sc => ({ general: 'Coordinator', email: 'Email', finance: 'Finance',
-    web: 'Assistant', coding: 'Coder', code: 'Coder', coder: 'Coder', image_generator: 'Image Generator', role_video_generator: 'Video Generator', role_tutor: 'Tutor' }[sc] ?? (sc ? sc.charAt(0).toUpperCase() + sc.slice(1) : ''));
+    web: 'Assistant', coding: 'Coder', code: 'Coder', coder: 'Coder', image_generator: 'Image Generator', role_video_generator: 'Video Generator', role_tutor: 'Tutor', role_home_assistant: 'Home Assistant' }[sc] ?? (sc ? sc.charAt(0).toUpperCase() + sc.slice(1) : ''));
   $('agentModelRows').innerHTML = agents.map(a => {
     const role = roleLabel(a.skillCategory ?? a.toolSet);
     return `<div class="agent-model-row">

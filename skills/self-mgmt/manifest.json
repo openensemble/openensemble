@@ -83,7 +83,7 @@
           "properties": {
             "name":             { "type": "string", "description": "Role name, e.g. 'Image Generator'" },
             "icon":             { "type": "string", "description": "Single emoji icon for the role" },
-            "description":      { "type": "string", "description": "Short one-line description shown in the UI" },
+            "description":      { "type": "string", "description": "Short one-line description of what this role handles (e.g. 'Control smart-home devices via Home Assistant', 'Manage household grocery list'). The coordinator reads this to decide when to route requests to this role's agent — write it so a reader can tell at a glance what kinds of requests belong here." },
             "responsibilities": { "type": "string", "description": "The full system prompt injected when this role is active — must be the exact text the user approved" },
             "confirmed":        { "type": "boolean", "description": "Set true ONLY after you have shown the user the draft system prompt and they have explicitly approved it" }
           },

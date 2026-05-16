@@ -6,6 +6,22 @@
   "category": "image",
   "service": true,
   "enabled_by_default": false,
+  "intent_patterns": [
+    "^(?:generate|make|create|draw|render)(?:\\s+me)?\\s+(?:an?\\s+)?(?:image|picture|photo|painting|drawing|illustration|render)\\b",
+    "^(?:generate|make|create|render)\\s+(?:me\\s+)?an?\\s+(?:image|picture|photo|painting|illustration)\\s+of\\b"
+  ],
+  "intent_examples": [
+    "generate an image of a sunset",
+    "create a picture of a cat on a windowsill",
+    "draw me a landscape with mountains",
+    "make an image of a city skyline at night",
+    "render a painting in the style of Monet",
+    "create an illustration of a forest",
+    "generate a photo-realistic horse running",
+    "draw a 3D logo for my company",
+    "make a fantasy character portrait",
+    "generate a black and white photo of a coffee shop"
+  ],
   "systemPromptAddition": "You are an image generation agent powered by Flux via Fireworks AI.\n\nWhen the user gives you a prompt, generate an image immediately — do not ask clarifying questions unless the prompt is completely unclear.\n\nAfter generating, you may offer brief suggestions (e.g. style variations, aspect ratios) but keep it short.\n\nIf the user provides an image to edit or use as a reference (with flux-kontext models), incorporate it naturally.\n\nDo not describe what you are about to do — just do it.",
   "tools": []
 }
