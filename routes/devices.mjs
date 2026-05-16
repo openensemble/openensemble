@@ -13,16 +13,32 @@ import { handlePairingRoutes } from './devices/pairing.mjs';
 import { sendToDevice, isDeviceOnline } from '../ws-handler.mjs';
 import { randomBytes } from 'crypto';
 
-// In-memory cache of one-shot test MP3s keyed by marker token. The /api/tts
-// route reads from this when the device echoes the marker in its TTS
-// request; the entry is deleted on read so each marker plays exactly once.
-// Cached MP3 is the *post-ffmpeg* 16 kHz buffer (already resampled), so the
-// TTS handler can return it without another transcode round-trip.
-const _testMp3Cache = new Map();
+// In-memory cache of one-shot MP3 buffers keyed by marker token. The /api/tts
+// route reads from this when the device echoes the marker in its TTS request;
+// the entry is deleted on read so each marker plays exactly once. Cached MP3
+// is already in device-ready encoding (ffmpeg-resampled by whoever cached it),
+// so the TTS handler can stream it without another transcode round-trip.
+// Originally added for /play-mp3 audio-quality testing; also used by the
+// reminder voice-channel (chime + TTS) to inject pre-rendered MP3s into the
+// device's existing TTS pipeline without firmware changes.
+const _oneShotMp3Cache = new Map();
 export function takeTestMp3(marker) {
-  const buf = _testMp3Cache.get(marker);
-  if (buf) _testMp3Cache.delete(marker);
+  const buf = _oneShotMp3Cache.get(marker);
+  if (buf) _oneShotMp3Cache.delete(marker);
   return buf || null;
+}
+
+/**
+ * Stash an MP3 under a fresh one-shot marker; returns the marker text the
+ * caller pushes to the device as a TTS token. /api/tts intercepts the marker
+ * and returns this buffer (then drops it from the cache). Entries expire
+ * after 60s if never claimed (offline device, dropped WS frame).
+ */
+export function cacheOneShotMp3(mp3Buf) {
+  const marker = `__test_audio_${randomBytes(4).toString('hex')}__`;
+  _oneShotMp3Cache.set(marker, mp3Buf);
+  setTimeout(() => _oneShotMp3Cache.delete(marker), 60_000);
+  return marker;
 }
 
 // Slot wake-word push moved to routes/voice-config.mjs as of 2026-05-13:
@@ -140,11 +156,7 @@ export async function handle(req, res) {
     const mp3Out = Buffer.concat(chunks);
     // Marker text the device will echo back. We use a punctuation-free
     // string so libhelix-bound sentence chunking doesn't split it weirdly.
-    const marker = `__test_audio_${randomBytes(4).toString('hex')}__`;
-    _testMp3Cache.set(marker, mp3Out);
-    // Expire entries after 60s so the cache doesn't grow if a marker
-    // is never claimed (e.g. device offline).
-    setTimeout(() => _testMp3Cache.delete(marker), 60_000);
+    const marker = cacheOneShotMp3(mp3Out);
 
     // Push a synthetic TTS event sequence to the device. The firmware
     // accumulates 'token' events into a sentence buffer, flushes on 'done',

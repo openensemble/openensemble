@@ -957,6 +957,7 @@
                 <option value="websocket">In-app (banner + chime)</option>
                 <option value="telegram">Telegram</option>
                 <option value="email">Email</option>
+                <option value="voice">Voice device</option>
                 <option value="all">All channels</option>
               </select>
               <span id="reminderChannelStatus" style="font-size:11px;color:var(--muted)"></span>
@@ -969,6 +970,16 @@
                 </select>
                 <span id="reminderEmailStatus" style="font-size:11px;color:var(--muted)"></span>
               </div>
+            </div>
+            <div id="reminderVoiceRow" style="display:none;margin-top:10px">
+              <div class="settings-section-desc" style="margin-bottom:6px">Speak reminders on:</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <select id="reminderVoiceSelect" data-change-action="saveReminderVoiceDevice" data-change-args="[&quot;$value&quot;]" style="flex:0 0 auto;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+                  <option value="">Loading…</option>
+                </select>
+                <span id="reminderVoiceStatus" style="font-size:11px;color:var(--muted)"></span>
+              </div>
+              <div id="reminderVoiceAllNote" style="display:none;margin-top:4px;font-size:11px;color:var(--muted)">"All channels" speaks on every paired device — the preferred pick above only applies to the standalone "Voice device" channel.</div>
             </div>
           </div>
           <div class="settings-section-title" style="margin-bottom:8px;border-top:1px solid var(--border);padding-top:14px">Scheduled Tasks</div>

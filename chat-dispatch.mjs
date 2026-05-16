@@ -11,6 +11,12 @@ import { getPendingEmail, clearPendingEmail, executePendingEmail } from './skill
 import { getPendingProven, clearPendingProven, executePendingProven } from './skills/profiles/execute.mjs';
 import { getRoleManifest, getRoleAssignments, setRoleAssignment, listRoles } from './roles.mjs';
 import { interceptScheduling } from './lib/scheduler-intent.mjs';
+import {
+  classifyTimerIntent, createVoiceTimer,
+  classifyTimerCancelIntent, cancelVoiceTimer,
+  classifyTimerExtendIntent, extendVoiceTimer,
+  resolveTimerDisambig,
+} from './lib/voice-timer.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { sendToDevice } from './ws-handler.mjs';
 import { log } from './logger.mjs';
@@ -239,6 +245,67 @@ export async function handleChatMessage({
   }
   userId = effectiveUserId;
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
+
+  // Fast-path: voice-device countdown timers ("set a 5 minute timer") bypass
+  // both the LLM and the scheduler-intent plan model. Targets the originating
+  // device so the chime + "Your X timer is done" TTS fires there, not on
+  // whatever the user's reminderVoiceDeviceId default happens to be.
+  // Cancel ("cancel the timer") shares the block — it must precede the
+  // generic 'stop'/'cancel' voice intent below, which would otherwise eat
+  // any cancellation that starts with 'stop'/'cancel'.
+  if (source === 'voice-device' && deviceId && typeof rawText === 'string') {
+    // Disambig response first: if we asked "the 5 or 10 minute one?" and
+    // the user just said "5 minute", treat that as the pick — before the
+    // create regex sees "5 minute timer"-shaped text and starts a new one.
+    // Works for both pending-cancel and pending-extend prompts.
+    try {
+      const resolved = await resolveTimerDisambig(rawText, { deviceId });
+      if (resolved) {
+        console.log(`[chat] voice-timer disambig resolved device=${deviceId}`);
+        onEvent({ type: 'token', text: resolved.confirmation, agent: agentId });
+        onEvent({ type: 'done', agent: agentId });
+        return;
+      }
+    } catch (e) {
+      console.warn(`[chat] voice-timer disambig failed: ${e.message}`);
+    }
+    const extend = classifyTimerExtendIntent(rawText);
+    if (extend) {
+      try {
+        const confirmation = await extendVoiceTimer({ userId, deviceId, addSeconds: extend.addSeconds, targetSeconds: extend.targetSeconds });
+        console.log(`[chat] voice-timer extend: +${extend.addSeconds}s target=${extend.targetSeconds ?? '?'} device=${deviceId}`);
+        onEvent({ type: 'token', text: confirmation, agent: agentId });
+        onEvent({ type: 'done', agent: agentId });
+        return;
+      } catch (e) {
+        console.warn(`[chat] voice-timer extend failed: ${e.message}`);
+      }
+    }
+    const cancel = classifyTimerCancelIntent(rawText);
+    if (cancel) {
+      try {
+        const confirmation = cancelVoiceTimer({ userId, deviceId, all: cancel.all, seconds: cancel.seconds });
+        console.log(`[chat] voice-timer cancel: all=${cancel.all} seconds=${cancel.seconds ?? '?'} userId=${userId}`);
+        onEvent({ type: 'token', text: confirmation, agent: agentId });
+        onEvent({ type: 'done', agent: agentId });
+        return;
+      } catch (e) {
+        console.warn(`[chat] voice-timer cancel failed: ${e.message}`);
+      }
+    }
+    const timer = classifyTimerIntent(rawText);
+    if (timer) {
+      try {
+        const confirmation = await createVoiceTimer({ userId, deviceId, seconds: timer.seconds });
+        console.log(`[chat] voice-timer: ${timer.spoken} device=${deviceId}`);
+        onEvent({ type: 'token', text: confirmation, agent: agentId });
+        onEvent({ type: 'done', agent: agentId });
+        return;
+      } catch (e) {
+        console.warn(`[chat] voice-timer failed: ${e.message}`);
+      }
+    }
+  }
 
   // Fast-path: voice-device control intents bypass the LLM entirely.
   // "sydney, volume up" / "pause" / "stop" → regex match → WS message

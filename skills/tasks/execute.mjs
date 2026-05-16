@@ -54,7 +54,7 @@ async function execCancelReminder(id, userId) {
   return `Reminder "${task.label}" cancelled.`;
 }
 
-async function execSetReminder({ label, datetime, time, repeat = 'once' }, userId) {
+async function execSetReminder({ label, datetime, time, repeat = 'once', voice_device }, userId) {
   if (!userId) return 'Error: no user context.';
   if (!label || typeof label !== 'string') return 'Error: label is required.';
   const cleanLabel = label.trim();
@@ -63,6 +63,28 @@ async function execSetReminder({ label, datetime, time, repeat = 'once' }, userI
   const { addTask, scheduleNewTask } = await import('../../scheduler.mjs');
   const base = { label: cleanLabel, ownerId: userId, type: 'reminder', handler: 'fireReminder' };
 
+  // Per-task voice-device override. Accept either an exact device id or a
+  // case-insensitive substring match against device name ("remind me in the
+  // kitchen"). Unknown name → fail loud rather than silently dropping the
+  // override, since the user explicitly named a target. The override layers on
+  // top of the user-wide reminderChannel and forces voice delivery in
+  // fireReminder regardless of the configured channel.
+  if (voice_device && typeof voice_device === 'string') {
+    const { listDevices } = await import('../../lib/voice-devices.mjs');
+    const devices = listDevices(userId);
+    const needle = voice_device.trim().toLowerCase();
+    const match = devices.find(d => d.id === voice_device)
+      || devices.find(d => (d.name || '').toLowerCase() === needle)
+      || devices.find(d => (d.name || '').toLowerCase().includes(needle));
+    if (!match) {
+      const names = devices.map(d => d.name || d.id).join(', ') || '(none paired)';
+      return `Error: no paired voice device matches "${voice_device}". Paired devices: ${names}.`;
+    }
+    base.voiceDeviceId = match.id;
+  }
+
+  const deviceSuffix = base.voiceDeviceId ? ` (speaking on ${voice_device})` : '';
+
   if (repeat === 'daily') {
     if (!time || !/^\d{1,2}:\d{2}$/.test(time)) return 'Error: daily reminder needs a time in HH:MM 24-hour format.';
     const [h, m] = time.split(':').map(Number);
@@ -70,7 +92,7 @@ async function execSetReminder({ label, datetime, time, repeat = 'once' }, userI
     const hhmm = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
     const task = await addTask({ ...base, repeat: 'daily', time: hhmm });
     scheduleNewTask(task);
-    return `Reminder "${task.label}" set daily at ${hhmm}. id=${task.id}`;
+    return `Reminder "${task.label}" set daily at ${hhmm}${deviceSuffix}. id=${task.id}`;
   }
 
   if (!datetime) return 'Error: one-shot reminder needs a `datetime` (ISO 8601).';
@@ -79,7 +101,7 @@ async function execSetReminder({ label, datetime, time, repeat = 'once' }, userI
   if (when.getTime() - Date.now() < 5000) return `Error: datetime ${when.toLocaleString()} is in the past or too soon.`;
   const task = await addTask({ ...base, repeat: 'once', datetime: when.toISOString() });
   scheduleNewTask(task);
-  return `Reminder "${task.label}" set for ${when.toLocaleString()}. id=${task.id}`;
+  return `Reminder "${task.label}" set for ${when.toLocaleString()}${deviceSuffix}. id=${task.id}`;
 }
 
 // ── Watch tasks (condition-triggered monitors) ───────────────────────────────

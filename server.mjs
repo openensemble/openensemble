@@ -63,6 +63,7 @@ import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
 import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
+import { speakReminder, pickReminderDevices } from './lib/voice-reminder.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn } from './background-tasks.mjs';
@@ -425,6 +426,11 @@ registerBuiltin('fireReminder', async (task) => {
   const wantWs = channel === 'websocket' || channel === 'all';
   const wantTg = channel === 'telegram'  || channel === 'all';
   const wantEm = channel === 'email'     || channel === 'all';
+  // Voice fires when (a) the channel is 'voice' / 'all' / 'websocket' with a
+  // per-task device override, or (b) the task itself names a target device.
+  // The override path means "remind me in the kitchen at 5" works even for a
+  // user whose default channel is websocket+email.
+  const wantVoice = channel === 'voice' || channel === 'all' || !!task.voiceDeviceId;
 
   const payload = { type: 'reminder', id: task.id, label: task.label, ts: Date.now() };
   const delivered = [];
@@ -483,6 +489,16 @@ registerBuiltin('fireReminder', async (task) => {
         }
       }
     } catch (e) { console.warn('[reminder] email delivery failed:', e.message); }
+  }
+
+  if (wantVoice) {
+    try {
+      const deviceIds = pickReminderDevices({ user, channel, taskDeviceId: task.voiceDeviceId });
+      if (deviceIds.length) {
+        const fired = await speakReminder({ userId: task.ownerId, deviceIds, text: task.label });
+        if (fired.length) delivered.push(`voice(${fired.length})`);
+      }
+    } catch (e) { console.warn('[reminder] voice delivery failed:', e.message); }
   }
 
   // Fallback: if the preferred channel couldn't deliver and WS wasn't already

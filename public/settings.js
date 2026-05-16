@@ -861,6 +861,19 @@ function _toggleReminderEmailRow(channel) {
   row.style.display = (channel === 'email' || channel === 'all') ? '' : 'none';
 }
 
+function _toggleReminderVoiceRow(channel) {
+  const row = $('reminderVoiceRow');
+  if (!row) return;
+  const show = channel === 'voice' || channel === 'all';
+  row.style.display = show ? '' : 'none';
+  // The preferred-device picker only affects the standalone 'voice' channel.
+  // 'all' fans out to every paired device, so surface that caveat inline so
+  // a user who sets the dropdown then switches to 'all' isn't confused that
+  // both rooms speak.
+  const note = $('reminderVoiceAllNote');
+  if (note) note.style.display = (channel === 'all') ? '' : 'none';
+}
+
 async function loadReminderChannel() {
   const sel = $('reminderChannelSelect');
   const status = $('reminderChannelStatus');
@@ -873,7 +886,9 @@ async function loadReminderChannel() {
     sel.value = channel;
     if (status) status.textContent = '';
     _toggleReminderEmailRow(channel);
+    _toggleReminderVoiceRow(channel);
     await loadReminderEmail(u.reminderEmailId);
+    await loadReminderVoiceDevice(u.reminderVoiceDeviceId);
   } catch {}
 }
 
@@ -894,7 +909,9 @@ async function saveReminderChannel(channel) {
     if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saved'; setTimeout(() => status.textContent = '', 1500); }
     showToast(`Reminder delivery: ${channel}`, 2000);
     _toggleReminderEmailRow(channel);
+    _toggleReminderVoiceRow(channel);
     if (channel === 'email' || channel === 'all') await loadReminderEmail();
+    if (channel === 'voice' || channel === 'all') await loadReminderVoiceDevice();
   } catch {
     if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Network error.'; }
   }
@@ -940,6 +957,59 @@ async function saveReminderEmail(accountId) {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reminderEmailId: accountId }),
+    });
+    if (!r.ok) {
+      if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Failed to save.'; }
+      return;
+    }
+    if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saved'; setTimeout(() => status.textContent = '', 1500); }
+  } catch {
+    if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Network error.'; }
+  }
+}
+
+async function loadReminderVoiceDevice(currentSelection) {
+  const sel = $('reminderVoiceSelect');
+  if (!sel || !_currentUser) return;
+  try {
+    const r = await fetch('/api/devices');
+    if (!r.ok) {
+      sel.innerHTML = '<option value="">No devices available</option>';
+      return;
+    }
+    const data = await r.json();
+    const devices = Array.isArray(data?.devices) ? data.devices : [];
+    if (!devices.length) {
+      sel.innerHTML = '<option value="">No voice devices paired</option>';
+      return;
+    }
+    if (currentSelection === undefined) {
+      const u = await fetch(`/api/users/${_currentUser.id}`).then(r => r.ok ? r.json() : null).catch(() => null);
+      currentSelection = u?.reminderVoiceDeviceId;
+    }
+    sel.innerHTML = devices.map(d => {
+      const label = d.name || d.id;
+      const status = d.online ? ' • online' : ' • offline';
+      return `<option value="${d.id}">${label}${status}</option>`;
+    }).join('');
+    // Default to the first device if the user hasn't chosen one yet, matching
+    // the email-account default behavior.
+    const defaultId = currentSelection || devices[0]?.id;
+    if (defaultId) sel.value = defaultId;
+  } catch {
+    sel.innerHTML = '<option value="">Failed to load</option>';
+  }
+}
+
+async function saveReminderVoiceDevice(deviceId) {
+  const status = $('reminderVoiceStatus');
+  if (!_currentUser || !deviceId) return;
+  if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Saving…'; }
+  try {
+    const r = await fetch(`/api/users/${_currentUser.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reminderVoiceDeviceId: deviceId }),
     });
     if (!r.ok) {
       if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Failed to save.'; }

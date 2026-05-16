@@ -18,7 +18,8 @@
             "label":    { "type": "string", "description": "Short label shown in the notification, e.g. 'Drink water'." },
             "datetime": { "type": "string", "description": "ISO 8601 timestamp for one-shot reminders, e.g. '2026-05-02T15:00:00-04:00'. Required when repeat is 'once' or omitted." },
             "time":     { "type": "string", "description": "HH:MM 24-hour clock time for daily reminders, e.g. '07:30'. Required when repeat is 'daily'." },
-            "repeat":   { "type": "string", "enum": ["once", "daily"], "description": "Defaults to 'once'." }
+            "repeat":   { "type": "string", "enum": ["once", "daily"], "description": "Defaults to 'once'." },
+            "voice_device": { "type": "string", "description": "Optional. Speak this reminder on a specific paired voice device — pass the device name (e.g. 'kitchen', 'bedroom') or its id. Resolved case-insensitively against the user's paired devices. Use when the user names a room/device ('remind me in the kitchen at 5'). Overrides the user's default reminder-delivery channel for this one reminder only." }
           },
           "required": ["label"]
         }
