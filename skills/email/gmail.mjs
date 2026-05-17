@@ -154,6 +154,7 @@ async function cmdList(args) {
     console.log(`   From:    ${getHeader(h, 'From')}`);
     console.log(`   Subject: ${getHeader(h, 'Subject')}`);
     console.log(`   Date:    ${getHeader(h, 'Date')}`);
+    console.log(`   Thread:  ${msg.threadId}`);
     console.log(`   Preview: ${(msg.snippet||'').slice(0,120)}`);
     console.log('');
   }

@@ -11,15 +11,29 @@ import { CFG_PATH, USERS_DIR, readConfig } from './lib/paths.mjs';
 let _customAgentsCache = null; // cache of ALL agents across all user files
 let _modelOverridesCache = null;
 
-// Invalidate caches when files change externally (direct edits, model hot-swap)
+// Invalidate caches when files change externally (direct edits, model hot-swap).
+// One narrow watcher per existing users/<id>/agents.json — avoids the recursive
+// watch on USERS_DIR that fans out to one inotify instance per subdirectory.
+const _watchedAgentFiles = new Set();
+function watchAgentsFile(filePath) {
+  if (_watchedAgentFiles.has(filePath) || !existsSync(filePath)) return;
+  try {
+    const w = watch(filePath, () => { _customAgentsCache = null; });
+    w.on('error', e => console.warn('[agents] agents.json watcher error:', e.message));
+    _watchedAgentFiles.add(filePath);
+  } catch (e) { console.warn('[agents] failed to watch', filePath, ':', e.message); }
+}
+
 try {
   if (existsSync(USERS_DIR)) {
-    watch(USERS_DIR, { recursive: true }, (_, filename) => {
-      if (filename?.endsWith('agents.json')) _customAgentsCache = null;
-    });
+    for (const entry of readdirSync(USERS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      watchAgentsFile(path.join(USERS_DIR, entry.name, 'agents.json'));
+    }
   }
   if (existsSync(CFG_PATH)) {
-    watch(CFG_PATH, () => { _modelOverridesCache = null; });
+    const w = watch(CFG_PATH, () => { _modelOverridesCache = null; });
+    w.on('error', e => console.warn('[agents] config watcher error:', e.message));
   }
 } catch (e) { console.warn('[agents] fs.watch unavailable:', e.message); }
 
@@ -37,8 +51,10 @@ function loadUserAgents(userId) {
 function saveUserAgents(userId, list) {
   const dir = path.join(USERS_DIR, userId);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(getUserAgentsPath(userId), JSON.stringify(list, null, 2));
+  const p = getUserAgentsPath(userId);
+  writeFileSync(p, JSON.stringify(list, null, 2));
   _customAgentsCache = null;
+  watchAgentsFile(p);
 }
 
 export function loadCustomAgents() {

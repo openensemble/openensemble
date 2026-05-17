@@ -118,6 +118,31 @@ async function gmailComposeWithAttachments(args, userId, accountId) {
   return `Email sent${attachNote}. Message ID: ${sent.id}`;
 }
 
+// Strip HTML tags AND drop style/script/head block contents so CSS rules don't
+// bleed into the plain-text output. Used by both promoteHtmlBody (for compose)
+// and the Microsoft email_read path (to summarise body for the LLM).
+function htmlToText(html) {
+  return html
+    .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(p|div|tr|li|h[1-6])[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// If the LLM put HTML markup in `body` instead of `html_body`, hoist it into
+// `html_body` and derive a plain-text version for `body`. Recipients then see
+// a proper rich-text email instead of literal `<p>` tags.
+function promoteHtmlBody(args) {
+  if (args.html_body || !args.body || !/<[a-z][\s\S]*>/i.test(args.body)) return args;
+  return { ...args, html_body: args.body, body: htmlToText(args.body) };
+}
+
 // ── Gmail dispatch (via CLI subprocess) ───────────────────────────────────────
 
 function spawnGmail(cmdArgs, userId, accountId) {
@@ -150,24 +175,8 @@ async function execGmail(name, args, userId, accountId) {
       return spawnGmail(['thread', args.threadId], userId, accountId);
     case 'email_reply':
       return spawnGmail(['reply', args.messageId, args.body], userId, accountId);
-    case 'email_compose': {
-      // Guard: if body looks like HTML but html_body is not set, move it there
-      if (!args.html_body && args.body && /<[a-z][\s\S]*>/i.test(args.body)) {
-        const plainText = args.body
-          .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, '')  // strip style/script/head blocks
-          .replace(/<br\s*\/?>/gi, '\n')                               // br → newline
-          .replace(/<\/?(p|div|tr|li|h[1-6])[^>]*>/gi, '\n')         // block elements → newline
-          .replace(/<[^>]+>/g, '')                                     // strip remaining tags
-          .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-          .replace(/[ \t]+/g, ' ')                                     // collapse spaces
-          .replace(/\n{3,}/g, '\n\n')                                  // collapse blank lines
-          .trim();
-        args = { ...args, html_body: args.body, body: plainText };
-      }
-      return gmailComposeWithAttachments(args, userId, accountId);
-    }
+    case 'email_compose':
+      return gmailComposeWithAttachments(promoteHtmlBody(args), userId, accountId);
     case 'email_trash':
       return spawnGmail(['trash', args.messageId], userId, accountId);
     case 'email_batch_trash': {
@@ -192,7 +201,11 @@ async function execGmail(name, args, userId, accountId) {
       return spawnGmail(['labelquery', args.query, ...addArgs, ...rmArgs], userId, accountId);
     }
     case 'email_purge_sender': {
-      const query = args.query ?? (args.sender ? `from:${args.sender}` : null);
+      // Treat empty strings as absent — some LLMs emit `{query: ""}` alongside
+      // a real `sender` value when JSON-schema-coerced fields are populated.
+      const query = (args.query && args.query.trim())
+        ? args.query.trim()
+        : (args.sender && args.sender.trim() ? `from:${args.sender.trim()}` : null);
       if (!query) return 'Provide either sender or query.';
       return spawnGmail(['purge', query, ...(args.permanent ? ['--permanent'] : [])], userId, accountId);
     }
@@ -217,14 +230,17 @@ async function execMicrosoft(name, args, userId, accountId) {
   const ms = await import('../../lib/ms-graph.mjs');
   switch (name) {
     case 'email_list': {
-      const { emails } = await ms.fetchMsInboxPage(userId, accountId, null, args.maxResults || 10);
+      // Microsoft email_list is already inbox-scoped; strip a leading Gmail-style
+      // "in:inbox" so an LLM trained on Gmail syntax doesn't produce a $search
+      // that matches the literal string and returns nothing.
+      let q = args.query;
+      if (typeof q === 'string') q = q.replace(/^\s*in:inbox\s*/i, '').trim() || undefined;
+      const { emails } = await ms.fetchMsInboxPage(userId, accountId, null, args.maxResults || 10, q);
       if (!emails.length) return 'No messages found.';
-      return emails.map(e => `[${e.id}] From: ${e.from}\nSubject: ${e.subject}\nDate: ${e.date}\n${e.snippet}`).join('\n\n---\n\n');
+      return emails.map(e => `[${e.id}] From: ${e.from}\nSubject: ${e.subject}\nDate: ${e.date}\nThread: ${e.threadId}\n${e.snippet}`).join('\n\n---\n\n');
     }
     case 'email_read':
-      return ms.fetchMsMessageBody(userId, accountId, args.messageId).then(html =>
-        html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
-      );
+      return ms.fetchMsMessageBody(userId, accountId, args.messageId).then(htmlToText);
     case 'email_thread':
       return ms.fetchMsThread(userId, accountId, args.threadId).then(msgs =>
         msgs.map(m => `From: ${m.from}\nDate: ${m.date}\n${m.body}`).join('\n\n---\n\n')
@@ -232,20 +248,24 @@ async function execMicrosoft(name, args, userId, accountId) {
     case 'email_reply':
       return ms.replyMsMessage(userId, accountId, args.messageId, args.body);
     case 'email_compose':
-      return ms.composeMsMessage(userId, accountId, args);
+      return ms.composeMsMessage(userId, accountId, promoteHtmlBody(args));
     case 'email_trash':
       return ms.trashMsMessage(userId, accountId, args.messageId);
     case 'email_batch_trash': {
       const ids = args.messageIds ?? [];
       if (!ids.length) return 'No message IDs provided.';
-      const results = await Promise.all(ids.map(id => ms.trashMsMessage(userId, accountId, id)));
-      return `${results.length} email(s) moved to trash.`;
+      const done = await ms.trashMsBatch(userId, accountId, ids);
+      return `${done} email(s) moved to trash.`;
     }
     case 'email_batch_label':
     case 'email_label_query':
       return 'Label management is only supported for Gmail accounts.';
-    case 'email_purge_sender':
-      return 'Purge sender is only supported for Gmail accounts.';
+    case 'email_purge_sender': {
+      const query = (args.query && args.query.trim()) ? args.query.trim() : null;
+      const sender = (args.sender && args.sender.trim()) ? args.sender.trim() : null;
+      if (!query && !sender) return 'Provide either sender or query.';
+      return ms.purgeMsSender(userId, accountId, { sender, query, permanent: !!args.permanent });
+    }
     case 'email_mark_read':
       return ms.markMsRead(userId, accountId, args.messageIds ?? [], args.unread);
     case 'email_inbox_stats':
@@ -258,7 +278,7 @@ async function execMicrosoft(name, args, userId, accountId) {
 // ── IMAP dispatch (read-only) ─────────────────────────────────────────────────
 
 async function execImap(name, args, account, userId) {
-  const { fetchInboxPage, fetchImapMessageBody, deleteImapMessages, markImapMessages, fetchImapReplyHeaders } = await import('../../lib/imap-client.mjs');
+  const { fetchInboxPage, fetchImapMessageBody, deleteImapMessages, markImapMessages, fetchImapReplyHeaders, purgeImapBySender, fetchImapInboxStats } = await import('../../lib/imap-client.mjs');
 
   if (name === 'email_compose') {
     if (!account.smtpHost) {
@@ -309,8 +329,18 @@ async function execImap(name, args, account, userId) {
     return `${count} message(s) marked ${args.unread ? 'unread' : 'read'}.`;
   }
 
-  const WRITE_OPS = ['email_batch_label', 'email_label_query', 'email_purge_sender'];
-  if (WRITE_OPS.includes(name)) {
+  if (name === 'email_purge_sender') {
+    const query = (args.query && args.query.trim()) ? args.query.trim() : null;
+    const sender = (args.sender && args.sender.trim()) ? args.sender.trim() : null;
+    if (!query && !sender) return 'Provide either sender or query.';
+    const count = await purgeImapBySender(userId, account, { sender, query });
+    if (!count) return 'No emails found matching query.';
+    const target = sender ?? query;
+    return `Done. ${count} email(s) from "${target}" deleted.`;
+  }
+
+  const LABEL_OPS = ['email_batch_label', 'email_label_query'];
+  if (LABEL_OPS.includes(name)) {
     return `"${account.label}" is an IMAP account — ${name} is not supported. Label management is Gmail-only.`;
   }
   switch (name) {
@@ -326,7 +356,7 @@ async function execImap(name, args, account, userId) {
     case 'email_thread':
       return 'Thread view is not supported for IMAP accounts.';
     case 'email_inbox_stats':
-      return 'Inbox stats are not available for IMAP accounts.';
+      return fetchImapInboxStats(userId, account);
     default:
       return `Tool ${name} not supported for IMAP accounts.`;
   }
@@ -384,7 +414,7 @@ async function _executeInner(name, args, userId) {
     const accounts = loadAccounts(userId);
     if (!accounts.length) return 'No email accounts connected. The user can add accounts in Settings → Profile → Connected Accounts.';
     return accounts.map((a, i) =>
-      `${i === 0 ? '★ ' : ''}${a.label} (${a.provider})${a.provider === 'imap' ? ' [read-only]' : ''}`
+      `${i === 0 ? '★ ' : ''}${a.label} (${a.provider})`
     ).join('\n');
   }
 
