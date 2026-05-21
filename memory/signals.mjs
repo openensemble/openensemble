@@ -56,6 +56,16 @@ async function detectSignals({ agentId, userMessage, agentLastResponse, userId =
     correctionRecord = await remember({ agentId, type: 'params', source: 'correction',
       confidence: 0.99, text, metadata: { category: 'correction' }, userId });
 
+    // Per-skill telemetry: attribute this correction to the most recent
+    // user-skill invocation in the past few minutes (closest in time = most
+    // likely culprit). Drives both the mid-zone refine proposal and the
+    // auto-deprecation proposal. Pass the correction text so the refine
+    // accept handler can feed it to coder for skill_patch_code. Fire-and-
+    // forget; telemetry must never block signal storage.
+    import('../lib/skill-telemetry.mjs')
+      .then(m => m.recordCorrection({ userId, agentId, correctionText: s.correction }))
+      .catch(e => console.warn('[skill-telemetry] correction attribution failed:', e.message));
+
     // Cortex automation #2: corrections-to-rules promotion. If the same
     // correction has fired before (vector-similarity match in this agent's
     // _params), surface a proposal to promote it to a per-user standing rule

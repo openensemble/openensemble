@@ -277,13 +277,29 @@ function appendProposalBubble(proposal, scroll = true) {
   header.appendChild(icon);
   const label = document.createElement('span');
   label.style.cssText = 'font-weight:600';
-  label.textContent = proposal.kind === 'watch' ? 'Set up a monitor?' : 'Make this a recurring task?';
+  const HEADER_BY_KIND = {
+    watch:              'Set up a monitor?',
+    recurring_task:     'Make this a recurring task?',
+    rule_promotion:     'Promote this correction to a standing rule?',
+    skill_proposal:     'Bundle this workflow into a skill?',
+    skill_refine:       'Refine this skill based on your corrections?',
+    skill_deprecation:  'This skill keeps getting corrected — delete it?',
+  };
+  label.textContent = HEADER_BY_KIND[proposal.kind] || 'Proposal';
   header.appendChild(label);
   el.appendChild(header);
 
   const body = document.createElement('div');
-  body.style.cssText = 'color:var(--muted);font-size:12px;margin-bottom:8px';
-  body.textContent = `You've asked this a few times: "${proposal.message}"`;
+  body.style.cssText = 'color:var(--muted);font-size:12px;margin-bottom:8px;white-space:pre-wrap';
+  // Friction proposals (watch / recurring_task) are the only kinds whose
+  // server-side message text is the bare user phrasing — they need the
+  // "You've asked this a few times" preamble for context. All other kinds
+  // already build a self-contained body server-side, so render their message
+  // verbatim.
+  const isFrictionKind = proposal.kind === 'watch' || proposal.kind === 'recurring_task';
+  body.textContent = isFrictionKind
+    ? `You've asked this a few times: "${proposal.message}"`
+    : (proposal.message || '');
   el.appendChild(body);
 
   const actions = document.createElement('div');

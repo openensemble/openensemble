@@ -60,6 +60,67 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
   trackFriction({ agentId: agent.id, userMessage: sessionText, userId })
     .catch(e => console.warn('[cortex] Friction tracking failed:', e.message));
 
+  // Auto-skill proposer — Hermes-style: a turn that used several real tools
+  // is a candidate for bundling into a reusable user skill. Runs in parallel
+  // with friction tracking; declines internally on rate-limit, destructive
+  // verbs, mutation-only tool sets, etc. Skip ephemeral one-shots.
+  if (!agent.ephemeral) {
+    import('./lib/skill-proposer.mjs')
+      .then(m => m.maybeProposeSkill({
+        userId, agentId: agent.id, agentName: agent.name,
+        userMessage: sessionText, assistantContent, toolsUsed,
+      }))
+      .catch(e => console.warn('[skill-proposer] failed:', e.message));
+
+    // Per-skill telemetry — bump invocation counters for any user-created
+    // skill tools that fired this turn. Pairs with recordCorrection in
+    // memory/signals.mjs to compute correction-rate per skill and propose
+    // deprecation when the ratio crosses threshold.
+    import('./lib/skill-telemetry.mjs')
+      .then(m => m.recordToolInvocations({ userId, toolsUsed }))
+      .catch(e => console.warn('[skill-telemetry] record failed:', e.message));
+
+    // Trigger learning — when a user-skill tool fires, the userText that
+    // triggered it becomes a new natural-language example for that skill's
+    // triggers.json. The agent-resolver injects these as system-prompt
+    // examples, biasing the LLM toward existing skills for similar requests.
+    // appendTrigger dedups by lowercase phrase and caps the list — safe to
+    // call on every invocation.
+    (async () => {
+      try {
+        const { userSkillsDir } = await import('./lib/paths.mjs');
+        const fs = (await import('fs')).default;
+        const path = (await import('path')).default;
+        const dir = userSkillsDir(userId);
+        if (!fs.existsSync(dir)) return;
+        // Cheap tool→skill index: scan once.
+        const idx = {};
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const mp = path.join(dir, entry.name, 'manifest.json');
+          if (!fs.existsSync(mp)) continue;
+          try {
+            const m = JSON.parse(fs.readFileSync(mp, 'utf8'));
+            for (const t of m.tools || []) {
+              const n = t?.function?.name;
+              if (n) idx[n] = entry.name;
+            }
+          } catch { /* skip */ }
+        }
+        const skillIds = new Set();
+        for (const t of toolsUsed) {
+          const sid = idx[t?.name];
+          if (sid) skillIds.add(sid);
+        }
+        if (skillIds.size === 0) return;
+        const { appendTrigger } = await import('./lib/skill-triggers.mjs');
+        for (const sid of skillIds) appendTrigger(userId, sid, sessionText);
+      } catch (e) {
+        console.warn('[skill-triggers] append failed:', e.message);
+      }
+    })();
+  }
+
   if (skipSignals) return;
 
   // Explicit memory-mutating tools — agent already recorded its intent.
@@ -137,6 +198,16 @@ async function* consumeProvider(providerGen) {
 
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false) {
+  // Flush any deferred skill-proposal candidate from the prior turn. The
+  // proposer stashes after qualifying multi-tool turns and only emits on the
+  // next turn — so we can drop the candidate if the user's current message
+  // is corrective. Fire-and-forget; failures here must never block chat.
+  if (!agent.ephemeral && !silent) {
+    import('./lib/skill-proposer.mjs')
+      .then(m => m.flushPendingSkillCandidate({ agentId: agent.id, currentUserMessage: userText }))
+      .catch(e => console.warn('[skill-proposer] flush failed:', e.message));
+  }
+
   // Finance/email agents handle transactions and actions — skip memory signal processing.
   // Ephemeral agents (deep_research_parallel workers) are stateless one-shots — skip all memory ops.
   // Scheduler intercepts: when chat-dispatch.mjs's interceptScheduling fired and
@@ -167,6 +238,21 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     ? null
     : await buildAgentContext(agent.id, recallQuery, userId).catch(() => null);
   const memBlock = ctx ? formatContext(ctx) : '';
+
+  // Per-turn user-skill trigger nudge. Embedding-ranked when cortex is up
+  // (top-K skills by cosine similarity to userText), all-triggers fallback
+  // when not. Empty string for ephemeral agents and for users with no custom
+  // skills — buildTriggerNudgeBlock handles both. Concatenated into the
+  // system prompt below alongside memBlock.
+  let skillTriggersBlock = '';
+  if (!agent.ephemeral && userId && userId !== 'default') {
+    try {
+      const { buildTriggerNudgeBlock } = await import('./lib/skill-triggers.mjs');
+      skillTriggersBlock = await buildTriggerNudgeBlock(userId, userText);
+    } catch (e) {
+      console.debug('[skill-triggers] nudge build failed:', e.message);
+    }
+  }
 
   // Inject current name so renaming takes effect in the LLM's self-awareness.
   // Anthropic models are trained to always identify as Claude — skip for them.
@@ -208,9 +294,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // outcome). Goes into the system prompt — not userText — so the UI doesn't
   // render it and the session doesn't persist it into history.
   const noteBlock = systemNote ? `\n\n${systemNote}` : '';
+  const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
   const systemPrompt = memBlock
-    ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${noteBlock}`
-    : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${noteBlock}`;
+    ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}`
+    : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}`;
 
   // 2. Build message history (strip ts field — Ollama doesn't want it).
   // Filter out UI-only role types — `status` (watcher progress bubbles),

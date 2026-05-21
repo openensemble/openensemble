@@ -265,6 +265,15 @@ async function handleCreate(args, userId) {
     drawerNote = ` A sidebar drawer was also installed — reload the page to see it.`;
   }
 
+  // Improvement log — first entry for the new skill.
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    appendEntry(userId, skillId, {
+      kind: 'created',
+      summary: `Created with ${newNames.length} tool${newNames.length === 1 ? '' : 's'}: ${newNames.join(', ')}`,
+    });
+  } catch (e) { console.debug('[skill-builder] log append (create) failed:', e.message); }
+
   return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}. The skill persists across server restarts.${drawerNote}`;
 }
 
@@ -313,6 +322,14 @@ async function handleUpdateCode(args, userId) {
   rmSync(backupPath, { force: true });
 
   clearExecutorCache(skillId, ownerId);
+
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    appendEntry(ownerId, skillId, {
+      kind: 'manual_update',
+      summary: `Full code replacement (${code.length} bytes)`,
+    });
+  } catch (e) { console.debug('[skill-builder] log append (update) failed:', e.message); }
 
   return `Skill "${manifest.name}" (${skillId}) updated and hot-reloaded. New code is active immediately.`;
 }
@@ -410,6 +427,18 @@ async function handlePatchCode(args, userId) {
   clearExecutorCache(skillId, ownerId);
 
   const n = edits.length;
+
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    // Summary captures the first edit's find-string preview so the log
+    // shows what changed without forcing the user to diff manually.
+    const firstFind = edits[0].find.replace(/\s+/g, ' ').slice(0, 80);
+    appendEntry(ownerId, skillId, {
+      kind: 'manual_patch',
+      summary: `${n} edit${n === 1 ? '' : 's'} applied; first targeted: "${firstFind}…"`,
+    });
+  } catch (e) { console.debug('[skill-builder] log append (patch) failed:', e.message); }
+
   return `Skill "${manifest.name}" (${skillId}) patched (${n} edit${n === 1 ? '' : 's'}) and hot-reloaded. New code is active immediately.`;
 }
 
@@ -439,6 +468,19 @@ async function handleDelete(args, userId) {
   // Remove the paired drawer plugin (if any). Safe no-op when no drawer exists.
   removeDrawerForSkill(ownerId, skillId);
 
+  // Drop the LanceDB skill-trigger rows for this skill — the JSON triggers
+  // file went with the skill dir above, but the embedded mirror persists
+  // unless we delete it explicitly. Fire-and-forget; trigger leftovers can
+  // never invoke a deleted skill (the tool name is gone) but they'd waste
+  // prompt space if surfaced. Lazy import — keeps skill-builder usable on
+  // installs that don't have cortex.
+  try {
+    const { dropSkillTriggers } = await import('../../lib/skill-triggers.mjs');
+    await dropSkillTriggers(ownerId, skillId);
+  } catch (e) {
+    console.debug('[skill-builder] trigger drop skipped:', e.message);
+  }
+
   // Clean up the owner's profile (may be a different user when an admin is deleting).
   await modifyProfile(ownerId, user => {
     user.skills = (user.skills ?? []).filter(s => s !== skillId);
@@ -450,11 +492,17 @@ async function handleDelete(args, userId) {
 
 async function handleList(userId) {
   const { listRoles } = await import('../../roles.mjs');
+  const { readLog } = await import('../../lib/skill-improvement-log.mjs');
   const mySkills = listRoles(userId).filter(m => m.custom === true && m.createdBy === userId);
   if (!mySkills.length) return 'No custom skills yet. Use skill_create to build one.';
   return mySkills.map(m => {
     const n = (m.tools ?? []).length;
-    return `• ${m.icon ?? '🔧'} **${m.name}** (${m.id}) — ${m.description} [${n} tool${n !== 1 ? 's' : ''}]`;
+    const log = readLog(userId, m.id);
+    const latest = log.length ? log[log.length - 1] : null;
+    const historyHint = latest
+      ? `\n    ↳ last change (${latest.kind}): ${latest.summary}`
+      : '';
+    return `• ${m.icon ?? '🔧'} **${m.name}** (${m.id}) — ${m.description} [${n} tool${n !== 1 ? 's' : ''}]${historyHint}`;
   }).join('\n');
 }
 
