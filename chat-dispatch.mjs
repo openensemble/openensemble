@@ -19,6 +19,7 @@ import {
 } from './lib/voice-timer.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { sendToDevice } from './ws-handler.mjs';
+import { broadcastAlarmStop, hasActiveAlarms } from './lib/alarms.mjs';
 import { log } from './logger.mjs';
 import {
   loadConfig, loadUsers, saveUsers, getAgentsForUser, detectNewsPref, detectRenameCommand,
@@ -115,8 +116,17 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   'memory_search',
   'memory_save',
   'ask_agent',
+  // Scheduler family — actual tool names per skills/tasks/manifest.json.
+  // The previous entry "create_task" was wrong (no such tool exists), which
+  // is why Sydney told users "the alarm tool isn't available to me in this
+  // turn" on voice-device requests like "set an alarm for 11:22 AM today".
+  'set_reminder',
+  'set_alarm',
+  'schedule_task',
   'list_tasks',
-  'create_task',
+  'list_reminders',
+  'delete_task',
+  'cancel_reminder',
   'ha_list_devices',
   'ha_get_state',
   'ha_call_service',
@@ -175,7 +185,7 @@ function classifyVoiceIntent(text) {
  * the side effect but the caller can continue if desired (in practice
  * we still short-circuit for all of these because they're terminal).
  */
-function executeVoiceIntent(intent, deviceId) {
+function executeVoiceIntent(intent, deviceId, userId) {
   if (!deviceId) return { replaces: false };
   switch (intent.type) {
     case 'volume_up':
@@ -204,8 +214,16 @@ function executeVoiceIntent(intent, deviceId) {
       return { replaces: true };
     case 'stop':
       // Local audio was already stopped by the barge-in handler in
-      // firmware when the wake fired. Nothing else to do; just suppress
-      // generating a reply.
+      // firmware when the wake fired. Also broadcast alarm_stop to every
+      // device holding an active alarm for this user — devices halt their
+      // ring loops and send alarm_acked back, which cleans up the server
+      // registry. The firmware's wake-while-alarm-firing path already
+      // dismisses locally without an STT roundtrip, so this catches the
+      // typed/UI-driven stops that don't go through the device's wake.
+      if (userId && hasActiveAlarms(userId)) {
+        const n = broadcastAlarmStop(userId);
+        console.log(`[chat] voice-stop broadcasted alarm_stop to ${n} device(s) for ${userId}`);
+      }
       return { replaces: true };
   }
   return { replaces: false };
@@ -432,7 +450,7 @@ export async function handleChatMessage({
   if (source === 'voice-device' && typeof rawText === 'string') {
     const intent = classifyVoiceIntent(rawText);
     if (intent) {
-      const { replaces } = executeVoiceIntent(intent, deviceId);
+      const { replaces } = executeVoiceIntent(intent, deviceId, userId);
       console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);
       if (replaces) {
         // Short audible confirmation so the user hears that the device
@@ -560,7 +578,16 @@ export async function handleChatMessage({
     const financeExtra = agent.skillCategory === 'finance'
       ? `\nUser ID: ${userId ?? 'default'}\nAlways pass this exact User ID to every expense tool call.`
       : '';
-    scopedAgent.systemPrompt = `${agent.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}${financeExtra}`;
+    // Voice-device chats: instruct the LLM to ALWAYS end clarification
+    // replies with a question mark. The firmware uses that as the signal
+    // to open a follow-up listen window so the user can answer without
+    // saying the wake word again. Phrase deliberately as a hard rule —
+    // without it we'd be sniffing reply text for "?" anywhere, which
+    // false-positives on quoted questions.
+    const voiceExtra = source === 'voice-device'
+      ? `\n\n## Voice device follow-up\nThis chat is coming from a voice device with a microphone. When you need ANY clarification, confirmation, or further info from the user — ALWAYS phrase the LAST sentence of your reply as a direct question ending with "?". Don't trail off with imperative "say X" or "let me know" without a closing "?". The device uses this trailing "?" as the signal to keep listening for the user's answer; without it they have to say the wake word again to respond.`
+      : '';
+    scopedAgent.systemPrompt = `${agent.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}${financeExtra}${voiceExtra}`;
   }
 
   let userText   = rawText?.trim() ?? '';
@@ -1003,6 +1030,23 @@ export async function handleChatMessage({
       }
     }
   } finally {
+    // Follow-up listening: if the reply contains a question OR an
+    // imperative asking the user to say/tell/respond, open a short listen
+    // window so the user can answer without saying the wake word again.
+    // The system prompt instructs the LLM to use a trailing "?" — these
+    // imperatives are a safety net for when it doesn't. Only sends for
+    // voice-device sources.
+    if (source === 'voice-device' && deviceId) {
+      const reply = (_streamBuf || '').trim();
+      const HAS_QUESTION = /[?？]/;
+      // Patterns: "please say X", "say 'X'", "tell me X", "let me know",
+      // "do you mean", "did you mean" — common LLM hedges that ask for
+      // user input without a literal "?".
+      const ASKS_FOR_REPLY = /\b(please\s+(say|tell|repeat)|say\s+["'“]|tell\s+me|let\s+me\s+know|d(o|id)\s+you\s+mean)\b/i;
+      if (HAS_QUESTION.test(reply) || ASKS_FOR_REPLY.test(reply)) {
+        sendToDevice(deviceId, { type: 'await_followup', windowMs: 5000 });
+      }
+    }
     recordActivity(userId, agentId, { apiCall: true });
     abortControllers.delete(scopedSessionKey);
     activeStreams.delete(scopedSessionKey);

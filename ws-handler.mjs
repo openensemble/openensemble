@@ -23,6 +23,7 @@ console.log(`[ws] boot_id: ${BOOT_ID}`);
 import { handleChatMessage, abortChat, getActiveStreams } from './chat-dispatch.mjs';
 import { getActiveTasks as getActiveBgTasks } from './background-tasks.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer } from './sessions.mjs';
+import { markAlarmFired, markAlarmAcked } from './lib/alarms.mjs';
 import { initNodeWss, initTerminalWss } from './routes/nodes.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
@@ -301,6 +302,28 @@ function onConnection(ws, req) {
     if (msg.type === 'stop') {
       const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
       if (stopAgent) abortChat(ws._userId, stopAgent);
+      return;
+    }
+
+    if (msg.type === 'alarm_fired') {
+      // Device reports it started ringing. State transition: armed → firing.
+      // Phase A4: this also cancels the ack-timeout watchdog (no fallback
+      // email/telegram needed since device clearly received the arm).
+      const id = typeof msg.id === 'string' ? msg.id : null;
+      if (id) {
+        const ok = markAlarmFired(ws._userId, id);
+        console.log(`[alarm] fired ack from device=${ws._deviceId ?? '?'} id=${id} known=${ok}`);
+      }
+      return;
+    }
+
+    if (msg.type === 'alarm_acked') {
+      // Device reports user-dismissed. Remove from registry.
+      const id = typeof msg.id === 'string' ? msg.id : null;
+      if (id) {
+        const ok = markAlarmAcked(ws._userId, id);
+        console.log(`[alarm] acked from device=${ws._deviceId ?? '?'} id=${id} known=${ok}`);
+      }
       return;
     }
 

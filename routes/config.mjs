@@ -1162,7 +1162,15 @@ export async function handle(req, res) {
       });
       if (!sttRes.ok) throw new Error(`STT API returned ${sttRes.status}: ${await sttRes.text()}`);
       const data = await sttRes.json();
-      const transcript = data.text ?? data.transcript ?? '';
+      let transcript = data.text ?? data.transcript ?? '';
+      // Whisper renders times like "11:02 AM" as "11.02 AM" or just "11.22"
+      // — period instead of colon. Normalize any HH.MM in valid time range
+      // (00-23 hours, 00-59 minutes) to HH:MM. The bounds keep prices
+      // ("$1.99") and version numbers ("v1.2") from getting rewritten.
+      transcript = transcript.replace(
+        /\b([0-1]?\d|2[0-3])\.([0-5]\d)\b/g,
+        '$1:$2',
+      );
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ transcript, raw: data }));
     } catch (e) { safeError(res, e); }

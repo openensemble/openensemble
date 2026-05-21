@@ -54,7 +54,7 @@ async function execCancelReminder(id, userId) {
   return `Reminder "${task.label}" cancelled.`;
 }
 
-async function execSetReminder({ label, datetime, time, repeat = 'once', voice_device }, userId) {
+async function execSetReminder({ label, datetime, time, repeat = 'once', voice_device, _alarm }, userId) {
   if (!userId) return 'Error: no user context.';
   if (!label || typeof label !== 'string') return 'Error: label is required.';
   const cleanLabel = label.trim();
@@ -62,6 +62,11 @@ async function execSetReminder({ label, datetime, time, repeat = 'once', voice_d
 
   const { addTask, scheduleNewTask } = await import('../../scheduler.mjs');
   const base = { label: cleanLabel, ownerId: userId, type: 'reminder', handler: 'fireReminder' };
+  // Alarm-clock style (set via the set_alarm tool wrapper): when the task
+  // fires, route to the device-side alarm ring loop instead of the
+  // one-shot chime+TTS. server.mjs:fireReminder checks task.alarm to pick
+  // the path.
+  if (_alarm) base.alarm = true;
 
   // Per-task voice-device override. Accept either an exact device id or a
   // case-insensitive substring match against device name ("remind me in the
@@ -338,6 +343,7 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
 
 export default async function execute(name, args, userId, agentId, ctx) {
   if (name === 'set_reminder')    return execSetReminder(args || {}, userId);
+  if (name === 'set_alarm')       return execSetReminder({ ...(args || {}), _alarm: true }, userId);
   if (name === 'schedule_task')   return execScheduleTask(args || {}, userId, agentId);
   if (name === 'list_tasks')      return execListTasks(userId);
   if (name === 'delete_task')     return execDeleteTask(args.id, userId);

@@ -26,6 +26,10 @@ let _wakewordLibrary = [];
 // is a label + transcript + WAV file the user uploaded; F5-TTS clones
 // from these. Drawer fetches this when ttsProvider='f5-tts'.
 let _voiceRefs = [];
+// Alarm chime state — per-user. { hasCustom: bool, sizeBytes: number }.
+// When hasCustom is false the device(s) use the firmware's built-in
+// procedural two-tone chime.
+let _chimeInfo = { hasCustom: false, sizeBytes: 0 };
 // Server-reported TTS provider. Drives which voice-control UI to render
 // per slot ('openai' → named-voice dropdown, 'piper' → numeric speaker
 // ID input, 'f5-tts' → reference dropdown, 'elevenlabs' → fetched-voice
@@ -121,7 +125,7 @@ async function loadDevices() {
     // refs, OE user roster, AND the per-user voice-config (sole source
     // of truth for slot routing since 2026-05-13 — applies to all of
     // this user's voice devices).
-    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw] = await Promise.all([
+    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw, rChime] = await Promise.all([
       fetch('/api/devices'),
       fetch('/api/devices/incoming-slots'),
       fetch('/api/wakewords'),
@@ -130,6 +134,7 @@ async function loadDevices() {
       ensureUsersRoster(),
       fetch('/api/voice-config'),
       fetch('/firmware/voice-device/manifest.json'),
+      fetch('/api/voice-chime'),
     ]);
     // Firmware manifest is best-effort — if it's missing (no flash wizard
     // bundled, etc.) the Update button just doesn't appear. Don't fail the
@@ -181,6 +186,12 @@ async function loadDevices() {
       _voiceConfig = await rCfg.json();
     } else {
       _voiceConfig = { version: 0, slot_assignments: {} };
+    }
+    if (rChime && rChime.ok) {
+      try { _chimeInfo = await rChime.json(); }
+      catch { _chimeInfo = { hasCustom: false, sizeBytes: 0 }; }
+    } else {
+      _chimeInfo = { hasCustom: false, sizeBytes: 0 };
     }
     renderDevices();
     // Coordinator-name labels are populated lazily after render — we don't
@@ -269,6 +280,29 @@ function renderDevices() {
   const LIBRARY_CAP = 10;
   const libCount = customWakewords.length;
   const atCap = libCount >= LIBRARY_CAP;
+  // Alarm chime — applies to every voice device paired to this user.
+  // The firmware ships with a built-in procedural two-tone chime; uploading
+  // a custom MP3 (any reasonable length, server normalizes to mono 16k)
+  // replaces it on all paired devices.
+  const chimeStatus = _chimeInfo.hasCustom
+    ? `Custom chime <span style="color:var(--muted)">· ${(_chimeInfo.sizeBytes / 1024).toFixed(1)} KB</span>`
+    : `<span style="color:var(--muted)">Built-in chime (two-tone alert)</span>`;
+  const chimeRevertBtn = _chimeInfo.hasCustom
+    ? `<button class="cdraw-btn" data-action="revertChime" style="font-size:11px;padding:3px 7px" title="Revert to the built-in procedural chime">Reset to default</button>`
+    : '';
+  const chimeHtml = `
+    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Alarm chime</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          ${chimeRevertBtn}
+          <button class="cdraw-btn cdraw-btn-primary" data-action="openChimeUpload" style="font-size:11px;padding:4px 10px" title="Upload an MP3 to use as the alarm chime on every paired voice device">${_chimeInfo.hasCustom ? 'Replace' : '+ Upload chime'}</button>
+        </div>
+      </div>
+      <div style="font-size:12px">${chimeStatus}</div>
+    </div>
+  `;
+
   const libraryHtml = `
     <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
@@ -332,7 +366,7 @@ function renderDevices() {
   ` : '';
 
   if (!_devicesList.length) {
-    body.innerHTML = header + libraryHtml + refsHtml + incomingHtml + `
+    body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + `
       <div class="cdraw-empty" style="padding:30px 18px;text-align:center;font-size:13px;color:var(--muted);line-height:1.55">
         <div style="font-size:32px;margin-bottom:10px;opacity:.4">🎙️</div>
         ${_incomingSlots.length
@@ -391,7 +425,7 @@ function renderDevices() {
     `;
   }).join('');
 
-  body.innerHTML = header + libraryHtml + refsHtml + incomingHtml + voiceConfigPanel + rows;
+  body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + voiceConfigPanel + rows;
 }
 
 // Build the per-user voice-configuration panel: one card per assigned
@@ -762,6 +796,61 @@ window.setSlotWakeword = function (slot, ev) {
   if ((existing.wakewordId ?? null) === next) return;
   _voiceConfig.slot_assignments[slot] = { ...existing, wakewordId: next };
   saveVoiceConfig();
+};
+
+// Open a hidden file picker for the alarm-chime upload flow. POSTs the
+// raw MP3 to /api/voice-chime, which transcodes + broadcasts to every
+// paired voice device.
+window.openChimeUpload = function () {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.mp3,audio/mpeg,audio/mp3,audio/*';
+  input.style.display = 'none';
+  input.onchange = async () => {
+    const file = (input.files || [])[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const r = await fetch('/api/voice-chime', {
+        method: 'POST',
+        headers: { 'Content-Type': 'audio/mpeg' },
+        body: buf,
+      });
+      if (!r.ok) {
+        const { error } = await r.json().catch(() => ({}));
+        throw new Error(error || `HTTP ${r.status}`);
+      }
+      const { bytes, pushed, devices } = await r.json();
+      const tail = devices
+        ? ` Pushed to ${pushed}/${devices} device(s).`
+        : ' No paired devices online to receive it.';
+      showDeviceToast(`Chime updated (${(bytes / 1024).toFixed(1)} KB).${tail}`);
+      loadDevices();
+    } catch (e) {
+      showDeviceToast(`Chime upload failed: ${e.message}`, { variant: 'error' });
+    }
+  };
+  document.body.appendChild(input);
+  input.click();
+  setTimeout(() => input.remove(), 60_000);
+};
+
+// Revert to the firmware's built-in procedural chime. DELETE on the same
+// endpoint clears the persisted MP3 and broadcasts `chime_upload` with no
+// audioMarker, which the device interprets as "use the procedural chime."
+window.revertChime = async function () {
+  if (!confirm('Reset the alarm chime to the built-in default on every paired device?')) return;
+  try {
+    const r = await fetch('/api/voice-chime', { method: 'DELETE' });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      throw new Error(error || `HTTP ${r.status}`);
+    }
+    showDeviceToast('Chime reset to default.');
+    loadDevices();
+  } catch (e) {
+    showDeviceToast(`Reset failed: ${e.message}`, { variant: 'error' });
+  }
 };
 
 // Open a hidden file picker for the wake-word upload flow. User selects

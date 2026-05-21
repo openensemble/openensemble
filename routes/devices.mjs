@@ -12,6 +12,18 @@ import { listDevices, getDevice, updateDevice, removeDevice, findIncomingSlots, 
 import { handlePairingRoutes } from './devices/pairing.mjs';
 import { sendToDevice, isDeviceOnline } from '../ws-handler.mjs';
 import { randomBytes } from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { USERS_DIR } from '../lib/paths.mjs';
+
+// Per-user custom alarm chime: stored as a transcoded MP3 on disk so it
+// survives server restart AND so future-paired devices can be pushed the
+// chime on first connect (not yet wired — currently only broadcasts to
+// devices paired right now). Missing file means the device uses its
+// built-in procedural chime.
+function userChimePath(userId) {
+  return path.join(USERS_DIR, userId, 'alarm-chime.mp3');
+}
 
 // In-memory cache of one-shot MP3 buffers keyed by marker token. The /api/tts
 // route reads from this when the device echoes the marker in its TTS request;
@@ -53,6 +65,128 @@ export async function handle(req, res) {
   // don't fall through to the generic /api/devices/:id handlers below.
   if (await handlePairingRoutes(req, res, p)) return true;
 
+  // GET /api/voice-chime — report whether this user has a custom chime
+  // installed and how big it is. UI uses this to decide between
+  // "Built-in chime" and "Custom chime (NN KB)" labels.
+  if (p === '/api/voice-chime' && req.method === 'GET') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const cp = userChimePath(userId);
+    let hasCustom = false, sizeBytes = 0;
+    try {
+      const st = fs.statSync(cp);
+      if (st.isFile()) { hasCustom = true; sizeBytes = st.size; }
+    } catch (_) { /* file doesn't exist — built-in */ }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ hasCustom, sizeBytes }));
+    return true;
+  }
+
+  // POST /api/voice-chime — upload a custom alarm chime that applies to
+  // every voice device paired to this user. Server transcodes (mono 16 kHz
+  // 64 kbps), persists to users/<id>/alarm-chime.mp3, then broadcasts
+  // `chime_upload` over WS to every paired-and-online device. Currently-
+  // offline devices won't pick it up until they reconnect AND a manual
+  // re-broadcast happens; first-connect auto-push is a future iteration.
+  if (p === '/api/voice-chime' && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const CHIME_CAP = 2 * 1024 * 1024;
+    let mp3In;
+    try {
+      mp3In = await new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        req.on('data', chunk => {
+          size += chunk.length;
+          if (size > CHIME_CAP) {
+            req.destroy();
+            reject(new Error(`MP3 too large (>${CHIME_CAP} bytes)`));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+      });
+    } catch (e) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message || 'Request body too large' }));
+      return true;
+    }
+    if (!mp3In || mp3In.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'empty body' }));
+      return true;
+    }
+    // -t 10 clips to 10 s max — chime, not a song. Caps output ~80 KB
+    // (mono/16k/64kbps) regardless of input duration so a "user uploads
+    // a movie" mistake can't reach the device.
+    const { spawn } = await import('child_process');
+    const ff = spawn('ffmpeg', [
+      '-loglevel', 'error',
+      '-i', 'pipe:0',
+      '-t', '10',
+      '-ac', '1', '-ar', '16000', '-b:a', '64k',
+      '-f', 'mp3', 'pipe:1',
+    ]);
+    const chunks = [];
+    ff.stdout.on('data', c => chunks.push(c));
+    const ffDone = new Promise((resolve, reject) => {
+      ff.on('error', reject);
+      ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
+    });
+    ff.stdin.end(mp3In);
+    try { await ffDone; } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `ffmpeg failed: ${e.message}` }));
+      return true;
+    }
+    const mp3Out = Buffer.concat(chunks);
+
+    // Persist for future cross-server-restart use.
+    const cp = userChimePath(userId);
+    try {
+      fs.mkdirSync(path.dirname(cp), { recursive: true });
+      fs.writeFileSync(cp, mp3Out);
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `failed to persist chime: ${e.message}` }));
+      return true;
+    }
+
+    // Broadcast to every paired-and-online device. Each push needs its own
+    // one-shot marker because cacheOneShotMp3 markers are single-use (the
+    // device consumes the cache entry when it fetches).
+    const devices = listDevices(userId).filter(d => isDeviceOnline(d.id));
+    let pushed = 0;
+    for (const d of devices) {
+      const marker = cacheOneShotMp3(mp3Out);
+      if (sendToDevice(d.id, { type: 'chime_upload', audioMarker: marker })) pushed++;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, bytes: mp3Out.length, pushed, devices: devices.length }));
+    return true;
+  }
+
+  // DELETE /api/voice-chime — revert to the firmware's built-in procedural
+  // chime. Removes the persisted MP3 and broadcasts a `chime_upload` with
+  // no audioMarker; firmware treats that as "clear custom chime, fall back
+  // to procedural."
+  if (p === '/api/voice-chime' && req.method === 'DELETE') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    try { fs.unlinkSync(userChimePath(userId)); } catch (_) { /* not present, ok */ }
+    const devices = listDevices(userId).filter(d => isDeviceOnline(d.id));
+    let pushed = 0;
+    for (const d of devices) {
+      if (sendToDevice(d.id, { type: 'chime_upload' })) pushed++;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, pushed, devices: devices.length }));
+    return true;
+  }
+
   // GET /api/devices — list this user's voice devices
   // `online` is computed live from open WS connections (not persisted), so a
   // device that's been paired for days but offline right now shows online=false.
@@ -74,6 +208,90 @@ export async function handle(req, res) {
     if (!userId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ slots: findIncomingSlots(userId) }));
+    return true;
+  }
+
+  // POST /api/devices/:id/chime — replace the device's alarm chime with a
+  // user-uploaded MP3. Server transcodes to mono 16 kHz (matches the
+  // built-in procedural chime), caches under a one-shot marker, and sends
+  // `chime_upload` over WS. The device fetches the MP3 via /api/tts,
+  // decodes + persists to its `storage` SPIFFS partition, and uses that
+  // as the alarm chime from then on (survives reboots).
+  const chimeMatch = p.match(/^\/api\/devices\/([^/]+)\/chime$/);
+  if (chimeMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const deviceId = decodeURIComponent(chimeMatch[1]);
+    if (!getDevice(userId, deviceId)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'device not found' }));
+      return true;
+    }
+    // 2 MB cap — a chime is a short tone, anything bigger almost certainly
+    // means the user uploaded a full song by accident.
+    const CHIME_CAP = 2 * 1024 * 1024;
+    let mp3In;
+    try {
+      mp3In = await new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        req.on('data', chunk => {
+          size += chunk.length;
+          if (size > CHIME_CAP) {
+            req.destroy();
+            reject(new Error(`MP3 too large (>${CHIME_CAP} bytes)`));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+      });
+    } catch (e) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message || 'Request body too large' }));
+      return true;
+    }
+    if (!mp3In || mp3In.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'empty body' }));
+      return true;
+    }
+    // Normalize to mono 16 kHz 64 kbps so the SPIFFS footprint is small
+    // and the format matches the procedural chime characteristics.
+    // -t 10 clips anything past 10 seconds — a chime is a short tone, not
+    // a song. Caps output size at ~80 KB (mono/16k/64kbps) regardless of
+    // input duration, preventing a "user uploads a movie" footgun.
+    const { spawn } = await import('child_process');
+    const ff = spawn('ffmpeg', [
+      '-loglevel', 'error',
+      '-i', 'pipe:0',
+      '-t', '10',
+      '-ac', '1', '-ar', '16000', '-b:a', '64k',
+      '-f', 'mp3', 'pipe:1',
+    ]);
+    const chunks = [];
+    ff.stdout.on('data', c => chunks.push(c));
+    const ffDone = new Promise((resolve, reject) => {
+      ff.on('error', reject);
+      ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
+    });
+    ff.stdin.end(mp3In);
+    try { await ffDone; } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `ffmpeg failed: ${e.message}` }));
+      return true;
+    }
+    const mp3Out = Buffer.concat(chunks);
+    const marker = cacheOneShotMp3(mp3Out);
+    const sent = sendToDevice(deviceId, { type: 'chime_upload', audioMarker: marker });
+    if (!sent) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'device offline' }));
+      return true;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, bytes: mp3Out.length }));
     return true;
   }
 

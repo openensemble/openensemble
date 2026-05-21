@@ -67,6 +67,8 @@ import { handle as handleGuide }          from './routes/guide.mjs';
 import { handle as handleHomeAssistant }  from './routes/home-assistant.mjs';
 import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
 import { speakReminder, pickReminderDevices } from './lib/voice-reminder.mjs';
+import { registerAlarm, getCachedAlarmTts, sendAlarmArm } from './lib/alarms.mjs';
+import { formatDurationAdj } from './lib/voice-timer.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn } from './background-tasks.mjs';
@@ -499,8 +501,39 @@ registerBuiltin('fireReminder', async (task) => {
     try {
       const deviceIds = pickReminderDevices({ user, channel, taskDeviceId: task.voiceDeviceId });
       if (deviceIds.length) {
-        const fired = await speakReminder({ userId: task.ownerId, deviceIds, text: task.label });
-        if (fired.length) delivered.push(`voice(${fired.length})`);
+        // Device-managed alarm path: triggered by timer-fast-path tasks
+        // (voiceTimer + voiceTimerSeconds) or by set_alarm tool calls
+        // (task.alarm). Rings on the device until the user dismisses or
+        // the 10-minute cap hits. Distinct from one-shot reminders below.
+        const isAlarm = (task.voiceTimer && task.voiceTimerSeconds) || task.alarm;
+        if (isAlarm) {
+          const label = task.voiceTimerSeconds
+            ? formatDurationAdj(task.voiceTimerSeconds)
+            : (task.label || 'alarm');
+          const id = registerAlarm({
+            userId: task.ownerId,
+            label,
+            deviceIds,
+            triggerAtMs: Date.now(),
+            awaitingFireAck: true,
+          });
+          // Alarms ring chime-only — no TTS announcement. The chime + cadence
+          // is the alarm; the label is for logging / future "list my alarms"
+          // queries only. Skipping synth saves an OpenAI TTS round-trip per
+          // fire and matches phone-alarm behavior.
+          let pushed = 0;
+          const alarmType = task.voiceTimer ? 'timer' : 'wallclock';
+          for (const dId of deviceIds) {
+            if (sendAlarmArm(dId, { id, label, triggerAtMs: Date.now(), audioMp3: null, type: alarmType })) {
+              pushed++;
+            }
+          }
+          delivered.push(`alarm(${pushed}/${deviceIds.length})`);
+        } else {
+          // Regular reminder → one-shot chime + TTS.
+          const fired = await speakReminder({ userId: task.ownerId, deviceIds, text: task.label });
+          if (fired.length) delivered.push(`voice(${fired.length})`);
+        }
       }
     } catch (e) { console.warn('[reminder] voice delivery failed:', e.message); }
   }
