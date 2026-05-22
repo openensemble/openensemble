@@ -15,7 +15,11 @@ import {
 import { getSessionMeta } from './_helpers/auth-sessions.mjs';
 import { getSlotAssignment } from '../lib/voice-devices.mjs';
 import { getVoiceRef } from '../lib/voice-refs.mjs';
-import { takeTestMp3 } from './devices.mjs';
+import {
+  takeTestMp3,
+  takeAmbientStream, registerAmbientResponse, unregisterAmbientResponse,
+} from './devices.mjs';
+import { ambientFilePath } from '../lib/routines.mjs';
 import { supportsVision } from '../lib/model-capabilities.mjs';
 import { log } from '../logger.mjs';
 
@@ -891,6 +895,48 @@ export async function handle(req, res) {
         // Marker recognized but cache miss (expired or already consumed) —
         // fall through to normal TTS so the device still gets something
         // rather than hanging.
+      }
+      // Ambient marker — server streams ONE continuous MP3 via ffmpeg
+      // `-stream_loop -1` so the device gets zero silence at loop seams.
+      // The response holds open until either the device closes the socket
+      // (wake fire / stop) OR a server-side dropAmbientForDevice ends it.
+      if (/^__ambient_[a-f0-9]+__$/.test(trimmedText)) {
+        const meta = takeAmbientStream(trimmedText);
+        if (meta) {
+          const sourcePath = ambientFilePath(meta.userId, meta.file);
+          if (!sourcePath) {
+            console.warn(`[tts] ambient marker=${trimmedText} resolved bad filename ${meta.file}`);
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'ambient source missing' }));
+            return true;
+          }
+          const { spawn } = await import('child_process');
+          const args = ['-loglevel', 'error'];
+          if (meta.loop !== false) args.push('-stream_loop', '-1');
+          args.push('-i', sourcePath,
+                    '-ac', '2', '-ar', '48000', '-b:a', '160k',
+                    '-f', 'mp3', 'pipe:1');
+          const ff = spawn('ffmpeg', args);
+          res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Transfer-Encoding': 'chunked' });
+          // Wire ffmpeg stdout → response; ffmpeg stderr → console (rarely
+          // chatty since -loglevel error). Close cleanup is critical: we
+          // must always kill the ffmpeg process when the response ends so
+          // we don't leak a runaway child per stop-without-restart.
+          ff.stdout.pipe(res);
+          ff.stderr.on('data', d => console.warn(`[tts] ambient ffmpeg: ${d.toString().trim()}`));
+          const cleanup = () => {
+            try { ff.kill('SIGKILL'); } catch {}
+            unregisterAmbientResponse(trimmedText);
+          };
+          ff.on('error', cleanup);
+          ff.on('exit', cleanup);
+          res.on('close', cleanup);
+          res.on('error', cleanup);
+          registerAmbientResponse(trimmedText, res, cleanup);
+          console.log(`[tts] ambient stream started marker=${trimmedText} file=${meta.file} loop=${meta.loop !== false}`);
+          return true;
+        }
+        console.warn(`[tts] ambient marker=${trimmedText} missed cache (TTL expired or never cached)`);
       }
       // Voice resolution order:
       //   1. explicit `voice` body param (used by Settings → voice preview

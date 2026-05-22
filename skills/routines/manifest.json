@@ -1,0 +1,81 @@
+{
+  "id": "routines",
+  "name": "Voice Routines",
+  "description": "Bind a phrase to a multi-step action — say a trigger, run lights/scenes/ambient sounds in order.",
+  "icon": "🎬",
+  "category": "utility",
+  "enabled_by_default": true,
+  "systemPromptAddition": "## Voice routines\n\nIf the user describes a recurring trigger-phrase → action(s) mapping they want bound to their voice devices — patterns like \"when I say X, do Y\", \"set up a routine\", \"every time I tell you 'goodnight', turn off the lights and play thunderstorm sounds\" — call `create_routine`. Routines fire pre-LLM on voice devices: the matched phrase triggers the action list directly without round-tripping through you, so latency is ~200 ms instead of seconds.\n\nBefore calling, read back what you're going to bind in plain English so the user can correct mistakes (\"Going to bind 'goodnight' to: turn off scene.goodnight, then play thunderstorm.mp3 on loop. Sound right?\"). Only call the tool after they confirm. If the user wants to change an existing routine, call `create_routine` with the same `id` — it's an upsert.\n\nAction types you can compose:\n- `ha_scene` — activate a Home Assistant scene or script. Use this for groups of lights/devices the user already has wired up in HA (it's the cleanest path because the scene definition lives in HA where they already manage it).\n- `ha_call` — generic HA service call. Use when there's no existing scene and the user wants something specific.\n- `play_ambient` — start a looped ambient MP3 on the originating voice device. The file must already exist in the user's ambient library — list it with `list_ambient_files` if you need to check. If the user names a file that doesn't exist, ask them to upload it via the Routines panel in voice-config; you can't upload audio yourself.\n- `tts_say` — speak a short confirmation. Optional — omit for silent activation (Alexa-style).\n\nFor each ha_scene action, confirm the scene id with the user if it's not obvious (\"scene.goodnight\" or \"scene.movie_time\"). For ha_call, you need both `domain` and `service` plus the `data` payload HA expects.\n\nUse `list_routines` when the user asks what's set up, and `delete_routine` when they ask to remove one.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "create_routine",
+        "description": "Create or update a voice routine (trigger phrase → ordered action list). The same `id` is treated as an upsert — passing an existing id replaces that routine in place. Confirm the proposed routine with the user in plain English BEFORE calling, then call only after they say yes.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id":      { "type": "string", "description": "Short slug, lowercase letters/digits/underscores/dashes only. Used as primary key. Example: 'goodnight', 'morning_briefing'." },
+            "trigger": { "type": "string", "description": "Primary trigger phrase the user will say to fire the routine (after the wake word). Example: 'goodnight'." },
+            "aliases": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Optional alternative phrasings that should also fire this routine. Example: ['good night', 'time for bed']."
+            },
+            "actions": {
+              "type": "array",
+              "description": "Ordered list of actions. Executed sequentially when the trigger fires.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type":     { "type": "string", "enum": ["ha_scene", "ha_call", "play_ambient", "tts_say"] },
+                  "scene_id": { "type": "string", "description": "ha_scene only: HA entity id. scene.* or script.* (always activated), or group.* / light.* / switch.* / etc. (controlled by the verb)." },
+                  "verb":     { "type": "string", "enum": ["turn_on", "turn_off", "toggle"], "description": "ha_scene only: for group/light/switch entities, which way to drive it. Ignored for scene/script (always turn_on). Defaults to turn_off for groups since most goodnight-style routines turn things off." },
+                  "domain":   { "type": "string", "description": "ha_call only: HA domain, e.g. 'light'." },
+                  "service":  { "type": "string", "description": "ha_call only: HA service, e.g. 'turn_off'." },
+                  "data":     { "type": "object", "description": "ha_call only: service data payload, e.g. {entity_id:'light.kitchen'}." },
+                  "file":     { "type": "string", "description": "play_ambient only: filename in user's ambient library, e.g. 'thunderstorm.mp3'." },
+                  "loop":     { "type": "boolean", "description": "play_ambient only: loop forever (default true). False = play once and stop." },
+                  "volume":   { "type": "integer", "minimum": 0, "maximum": 100, "description": "play_ambient only: 0-100. Omit to use device's current volume." },
+                  "text":     { "type": "string", "description": "tts_say only: short phrase to speak." }
+                },
+                "required": ["type"]
+              }
+            }
+          },
+          "required": ["id", "trigger", "actions"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_routines",
+        "description": "List the user's currently configured voice routines. Returns ids, triggers, and a short action summary for each.",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "delete_routine",
+        "description": "Remove a voice routine by id. Confirm with the user before calling.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "The routine's id (slug)." }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_ambient_files",
+        "description": "List the audio files the user has uploaded to their ambient library. Use this when the user references an ambient sound and you want to confirm it exists before creating a routine that references it.",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    }
+  ]
+}

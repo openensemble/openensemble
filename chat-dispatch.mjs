@@ -20,6 +20,8 @@ import {
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { sendToDevice } from './ws-handler.mjs';
 import { broadcastAlarmStop, hasActiveAlarms } from './lib/alarms.mjs';
+import { classifyRoutineIntent, executeRoutine } from './lib/routines.mjs';
+import { stopAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { log } from './logger.mjs';
 import {
   loadConfig, loadUsers, saveUsers, getAgentsForUser, detectNewsPref, detectRenameCommand,
@@ -132,6 +134,14 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   'ha_call_service',
   'ha_list_areas',
   'ha_list_services',
+  // Voice routines — let users bind/edit/delete routines by speaking
+  // ("Sydney, when I say goodnight, turn off the lights and play
+  // thunderstorm sounds"). Fast-path executes matched routines pre-LLM;
+  // these tools are the AUTHORING path that lands on the same store.
+  'create_routine',
+  'list_routines',
+  'delete_routine',
+  'list_ambient_files',
 ]);
 
 /**
@@ -224,51 +234,130 @@ function executeVoiceIntent(intent, deviceId, userId) {
         const n = broadcastAlarmStop(userId);
         console.log(`[chat] voice-stop broadcasted alarm_stop to ${n} device(s) for ${userId}`);
       }
+      // Also cancel any looped ambient playback on the originating device.
+      // The firmware's wake-during-ambient path stops the loop locally, but
+      // a typed/UI "stop" goes through here without that signal — so we
+      // mirror it server-side.
+      if (deviceId) stopAmbientOnDevice(deviceId);
       return { replaces: true };
   }
   return { replaces: false };
 }
 
 // ── HA fast-path (pre-LLM) ────────────────────────────────────────────────────
-// "turn on hall front left" / "turn off X" / "toggle X" / "activate movie night"
-// → matched against the HA entity-name cache → direct HA HTTP call. Skips
-// Sydney → Helen delegation entirely (~28s → ~200ms).
+// Resolution order for "<verb> <phrase>" commands:
+//   1. user phrase alias (users/<id>/ha-aliases.json) — instant, learned from
+//      prior Helen turns or set manually via the Phrase aliases UI
+//   2. HA entity-name cache (light.kitchen_lights friendly name match)
+//   3. multi-match / miss → null → fall through to specialist router / LLM
 //
-// Returns null when nothing matches → caller falls through to the normal
-// LLM/agent pipeline. Multi-match (ambiguous phrase) also returns null so
-// the LLM can disambiguate. Works for both voice devices and typed chat
-// because it runs before the source === 'voice-device' tool-set trim.
-const HA_INTENT_RE = /^(turn\s+on|turn\s+off|toggle|activate|run)\s+(.+?)\s*$/i;
+// Supported verbs: turn on/off/toggle, activate/run (scenes/scripts), lock/
+// unlock, open/close, "set X to N%" (light brightness, fan percentage),
+// "set X to N degrees" (climate temperature). Each maps to a domain-aware
+// service call below. New verbs go in classifyHaIntent → executeHaIntent.
 
-async function classifyHaIntent(text) {
+const HA_VERB_RE      = /^(turn\s+on|turn\s+off|toggle|activate|run|lock|unlock|open|close)\s+(.+?)\s*$/i;
+const HA_SET_PCT_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:%|percent)\s*$/i;
+const HA_SET_DEG_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:degrees?|deg)\s*$/i;
+
+async function resolvePhrase(phrase, userId) {
+  const { resolveAlias } = await import('./lib/ha-aliases.mjs');
+  const aliased = resolveAlias(userId, phrase);
+  if (aliased) {
+    const domain = aliased.split('.', 1)[0];
+    // The friendly name shown in the spoken confirmation — derive from the
+    // entity_id when we don't have a cached one (alias may point at an entity
+    // the cache hasn't picked up yet on a fresh install).
+    const { ensureCache } = await import('./lib/ha-cache.mjs');
+    let friendly_name = null;
+    try {
+      const idx = await ensureCache();
+      if (idx) for (const v of idx.values()) if (v.entity_id === aliased) { friendly_name = v.friendly_name; break; }
+    } catch { /* best-effort */ }
+    if (!friendly_name) {
+      const tail = aliased.split('.', 2)[1] || aliased;
+      friendly_name = tail.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+    }
+    return { entity_id: aliased, domain, friendly_name, strategy: 'alias' };
+  }
+  const { lookupEntity } = await import('./lib/ha-cache.mjs');
+  return await lookupEntity(phrase);
+}
+
+async function classifyHaIntent(text, userId) {
   if (typeof text !== 'string') return null;
   const trimmed = text.trim().replace(/[.,!?]+$/, '');
-  const m = trimmed.match(HA_INTENT_RE);
-  if (!m) return null;
-  const verb = m[1].toLowerCase().replace(/\s+/g, ' ');
-  const phrase = m[2];
-  const { lookupEntity } = await import('./lib/ha-cache.mjs');
-  const hit = await lookupEntity(phrase);
-  if (!hit) return null;
-  const { entity_id, domain, friendly_name } = hit;
 
-  // Verb → service mapping. "activate"/"run" only make sense for scene/script;
-  // refuse on other domains so we don't silently turn on a light when the user
-  // said "run pomodoro" expecting a script.
-  let service, serviceDomain = domain;
-  if (verb === 'activate' || verb === 'run') {
-    if (domain !== 'scene' && domain !== 'script') return null;
-    service = 'turn_on';
-  } else if (verb === 'toggle') {
-    service = 'toggle';
-  } else if (verb === 'turn on') {
-    service = 'turn_on';
-  } else if (verb === 'turn off') {
-    service = 'turn_off';
-  } else {
-    return null;
+  // Verb-prefix path: "turn on X", "lock X", "open X", "activate X", etc.
+  const vm = trimmed.match(HA_VERB_RE);
+  if (vm) {
+    const verb = vm[1].toLowerCase().replace(/\s+/g, ' ');
+    const phrase = vm[2];
+    const hit = await resolvePhrase(phrase, userId);
+    if (!hit) return null;
+    const { entity_id, domain, friendly_name } = hit;
+
+    // activate/run are scene/script-only by intent (user said "run pomodoro"
+    // expecting a script, not a light named "pomodoro").
+    if ((verb === 'activate' || verb === 'run') && domain !== 'scene' && domain !== 'script') return null;
+
+    let serviceDomain, service, data;
+    if (verb === 'turn on' || verb === 'activate' || verb === 'run') {
+      if (domain === 'scene' || domain === 'script') { serviceDomain = domain; service = 'turn_on'; }
+      else { serviceDomain = 'homeassistant'; service = 'turn_on'; }
+    } else if (verb === 'turn off') {
+      serviceDomain = 'homeassistant'; service = 'turn_off';
+    } else if (verb === 'toggle') {
+      serviceDomain = 'homeassistant'; service = 'toggle';
+    } else if (verb === 'lock' || verb === 'unlock') {
+      if (domain !== 'lock') return null;
+      serviceDomain = 'lock'; service = verb;
+    } else if (verb === 'open' || verb === 'close') {
+      if (domain !== 'cover') return null;
+      serviceDomain = 'cover'; service = verb === 'open' ? 'open_cover' : 'close_cover';
+    } else {
+      return null;
+    }
+    return { entity_id, domain, friendly_name, verb, serviceDomain, service, data };
   }
-  return { entity_id, domain: serviceDomain, service, friendly_name, verb };
+
+  // "set X to N%" — light brightness or fan percentage.
+  const pm = trimmed.match(HA_SET_PCT_RE);
+  if (pm) {
+    const phrase = pm[1];
+    const pct = Math.max(0, Math.min(100, Number(pm[2])));
+    const hit = await resolvePhrase(phrase, userId);
+    if (!hit) return null;
+    const { entity_id, domain, friendly_name } = hit;
+    let serviceDomain, service, data;
+    if (domain === 'light') {
+      serviceDomain = 'light'; service = 'turn_on'; data = { brightness_pct: pct };
+    } else if (domain === 'fan') {
+      serviceDomain = 'fan'; service = 'set_percentage'; data = { percentage: pct };
+    } else if (domain === 'media_player') {
+      serviceDomain = 'media_player'; service = 'volume_set'; data = { volume_level: pct / 100 };
+    } else {
+      return null;  // % doesn't map cleanly to other domains; fall through to LLM
+    }
+    return { entity_id, domain, friendly_name, verb: `set to ${pct}%`, serviceDomain, service, data };
+  }
+
+  // "set X to N degrees" — thermostat temperature.
+  const dm = trimmed.match(HA_SET_DEG_RE);
+  if (dm) {
+    const phrase = dm[1];
+    const temp = Number(dm[2]);
+    const hit = await resolvePhrase(phrase, userId);
+    if (!hit) return null;
+    const { entity_id, domain, friendly_name } = hit;
+    if (domain !== 'climate') return null;
+    return {
+      entity_id, domain, friendly_name, verb: `set to ${temp}°`,
+      serviceDomain: 'climate', service: 'set_temperature', data: { temperature: temp },
+    };
+  }
+
+  return null;
 }
 
 // Runtime toggle for the specialist router's tool-surface trim.
@@ -331,13 +420,25 @@ async function executeHaIntent(intent) {
   const { getHaConfig, haRequest } = await import('./lib/ha-client.mjs');
   const haCfg = getHaConfig();
   if (!haCfg) return { error: 'Home Assistant is not configured.' };
-  const res = await haRequest(haCfg, `/services/${intent.domain}/${intent.service}`, 'POST', { entity_id: intent.entity_id });
+  // serviceDomain may differ from the entity's domain (e.g. group entity
+  // controlled via homeassistant.turn_off). intent.data is optional.
+  const serviceDomain = intent.serviceDomain || intent.domain;
+  const payload = { entity_id: intent.entity_id, ...(intent.data || {}) };
+  const res = await haRequest(haCfg, `/services/${serviceDomain}/${intent.service}`, 'POST', payload);
   if (res?.__err) return { error: res.__err };
   let confirm;
-  if (intent.service === 'turn_on') confirm = `${intent.friendly_name} on.`;
-  else if (intent.service === 'turn_off') confirm = `${intent.friendly_name} off.`;
-  else if (intent.service === 'toggle') confirm = `${intent.friendly_name} toggled.`;
-  else confirm = `Done.`;
+  if (intent.service === 'turn_on'  && !intent.data) confirm = `${intent.friendly_name} on.`;
+  else if (intent.service === 'turn_off')             confirm = `${intent.friendly_name} off.`;
+  else if (intent.service === 'toggle')               confirm = `${intent.friendly_name} toggled.`;
+  else if (intent.service === 'lock')                 confirm = `${intent.friendly_name} locked.`;
+  else if (intent.service === 'unlock')               confirm = `${intent.friendly_name} unlocked.`;
+  else if (intent.service === 'open_cover')           confirm = `Opening ${intent.friendly_name}.`;
+  else if (intent.service === 'close_cover')          confirm = `Closing ${intent.friendly_name}.`;
+  else if (intent.data?.brightness_pct != null)       confirm = `${intent.friendly_name} at ${intent.data.brightness_pct}%.`;
+  else if (intent.data?.percentage != null)           confirm = `${intent.friendly_name} at ${intent.data.percentage}%.`;
+  else if (intent.data?.volume_level != null)         confirm = `${intent.friendly_name} volume ${Math.round(intent.data.volume_level * 100)}%.`;
+  else if (intent.data?.temperature != null)          confirm = `${intent.friendly_name} set to ${intent.data.temperature}°.`;
+  else                                                confirm = `Done.`;
   return { text: confirm };
 }
 
@@ -380,6 +481,48 @@ export async function handleChatMessage({
   }
   userId = effectiveUserId;
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
+
+  // Voice proposal yes/no — if the prior turn spoke a proposal ("Want me to
+  // remember that 'kitchen' means light.kitchen_group?") and the user is
+  // now answering, accept or dismiss directly without going through any
+  // LLM/router. Anything that ISN'T yes/no on a pending proposal clears
+  // the pending state and continues into the normal pipeline.
+  if (source === 'voice-device' && deviceId && typeof rawText === 'string') {
+    try {
+      const { peekPendingVoiceProposal, clearPendingVoiceProposal } =
+        await import('./lib/voice-proposal-queue.mjs');
+      const pending = peekPendingVoiceProposal(deviceId);
+      if (pending) {
+        const t = rawText.trim().toLowerCase().replace(/[.,!?]+$/, '');
+        const YES = /^(yes|yeah|yep|yup|sure|ok|okay|please|do it|go ahead|sounds good|sure thing)\b/;
+        const NO  = /^(no|nope|nah|don't|dont|cancel|skip|not now|never mind|nevermind)\b/;
+        if (YES.test(t)) {
+          clearPendingVoiceProposal(deviceId);
+          const { acceptProposal } = await import('./lib/proposals.mjs');
+          await acceptProposal(pending.proposalId);
+          console.log(`[chat] voice-proposal accept: ${pending.proposalId}`);
+          onEvent({ type: 'token', text: 'Saved.', agent: agentId });
+          onEvent({ type: 'done', agent: agentId });
+          return;
+        }
+        if (NO.test(t)) {
+          clearPendingVoiceProposal(deviceId);
+          const { dismissProposal } = await import('./lib/proposals.mjs');
+          await dismissProposal(pending.proposalId);
+          console.log(`[chat] voice-proposal dismiss: ${pending.proposalId}`);
+          onEvent({ type: 'token', text: 'Okay.', agent: agentId });
+          onEvent({ type: 'done', agent: agentId });
+          return;
+        }
+        // Not yes/no — clear pending state so a later unrelated "yes" doesn't
+        // get attributed to this proposal, then fall through to normal flow.
+        clearPendingVoiceProposal(deviceId);
+        console.log(`[chat] voice-proposal cleared (non-yes/no follow-up): ${pending.proposalId}`);
+      }
+    } catch (e) {
+      console.warn('[chat] voice-proposal check threw, falling through:', e.message);
+    }
+  }
 
   // Fast-path: voice-device control intents bypass the LLM entirely.
   // "sydney, volume up" / "pause" / "stop" → regex match → WS message
@@ -763,7 +906,7 @@ export async function handleChatMessage({
   // other reply so the chat UI shows it.
   if (userText) {
     try {
-      const haIntent = await classifyHaIntent(userText);
+      const haIntent = await classifyHaIntent(userText, userId);
       if (haIntent) {
         const result = await executeHaIntent(haIntent);
         if (!result.error) {
@@ -788,6 +931,36 @@ export async function handleChatMessage({
       }
     } catch (e) {
       console.warn('[chat] ha-fastpath threw, falling through:', e.message);
+    }
+  }
+
+  // ── Routine fast-path (voice device only) ────────────────────────────────
+  // User-defined "trigger phrase → ordered action list" — e.g. "goodnight"
+  // dims lights via HA and starts a looped ambient sound on the originating
+  // device. Strict equality match against the normalized trigger/aliases,
+  // executed in lib/routines.mjs. Runs only on voice-device source so that
+  // typing "goodnight" in a browser chat falls through to the normal LLM.
+  if (source === 'voice-device' && userText && deviceId) {
+    try {
+      const routine = classifyRoutineIntent(userText, userId);
+      if (routine) {
+        const result = await executeRoutine(routine, { userId, deviceId });
+        const reply = result.text || '';
+        appendToSession(`${userId}_${agentId}`,
+          { role: 'user', content: userText, ts: Date.now() },
+          { role: 'assistant', content: reply || '(routine executed silently)', ts: Date.now() }
+        );
+        if (reply) onEvent({ type: 'token', text: reply, agent: agentId });
+        onEvent({ type: 'done', agent: agentId });
+        console.log(`[chat] routine-fastpath: ${routine.id} actions=${routine.actions.length} errors=${result.errors.length}`);
+        abortControllers.delete(scopedSessionKey);
+        activeStreams.delete(scopedSessionKey);
+        clearStreamBuffer(scopedSessionKey);
+        busySlot.release();
+        return;
+      }
+    } catch (e) {
+      console.warn('[chat] routine-fastpath threw, falling through:', e.message);
     }
   }
 
@@ -880,7 +1053,7 @@ export async function handleChatMessage({
           try {
             for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
               onEvent({ ...e, agent: agentId });
-            }, userId, attachment)) {
+            }, userId, attachment, null, false, { source, deviceId })) {
               if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
               if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
               if (event.type === 'token')    routerBuf += event.text;
@@ -951,7 +1124,7 @@ export async function handleChatMessage({
   async function runStream(agentObj) {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       onEvent({ ...e, agent: agentId });
-    }, userId ?? 'default', attachment, schedulerNote)) {
+    }, userId ?? 'default', attachment, schedulerNote, false, { source, deviceId })) {
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
       // Check if this error is retriable — return it instead of emitting

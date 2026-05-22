@@ -11,7 +11,9 @@
     "^what(?:s| is)\\s+(?:the\\s+)?(?:temperature|temp)\\s+(?:in|on|at|of|upstairs|downstairs)\\b",
     "^(?:is|are)\\s+(?:the|my)\\s+.+(?:on|off|locked|unlocked|open|closed|running|playing)\\??\\s*$",
     "^what\\s+(?:lights?|devices?|switches?)\\s+are\\s+(?:on|off|running)\\b",
-    "^(?:list|show|get)(?:\\s+\\S+){0,3}\\s+(?:scenes?|areas|rooms|devices?|entities)\\b"
+    "^(?:list|show|get)(?:\\s+\\S+){0,3}\\s+(?:scenes?|areas|rooms|devices?|entities)\\b",
+    "^(?:turn\\s+(?:on|off)|toggle|activate|dim|brighten|lock|unlock|open|close)\\s+(?:the\\s+|my\\s+)?\\S+",
+    "^set\\s+(?:the\\s+|my\\s+)?(?:thermostat|temperature|temp|brightness|fan)\\b"
   ],
   "intent_examples": [
     "what lights are on in the house",
@@ -23,9 +25,15 @@
     "any deliveries showing up at the door",
     "are the porch lights still on",
     "what devices do i have set up",
-    "is my thermostat running"
+    "is my thermostat running",
+    "turn off the kitchen",
+    "turn on the living room lights",
+    "toggle the bedroom fan",
+    "dim the dining room",
+    "lock the front door",
+    "set the thermostat to 70"
   ],
-  "systemPromptAddition": "## Home Assistant\n\nYou can control {{USER_NAME}}'s Home Assistant smart home via the `ha_*` tools. The connection is configured once by the admin in Settings → Providers; you don't see the URL or token.\n\n### When to act vs. confirm\n- Direct commands (\"turn off the kitchen lights\", \"set the thermostat to 70\", \"run goodnight\") — call the tool immediately. Do not ask \"are you sure?\".\n- Ambiguous references (\"turn it off\" with no recent context, \"the lights\" when several rooms are lit) — ask one short clarifying question.\n\n### Discovery flow\n1. If you don't know what's available, call `ha_list_areas` first — areas (rooms) are how people speak about their home.\n2. Then `ha_list_devices` with a `domain` filter to find the right entity in that area. Common domains: `light`, `switch`, `climate`, `media_player`, `cover` (blinds/garage), `lock`, `fan`, `sensor`, `binary_sensor`, `scene`, `script`.\n3. Use `ha_call_service` to act. For lights: `light.turn_on` / `light.turn_off` / `light.toggle`. For scenes: `scene.turn_on`. For climate: `climate.set_temperature` with `data: { temperature: 70 }`.\n\n### Speaking to {{USER_NAME}}\nKeep responses very short — this role is usually invoked through voice devices. Confirm the result in one short sentence (\"Living room lights off.\" / \"Set to 72.\"). Don't list every entity you touched unless asked.\n\n### Multiple matches\nIf {{USER_NAME}} says \"turn off the lights\" and several rooms have lights on, default to the room they're most likely in if you can infer it from recent context; otherwise act on all lights in `light.*` that are currently `on`. Mention how many you affected (\"Turned off 4 lights.\").\n\n### Errors\nIf a tool returns an error, say what failed in one sentence and suggest what to check (\"Couldn't reach Home Assistant — the admin may need to check the connection in Settings.\"). Don't retry the same call automatically.\n\n### What you can't do\n- You can't create automations, edit dashboards, or change HA configuration — those live in the Home Assistant UI itself.\n- You can't see device states change in real time — each `ha_get_state` is a one-shot snapshot.",
+  "systemPromptAddition": "## Home Assistant\n\nYou can control {{USER_NAME}}'s Home Assistant smart home via the `ha_*` tools. The connection is configured once by the admin in Settings → Providers; you don't see the URL or token.\n\n### When to act vs. confirm\n- Direct commands (\"turn off the kitchen lights\", \"set the thermostat to 70\", \"run goodnight\") — call the tool immediately. Do not ask \"are you sure?\".\n- Ambiguous references (\"turn it off\" with no recent context, \"the lights\" when several rooms are lit) — ask one short clarifying question.\n- **Idempotency**: even when the device is ALREADY in the target state, still call `ha_call_service` — it is a no-op on the HA side but makes the entity you resolved observable to the system (which is what lets routines get auto-suggested). Your reply can still say \"Kitchen was already on\" — just place the call first.\n\n### Discovery flow\n1. If you don't know what's available, call `ha_list_areas` first — areas (rooms) are how people speak about their home.\n2. Then `ha_list_devices` with a `domain` filter to find the right entity in that area. Common domains: `light`, `switch`, `climate`, `media_player`, `cover` (blinds/garage), `lock`, `fan`, `sensor`, `binary_sensor`, `scene`, `script`.\n3. Use `ha_call_service` to act. For lights: `light.turn_on` / `light.turn_off` / `light.toggle`. For scenes: `scene.turn_on`. For climate: `climate.set_temperature` with `data: { temperature: 70 }`.\n\n### Speaking to {{USER_NAME}}\nKeep responses very short — this role is usually invoked through voice devices. Confirm the result in one short sentence (\"Living room lights off.\" / \"Set to 72.\"). Don't list every entity you touched unless asked.\n\n### Multiple matches\nIf {{USER_NAME}} says \"turn off the lights\" and several rooms have lights on, default to the room they're most likely in if you can infer it from recent context; otherwise act on all lights in `light.*` that are currently `on`. Mention how many you affected (\"Turned off 4 lights.\").\n\n### Errors\nIf a tool returns an error, say what failed in one sentence and suggest what to check (\"Couldn't reach Home Assistant — the admin may need to check the connection in Settings.\"). Don't retry the same call automatically.\n\n### What you can't do\n- You can't create automations, edit dashboards, or change HA configuration — those live in the Home Assistant UI itself.\n- You can't see device states change in real time — each `ha_get_state` is a one-shot snapshot.",
   "tools": [
     {
       "type": "function",
@@ -57,7 +65,9 @@
               "description": "The entity ID, e.g. 'light.living_room' or 'climate.upstairs'."
             }
           },
-          "required": ["entity_id"]
+          "required": [
+            "entity_id"
+          ]
         }
       }
     },
@@ -86,7 +96,10 @@
               "description": "Extra service data, e.g. { brightness_pct: 50 } for lights, { temperature: 70 } for climate, { volume_level: 0.5 } for media_player."
             }
           },
-          "required": ["service", "entity_id"]
+          "required": [
+            "service",
+            "entity_id"
+          ]
         }
       }
     },
@@ -95,7 +108,11 @@
       "function": {
         "name": "ha_list_areas",
         "description": "List the areas (rooms) configured in Home Assistant. Call this first when the user refers to a room by name — areas are how people actually talk about their home.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     },
     {

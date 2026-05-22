@@ -23,7 +23,7 @@ import {
   requireAuth, requirePrivileged, readBody,
   loadConfig, modifyConfig,
 } from './_helpers.mjs';
-import { invalidateCache as invalidateHaCache } from '../lib/ha-cache.mjs';
+import { invalidateCache as invalidateHaCache, ensureCache as ensureHaCache } from '../lib/ha-cache.mjs';
 
 function probeHa({ url, token, allowSelfSigned }, timeoutMs = 8000) {
   return new Promise((resolve) => {
@@ -118,6 +118,48 @@ export async function handle(req, res) {
     });
     invalidateHaCache();
     return json({ ok: true });
+  }
+
+  // List Home Assistant scenes + scripts + groups so the Routines UI can
+  // populate a dropdown instead of making users hand-type entity ids. Pulls
+  // from the 5-min ha-cache. Filter optional: ?domain=scene,script,group
+  // (default scene,script). When `group` is requested, ANY entity flagged
+  // isGroup is included regardless of its domain — that covers modern HA
+  // helper groups that surface under light.*/switch.* instead of group.*.
+  if (req.url.startsWith('/api/home-assistant/entities') && req.method === 'GET') {
+    if (!requireAuth(req, res)) return true;
+    const u = new URL(req.url, 'http://x');
+    const wantDomains = new Set((u.searchParams.get('domain') || 'scene,script')
+      .split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+    const wantsGroups = wantDomains.has('group');
+    const idx = await ensureHaCache().catch(() => null);
+    if (!idx) return json({ entities: [], configured: false });
+    const entities = [];
+    for (const [, v] of idx) {
+      const match = wantDomains.has(v.domain) || (wantsGroups && v.isGroup);
+      if (!match) continue;
+      // Normalize so the UI can group "this is a group" consistently —
+      // legacy group.* and modern light.kitchen_lights (a group helper)
+      // both come back with domain='group' for the UI's optgroup logic,
+      // while preserving the real entity_id for HA calls.
+      entities.push({
+        entity_id: v.entity_id,
+        domain:    v.isGroup ? 'group' : v.domain,
+        friendly_name: v.friendly_name,
+      });
+    }
+    entities.sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+    return json({ entities, configured: true });
+  }
+
+  // Force the HA entity cache to refresh now. Used by the Routines UI's
+  // refresh button so newly-added scenes/groups/scripts show up without
+  // waiting for the 5-min background tick.
+  if (req.url === '/api/home-assistant/refresh' && req.method === 'POST') {
+    if (!requireAuth(req, res)) return true;
+    invalidateHaCache();
+    const idx = await ensureHaCache(true).catch(() => null);
+    return json({ ok: !!idx, count: idx ? idx.size : 0 });
   }
 
   if (req.url === '/api/home-assistant/test' && req.method === 'POST') {

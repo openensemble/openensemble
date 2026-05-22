@@ -37,6 +37,16 @@ let _chimeInfo = { hasCustom: false, sizeBytes: 0 };
 let _ttsProvider = 'openai';
 // ElevenLabs voice catalog — populated lazily when ttsProvider='elevenlabs'.
 let _elevenlabsVoices = [];
+// Voice routines (trigger phrase → action list) and the ambient sound library
+// they draw from. Both per-user; the Routines panel below the voice-config
+// section in the drawer is the sole UI for both. Server-side persistence in
+// users/<id>/routines.json + users/<id>/ambient/*.mp3.
+let _routines = [];
+let _ambientFiles = [];
+// HA scene + script entities — populated on drawer open from the HA cache.
+// Drives the ha_scene action picker so users don't have to type entity ids.
+let _haSceneEntities = [];
+
 // Per-user voice configuration: { version, updated_at, slot_assignments }.
 // Single source of truth for wake-slot routing — applies to every voice
 // device paired to this user. Fetched on drawer open via /api/voice-config
@@ -125,7 +135,7 @@ async function loadDevices() {
     // refs, OE user roster, AND the per-user voice-config (sole source
     // of truth for slot routing since 2026-05-13 — applies to all of
     // this user's voice devices).
-    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw, rChime] = await Promise.all([
+    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw, rChime, rRoutines, rAmbient, rHaEnts] = await Promise.all([
       fetch('/api/devices'),
       fetch('/api/devices/incoming-slots'),
       fetch('/api/wakewords'),
@@ -135,6 +145,9 @@ async function loadDevices() {
       fetch('/api/voice-config'),
       fetch('/firmware/voice-device/manifest.json'),
       fetch('/api/voice-chime'),
+      fetch('/api/routines'),
+      fetch('/api/devices/ambient-library'),
+      fetch('/api/home-assistant/entities?domain=scene,script,group'),
     ]);
     // Firmware manifest is best-effort — if it's missing (no flash wizard
     // bundled, etc.) the Update button just doesn't appear. Don't fail the
@@ -193,6 +206,18 @@ async function loadDevices() {
     } else {
       _chimeInfo = { hasCustom: false, sizeBytes: 0 };
     }
+    if (rRoutines && rRoutines.ok) {
+      try { const j = await rRoutines.json(); _routines = Array.isArray(j.routines) ? j.routines : []; }
+      catch { _routines = []; }
+    } else { _routines = []; }
+    if (rAmbient && rAmbient.ok) {
+      try { const j = await rAmbient.json(); _ambientFiles = Array.isArray(j.files) ? j.files : []; }
+      catch { _ambientFiles = []; }
+    } else { _ambientFiles = []; }
+    if (rHaEnts && rHaEnts.ok) {
+      try { const j = await rHaEnts.json(); _haSceneEntities = Array.isArray(j.entities) ? j.entities : []; }
+      catch { _haSceneEntities = []; }
+    } else { _haSceneEntities = []; }
     renderDevices();
     // Coordinator-name labels are populated lazily after render — we don't
     // know which user(s) are assigned to slots until the DOM is in place,
@@ -425,7 +450,240 @@ function renderDevices() {
     `;
   }).join('');
 
-  body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + voiceConfigPanel + rows;
+  const routinesPanel = renderRoutinesPanel();
+  const ambientPanel = renderAmbientLibraryPanel();
+  body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + voiceConfigPanel + routinesPanel + ambientPanel + rows;
+}
+
+// ── Routines panel ──────────────────────────────────────────────────────────
+// Trigger-phrase → ordered action list. Mirrors the schema in
+// lib/routines.mjs; the server validates on PUT so we don't need exhaustive
+// client-side validation. Inline editor expands when a routine is being
+// edited (tracked in _editingRoutineId so re-renders don't collapse it).
+let _editingRoutineId = null;
+let _ambientUploadProgress = null;
+
+function renderRoutinesPanel() {
+  const rows = _routines.length
+    ? _routines.map(renderRoutineRow).join('')
+    : `<div style="font-size:11px;color:var(--muted);padding:8px 0;line-height:1.5">No routines yet. Click <strong>+ New routine</strong> to bind a phrase to an action sequence — e.g. "goodnight" turns off scene.goodnight and plays thunderstorm.mp3.</div>`;
+  return `
+    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
+          Voice routines
+          <span style="text-transform:none;letter-spacing:0;margin-left:6px;opacity:.7">${_routines.length}</span>
+        </div>
+        <button class="cdraw-btn cdraw-btn-primary" data-action="addRoutine" style="font-size:11px;padding:4px 10px">+ New routine</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.45">
+        Say the trigger phrase after your wake word ("hey sydney, goodnight") to fire the actions in order.
+      </div>
+      ${rows}
+    </div>
+  `;
+}
+
+function renderRoutineRow(r) {
+  if (_editingRoutineId === r.id) return renderRoutineEditor(r);
+  const aliases = r.aliases?.length ? ` <span style="color:var(--muted);font-size:11px">(${r.aliases.map(escHtml).join(', ')})</span>` : '';
+  const summary = r.actions.map(summarizeRoutineAction).join(' → ');
+  return `
+    <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-top:1px solid var(--border);font-size:12px">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600">"${escHtml(r.trigger)}"${aliases}</div>
+        <div style="color:var(--muted);font-size:11px;margin-top:2px;word-break:break-word">${escHtml(summary)}</div>
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0">
+        <button class="cdraw-btn" data-action="testRoutine" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px" title="Fire this routine now on a paired device">Test</button>
+        <button class="cdraw-btn" data-action="editRoutine" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px">Edit</button>
+        <button class="cdraw-btn" data-action="deleteRoutine" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
+function summarizeRoutineAction(a) {
+  switch (a.type) {
+    case 'ha_scene': {
+      const id = a.scene_id || '?';
+      const isPreset = /^(scene|script)\./.test(id);
+      const verbLabel = isPreset ? 'activate' :
+        a.verb === 'turn_off' ? 'turn off' :
+        a.verb === 'toggle'   ? 'toggle'    :
+        'turn on';
+      return `${verbLabel} ${id}`;
+    }
+    case 'ha_call':      return `${a.domain || '?'}.${a.service || '?'}${a.data?.entity_id ? ` (${a.data.entity_id})` : ''}`;
+    case 'play_ambient': return `play ${a.file || '?'}${a.loop !== false ? ' on loop' : ''}${Number.isFinite(a.volume) ? ` @ ${a.volume}%` : ''}`;
+    case 'tts_say':      return `say "${a.text || ''}"`;
+    default:             return a.type || '?';
+  }
+}
+
+function renderRoutineEditor(r) {
+  // "_new" is the synthetic id used to flag an in-progress create. Don't
+  // surface it in the id input — leave the field empty so the user types
+  // their own slug. After save, the editor switches to readonly with the
+  // user's chosen id, so this branch only fires while authoring.
+  const isNew = !r.id || r.id === '_new';
+  const displayId = isNew ? '' : r.id;
+  const ambientOpts = _ambientFiles.map(f => `<option value="${escHtml(f.name)}">${escHtml(f.name)}</option>`).join('');
+  const actionsHtml = (r.actions || []).map((a, i) => renderActionEditor(a, i, ambientOpts)).join('');
+  return `
+    <div data-routine-editor="${escHtml(r.id || '_new')}" style="padding:10px;margin:8px 0;border:1px solid var(--accent,#5da0ff);border-radius:6px;background:var(--bg)">
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;align-items:center;margin-bottom:8px">
+        <label style="font-size:11px;color:var(--muted)">ID</label>
+        <input type="text" class="cdraw-input" data-routine-field="id" value="${escHtml(displayId)}" placeholder="goodnight" ${isNew ? '' : 'readonly'} style="font-family:monospace;font-size:12px;padding:4px 6px${isNew ? '' : ';opacity:.6'}">
+        <label style="font-size:11px;color:var(--muted)">Trigger</label>
+        <input type="text" class="cdraw-input" data-routine-field="trigger" value="${escHtml(r.trigger || '')}" placeholder="goodnight" style="font-size:12px;padding:4px 6px">
+        <label style="font-size:11px;color:var(--muted)">Aliases</label>
+        <input type="text" class="cdraw-input" data-routine-field="aliases" value="${escHtml((r.aliases || []).join(', '))}" placeholder="good night, time for bed" style="font-size:12px;padding:4px 6px" title="Comma-separated alternative phrasings">
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Actions</div>
+        <select class="cdraw-input" data-change-action="addRoutineAction" data-change-args='["$value"]' style="font-size:11px;padding:3px 6px">
+          <option value="">+ Add action…</option>
+          <option value="ha_scene">HA scene</option>
+          <option value="ha_call">HA service call</option>
+          <option value="play_ambient">Play ambient sound</option>
+          <option value="tts_say">Speak text</option>
+        </select>
+      </div>
+      <div data-routine-actions>${actionsHtml || '<div style="font-size:11px;color:var(--muted);padding:4px 0">No actions yet. Pick one above.</div>'}</div>
+      <div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">
+        <button class="cdraw-btn" data-action="cancelRoutineEdit" style="font-size:11px;padding:4px 10px">Cancel</button>
+        <button class="cdraw-btn cdraw-btn-primary" data-action="saveRoutineEdit" style="font-size:11px;padding:4px 10px">Save routine</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderActionEditor(a, idx, ambientOpts) {
+  const headerRow = `
+    <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
+      <span>${idx + 1}. ${escHtml(a.type)}</span>
+      <div style="display:flex;gap:4px">
+        ${idx > 0 ? `<button class="cdraw-btn" data-action="moveRoutineAction" data-args='${JSON.stringify([idx, -1]).replace(/'/g, '&#39;')}' style="font-size:10px;padding:1px 6px" title="Move up">↑</button>` : ''}
+        <button class="cdraw-btn" data-action="moveRoutineAction" data-args='${JSON.stringify([idx, 1]).replace(/'/g, '&#39;')}' style="font-size:10px;padding:1px 6px" title="Move down">↓</button>
+        <button class="cdraw-btn" data-action="removeRoutineAction" data-args='${JSON.stringify([idx]).replace(/'/g, '&#39;')}' style="font-size:10px;padding:1px 6px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)">✕</button>
+      </div>
+    </div>
+  `;
+  let body = '';
+  if (a.type === 'ha_scene') {
+    // Dropdown pulled from the HA entity cache (scenes + scripts + groups).
+    // If the saved entity_id isn't in the cache (HA offline, fresh entity
+    // not refreshed), prepend it so the value isn't lost on next save.
+    // Grouped by entity type so the long list stays scannable.
+    const cur = a.scene_id || '';
+    const grouped = { scene: [], script: [], group: [], other: [] };
+    for (const e of _haSceneEntities) {
+      const bucket = grouped[e.domain] ? e.domain : 'other';
+      grouped[bucket].push(e);
+    }
+    const optgroup = (label, list) => list.length
+      ? `<optgroup label="${escHtml(label)}">${list.map(e => {
+          const lbl = e.friendly_name && e.friendly_name !== e.entity_id
+            ? `${e.friendly_name} (${e.entity_id})`
+            : e.entity_id;
+          return `<option value="${escHtml(e.entity_id)}" ${e.entity_id === cur ? 'selected' : ''}>${escHtml(lbl)}</option>`;
+        }).join('')}</optgroup>`
+      : '';
+    const hasCur = !cur || _haSceneEntities.some(e => e.entity_id === cur);
+    const opts = ['<option value="">Pick a scene, script, or group…</option>']
+      .concat(hasCur ? [] : [`<option value="${escHtml(cur)}" selected>${escHtml(cur)} (not in cache)</option>`])
+      .concat(optgroup('Scenes',  grouped.scene),
+              optgroup('Scripts', grouped.script),
+              optgroup('Groups',  grouped.group),
+              optgroup('Other',   grouped.other))
+      .join('');
+    // Verb picker — meaningful for groups (and any other domain), ignored
+    // server-side for scene/script (always turn_on). Default 'turn_off'
+    // for groups since routines almost always turn things off; toggleable.
+    const isPresetType = /^(scene|script)\./.test(cur);
+    const verb = a.verb || (isPresetType ? 'turn_on' : 'turn_off');
+    const verbPicker = isPresetType
+      ? `<input type="hidden" data-action-field="${idx}.verb" value="turn_on">`
+      : `<select class="cdraw-input" data-action-field="${idx}.verb" style="font-size:12px;padding:4px 6px;margin-top:4px">
+          <option value="turn_off" ${verb === 'turn_off' ? 'selected' : ''}>Turn off</option>
+          <option value="turn_on"  ${verb === 'turn_on'  ? 'selected' : ''}>Turn on</option>
+          <option value="toggle"   ${verb === 'toggle'   ? 'selected' : ''}>Toggle</option>
+        </select>`;
+    const emptyHint = _haSceneEntities.length === 0
+      ? '<div style="font-size:10px;color:var(--amber,#d49a44);margin-top:4px">No HA scenes/scripts/groups found. Check the Home Assistant integration is configured + reachable, or wait up to 5 min for the cache to refresh.</div>'
+      : '';
+    body = `<div style="display:flex;gap:4px;align-items:stretch">
+        <select class="cdraw-input" data-action-field="${idx}.scene_id" style="flex:1;min-width:0;font-family:monospace;font-size:12px;padding:4px 6px">${opts}</select>
+        <button class="cdraw-btn" data-action="refreshHaEntities" title="Re-fetch scenes/scripts/groups from Home Assistant (skips the 5-min cache)" style="font-size:11px;padding:4px 8px">↻</button>
+      </div>${verbPicker}${emptyHint}`;
+  } else if (a.type === 'ha_call') {
+    body = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <input type="text" class="cdraw-input" data-action-field="${idx}.domain" value="${escHtml(a.domain || '')}" placeholder="domain (e.g. light)" style="font-family:monospace;font-size:12px;padding:4px 6px">
+        <input type="text" class="cdraw-input" data-action-field="${idx}.service" value="${escHtml(a.service || '')}" placeholder="service (e.g. turn_off)" style="font-family:monospace;font-size:12px;padding:4px 6px">
+      </div>
+      <input type="text" class="cdraw-input" data-action-field="${idx}.data" value="${escHtml(JSON.stringify(a.data || {}))}" placeholder='{"entity_id":"light.kitchen"}' style="width:100%;font-family:monospace;font-size:11px;padding:4px 6px;margin-top:4px" title="JSON payload for the service call">
+    `;
+  } else if (a.type === 'play_ambient') {
+    body = `
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;align-items:center">
+        <select class="cdraw-input" data-action-field="${idx}.file" style="font-size:12px;padding:4px 6px">
+          <option value="">Pick a sound…</option>
+          ${ambientOpts.replace(`value="${escHtml(a.file || '')}"`, `value="${escHtml(a.file || '')}" selected`)}
+        </select>
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px"><input type="checkbox" data-action-field="${idx}.loop" ${a.loop !== false ? 'checked' : ''}> Loop</label>
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px">Vol <input type="number" class="cdraw-input" data-action-field="${idx}.volume" value="${a.volume ?? ''}" min="0" max="100" placeholder="—" style="width:50px;font-size:12px;padding:2px 4px"></label>
+      </div>
+      ${_ambientFiles.length ? '' : '<div style="font-size:10px;color:var(--amber,#d49a44);margin-top:4px">Library is empty — upload an MP3 in the Ambient library section below.</div>'}
+    `;
+  } else if (a.type === 'tts_say') {
+    body = `<input type="text" class="cdraw-input" data-action-field="${idx}.text" value="${escHtml(a.text || '')}" placeholder="Sleep well." style="width:100%;font-size:12px;padding:4px 6px">`;
+  } else {
+    body = `<div style="font-size:11px;color:var(--red,#e05c5c)">Unknown action type: ${escHtml(a.type)}</div>`;
+  }
+  return `<div style="padding:6px;margin:4px 0;border:1px solid var(--border);border-radius:4px;background:var(--bg2)">${headerRow}<div style="margin-top:4px">${body}</div></div>`;
+}
+
+// ── Ambient library panel ────────────────────────────────────────────────────
+
+function renderAmbientLibraryPanel() {
+  const rows = _ambientFiles.length
+    ? _ambientFiles.map(renderAmbientFileRow).join('')
+    : `<div style="font-size:11px;color:var(--muted);padding:4px 0">No ambient sounds uploaded yet. Drop an MP3 below or click <strong>+ Upload sound</strong>.</div>`;
+  const dragHint = _ambientUploadProgress
+    ? `<div style="font-size:11px;color:var(--muted);margin-top:6px">Uploading ${escHtml(_ambientUploadProgress.name)}… ${_ambientUploadProgress.pct}%</div>`
+    : '';
+  return `
+    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)" data-ambient-drop>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
+          Ambient library
+          <span style="text-transform:none;letter-spacing:0;margin-left:6px;opacity:.7">${_ambientFiles.length}</span>
+        </div>
+        <button class="cdraw-btn cdraw-btn-primary" data-action="uploadAmbient" style="font-size:11px;padding:4px 10px">+ Upload sound</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.45">
+        MP3s available to the <em>play ambient</em> action. Click <strong>+ Upload sound</strong> to add one (max 15&nbsp;MB).
+      </div>
+      ${rows}
+      ${dragHint}
+    </div>
+  `;
+}
+
+function renderAmbientFileRow(f) {
+  const sizeKb = (f.size / 1024).toFixed(1) + ' KB';
+  const dur = f.duration_s
+    ? (() => { const m = Math.floor(f.duration_s / 60); const s = Math.floor(f.duration_s % 60); return `${m}:${String(s).padStart(2, '0')}`; })()
+    : '—';
+  return `
+    <div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><strong>${escHtml(f.name)}</strong> <span style="color:var(--muted)">${sizeKb} · ${dur}</span></span>
+      <button class="cdraw-btn" data-action="previewAmbient" data-args='${JSON.stringify([f.name]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px" title="Preview in browser">▶</button>
+      <button class="cdraw-btn" data-action="deleteAmbient" data-args='${JSON.stringify([f.name]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)">Delete</button>
+    </div>
+  `;
 }
 
 // Build the per-user voice-configuration panel: one card per assigned
@@ -1061,6 +1319,307 @@ window.revokeDevice = async function (id) {
   } catch (e) {
     alert(`Revoke failed: ${e.message}`);
   }
+};
+
+// ── Routines: actions ───────────────────────────────────────────────────────
+// Pending-edits buffer: when the user clicks Edit (or + New routine), we
+// stash the working copy here so live <input>s drive it. Save flushes the
+// buffer to _routines and PUTs the whole list.
+let _routineEditBuffer = null;
+
+function _readEditorIntoBuffer() {
+  if (!_routineEditBuffer) return;
+  const root = document.querySelector(`[data-routine-editor]`);
+  if (!root) return;
+  const get = (sel) => root.querySelector(sel);
+  _routineEditBuffer.id      = (get('[data-routine-field="id"]')?.value || '').trim().toLowerCase();
+  _routineEditBuffer.trigger = (get('[data-routine-field="trigger"]')?.value || '').trim();
+  _routineEditBuffer.aliases = (get('[data-routine-field="aliases"]')?.value || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  for (let i = 0; i < (_routineEditBuffer.actions || []).length; i++) {
+    const a = _routineEditBuffer.actions[i];
+    const f = (key) => root.querySelector(`[data-action-field="${i}.${key}"]`);
+    if (a.type === 'ha_scene') {
+      a.scene_id = (f('scene_id')?.value || '').trim();
+      a.verb = f('verb')?.value || 'turn_on';
+    } else if (a.type === 'ha_call') {
+      a.domain = (f('domain')?.value || '').trim().toLowerCase();
+      a.service = (f('service')?.value || '').trim().toLowerCase();
+      const raw = (f('data')?.value || '').trim();
+      try { a.data = raw ? JSON.parse(raw) : {}; }
+      catch { /* leave as previous on parse fail; server will reject and surface */ }
+    } else if (a.type === 'play_ambient') {
+      a.file = (f('file')?.value || '').trim();
+      a.loop = !!f('loop')?.checked;
+      const v = Number(f('volume')?.value);
+      a.volume = Number.isFinite(v) && v >= 0 && v <= 100 ? v : undefined;
+    } else if (a.type === 'tts_say') {
+      a.text = (f('text')?.value || '').trim();
+    }
+  }
+}
+
+window.addRoutine = function () {
+  _readEditorIntoBuffer();
+  _routineEditBuffer = { id: '', trigger: '', aliases: [], actions: [] };
+  _editingRoutineId = '_new';
+  // Put the in-progress buffer into _routines temporarily so renderRoutineRow
+  // → renderRoutineEditor finds it.
+  _routines = _routines.filter(r => r.id !== '_new');
+  _routines.push({ ..._routineEditBuffer, id: '_new' });
+  renderDevices();
+  populateCoordinatorLabels();
+};
+
+window.editRoutine = function (id) {
+  _readEditorIntoBuffer();
+  const r = _routines.find(x => x.id === id);
+  if (!r) return;
+  _routineEditBuffer = JSON.parse(JSON.stringify(r));
+  _editingRoutineId = id;
+  renderDevices();
+  populateCoordinatorLabels();
+};
+
+window.cancelRoutineEdit = function () {
+  // Drop the in-progress new-routine row if it never got saved.
+  _routines = _routines.filter(r => r.id !== '_new');
+  _routineEditBuffer = null;
+  _editingRoutineId = null;
+  renderDevices();
+  populateCoordinatorLabels();
+};
+
+window.saveRoutineEdit = async function () {
+  _readEditorIntoBuffer();
+  if (!_routineEditBuffer) return;
+  const buf = _routineEditBuffer;
+  if (!buf.id || buf.id === '_new') { showDeviceToast('Routine needs an id (short slug, e.g. goodnight).', { variant: 'error' }); return; }
+  if (!buf.trigger) { showDeviceToast('Routine needs a trigger phrase.', { variant: 'error' }); return; }
+  if (!buf.actions?.length) { showDeviceToast('Add at least one action.', { variant: 'error' }); return; }
+  // If we were editing under the synthetic "_new" id, swap in the real one.
+  const realId = buf.id;
+  const merged = _routines.filter(r => r.id !== '_new' && r.id !== _editingRoutineId);
+  const existingIdx = merged.findIndex(r => r.id === realId);
+  if (existingIdx >= 0) merged[existingIdx] = { ...buf, id: realId };
+  else merged.push({ ...buf, id: realId });
+  try {
+    const r = await fetch('/api/routines', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ routines: merged }),
+    });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      throw new Error(error || `HTTP ${r.status}`);
+    }
+    const saved = await r.json();
+    _routines = saved.routines || merged;
+    _routineEditBuffer = null;
+    _editingRoutineId = null;
+    showDeviceToast(`Routine "${realId}" saved.`);
+    renderDevices();
+    populateCoordinatorLabels();
+  } catch (e) {
+    showDeviceToast(`Save failed: ${e.message}`, { variant: 'error' });
+  }
+};
+
+window.deleteRoutine = async function (id) {
+  const r = _routines.find(x => x.id === id);
+  if (!r) return;
+  if (!confirm(`Delete routine "${id}"?`)) return;
+  try {
+    const next = _routines.filter(x => x.id !== id);
+    const resp = await fetch('/api/routines', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ routines: next }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const saved = await resp.json();
+    _routines = saved.routines || next;
+    if (_editingRoutineId === id) { _editingRoutineId = null; _routineEditBuffer = null; }
+    showDeviceToast(`Deleted "${id}".`);
+    renderDevices();
+    populateCoordinatorLabels();
+  } catch (e) {
+    showDeviceToast(`Delete failed: ${e.message}`, { variant: 'error' });
+  }
+};
+
+window.testRoutine = async function (id) {
+  const onlineDevice = _devicesList.find(d => d.online);
+  if (!onlineDevice) {
+    showDeviceToast('No paired device is online to test against.', { variant: 'error' });
+    return;
+  }
+  try {
+    const r = await fetch(`/api/routines/${encodeURIComponent(id)}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId: onlineDevice.id }),
+    });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      throw new Error(error || `HTTP ${r.status}`);
+    }
+    const { errors } = await r.json();
+    if (errors?.length) {
+      showDeviceToast(`Routine ran with ${errors.length} error(s): ${errors[0].message}`, { variant: 'error' });
+    } else {
+      showDeviceToast(`Routine "${id}" fired on ${onlineDevice.name}.`);
+    }
+  } catch (e) {
+    showDeviceToast(`Test failed: ${e.message}`, { variant: 'error' });
+  }
+};
+
+window.addRoutineAction = function (type, ev) {
+  if (!type) return;
+  if (ev?.target) ev.target.value = '';  // reset dropdown
+  _readEditorIntoBuffer();
+  if (!_routineEditBuffer) return;
+  const fresh = { ha_scene:     { type, scene_id: '' },
+                  ha_call:      { type, domain: '', service: '', data: {} },
+                  play_ambient: { type, file: '', loop: true },
+                  tts_say:      { type, text: '' } }[type];
+  if (!fresh) return;
+  _routineEditBuffer.actions = _routineEditBuffer.actions || [];
+  _routineEditBuffer.actions.push(fresh);
+  // Render buffer back into _routines for the editor to pick up.
+  const target = _routines.find(r => r.id === _editingRoutineId);
+  if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
+  renderDevices();
+  populateCoordinatorLabels();
+};
+
+window.removeRoutineAction = function (idx) {
+  _readEditorIntoBuffer();
+  if (!_routineEditBuffer) return;
+  _routineEditBuffer.actions.splice(idx, 1);
+  const target = _routines.find(r => r.id === _editingRoutineId);
+  if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
+  renderDevices();
+  populateCoordinatorLabels();
+};
+
+window.refreshHaEntities = async function (_ignored, ev) {
+  if (ev) ev.preventDefault();
+  // Stash the in-flight editor before re-render swallows it.
+  _readEditorIntoBuffer();
+  try {
+    const r = await fetch('/api/home-assistant/refresh', { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const r2 = await fetch('/api/home-assistant/entities?domain=scene,script,group');
+    if (r2.ok) {
+      const j = await r2.json();
+      _haSceneEntities = Array.isArray(j.entities) ? j.entities : [];
+    }
+    // Persist edits to the editor's working buffer so the re-render keeps them.
+    if (_routineEditBuffer && _editingRoutineId) {
+      const target = _routines.find(r => r.id === _editingRoutineId);
+      if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
+    }
+    showDeviceToast(`HA refreshed — ${_haSceneEntities.length} scene/script/group entities.`);
+    renderDevices();
+    populateCoordinatorLabels();
+  } catch (e) {
+    showDeviceToast(`HA refresh failed: ${e.message}`, { variant: 'error' });
+  }
+};
+
+window.moveRoutineAction = function (idx, delta) {
+  _readEditorIntoBuffer();
+  if (!_routineEditBuffer) return;
+  const list = _routineEditBuffer.actions;
+  const ni = idx + delta;
+  if (ni < 0 || ni >= list.length) return;
+  [list[idx], list[ni]] = [list[ni], list[idx]];
+  const target = _routines.find(r => r.id === _editingRoutineId);
+  if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
+  renderDevices();
+  populateCoordinatorLabels();
+};
+
+// ── Ambient library: actions ────────────────────────────────────────────────
+
+window.uploadAmbient = function () {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.mp3,audio/mpeg';
+  input.style.display = 'none';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    await _uploadAmbientFile(file);
+  };
+  document.body.appendChild(input);
+  input.click();
+  setTimeout(() => input.remove(), 60_000);
+};
+
+async function _uploadAmbientFile(file) {
+  if (file.size > 15 * 1024 * 1024) {
+    showDeviceToast('File too large (max 15 MB).', { variant: 'error' });
+    return;
+  }
+  if (!/\.mp3$/i.test(file.name)) {
+    showDeviceToast('Only MP3 files are supported.', { variant: 'error' });
+    return;
+  }
+  _ambientUploadProgress = { name: file.name, pct: 0 };
+  renderDevices();
+  populateCoordinatorLabels();
+  try {
+    const r = await fetch(`/api/devices/ambient-library/${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'audio/mpeg' },
+      body: file,
+    });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      throw new Error(error || `HTTP ${r.status}`);
+    }
+    _ambientUploadProgress = null;
+    showDeviceToast(`Uploaded "${file.name}".`);
+    loadDevices();
+  } catch (e) {
+    _ambientUploadProgress = null;
+    showDeviceToast(`Upload failed: ${e.message}`, { variant: 'error' });
+    renderDevices();
+    populateCoordinatorLabels();
+  }
+}
+
+window.deleteAmbient = async function (name) {
+  if (!confirm(`Delete "${name}" from your ambient library?\n\nAny routines referencing it will start failing until you change the action.`)) return;
+  try {
+    const r = await fetch(`/api/devices/ambient-library/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    loadDevices();
+  } catch (e) {
+    showDeviceToast(`Delete failed: ${e.message}`, { variant: 'error' });
+  }
+};
+
+window.previewAmbient = function (name) {
+  // Toggle one transient <audio> per session so clicking another preview
+  // stops the prior one cleanly. The element is hidden — we just want playback.
+  if (window._ambientPreviewEl) {
+    try { window._ambientPreviewEl.pause(); } catch {}
+    window._ambientPreviewEl.remove();
+    window._ambientPreviewEl = null;
+  }
+  const audio = document.createElement('audio');
+  audio.src = `/api/devices/ambient-library/${encodeURIComponent(name)}/preview`;
+  audio.controls = false;
+  audio.autoplay = true;
+  audio.style.display = 'none';
+  audio.addEventListener('ended', () => { audio.remove(); window._ambientPreviewEl = null; });
+  document.body.appendChild(audio);
+  window._ambientPreviewEl = audio;
+  showDeviceToast(`Previewing "${name}" (click another file or refresh to stop).`);
 };
 
 window.revokeAllDevices = async function () {

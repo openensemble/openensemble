@@ -15,6 +15,11 @@ import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
+import {
+  listAmbientFiles, saveAmbientFile, deleteAmbientFile, ambientFilePath,
+  probeAmbientDuration,
+} from '../lib/routines.mjs';
+import { playAmbientOnDevice, stopAmbientOnDevice } from '../lib/ambient-playback.mjs';
 
 // Per-user custom alarm chime: stored as a transcoded MP3 on disk so it
 // survives server restart AND so future-paired devices can be pushed the
@@ -51,6 +56,64 @@ export function cacheOneShotMp3(mp3Buf) {
   _oneShotMp3Cache.set(marker, mp3Buf);
   setTimeout(() => _oneShotMp3Cache.delete(marker), 60_000);
   return marker;
+}
+
+// Ambient (looped) playback: register a source file + loop flag against a
+// fresh marker. The /api/tts handler matches the marker and spawns ffmpeg
+// with `-stream_loop -1` so the response is ONE continuous MP3 stream with
+// zero silence at seams. Lifecycle is bounded by stopAmbientOnDevice (which
+// drops the entry + closes the in-flight HTTP response) and a 4-hour idle
+// TTL backstop.
+const _ambientStreamCache = new Map();        // marker → { userId, file, loop }
+const _ambientByDevice    = new Map();        // deviceId → marker
+const _ambientTimers      = new Map();        // marker → setTimeout handle
+const _ambientResponses   = new Map();        // marker → in-flight res (so stop can end it)
+const AMBIENT_TTL_MS = 4 * 60 * 60 * 1000;
+
+export function takeAmbientStream(marker) {
+  return _ambientStreamCache.get(marker) || null;
+}
+
+export function registerAmbientResponse(marker, res, killFn) {
+  _ambientResponses.set(marker, { res, killFn });
+}
+
+export function unregisterAmbientResponse(marker) {
+  _ambientResponses.delete(marker);
+}
+
+export function cacheAmbientStream(deviceId, meta) {
+  // Drop any prior ambient marker for this device so we don't leak entries
+  // when the user fires a second routine while the first is still playing.
+  const prev = _ambientByDevice.get(deviceId);
+  if (prev) dropAmbientMp3(prev);
+  const marker = `__ambient_${randomBytes(4).toString('hex')}__`;
+  _ambientStreamCache.set(marker, meta);
+  _ambientByDevice.set(deviceId, marker);
+  _ambientTimers.set(marker, setTimeout(() => dropAmbientMp3(marker), AMBIENT_TTL_MS));
+  return marker;
+}
+
+export function dropAmbientMp3(marker) {
+  _ambientStreamCache.delete(marker);
+  const t = _ambientTimers.get(marker);
+  if (t) { clearTimeout(t); _ambientTimers.delete(marker); }
+  // Close any in-flight HTTP response + kill its ffmpeg so the connection
+  // doesn't dangle. The device's mp3 decoder sees EOF and exits.
+  const inFlight = _ambientResponses.get(marker);
+  if (inFlight) {
+    try { inFlight.killFn?.(); } catch {}
+    try { inFlight.res?.end(); } catch {}
+    _ambientResponses.delete(marker);
+  }
+}
+
+export function dropAmbientForDevice(deviceId) {
+  const m = _ambientByDevice.get(deviceId);
+  if (m) {
+    dropAmbientMp3(m);
+    _ambientByDevice.delete(deviceId);
+  }
 }
 
 // Slot wake-word push moved to routes/voice-config.mjs as of 2026-05-13:
@@ -386,6 +449,183 @@ export async function handle(req, res) {
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, marker, bytes: mp3Out.length }));
+    return true;
+  }
+
+  // ── Ambient sound library ────────────────────────────────────────────────
+  // Persistent MP3s the user uploads once, then references from routines (or
+  // plays manually). Files live at users/<id>/ambient/<filename>.mp3; routines
+  // (lib/routines.mjs) and the play-ambient route below resolve the filename
+  // through ambientFilePath which guards against path traversal.
+
+  // GET /api/devices/ambient-library — list this user's uploaded files.
+  if (p === '/api/devices/ambient-library' && req.method === 'GET') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const files = listAmbientFiles(userId);
+    // Lazy-fill missing durations so the UI can show "0:42" alongside size.
+    // Fan out the probes in parallel; ffprobe on a small MP3 is ~20ms.
+    await Promise.all(files.map(async (f) => {
+      if (f.duration_s == null) f.duration_s = await probeAmbientDuration(userId, f.name);
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ files }));
+    return true;
+  }
+
+  // POST /api/devices/ambient-library/:file — upload a raw MP3 to the user's
+  // ambient library. Same 15 MB cap as the existing play-mp3 endpoint; the
+  // route reads bytes inline because the global BODY_LIMIT (512 KB) would
+  // reject any reasonable ambient sound.
+  const libUploadMatch = p.match(/^\/api\/devices\/ambient-library\/([^/]+)$/);
+  if (libUploadMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const file = decodeURIComponent(libUploadMatch[1]);
+    if (!ambientFilePath(userId, file)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid filename' }));
+      return true;
+    }
+    const CAP = 15 * 1024 * 1024;
+    let buf;
+    try {
+      buf = await new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        req.on('data', chunk => {
+          size += chunk.length;
+          if (size > CAP) {
+            req.destroy();
+            reject(new Error(`File too large (>${CAP} bytes)`));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+      });
+    } catch (e) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+      return true;
+    }
+    if (!buf || buf.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'empty body' }));
+      return true;
+    }
+    // MP3 frame-sync check: first two bytes are 0xFFEx (MPEG frame header)
+    // OR an ID3v2 tag header ("ID3"). Reject anything else so the UI surfaces
+    // mis-labeled uploads immediately instead of letting ffmpeg fail later
+    // inside an in-flight playback request.
+    const isMp3 = (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)
+                || (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33);
+    if (!isMp3) {
+      res.writeHead(415, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not an MP3 file (expected MP3 frame or ID3 tag at offset 0)' }));
+      return true;
+    }
+    try {
+      saveAmbientFile(userId, file, buf);
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+      return true;
+    }
+    const duration_s = await probeAmbientDuration(userId, file);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, file, size: buf.length, duration_s }));
+    return true;
+  }
+
+  // DELETE /api/devices/ambient-library/:file
+  if (libUploadMatch && req.method === 'DELETE') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const file = decodeURIComponent(libUploadMatch[1]);
+    const removed = deleteAmbientFile(userId, file);
+    res.writeHead(removed ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ removed }));
+    return true;
+  }
+
+  // GET /api/devices/ambient-library/:file/preview — stream the raw stored
+  // MP3 so the routines drawer can preview-play it in a browser <audio>
+  // element. Range-aware to keep the file playable in browser seeking.
+  const libPreviewMatch = p.match(/^\/api\/devices\/ambient-library\/([^/]+)\/preview$/);
+  if (libPreviewMatch && req.method === 'GET') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const file = decodeURIComponent(libPreviewMatch[1]);
+    const full = ambientFilePath(userId, file);
+    if (!full || !fs.existsSync(full)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+      return true;
+    }
+    const stat = fs.statSync(full);
+    res.writeHead(200, {
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': stat.size,
+      'Cache-Control': 'private, max-age=60',
+    });
+    fs.createReadStream(full).pipe(res);
+    return true;
+  }
+
+  // POST /api/devices/:id/play-ambient — start (looped) ambient playback on
+  // a paired voice device. Body: { file: string, loop?: bool, volume?: 0-100 }.
+  // The ffmpeg transcode + WS dispatch lives in lib/ambient-playback.mjs so
+  // routines can reuse the same code path.
+  const ambPlayMatch = p.match(/^\/api\/devices\/([^/]+)\/play-ambient$/);
+  if (ambPlayMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const deviceId = decodeURIComponent(ambPlayMatch[1]);
+    if (!getDevice(userId, deviceId)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'device not found' }));
+      return true;
+    }
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return true;
+    }
+    try {
+      const result = await playAmbientOnDevice({
+        userId,
+        deviceId,
+        file: body.file,
+        loop: body.loop !== false,
+        volume: body.volume,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, ...result }));
+    } catch (e) {
+      const code = /not found/i.test(e.message) ? 404 : /offline/i.test(e.message) ? 503 : 500;
+      res.writeHead(code, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+
+  // POST /api/devices/:id/stop-ambient — stop ambient playback on the device.
+  const ambStopMatch = p.match(/^\/api\/devices\/([^/]+)\/stop-ambient$/);
+  if (ambStopMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const deviceId = decodeURIComponent(ambStopMatch[1]);
+    if (!getDevice(userId, deviceId)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'device not found' }));
+      return true;
+    }
+    const sent = stopAmbientOnDevice(deviceId);
+    res.writeHead(sent ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: !!sent }));
     return true;
   }
 

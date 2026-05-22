@@ -45,7 +45,7 @@ export { OPENAI_COMPAT_PROVIDERS };
 // unless the message actually contains preference/correction wording.
 const SIGNAL_WORDS_RE = /prefer|like|love|hate|want|don'?t like|remember|decided|will use|choose|chose|my name|i am|i'm|my \w+ is|call me|always|never|make sure|correction/i;
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [] } = {}) {
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], voiceCtx = null } = {}) {
   appendToSession(agent.id,
     { role: 'user', content: sessionText, ts: Date.now() },
     { role: 'assistant', content: assistantContent, ts: Date.now() });
@@ -71,6 +71,22 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
         userMessage: sessionText, assistantContent, toolsUsed,
       }))
       .catch(e => console.warn('[skill-proposer] failed:', e.message));
+  }
+
+  // Routine proposer — runs on EVERY turn (including ephemeral specialist
+  // runs), unlike skill-proposer which skips ephemerals. The whole point is
+  // to catch the case where Helen runs as an ephemeral router delegate and
+  // resolves an ambiguous "turn off X" via ha_call_service — that turn is
+  // exactly the alias-learning signal we want. Keyed by userId because the
+  // FLUSH happens on Sydney's next turn (different agentId).
+  import('./lib/routine-proposer.mjs')
+    .then(m => m.maybeProposeRoutine({
+      userId, agentId: agent.id, agentName: agent.name,
+      userMessage: sessionText, toolsUsed, voiceCtx,
+    }))
+    .catch(e => console.warn('[routine-proposer] failed:', e.message));
+
+  if (!agent.ephemeral) {
 
     // Per-skill telemetry — bump invocation counters for any user-created
     // skill tools that fired this turn. Pairs with recordCorrection in
@@ -187,9 +203,18 @@ async function* consumeProvider(providerGen) {
   let assistantContent = '';
   let errored = false;
   const toolsUsed = [];
+  // Latest tool_call args by name, attached to the matching tool_result so
+  // downstream proposers (routine-proposer) can inspect what the LLM passed.
+  let _lastCallArgsByName = Object.create(null);
   for await (const event of providerGen) {
     if (event.type === '__content') { assistantContent = event.content; continue; }
-    if (event.type === 'tool_result' && event.name) toolsUsed.push({ name: event.name, text: event.text || '' });
+    if (event.type === 'tool_call' && event.name) {
+      _lastCallArgsByName[event.name] = event.args ?? null;
+    }
+    if (event.type === 'tool_result' && event.name) {
+      toolsUsed.push({ name: event.name, text: event.text || '', args: _lastCallArgsByName[event.name] ?? null });
+      delete _lastCallArgsByName[event.name];
+    }
     yield event;
     if (event.type === 'error') { errored = true; break; }
   }
@@ -197,7 +222,7 @@ async function* consumeProvider(providerGen) {
 }
 
 // ── Main chat generator ───────────────────────────────────────────────────────
-export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false) {
+export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null) {
   // Flush any deferred skill-proposal candidate from the prior turn. The
   // proposer stashes after qualifying multi-tool turns and only emits on the
   // next turn — so we can drop the candidate if the user's current message
@@ -206,6 +231,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     import('./lib/skill-proposer.mjs')
       .then(m => m.flushPendingSkillCandidate({ agentId: agent.id, currentUserMessage: userText }))
       .catch(e => console.warn('[skill-proposer] flush failed:', e.message));
+  }
+  // Routine-proposer flush runs on EVERY non-silent turn — including
+  // ephemeral specialist-router runs (Helen). On voice-device pipelines
+  // every user turn lands in Helen ephemerally, so gating on !ephemeral
+  // would mean the flush never fires for voice-only users. Keyed by userId.
+  if (!silent) {
+    import('./lib/routine-proposer.mjs')
+      .then(m => m.flushPendingRoutineCandidate({ userId, currentUserMessage: userText }))
+      .catch(e => console.warn('[routine-proposer] flush failed:', e.message));
   }
 
   // Finance/email agents handle transactions and actions — skip memory signal processing.
@@ -627,7 +661,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
   log.info('chat', 'llm turn complete', _llmMeta);
   if (assistantContent) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed });
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, voiceCtx });
     yield { type: '__content', content: assistantContent };
   }
   yield { type: 'done' };

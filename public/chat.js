@@ -284,6 +284,8 @@ function appendProposalBubble(proposal, scroll = true) {
     skill_proposal:     'Bundle this workflow into a skill?',
     skill_refine:       'Refine this skill based on your corrections?',
     skill_deprecation:  'This skill keeps getting corrected — delete it?',
+    routine_proposal:   'Save this as a voice routine?',
+    alias_proposal:     'Remember this phrase shortcut?',
   };
   label.textContent = HEADER_BY_KIND[proposal.kind] || 'Proposal';
   header.appendChild(label);

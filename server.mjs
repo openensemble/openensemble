@@ -61,6 +61,7 @@ import { handle as handleDevices }      from './routes/devices.mjs';
 import { handle as handleWakewords }    from './routes/wakewords.mjs';
 import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
 import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
+import { handle as handleRoutines }     from './routes/routines.mjs';
 import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
@@ -198,6 +199,7 @@ const routeHandlers = [
   handleWakewords,
   handleVoiceRefs,
   handleVoiceConfig,
+  handleRoutines,
   handleMisc,
   handleTelegram,
   handleTunnel,
