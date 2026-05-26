@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * OpenEnsemble Roles Registry
  *
@@ -573,13 +574,13 @@ async function buildCtx(userId, agentId) {
     ? agentId.slice(userId.length + 1)
     : agentId;
   const ctx = { userId, agentId };
-  ctx.showImage = async ({ base64, mimeType = 'image/png', filename, savedPath, prompt } = {}) => {
+  ctx.showImage = /** @param {{base64?: string, mimeType?: string, filename?: string, savedPath?: string, prompt?: string}} [opts] */ async ({ base64, mimeType = 'image/png', filename, savedPath, prompt } = {}) => {
     if (!wsAgentId || !base64 || !filename) return 0;
     const mod = await _wsHandler();
     if (!mod?.sendToUser) return 0;
     return mod.sendToUser(userId, { type: 'image', agent: wsAgentId, base64, mimeType, filename, savedPath, prompt });
   };
-  ctx.showVideo = async ({ url, filename, savedPath } = {}) => {
+  ctx.showVideo = /** @param {{url?: string, filename?: string, savedPath?: string}} [opts] */ async ({ url, filename, savedPath } = {}) => {
     if (!wsAgentId || !url || !filename) return 0;
     const mod = await _wsHandler();
     if (!mod?.sendToUser) return 0;
@@ -599,10 +600,10 @@ async function buildCtx(userId, agentId) {
   // estimate of how long the work takes. Pass `null` for indefinite watchers
   // (price alerts, "tell me when X" — supervisor never auto-reaps these,
   // user must dismiss them from the tasks drawer).
-  ctx.watch = async (opts = {}) => {
+  ctx.watch = /** @param {{kind?: string, state?: any, cadenceSec?: number, expiresAt?: number|null, skillId?: string, label?: string, onFire?: any}} [opts] */ async (opts = {}) => {
     try {
       const watchers = await import('./scheduler/watchers.mjs');
-      return watchers.registerWatcher({
+      return watchers.registerWatcher(/** @type {any} */ ({
         ...opts,
         userId,
         agentId: wsAgentId,
@@ -611,7 +612,7 @@ async function buildCtx(userId, agentId) {
         // skillId is best-effort and required only if the handler is not in
         // the system registry.
         skillId: opts.skillId || null,
-      });
+      }));
     } catch (e) { console.warn('[ctx.watch]', e.message); return null; }
   };
   ctx.unwatch = async (watcherId) => {

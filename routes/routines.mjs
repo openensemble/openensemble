@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Per-user routines REST API.
  *
