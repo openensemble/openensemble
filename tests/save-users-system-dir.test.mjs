@@ -36,7 +36,7 @@ beforeEach(() => {
   // Pre-seed _system with a master-key sentinel.
   const sysDir = path.join(USERS_DIR, '_system');
   ensure(sysDir);
-  fs.writeFileSync(path.join(sysDir, '.master-key'), 'SENTINEL_KEY_DO_NOT_DELETE');
+  fs.writeFileSync(path.join(sysDir, '.master-key'), 'SENTINEL_KEY_DO_NOT_DELETE'); // oe-allow: regression test seeds a sentinel
 });
 
 afterEach(() => {

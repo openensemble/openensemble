@@ -22,7 +22,7 @@ describe('assertWritablePath', () => {
     expect(() => assertWritablePath(inBase('skills/oe-admin/integrations/tailscale.json'))).not.toThrow();
   });
   it('REJECTS the master key', () => {
-    expect(() => assertWritablePath(inBase('users/_system/.master-key'))).toThrow(/deny list/);
+    expect(() => assertWritablePath(inBase('users/_system/.master-key'))).toThrow(/deny list/); // oe-allow: deny-list assertion, no fs touch
   });
   it('REJECTS a lib/ source file', () => {
     expect(() => assertWritablePath(inBase('lib/credentials.mjs'))).toThrow(/deny list/);

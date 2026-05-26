@@ -1,0 +1,55 @@
+# CI for OpenEnsemble — runs on every push to main and on PRs.
+#
+# Three gates, in order of speed:
+#   1. Syntax check every .mjs (catches typos before the test suite even imports)
+#   2. Danger-zone lint (flags filesystem patterns with a track record of
+#      taking down installs; see scripts/danger-zone-lint.mjs)
+#   3. Vitest suite (currently 530+ tests, ~25s)
+#
+# npm ci uses --ignore-scripts so the postinstall model fetch (~220 MB GGUF
+# weights) doesn't burn CI time. No test loads the bundled models directly.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install deps (no model fetch)
+        run: npm ci --ignore-scripts
+
+      - name: Syntax check
+        run: |
+          find . -name '*.mjs' \
+            -not -path './node_modules/*' \
+            -not -path './public/firmware/*' \
+            -not -path './vendor/*' \
+            -not -path './venv/*' \
+            -print0 | xargs -0 -n1 -P4 node --check
+
+      - name: Danger-zone lint
+        run: node scripts/danger-zone-lint.mjs
+
+      - name: Tests
+        run: npm test

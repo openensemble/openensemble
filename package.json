@@ -7,6 +7,7 @@
     "start": "node server.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "lint": "node scripts/danger-zone-lint.mjs",
     "postinstall": "node scripts/fetch-models.mjs"
   },
   "dependencies": {
