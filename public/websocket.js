@@ -213,6 +213,21 @@ function handleServerMessage(msg) {
       if (msg.agent !== activeAgent) break;
       updateToolPill(msg.name, msg.preview, msg.text);
       break;
+    case 'credential_prompt':
+      if (typeof appendCredentialPromptBubble === 'function') {
+        appendCredentialPromptBubble(msg.credentialId, msg.label, msg.description, msg.kind);
+      }
+      break;
+    case 'credential_resolved':
+      if (typeof resolveCredentialBubble === 'function') {
+        resolveCredentialBubble(msg.credentialId, msg.cancelled === true);
+      }
+      break;
+    case 'credential_error':
+      if (typeof markCredentialBubbleError === 'function') {
+        markCredentialBubbleError(msg.credentialId, msg.error);
+      }
+      break;
     case 'replace':
       if (msg.agent !== activeAgent) {
         if (agentStreams[msg.agent]) agentStreams[msg.agent].buf = msg.text;

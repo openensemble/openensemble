@@ -682,19 +682,93 @@ async function openSettingsDrawer(openIt = true) {
 let _enabledProviders = {};
 let _providerKeyStatus = {};
 
-// Metadata for OpenAI-compatible cloud LLM providers. Adding a new provider
-// is a one-line change: it auto-renders a card and wires up save + fetch-models.
-const COMPAT_PROVIDER_META = [
-  { id: 'openai',     label: 'OpenAI',        icon: 'sparkles',    placeholder: 'sk-…',              keyField: 'openaiApiKey',     blurb: 'API key for OpenAI models (GPT-5, GPT-4.1, o-series, etc.).' },
-  { id: 'openai-oauth', label: 'OpenAI (ChatGPT login)', icon: 'log-in', connectMode: 'oauth',      blurb: 'Sign in with your ChatGPT Plus/Pro account to use Codex models via OAuth.' },
-  { id: 'gemini',     label: 'Google Gemini', icon: 'gem',         placeholder: 'AIza…',             keyField: 'geminiApiKey',     blurb: 'API key for Google Gemini via the OpenAI-compat endpoint.' },
-  { id: 'deepseek',   label: 'DeepSeek',      icon: 'brain',       placeholder: 'sk-…',              keyField: 'deepseekApiKey',   blurb: 'API key for DeepSeek (deepseek-chat, deepseek-reasoner).' },
-  { id: 'mistral',    label: 'Mistral AI',    icon: 'wind',        placeholder: 'API key',           keyField: 'mistralApiKey',    blurb: 'API key for Mistral AI (Mistral Large, Codestral, etc.).' },
-  { id: 'groq',       label: 'Groq',          icon: 'bolt',        placeholder: 'gsk_…',             keyField: 'groqApiKey',       blurb: 'API key for Groq ultra-fast inference (Llama, Mixtral, Qwen).' },
-  { id: 'together',   label: 'Together AI',   icon: 'users',       placeholder: 'API key',           keyField: 'togetherApiKey',   blurb: 'API key for Together AI — hundreds of open-weight models.' },
-  { id: 'perplexity', label: 'Perplexity',    icon: 'search',      placeholder: 'pplx-…',            keyField: 'perplexityApiKey', blurb: 'API key for Perplexity Sonar models (search-grounded).' },
-  { id: 'zai',        label: 'Z.AI',          icon: 'zap',         placeholder: 'API key',           keyField: 'zaiApiKey',        blurb: 'API key for Z.AI (GLM-5.1, GLM-5V-Turbo — OpenAI-compatible).' },
+// UI metadata (icons, blurbs, placeholders) for the built-in OpenAI-compat
+// providers. The list of providers IS the server's compatProviders array (so
+// runtime-added providers via oe-admin show up too); this map only supplies
+// the per-provider chrome the server doesn't know about. openai-oauth is the
+// odd one out — it uses an OAuth connect flow rather than an API-key input.
+const COMPAT_BUILTIN_META = {
+  openai:        { icon: 'sparkles', placeholder: 'sk-…',    blurb: 'API key for OpenAI models (GPT-5, GPT-4.1, o-series, etc.).' },
+  'openai-oauth':{ icon: 'log-in',   connectMode: 'oauth',   blurb: 'Sign in with your ChatGPT Plus/Pro account to use Codex models via OAuth.' },
+  gemini:        { icon: 'gem',      placeholder: 'AIza…',   blurb: 'API key for Google Gemini via the OpenAI-compat endpoint.' },
+  deepseek:      { icon: 'brain',    placeholder: 'sk-…',    blurb: 'API key for DeepSeek (deepseek-chat, deepseek-reasoner).' },
+  mistral:       { icon: 'wind',     placeholder: 'API key', blurb: 'API key for Mistral AI (Mistral Large, Codestral, etc.).' },
+  groq:          { icon: 'bolt',     placeholder: 'gsk_…',   blurb: 'API key for Groq ultra-fast inference (Llama, Mixtral, Qwen).' },
+  together:      { icon: 'users',    placeholder: 'API key', blurb: 'API key for Together AI — hundreds of open-weight models.' },
+  perplexity:    { icon: 'search',   placeholder: 'pplx-…',  blurb: 'API key for Perplexity Sonar models (search-grounded).' },
+  zai:           { icon: 'zap',      placeholder: 'API key', blurb: 'API key for Z.AI (GLM-5.1, GLM-5V-Turbo — OpenAI-compatible).' },
+};
+
+// Mutable. Populated by loadProviderConfig() from /api/provider-config's
+// `compatProviders` array. Shape per entry: { id, label, icon, placeholder,
+// keyField, blurb, connectMode?, source: 'static'|'user' }. Other modules
+// (settings.js) read this via getCompatProviderMeta() so they iterate the
+// same merged list and never need to know which providers exist statically
+// vs which were added via add_provider.
+let COMPAT_PROVIDER_META = [];
+
+// Frontend-only virtual entries — providers that don't live in the server's
+// OPENAI_COMPAT_PROVIDERS map (no API key field, no shared compat flow) but
+// still need a card + model-picker group in the UI. openai-oauth is the
+// canonical example: it uses ChatGPT OAuth + a hardcoded model list, so the
+// backend doesn't surface it through /api/provider-config's compatProviders.
+// We splice it in here so the UI behaves the same as before the server-driven
+// list landed.
+const COMPAT_VIRTUAL_PROVIDERS = [
+  {
+    id: 'openai-oauth',
+    displayName: 'OpenAI (ChatGPT login)',
+    keyField: null,
+    source: 'virtual',
+    insertAfter: 'openai',
+  },
 ];
+
+// Server compat entries we DON'T want rendered by the dynamic UI because they
+// already have a hardcoded card + separate model-picker pipeline elsewhere.
+// `xai` shares grokApiKey with the legacy `grok` client (image/video). Showing
+// both would duplicate the card AND the Grok optgroup in the agent model
+// picker. The hardcoded grok card is the canonical UI surface; xai stays in
+// the backend Proxy so chat dispatch can still hit /v1/chat/completions when
+// it wants the OpenAI-compat path.
+const COMPAT_FRONTEND_EXCLUDED = new Set(['xai']);
+
+function buildCompatProviderMeta(compatProviders) {
+  const raw = Array.isArray(compatProviders) ? compatProviders : [];
+  // Drop entries the frontend deliberately doesn't render (see
+  // COMPAT_FRONTEND_EXCLUDED comment).
+  const list = raw.filter(p => !COMPAT_FRONTEND_EXCLUDED.has(p.id));
+  // Splice virtual entries in right after their preferred neighbour (or
+  // append if the neighbour isn't present). The result is a stable order
+  // where every well-known compat provider sits in the same slot it did
+  // when the list was hardcoded.
+  for (const v of COMPAT_VIRTUAL_PROVIDERS) {
+    if (list.some(p => p.id === v.id)) continue;
+    const afterIdx = v.insertAfter ? list.findIndex(p => p.id === v.insertAfter) : -1;
+    const insertAt = afterIdx >= 0 ? afterIdx + 1 : list.length;
+    list.splice(insertAt, 0, v);
+  }
+  return list.map(p => {
+    const built = COMPAT_BUILTIN_META[p.id] || {};
+    return {
+      id: p.id,
+      label: p.displayName || p.id,
+      keyField: p.keyField || null,
+      source: p.source || 'static',
+      icon: built.icon || 'globe',
+      placeholder: built.placeholder || 'API key',
+      connectMode: built.connectMode || null,
+      blurb: built.blurb || `Custom OpenAI-compatible provider added via OE Admin (${p.baseUrl}).`,
+    };
+  });
+}
+
+// Exposed so settings.js can iterate the same merged list. Avoid re-deriving;
+// loadProviderConfig() refreshes COMPAT_PROVIDER_META in place after every GET.
+function getCompatProviderMeta() {
+  return COMPAT_PROVIDER_META;
+}
+window.getCompatProviderMeta = getCompatProviderMeta;
 
 function renderCompatProviderCards(cfg) {
   const host = $('providerCompatList');
@@ -798,6 +872,10 @@ async function loadCompatProviderModels(providerId) {
 async function loadProviderConfig() {
   try {
     const cfg = await fetch('/api/provider-config').then(r => r.json());
+    // Refresh the runtime compat provider list FIRST so renderCompatProviderCards
+    // and the model picker (via settings.js) see the latest set, including any
+    // providers added at runtime via oe-admin's add_provider tool.
+    COMPAT_PROVIDER_META = buildCompatProviderMeta(cfg.compatProviders);
     $('providerAnthropicStatus').textContent  = cfg.anthropicKeySet  ? 'API key is set.' : 'No API key configured.';
     $('providerFireworksStatus').textContent  = cfg.fireworksKeySet  ? 'API key is set.' : 'No API key configured.';
     $('providerGrokStatus').textContent       = cfg.grokKeySet       ? 'API key is set (chat + image + video).' : 'No API key configured.';
@@ -835,6 +913,13 @@ async function loadProviderConfig() {
         piperBtn.style.display = '';
       }
     }
+
+    // Gate provider <option>s by runtime availability. Every TTS branch
+    // shells out to ffmpeg (resample to 16 kHz / encode to MP3), so if
+    // ffmpeg is missing on the server we disable the whole dropdown and
+    // surface a one-shot install hint. Otherwise each option is disabled
+    // only when its own service/key is missing.
+    window.updateTtsProviderAvailability?.(cfg);
 
     // Render only the input fields relevant to the selected TTS provider.
     window.updateTtsProviderFields?.();
@@ -956,7 +1041,36 @@ async function saveProviderGrokKey() {
     $('providerGrokStatus').textContent = 'Inference key is set.';
     showToast('Grok key saved');
     _enableAndSync('grok');
+    // Auto-refresh the model list so the picker stops showing yesterday's
+    // hardcoded fallback the moment a new key lands. Best-effort; the manual
+    // "Fetch models" button next to Save is the user-visible way to retry.
+    refreshGrokModels().catch(() => {});
   } catch { showToast('Failed to save key'); }
+}
+
+// Manual model refresh — same shape as loadCompatProviderModels but routes
+// through /api/grok-models since Grok doesn't ride the OpenAI-compat /models
+// endpoint. Renders the result into providerGrokModels for parity with the
+// other provider cards.
+async function refreshGrokModels() {
+  const box = $('providerGrokModels');
+  if (box) box.textContent = 'Loading models…';
+  try {
+    await loadGrokModels();
+    const models = getGrokModels();
+    if (!models.length) {
+      if (box) box.textContent = 'No models returned. Check that the inference key is valid.';
+      return;
+    }
+    if (box) {
+      box.innerHTML = `<div style="color:var(--muted);margin-bottom:4px">${models.length} model${models.length === 1 ? '' : 's'} available:</div>`
+        + models.slice(0, 50).map(m => `<div style="font-family:monospace;color:var(--text)">${m.name}${m.displayName && m.displayName !== m.name ? ` <span style="color:var(--muted)">(${m.displayName})</span>` : ''}</div>`).join('')
+        + (models.length > 50 ? `<div style="color:var(--muted);margin-top:4px">…and ${models.length - 50} more</div>` : '');
+    }
+    renderModelBrowser?.(); renderAgentModelRows?.();
+  } catch (e) {
+    if (box) box.textContent = `Error: ${e.message}`;
+  }
 }
 
 
@@ -1052,6 +1166,58 @@ function updateTtsProviderFields() {
   }
 }
 window.updateTtsProviderFields = updateTtsProviderFields;
+
+// Disable provider <option>s whose runtime deps aren't satisfied, and
+// annotate each label with the reason (so users see "Piper (local …) —
+// install required" rather than a silently-broken pick). Called after
+// /api/provider-config returns with ffmpegAvailable + piperAvailable +
+// key-set flags. Pure DOM mutation — safe to call multiple times.
+function updateTtsProviderAvailability(cfg) {
+  const sel = document.getElementById('providerTtsProvider');
+  if (!sel) return;
+  const opts = {
+    openai:     sel.querySelector('option[value="openai"]'),
+    elevenlabs: sel.querySelector('option[value="elevenlabs"]'),
+    piper:      sel.querySelector('option[value="piper"]'),
+  };
+  // Cache the original labels so we can re-decorate on every refresh
+  // without compounding " — reason" suffixes.
+  for (const [k, opt] of Object.entries(opts)) {
+    if (opt && !opt.dataset.baseLabel) opt.dataset.baseLabel = opt.textContent;
+  }
+  const ffmpeg = !!cfg.ffmpegAvailable;
+  const reasons = {
+    openai:     !ffmpeg ? 'ffmpeg not installed' : (!cfg.ttsKeySet ? 'API key not set' : ''),
+    elevenlabs: !ffmpeg ? 'ffmpeg not installed' : (!cfg.elevenlabsKeySet ? 'API key not set' : ''),
+    piper:      !ffmpeg ? 'ffmpeg not installed' : (!cfg.piperAvailable ? 'service not running' : ''),
+  };
+  for (const [k, opt] of Object.entries(opts)) {
+    if (!opt) continue;
+    const reason = reasons[k];
+    opt.disabled    = !!reason;
+    opt.textContent = reason ? `${opt.dataset.baseLabel} — ${reason}` : opt.dataset.baseLabel;
+  }
+  // Top-of-section banner — shown only when ffmpeg itself is missing,
+  // since that breaks every provider and the per-option suffixes get
+  // visually noisy without a headline. Keyed inside #providerBody_tts
+  // so toggling the whole TTS card hides it too.
+  const body = document.getElementById('providerBody_tts');
+  if (body) {
+    let banner = document.getElementById('providerTtsFfmpegBanner');
+    if (!ffmpeg) {
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'providerTtsFfmpegBanner';
+        banner.style.cssText = 'background:var(--bg3);border:1px solid var(--warning,#d97706);color:var(--warning,#d97706);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px';
+        body.insertBefore(banner, body.firstChild);
+      }
+      banner.textContent = 'ffmpeg is not installed on this server. All TTS providers need it for audio encoding. Install with: sudo apt install ffmpeg (or your distro equivalent), then restart OE.';
+    } else if (banner) {
+      banner.remove();
+    }
+  }
+}
+window.updateTtsProviderAvailability = updateTtsProviderAvailability;
 
 // Install-Piper button handler. Posts to /api/provider-config/install-piper,
 // reads the SSE response, appends progress lines into the log pane.

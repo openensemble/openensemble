@@ -9,6 +9,7 @@ import {
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
+import { applyRedactions } from '../../lib/credentials.mjs';
 
 export async function* streamOpenRouter(agent, systemPrompt, messages, signal, userId = 'default') {
   const apiKey = getOpenRouterKey();
@@ -119,7 +120,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
           for (const ev of events) yield ev;
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-          working.push({ role: 'tool', tool_call_id: block.id, content: result });
+          working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         }
         { const sc = guard.check(results.map(r => ({ name: r.block.name, args: r.block.argsJson })), results.map(r => r.result));
           if (sc.stalled) { console.warn(`[openrouter] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
@@ -146,7 +147,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
         const { text: result, _notify } = normalizeToolResult(orToolResult);
         yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-        working.push({ role: 'tool', tool_call_id: block.id, content: result });
+        working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         orSeqResults.push({ name: block.name, args: block.argsJson, result });
       }
       { const sc = guard.check(orSeqResults.map(r => ({ name: r.name, args: r.args })), orSeqResults.map(r => r.result));

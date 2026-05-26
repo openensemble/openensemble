@@ -1,0 +1,215 @@
+{
+  "id": "oe-admin",
+  "name": "OE Admin",
+  "description": "Modify the OpenEnsemble installation: add providers, install integrations like Tailscale, flip safe config flags, restart. Admin-only.",
+  "icon": "⚙️",
+  "category": "service",
+  "service": true,
+  "always_on": false,
+  "enabled_by_default": false,
+  "systemPromptAddition": "You can modify the OpenEnsemble installation itself — the server this assistant runs on — using the oe-admin tools. These are ADMIN-ONLY; the server enforces privilege checks on every tool call.\n\n**oe-admin vs node tools — disambiguate FIRST.** When the user asks to install something (Tailscale, Cloudflared, a package, a service), figure out the target machine:\n  - 'install Tailscale' / 'install Tailscale on this server' / 'install Tailscale on OE' / 'install Tailscale here' / 'install Tailscale on yourself' → the OE host itself → use `install_integration` (oe-admin).\n  - 'install Tailscale on pihole02' / 'install Tailscale on the proxmox box' / any named remote node → use `node_exec` (Remote Nodes skill).\nDefault to oe-admin when the target is unspecified and the request is about extending OE's own capabilities (mesh networking, tunnels, providers, supervisord, etc.). If genuinely ambiguous, ask once.\n\n**Mandatory blueprint read.** Before calling any of `add_provider`, `install_integration`, `set_config_field`, or `restart_server`, you MUST first call `oe_admin_read_blueprint`. The blueprint documents safe paths, the integration-recipe schema, the credential-prompt protocol, and the restart-and-revert semantics. Never skip this step.\n\n**New provider setup** (e.g. 'set up Cerebras as a provider', 'look up how to connect X'): use WebFetch / WebSearch to read the provider's API docs FIRST, then draft a provider definition (name, baseUrl, keyField, sample model id), summarize it to the user for one-tap approval, and ONLY THEN call `add_provider`. The credential prompt collects the API key via a protected widget — the value never reaches you.\n\n**OS-level integrations** (Tailscale, Cloudflared, systemd, etc.): check `list_integration_recipes` for an existing recipe first (Tailscale, Cloudflared, and systemd-unit are already shipped — use them). If none exists, author a new recipe via `save_integration_recipe` and show it to the user before running. Recipes that need root MUST declare `requiresRoot: true` on the relevant steps — the server will issue a single sudo-password credential prompt at recipe start; never put passwords in command strings yourself.\n\nEvery mutation is logged to an audit trail with file snapshots, so changes are revertible via `revert_audit_entry` if something goes wrong. After most changes the server must restart for them to take effect — use `restart_server` when ready. The boot-check will auto-revert if the post-restart server fails to come up within the commit deadline.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "oe_admin_read_blueprint",
+        "description": "Read the OE Admin authoring guide. Always call this first, before any mutation tool.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "add_provider",
+        "description": "Register a new OpenAI-compatible LLM provider at runtime. Validates the base URL, issues a credential prompt for the API key, optionally probes the provider's /models endpoint, and writes a user-providers overlay entry. The change is auditable and revertible. Restart required.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name":           { "type": "string", "description": "Provider id, e.g. 'cerebras' (lowercase letters / numbers / hyphens)" },
+            "baseUrl":        { "type": "string", "description": "OpenAI-compat base URL, e.g. 'https://api.cerebras.ai/v1'" },
+            "keyField":       { "type": "string", "description": "Config field where the API key lives, e.g. 'cerebrasApiKey'" },
+            "displayName":    { "type": "string", "description": "Human label shown in the model picker (defaults to name)" },
+            "modelsEndpoint": { "type": "string", "description": "OPTIONAL — path under baseUrl to probe (default '/models')" },
+            "sampleModelId":  { "type": "string", "description": "OPTIONAL — a model slug from the provider's docs, used to validate the probe" }
+          },
+          "required": ["name", "baseUrl", "keyField"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_user_providers",
+        "description": "List all user-added providers in the overlay (does not include built-in providers like OpenAI / Anthropic).",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "install_integration",
+        "description": "Run an integration recipe from skills/oe-admin/integrations/. Steps marked `requiresRoot:true` are run via sudo after a single sudo-password prompt. Every step's output surfaces back to chat. Recipe must already be authored via save_integration_recipe.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "recipeName": { "type": "string", "description": "File basename under skills/oe-admin/integrations/ (without .json)" }
+          },
+          "required": ["recipeName"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "save_integration_recipe",
+        "description": "Author or update an integration recipe. The recipe shape is documented in the blueprint. Recipe is validated (binary names, credential references, configWrites paths) before saving.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name":   { "type": "string", "description": "Recipe file basename (lowercase letters / numbers / hyphens)" },
+            "recipe": { "type": "object", "description": "Recipe object — see blueprint for full schema" }
+          },
+          "required": ["name", "recipe"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_integration_recipes",
+        "description": "List all integration recipe names under skills/oe-admin/integrations/.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_integration_recipe",
+        "description": "Read the JSON contents of a saved integration recipe.",
+        "parameters": {
+          "type": "object",
+          "properties": { "name": { "type": "string" } },
+          "required": ["name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "set_config_field",
+        "description": "Set one config.json field by dotted path. Only paths on the allowlist are accepted (enabledProviders, integrations, featureFlags, etc.). API keys / secrets MUST go through add_provider.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path":  { "type": "string", "description": "Dotted path, e.g. 'enabledProviders.cerebras'" },
+            "value": { "description": "New value (any JSON type)" }
+          },
+          "required": ["path", "value"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "restart_server",
+        "description": "Commit pending changes and restart the OE server. Issues a confirmation credential prompt (admin must type the exact phrase RESTART). The post-restart boot-check auto-reverts if the server fails to come up within the commit deadline.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reason": { "type": "string", "description": "Short reason for the restart (audit trail)" }
+          },
+          "required": ["reason"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_audit_log",
+        "description": "List recent oe-admin audit entries (most-recent first). Use this to show change history or find an id for revert_audit_entry.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "limit": { "type": "integer", "description": "Max entries to return (default 10)" }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "revert_audit_entry",
+        "description": "Revert one audit entry: restores snapshotted files and runs any inverse commands (including recipe rollback steps). Steps requiring sudo will trigger a fresh sudo prompt.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Audit entry id from list_audit_log" }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "oe_update_check",
+        "description": "Check whether a newer version of OpenEnsemble is available on origin/HEAD. Read-only — does not pull or restart.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "oe_update_apply",
+        "description": "Pull latest from origin, run npm install if package.json changed, then restart the server. Refuses to run on a dirty working tree unless force:true is set (which discards local edits to tracked files).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "force": { "type": "boolean", "description": "If true, discard local edits to tracked files before pulling. Default false." }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tunnel_status",
+        "description": "Report current Cloudflare Tunnel state (mode, enabled, state, hostname, publicUrl, hasToken, lastError).",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tunnel_configure",
+        "description": "Configure the Cloudflare Tunnel: hostname + tunnel token. Token is collected via the protected credential widget and stored in tunnel.json (chmod 600, gitignored). Does NOT start the tunnel — call tunnel_start after.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "hostname":  { "type": "string", "description": "Fully-qualified hostname mapped in your Cloudflare Zero Trust dashboard, e.g. oe.example.com" },
+            "localPort": { "type": "integer", "description": "OE port to expose (default 3737)" }
+          },
+          "required": ["hostname"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tunnel_start",
+        "description": "Start the configured Cloudflare Tunnel and set autoStart=true so it comes up on every boot.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tunnel_stop",
+        "description": "Stop the running tunnel and clear autoStart so it stays down until the admin calls tunnel_start again.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    }
+  ]
+}

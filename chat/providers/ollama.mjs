@@ -13,6 +13,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags } from './_shared.mjs';
 import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
+import { applyRedactions } from '../../lib/credentials.mjs';
 
 export async function* streamOllama(agent, systemPrompt, working, signal, userId = 'default') {
   // Inject system as first message — more reliable than top-level system field.
@@ -177,7 +178,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
           for (const ev of events) yield ev;
           yield { type: 'tool_result', name, text: result, preview: summarizeToolResult(name, result) };
           if (_notify) yield { type: '__notify', name, ..._notify };
-          ollamaMessages.push({ role: 'tool', content: truncateToolResult(result), name });
+          ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name });
         }
         { const sc = guard.check(batchResults.map(r => ({ name: r.name, args: JSON.stringify(batchParsed.find(p => p.name === r.name)?.args ?? {}) })), batchResults.map(r => r.result));
           if (sc.stalled) { console.warn(`[ollama] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
@@ -206,7 +207,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
         // Add tool result to working history — truncate large outputs so the model
         // isn't carrying full file contents forward (mirrors Claude Code behavior).
-        ollamaMessages.push({ role: 'tool', content: truncateToolResult(result), name });
+        ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name });
       }
 
       { const sc = guard.check(

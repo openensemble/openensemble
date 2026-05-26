@@ -54,13 +54,19 @@ async function loadGrokModels() {
 
 let openrouterModels = [];
 
-// OpenAI-compatible cloud providers — each populated lazily by loadCompatProviderModels()
+// OpenAI-compatible cloud providers — populated lazily by loadCompatProviderModels()
 // (defined in oauth.js) which writes into window._compatProviderModels[provider].
-const COMPAT_PROVIDER_IDS = ['openai', 'openai-oauth', 'gemini', 'deepseek', 'mistral', 'groq', 'together', 'perplexity', 'zai'];
+// The list of provider IDs is sourced from window.getCompatProviderMeta() (also
+// in oauth.js, refreshed by loadProviderConfig) so runtime-added providers via
+// oe-admin's add_provider show up in the model picker without any code change.
+function getCompatProviderIds() {
+  const meta = typeof window.getCompatProviderMeta === 'function' ? window.getCompatProviderMeta() : [];
+  return meta.map(p => p.id);
+}
 function getCompatProviderModels() {
   const out = [];
   const store = window._compatProviderModels ?? {};
-  for (const p of COMPAT_PROVIDER_IDS) {
+  for (const p of getCompatProviderIds()) {
     for (const m of store[p] ?? []) {
       out.push({ name: m.id, provider: p, displayName: m.name ?? m.id, contextLen: m.contextLen ?? null, supportsVision: m.supportsVision === true });
     }
@@ -137,18 +143,16 @@ function renderModelBrowser() {
   const el = $('modelBrowser'); if (!el) return;
   const models = allAvailableModels();
   const byProvider = groupModelsByProvider(models, { splitOllamaTier: true });
-  const order = ['anthropic', 'openai', 'openai-oauth', 'gemini', 'deepseek', 'mistral', 'groq', 'together', 'perplexity', 'zai', 'ollama-local', 'ollama-cloud', 'ollama', 'lmstudio', 'fireworks', 'grok', 'openrouter'];
+  // Built-in providers come first in a canonical order; runtime-added compat
+  // providers (via oe-admin's add_provider) are appended at the end, after
+  // the static entries, using their server-supplied displayName as the label.
+  const compatMeta = (typeof window.getCompatProviderMeta === 'function' ? window.getCompatProviderMeta() : []);
+  const compatLabels = Object.fromEntries(compatMeta.map(p => [p.id, p.label]));
+  const compatIds = compatMeta.map(p => p.id);
+  const staticOrder = ['anthropic', ...compatIds, 'ollama-local', 'ollama-cloud', 'ollama', 'lmstudio', 'fireworks', 'grok', 'openrouter'];
+  const order = [...new Set(staticOrder)];
   const labels = {
     anthropic: 'Anthropic',
-    openai: 'OpenAI',
-    'openai-oauth': 'OpenAI (ChatGPT login)',
-    gemini: 'Google Gemini',
-    deepseek: 'DeepSeek',
-    mistral: 'Mistral AI',
-    groq: 'Groq',
-    together: 'Together AI',
-    perplexity: 'Perplexity',
-    zai: 'Z.AI',
     ollama: 'Ollama',
     'ollama-local': 'Ollama (local)',
     'ollama-cloud': 'Ollama (cloud)',
@@ -156,6 +160,7 @@ function renderModelBrowser() {
     fireworks: 'Fireworks AI',
     grok: 'xAI Grok',
     openrouter: 'OpenRouter',
+    ...compatLabels,
   };
   let html = '';
   for (const prov of order) {
@@ -176,19 +181,25 @@ function renderModelBrowser() {
   el.innerHTML = html || '<div style="padding:12px;color:var(--muted);font-size:13px">No models found.</div>';
 }
 
+// Pretty labels (with emoji) for the built-in compat providers in the agent
+// model picker. Runtime-added compat providers (via oe-admin's add_provider)
+// fall back to their plain server-supplied displayName.
+const COMPAT_OPTGROUP_LABELS = {
+  openai:        'OpenAI ✨',
+  'openai-oauth':'OpenAI (ChatGPT login) 🔐',
+  gemini:        'Google Gemini 💎',
+  deepseek:      'DeepSeek 🧠',
+  mistral:       'Mistral AI 🌬',
+  groq:          'Groq ⚡',
+  together:      'Together AI 👥',
+  perplexity:    'Perplexity 🔍',
+  zai:           'Z.AI ⚡',
+};
+
 function renderAgentModelRows() {
   const models = allAvailableModels();
   if (!agents.length) { $('agentModelRows').innerHTML = '<div style="color:var(--muted)">No agents loaded.</div>'; return; }
   const anthropicOpts    = models.filter(m => m.provider === 'anthropic');
-  const openaiOpts       = models.filter(m => m.provider === 'openai');
-  const openaiOauthOpts  = models.filter(m => m.provider === 'openai-oauth');
-  const geminiOpts       = models.filter(m => m.provider === 'gemini');
-  const deepseekOpts     = models.filter(m => m.provider === 'deepseek');
-  const mistralOpts      = models.filter(m => m.provider === 'mistral');
-  const groqOpts         = models.filter(m => m.provider === 'groq');
-  const togetherOpts     = models.filter(m => m.provider === 'together');
-  const perplexityOpts   = models.filter(m => m.provider === 'perplexity');
-  const zaiOpts          = models.filter(m => m.provider === 'zai');
   const ollamaAll        = models.filter(m => m.provider === 'ollama');
   const ollamaLocalOpts  = ollamaAll.filter(m => (m.tier ?? 'local') === 'local');
   const ollamaCloudOpts  = ollamaAll.filter(m => m.tier === 'cloud');
@@ -196,20 +207,21 @@ function renderAgentModelRows() {
   const fireworksOpts    = models.filter(m => m.provider === 'fireworks');
   const grokOpts         = models.filter(m => m.provider === 'grok');
   const openrouterOpts   = models.filter(m => m.provider === 'openrouter');
+  // Compat providers — driven by the server-supplied list so runtime-added
+  // providers via oe-admin's add_provider appear here without any code change.
+  const compatMeta = (typeof window.getCompatProviderMeta === 'function' ? window.getCompatProviderMeta() : []);
   function makeAgentModelSelect(a) {
     if (!models.length) return `<select data-change-action="assignModelToAgentFromSelect" data-change-args='${JSON.stringify([a.id, "$value"]).replace(/'/g, "&#39;")}'><option value="${escHtml(a.model)}||${a.provider ?? 'ollama'}" selected>${escHtml(a.model)}</option></select>`;
     const mkOpt = m => `<option value="${escHtml(m.name)}||${m.provider}" ${m.name === a.model && m.provider === a.provider ? 'selected' : ''}>${escHtml(m.displayName ?? m.name)}</option>`;
+    const compatGroups = compatMeta.map(p => {
+      const opts = models.filter(m => m.provider === p.id);
+      if (!opts.length) return '';
+      const label = COMPAT_OPTGROUP_LABELS[p.id] || p.label;
+      return `<optgroup label="${escHtml(label)}">${opts.map(mkOpt).join('')}</optgroup>`;
+    }).join('');
     return `<select data-change-action="assignModelToAgentFromSelect" data-change-args='${JSON.stringify([a.id, "$value"]).replace(/'/g, "&#39;")}'>
       ${anthropicOpts.length  ? `<optgroup label="Anthropic">${anthropicOpts.map(mkOpt).join('')}</optgroup>`          : ''}
-      ${openaiOpts.length     ? `<optgroup label="OpenAI ✨">${openaiOpts.map(mkOpt).join('')}</optgroup>`             : ''}
-      ${openaiOauthOpts.length? `<optgroup label="OpenAI (ChatGPT login) 🔐">${openaiOauthOpts.map(mkOpt).join('')}</optgroup>` : ''}
-      ${geminiOpts.length     ? `<optgroup label="Google Gemini 💎">${geminiOpts.map(mkOpt).join('')}</optgroup>`      : ''}
-      ${deepseekOpts.length   ? `<optgroup label="DeepSeek 🧠">${deepseekOpts.map(mkOpt).join('')}</optgroup>`         : ''}
-      ${mistralOpts.length    ? `<optgroup label="Mistral AI 🌬">${mistralOpts.map(mkOpt).join('')}</optgroup>`        : ''}
-      ${groqOpts.length       ? `<optgroup label="Groq ⚡">${groqOpts.map(mkOpt).join('')}</optgroup>`                  : ''}
-      ${togetherOpts.length   ? `<optgroup label="Together AI 👥">${togetherOpts.map(mkOpt).join('')}</optgroup>`      : ''}
-      ${perplexityOpts.length ? `<optgroup label="Perplexity 🔍">${perplexityOpts.map(mkOpt).join('')}</optgroup>`     : ''}
-      ${zaiOpts.length        ? `<optgroup label="Z.AI ⚡">${zaiOpts.map(mkOpt).join('')}</optgroup>`                  : ''}
+      ${compatGroups}
       ${ollamaLocalOpts.length? `<optgroup label="Ollama (local)">${ollamaLocalOpts.map(mkOpt).join('')}</optgroup>`   : ''}
       ${ollamaCloudOpts.length? `<optgroup label="Ollama (cloud) ☁">${ollamaCloudOpts.map(mkOpt).join('')}</optgroup>` : ''}
       ${lmsOpts.length        ? `<optgroup label="LM Studio">${lmsOpts.map(mkOpt).join('')}</optgroup>`                : ''}

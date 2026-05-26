@@ -10,6 +10,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
+import { applyRedactions } from '../../lib/credentials.mjs';
 
 // Convert Ollama/OpenAI tool format → Anthropic format (with description compression)
 export function toAnthropicTools(tools) {
@@ -155,7 +156,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         }
         working.push({ role: 'assistant', content: results.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })) });
-        working.push({ role: 'user',      content: results.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: r.result })) });
+        working.push({ role: 'user',      content: results.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: applyRedactions(r.result) })) });
         const sc1 = guard.check(results.map(r => ({ name: r.block.name, args: r.block.inputJson })), results.map(r => r.result));
         if (sc1.stalled) { console.warn(`[anthropic] stall: ${sc1.reason}`); assistantContent = `Stopped: ${sc1.reason}.`; yield { type: 'token', text: assistantContent }; break; }
         continue;
@@ -190,7 +191,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       // Anthropic requires all tool_use blocks in one assistant message
       // and all tool_result blocks in one user message
       working.push({ role: 'assistant', content: seqResults.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })) });
-      working.push({ role: 'user',      content: seqResults.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: r.result })) });
+      working.push({ role: 'user',      content: seqResults.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: applyRedactions(r.result) })) });
       const sc2 = guard.check(seqResults.map(r => ({ name: r.block.name, args: r.block.inputJson })), seqResults.map(r => r.result));
       if (sc2.stalled) { console.warn(`[anthropic] stall: ${sc2.reason}`); assistantContent = `Stopped: ${sc2.reason}.`; yield { type: 'token', text: assistantContent }; break; }
       continue;

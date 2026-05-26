@@ -86,6 +86,20 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     }))
     .catch(e => console.warn('[routine-proposer] failed:', e.message));
 
+  // Location-fact proposer — when a node_exec probe failed on a hard-coded
+  // path and a later call in the same turn found the real one, stash a
+  // candidate. Defer-one-turn like skill-proposer; drops on corrective next
+  // turn. Cheap heuristic, no LLM. Same broad gating as routine-proposer
+  // (runs even for ephemerals, since ops work often routes through them).
+  if (!agent.ephemeral) {
+    import('./lib/location-fact-proposer.mjs')
+      .then(m => m.maybeProposeLocationFact({
+        userId, agentId: agent.id, agentName: agent.name,
+        userMessage: sessionText, toolsUsed,
+      }))
+      .catch(e => console.warn('[location-fact-proposer] failed:', e.message));
+  }
+
   if (!agent.ephemeral) {
 
     // Per-skill telemetry — bump invocation counters for any user-created
@@ -240,6 +254,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     import('./lib/routine-proposer.mjs')
       .then(m => m.flushPendingRoutineCandidate({ userId, currentUserMessage: userText }))
       .catch(e => console.warn('[routine-proposer] flush failed:', e.message));
+  }
+
+  // Location-fact-proposer flush — same shape as skill-proposer: drop the
+  // pending candidate if the new turn looks corrective, otherwise emit the
+  // host-fact proposal bubble.
+  if (!agent.ephemeral && !silent) {
+    import('./lib/location-fact-proposer.mjs')
+      .then(m => m.flushPendingLocationFact({ userId, agentId: agent.id, currentUserMessage: userText }))
+      .catch(e => console.warn('[location-fact-proposer] flush failed:', e.message));
   }
 
   // Finance/email agents handle transactions and actions — skip memory signal processing.

@@ -1,0 +1,59 @@
+{
+  "name": "tailscale",
+  "description": "Install Tailscale on the OpenEnsemble host machine and bring up the node with a user-provided auth key. Adds a stable mesh-network IP so OE can be reached from anywhere the user's tailnet reaches, without exposing ports to the public internet.",
+  "version": 1,
+  "credentials": [
+    {
+      "id": "tailscale_authkey",
+      "kind": "api_key",
+      "label": "Tailscale auth key",
+      "description": "From https://login.tailscale.com/admin/settings/keys — recommended: reusable + ephemeral for first-time setup, then rotate."
+    }
+  ],
+  "steps": [
+    {
+      "id": "fetch-installer",
+      "cmd": ["curl", "-fsSL", "https://tailscale.com/install.sh", "-o", "/tmp/tailscale-install.sh"],
+      "timeoutMs": 60000
+    },
+    {
+      "id": "run-installer",
+      "requiresRoot": true,
+      "cmd": ["sh", "/tmp/tailscale-install.sh"],
+      "timeoutMs": 300000
+    },
+    {
+      "id": "enable-service",
+      "requiresRoot": true,
+      "cmd": ["systemctl", "enable", "--now", "tailscaled"],
+      "timeoutMs": 30000
+    },
+    {
+      "id": "tailscale-up",
+      "requiresRoot": true,
+      "cmd": ["tailscale", "up", "--authkey={{credentials.tailscale_authkey}}", "--accept-routes"],
+      "timeoutMs": 60000
+    }
+  ],
+  "configWrites": [
+    { "path": "integrations.tailscale.installed", "value": true }
+  ],
+  "verify": {
+    "cmd": ["tailscale", "status"],
+    "expect": { "kind": "exit_zero" }
+  },
+  "rollback": [
+    {
+      "id": "tailscale-down",
+      "requiresRoot": true,
+      "cmd": ["tailscale", "down"],
+      "timeoutMs": 30000
+    },
+    {
+      "id": "stop-service",
+      "requiresRoot": true,
+      "cmd": ["systemctl", "disable", "--now", "tailscaled"],
+      "timeoutMs": 30000
+    }
+  ]
+}

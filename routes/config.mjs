@@ -21,26 +21,15 @@ import {
 } from './devices.mjs';
 import { ambientFilePath } from '../lib/routines.mjs';
 import { supportsVision } from '../lib/model-capabilities.mjs';
+import {
+  probePiperAvailable,
+  probeFfmpegAvailable,
+  getTtsAvailability,
+  invalidateVoiceDepsCache,
+} from '../lib/voice-deps.mjs';
 import { log } from '../logger.mjs';
-
-/**
- * Quick liveness probe for the local Piper TTS service. Used by GET
- * /api/provider-config to populate `piperAvailable` so the Settings UI
- * can hide the install button when Piper is already running and surface
- * it otherwise. 500 ms timeout keeps the config endpoint snappy.
- */
-async function probePiperAvailable(cfg) {
-  const url = cfg.piperUrl || 'http://127.0.0.1:5151/';
-  try {
-    const r = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(500) });
-    // Piper's http_server responds with 405 to GET on /, 200 on /v1/info,
-    // and 200/400 on POST /. Anything in 2xx-5xx means *something* is
-    // listening on the port. Connection-refused throws.
-    return r.status >= 200 && r.status < 600;
-  } catch {
-    return false;
-  }
-}
+import { OPENAI_COMPAT_PROVIDERS } from '../chat/providers/_shared.mjs';
+import { loadUserProviders } from '../lib/user-providers.mjs';
 
 // Tailored URL gate for admin-writable provider endpoints (LM Studio, local
 // Ollama). Looser than lib/url-guard.mjs:isUrlSafe — loopback and LAN ranges
@@ -78,19 +67,11 @@ const LMS_DEFAULT    = 'http://127.0.0.1:1234';
 const GROK_BASE      = 'https://api.x.ai/v1';
 const GROK_MGMT_BASE = 'https://management-api.x.ai/v1';
 
-// OpenAI-compatible providers: base URL + config field name for the API key.
-// Add new providers here to auto-wire /api/provider-config and /api/provider-models/:provider.
-const COMPAT_PROVIDERS = {
-  openai:      { baseUrl: 'https://api.openai.com/v1',                               keyField: 'openaiApiKey',     displayName: 'OpenAI' },
-  deepseek:    { baseUrl: 'https://api.deepseek.com/v1',                             keyField: 'deepseekApiKey',   displayName: 'DeepSeek' },
-  mistral:     { baseUrl: 'https://api.mistral.ai/v1',                               keyField: 'mistralApiKey',    displayName: 'Mistral' },
-  groq:        { baseUrl: 'https://api.groq.com/openai/v1',                          keyField: 'groqApiKey',       displayName: 'Groq' },
-  together:    { baseUrl: 'https://api.together.xyz/v1',                             keyField: 'togetherApiKey',   displayName: 'Together AI' },
-  perplexity:  { baseUrl: 'https://api.perplexity.ai',                               keyField: 'perplexityApiKey', displayName: 'Perplexity' },
-  gemini:      { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', keyField: 'geminiApiKey',     displayName: 'Google Gemini' },
-  xai:         { baseUrl: 'https://api.x.ai/v1',                                     keyField: 'grokApiKey',       displayName: 'xAI Grok' },
-  zai:         { baseUrl: 'https://api.z.ai/api/paas/v4',                            keyField: 'zaiApiKey',        displayName: 'Z.AI' },
-};
+// OpenAI-compatible providers: imported from chat/providers/_shared.mjs so
+// both the chat dispatch and the config UI see the same map. The shared
+// export is a Proxy that transparently merges any runtime-added providers
+// from the oe-admin user-providers overlay (config/user-providers.json).
+const COMPAT_PROVIDERS = OPENAI_COMPAT_PROVIDERS;
 
 // ChatGPT backend (OAuth) — the Codex /responses endpoint accepts these model
 // slugs against a ChatGPT Plus/Pro account. There's no /models endpoint, and
@@ -131,9 +112,29 @@ export async function handle(req, res) {
       for (const [prov, { keyField }] of Object.entries(COMPAT_PROVIDERS)) {
         compatFlags[`${prov}KeySet`] = !!cfg[keyField];
       }
+      // Self-describing compat provider list. The UI uses this to render the
+      // Providers panel + the agent model-picker optgroups so that providers
+      // added at runtime via oe-admin's add_provider (saved to the
+      // config/user-providers.json overlay) appear in the UI just like the
+      // built-in ones — without the UI shipping a hardcoded list of names.
+      const userProviderIds = new Set(Object.keys(loadUserProviders() || {}));
+      const compatProviders = Object.entries(COMPAT_PROVIDERS).map(([id, p]) => ({
+        id,
+        displayName: p.displayName || id,
+        baseUrl: p.baseUrl,
+        keyField: p.keyField,
+        keySet: !!cfg[p.keyField],
+        enabled: cfg.enabledProviders?.[id] !== false,
+        source: userProviderIds.has(id) ? 'user' : 'static',
+      }));
       // Probe local Piper service (500 ms cap) so the UI can show "install"
-      // vs "running" status without a separate round-trip.
-      const piperAvailable = await probePiperAvailable(cfg);
+      // vs "running" status without a separate round-trip. ffmpegAvailable
+      // gates every TTS provider (we always resample/encode through ffmpeg)
+      // so Settings → Providers can disable options when ffmpeg is missing.
+      const [piperAvailable, ffmpegAvailable] = await Promise.all([
+        probePiperAvailable(cfg),
+        probeFfmpegAvailable(),
+      ]);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         anthropicKeySet:   !!cfg.anthropicApiKey,
@@ -157,6 +158,7 @@ export async function handle(req, res) {
         ttsVoice:     cfg.ttsVoice    ?? '',
         ttsProvider:  cfg.ttsProvider ?? 'openai',
         piperAvailable,
+        ffmpegAvailable,
         elevenlabsKeySet: !!cfg.elevenlabsApiKey,
         elevenlabsModel:  cfg.elevenlabsModel ?? '',
         sttKeySet:    !!cfg.sttApiKey,
@@ -168,6 +170,7 @@ export async function handle(req, res) {
         msTenant:          cfg.msTenant ?? '',
         providerFailover: cfg.providerFailover ?? { enabled: false, fallbackProvider: '', fallbackModel: '' },
         ...compatFlags,
+        compatProviders,
       }));
       return true;
     }
@@ -320,6 +323,10 @@ export async function handle(req, res) {
     child.stderr.on('data', onLine('stderr'));
 
     child.on('exit', (code, signal) => {
+      // Successful install → drop the 60 s availability cache so the
+      // next /api/provider-config GET reflects "running" immediately
+      // instead of waiting up to a minute.
+      if (code === 0) invalidateVoiceDepsCache();
       send('done', { code, signal: signal ?? null, ok: code === 0 });
       try { res.end(); } catch {}
     });
@@ -808,10 +815,16 @@ export async function handle(req, res) {
     const cfg = loadConfig();
     const ALLOWED = ['openai', 'piper', 'elevenlabs'];
     const provider = ALLOWED.includes(cfg.ttsProvider) ? cfg.ttsProvider : 'openai';
+    // Runtime availability snapshot — lets the devices drawer show a
+    // banner when the configured provider can't actually fulfill TTS
+    // (missing ffmpeg, Piper service down, key cleared, etc.) instead
+    // of letting the device hang in THINKING on the next wake.
+    const available = await getTtsAvailability(cfg);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       provider,
       defaultVoice: cfg.ttsVoice ?? null,
+      available,
       ...(provider === 'piper' ? { speakerCount: 904 } : {}),
       ...(provider === 'elevenlabs' ? { keySet: !!cfg.elevenlabsApiKey } : {}),
     }));
@@ -895,6 +908,20 @@ export async function handle(req, res) {
         // Marker recognized but cache miss (expired or already consumed) —
         // fall through to normal TTS so the device still gets something
         // rather than hanging.
+      }
+      // Pre-flight: every code path below this point shells out to ffmpeg
+      // (ambient stream loop, resample to 16 kHz, WAV→MP3 encode). If
+      // ffmpeg isn't on PATH, fail fast with a structured 503 so the
+      // device firmware can log the install hint and exit THINKING
+      // instead of hanging on a dead socket. Cached probe → ~free.
+      if (!(await probeFfmpegAvailable())) {
+        console.warn('[tts] ffmpeg not installed — refusing TTS request');
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'ffmpeg not installed',
+          install: 'sudo apt install ffmpeg (or your distro equivalent), then restart OE',
+        }));
+        return true;
       }
       // Ambient marker — server streams ONE continuous MP3 via ffmpeg
       // `-stream_loop -1` so the device gets zero silence at loop seams.

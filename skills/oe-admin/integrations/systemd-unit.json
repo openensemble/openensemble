@@ -1,0 +1,60 @@
+{
+  "name": "systemd-unit",
+  "description": "Install OpenEnsemble as a system-wide systemd service so it starts on boot and respawns if it crashes. Uses bin/oe-supervise.mjs as ExecStart so a botched oe-admin change can be auto-reverted even when Node can't come up.",
+  "version": 1,
+  "credentials": [],
+  "steps": [
+    {
+      "id": "write-unit",
+      "requiresRoot": true,
+      "cmd": ["tee", "/etc/systemd/system/openensemble.service"],
+      "stdin": "[Unit]\nDescription=OpenEnsemble\nDocumentation=https://github.com/OpenEnsemble/openensemble\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={{env.OE_USER}}\nWorkingDirectory={{env.OE_BASE_DIR}}\nExecStart={{env.OE_NODE_BIN}} {{env.OE_SUPERVISE}}\nRestart=always\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=15\nStandardOutput=journal\nStandardError=journal\nEnvironment=NODE_ENV=production\n\n# Resource limits — generous for AI workloads, can be tuned later.\nLimitNOFILE=65536\n\n[Install]\nWantedBy=multi-user.target\n",
+      "timeoutMs": 10000
+    },
+    {
+      "id": "daemon-reload",
+      "requiresRoot": true,
+      "cmd": ["systemctl", "daemon-reload"],
+      "timeoutMs": 15000
+    },
+    {
+      "id": "enable",
+      "requiresRoot": true,
+      "cmd": ["systemctl", "enable", "openensemble.service"],
+      "timeoutMs": 15000
+    }
+  ],
+  "configWrites": [
+    { "path": "integrations.systemd.installed", "value": true }
+  ],
+  "verify": {
+    "cmd": ["systemctl", "is-enabled", "openensemble.service"],
+    "expect": { "kind": "exit_zero" }
+  },
+  "rollback": [
+    {
+      "id": "stop",
+      "requiresRoot": true,
+      "cmd": ["systemctl", "stop", "openensemble.service"],
+      "timeoutMs": 30000
+    },
+    {
+      "id": "disable",
+      "requiresRoot": true,
+      "cmd": ["systemctl", "disable", "openensemble.service"],
+      "timeoutMs": 15000
+    },
+    {
+      "id": "remove-unit",
+      "requiresRoot": true,
+      "cmd": ["rm", "-f", "/etc/systemd/system/openensemble.service"],
+      "timeoutMs": 5000
+    },
+    {
+      "id": "daemon-reload-after-rm",
+      "requiresRoot": true,
+      "cmd": ["systemctl", "daemon-reload"],
+      "timeoutMs": 15000
+    }
+  ]
+}

@@ -75,6 +75,7 @@ import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn } from './background-tasks.mjs';
 import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
 import { startUpdateChecker } from './lib/update.mjs';
+import { runBootCheck, aliveResponse, cancelCommitDeadline } from './lib/oe-admin-boot-check.mjs';
 
 // Shared helpers
 import {
@@ -258,7 +259,13 @@ const httpServer = http.createServer(async (req, res) => {
   };
 
   // Canonicalize origin: redirect 127.0.0.1 → localhost so localStorage/cookies are shared
+  // EXCEPT for the oe-admin boot-check liveness endpoint — it pings 127.0.0.1
+  // directly and would 302-loop if we redirected.
   const host = req.headers.host ?? '';
+  if (req.url === '/api/_alive') {
+    aliveResponse(res);
+    return;
+  }
   if (host.startsWith('127.0.0.1')) {
     res.writeHead(302, { Location: `http://localhost:${host.split(':')[1] || PORT}${req.url}` });
     res.end();
@@ -766,6 +773,11 @@ function _detectLanIp() {
 httpServer.listen(PORT, '0.0.0.0', () => {
   const lanIp = _detectLanIp();
   console.log(`\n🎵 OpenEnsemble running at http://${lanIp}:${PORT}\n`);
+
+  // Arm oe-admin boot-check. If a pending mutation is awaiting commit and
+  // the server is now responding, this commits the change (or reverts +
+  // exits if the deadline expires). Safe no-op when no pending marker.
+  runBootCheck({ port: PORT }).catch(e => console.warn('[oe-admin] boot-check failed:', e.message));
 
   // HTTPS listener (port 3739) for browser features that need a secure
   // context — WebUSB / Web Serial for the voice-device flash wizard.

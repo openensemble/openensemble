@@ -13,6 +13,7 @@ import {
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
+import { applyRedactions } from '../../lib/credentials.mjs';
 
 export async function* streamOpenAICompat(providerKey, agent, systemPrompt, messages, signal, userId = 'default') {
   const cfg = OPENAI_COMPAT_PROVIDERS[providerKey];
@@ -123,7 +124,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
           for (const ev of events) yield ev;
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-          working.push({ role: 'tool', tool_call_id: block.id, content: result });
+          working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         }
         { const sc = guard.check(results.map(r => ({ name: r.block.name, args: r.block.argsJson })), results.map(r => r.result));
           if (sc.stalled) { console.warn(`[${providerKey}] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
@@ -149,7 +150,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         const { text: result, _notify } = normalizeToolResult(compatToolResult);
         yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-        working.push({ role: 'tool', tool_call_id: block.id, content: result });
+        working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         compatSeqResults.push({ name: block.name, args: block.argsJson, result });
       }
       { const sc = guard.check(compatSeqResults.map(r => ({ name: r.name, args: r.args })), compatSeqResults.map(r => r.result));

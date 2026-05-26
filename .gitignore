@@ -12,6 +12,13 @@ gmail-credentials.json
 .env
 .env.*
 
+# --- oe-admin per-install state (never commit) ---
+/config/user-providers.json
+/config/oe-admin-audit.jsonl
+/config/oe-admin-audit-archive-*.jsonl
+/config/oe-admin-snapshots/
+/config/.pending-change.json
+
 # --- Per-user data (anchored to repo root) ---
 /users/
 /sessions/

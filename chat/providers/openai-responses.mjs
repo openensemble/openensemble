@@ -14,6 +14,7 @@ import { ensureFreshToken } from '../../lib/openai-codex-auth.mjs';
 import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
+import { applyRedactions } from '../../lib/credentials.mjs';
 
 export function toResponsesInput(messages) {
   // Translate OpenAI-compat messages → Responses API input items.
@@ -274,7 +275,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           for (const ev of events) yield ev;
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-          working.push({ role: 'tool', tool_call_id: block.id, content: result });
+          working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         }
         { const sc = guard.check(results.map(r => ({ name: r.block.name, args: r.block.argsJson })), results.map(r => r.result));
           if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
@@ -300,7 +301,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         const { text: result, _notify } = normalizeToolResult(toolResultText);
         yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-        working.push({ role: 'tool', tool_call_id: block.id, content: result });
+        working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         seqResults.push({ name: block.name, args: block.argsJson, result });
       }
       { const sc = guard.check(seqResults.map(r => ({ name: r.name, args: r.args })), seqResults.map(r => r.result));

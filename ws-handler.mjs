@@ -32,6 +32,7 @@ import {
 import { getSessionMeta, setSessionDeviceId } from './routes/_helpers/auth-sessions.mjs';
 import { getSlotAssignment, findDeviceByTokenPrefix, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice } from './lib/voice-devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
+import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
 
 // Backfill ws._deviceId for voice-device sessions that were created before
 // the deviceId was stored on the session record (pre-2026-05-12). Looks up
@@ -109,6 +110,10 @@ export function initWs(httpServer) {
   _wss.on('close', () => clearInterval(heartbeat));
 
   _wss.on('connection', onConnection);
+
+  // Wire the credential primitive so server-side tools can emit
+  // `credential_prompt` frames via the per-user broadcast helper.
+  setCredentialEmitter(sendToUser);
 }
 
 /**
@@ -296,6 +301,29 @@ function onConnection(ws, req) {
         clearSession(sessionKey(ws._userId, agentId));
         ws.send(JSON.stringify({ type: 'session_loaded', agent: agentId, messages: [] }));
       }
+      return;
+    }
+
+    // Protected credential input — admin (or any tool) requested a secret
+    // via the chat-protocol widget. The value never enters the LLM message
+    // history; the server stores it (encrypted, for kind=api_key) or holds
+    // it in RAM (sudo/confirm) and only the credentialId reaches the tool.
+    if (msg.type === 'submit_credential') {
+      const credentialId = typeof msg.credentialId === 'string' ? msg.credentialId : '';
+      const value = typeof msg.value === 'string' ? msg.value : '';
+      if (!credentialId || !value) {
+        ws.send(JSON.stringify({ type: 'credential_error', credentialId, error: 'invalid_payload' }));
+        return;
+      }
+      const result = await submitCredential({ credentialId, value, userId: ws._userId });
+      if (!result.ok) {
+        ws.send(JSON.stringify({ type: 'credential_error', credentialId, error: result.error }));
+      }
+      return;
+    }
+    if (msg.type === 'cancel_credential') {
+      const credentialId = typeof msg.credentialId === 'string' ? msg.credentialId : '';
+      if (credentialId) cancelCredential({ credentialId, userId: ws._userId });
       return;
     }
 

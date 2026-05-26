@@ -29,7 +29,13 @@ export function getOllamaKey() {
 // ── OpenAI-compatible providers ──────────────────────────────────────────────
 // Each provider exposes the same `/chat/completions` schema. We only need to
 // know the base URL and the config key name that stores the API key.
-export const OPENAI_COMPAT_PROVIDERS = {
+//
+// `OPENAI_COMPAT_PROVIDERS` is exposed as a Proxy that transparently merges
+// the user-providers overlay (config/user-providers.json) on every read so
+// runtime-added providers via the oe-admin skill light up immediately. The
+// hardcoded list below always wins on collision — the overlay can ADD a new
+// provider but cannot silently redirect a built-in one.
+const STATIC_OPENAI_COMPAT_PROVIDERS = {
   openai:      { baseUrl: 'https://api.openai.com/v1',                               keyField: 'openaiApiKey',      displayName: 'OpenAI' },
   deepseek:    { baseUrl: 'https://api.deepseek.com/v1',                             keyField: 'deepseekApiKey',    displayName: 'DeepSeek' },
   mistral:     { baseUrl: 'https://api.mistral.ai/v1',                               keyField: 'mistralApiKey',     displayName: 'Mistral' },
@@ -40,6 +46,34 @@ export const OPENAI_COMPAT_PROVIDERS = {
   xai:         { baseUrl: 'https://api.x.ai/v1',                                     keyField: 'grokApiKey',        displayName: 'xAI Grok' },
   zai:         { baseUrl: 'https://api.z.ai/api/paas/v4',                            keyField: 'zaiApiKey',         displayName: 'Z.AI' },
 };
+
+// All traps run on property access, never at module-load, so a top-level
+// ESM import is safe (the user-providers module is fully initialized by the
+// time any provider lookup fires from chat.mjs / memory / etc.).
+import { mergeProviders } from '../../lib/user-providers.mjs';
+
+function mergedCompatProvidersSync() {
+  try { return mergeProviders(STATIC_OPENAI_COMPAT_PROVIDERS); }
+  catch { return STATIC_OPENAI_COMPAT_PROVIDERS; }
+}
+
+export const OPENAI_COMPAT_PROVIDERS = new Proxy(STATIC_OPENAI_COMPAT_PROVIDERS, {
+  get(_target, key) {
+    if (typeof key === 'symbol') return _target[key];
+    return mergedCompatProvidersSync()[key];
+  },
+  has(_target, key) {
+    return key in mergedCompatProvidersSync();
+  },
+  ownKeys() {
+    return Object.keys(mergedCompatProvidersSync());
+  },
+  getOwnPropertyDescriptor(_target, key) {
+    const m = mergedCompatProvidersSync();
+    if (key in m) return { configurable: true, enumerable: true, value: m[key] };
+    return undefined;
+  },
+});
 
 export function getCompatKey(provider) {
   const cfg = loadConfig();
