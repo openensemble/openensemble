@@ -1,0 +1,57 @@
+{
+  "//": [
+    "Opt-in JS type checking for OpenEnsemble. We don't ship TypeScript",
+    "source files — code stays .mjs — but tsc runs in --noEmit/--allowJs/",
+    "--checkJs mode over files that include `// @ts-check` at the top.",
+    "Add a file to the type-check set by adding the comment; that's it.",
+    "",
+    "How it works:",
+    "  - `checkJs: false` is the GLOBAL default — most files are ignored.",
+    "  - `// @ts-check` in a file's first comment overrides the global",
+    "    default for that file, enabling per-file checking. So the matrix is:",
+    "      include glob ✓ + @ts-check ✓ → checked",
+    "      include glob ✓ + @ts-check ✗ → ignored",
+    "      include glob ✗                → never seen by tsc",
+    "  - `noEmit: true` makes tsc a pure linter; no .js output anywhere.",
+    "",
+    "Add `// @ts-check` to your file to opt in. Run `npm run typecheck`",
+    "to verify. See: feedback_typescript_opt_in_pattern memory."
+  ],
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["esnext"],
+    "types": ["node"]
+  },
+  "include": [
+    "*.mjs",
+    "lib/**/*.mjs",
+    "routes/**/*.mjs",
+    "scheduler/**/*.mjs",
+    "chat/**/*.mjs",
+    "skills/**/*.mjs",
+    "memory/**/*.mjs",
+    "scripts/**/*.mjs"
+  ],
+  "exclude": [
+    "node_modules",
+    "vendor",
+    "venv",
+    "models",
+    "public",
+    "users",
+    "config",
+    "sessions"
+  ]
+}

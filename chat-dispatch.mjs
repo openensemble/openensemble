@@ -1,6 +1,13 @@
+// @ts-check
 /**
  * chat-dispatch.mjs
  * Platform-agnostic chat handler — used by WebSocket (server.mjs) and Telegram (routes/telegram.mjs).
+ *
+ * Type-checked via `// @ts-check` above. JSDoc on the public surface
+ * (`handleChatMessage`) is the canonical signature; everything internal
+ * relies on inference plus `@type` casts at native-binding boundaries
+ * (provider streams, skill manifests with dynamic shapes). To opt other
+ * files in, add `// @ts-check` and run `npm run typecheck`.
  */
 
 import { getAgent, updateCustomAgent, loadCustomAgents } from './agents.mjs';
@@ -51,12 +58,21 @@ export function waitForAgentIdle(agentId) {
   return busyPromises.get(agentId) ?? Promise.resolve();
 }
 
-// Register an in-flight run. Returns a release() fn the caller must invoke on finish.
+/**
+ * Register an in-flight run. Returns a `release()` fn the caller MUST
+ * invoke on finish — otherwise the next call to markAgentBusy(agentId)
+ * waits forever. waitTurn() resolves when the previous slot for this
+ * agent (if any) completes.
+ *
+ * @param {string} agentId  scoped session key — `${userId}_${agentId}` at call sites.
+ * @returns {{waitTurn: () => Promise<unknown>, release: () => void}}
+ */
 export function markAgentBusy(agentId) {
   // Serialize: if something is already in flight, chain onto it.
   const prev = busyPromises.get(agentId) ?? Promise.resolve();
-  let release;
-  const slot = new Promise(res => { release = res; });
+  /** @type {() => void} */
+  let release = () => {};
+  const slot = new Promise(res => { release = /** @type {() => void} */ (res); });
   const chained = prev.then(() => slot);
   busyPromises.set(agentId, chained);
   chained.finally(() => {
@@ -443,6 +459,26 @@ async function executeHaIntent(intent) {
   return { text: confirm };
 }
 
+/**
+ * Platform-agnostic chat entrypoint. WS (server.mjs) and Telegram
+ * (routes/telegram.mjs) both call this with a small adapter for their
+ * own event surface — onEvent for token/done/error pushes, onBroadcast
+ * for "agent list changed" fan-out, onNotify for toasts.
+ *
+ * @param {object} opts
+ * @param {string} opts.userId
+ * @param {string} opts.agentId
+ * @param {string} opts.text
+ * @param {object|null} [opts.attachment]
+ * @param {'voice-device'|'web'|'telegram'|null} [opts.source]
+ * @param {string|null} [opts.deviceId]              voice-device id if applicable
+ * @param {number|null} [opts.wakeSlot]              voice-device slot index (0–5)
+ * @param {(ev: {type: string, [k: string]: any}) => void} opts.onEvent
+ * @param {() => void} [opts.onBroadcast]
+ * @param {(fromUserId: string, agentId: string, notify: object) => void} [opts.onNotify]
+ * @param {boolean} [opts._isRoutineFollowup]        internal recursion guard
+ * @returns {Promise<void>}
+ */
 export async function handleChatMessage({
   userId,
   agentId: rawAgentId,
@@ -454,10 +490,6 @@ export async function handleChatMessage({
   onEvent,
   onBroadcast = () => {},
   onNotify    = () => {},
-  // Internal flag: set true when chat-dispatch is recursing into itself to
-  // run a routine's run_prompt followup. Skips the routine fast-path on the
-  // recursive call so a trigger phrase that accidentally appears in the
-  // generated followup prompt can't loop.
   _isRoutineFollowup = false,
 }) {
   // Wake-slot routing — household-shared voice device.
@@ -774,7 +806,10 @@ export async function handleChatMessage({
 
   // Intercept "APPROVE PROVEN" — execute staged trust-state promotion to proven
   if (userText.toUpperCase() === 'APPROVE PROVEN' && getPendingProven(userId)) {
-    const result = await executePendingProven(userId);
+    // executePendingProven returns either a string or whatever
+    // execProfileSetTrustState yields (currently an object with optional
+    // .text). Cast widens for the union-narrowing branch below.
+    const result = /** @type {string | { text?: string }} */ (await executePendingProven(userId));
     const text = typeof result === 'string' ? result : (result?.text ?? String(result));
     appendToSession(`${userId}_${agentId}`,
       { role: 'user', content: userText, ts: Date.now() },
@@ -1068,6 +1103,7 @@ export async function handleChatMessage({
   // turn vs Sydney's "decide → call list_roles → call ask_agent" path.
   if (userText) {
     try {
+      /** @type {{ skillId: string, agentId: string, name: string, strategy?: string, sim?: number, phrase?: string } | null} */
       let route = classifySpecialistIntent(userText, userId, agentId);
       // Embedding fallback: when regex misses, try semantic similarity against
       // the loaded intent_examples. Catches paraphrases regex can't enumerate.

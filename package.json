@@ -8,6 +8,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "node scripts/danger-zone-lint.mjs",
+    "typecheck": "tsc -p tsconfig.json",
     "postinstall": "node scripts/fetch-models.mjs"
   },
   "dependencies": {
@@ -22,6 +23,8 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   }
 }

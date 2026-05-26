@@ -51,5 +51,8 @@ jobs:
       - name: Danger-zone lint
         run: node scripts/danger-zone-lint.mjs
 
+      - name: Typecheck (opt-in via // @ts-check)
+        run: npm run typecheck
+
       - name: Tests
         run: npm test
