@@ -33,6 +33,7 @@
  * `registerProfileHealthWatchers(userId, nodeId, serviceId)` after a profile
  * is saved/reviewed.
  */
+// @ts-check
 
 import fs from 'fs';
 import path from 'path';
@@ -56,10 +57,21 @@ import { runTroubleshootingLoop } from '../lib/troubleshooting-loop.mjs';
 
 const DEFAULT_CADENCE_SEC = 60;
 
+/**
+ * @typedef {object} HealthCtx
+ * @property {Function} [fetchFn]      defaults to globalThis.fetch
+ * @property {(cmd: string) => Promise<{stdout: string, stderr: string, exitCode: number}>} [execFn]
+ * @property {string} [auth_override]  per-service auth token override
+ *
+ * @typedef {(state: any, helpers: any) => HealthCtx} HealthCtxResolver
+ */
+
 // Pluggable for tests — production wires fetchFn/execFn through a default
 // resolved at startHealthMonitorHandlers() time.
+/** @type {HealthCtxResolver} */
 let _ctxResolver = () => ({});
 
+/** @param {HealthCtxResolver | null} fn */
 export function setHealthMonitorCtxResolver(fn) {
   _ctxResolver = fn || (() => ({}));
 }

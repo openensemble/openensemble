@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Per-user polling/monitor service ("watchers").
  *
@@ -127,6 +128,9 @@ function loadAllUsersFromDisk() {
  * @param {string}  [opts.skillId]   Owning skill — used to locate the handler.
  * @param {string}  [opts.label]     Short user-facing description for the tasks
  *                                   drawer. Falls back to kind.
+ * @param {{type: 'notify'|'agent', prompt?: string, [k: string]: any} | null} [opts.onFire]
+ *                                   Action to run when this watcher reaches `done`
+ *                                   status — see executeOnFire below.
  * @returns {string} watcherId
  */
 export function registerWatcher(opts) {
@@ -776,6 +780,13 @@ async function tick() {
 /**
  * Start the supervisor. Pass it the WS push functions so handlers can post
  * status / image / video bubbles.
+ *
+ * @param {{
+ *   sendStatus?:       (userId: string, msg: object) => void,
+ *   sendNotification?: (userId: string, text: string, meta?: object) => void,
+ *   showImage?:        (userId: string, url: string, meta?: object) => void,
+ *   showVideo?:        (userId: string, url: string, meta?: object) => void,
+ * }} [opts]
  */
 export function startWatcherSupervisor({ sendStatus, sendNotification, showImage, showVideo } = {}) {
   if (_running) return;
