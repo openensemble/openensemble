@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Shared helpers used across all route modules.
  *
@@ -12,6 +13,11 @@
  *
  * What stays here: config, users, notes, invites, http, wire format,
  * small parsers — the bits most routes touch.
+ *
+ * Type-checked. Public helpers (loadConfig, loadUsers, saveUsers,
+ * modifyUser, etc.) carry JSDoc so callers in routes/* get type errors
+ * at edit time. The 2026-05-26 master-key incident was the kind of bug
+ * this catches: a saveUsers call from a single-field-mutation site.
  */
 
 import fs from 'fs';
@@ -144,9 +150,41 @@ export function saveConfig(cfg) {
 }
 
 // ── User store ───────────────────────────────────────────────────────────────
+
+/**
+ * Profile shape stored at users/{id}/profile.json. Many optional fields
+ * — only `id` is guaranteed at every call site. Extra fields outside this
+ * list are tolerated; routes/users.mjs and Settings UI add more over time.
+ *
+ * @typedef {object} User
+ * @property {string} id                       canonical user id, `user_xxxxxxxx`
+ * @property {string} [name]
+ * @property {string} [email]
+ * @property {'owner'|'admin'|'user'|'child'} [role]
+ * @property {string[]} [skills]               role ids the user has enabled
+ * @property {object} [agentOverrides]         per-agent field overrides keyed by agentId
+ * @property {Record<string, any>} [skillAssignments]
+ * @property {number} [newsDefaultTopic]
+ * @property {object} [telegram]
+ * @property {string} [telegramChatId]         legacy; superseded by telegram.chatId
+ * @property {string} [reminderEmailId]
+ * @property {string} [reminderVoiceDeviceId]
+ * @property {string[]} [allowedSkills]        restricts which skills user can enable
+ * @property {string[]} [allowedModels]
+ * @property {string[]} [allowedOAuthProviders]
+ * @property {boolean} [skillsLocked]
+ * @property {{blockedFrom?: string, blockedUntil?: string}} [accessSchedule]  child-safety curfew, HH:MM
+ */
+
+/** @type {User[] | null} */
 let _usersCache = null;
 let _usersDirMtime = 0;
 
+/**
+ * Return every user profile under users/{id}/profile.json. Caches by the
+ * users/ dir mtime so adding/removing a user invalidates automatically.
+ * @returns {User[]}
+ */
 export function loadUsers() {
   const dir = path.join(BASE_DIR, 'users');
   if (!fs.existsSync(dir)) return [];
@@ -174,7 +212,12 @@ export function loadUsers() {
 
 /** Invalidate users cache — call after any user profile write. */
 export function invalidateUsersCache() { _usersCache = null; _usersDirMtime = 0; }
-/** Write a single user's profile — does not touch any other files in their directory. */
+/**
+ * Write a single user's profile — does not touch any other files in their
+ * directory. Use this (or `modifyUser`) instead of `saveUsers` when you're
+ * only mutating one user.
+ * @param {User} user
+ */
 export function saveUser(user) {
   const dir = getUserDir(user.id);
   fs.mkdirSync(dir, { recursive: true });
@@ -198,6 +241,8 @@ export function saveUser(user) {
  * any `_*`-prefixed system dir). But the safer rule is: don't reach for
  * saveUsers at all unless you're adding or removing a user. modifyUser is
  * the right hammer for everything else.
+ *
+ * @param {User[]} list
  */
 export function saveUsers(list) {
   const currentIds = new Set(list.map(u => u.id));
@@ -213,6 +258,11 @@ export function saveUsers(list) {
     }
   } catch {}
 }
+/**
+ * Load one user's profile by id. Returns null if not found / unreadable.
+ * @param {string|null|undefined} id
+ * @returns {User|null}
+ */
 export function getUser(id) {
   if (!id) return null;
   const p = path.join(getUserDir(id), 'profile.json');
@@ -220,10 +270,13 @@ export function getUser(id) {
   catch (e) { console.warn('[users] Failed to load user', id + ':', e.message); }
   return null;
 }
+/** @param {string|null|undefined} id @returns {'owner'|'admin'|'user'|'child'} */
 export function getUserRole(id) { return getUser(id)?.role ?? 'user'; }
+/** @param {string} userId @returns {string|null} */
 export function getUserCoordinatorAgentId(userId) {
   return getRoleAssignments(userId)['coordinator'] ?? null;
 }
+/** @param {string|null|undefined} id @returns {boolean} */
 export function isPrivileged(id) { const r = getUserRole(id); return r === 'owner' || r === 'admin'; }
 export function isTimeBlocked(schedule) {
   if (!schedule?.blockedFrom || !schedule?.blockedUntil) return false;
@@ -347,7 +400,16 @@ export function detectRenameCommand(text) {
 // ── Locked modify helpers ─────────────────────────────────────────────────────
 export const modifyUsers     = makeModify(loadUsers,     saveUsers,     USERS_DIR);
 
-/** Modify a single user's profile — only writes that user's profile.json. */
+/**
+ * Modify a single user's profile — only writes that user's profile.json,
+ * locked across concurrent callers. The SURGICAL primitive for any
+ * single-user mutation; reach for this instead of saveUsers(loadUsers())
+ * unless you're truly changing the user LIST itself.
+ *
+ * @param {string} userId
+ * @param {(user: User) => void} fn  mutate the user in place; return value ignored.
+ * @returns {Promise<User>}
+ */
 export function modifyUser(userId, fn) {
   const profilePath = path.join(getUserDir(userId), 'profile.json');
   return withLock(profilePath, () => {
