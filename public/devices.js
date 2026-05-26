@@ -35,6 +35,11 @@ let _chimeInfo = { hasCustom: false, sizeBytes: 0 };
 // ID input, 'f5-tts' → reference dropdown, 'elevenlabs' → fetched-voice
 // dropdown). Fetched on drawer load.
 let _ttsProvider = 'openai';
+// Runtime availability snapshot from /api/tts/info — { ffmpeg, openai,
+// piper, elevenlabs }. Used to surface a banner when the configured
+// provider can't actually fulfill TTS (missing ffmpeg, Piper down, key
+// cleared) so devices don't silently hang on the next wake.
+let _ttsAvailable = null;
 // ElevenLabs voice catalog — populated lazily when ttsProvider='elevenlabs'.
 let _elevenlabsVoices = [];
 // Voice routines (trigger phrase → action list) and the ambient sound library
@@ -46,6 +51,17 @@ let _ambientFiles = [];
 // HA scene + script entities — populated on drawer open from the HA cache.
 // Drives the ha_scene action picker so users don't have to type entity ids.
 let _haSceneEntities = [];
+
+// Resolve the current user's coordinator agent name for routine-editor UI
+// strings. Reads the global `agents` array set up in init.js — every user
+// names their coordinator something different, so the "Ask <name>" labels
+// must NOT hardcode "Sydney".
+function _coordinatorLabel() {
+  const list = (typeof agents !== 'undefined' && Array.isArray(agents)) ? agents : [];
+  const coord = list.find(a => a?.skillCategory === 'coordinator');
+  const name = coord?.name?.trim();
+  return name || 'your coordinator';
+}
 
 // Per-user voice configuration: { version, updated_at, slot_assignments }.
 // Single source of truth for wake-slot routing — applies to every voice
@@ -160,6 +176,9 @@ async function loadDevices() {
     if (rTts.ok) {
       const info = await rTts.json();
       _ttsProvider = info.provider || 'openai';
+      _ttsAvailable = info.available || null;
+    } else {
+      _ttsAvailable = null;
     }
     if (rRefs.ok) {
       const { refs } = await rRefs.json();
@@ -253,6 +272,29 @@ async function populateCoordinatorLabels() {
   }
 }
 
+// Surface a warning when /api/tts/info reports the configured TTS
+// provider can't actually fulfill a request (missing ffmpeg, Piper
+// service down, key cleared since pairing). Without this the device
+// would just sit in THINKING-forever the next time it wakes; this
+// makes the failure mode visible in the drawer where the user can fix
+// it (Settings → Providers).
+function renderTtsAvailabilityBanner() {
+  if (!_ttsAvailable) return '';
+  if (_ttsAvailable[_ttsProvider]) return '';
+  const reason = !_ttsAvailable.ffmpeg
+    ? 'ffmpeg is not installed on this server. All TTS providers need it. Install with: <code>sudo apt install ffmpeg</code> (or your distro equivalent), then restart OE.'
+    : _ttsProvider === 'piper'
+      ? 'The local Piper service is not running. Reinstall or restart it from Settings → Providers → Text-to-Speech.'
+      : _ttsProvider === 'elevenlabs'
+        ? 'The ElevenLabs API key is missing. Set it in Settings → Providers → Text-to-Speech.'
+        : 'The OpenAI-compatible TTS provider is not configured. Set the URL and API key in Settings → Providers → Text-to-Speech.';
+  return `
+    <div style="padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--warning,#d97706);color:var(--warning,#d97706);font-size:12px;line-height:1.5">
+      <strong>Voice replies disabled:</strong> ${reason}
+    </div>
+  `;
+}
+
 function renderDevices() {
   const body = $('drawerDevicesBody');
   if (!body) return;
@@ -268,6 +310,7 @@ function renderDevices() {
         <button class="cdraw-btn cdraw-btn-primary" data-action="pairNewDevice" style="font-size:11px;padding:5px 12px">+ Pair new device</button>
       </div>
     </div>
+    ${renderTtsAvailabilityBanner()}
   `;
 
   // Wake-word library — user-uploaded .tflite + .json pairs available for
@@ -488,10 +531,14 @@ function renderRoutineRow(r) {
   if (_editingRoutineId === r.id) return renderRoutineEditor(r);
   const aliases = r.aliases?.length ? ` <span style="color:var(--muted);font-size:11px">(${r.aliases.map(escHtml).join(', ')})</span>` : '';
   const summary = r.actions.map(summarizeRoutineAction).join(' → ');
+  const boundDevice = r.device_id ? _devicesList.find(d => d.id === r.device_id) : null;
+  const targetLabel = boundDevice
+    ? `<span style="font-size:10px;color:var(--muted);margin-left:6px" title="Target device for play-ambient + tts-say">→ ${escHtml(boundDevice.name || boundDevice.id)}</span>`
+    : '';
   return `
     <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-top:1px solid var(--border);font-size:12px">
       <div style="flex:1;min-width:0">
-        <div style="font-weight:600">"${escHtml(r.trigger)}"${aliases}</div>
+        <div style="font-weight:600">"${escHtml(r.trigger)}"${aliases}${targetLabel}</div>
         <div style="color:var(--muted);font-size:11px;margin-top:2px;word-break:break-word">${escHtml(summary)}</div>
       </div>
       <div style="display:flex;gap:4px;flex-shrink:0">
@@ -517,6 +564,11 @@ function summarizeRoutineAction(a) {
     case 'ha_call':      return `${a.domain || '?'}.${a.service || '?'}${a.data?.entity_id ? ` (${a.data.entity_id})` : ''}`;
     case 'play_ambient': return `play ${a.file || '?'}${a.loop !== false ? ' on loop' : ''}${Number.isFinite(a.volume) ? ` @ ${a.volume}%` : ''}`;
     case 'tts_say':      return `say "${a.text || ''}"`;
+    case 'run_prompt': {
+      const p = (a.prompt || '').trim();
+      const short = p.length > 60 ? p.slice(0, 57) + '…' : p;
+      return `ask ${_coordinatorLabel()}: "${short || '?'}"`;
+    }
     default:             return a.type || '?';
   }
 }
@@ -530,15 +582,41 @@ function renderRoutineEditor(r) {
   const displayId = isNew ? '' : r.id;
   const ambientOpts = _ambientFiles.map(f => `<option value="${escHtml(f.name)}">${escHtml(f.name)}</option>`).join('');
   const actionsHtml = (r.actions || []).map((a, i) => renderActionEditor(a, i, ambientOpts)).join('');
+  // Target-device dropdown: "(originating device)" plus every paired device.
+  // For voice-triggered routines, the originating device is the one that
+  // heard the trigger; for webhook fires there's no originator so the user
+  // MUST pick a target if the routine has play_ambient/tts_say actions.
+  const deviceOpts = ['<option value="">(device that heard the trigger)</option>']
+    .concat(_devicesList.map(d =>
+      `<option value="${escHtml(d.id)}" ${r.device_id === d.id ? 'selected' : ''}>${escHtml(d.name || d.id)}</option>`
+    )).join('');
+  // Webhook URL panel — only after first save, when the server has stamped a
+  // token onto the routine. Uses window.location.origin so it works through
+  // tunnels / mylan / whatever the user actually exposes externally.
+  const webhookHtml = (r.webhook_token && !isNew)
+    ? `
+      <div style="margin-top:8px;padding:8px;border:1px dashed var(--border);border-radius:4px;background:var(--bg2)">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Webhook URL</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.45">POST to this URL to fire the routine — works from iPhone NFC tag scans (Shortcuts app → "Get contents of URL"), or any HTTP client. Anyone with the URL can fire it, so don't share it widely.</div>
+        <div style="display:flex;gap:6px;align-items:stretch">
+          <input type="text" class="cdraw-input" data-routine-webhook-url value="${escHtml(window.location.origin + '/api/routines/webhook/' + r.webhook_token)}" readonly style="flex:1;min-width:0;font-family:monospace;font-size:11px;padding:4px 6px;opacity:.85">
+          <button class="cdraw-btn" data-action="copyRoutineWebhook" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:4px 8px" title="Copy URL to clipboard">Copy</button>
+          <button class="cdraw-btn" data-action="regenRoutineWebhook" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:4px 8px" title="Issue a fresh token (revokes the old URL)">Regen</button>
+        </div>
+      </div>
+    `
+    : (isNew ? '<div style="font-size:11px;color:var(--muted);margin-top:6px">Webhook URL will appear here after you save.</div>' : '');
   return `
     <div data-routine-editor="${escHtml(r.id || '_new')}" style="padding:10px;margin:8px 0;border:1px solid var(--accent,#5da0ff);border-radius:6px;background:var(--bg)">
       <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;align-items:center;margin-bottom:8px">
-        <label style="font-size:11px;color:var(--muted)">ID</label>
-        <input type="text" class="cdraw-input" data-routine-field="id" value="${escHtml(displayId)}" placeholder="goodnight" ${isNew ? '' : 'readonly'} style="font-family:monospace;font-size:12px;padding:4px 6px${isNew ? '' : ';opacity:.6'}">
-        <label style="font-size:11px;color:var(--muted)">Trigger</label>
-        <input type="text" class="cdraw-input" data-routine-field="trigger" value="${escHtml(r.trigger || '')}" placeholder="goodnight" style="font-size:12px;padding:4px 6px">
+        <label style="font-size:11px;color:var(--muted)" title="Short slug for this routine — lowercase letters/digits/underscores/dashes only. Not the phrase you say.">ID</label>
+        <input type="text" class="cdraw-input" data-routine-field="id" value="${escHtml(displayId)}" placeholder="goodnight (slug — no spaces)" ${isNew ? '' : 'readonly'} data-keydown-action="blockRoutineIdSpace" data-keydown-args='["$key"]' style="font-family:monospace;font-size:12px;padding:4px 6px${isNew ? '' : ';opacity:.6'}" title="Slug — lowercase letters/digits/underscores/dashes only. The trigger phrase goes below.">
+        <label style="font-size:11px;color:var(--muted)" title="The actual phrase you'll say to fire this routine — spaces allowed.">Trigger</label>
+        <input type="text" class="cdraw-input" data-routine-field="trigger" value="${escHtml(r.trigger || '')}" placeholder="good night" style="font-size:12px;padding:4px 6px">
         <label style="font-size:11px;color:var(--muted)">Aliases</label>
         <input type="text" class="cdraw-input" data-routine-field="aliases" value="${escHtml((r.aliases || []).join(', '))}" placeholder="good night, time for bed" style="font-size:12px;padding:4px 6px" title="Comma-separated alternative phrasings">
+        <label style="font-size:11px;color:var(--muted)" title="Where play-ambient + tts-say actions go. Leave on (originating device) to follow the device that heard the trigger.">Target</label>
+        <select class="cdraw-input" data-routine-field="device_id" style="font-size:12px;padding:4px 6px">${deviceOpts}</select>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Actions</div>
@@ -548,9 +626,11 @@ function renderRoutineEditor(r) {
           <option value="ha_call">HA service call</option>
           <option value="play_ambient">Play ambient sound</option>
           <option value="tts_say">Speak text</option>
+          <option value="run_prompt">Ask ${_coordinatorLabel()} (run a prompt)</option>
         </select>
       </div>
       <div data-routine-actions>${actionsHtml || '<div style="font-size:11px;color:var(--muted);padding:4px 0">No actions yet. Pick one above.</div>'}</div>
+      ${webhookHtml}
       <div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">
         <button class="cdraw-btn" data-action="cancelRoutineEdit" style="font-size:11px;padding:4px 10px">Cancel</button>
         <button class="cdraw-btn cdraw-btn-primary" data-action="saveRoutineEdit" style="font-size:11px;padding:4px 10px">Save routine</button>
@@ -626,10 +706,18 @@ function renderActionEditor(a, idx, ambientOpts) {
       <input type="text" class="cdraw-input" data-action-field="${idx}.data" value="${escHtml(JSON.stringify(a.data || {}))}" placeholder='{"entity_id":"light.kitchen"}' style="width:100%;font-family:monospace;font-size:11px;padding:4px 6px;margin-top:4px" title="JSON payload for the service call">
     `;
   } else if (a.type === 'play_ambient') {
+    // If a.file points at something no longer in the library, prepend a
+    // "(missing)" option so the value sticks instead of silently resetting
+    // to "" — that would make the action fail cleanAction on the next save
+    // and drop the whole routine.
+    const cur = a.file || '';
+    const hasCur = !cur || _ambientFiles.some(f => f.name === cur);
+    const missingOpt = hasCur ? '' : `<option value="${escHtml(cur)}" selected>${escHtml(cur)} (missing — upload or re-pick)</option>`;
     body = `
       <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;align-items:center">
         <select class="cdraw-input" data-action-field="${idx}.file" style="font-size:12px;padding:4px 6px">
           <option value="">Pick a sound…</option>
+          ${missingOpt}
           ${ambientOpts.replace(`value="${escHtml(a.file || '')}"`, `value="${escHtml(a.file || '')}" selected`)}
         </select>
         <label style="font-size:11px;display:flex;align-items:center;gap:4px"><input type="checkbox" data-action-field="${idx}.loop" ${a.loop !== false ? 'checked' : ''}> Loop</label>
@@ -639,6 +727,12 @@ function renderActionEditor(a, idx, ambientOpts) {
     `;
   } else if (a.type === 'tts_say') {
     body = `<input type="text" class="cdraw-input" data-action-field="${idx}.text" value="${escHtml(a.text || '')}" placeholder="Sleep well." style="width:100%;font-size:12px;padding:4px 6px">`;
+  } else if (a.type === 'run_prompt') {
+    // Free-form prompt sent to the user's coordinator agent. The reply
+    // streams to TTS on the device that fired the routine, so any tools
+    // (news, weather, web search) just work.
+    body = `<textarea class="cdraw-input" data-action-field="${idx}.prompt" rows="2" placeholder="give me the latest news" style="width:100%;font-size:12px;padding:4px 6px;font-family:inherit;resize:vertical">${escHtml(a.prompt || '')}</textarea>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">Runs after the other actions in this routine. The reply is spoken on the device that fired the trigger.</div>`;
   } else {
     body = `<div style="font-size:11px;color:var(--red,#e05c5c)">Unknown action type: ${escHtml(a.type)}</div>`;
   }
@@ -677,10 +771,14 @@ function renderAmbientFileRow(f) {
   const dur = f.duration_s
     ? (() => { const m = Math.floor(f.duration_s / 60); const s = Math.floor(f.duration_s % 60); return `${m}:${String(s).padStart(2, '0')}`; })()
     : '—';
+  const isPlaying = window._ambientPreviewName === f.name;
+  const playBtn = isPlaying
+    ? `<button class="cdraw-btn" data-action="previewAmbient" data-args='${JSON.stringify([f.name]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px;color:var(--accent,#5da0ff);border-color:var(--accent,#5da0ff)" title="Stop preview">■</button>`
+    : `<button class="cdraw-btn" data-action="previewAmbient" data-args='${JSON.stringify([f.name]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px" title="Preview in browser">▶</button>`;
   return `
     <div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><strong>${escHtml(f.name)}</strong> <span style="color:var(--muted)">${sizeKb} · ${dur}</span></span>
-      <button class="cdraw-btn" data-action="previewAmbient" data-args='${JSON.stringify([f.name]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px" title="Preview in browser">▶</button>
+      ${playBtn}
       <button class="cdraw-btn" data-action="deleteAmbient" data-args='${JSON.stringify([f.name]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)">Delete</button>
     </div>
   `;
@@ -1336,6 +1434,7 @@ function _readEditorIntoBuffer() {
   _routineEditBuffer.trigger = (get('[data-routine-field="trigger"]')?.value || '').trim();
   _routineEditBuffer.aliases = (get('[data-routine-field="aliases"]')?.value || '')
     .split(',').map(s => s.trim()).filter(Boolean);
+  _routineEditBuffer.device_id = (get('[data-routine-field="device_id"]')?.value || '').trim() || null;
   for (let i = 0; i < (_routineEditBuffer.actions || []).length; i++) {
     const a = _routineEditBuffer.actions[i];
     const f = (key) => root.querySelector(`[data-action-field="${i}.${key}"]`);
@@ -1355,6 +1454,8 @@ function _readEditorIntoBuffer() {
       a.volume = Number.isFinite(v) && v >= 0 && v <= 100 ? v : undefined;
     } else if (a.type === 'tts_say') {
       a.text = (f('text')?.value || '').trim();
+    } else if (a.type === 'run_prompt') {
+      a.prompt = (f('prompt')?.value || '').trim();
     }
   }
 }
@@ -1397,6 +1498,15 @@ window.saveRoutineEdit = async function () {
   if (!buf.id || buf.id === '_new') { showDeviceToast('Routine needs an id (short slug, e.g. goodnight).', { variant: 'error' }); return; }
   if (!buf.trigger) { showDeviceToast('Routine needs a trigger phrase.', { variant: 'error' }); return; }
   if (!buf.actions?.length) { showDeviceToast('Add at least one action.', { variant: 'error' }); return; }
+  // Auto-slugify the id so "good night" (which the user often types when
+  // they confuse id-the-slug with trigger-the-phrase) becomes "good_night"
+  // and passes the server-side [a-z0-9_-]{1,64} regex.
+  const slugged = buf.id.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+  if (slugged !== buf.id) {
+    showDeviceToast(`Slugified id "${buf.id}" → "${slugged}".`);
+    buf.id = slugged;
+  }
+  if (!slugged) { showDeviceToast('ID must contain at least one letter, digit, underscore, or dash.', { variant: 'error' }); return; }
   // If we were editing under the synthetic "_new" id, swap in the real one.
   const realId = buf.id;
   const merged = _routines.filter(r => r.id !== '_new' && r.id !== _editingRoutineId);
@@ -1414,7 +1524,27 @@ window.saveRoutineEdit = async function () {
       throw new Error(error || `HTTP ${r.status}`);
     }
     const saved = await r.json();
-    _routines = saved.routines || merged;
+    const savedList = Array.isArray(saved.routines) ? saved.routines : [];
+    // Server cleanRoutine silently drops routines with no valid actions
+    // (e.g. an ha_scene without a scene_id picked, or a play_ambient pointing
+    // at a deleted file). Detect that here so the user doesn't get a fake
+    // "saved" toast while the routine vanishes. The server log explains why.
+    const persisted = savedList.find(r => r.id === realId);
+    if (!persisted) {
+      // Preserve the original list so the user sees their existing routines
+      // are still intact (the server kept them); restore the in-progress
+      // editor so they can fix the broken action and try again.
+      _routines = savedList;
+      const dropped = merged.filter(m => !savedList.some(s => s.id === m.id)).map(m => m.id);
+      showDeviceToast(
+        `Save rejected — routine "${realId}" was dropped (likely an action with an empty required field — check ha_scene scene_id, play_ambient file, tts_say text). Check the server log for the specific reason.${dropped.length > 1 ? ` Also dropped: ${dropped.filter(id => id !== realId).join(', ')}.` : ''}`,
+        { variant: 'error' }
+      );
+      renderDevices();
+      populateCoordinatorLabels();
+      return;
+    }
+    _routines = savedList;
     _routineEditBuffer = null;
     _editingRoutineId = null;
     showDeviceToast(`Routine "${realId}" saved.`);
@@ -1448,9 +1578,59 @@ window.deleteRoutine = async function (id) {
   }
 };
 
+window.copyRoutineWebhook = async function (id) {
+  const r = _routines.find(x => x.id === id);
+  if (!r?.webhook_token) {
+    showDeviceToast('Save the routine first to generate its webhook URL.', { variant: 'error' });
+    return;
+  }
+  const url = window.location.origin + '/api/routines/webhook/' + r.webhook_token;
+  try {
+    await navigator.clipboard.writeText(url);
+    showDeviceToast('Webhook URL copied.');
+  } catch {
+    // Fallback: select the field so the user can copy by hand.
+    const input = document.querySelector(`[data-routine-editor="${id}"] [data-routine-webhook-url]`);
+    if (input) { input.focus(); input.select(); }
+    showDeviceToast('Copy failed — URL is selected, press Ctrl+C.', { variant: 'error' });
+  }
+};
+
+window.regenRoutineWebhook = async function (id) {
+  if (!confirm(`Issue a fresh webhook URL for "${id}"? The old URL will stop working immediately.`)) return;
+  try {
+    const r = await fetch(`/api/routines/${encodeURIComponent(id)}/regen-token`, { method: 'POST' });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      throw new Error(error || `HTTP ${r.status}`);
+    }
+    const { routine } = await r.json();
+    // Splice the fresh token into _routines so the editor re-render shows
+    // the new URL without a full /api/routines re-fetch.
+    const idx = _routines.findIndex(x => x.id === id);
+    if (idx >= 0) _routines[idx] = routine;
+    if (_routineEditBuffer && _editingRoutineId === id) {
+      _routineEditBuffer.webhook_token = routine.webhook_token;
+    }
+    showDeviceToast('New webhook URL issued.');
+    renderDevices();
+    populateCoordinatorLabels();
+  } catch (e) {
+    showDeviceToast(`Regen failed: ${e.message}`, { variant: 'error' });
+  }
+};
+
 window.testRoutine = async function (id) {
-  const onlineDevice = _devicesList.find(d => d.online);
-  if (!onlineDevice) {
+  // Prefer the routine's bound device when it's online; fall back to any
+  // online paired device. Server applies the same precedence, but resolving
+  // it client-side lets us toast the actual target device name.
+  const routine = _routines.find(r => r.id === id);
+  let targetDevice = null;
+  if (routine?.device_id) {
+    targetDevice = _devicesList.find(d => d.id === routine.device_id && d.online) || null;
+  }
+  if (!targetDevice) targetDevice = _devicesList.find(d => d.online) || null;
+  if (!targetDevice) {
     showDeviceToast('No paired device is online to test against.', { variant: 'error' });
     return;
   }
@@ -1458,7 +1638,7 @@ window.testRoutine = async function (id) {
     const r = await fetch(`/api/routines/${encodeURIComponent(id)}/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId: onlineDevice.id }),
+      body: JSON.stringify({ deviceId: targetDevice.id }),
     });
     if (!r.ok) {
       const { error } = await r.json().catch(() => ({}));
@@ -1468,12 +1648,34 @@ window.testRoutine = async function (id) {
     if (errors?.length) {
       showDeviceToast(`Routine ran with ${errors.length} error(s): ${errors[0].message}`, { variant: 'error' });
     } else {
-      showDeviceToast(`Routine "${id}" fired on ${onlineDevice.name}.`);
+      showDeviceToast(`Routine "${id}" fired on ${targetDevice.name}.`);
     }
   } catch (e) {
     showDeviceToast(`Test failed: ${e.message}`, { variant: 'error' });
   }
 };
+
+// Swallow space on the routine-id input — the id is a slug, not a phrase,
+// and space typed there is almost always confusion with the Trigger field.
+// The auto-slugify on save still handles other invalid chars + paste.
+window.blockRoutineIdSpace = function (key, ev) {
+  if (key === ' ') ev.preventDefault();
+};
+
+// Apply buffer edits to the in-progress row in _routines so the next render
+// keeps showing the editor with the user's typed values + new actions. For
+// '_new' rows we MUST keep r.id === '_new' even if the buffer's id has been
+// typed in, otherwise renderRoutineRow's `_editingRoutineId === r.id` check
+// fails and the editor collapses to a summary row. The real id is stamped
+// at save time.
+function _flushBufferToRoutines() {
+  if (!_routineEditBuffer || !_editingRoutineId) return;
+  const target = _routines.find(r => r.id === _editingRoutineId);
+  if (!target) return;
+  const cloned = JSON.parse(JSON.stringify(_routineEditBuffer));
+  if (_editingRoutineId === '_new') cloned.id = '_new';
+  Object.assign(target, cloned);
+}
 
 window.addRoutineAction = function (type, ev) {
   if (!type) return;
@@ -1483,13 +1685,12 @@ window.addRoutineAction = function (type, ev) {
   const fresh = { ha_scene:     { type, scene_id: '' },
                   ha_call:      { type, domain: '', service: '', data: {} },
                   play_ambient: { type, file: '', loop: true },
-                  tts_say:      { type, text: '' } }[type];
+                  tts_say:      { type, text: '' },
+                  run_prompt:   { type, prompt: '' } }[type];
   if (!fresh) return;
   _routineEditBuffer.actions = _routineEditBuffer.actions || [];
   _routineEditBuffer.actions.push(fresh);
-  // Render buffer back into _routines for the editor to pick up.
-  const target = _routines.find(r => r.id === _editingRoutineId);
-  if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
+  _flushBufferToRoutines();
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -1498,8 +1699,7 @@ window.removeRoutineAction = function (idx) {
   _readEditorIntoBuffer();
   if (!_routineEditBuffer) return;
   _routineEditBuffer.actions.splice(idx, 1);
-  const target = _routines.find(r => r.id === _editingRoutineId);
-  if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
+  _flushBufferToRoutines();
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -1517,10 +1717,7 @@ window.refreshHaEntities = async function (_ignored, ev) {
       _haSceneEntities = Array.isArray(j.entities) ? j.entities : [];
     }
     // Persist edits to the editor's working buffer so the re-render keeps them.
-    if (_routineEditBuffer && _editingRoutineId) {
-      const target = _routines.find(r => r.id === _editingRoutineId);
-      if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
-    }
+    _flushBufferToRoutines();
     showDeviceToast(`HA refreshed — ${_haSceneEntities.length} scene/script/group entities.`);
     renderDevices();
     populateCoordinatorLabels();
@@ -1536,8 +1733,7 @@ window.moveRoutineAction = function (idx, delta) {
   const ni = idx + delta;
   if (ni < 0 || ni >= list.length) return;
   [list[idx], list[ni]] = [list[ni], list[idx]];
-  const target = _routines.find(r => r.id === _editingRoutineId);
-  if (target) Object.assign(target, JSON.parse(JSON.stringify(_routineEditBuffer)));
+  _flushBufferToRoutines();
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -1604,22 +1800,41 @@ window.deleteAmbient = async function (name) {
 };
 
 window.previewAmbient = function (name) {
-  // Toggle one transient <audio> per session so clicking another preview
-  // stops the prior one cleanly. The element is hidden — we just want playback.
+  // Toggle: clicking the play button while THIS file is already playing
+  // stops it; otherwise stop any other preview and start this one. The
+  // button's icon (▶ vs ■) is driven by window._ambientPreviewName so a
+  // re-render flips it.
+  const wasPlayingThis = window._ambientPreviewName === name;
   if (window._ambientPreviewEl) {
     try { window._ambientPreviewEl.pause(); } catch {}
     window._ambientPreviewEl.remove();
     window._ambientPreviewEl = null;
+  }
+  window._ambientPreviewName = null;
+  if (wasPlayingThis) {
+    renderDevices();
+    populateCoordinatorLabels();
+    return;
   }
   const audio = document.createElement('audio');
   audio.src = `/api/devices/ambient-library/${encodeURIComponent(name)}/preview`;
   audio.controls = false;
   audio.autoplay = true;
   audio.style.display = 'none';
-  audio.addEventListener('ended', () => { audio.remove(); window._ambientPreviewEl = null; });
+  audio.addEventListener('ended', () => {
+    audio.remove();
+    if (window._ambientPreviewEl === audio) window._ambientPreviewEl = null;
+    if (window._ambientPreviewName === name) {
+      window._ambientPreviewName = null;
+      renderDevices();
+      populateCoordinatorLabels();
+    }
+  });
   document.body.appendChild(audio);
   window._ambientPreviewEl = audio;
-  showDeviceToast(`Previewing "${name}" (click another file or refresh to stop).`);
+  window._ambientPreviewName = name;
+  renderDevices();
+  populateCoordinatorLabels();
 };
 
 window.revokeAllDevices = async function () {

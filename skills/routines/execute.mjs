@@ -24,15 +24,21 @@ async function execCreateRoutine(args, userId) {
   if (!args?.trigger || typeof args.trigger !== 'string') return 'Error: trigger phrase is required.';
   if (!Array.isArray(args.actions) || args.actions.length === 0) return 'Error: actions list is required (at least one).';
 
+  const { routines } = loadRoutines(userId);
+  const idx = routines.findIndex(r => r.id === args.id.toLowerCase().trim());
+  const existing = idx >= 0 ? routines[idx] : null;
   const next = {
+    // Carry forward webhook_token + device_id when updating an existing
+    // routine so iPhone NFC URLs stamped on tags don't break each time
+    // the LLM tweaks the actions list.
+    ...(existing || {}),
     id: args.id.toLowerCase().trim(),
     trigger: args.trigger.trim(),
     aliases: Array.isArray(args.aliases) ? args.aliases.filter(a => typeof a === 'string' && a.trim()) : [],
     actions: args.actions,
+    ...(typeof args.device_id === 'string' ? { device_id: args.device_id } : {}),
   };
 
-  const { routines } = loadRoutines(userId);
-  const idx = routines.findIndex(r => r.id === next.id);
   const action = idx >= 0 ? 'updated' : 'created';
   if (idx >= 0) routines[idx] = next;
   else routines.push(next);

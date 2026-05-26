@@ -1,21 +1,37 @@
 /**
  * Per-user routines REST API.
  *
- *   GET    /api/routines          — return this user's routines list
- *   PUT    /api/routines          — replace the full list (web UI + create_routine
- *                                   skill both use this; cleanRoutine in
- *                                   lib/routines.mjs sanitizes)
- *   POST   /api/routines/:id/test — execute a routine immediately (UI "Test"
- *                                   button); deviceId in body or first paired
- *                                   device wins
+ *   GET    /api/routines                  — return this user's routines list
+ *   PUT    /api/routines                  — replace the full list (web UI +
+ *                                           create_routine skill both use this;
+ *                                           cleanRoutine in lib/routines.mjs
+ *                                           sanitizes + auto-generates
+ *                                           webhook_token)
+ *   POST   /api/routines/:id/test         — execute a routine immediately (UI
+ *                                           "Test" button); deviceId in body or
+ *                                           routine.device_id or first paired
+ *                                           device wins
+ *   POST   /api/routines/:id/regen-token  — issue a fresh webhook token for
+ *                                           the routine (revokes the old URL)
+ *   POST   /api/routines/webhook/:token   — UNAUTHENTICATED external trigger.
+ *                                           iPhone NFC shortcuts POST here to
+ *                                           fire the routine. Token in URL is
+ *                                           the only credential — capability-
+ *                                           URL model, same shape as HA
+ *                                           webhooks. Targets routine.device_id
+ *                                           for play_ambient / tts_say.
  *
  * Authoring also goes through the voice-taught create_routine skill, which
  * persists via the same lib/routines.mjs primitives — the only routine writer.
  */
 
 import { requireAuth, readBody } from './_helpers.mjs';
-import { loadRoutines, saveRoutines, executeRoutine } from '../lib/routines.mjs';
+import {
+  loadRoutines, saveRoutines, executeRoutine,
+  findRoutineByWebhookToken, regenerateWebhookToken, resolveRoutineDeviceId,
+} from '../lib/routines.mjs';
 import { listDevices } from '../lib/voice-devices.mjs';
+import { speakReminder } from '../lib/voice-reminder.mjs';
 
 export async function handle(req, res) {
   if (req.url === '/api/routines' && req.method === 'GET') {
@@ -55,18 +71,87 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'routine not found' }));
       return true;
     }
-    // Pick a target device: explicit deviceId in body, or the first paired
-    // device. HA-only routines don't need a device, but play_ambient + tts_say
-    // do — the executor surfaces the error in `errors[]` rather than failing
-    // the whole call so partial-success is observable.
+    // Target device precedence: explicit body.deviceId > routine.device_id >
+    // first paired device. HA-only routines don't need a device, but
+    // play_ambient + tts_say do — the executor surfaces the error in
+    // `errors[]` rather than failing the whole call so partial-success is
+    // observable.
     let deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
+    if (!deviceId) deviceId = resolveRoutineDeviceId(routine, null);
     if (!deviceId) {
       const devs = listDevices(userId);
       deviceId = devs[0]?.id ?? null;
     }
     const result = await executeRoutine(routine, { userId, deviceId });
+    // Push tts_say via the speakReminder MP3-marker path so an idle device
+    // speaks the reply. The chat-dispatch routine fast-path streams tokens
+    // over an active WS chat session, but the "Test" button has no such
+    // session — it's the same shape as a webhook fire from this side.
+    if (result.text && deviceId) {
+      try {
+        await speakReminder({ userId, deviceIds: [deviceId], text: result.text, prefix: '', chime: false });
+      } catch (e) {
+        console.warn(`[routines] test push tts failed: ${e.message}`);
+      }
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, ...result, deviceId }));
+    return true;
+  }
+
+  const regenMatch = req.url.match(/^\/api\/routines\/([^/?]+)\/regen-token$/);
+  if (regenMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const id = decodeURIComponent(regenMatch[1]);
+    const updated = regenerateWebhookToken(userId, id);
+    if (!updated) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'routine not found' }));
+      return true;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, routine: updated }));
+    return true;
+  }
+
+  const webhookMatch = req.url.match(/^\/api\/routines\/webhook\/([a-f0-9]{16,64})$/);
+  if (webhookMatch && req.method === 'POST') {
+    const token = webhookMatch[1];
+    const hit = findRoutineByWebhookToken(token);
+    if (!hit) {
+      // Generic 404; don't leak whether the token format matched a real one.
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+      return true;
+    }
+    const { userId, routine } = hit;
+    let body = {};
+    try { body = JSON.parse(await readBody(req) || '{}'); } catch { /* optional body */ }
+    const deviceId = resolveRoutineDeviceId(routine, typeof body.deviceId === 'string' ? body.deviceId : null);
+    const result = await executeRoutine(routine, { userId, deviceId });
+    // Webhook fires don't have an open chat session — push TTS via the
+    // MP3-marker path so an idle paired device speaks the reply.
+    if (result.text && deviceId) {
+      try {
+        await speakReminder({ userId, deviceIds: [deviceId], text: result.text, prefix: '', chime: false });
+      } catch (e) {
+        console.warn(`[routines] webhook tts push failed: ${e.message}`);
+      }
+    }
+    if (result.followupPrompt) {
+      // run_prompt inside a webhook-triggered routine is a known gap — the
+      // followup needs an active chat session to stream the LLM reply back to
+      // the device, and the webhook handler doesn't own one. Log + surface as
+      // a non-fatal error so the user can see why their NFC tap was quieter
+      // than they expected.
+      console.warn(`[routines] webhook ${routine.id}: run_prompt skipped (webhook can't stream LLM reply)`);
+      result.errors = [...(result.errors || []),
+        { type: 'run_prompt', message: 'run_prompt actions are not supported for webhook-triggered routines yet' }];
+    }
+    console.log(`[routines] webhook fire: ${routine.id} (user=${userId} device=${deviceId || '-'} errors=${result.errors.length})`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, routine_id: routine.id, deviceId, errors: result.errors }));
     return true;
   }
 

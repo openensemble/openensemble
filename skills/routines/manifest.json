@@ -22,6 +22,10 @@
               "items": { "type": "string" },
               "description": "Optional alternative phrasings that should also fire this routine. Example: ['good night', 'time for bed']."
             },
+            "device_id": {
+              "type": "string",
+              "description": "Optional voice device id (e.g. 'vdev_abcd1234') to bind this routine to. play_ambient and tts_say target this device regardless of which device heard the trigger — useful when the user wants 'goodnight' said in the kitchen to play sounds in the bedroom. Also required for webhook-triggered routines that include play_ambient/tts_say since they have no originating device. List paired devices with the user's voice-config panel if you need ids."
+            },
             "actions": {
               "type": "array",
               "description": "Ordered list of actions. Executed sequentially when the trigger fires.",

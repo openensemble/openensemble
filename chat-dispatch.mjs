@@ -20,11 +20,12 @@ import {
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { sendToDevice } from './ws-handler.mjs';
 import { broadcastAlarmStop, hasActiveAlarms } from './lib/alarms.mjs';
-import { classifyRoutineIntent, executeRoutine } from './lib/routines.mjs';
+import { classifyRoutineIntent, executeRoutine, resolveRoutineDeviceId } from './lib/routines.mjs';
+import { speakReminder } from './lib/voice-reminder.mjs';
 import { stopAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { log } from './logger.mjs';
 import {
-  loadConfig, loadUsers, saveUsers, getAgentsForUser, detectNewsPref, detectRenameCommand,
+  loadConfig, modifyUser, getAgentsForUser, detectNewsPref, detectRenameCommand,
   saveUserAgentOverride, getUser, getUserCoordinatorAgentId, recordActivity, recordTokenUsage,
   isUserTimeBlocked,
 } from './routes/_helpers.mjs';
@@ -453,6 +454,11 @@ export async function handleChatMessage({
   onEvent,
   onBroadcast = () => {},
   onNotify    = () => {},
+  // Internal flag: set true when chat-dispatch is recursing into itself to
+  // run a routine's run_prompt followup. Skips the routine fast-path on the
+  // recursive call so a trigger phrase that accidentally appears in the
+  // generated followup prompt can't loop.
+  _isRoutineFollowup = false,
 }) {
   // Wake-slot routing — household-shared voice device.
   //
@@ -664,9 +670,10 @@ export async function handleChatMessage({
   const newsPrefIdx = detectNewsPref(rawText);
   if (newsPrefIdx !== null) {
     try {
-      const list = loadUsers();
-      const idx = list.findIndex(u => u.id === userId);
-      if (idx !== -1) { list[idx].newsDefaultTopic = newsPrefIdx; saveUsers(list); }
+      // Surgical: write just this user's profile.json. Don't bulk-rewrite
+      // every user — saveUsers does directory garbage-collection that has
+      // bitten us before (see feedback_master_key_never_overwrite).
+      modifyUser(userId, u => { u.newsDefaultTopic = newsPrefIdx; });
     } catch (e) { console.warn('[chat] Failed to save news preference:', e.message); }
     onEvent({ type: 'news_pref_saved', topic: newsPrefIdx });
   }
@@ -680,13 +687,15 @@ export async function handleChatMessage({
     const customAgent = loadCustomAgents().find(a => a.id === agentId && a.ownerId === userId);
     if (customAgent) {
       updateCustomAgent(agentId, changes);
-      // Clear any stale per-user overrides for fields now canonical on the agent
-      const list = loadUsers();
-      const u = list.find(u => u.id === userId);
-      if (u?.agentOverrides?.[agentId]) {
-        for (const k of Object.keys(changes)) delete u.agentOverrides[agentId][k];
-        saveUsers(list);
-      }
+      // Clear any stale per-user overrides for fields now canonical on the agent.
+      // Surgical write — same reason as the news-pref site above.
+      try {
+        modifyUser(userId, u => {
+          if (u.agentOverrides?.[agentId]) {
+            for (const k of Object.keys(changes)) delete u.agentOverrides[agentId][k];
+          }
+        });
+      } catch (e) { console.warn('[chat] Failed to clear agent overrides:', e.message); }
     } else {
       saveUserAgentOverride(userId, agentId, changes);
     }
@@ -859,13 +868,14 @@ export async function handleChatMessage({
         if (current) result = `✓ **${manifest.name}** transferred from "${current}" to **${agent.name}**.`;
         else result = `✓ **${manifest.name}** is now assigned to **${agent.name}**.`;
         setRoleAssignment(skillId, agentId, userId);
+        // Add the skill to this user's enabled list — surgical write of just
+        // this profile.json. Using saveUsers here would trigger a full users/
+        // directory GC sweep (historical root cause of the master-key wipe;
+        // see feedback_master_key_never_overwrite).
         try {
-          const userList = loadUsers();
-          const uIdx = userList.findIndex(u => u.id === userId);
-          if (uIdx !== -1 && userList[uIdx].skills && !userList[uIdx].skills.includes(skillId)) {
-            userList[uIdx].skills.push(skillId);
-            saveUsers(userList);
-          }
+          modifyUser(userId, u => {
+            if (u.skills && !u.skills.includes(skillId)) u.skills.push(skillId);
+          });
         } catch {}
       }
     }
@@ -940,17 +950,74 @@ export async function handleChatMessage({
   // device. Strict equality match against the normalized trigger/aliases,
   // executed in lib/routines.mjs. Runs only on voice-device source so that
   // typing "goodnight" in a browser chat falls through to the normal LLM.
-  if (source === 'voice-device' && userText && deviceId) {
+  if (source === 'voice-device' && userText && deviceId && !_isRoutineFollowup) {
     try {
       const routine = classifyRoutineIntent(userText, userId);
       if (routine) {
-        const result = await executeRoutine(routine, { userId, deviceId });
+        // routine.device_id, if set, overrides the originating device for
+        // play_ambient + tts_say. Example: "goodnight" on the kitchen mic
+        // can still play sounds in the bedroom. The originating device's WS
+        // still gets the `done` event so its chat stream closes cleanly.
+        const targetDeviceId = resolveRoutineDeviceId(routine, deviceId);
+        const targetDiffers = targetDeviceId && targetDeviceId !== deviceId;
+        const result = await executeRoutine(routine, { userId, deviceId: targetDeviceId });
         const reply = result.text || '';
+        // When the routine targets a different device, push the spoken reply
+        // to THAT device via the MP3-marker path. Don't stream it over the
+        // originating device's WS (that'd speak the reply in the wrong room).
+        if (reply && targetDiffers) {
+          try {
+            await speakReminder({ userId, deviceIds: [targetDeviceId], text: reply, prefix: '', chime: false });
+          } catch (e) {
+            console.warn(`[chat] routine cross-device tts push failed: ${e.message}`);
+          }
+        }
+        // If a run_prompt action is in the routine, the trigger phrase
+        // becomes a setup step — speak the routine's collected text first,
+        // then hand the prompt off to the user's coordinator agent. The
+        // coordinator's reply streams to TTS on the same device via the
+        // normal chat pipeline.
+        if (result.followupPrompt) {
+          appendToSession(`${userId}_${agentId}`,
+            { role: 'user', content: userText, ts: Date.now() },
+          );
+          if (reply) {
+            appendToSession(`${userId}_${agentId}`,
+              { role: 'assistant', content: reply, ts: Date.now() },
+            );
+            // Skip the WS token push when the routine is bound to a different
+            // device — speakReminder above already spoke it in the right room.
+            if (!targetDiffers) onEvent({ type: 'token', text: reply, agent: agentId });
+          }
+          console.log(`[chat] routine-fastpath: ${routine.id} → followup prompt`);
+          // Release the busy slot BEFORE recursing so the followup can claim
+          // its own slot via markAgentBusy. Cleanup the abortController for
+          // the trigger turn — the followup gets a fresh one.
+          abortControllers.delete(scopedSessionKey);
+          activeStreams.delete(scopedSessionKey);
+          clearStreamBuffer(scopedSessionKey);
+          busySlot.release();
+          // Re-enter with the followup prompt as the new user message.
+          // _isRoutineFollowup is a defensive bypass so a prompt that
+          // accidentally matches another routine trigger doesn't loop. The
+          // followup goes to the routine's target device so its LLM reply
+          // streams to the same room as the routine's spoken bits.
+          await handleChatMessage({
+            userId, agentId, text: result.followupPrompt,
+            attachment: null, source, deviceId: targetDeviceId, wakeSlot,
+            onEvent, onBroadcast, onNotify,
+            _isRoutineFollowup: true,
+          });
+          return;
+        }
         appendToSession(`${userId}_${agentId}`,
           { role: 'user', content: userText, ts: Date.now() },
           { role: 'assistant', content: reply || '(routine executed silently)', ts: Date.now() }
         );
-        if (reply) onEvent({ type: 'token', text: reply, agent: agentId });
+        // Only stream the spoken reply over the originating WS when the
+        // routine fires on that same device — otherwise speakReminder above
+        // has already pushed it to the target device.
+        if (reply && !targetDiffers) onEvent({ type: 'token', text: reply, agent: agentId });
         onEvent({ type: 'done', agent: agentId });
         console.log(`[chat] routine-fastpath: ${routine.id} actions=${routine.actions.length} errors=${result.errors.length}`);
         abortControllers.delete(scopedSessionKey);
