@@ -1,6 +1,12 @@
 {
   "sections": [
     {
+      "title": "Updates",
+      "pages": [
+        { "slug": "whats-new", "title": "What's new" }
+      ]
+    },
+    {
       "title": "Start here",
       "pages": [
         { "slug": "welcome",         "title": "Welcome to OpenEnsemble" },

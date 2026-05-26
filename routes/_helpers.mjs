@@ -182,14 +182,33 @@ export function saveUser(user) {
   invalidateUsersCache();
 }
 
-/** Bulk save — used when the user list itself changes (create/delete). Removes dirs for deleted users. */
+/**
+ * Bulk save — used when the user LIST ITSELF changes (i.e. a user was added
+ * or removed). For a single user's field change, ALWAYS prefer `modifyUser`
+ * (locked, surgical, writes one profile.json) over `saveUsers(loadUsers())`.
+ *
+ * Why this matters: this function rewrites every profile.json AND runs an
+ * orphan-cleanup sweep over every subdir of `users/`. Callers that just want
+ * to flip one field on one user (news pref, agent rename, /claim, telegram
+ * link) used to come in here, triggering a full-directory GC every time.
+ * The 2026-05-26 master-key incident traced back to exactly that pattern.
+ *
+ * The orphan-cleanup loop is now scoped to `user_*` directories so even
+ * legitimate uses can't touch system-reserved dirs (`_system/`, `default/`,
+ * any `_*`-prefixed system dir). But the safer rule is: don't reach for
+ * saveUsers at all unless you're adding or removing a user. modifyUser is
+ * the right hammer for everything else.
+ */
 export function saveUsers(list) {
   const currentIds = new Set(list.map(u => u.id));
   for (const user of list) saveUser(user);
-  // Remove subdirs for users no longer in the list
+  // Remove subdirs for users no longer in the list — but only directories
+  // that actually look like user IDs. Anything else (`_system`, `_admin`,
+  // `default`, etc.) is system-reserved and never managed by this function.
   try {
     for (const entry of fs.readdirSync(USERS_DIR, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      if (!entry.name.startsWith('user_')) continue;
       if (!currentIds.has(entry.name)) fs.rmSync(path.join(USERS_DIR, entry.name), { recursive: true, force: true });
     }
   } catch {}

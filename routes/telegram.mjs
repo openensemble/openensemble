@@ -20,7 +20,7 @@
 import { randomBytes, timingSafeEqual } from 'crypto';
 import {
   requireAuth, readBody,
-  loadUsers, saveUsers,
+  loadUsers, modifyUser,
   getUserCoordinatorAgentId,
 } from './_helpers.mjs';
 import { handleChatMessage, abortChat } from '../chat-dispatch.mjs';
@@ -134,28 +134,29 @@ function isTelegramAllowed(user) {
 }
 
 function patchUserTelegram(userId, patch) {
-  const users = loadUsers();
-  const idx = users.findIndex(u => u.id === userId);
-  if (idx === -1) return null;
-  const existing = getUserTelegram(users[idx]);
-  users[idx].telegram = { ...existing, ...patch };
-  // Clean up the legacy top-level field once migrated
-  delete users[idx].telegramChatId;
-  saveUsers(users);
-  return users[idx];
+  // Surgical write of just this user's profile.json — see
+  // feedback_master_key_never_overwrite for why we don't bulk-rewrite the list.
+  try {
+    return modifyUser(userId, u => {
+      const existing = getUserTelegram(u);
+      u.telegram = { ...existing, ...patch };
+      // Clean up the legacy top-level field once migrated
+      delete u.telegramChatId;
+    });
+  } catch { return null; }
 }
 
 function clearUserTelegram(userId, opts = {}) {
-  const users = loadUsers();
-  const idx = users.findIndex(u => u.id === userId);
-  if (idx === -1) return;
-  if (opts.chatOnly) {
-    if (users[idx].telegram) delete users[idx].telegram.chatId;
-  } else {
-    delete users[idx].telegram;
-  }
-  delete users[idx].telegramChatId;
-  saveUsers(users);
+  try {
+    modifyUser(userId, u => {
+      if (opts.chatOnly) {
+        if (u.telegram) delete u.telegram.chatId;
+      } else {
+        delete u.telegram;
+      }
+      delete u.telegramChatId;
+    });
+  } catch {}
 }
 
 // ── Outbound (scheduler, background tasks) ────────────────────────────────────
