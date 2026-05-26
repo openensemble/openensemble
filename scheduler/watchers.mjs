@@ -27,7 +27,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { log } from '../logger.mjs';
 
@@ -157,8 +157,23 @@ export function registerWatcher(opts) {
     resolvedExpires = Date.now() + DEFAULT_EXPIRY_MS;
   }
 
+  // Disperse first ticks across the cadence window so a profile-attach burst
+  // doesn't queue every node's health check at the same instant. Hash the
+  // (node, service) identity when present so the offset is stable across
+  // re-registrations (re-reviewing a profile doesn't shift its phase). For
+  // non-health watchers, fall back to a per-record hash — still spreads new
+  // registrations across the window. Once each watcher ticks, tickOne sets
+  // nextTickAt = now + cadenceMs which keeps the spread for the lifetime of
+  // the watcher.
+  const id = randomUUID();
+  const cadenceMs = Math.max(5, Number(cadenceSec) || DEFAULT_CADENCE_SEC) * 1000;
+  const jitterKey = (state && (state.node_id || state.service_id))
+    ? `${state.node_id || ''}|${state.service_id || ''}`
+    : id;
+  const phaseOffsetMs = Number(BigInt('0x' + createHash('sha1').update(jitterKey).digest('hex').slice(0, 12)) % BigInt(cadenceMs));
+
   const record = {
-    id: randomUUID(),
+    id,
     userId,
     agentId,
     kind,
@@ -167,7 +182,7 @@ export function registerWatcher(opts) {
     state,
     cadenceSec: Math.max(5, Number(cadenceSec) || DEFAULT_CADENCE_SEC),
     createdAt: Date.now(),
-    nextTickAt: Date.now() + 1000, // first tick almost immediately
+    nextTickAt: Date.now() + phaseOffsetMs,
     expiresAt: resolvedExpires,
     lastStatusText: null,
     lastChangeAt: Date.now(),
