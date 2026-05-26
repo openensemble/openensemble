@@ -92,11 +92,17 @@ export const BASE_SCHEMA = {
   // fact is only injected into agents that currently hold that role. Set at
   // pin time and filtered in recall (see recall.mjs).
   role_scope: '',
+  // Empty string = fact applies anywhere. A hostname means the fact is about
+  // that specific machine (e.g. "TFTP root is /srv/tftp" on pxeserver). Set
+  // by location-fact-proposer; recall doesn't filter on it yet — the value
+  // surfaces via vector similarity since the hostname is also in the fact text.
+  host_scope: '',
 };
 
 // Tracks (userId::tableName) entries where we've already verified the
 // role_scope column exists — avoids retrying addColumns on every getTable call.
 const _scopeColumnEnsured = new Set();
+const _hostScopeColumnEnsured = new Set();
 
 async function ensureRoleScopeColumn(table, userId, name) {
   const key = `${userId}::${name}`;
@@ -109,6 +115,19 @@ async function ensureRoleScopeColumn(table, userId, name) {
   } catch (e) {
     if (!/already exists|duplicate/i.test(e.message)) {
       console.debug('[cortex] role_scope column ensure skipped for', key + ':', e.message);
+    }
+  }
+}
+
+async function ensureHostScopeColumn(table, userId, name) {
+  const key = `${userId}::${name}`;
+  if (_hostScopeColumnEnsured.has(key)) return;
+  _hostScopeColumnEnsured.add(key);
+  try {
+    await table.addColumns([{ name: 'host_scope', valueSql: "''" }]);
+  } catch (e) {
+    if (!/already exists|duplicate/i.test(e.message)) {
+      console.debug('[cortex] host_scope column ensure skipped for', key + ':', e.message);
     }
   }
 }
@@ -143,6 +162,7 @@ export async function getTable(name, userId = 'default') {
   // One-time per-table migration: ensure role_scope column exists on existing
   // tables created before this feature landed. No-op after first call per table.
   await ensureRoleScopeColumn(table, userId, name);
+  await ensureHostScopeColumn(table, userId, name);
   return table;
 }
 
@@ -183,6 +203,7 @@ export async function rememberFast({ agentId = 'main', type = 'episodes', text,
     category: metadata.category || type,
     enriched: false,
     role_scope: metadata.role_scope || '',
+    host_scope: metadata.host_scope || '',
   };
 
   await queuedWrite(tableName, () => table.add([record]));
@@ -344,6 +365,7 @@ export async function remember({
     enriched: true,
     next_review_at: metadata.next_review_at || '',
     role_scope: metadata.role_scope || '',
+    host_scope: metadata.host_scope || '',
   };
 
   await queuedWrite(tableName, () => table.add([record]));
@@ -351,9 +373,9 @@ export async function remember({
 }
 
 // ── pin — immortal memory (never decays, never forgotten) ────────────────────
-export async function pin({ agentId = 'main', type = 'params', text, category = 'rule', userId = 'default', roleScope = '' }) {
+export async function pin({ agentId = 'main', type = 'params', text, category = 'rule', userId = 'default', roleScope = '', hostScope = '' }) {
   return remember({
     agentId, type, text, immortal: true, source: 'user_stated', confidence: 1.0,
-    metadata: { category, role_scope: roleScope }, userId,
+    metadata: { category, role_scope: roleScope, host_scope: hostScope }, userId,
   });
 }

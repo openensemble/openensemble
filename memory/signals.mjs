@@ -365,6 +365,25 @@ export async function pinFact({ agentId, text, userId, scope = null }) {
   }
 }
 
+// ── pinLocationFact — host-scoped fact about a specific machine ─────────────
+// Used by the location-fact proposer's accept handler. Same path as pinFact
+// (shared user_facts table, cross-agent) but stamps host_scope so the fact
+// can later be filtered to recalls about that host. Fact text already names
+// the host, so vector recall surfaces it even without explicit filtering.
+export async function pinLocationFact({ text, userId, hostScope }) {
+  if (!text || !userId || !hostScope) return null;
+  const factText = text.startsWith('FACT:') ? text : `FACT: ${text}`;
+  try {
+    return await pin({
+      agentId: 'shared', type: 'user_facts', text: factText,
+      category: 'location_fact', userId, roleScope: '', hostScope,
+    });
+  } catch (e) {
+    console.warn('[cortex] Location-fact pin failed:', e.message);
+    return null;
+  }
+}
+
 // ── processSignals — run after each turn, non-blocking ───────────────────────
 export async function processSignals({ agentId, userMessage, agentLastResponse = null, userId = 'default' }) {
   // Skip very short confirmations — "yes", "trash", "ok", "confirm", etc.
