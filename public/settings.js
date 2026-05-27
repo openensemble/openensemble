@@ -772,6 +772,7 @@ function switchSettingsTab(name) {
   if (name === 'system') {
     loadPlanRuntimeStatus().then(renderPlanModelRows);
     if (typeof loadTunnelStatus === 'function') loadTunnelStatus();
+    if (typeof loadTailscaleStatus === 'function') loadTailscaleStatus();
   }
 }
 
@@ -1393,6 +1394,179 @@ function copyToClipboard(text) {
   if (!text) return;
   try { navigator.clipboard.writeText(text); showToast('Copied'); }
   catch { showToast('Copy failed'); }
+}
+
+// ── Private Mesh (Tailscale) — owner/admin only ──────────────────────────────
+// Mirrors the Cloudflare Tunnel panel: probe + render + per-button handler.
+// Install goes through /api/integrations/tailscale/install which collects the
+// auth key + sudo password inline (no chat-bubble round-trip) and runs the
+// same recipe the oe-admin skill would.
+async function loadTailscaleStatus() {
+  const section = $('tailscaleAccessSection');
+  const body    = $('tailscaleAccessBody');
+  if (!section || !body) return;
+  const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+  if (!isPriv) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  try {
+    const s = await fetch('/api/integrations/tailscale/status').then(r => r.json());
+    renderTailscaleStatus(s);
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red,#e05c5c);font-size:12px">Failed to load Tailscale status: ${e.message}</div>`;
+  }
+}
+
+function renderTailscaleStatus(s) {
+  const body = $('tailscaleAccessBody');
+  if (!body) return;
+
+  // Three coarse buckets the user cares about:
+  //   active   — daemon running, joined to a tailnet, IP assigned
+  //   needs    — binary present but daemon down or NeedsLogin
+  //   missing  — binary not installed
+  const bucket = !s.binaryPresent ? 'missing' : (s.running ? 'active' : 'needs');
+  const stateColor = {
+    active:  'var(--green, #4caf50)',
+    needs:   'var(--accent)',
+    missing: 'var(--muted)',
+  }[bucket];
+  const stateText = {
+    active:  '✓ Joined to tailnet',
+    needs:   s.state ? `⚠ ${s.state} — needs login or restart` : '⚠ Installed but not running',
+    missing: 'Not installed',
+  }[bucket];
+
+  const ipBlock = s.ip
+    ? `<div style="margin-top:8px;font-size:12px"><span style="opacity:0.6">Tailscale IP:</span> <code style="color:var(--accent)">${escHtml(s.ip)}</code> <button data-action="copyToClipboard" data-args='${JSON.stringify([s.ip]).replace(/'/g, "&#39;")}' title="Copy" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;margin-left:6px">copy</button></div>`
+    : '';
+  const hostBlock = s.hostname && s.tailnet
+    ? `<div style="margin-top:4px;font-size:11px;opacity:0.7">MagicDNS: <code>${escHtml(s.hostname)}.${escHtml(s.tailnet)}</code></div>`
+    : (s.hostname ? `<div style="margin-top:4px;font-size:11px;opacity:0.7">Host: <code>${escHtml(s.hostname)}</code></div>` : '');
+
+  // Two action surfaces. Manual path collects the authkey + sudo inline; the
+  // coordinator path drops the user into chat with a prefilled prompt so the
+  // oe-admin tool flow runs the same recipe but with the LLM handling any
+  // ambiguity.
+  const manualPanel = bucket === 'active' ? '' : `
+    <div style="margin-top:14px;border:1px solid var(--border);border-radius:8px;padding:10px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:4px">Set up manually</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Paste a reusable auth key from your <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" style="color:var(--accent)">Tailscale admin → Keys</a>. The installer runs <code>tailscale up</code> using your key, then this server appears in your tailnet.</div>
+      <label style="display:block;font-size:11px;opacity:0.7;margin-bottom:4px">Tailscale auth key</label>
+      <input type="password" id="tailscaleAuthkeyInput" autocomplete="new-password"
+        placeholder="tskey-auth-…"
+        style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+      <label style="display:block;font-size:11px;opacity:0.7;margin-bottom:4px">sudo password (used once, not stored)</label>
+      <input type="password" id="tailscaleSudoInput" autocomplete="new-password"
+        placeholder="${process_geteuid_hint()}"
+        style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button data-action="installTailscale" id="btnInstallTailscale" style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Install</button>
+        <button data-action="askCoordinatorTailscale" style="background:transparent;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Ask the coordinator instead</button>
+      </div>
+      <div id="tailscaleInstallStatus" style="margin-top:10px;font-size:12px;color:var(--muted);display:none"></div>
+    </div>
+  `;
+
+  const uninstallPanel = bucket === 'active' ? `
+    <div style="margin-top:14px;border:1px solid var(--border);border-radius:8px;padding:10px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:4px">Manage</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Removing reverts the most recent install audit entry: brings the node down, disables the service, and clears the config flag.</div>
+      <label style="display:block;font-size:11px;opacity:0.7;margin-bottom:4px">sudo password (used once, not stored)</label>
+      <input type="password" id="tailscaleSudoInput" autocomplete="new-password"
+        placeholder="${process_geteuid_hint()}"
+        style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button data-action="uninstallTailscale" style="background:var(--red,#e05c5c);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Uninstall</button>
+      </div>
+      <div id="tailscaleInstallStatus" style="margin-top:10px;font-size:12px;color:var(--muted);display:none"></div>
+    </div>
+  ` : '';
+
+  body.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:${stateColor}">●&nbsp;${stateText}</span>
+      ${s.binaryPresent ? '<span style="opacity:0.4;font-size:11px">|</span><span style="font-size:11px;opacity:0.7">binary: present</span>' : ''}
+      ${s.configFlag ? '<span style="opacity:0.4;font-size:11px">|</span><span style="font-size:11px;opacity:0.7">tracked by oe-admin</span>' : ''}
+    </div>
+    ${ipBlock}
+    ${hostBlock}
+    ${manualPanel}
+    ${uninstallPanel}
+  `;
+  if (window.lucide?.createIcons) window.lucide.createIcons();
+}
+
+// Hint text only — the client can't actually probe the server's euid, so we
+// show the install-time sudo hint generically. Centralised so both the
+// install and uninstall panels stay in sync if we ever swap the wording.
+function process_geteuid_hint() { return 'leave blank if OE runs as root'; }
+
+async function installTailscale() {
+  const authkey = $('tailscaleAuthkeyInput')?.value?.trim() || '';
+  const sudoPw  = $('tailscaleSudoInput')?.value || '';
+  if (!authkey) { showToast('Auth key required'); return; }
+  const btn = $('btnInstallTailscale');
+  const statusEl = $('tailscaleInstallStatus');
+  if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+  if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Running install steps (curl → install.sh → systemctl enable → tailscale up). May take ~1 minute.'; }
+  try {
+    const r = await fetch('/api/integrations/tailscale/install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authkey, sudoPassword: sudoPw }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) {
+      if (statusEl) statusEl.innerHTML = `<span style="color:var(--red,#e05c5c)">${escHtml(data.message || data.error || `Install failed (${r.status})`)}</span>`;
+      showToast('Tailscale install failed');
+    } else {
+      if (statusEl) statusEl.innerHTML = `<span style="color:var(--green,#4caf50)">${escHtml(data.message || 'Installed.')}</span>`;
+      showToast('Tailscale installed');
+      // Clear secrets from the form, then refresh status.
+      if ($('tailscaleAuthkeyInput')) $('tailscaleAuthkeyInput').value = '';
+      if ($('tailscaleSudoInput'))    $('tailscaleSudoInput').value    = '';
+      setTimeout(loadTailscaleStatus, 800);
+    }
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<span style="color:var(--red,#e05c5c)">${escHtml(e.message)}</span>`;
+    showToast('Install failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+  }
+}
+
+async function uninstallTailscale() {
+  if (!confirm('Uninstall Tailscale? This brings the node down and disables the system service.')) return;
+  const sudoPw = $('tailscaleSudoInput')?.value || '';
+  try {
+    const r = await fetch('/api/integrations/tailscale/uninstall', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sudoPassword: sudoPw }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) {
+      showToast(data.error || `Uninstall failed (${r.status})`);
+      return;
+    }
+    if ($('tailscaleSudoInput')) $('tailscaleSudoInput').value = '';
+    showToast('Tailscale uninstalled');
+    setTimeout(loadTailscaleStatus, 500);
+  } catch (e) {
+    showToast('Uninstall failed: ' + e.message);
+  }
+}
+
+// "Ask the coordinator instead" — drop the user into chat with a prefilled
+// prompt. The coordinator (whichever agent has oe-admin assigned, or just the
+// default) handles the credential prompts via the chat-bubble widget.
+function askCoordinatorTailscale() {
+  try { closeAllDrawers?.(); } catch {}
+  const composer = $('input');
+  if (composer) {
+    composer.value = 'Install Tailscale on this server.';
+    composer.focus();
+    // Move caret to the end so the user can append clarifications if needed.
+    try { composer.setSelectionRange(composer.value.length, composer.value.length); } catch {}
+  }
 }
 
 // ── Drawers ───────────────────────────────────────────────────────────────────

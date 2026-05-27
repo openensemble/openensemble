@@ -247,68 +247,49 @@ async function handleSetConfigField(args, userId) {
   return `config.${dotted} set (audit ${entryId}). Restart required — call restart_server to commit.`;
 }
 
-// ── Tool: install_integration ────────────────────────────────────────────────
+// ── Recipe runner core ───────────────────────────────────────────────────────
+// Loads + validates a recipe, snapshots config.json, runs its steps with the
+// supplied credential values + sudo password, applies configWrites, and
+// records the result in the audit log. Caller is responsible for collecting
+// credentials (either via the chat credential-prompt widget or via a direct
+// HTTP request body).
+//
+// Returns: { ok, status: 'committed'|'restart_required'|'rolled_back'|'error',
+//            entryId, message, outputs }
+export async function runRecipeWithCredentials(recipeName, userId, opts = {}) {
+  const { credValues = {}, sudoPassword = null } = opts;
 
-async function handleInstallIntegration(args, userId) {
   if (hasPendingChange()) {
-    return 'Another oe-admin change is awaiting restart-commit. Commit or revert it first.';
+    return { ok: false, status: 'error', message: 'Another oe-admin change is awaiting restart-commit. Commit or revert it first.' };
   }
-  const { recipeName } = args ?? {};
-  if (!recipeName) return 'recipeName is required.';
   const p = recipeFilePath(recipeName);
-  if (!fs.existsSync(p)) return `Recipe "${recipeName}" not found.`;
+  if (!fs.existsSync(p)) return { ok: false, status: 'error', message: `Recipe "${recipeName}" not found.` };
   let recipe;
   try { recipe = validateRecipe(JSON.parse(fs.readFileSync(p, 'utf8'))); }
-  catch (e) { return `Recipe failed validation: ${e.message}`; }
+  catch (e) { return { ok: false, status: 'error', message: `Recipe failed validation: ${e.message}` }; }
 
-  // Collect credentials declared by the recipe.
-  const credValues = {};
+  // Validate that every credential the recipe declares was supplied.
   for (const c of recipe.credentials) {
-    let credResult;
-    try {
-      credResult = await requestCredential({
-        userId,
-        label: c.label,
-        description: c.description,
-        kind: c.kind ?? 'api_key',
-        ttlMs: 300_000,
-      });
-    } catch (e) {
-      return `Cancelled while collecting "${c.label}": ${e.message}`;
+    const v = credValues[c.id];
+    if (typeof v !== 'string' || !v.length) {
+      return { ok: false, status: 'error', message: `Credential "${c.id}" (${c.label}) was empty.` };
     }
-    const v = resolveCredentialValue(userId, credResult.id);
-    if (!v) return `Credential "${c.id}" was empty.`;
-    credValues[c.id] = v;
-    registerRedaction(v);
   }
-
-  // If any step needs root, collect sudo password once (RAM only).
   const needsRoot = recipe.steps.some(s => s.requiresRoot) || recipe.rollback.some(s => s.requiresRoot);
-  let sudoPassword = null;
-  if (needsRoot && process.getuid && process.getuid() !== 0) {
-    try {
-      const sudoResult = await requestCredential({
-        userId,
-        label: 'sudo password',
-        description: 'Used once for this recipe. Held in memory only — never persisted.',
-        kind: 'sudo',
-        ttlMs: 300_000,
-      });
-      sudoPassword = resolveCredentialValue(userId, sudoResult.id);
-      registerRedaction(sudoPassword);
-      dropRamCredential(sudoResult.id); // we have our own ref now
-    } catch (e) {
-      return `Cancelled while collecting sudo password: ${e.message}`;
-    }
+  if (needsRoot && process.getuid && process.getuid() !== 0 && !sudoPassword) {
+    return { ok: false, status: 'error', message: 'Recipe needs sudo but no sudo password was supplied.' };
   }
 
-  // Snapshot any files touched by configWrites.
-  const snapshotFiles = ['config.json'];
+  // Register redactions so secrets get scrubbed from any LLM-bound tool output
+  // that happens to capture this subprocess's stdout/stderr.
+  for (const v of Object.values(credValues)) registerRedaction(v);
+  if (sudoPassword) registerRedaction(sudoPassword);
+
   const entryId = recordPending({
     userId,
     op: 'install_integration',
     args: { recipeName },
-    snapshotFiles,
+    snapshotFiles: ['config.json'],
     inverse: {
       kind: 'install_integration_revert',
       rollbackSteps: recipe.rollback,
@@ -319,13 +300,7 @@ async function handleInstallIntegration(args, userId) {
   });
 
   const outputs = [];
-
-  // Install-detected env vars available to every step as {{env.NAME}}:
-  //   OE_BASE_DIR — absolute path to the OE install
-  //   OE_NODE_BIN — node executable currently running
-  //   OE_USER     — process owner's username
-  //   OE_PORT     — HTTP port (3737)
-  //   OE_SUPERVISE — absolute path to bin/oe-supervise.mjs (for systemd recipes)
+  // Install-detected env vars available to every step as {{env.NAME}}.
   const envLookup = {
     OE_BASE_DIR: BASE_DIR,
     OE_NODE_BIN: process.execPath,
@@ -372,15 +347,16 @@ async function handleInstallIntegration(args, userId) {
     }
 
     if (failed) {
-      // Run rollback in reverse order, then mark entry rolled_back.
       for (const step of [...recipe.rollback].reverse()) {
         try { await runOne(step, 'rollback'); } catch {}
       }
       markRolledBack(entryId, 'step_failed');
-      return `Recipe "${recipeName}" failed and was rolled back (audit ${entryId}).\n\n${outputs.join('\n\n')}`;
+      return {
+        ok: false, status: 'rolled_back', entryId, outputs,
+        message: `Recipe "${recipeName}" failed and was rolled back (audit ${entryId}).`,
+      };
     }
 
-    // Apply configWrites via modifyConfig
     if (recipe.configWrites.length) {
       await modifyConfig(cfg => {
         for (const w of recipe.configWrites) {
@@ -395,21 +371,78 @@ async function handleInstallIntegration(args, userId) {
           cur[segs[segs.length - 1]] = w.value;
         }
       });
+      return {
+        ok: true, status: 'restart_required', entryId, outputs,
+        message: `Recipe "${recipeName}" completed (audit ${entryId}). Restart required to apply configWrites — call restart_server.`,
+      };
     }
 
-    if (!recipe.configWrites.length) {
-      // No restart needed — commit immediately.
-      markCommitted(entryId);
-      return `Recipe "${recipeName}" completed (audit ${entryId}). No restart needed.\n\n${outputs.join('\n\n')}`;
-    }
-    return `Recipe "${recipeName}" completed (audit ${entryId}). Restart required to apply configWrites — call restart_server.\n\n${outputs.join('\n\n')}`;
+    markCommitted(entryId);
+    return {
+      ok: true, status: 'committed', entryId, outputs,
+      message: `Recipe "${recipeName}" completed (audit ${entryId}). No restart needed.`,
+    };
   } finally {
     for (const v of Object.values(credValues)) unregisterRedaction(v);
-    if (sudoPassword) {
-      unregisterRedaction(sudoPassword);
-      sudoPassword = null;
+    if (sudoPassword) unregisterRedaction(sudoPassword);
+  }
+}
+
+// ── Tool: install_integration ────────────────────────────────────────────────
+// LLM wrapper — collects credentials via the in-chat credential-prompt widget,
+// then hands off to runRecipeWithCredentials.
+
+async function handleInstallIntegration(args, userId) {
+  const { recipeName } = args ?? {};
+  if (!recipeName) return 'recipeName is required.';
+  const p = recipeFilePath(recipeName);
+  if (!fs.existsSync(p)) return `Recipe "${recipeName}" not found.`;
+  let recipe;
+  try { recipe = validateRecipe(JSON.parse(fs.readFileSync(p, 'utf8'))); }
+  catch (e) { return `Recipe failed validation: ${e.message}`; }
+
+  // Collect credentials declared by the recipe.
+  const credValues = {};
+  for (const c of recipe.credentials) {
+    let credResult;
+    try {
+      credResult = await requestCredential({
+        userId,
+        label: c.label,
+        description: c.description,
+        kind: c.kind ?? 'api_key',
+        ttlMs: 300_000,
+      });
+    } catch (e) {
+      return `Cancelled while collecting "${c.label}": ${e.message}`;
+    }
+    const v = resolveCredentialValue(userId, credResult.id);
+    if (!v) return `Credential "${c.id}" was empty.`;
+    credValues[c.id] = v;
+  }
+
+  // If any step needs root, collect sudo password once (RAM only).
+  const needsRoot = recipe.steps.some(s => s.requiresRoot) || recipe.rollback.some(s => s.requiresRoot);
+  let sudoPassword = null;
+  if (needsRoot && process.getuid && process.getuid() !== 0) {
+    try {
+      const sudoResult = await requestCredential({
+        userId,
+        label: 'sudo password',
+        description: 'Used once for this recipe. Held in memory only — never persisted.',
+        kind: 'sudo',
+        ttlMs: 300_000,
+      });
+      sudoPassword = resolveCredentialValue(userId, sudoResult.id);
+      dropRamCredential(sudoResult.id);
+    } catch (e) {
+      return `Cancelled while collecting sudo password: ${e.message}`;
     }
   }
+
+  const result = await runRecipeWithCredentials(recipeName, userId, { credValues, sudoPassword });
+  const outputBlock = result.outputs?.length ? '\n\n' + result.outputs.join('\n\n') : '';
+  return `${result.message}${outputBlock}`;
 }
 
 // ── Tool: restart_server ─────────────────────────────────────────────────────

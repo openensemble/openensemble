@@ -51,6 +51,7 @@ import { handle as handleOpenAIOAuth }   from './routes/openai-oauth.mjs';
 import { handle as handleEmailAccounts } from './routes/email-accounts.mjs';
 import { handle as handleTelegram }      from './routes/telegram.mjs';
 import { handle as handleTunnel }        from './routes/tunnel.mjs';
+import { handle as handleIntegrations }  from './routes/integrations.mjs';
 import { startTunnelSupervisor, stopTunnelSupervisor } from './lib/tunnel.mjs';
 import { handle as handleMemory }        from './routes/memory.mjs';
 import { handle as handleReasonRuntime } from './routes/reason-runtime.mjs';
@@ -204,6 +205,7 @@ const routeHandlers = [
   handleMisc,
   handleTelegram,
   handleTunnel,
+  handleIntegrations,
   handleTutor,
   handleCoder,
   handleGuide,

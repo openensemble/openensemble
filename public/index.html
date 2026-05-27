@@ -1094,6 +1094,15 @@
             <div class="settings-section-desc" style="margin:8px 0 10px">Expose this install to the public internet so webhooks (Telegram), OAuth callbacks, and sharing links work without a static IP. Server-wide setting — owner/admin only.</div>
             <div id="publicAccessBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
           </details>
+
+          <details id="tailscaleAccessSection" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px;display:none">
+            <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px">
+              <i data-lucide="chevron-right" style="width:14px;height:14px;transition:transform .15s" class="details-chevron"></i>
+              <span class="settings-section-title" style="margin:0"><i data-lucide="share-2" style="width:14px;height:14px"></i> Private Mesh (Tailscale)</span>
+            </summary>
+            <div class="settings-section-desc" style="margin:8px 0 10px">Join this install to your tailnet for a stable private IP reachable from any device on your Tailscale network — no public port exposure. Server-wide setting — owner/admin only.</div>
+            <div id="tailscaleAccessBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
+          </details>
           <details class="settings-group" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
             <summary class="settings-group-summary">
               <i data-lucide="chevron-right" style="width:14px;height:14px;flex-shrink:0" class="details-chevron"></i>

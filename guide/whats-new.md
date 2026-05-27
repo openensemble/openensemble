@@ -8,6 +8,9 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-05-27
 
+**Tailscale integration in Settings**
+Settings → System → **Private Mesh (Tailscale)** is a new panel right beneath Public Access (Cloudflare Tunnel). Shows whether Tailscale is installed and running on this host, the assigned tailnet IP (with copy button), and your MagicDNS name. Two ways to set it up: paste a reusable auth key + sudo password directly in the panel for a one-click install, or click "Ask the coordinator instead" to drop into chat with the install request prefilled — same recipe runs either way, with the same audit log + one-click revert. Owner/admin only.
+
 **Rename voice devices live**
 Edit a device's name in Settings → Voice devices (click the name at the top of any device card) and press Enter — the new name is saved, pushed to the device, and the AirPlay picker label on iOS updates within ~5 seconds. No reboot needed, and an active music stream isn't interrupted by the rename.
 
