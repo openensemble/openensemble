@@ -133,6 +133,14 @@ function switchInboxTab(accountId) {
 }
 
 async function loadInboxPreview(accountId) {
+  // event-delegation.js appends the click Event as the last positional arg
+  // to every data-action handler. The back-button (`data-action="loadInboxPreview"`
+  // with no data-args) and the toolbar refresh button both fire with `event`
+  // as the only arg, which sailed past the `if (!accountId)` check below and
+  // hit /api/inbox with `accountId=[object PointerEvent]` → 500 from
+  // resolveAccount's "Account ${id} not found". Coerce to null when the
+  // caller didn't supply a real account id string.
+  if (typeof accountId !== 'string') accountId = null;
   // Load tabs if stale or empty
   if (!_inboxAccounts.length || Date.now() - _inboxAccountsLoadedAt > 300000) {
     await loadEmailAccountTabs();
