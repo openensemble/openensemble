@@ -10,6 +10,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { requireAuth, BASE_DIR } from './_helpers.mjs';
 
 const GUIDE_DIR = path.join(BASE_DIR, 'guide');
@@ -18,6 +19,17 @@ const INDEX_PATH = path.join(GUIDE_DIR, 'index.json');
 function loadIndex() {
   try { return JSON.parse(fs.readFileSync(INDEX_PATH, 'utf8')); }
   catch { return { sections: [] }; }
+}
+
+// Short content hash of whats-new.md so the client can show a "there's
+// something new" dot on the Guide button until the user opens it. SHA-1
+// truncated to 12 hex chars — collision risk is irrelevant here, we just
+// need any-change detection.
+function whatsNewVersion() {
+  try {
+    const body = fs.readFileSync(path.join(GUIDE_DIR, 'whats-new.md'), 'utf8');
+    return crypto.createHash('sha1').update(body).digest('hex').slice(0, 12);
+  } catch { return null; }
 }
 
 function listSlugs(idx) {
@@ -45,8 +57,10 @@ export async function handle(req, res) {
   const userId = requireAuth(req, res); if (!userId) return true;
 
   if (req.url === '/api/guide' || req.url === '/api/guide/') {
+    const idx = loadIndex();
+    idx.whatsNewVersion = whatsNewVersion();
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
-    res.end(JSON.stringify(loadIndex()));
+    res.end(JSON.stringify(idx));
     return true;
   }
 

@@ -2,10 +2,38 @@
 // Renders the bundled OpenEnsemble user guide from /api/guide.
 // Pages are markdown stored under guide/{slug}.md on the server.
 
-let _guideIndex      = null;            // { sections: [...] }
+let _guideIndex      = null;            // { sections: [...], whatsNewVersion?: string }
 let _guidePageCache  = new Map();       // slug -> { title, body, html }
 let _guideCurrent    = null;            // current slug
 let _guideSearchTerm = '';
+
+// Per-browser localStorage key recording the whatsNewVersion the user has
+// already seen. When it differs from the server's current version, the
+// sidebar Guide button shows a red dot until the user opens the What's new
+// page (or the drawer, since that page is the default landing slug).
+const _WHATS_NEW_SEEN_KEY = 'oe_whats_new_seen';
+
+function _setWhatsNewAlert(show) {
+  const dot = document.getElementById('sbtnGuideAlert');
+  if (dot) dot.style.display = show ? '' : 'none';
+}
+
+// Called once at app boot (from init.js, after auth). Loads /api/guide,
+// caches the result into _guideIndex so the drawer open doesn't refetch,
+// and shows the red dot if the user hasn't opened the current What's new.
+async function checkWhatsNewBadge() {
+  try {
+    const r = await fetch('/api/guide');
+    if (!r.ok) return;
+    const idx = await r.json();
+    if (!Array.isArray(idx?.sections)) return;
+    _guideIndex = idx;
+    const v = idx.whatsNewVersion;
+    if (!v) return;
+    const seen = localStorage.getItem(_WHATS_NEW_SEEN_KEY);
+    if (seen !== v) _setWhatsNewAlert(true);
+  } catch {}
+}
 
 async function openGuideDrawer() {
   if (!_guideIndex || !Array.isArray(_guideIndex.sections) || !_guideIndex.sections.length) {
@@ -84,6 +112,14 @@ function _renderGuideToc() {
 
 async function _loadGuidePage(slug) {
   _guideCurrent = slug;
+  // Opening What's new clears the red dot on the Guide button and stamps the
+  // user's localStorage so the dot doesn't reappear until the file changes
+  // again. The default-landing page in the drawer IS whats-new (first slug
+  // in the index), so simply opening the drawer also clears the dot.
+  if (slug === 'whats-new' && _guideIndex?.whatsNewVersion) {
+    try { localStorage.setItem(_WHATS_NEW_SEEN_KEY, _guideIndex.whatsNewVersion); } catch {}
+    _setWhatsNewAlert(false);
+  }
   _renderGuideToc();
   const pane = document.getElementById('guideContent');
   if (!pane) return;

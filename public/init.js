@@ -196,6 +196,10 @@ async function init() {
 
   connect();
 
+  // Fire-and-forget: light up the Guide button's "new" dot if whats-new.md
+  // changed since this browser last opened it. Cheap GET; no need to await.
+  if (typeof checkWhatsNewBadge === 'function') checkWhatsNewBadge();
+
   // Render Lucide icons for any data-lucide elements
   if (window.lucide) lucide.createIcons();
 }
