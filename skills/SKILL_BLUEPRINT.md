@@ -637,6 +637,48 @@ const res = await fetch('/api/usr_myskill/items', {
 
 ---
 
+## Iterating on a skill
+
+Skills are not write-once. After `skill_create`, you can edit a skill's code live with these tools (all hot-reload, no server restart):
+
+- `skill_read_code` — read the current `execute.mjs`. Always call this before patching so the `find` strings match exactly.
+- `skill_patch_code` — apply one or more find/replace edits. Prefer this for small changes (adding a sender, fixing a category mapping, tweaking a regex). The `find` string must appear exactly once — include surrounding context. If the patched file fails validation, the original is restored automatically.
+- `skill_update_code` — replace the entire `execute.mjs`. Use only for large or structural changes.
+
+### Design for iteration
+
+Skills that classify, match, or map real-world inputs (receipts, senders, merchants, categories, device aliases, URL patterns) almost always miss cases on day one and grow over time as the user reports them. Write them so a one-line patch is enough to extend coverage.
+
+**Do:** put the things the user will want to extend in named constants at the top of `execute.mjs`.
+
+```js
+const RECEIPT_SENDERS = [
+  'noreply@uber.com',
+  'receipts@doordash.com',
+  'auto-confirm@amazon.com',
+];
+
+const CATEGORY_MAP = {
+  uber:      'Transportation',
+  doordash:  'Food & Dining',
+  instacart: 'Groceries',
+};
+```
+
+**Don't:** bury those values inside regex literals or scattered `if` statements. Patching `if (from.includes('uber') || from.includes('lyft'))` to add a third sender is error-prone; patching a `RECEIPT_SENDERS` array is trivial.
+
+### The correction loop
+
+When the user reports a miss ("you skipped my Lyft receipt", "Ticketmaster should be Entertainment, not Shopping"):
+
+1. `skill_read_code` — locate the relevant constant.
+2. `skill_patch_code` — add the new entry. Include enough surrounding lines to make `find` unique.
+3. Confirm in plain language what you changed ("Added `tickets@ticketmaster.com` to `RECEIPT_SENDERS` and mapped `ticketmaster` → `Entertainment`.").
+
+This pattern compounds: over weeks the skill's lookup tables become a personalized record of how the user actually uses it, without ever rewriting the logic.
+
+---
+
 ## Common pitfalls
 
 1. **Tool name collisions** — always prefix tool names with the skill id. `turn_on` will collide; `ha_turn_on` won't.
