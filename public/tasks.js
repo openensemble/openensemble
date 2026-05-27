@@ -3,6 +3,7 @@ let tasks = [];
 let watchers = { active: [], recent: [] };
 let expandedTaskId = null;
 let expandedWatcherId = null;
+let nodeMonitorsExpanded = false;
 
 const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function _parseCronDow(spec) {
@@ -119,6 +120,11 @@ function toggleWatcherExpanded(id) {
   renderTasks();
 }
 
+function toggleNodeMonitors() {
+  nodeMonitorsExpanded = !nodeMonitorsExpanded;
+  renderTasks();
+}
+
 async function cancelWatcher(id) {
   if (!confirm('Stop monitoring this?')) return;
   await fetch(`/api/watchers/${id}`, { method: 'DELETE' });
@@ -227,9 +233,37 @@ function renderTasks() {
 
   const activeWatchers = watchers.active || [];
   const recentWatchers = watchers.recent || [];
-  const watchersHtml = activeWatchers.length
-    ? activeWatchers.map(renderWatcherRow).join('')
-    : '<em style="color:var(--muted);font-size:13px">No active monitors.</em>';
+
+  // Per-node profile_health watchers (one per attached node) crowd out
+  // everything else when more than a few nodes are paired. Group them under
+  // a single collapsible header so the section reads as "node health: 5
+  // nodes" instead of five separate rows competing with real monitors.
+  const nodeWatchers = activeWatchers.filter(w => w.kind === 'profile_health');
+  const otherWatchers = activeWatchers.filter(w => w.kind !== 'profile_health');
+
+  let watchersHtml = '';
+  if (nodeWatchers.length) {
+    const expandToggle = nodeMonitorsExpanded ? '▾' : '▸';
+    const headerLabel = `🖥️ Node health · ${nodeWatchers.length} node${nodeWatchers.length === 1 ? '' : 's'}`;
+    const headerMeta = nodeWatchers
+      .map(w => w.lastStatusText)
+      .filter(Boolean)
+      .slice(0, 1)[0] || 'monitoring';
+    watchersHtml += `
+      <div class="task-item${nodeMonitorsExpanded ? ' task-item-open' : ''}">
+        <div class="task-item-info" data-action="toggleNodeMonitors" title="Click to expand node monitors" style="cursor:pointer">
+          <div class="task-item-label">${expandToggle} ${headerLabel}</div>
+          <div class="task-item-meta" style="font-style:italic">${escHtml(headerMeta)}</div>
+        </div>
+      </div>`;
+    if (nodeMonitorsExpanded) {
+      watchersHtml += `<div style="padding-left:18px;border-left:2px solid var(--border, #e5e5e5);margin-left:6px">${nodeWatchers.map(renderWatcherRow).join('')}</div>`;
+    }
+  }
+  watchersHtml += otherWatchers.map(renderWatcherRow).join('');
+  if (!watchersHtml) {
+    watchersHtml = '<em style="color:var(--muted);font-size:13px">No active monitors.</em>';
+  }
 
   const recentHtml = recentWatchers.length
     ? recentWatchers.slice(0, 5).map(w => {

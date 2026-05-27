@@ -8,6 +8,9 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-05-27
 
+**Active monitors: node health collapsed into one row**
+If you have several nodes paired, each one was registering its own row in Active monitors and burying the rest of your watchers. They now collapse under a single "🖥️ Node health · N nodes" row at the top of the section. Click it to expand and see / cancel / extend individual nodes; all the per-node controls still work exactly as before, just behind one click instead of crowding the list.
+
 **AirPlay pause/resume reliability (firmware 0.2.15-airplay)**
 Pausing an AirPlay stream from iOS — Control Center, lock screen, or just stopping inside Apple Music — and then hitting play used to produce a few seconds of robotic / clipped audio before things stabilized, especially after pauses longer than half a minute. Renaming a voice device during playback could also drop the stream and bring it back glitchy. Both are fixed: the receiver now re-handshakes timing with iOS on every pause and the audio resampler resets its phase state at the right moment, so resume sounds clean from the first sample. A rename mid-stream no longer races two decoders against each other. Devices on 0.2.13-airplay will auto-OTA to 0.2.15-airplay on their next chat round-trip (or reboot to force the pull).
 
