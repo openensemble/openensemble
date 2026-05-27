@@ -688,6 +688,13 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'not found' }));
       return true;
     }
+    // If the user renamed the device, push the new name to the firmware so
+    // it persists to NVS + live-refreshes the AirPlay mDNS instance label.
+    // Fire-and-forget — offline devices won't see the rename until they
+    // come back AND someone renames again (no on-reconnect re-sync yet).
+    if (typeof body?.name === 'string' && body.name.trim()) {
+      try { sendToDevice(updated.id, { type: 'set_device_name', name: updated.name }); } catch {}
+    }
     // Per-device PATCH no longer mutates slot routing — slot_assignments
     // is per-user (voice-config) since 2026-05-13. push is always empty
     // here; the voice-config PUT handler is where wake-word OTA fires.

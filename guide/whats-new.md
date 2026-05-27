@@ -6,6 +6,19 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-05-27
+
+**Rename voice devices live**
+Edit a device's name in Settings → Voice devices (click the name at the top of any device card) and press Enter — the new name is saved, pushed to the device, and the AirPlay picker label on iOS updates within ~5 seconds. No reboot needed, and an active music stream isn't interrupted by the rename.
+
+**Voice devices are now AirPlay receivers**
+Paired voice devices (XVF3800 + ESP32-S3 with firmware 0.2.13-airplay or later) show up in your iOS Control Center → AirPlay picker as the device name you set in Settings → Voice devices. Cast Apple Music, Spotify, YouTube Music, or any iOS system audio to one and it plays through the speaker — at full 44.1 kHz CD quality via Apple's ALAC codec. Saying your wake word during music pauses playback for the conversation and resumes after the reply. Music keeps playing through brief network blips because the device buffers ~9 seconds of audio in PSRAM. Devices need to be on the same Wi-Fi network as the iOS device. After updating, reboot the voice device so the new firmware loads — paired devices will auto-OTA on their next chat round-trip.
+
+**Inbox drawer: back button now returns to the email list**
+After opening an email in the Inbox drawer, clicking the **←** back button would show "Failed: internal error" instead of returning to the message list — clicking the account tab refreshed it. Affected all providers (Gmail, Microsoft, IMAP) though Microsoft and IMAP users hit it most. The refresh **↻** button in the same toolbar had the same defect. Both now work as expected.
+
+---
+
 ## 2026-05-26
 
 **CRITICAL fix: bulk user-save no longer wipes the master-key file**
