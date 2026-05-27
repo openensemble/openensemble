@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.15-airplay",
+  "version": "0.2.16-airplay",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

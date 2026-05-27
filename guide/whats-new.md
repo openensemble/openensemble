@@ -8,6 +8,9 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-05-27
 
+**AirPlay volume slider now controls the voice device (firmware 0.2.16-airplay)**
+Adjusting the volume from iOS Control Center / lock screen / Apple Music while AirPlaying to a voice device now changes the device's actual playback volume in real time. Previously the slider moved on screen but the device kept playing at its own volume. The new value applies for the rest of the AirPlay session only — when iOS disconnects, the device returns to whatever volume it was at before (or whatever you last set via voice command), so leaving an AirPlay session at very low volume won't leave the device effectively muted next time. Devices on 0.2.15-airplay will auto-OTA on their next chat round-trip.
+
 **Active monitors: node health collapsed into one row**
 If you have several nodes paired, each one was registering its own row in Active monitors and burying the rest of your watchers. They now collapse under a single "🖥️ Node health · N nodes" row at the top of the section. Click it to expand and see / cancel / extend individual nodes; all the per-node controls still work exactly as before, just behind one click instead of crowding the list.
 
