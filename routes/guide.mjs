@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Guide routes:
  *   GET /api/guide              — table of contents (sections + pages)
