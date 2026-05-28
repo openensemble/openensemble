@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.20-airplay",
+  "version": "0.2.27-paused-for-wake",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

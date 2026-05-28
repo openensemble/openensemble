@@ -6,6 +6,22 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-05-28
+
+**Voice control of AirPlay sessions (firmware 0.2.24 – 0.2.27)**
+While AirPlaying music to a voice device, you can now say "hey [coordinator] skip" / "next song" to advance, "back" / "previous" to go back a track, "pause" / "play" / "resume" to pause and resume, and "stop" to end the session. The device sends control commands back to the iPhone / iPad / Mac that's streaming, so the music app reflects the new state (paused, advanced track, etc.) within a fraction of a second. Resume sends both `playresume` and `play` so it works regardless of iOS version. Voice control works in headphone mode too — the wake word fires during music playback, the LED responds immediately, and audio resumes cleanly on play.
+
+**Headphone mode for voice devices (firmware 0.2.21-headphone)**
+A new per-device "headphone mode" setting that, when on, keeps the speaker amplifier disabled and routes audio out through the 3.5 mm jack only. This lets the wake word stay sensitive while music plays — the device's normal wake-during-music suppression is a side effect of the amplifier being on, so muting the internal speaker preserves wake-word detection on headphone listening. Toggle by saying "headphones on" / "headphones off" to a voice device, or via PATCH `/api/devices/<id>` with `{"headphone_mode": true|false}`. Persisted across reboot. Internal-speaker case is unchanged.
+
+**Wake word fires faster during music playback (firmware 0.2.22-cutoff)**
+When the device is actively playing audio (TTS, AirPlay, ambient), per-frame wake probability builds slower because the I²S audio bus is busy. The device now temporarily lowers the wake-word probability cutoff while playback is active and snaps it back the moment playback ends — restoring first-try wake during music without affecting idle-room sensitivity or false-positive characteristics.
+
+**LED responds the instant the wake word fires (firmware 0.2.23-led-first)**
+Before, the LED ring switched to LISTENING only after the device finished its barge-in cleanup (pausing AirPlay, flushing audio buffers, sending the WebSocket stop signal). That cleanup includes a network write that can stall 50–500 ms depending on connection state, so the LED visibly lagged the wake. The visual ack now fires first; cleanup happens after, off-screen.
+
+---
+
 ## 2026-05-27
 
 **AirPlay no longer goes silent after a wake-word conversation (firmware 0.2.20-airplay)**

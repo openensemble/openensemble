@@ -695,6 +695,9 @@ export async function handle(req, res) {
     if (typeof body?.name === 'string' && body.name.trim()) {
       try { sendToDevice(updated.id, { type: 'set_device_name', name: updated.name }); } catch {}
     }
+    if (typeof body?.headphone_mode === 'boolean') {
+      try { sendToDevice(updated.id, { type: 'set_headphone_mode', enabled: !!body.headphone_mode }); } catch {}
+    }
     // Per-device PATCH no longer mutates slot routing — slot_assignments
     // is per-user (voice-config) since 2026-05-13. push is always empty
     // here; the voice-config PUT handler is where wake-word OTA fires.

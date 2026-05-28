@@ -29,6 +29,7 @@ import {
   resolveTimerDisambig,
 } from '../lib/voice-timer.mjs';
 import { sendToDevice } from '../ws-handler.mjs';
+import { updateDevice } from '../lib/voice-devices.mjs';
 import { broadcastAlarmStop, hasActiveAlarms } from '../lib/alarms.mjs';
 import { stopAmbientOnDevice } from '../lib/ambient-playback.mjs';
 import {
@@ -73,8 +74,30 @@ function classifyVoiceIntent(text) {
   if (/^(mute|be\s+quiet)\b/.test(t))     return { type: 'mute' };
   if (/^unmute\b/.test(t))                return { type: 'unmute' };
 
+  if (/^(headphones?|headphone\s*mode)\s+(on|enable[d]?)\b/.test(t)) return { type: 'headphone_on' };
+  if (/^(headphones?|headphone\s*mode)\s+(off|disable[d]?)\b/.test(t)) return { type: 'headphone_off' };
+
+  // AirPlay track control. Sent unconditionally — the device-side wrappers
+  // no-op when no AirPlay session is streaming, so we don't need to track
+  // playback state server-side. Match the keyword *anywhere* in a short
+  // utterance so STT prefixes ("uh skip", "go to the next song", "play the
+  // previous track") still hit the fast-path instead of falling through to
+  // the LLM. The 6-word ceiling keeps unrelated long sentences from being
+  // mis-routed (e.g. "I'll do that next time you ask").
+  const wordCount = t.split(/\s+/).length;
+  if (wordCount <= 6) {
+    if (/\b(skip|fast\s*forward)\b/.test(t)) return { type: 'airplay_next' };
+    if (/\bnext\s+(song|track|one)\b/.test(t)) return { type: 'airplay_next' };
+    if (/^next\.?$/.test(t)) return { type: 'airplay_next' };
+    if (/\bprevious(\s+(song|track|one))?\b/.test(t)) return { type: 'airplay_prev' };
+    if (/\b(go\s+back|back\s+(one|song|track))\b/.test(t)) return { type: 'airplay_prev' };
+    if (/^(back|rewind)\.?$/.test(t)) return { type: 'airplay_prev' };
+    if (/\bpause\s+(it|this|the\s+(song|music|track))\b/.test(t)) return { type: 'pause' };
+    if (/\b(resume|unpause|keep\s+playing)\b/.test(t)) return { type: 'resume' };
+  }
+
   if (/^pause\b/.test(t))                 return { type: 'pause' };
-  if (/^(resume|continue|unpause)\b/.test(t)) return { type: 'resume' };
+  if (/^(resume|continue|unpause|play)\b/.test(t)) return { type: 'resume' };
 
   // Stop / cancel — barge-in firmware has already killed local audio; we
   // mark this `replaces` so the chat pipeline doesn't generate a reply.
@@ -113,6 +136,14 @@ function executeVoiceIntent(intent, deviceId, userId) {
       // could track pre-mute volume per device.
       sendToDevice(deviceId, { type: 'set_volume', pct: 80 });
       return { replaces: true };
+    case 'headphone_on':
+      sendToDevice(deviceId, { type: 'set_headphone_mode', enabled: true });
+      if (userId) updateDevice(userId, deviceId, { headphone_mode: true });
+      return { replaces: true };
+    case 'headphone_off':
+      sendToDevice(deviceId, { type: 'set_headphone_mode', enabled: false });
+      if (userId) updateDevice(userId, deviceId, { headphone_mode: false });
+      return { replaces: true };
     case 'pause':
       sendToDevice(deviceId, { type: 'pause_playback' });
       return { replaces: true };
@@ -136,6 +167,16 @@ function executeVoiceIntent(intent, deviceId, userId) {
       // a typed/UI "stop" goes through here without that signal — so we
       // mirror it server-side.
       if (deviceId) stopAmbientOnDevice(deviceId);
+      // Stop any AirPlay session. The device's airplay_stop is a no-op when
+      // nothing is streaming, so sending unconditionally is safe and avoids
+      // tracking session state server-side.
+      if (deviceId) sendToDevice(deviceId, { type: 'airplay_stop' });
+      return { replaces: true };
+    case 'airplay_next':
+      sendToDevice(deviceId, { type: 'airplay_next' });
+      return { replaces: true };
+    case 'airplay_prev':
+      sendToDevice(deviceId, { type: 'airplay_prev' });
       return { replaces: true };
   }
   return { replaces: false };
