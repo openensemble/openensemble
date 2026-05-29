@@ -115,15 +115,15 @@ export function getAgentsForUser(userId) {
     const roleSkillId = assigned.find(id => getRoleManifest(id, userId)?.service) ?? assigned[0];
     return roleSkillId ?? a.skillCategory ?? TOOL_SETS_COMPAT[a.toolSet ?? 'web'];
   };
+  // Compact format: `<id>=<name>(<role>)`. Cut from "'agent_x' (Name 📬) handles:
+  // Email (All Accounts) — Unified email access across Gmail, Microsoft/Exchange,
+  // and IMAP accounts." down to "agent_x=Name(email)". The LLM can call list_roles
+  // to get the verbose role descriptions when actually choosing a specialist.
   const delegateAgentDesc = visibleBase
     .map(a => ({ a, cat: effectiveSkillCategory(a) }))
     .filter(({ cat }) => cat && cat !== 'general' && cat !== 'web' && cat !== 'coordinator')
-    .map(({ a, cat }) => {
-      const m = getRoleManifest(cat, userId);
-      const roleLabel = m ? `${m.name}${m.description ? ` — ${m.description}` : ''}` : cat;
-      return `'${a.id}' (${a.name}${a.emoji ? ' ' + a.emoji : ''}) handles: ${roleLabel}`;
-    })
-    .join(' | ') || 'none configured';
+    .map(({ a, cat }) => `${a.id}=${a.name}(${cat})`)
+    .join(', ') || 'none configured';
 
   const skillAssignments = getRoleAssignments(userId);
   const toolOwnerIndex = buildToolOwnerIndex(userId);

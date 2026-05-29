@@ -86,14 +86,17 @@ describe('trimToolsForTurn', () => {
     const agent = buildAgent(ALL_TOOLS);
     const r = await trimToolsForTurn({ agent, userText: 'hi there', userId: 'u1' });
     const names = r.trimmedTools.map(t => t.function.name).sort();
-    // Always-on built-in + my_custom_tool (default-scope). kroger_check_deals
-    // is custom + coordinator_scope='auto', so it's NOT in the always-on set
-    // and the classifier missed it on this prompt.
+    // Always-on built-in (coordinator + self-mgmt + web) + my_custom_tool
+    // (default-scope). `tasks` is now on-demand, so list_tasks/set_reminder
+    // are NOT in this set unless the classifier matches. kroger_check_deals
+    // is custom + coordinator_scope='auto', also classifier-gated.
     expect(names).toEqual([
-      'ask_agent', 'create_agent', 'list_tasks',
+      'ask_agent', 'create_agent',
       'my_custom_tool', 'remember_fact', 'request_tools',
-      'set_reminder', 'web_search',
+      'web_search',
     ]);
+    expect(names).not.toContain('list_tasks');
+    expect(names).not.toContain('set_reminder');
     expect(names).not.toContain('email_list');
     expect(names).not.toContain('ha_call_service');
     expect(names).not.toContain('install_integration');

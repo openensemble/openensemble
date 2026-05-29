@@ -1,4 +1,38 @@
+// Platform-knowledge FAQ, returned only when the LLM calls
+// `oe_describe_platform`. Pulled out of the coordinator SPA so it doesn't
+// ship on every turn — most turns don't need this content. Keep it factual
+// and stable; refresh when the platform's capabilities change shape.
+const PLATFORM_KNOWLEDGE = `# OpenEnsemble platform
+
+OpenEnsemble is a self-hosted multi-user AI assistant platform.
+
+## Avatars
+- Supported formats: JPEG, PNG, WebP, GIF
+- Max upload size: 2 MB
+- Output dimensions: 512 × 512 px (square, auto-cropped)
+- Fallback: built-in emoji avatars
+
+## Users & accounts
+- Multi-user: each user has their own account, settings, and agent sessions
+- Child accounts with per-account safety settings
+- Invite links for onboarding new users
+- Per-user email connections (e.g. Gmail via OAuth)
+
+## Agents & roles
+- Agents are configured per-user; roles add tools and context to specific agents
+- Roles are assigned to specific agents in platform config
+- Each agent-user session is stored as a separate conversation history
+
+## Configuration
+- All user-facing config is done via chat or the UI — no manual file editing required for end users
+`;
+
 export default async function* execute(name, args, userId, agentId) {
+  if (name === 'oe_describe_platform') {
+    yield { type: 'result', text: PLATFORM_KNOWLEDGE };
+    return;
+  }
+
   if (name === 'request_tools') {
     const { getToolRouterContext } = await import('../../lib/tool-router-context.mjs');
     const { expandToolsByReason } = await import('../../lib/tool-router.mjs');
