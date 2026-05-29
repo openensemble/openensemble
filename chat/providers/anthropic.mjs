@@ -53,13 +53,18 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
 
   // Anthropic wants system as top-level field, messages must be user/assistant only
   const working = messages.filter(m => m.role !== 'system');
-  const anthropicTools = agent.tools?.length ? toAnthropicTools(agent.tools) : undefined;
 
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
 
   while (guard.tick()) {
+    // Re-read tools per iteration so dynamic toolset mutations (request_tools
+    // meta-tool expanding the coordinator's surface mid-turn) take effect on
+    // the next provider call. The system message keeps its ephemeral
+    // cache_control breakpoint, so the bulk of the input still cache-hits;
+    // only the tools portion takes a partial miss when expanded.
+    const anthropicTools = agent.tools?.length ? toAnthropicTools(agent.tools) : undefined;
     const body = {
       model:      agent.model,
       max_tokens: agent.maxTokens ?? 8192,

@@ -24,6 +24,9 @@ import { trackFriction } from './memory/signals.mjs';
 import { loadSession, appendToSession, loadCrossAgentContext } from './sessions.mjs';
 import { getUserFilesDir } from './lib/paths.mjs';
 import { log } from './logger.mjs';
+import { trimToolsForTurn, recordTurnRouting } from './lib/tool-router.mjs';
+import { toolRouterContext } from './lib/tool-router-context.mjs';
+import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 
 import {
   OPENAI_COMPAT_PROVIDERS, FIREWORKS_BASE,
@@ -252,6 +255,41 @@ async function* consumeProvider(providerGen) {
 
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null) {
+  // Per-turn tool routing: trim the coordinator's outbound tool list to the
+  // always-on subset + on-demand skills whose intent_examples match this
+  // user message. Other agents (specialists) are already tightly scoped and
+  // skip the trim. The full pre-trim list is stashed on toolRouterContext so
+  // the request_tools meta-tool can pull additional tools mid-turn when the
+  // classifier missed. enterWith sets the AsyncLocalStorage for THIS async
+  // context (and downstream awaits / tool dispatches), so the executor in
+  // skills/coordinator/execute.mjs can reach it without us threading agent
+  // refs through every provider's tool-loop call site.
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, addedSkills: Set<string>} | null} */
+  let _routerStore = null;
+  if (agent.skillCategory === 'coordinator' && Array.isArray(agent.tools) && agent.tools.length > 0) {
+    try {
+      const trim = await trimToolsForTurn({ agent, userText, userId });
+      agent.tools = trim.trimmedTools;
+      _routerStore = {
+        agent, fullTools: trim.fullTools,
+        initiallyIncludedSkills: trim.initiallyIncludedSkills,
+        addedSkills: new Set(),
+      };
+      toolRouterContext.enterWith(_routerStore);
+      // Recompose the SPA portion of the system prompt against the trimmed
+      // tool set. Without this, SPAs for skills whose tools just got dropped
+      // (e.g. the ~10 KB profiles SPA) keep shipping. The "shell" was
+      // stashed on the agent record in agent-resolver with %%SKILL_SPAS%%
+      // marking where the SPAs live.
+      if (agent._systemPromptShell && agent._composerInputs) {
+        const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
+        agent.systemPrompt = agent._systemPromptShell.replace('%%SKILL_SPAS%%', newSpa);
+      }
+      log.info('chat', 'tool-router trim', { userId, agentId: agent.id, kept: trim.trimmedTools.length, full: trim.fullTools.length, notes: trim.routerNotes, spChars: agent.systemPrompt.length });
+    } catch (e) {
+      console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message);
+    }
+  }
   // Flush any deferred skill-proposal candidate from the prior turn. The
   // proposer stashes after qualifying multi-tool turns and only emits on the
   // next turn — so we can drop the candidate if the user's current message
@@ -742,6 +780,16 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     return;
   }
   log.info('chat', 'llm turn complete', _llmMeta);
+  if (_routerStore) {
+    // Telemetry: fire-and-forget, feeds the future learning loop that uses
+    // prior {prompt → skill} pairs as extra intent examples. Never blocks.
+    recordTurnRouting({
+      userId, userText,
+      initiallyIncludedSkills: _routerStore.initiallyIncludedSkills,
+      addedSkills: _routerStore.addedSkills,
+      usedToolNames: toolsUsed.map(t => t.name),
+    }).catch(() => {});
+  }
   if (assistantContent) {
     if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, voiceCtx });
     yield { type: '__content', content: assistantContent };

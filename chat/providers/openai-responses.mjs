@@ -117,13 +117,17 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   }
 
   const working = [...messages];
-  const responsesTools = agent.tools?.length ? toResponsesTools(agent.tools) : undefined;
 
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
 
   while (guard.tick()) {
+    // Re-read tools per iteration so dynamic toolset mutations (e.g. the
+    // request_tools meta-tool expanding the coordinator's surface mid-turn)
+    // take effect on the very next provider call. Cost: one O(tools) map
+    // per iteration — negligible vs the API roundtrip.
+    const responsesTools = agent.tools?.length ? toResponsesTools(agent.tools) : undefined;
     const body = {
       model:        agent.model,
       instructions: systemPrompt,

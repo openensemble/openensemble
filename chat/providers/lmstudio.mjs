@@ -141,13 +141,14 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     ...history,
     { role: 'user', content: userText },
   ];
-  const lmTools = compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }));
-
   let assistantContent = '';
   let totalCompatTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
 
   while (guard.tick()) {
+    // Re-read tools per iteration so dynamic toolset mutations
+    // (request_tools meta-tool) take effect on the next provider call.
+    const lmTools = compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }));
     // Force tool use on the first call so models like GLM don't skip tools and answer from history.
     // Subsequent iterations (after a tool result) use 'auto' to allow a free-text final response.
     const toolChoice = guard.count === 1 ? 'required' : 'auto';

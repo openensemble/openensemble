@@ -22,15 +22,17 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     { role: 'system', content: systemPrompt },
     ...messages,
   ];
-  const orTools = agent.tools?.length
-    ? compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }))
-    : undefined;
 
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
 
   while (guard.tick()) {
+    // Re-read tools per iteration so dynamic toolset mutations
+    // (request_tools meta-tool) take effect on the next provider call.
+    const orTools = agent.tools?.length
+      ? compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }))
+      : undefined;
     const body = {
       model:    agent.model,
       messages: working,

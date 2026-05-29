@@ -57,6 +57,14 @@ The validator accepts either a 4-param or 5-param signature. Anything else is re
   "description": "One-sentence description of what this skill does",
   "icon": "🔧",
   "category": "utility",
+  "intent_examples": [
+    "find snack deals at kroger",
+    "what's on sale at kroger this week",
+    "check kroger weekly ad",
+    "are eggs on sale at kroger",
+    "kroger digital coupons today"
+  ],
+  "coordinator_scope": "auto",
   "tools": [
     {
       "type": "function",
@@ -83,6 +91,16 @@ The validator accepts either a 4-param or 5-param signature. Anything else is re
 - `id` must match the directory name
 - Tool names must be **globally unique** — always prefix them with the skill id (e.g. `ha_turn_on`, not `turn_on`)
 - `category` should be `"utility"` for user-created skills
+
+### intent_examples + coordinator_scope (tool-router)
+
+The coordinator's per-turn tool list is trimmed by an embedding classifier — only skills whose `intent_examples` match the user's prompt get loaded as tools that turn. Without examples your skill's tools are reachable only after the LLM explicitly calls `request_tools`, which costs one extra round-trip.
+
+- **`intent_examples`** — 6 to 15 short natural-language phrases the user might say when they want this skill. Write them the way real users phrase requests, varied in surface form. Don't include the skill's name in the phrase — match the user's GOAL ("are eggs on sale", not "use the kroger skill").
+- **`coordinator_scope`**:
+  - `"include"` (default) — always available to the coordinator (current behavior for skills authored before scoping existed)
+  - `"auto"` — only loaded when intent matches (preferred for most user skills — keeps the coordinator's prompt small on unrelated turns)
+  - `"exclude"` — never available to the coordinator. Use for heavyweight skills that belong on a specialist agent (GPU-pod managers, finance ingestion, batch ML training). The skill stays usable on other agents via direct chat or `ask_agent`.
 
 ---
 

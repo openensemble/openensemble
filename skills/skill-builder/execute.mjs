@@ -174,7 +174,7 @@ function handleReadBlueprint() {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -228,6 +228,20 @@ async function handleCreate(args, userId) {
       description: String(w.description || '').trim(),
     })).filter(w => w.kind);
   }
+  // Per-turn tool router fields. intent_examples drives the embed classifier
+  // decision "does this user prompt look like a request for this skill"; when
+  // present, the tool-router can include the skill's tools on a matched turn
+  // without the LLM having to call request_tools. coordinator_scope controls
+  // whether the skill flows to coordinator-class agents at all.
+  if (Array.isArray(intent_examples) && intent_examples.length) {
+    const cleaned = intent_examples
+      .map(s => typeof s === 'string' ? s.trim() : '')
+      .filter(s => s.length > 0 && s.length < 200);
+    if (cleaned.length) manifest.intent_examples = cleaned;
+  }
+  if (coordinator_scope === 'exclude' || coordinator_scope === 'auto' || coordinator_scope === 'include') {
+    manifest.coordinator_scope = coordinator_scope;
+  }
 
   mkdirSync(skillDir, { recursive: true });
   writeFileSync(path.join(skillDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
@@ -274,7 +288,18 @@ async function handleCreate(args, userId) {
     });
   } catch (e) { console.debug('[skill-builder] log append (create) failed:', e.message); }
 
-  return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}. The skill persists across server restarts.${drawerNote}`;
+  // If the new skill declared intent_examples, rebuild the embed-router's
+  // index so the classifier picks up its phrases on the next chat turn
+  // without waiting for a server restart.
+  if (manifest.intent_examples?.length) {
+    try {
+      const { invalidateIntentEmbeddings, loadIntentEmbeddings } = await import('../../lib/specialist-embed-router.mjs');
+      invalidateIntentEmbeddings();
+      loadIntentEmbeddings().catch(e => console.warn('[skill-builder] reload intent embeddings failed:', e.message));
+    } catch (e) { console.warn('[skill-builder] intent embedding refresh failed:', e.message); }
+  }
+
+  return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}.${manifest.intent_examples?.length ? ` Tool-router classifier picked up ${manifest.intent_examples.length} intent example(s).` : ''} The skill persists across server restarts.${drawerNote}`;
 }
 
 async function handleUpdateCode(args, userId) {
@@ -486,6 +511,16 @@ async function handleDelete(args, userId) {
     user.skills = (user.skills ?? []).filter(s => s !== skillId);
     if (user.skillAssignments) delete user.skillAssignments[skillId];
   });
+
+  // Rebuild the embed-router intent index so the deleted skill's example
+  // phrases stop scoring against future prompts.
+  if (manifest.intent_examples?.length) {
+    try {
+      const { invalidateIntentEmbeddings, loadIntentEmbeddings } = await import('../../lib/specialist-embed-router.mjs');
+      invalidateIntentEmbeddings();
+      loadIntentEmbeddings().catch(e => console.warn('[skill-builder] reload intent embeddings failed:', e.message));
+    } catch (e) { console.warn('[skill-builder] intent embedding refresh failed:', e.message); }
+  }
 
   return `Skill "${manifest.name}" (${skillId}) deleted and unloaded.`;
 }

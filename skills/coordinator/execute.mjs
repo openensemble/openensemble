@@ -1,4 +1,39 @@
 export default async function* execute(name, args, userId, agentId) {
+  if (name === 'request_tools') {
+    const { getToolRouterContext } = await import('../../lib/tool-router-context.mjs');
+    const { expandToolsByReason } = await import('../../lib/tool-router.mjs');
+    const ctx = getToolRouterContext();
+    if (!ctx) {
+      // Not in a coordinator turn — this tool is a no-op outside that context.
+      yield { type: 'result', text: 'request_tools is only available during a coordinator turn.' };
+      return;
+    }
+    const reason = typeof args?.reason === 'string' ? args.reason : null;
+    const groups = Array.isArray(args?.groups) ? args.groups : null;
+    if (!reason && !groups) {
+      yield { type: 'result', text: 'Pass either a `reason` (free text) or `groups` (array of skill IDs).' };
+      return;
+    }
+    const r = await expandToolsByReason({
+      agent: ctx.agent, fullTools: ctx.fullTools,
+      reason, groups, userId,
+      alreadyIncludedSkills: ctx.initiallyIncludedSkills,
+    });
+    for (const s of r.addedSkills) ctx.addedSkills.add(s);
+    if (!r.addedToolNames.length) {
+      yield { type: 'result', text: `No additional tools matched (reason: "${reason ?? '?'}", groups: ${JSON.stringify(groups ?? [])}). If you need a role-gated capability, use ask_agent to delegate instead.` };
+      return;
+    }
+    // NOTE: the expanded skills' SPAs do NOT get added back into the system
+    // prompt this turn — providers read systemPrompt once per turn (as a
+    // function param, not from agent.systemPrompt). The LLM works from the
+    // tool descriptions only for newly-added tools, which is usually enough.
+    // If we observe quality issues for specific skills, future work could
+    // thread a mutable currentSystemPrompt ref through the providers.
+    yield { type: 'result', text: `Added ${r.addedToolNames.length} tool(s) from ${r.addedSkills.join(', ')}: ${r.addedToolNames.join(', ')}. These are now available — call them directly.` };
+    return;
+  }
+
   if (name === 'create_agent') {
     const agentName = args.name?.trim();
     if (!agentName) { yield { type: 'result', text: 'name is required.' }; return; }

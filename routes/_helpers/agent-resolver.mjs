@@ -19,6 +19,7 @@ import {
 } from '../../roles.mjs';
 import { getUser, modifyUser } from '../_helpers.mjs';
 import { getLanAddress } from '../../discovery.mjs';
+import { composeSkillSpaBlock } from '../../lib/skill-prompt-composer.mjs';
 
 const TOOL_SETS_COMPAT = {
   web: 'general', general: 'general', gmail: 'email', email: 'email', none: 'none',
@@ -147,10 +148,16 @@ export function getAgentsForUser(userId) {
       const allowed = new Set(toolIds);
       // The user's own custom skills always bypass the allowlist — they asked for them
       // explicitly via skill-builder. Scoped to listRoles(userId) so other users'
-      // custom skills are never considered here.
+      // custom skills are never considered here. Exception: a custom skill can
+      // opt out of being shared with the coordinator by setting
+      // `coordinator_scope: "exclude"` in its manifest — useful for heavyweight
+      // skills (runpod, thunder-compute) that belong on a specialist agent
+      // (image_generator, role_video_generator) but pollute the coordinator's
+      // surface. The skill stays available to other agents normally.
+      const isCoordinatorAgent = skillCategory === 'coordinator';
       const userSkillTools = new Set(
         listRoles(userId)
-          .filter(m => m.custom === true)
+          .filter(m => m.custom === true && !(isCoordinatorAgent && m.coordinator_scope === 'exclude'))
           .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
           .filter(Boolean)
       );
@@ -160,73 +167,23 @@ export function getAgentsForUser(userId) {
       });
     }
 
-    // Tool-presence SPA injection. Walk the resolved tool set, collect every
-    // skill that contributed at least one tool, then append each of those
-    // skills' systemPromptAddition (plus any user-added rules.md).
-    // Deterministic order: iterate listRoles(userId) ordering, not Set
-    // insertion order, so prompts are stable across runs.
-    const activeSkillIds = new Set();
-    for (const t of tools) {
-      const skillId = toolOwnerIndex[t.function?.name];
-      if (skillId) activeSkillIds.add(skillId);
-    }
-    const orderedSkillIds = listRoles(userId).map(m => m.id).filter(id => activeSkillIds.has(id));
+    // Tool-presence SPA injection lives in lib/skill-prompt-composer.mjs so
+    // chat.mjs can re-compose after per-turn tool trimming. See module
+    // docstring for why: without the post-trim recompose, big SPAs (notably
+    // profiles' ~10 KB) stay in the prompt even when their tools are dropped.
     const agentName = withOverrides.name ?? a.name;
     const agentEmoji = withOverrides.emoji ?? a.emoji ?? '';
     const serverIp = getLanAddress();
-    // Per-user email send-without-confirm flag swaps the email skill's
-    // compose-flow text. Default behavior (flag off) keeps the
-    // "draft → confirmation → send" gate that protects users from
-    // model-initiated sends. When the user has explicitly opted in, the
-    // gate becomes "send directly when {{USER_NAME}} explicitly asks you
-    // to send" — which is the only way to make ephemeral ask_agent
-    // delegations actually email anything (the gate-on flow needs two
-    // turns; ephemeral sessions only get one).
     const emailNoConfirm = currentUser?.emailSendWithoutConfirm === true;
-    const emailConfirmGuidance = emailNoConfirm
-      ? `- {{USER_NAME}} has opted into send-without-confirm: when they explicitly ask you to send/reply/compose, do it directly. Still show a draft preview only when YOU initiated the suggestion and they haven't agreed yet.`
-      : `- ALWAYS show a reply or compose draft and wait for explicit approval before sending.`;
-    const emailComposeFlow = emailNoConfirm
-      ? `- For replies: when {{USER_NAME}} explicitly asks you to reply, call email_reply directly. Show a draft first only if their wording was ambiguous (e.g. "draft a reply").\n- For new emails: when {{USER_NAME}} explicitly asks you to email/send, call email_compose directly. Show a draft first only if you're filling in a gap (e.g. recipient unstated, no clear request to send).`
-      : `- For replies: show draft → get confirmation → call email_reply\n- For new emails: show draft → get confirmation → call email_compose`;
+    const composerInputs = { userId, userName, agentName, agentEmoji, serverIp, emailNoConfirm };
+    const skillPromptAdditions = composeSkillSpaBlock({ tools, ...composerInputs });
+    // Same expander composeSkillSpaBlock uses internally — needed below for
+    // the agent's own raw systemPrompt (with {{USER_NAME}} etc).
     const expandTemplates = (s) => s
       .replace(/\{\{USER_NAME\}\}/g, userName)
       .replace(/\{\{AGENT_NAME\}\}/g, agentName)
       .replace(/\{\{AGENT_EMOJI\}\}/g, agentEmoji)
-      .replace(/\{\{SERVER_IP\}\}/g, serverIp)
-      .replace(/\{\{EMAIL_CONFIRM_GUIDANCE\}\}/g, emailConfirmGuidance)
-      .replace(/\{\{EMAIL_COMPOSE_FLOW\}\}/g, emailComposeFlow);
-
-    const skillPromptAdditions = orderedSkillIds
-      .map(skillId => {
-        const parts = [];
-        const raw = getRoleManifest(skillId, userId)?.systemPromptAddition;
-        if (raw) {
-          let spa = expandTemplates(raw);
-          if (spa.includes('{{WORKSPACE}}')) {
-            const ws = path.join(BASE_DIR, 'users', userId, 'documents', 'code');
-            spa = spa.replace(/\{\{WORKSPACE\}\}/g, ws);
-          }
-          parts.push(spa);
-        }
-        // Global rules.md = shipped admin baseline (e.g. coder, coordinator).
-        // Per-user role-rules/<skillId>.md = this user's personal rules,
-        // including any auto-promoted from repeated corrections. Both layer
-        // into the prompt with global first so user rules can override.
-        const globalRulesPath = path.join(BASE_DIR, 'skills', skillId, 'rules.md');
-        if (fs.existsSync(globalRulesPath)) {
-          const rules = fs.readFileSync(globalRulesPath, 'utf8').trim();
-          if (rules) parts.push(rules);
-        }
-        const userRulesPath = userRoleRulesPath(userId, skillId);
-        if (fs.existsSync(userRulesPath)) {
-          const rules = fs.readFileSync(userRulesPath, 'utf8').trim();
-          if (rules) parts.push(`## Your standing instructions for ${getRoleManifest(skillId, userId)?.name ?? skillId}\n${rules}`);
-        }
-        return parts.join('\n\n');
-      })
-      .filter(Boolean)
-      .join('\n\n');
+      .replace(/\{\{SERVER_IP\}\}/g, serverIp);
 
     const childPrompt = currentUser?.childSafetyPrompt ?? CHILD_SAFETY_PREFIX;
     const rawPrompt = expandTemplates(withOverrides.systemPrompt ?? '');
@@ -280,6 +237,13 @@ export function getAgentsForUser(userId) {
 
     const promptParts = [expandedPrompt, skillPromptAdditions, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance].filter(Boolean);
     const systemPrompt = promptParts.join('\n\n');
+    // Stash the "shell" + composer inputs so chat.mjs can re-compose the
+    // SPA section after per-turn tool trimming (the coordinator's tool
+    // surface shrinks per-turn; the SPAs of dropped skills should shrink
+    // too). The placeholder appears exactly where skillPromptAdditions
+    // sits in the shell — chat.mjs splices the recomposed block in.
+    const _spaShellParts = [expandedPrompt, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance].filter(p => p !== '');
+    const _systemPromptShell = _spaShellParts.join('\n\n');
 
     // Patch ask_agent description with the real agent list
     tools = tools.map(t => {
@@ -289,7 +253,13 @@ export function getAgentsForUser(userId) {
         agent_id: { type: 'string', description: `Which specialist to delegate to: ${delegateAgentDesc}` }
       }}}};
     });
-    const result = { ...withOverrides, systemPrompt, tools, skillCategory };
+    const result = {
+      ...withOverrides, systemPrompt, tools, skillCategory,
+      // chat.mjs uses these to recompose the SPA block after tool trimming.
+      // Underscored to signal "internal — not for clients of the agent
+      // record." Safe to omit from JSON serialization to the UI if needed.
+      _systemPromptShell, _composerInputs: composerInputs,
+    };
     // Child containment: never let agents cross-read each other's sessions.
     // Amplifies jailbreak persistence if enabled.
     if (isChild) result.crossAgentRead = null;

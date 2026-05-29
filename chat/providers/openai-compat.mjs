@@ -29,15 +29,18 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     { role: 'system', content: systemPrompt },
     ...messages,
   ];
-  const compatTools = agent.tools?.length
-    ? compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }))
-    : undefined;
 
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
 
   while (guard.tick()) {
+    // Re-read tools per iteration so dynamic toolset mutations (request_tools
+    // meta-tool expanding the coordinator's surface mid-turn) take effect on
+    // the next provider call.
+    const compatTools = agent.tools?.length
+      ? compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }))
+      : undefined;
     const body = {
       model:    agent.model,
       messages: working,
