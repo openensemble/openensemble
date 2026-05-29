@@ -40,6 +40,35 @@ import { getSpecialistTrim } from './slash-commands.mjs';
 // Only fires when the user is chatting with their coordinator. If they
 // intentionally opened a specialist chat, leave them alone — they want that
 // specific agent to handle everything in that session.
+
+// A request is "compound" when the user is clearly asking for multiple steps
+// or explicitly naming a delegation target. Routing those to a single
+// specialist via embedding similarity is structurally wrong — the picked
+// specialist can satisfy at most one of the asked-for steps, and the others
+// either get hallucinated as completed or quietly dropped. (See the
+// 2026-05-28 incident where "Compile briefing. Send via Telegram. Also
+// delegate to email specialist to email it." routed to deep_research and
+// the email step was narrated, not delegated.) Falls through to the
+// coordinator's LLM loop instead.
+const DELEGATION_VERB_RE = /\b(?:delegate(?:\s+to)?|have\s+\w+\s+(?:email|send|message|tell|do|handle|run|generate|create|compile)|tell\s+\w+\s+to|ask\s+\w+\s+to|have\s+(?:the\s+)?\w+\s+specialist|the\s+\w+\s+specialist|via\s+the\s+\w+\s+specialist)\b/i;
+const COMPOUND_CONNECTIVE_RE = /\b(?:also\s+(?:delegate|have|email|send|tell|ask|make|create|generate|compile)|and\s+(?:also|then|email|send|tell|ask|delegate)|then\s+(?:email|send|tell|ask|delegate|have))\b/i;
+export function looksCompoundOrDelegation(text) {
+  if (!text) return false;
+  if (DELEGATION_VERB_RE.test(text)) return true;
+  if (COMPOUND_CONNECTIVE_RE.test(text)) return true;
+  // Long compound: 3+ sentences AND at least two distinct imperative verbs.
+  // Catches "X. Y. Z." multi-step requests that don't use a connective word.
+  const sentences = text.split(/[.!?]+\s+/).filter(s => s.trim().length > 4);
+  if (sentences.length >= 3) {
+    const imperatives = sentences
+      .map(s => s.trim().match(/^(?:please\s+)?(\w+)/i)?.[1]?.toLowerCase())
+      .filter(Boolean);
+    const unique = new Set(imperatives);
+    if (unique.size >= 2) return true;
+  }
+  return false;
+}
+
 function classifySpecialistIntent(text, userId, currentAgentId) {
   if (!text) return null;
   // Normalize for matching: lowercase, strip apostrophes, collapse whitespace.
@@ -93,6 +122,14 @@ export async function runSpecialistRoute({
   userText, userId, agentId, source, deviceId, attachment, ac, onEvent, onNotify,
 }) {
   if (!userText) return null;
+  // Compound multi-step requests and explicit delegation language (e.g.
+  // "delegate to the email specialist", "have <agent> send …") must go through
+  // the coordinator's LLM loop — single-specialist routing drops the steps
+  // that aren't in the matched specialist's tool surface.
+  if (looksCompoundOrDelegation(userText)) {
+    console.log('[chat] specialist-router: skipped (compound/delegation message)');
+    return null;
+  }
   try {
     /** @type {{ skillId: string, agentId: string, name: string, strategy?: string, sim?: number, phrase?: string } | null} */
     let route = classifySpecialistIntent(userText, userId, agentId);
@@ -159,9 +196,18 @@ export async function runSpecialistRoute({
       // Persist the turn under the coordinator's session so the user sees it
       // in the chat they actually typed into. The specialist ran ephemerally,
       // so this is the only durable record.
+      //
+      // Tag the assistant message with `via` so future history loads can tell
+      // this turn came from a specialist, not from the coordinator itself.
+      // Append a system note so the NEXT coordinator turn can read "what just
+      // happened" without us having to filter on `via` everywhere — without
+      // this, short follow-ups like "send" land on the coordinator with no
+      // idea what the prior routed turn did, and it asks "send what, where?".
+      const viaTs = Date.now();
       appendToSession(`${userId}_${agentId}`,
-        { role: 'user', content: userText, ts: Date.now() },
-        { role: 'assistant', content: routerBuf, ts: Date.now() }
+        { role: 'user', content: userText, ts: viaTs },
+        { role: 'assistant', content: routerBuf, ts: viaTs, via: route.skillId, viaAgent: route.agentId, viaName: route.name },
+        { role: 'system', content: `[routed to ${route.name} (${route.skillId}) — that specialist ran ephemerally and produced the assistant reply above; you (the coordinator) did not run a turn]`, ts: viaTs + 1, routerNote: true }
       );
       console.log(`[chat] specialist-router done: skill=${route.skillId} trim=${trimEnabled ? 'on' : 'off'} tools=${usedToolCount} durationMs=${Date.now() - routerStart} bytes=${routerBuf.length}`);
     } catch (e) {

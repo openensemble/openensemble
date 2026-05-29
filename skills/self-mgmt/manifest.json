@@ -38,6 +38,20 @@
     {
       "type": "function",
       "function": {
+        "name": "set_email_send_without_confirm",
+        "description": "Toggle the per-user email send-without-confirmation gate. When ON, email agents (Gmail, Microsoft, IMAP) send replies and new emails directly when the user explicitly asks — no draft preview, no 'are you sure?'. When OFF (default), email agents always show a draft and wait for explicit approval. Call this when the user says things like 'stop asking me to confirm emails', 'just send emails directly', 'turn off email confirmation', or the inverse ('require confirmation before sending email', 'always ask before sending'). The setting persists across conversations until the user changes it again. Note: this only affects sends the user explicitly asked for in their message; drafts the agent proactively suggested still wait for approval regardless.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "description": "true to turn OFF the confirmation gate (send directly when user asks); false to require draft + confirm before every send" }
+          },
+          "required": ["enabled"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
         "name": "role_list_rules",
         "description": "List all user-added rules for a role. Shows each rule with its index so rules can be removed by index if needed.",
         "parameters": {

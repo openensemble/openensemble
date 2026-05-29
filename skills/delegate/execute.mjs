@@ -6,7 +6,7 @@
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null) {
   if (name !== 'ask_agent') { yield { type: 'result', text: null }; return; }
 
-  const { agent_id, task: rawTask, background = false, _parallel = false } = args;
+  const { agent_id, task: rawTask, background = false, no_confirm = false, _parallel = false } = args;
   let task = rawTask;
   if (!agent_id || !task) { yield { type: 'result', text: 'Missing agent_id or task.' }; return; }
 
@@ -119,9 +119,30 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // fall back to their default "show draft and wait" behavior, which
   // never resolves on a scheduled run since no human is there to answer.
   const scheduledNote = getScheduledNote();
+  // Per-call no-confirm: the coordinator can pass no_confirm:true when the
+  // user explicitly authorized the action in the triggering message
+  // ("just send it", "no need to confirm"). Composes with scheduledNote
+  // when both apply.
+  const noConfirmNote = no_confirm
+    ? `[DELEGATION OVERRIDE — NO CONFIRM] The coordinator has authorized this delegation as a direct send. The user's original message in the coordinator chat IS the confirmation. Do NOT show a draft, do NOT ask "are you sure?", do NOT wait for "send it" — call the action tool directly with reasonable defaults for anything unspecified, then report what you did. This overrides any "show draft and wait for approval" rule from your role's prompt for this single delegation only.`
+    : null;
+  const combinedNote = [scheduledNote, noConfirmNote].filter(Boolean).join('\n\n') || null;
+  // Surface the specialist's prose into the coordinator's chat as a
+  // live-streaming tool bubble (rendered by public/chat.js _ensureStreamBubble
+  // via the tool_progress event). Without this, the user only sees the small
+  // ask_agent pill in the coordinator's chat and has to either expand the
+  // pill or switch to the specialist's chat tab to read the actual reply —
+  // which defeats the whole point of delegating from the coordinator.
+  // We label the stream with the specialist's name + emoji so a 3-way
+  // parallel delegation (email + calendar + weather) shows three distinct
+  // sub-streams instead of three identical "ask_agent" bubbles.
+  const streamLabel = `${agentEmoji} ${agentName}`.trim();
   try {
-    for await (const event of streamChat(scopedAgent, task, null, null, userId, null, scheduledNote)) {
-      if (event.type === 'token') fullText += event.text;
+    for await (const event of streamChat(scopedAgent, task, null, null, userId, null, combinedNote)) {
+      if (event.type === 'token') {
+        fullText += event.text;
+        yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: streamLabel };
+      }
       if (event.type === 'error') { errText = `Error from ${agent_id}: ${event.message}`; break; }
     }
   } finally {

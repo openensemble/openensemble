@@ -174,11 +174,28 @@ export function getAgentsForUser(userId) {
     const agentName = withOverrides.name ?? a.name;
     const agentEmoji = withOverrides.emoji ?? a.emoji ?? '';
     const serverIp = getLanAddress();
+    // Per-user email send-without-confirm flag swaps the email skill's
+    // compose-flow text. Default behavior (flag off) keeps the
+    // "draft → confirmation → send" gate that protects users from
+    // model-initiated sends. When the user has explicitly opted in, the
+    // gate becomes "send directly when {{USER_NAME}} explicitly asks you
+    // to send" — which is the only way to make ephemeral ask_agent
+    // delegations actually email anything (the gate-on flow needs two
+    // turns; ephemeral sessions only get one).
+    const emailNoConfirm = currentUser?.emailSendWithoutConfirm === true;
+    const emailConfirmGuidance = emailNoConfirm
+      ? `- {{USER_NAME}} has opted into send-without-confirm: when they explicitly ask you to send/reply/compose, do it directly. Still show a draft preview only when YOU initiated the suggestion and they haven't agreed yet.`
+      : `- ALWAYS show a reply or compose draft and wait for explicit approval before sending.`;
+    const emailComposeFlow = emailNoConfirm
+      ? `- For replies: when {{USER_NAME}} explicitly asks you to reply, call email_reply directly. Show a draft first only if their wording was ambiguous (e.g. "draft a reply").\n- For new emails: when {{USER_NAME}} explicitly asks you to email/send, call email_compose directly. Show a draft first only if you're filling in a gap (e.g. recipient unstated, no clear request to send).`
+      : `- For replies: show draft → get confirmation → call email_reply\n- For new emails: show draft → get confirmation → call email_compose`;
     const expandTemplates = (s) => s
       .replace(/\{\{USER_NAME\}\}/g, userName)
       .replace(/\{\{AGENT_NAME\}\}/g, agentName)
       .replace(/\{\{AGENT_EMOJI\}\}/g, agentEmoji)
-      .replace(/\{\{SERVER_IP\}\}/g, serverIp);
+      .replace(/\{\{SERVER_IP\}\}/g, serverIp)
+      .replace(/\{\{EMAIL_CONFIRM_GUIDANCE\}\}/g, emailConfirmGuidance)
+      .replace(/\{\{EMAIL_COMPOSE_FLOW\}\}/g, emailComposeFlow);
 
     const skillPromptAdditions = orderedSkillIds
       .map(skillId => {

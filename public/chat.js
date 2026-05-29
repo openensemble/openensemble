@@ -498,6 +498,9 @@ function appendStreamingBubble() {
 function toolPillSubtitle(name, args) {
   if (!args || typeof args !== 'object') return '';
   // Tools where the headline arg is the user-visible action.
+  if (name === 'ask_agent' && typeof args.agent_id === 'string') {
+    return `→ ${args.agent_id}`;
+  }
   if (name === 'node_exec' && typeof args.command === 'string') return args.command;
   if (name === 'node_push_project' && typeof args.dest_path === 'string') {
     return `${args.node_id || ''} → ${args.dest_path}`.trim();

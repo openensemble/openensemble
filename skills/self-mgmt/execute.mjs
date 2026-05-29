@@ -67,7 +67,17 @@ export default async function execute(name, args, userId, agentId) {
     const manifest = loadSkillManifest(skillId);
     if (!manifest) return `No role found with id "${skillId}".`;
     const rules = loadRules(userId, skillId);
-    rules.push(`- ${rule.trim()}`);
+    const incoming = `- ${rule.trim()}`;
+    // Normalize for duplicate detection: lowercase, drop punctuation,
+    // collapse whitespace. Catches the coordinator emitting two paraphrases
+    // of the same rule on consecutive corrections (e.g. "<role> may send …"
+    // vs "send it without asking …") as separate adds.
+    const norm = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
+    const incomingNorm = norm(incoming);
+    if (rules.some(r => norm(r) === incomingNorm)) {
+      return `That rule is already set for ${manifest.name} — no change.`;
+    }
+    rules.push(incoming);
     saveRules(userId, skillId, rules);
     return `Rule added to ${manifest.name} for your account. It will apply to any of your agents handling this role from the next conversation.`;
   }
@@ -84,6 +94,26 @@ export default async function execute(name, args, userId, agentId) {
     const removed = rules.splice(index, 1)[0];
     saveRules(userId, skillId, rules);
     return `Removed rule: ${removed}`;
+  }
+
+  if (name === 'set_email_send_without_confirm') {
+    if (!userId) return 'userId is required.';
+    const { enabled } = args;
+    if (typeof enabled !== 'boolean') return 'enabled must be true or false.';
+    const user = getUserById(userId);
+    if (!user) return `User profile not found for ${userId}.`;
+    const wasEnabled = user.emailSendWithoutConfirm === true;
+    user.emailSendWithoutConfirm = enabled;
+    user.id = user.id ?? userId;
+    saveUserById(user);
+    if (enabled === wasEnabled) {
+      return enabled
+        ? 'Email send-without-confirm is already ON — emails will continue to send directly when you explicitly ask.'
+        : 'Email send-without-confirm is already OFF — emails will continue to require draft + confirmation.';
+    }
+    return enabled
+      ? 'Email send-without-confirm turned ON. From your next conversation onward, when you explicitly ask the email agent to send a reply or new email, it will send directly without showing a draft first. Drafts the agent proactively suggests still wait for your approval.'
+      : 'Email send-without-confirm turned OFF. The email agent will now show a draft and wait for your explicit approval before every send.';
   }
 
   if (name === 'role_list_rules') {

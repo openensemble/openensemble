@@ -26,6 +26,10 @@
             "background": {
               "type": "boolean",
               "description": "If true, dispatch the task immediately and return without waiting for completion. The user and coordinator will be notified with the agent's name and full result when it finishes. Use when the user does not need to review the result before the coordinator responds."
+            },
+            "no_confirm": {
+              "type": "boolean",
+              "description": "If true, instruct the specialist to skip its 'show draft and wait for approval' gate for this one delegation. Use when the user has explicitly authorized the action in the message that triggered this delegation (e.g. 'just send it', 'no need to confirm'). Defaults to false."
             }
           },
           "required": ["agent_id", "task"]

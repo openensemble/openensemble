@@ -46,9 +46,24 @@ export { OPENAI_COMPAT_PROVIDERS };
 const SIGNAL_WORDS_RE = /prefer|like|love|hate|want|don'?t like|remember|decided|will use|choose|chose|my name|i am|i'm|my \w+ is|call me|always|never|make sure|correction/i;
 
 function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], voiceCtx = null } = {}) {
+  // Record a compact summary of which tools fired this turn so future loads
+  // of this session can show the assistant what it actually did, not just
+  // what it said. Without this, short follow-ups ("send", "again", "do that
+  // for the other one too") land on a model that sees only its own prose
+  // and has no record of which side-effects happened. We keep only the
+  // name + a short args preview — full tool_result bodies stay out of the
+  // session log to keep file size bounded.
+  const toolsSummary = toolsUsed.length
+    ? toolsUsed.map(t => {
+        const args = t.args ? JSON.stringify(t.args).slice(0, 120) : '';
+        return args ? `${t.name}(${args})` : t.name;
+      })
+    : null;
   appendToSession(agent.id,
     { role: 'user', content: sessionText, ts: Date.now() },
-    { role: 'assistant', content: assistantContent, ts: Date.now() });
+    toolsSummary
+      ? { role: 'assistant', content: assistantContent, ts: Date.now(), toolsUsed: toolsSummary }
+      : { role: 'assistant', content: assistantContent, ts: Date.now() });
 
   // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
   // toolsUsed, before any other gate. It's about repeat-detection, not
@@ -361,12 +376,25 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // `proposal` and `proposal_outcome` (friction-as-proposer bubbles),
   // `notification`. Providers (OpenAI especially) reject unknown roles with
   // a 400, and these entries carry no LLM-actionable content anyway.
+  //
+  // Assistant entries persisted with `toolsUsed: [...]` (from persist()
+  // above) get a compact "[tools: …]" suffix so the next turn's LLM can
+  // see which side-effects happened in the prior turn, not just the prose
+  // it wrote. Same idea for `via:` on router-routed turns — the coordinator
+  // needs to know the prior reply came from a specialist, not its own run.
   const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
   const history = loadSession(agent.id)
     .filter(m => LLM_ROLES.has(m.role))
-    .map(({ role, content, name }) =>
-      name ? { role, content, name } : { role, content }
-    );
+    .map(({ role, content, name, toolsUsed, via, viaName }) => {
+      let body = content;
+      if (role === 'assistant' && via) {
+        body = `${body || ''}\n[note: this reply was produced by the ${viaName ?? via} specialist via the pre-LLM router — you (the coordinator) did not run a turn]`;
+      }
+      if (role === 'assistant' && Array.isArray(toolsUsed) && toolsUsed.length) {
+        body = `${body || ''}\n[tools used this turn: ${toolsUsed.join(', ')}]`;
+      }
+      return name ? { role, content: body, name } : { role, content: body };
+    });
 
   // For session storage, store text only (no base64 — too large and not replayable)
   const sessionText = attachment ? `[Attached: ${attachment.name}]\n${userText}`.trim() : userText;
