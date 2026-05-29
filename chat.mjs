@@ -403,8 +403,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Trim history if it gets too long — rough token estimate: 1 token ≈ 4 chars.
   // Budget = 55% of the agent's context window minus tool schema overhead,
   // leaving the rest for system prompt, current turn, tools, and model response.
+  //
+  // Tool size: real per-turn measurement of the coordinator showed ~735 bytes
+  // per tool (≈ 184 tokens), not the 60 tokens this calc used to assume.
+  // Underestimating by 3× pushed every coordinator turn over budget and
+  // caused trimmed-history to drop to zero. Compute from the actual schema
+  // bytes — one JSON.stringify at turn boundary, not in the tool loop.
   const ctxWindow  = agent.contextSize ?? 32768;
-  const toolTokens = Math.ceil((agent.tools?.length ?? 0) * 60); // ~60 tok/tool compressed
+  const toolsBytes = JSON.stringify(agent.tools ?? []).length;
+  const toolTokens = Math.ceil(toolsBytes / 4);
   const TOKEN_BUDGET = Math.max(1000, Math.floor(ctxWindow * 0.55) - toolTokens);
   let trimmed = [...history];
   let approxTokens = (systemPrompt.length + userText.length) / 4;
@@ -412,6 +419,20 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     approxTokens += (trimmed[i].content?.length ?? 0) / 4;
     if (approxTokens > TOKEN_BUDGET) { trimmed = trimmed.slice(i + 1); break; }
   }
+
+  // Pre-LLM size snapshot — measurement-only, surfaced on the
+  // "llm turn complete" log line so we can audit prompt/tools/history
+  // bloat without re-running the request. Cheap (no JSON.stringify in the
+  // hot tool loop, just at turn boundaries).
+  const _sizes = {
+    spChars: systemPrompt.length,
+    toolsBytes,
+    toolCount: agent.tools?.length ?? 0,
+    historyMsgs: trimmed.length,
+    historyBytes: trimmed.reduce((n, m) => n + (m.content?.length ?? 0), 0),
+    droppedFromHistory: Math.max(0, history.length - trimmed.length),
+    userTextChars: userText.length,
+  };
 
   // Build the current user turn — include image data if attachment present
   let currentUserTurn;
@@ -705,6 +726,16 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     model: agent.model,
     durationMs: Date.now() - _llmStart,
     bytes: assistantContent ? (typeof assistantContent === 'string' ? assistantContent.length : JSON.stringify(assistantContent).length) : 0,
+    // Pre-LLM payload composition (chars; ÷4 ≈ tokens). Lets us audit
+    // prompt/tool/history bloat from app.log without re-running the turn.
+    spChars: _sizes.spChars,
+    toolsBytes: _sizes.toolsBytes,
+    toolCount: _sizes.toolCount,
+    historyMsgs: _sizes.historyMsgs,
+    historyBytes: _sizes.historyBytes,
+    droppedFromHistory: _sizes.droppedFromHistory,
+    userTextChars: _sizes.userTextChars,
+    toolNamesUsed: toolsUsed.map(t => t.name),
   };
   if (errored) {
     log.error('chat', 'llm turn errored', _llmMeta);

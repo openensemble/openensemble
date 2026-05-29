@@ -84,8 +84,33 @@ Be concise and direct. {{USER_NAME}} prefers short, focused answers over long ex
 You have access to persistent memory — relevant facts from past conversations may appear in your context. Use them naturally. When {{USER_NAME}} says "remember X", confirm briefly. When they say "forget X", confirm it's been removed.`;
 }
 
+// Slug a display name into an agent id candidate. We try this first so an
+// agent called "Mira" becomes id "mira" instead of "agent_bad1a5f9" — readable
+// IDs are easier for the coordinator's LLM to call (it stops inventing wrong
+// hex ids like "agent_mira" by extrapolating the hex pattern from the tool
+// description). Falls back to a hex id when the slug is empty, too short,
+// collides with an existing agent in this user's roster, or collides with a
+// reserved word that other parts of the system pattern-match on.
+const RESERVED_AGENT_IDS = new Set([
+  'coordinator', // alias in skillAssignments — would shadow assignment resolution
+  'agent', 'system', 'user', 'tool', 'admin',
+]);
+function pickAgentId(name, ownerId) {
+  const slug = String(name ?? '').toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '_')
+    .replace(/^_+|_+$/g, '');
+  const hexId = () => 'agent_' + randomBytes(4).toString('hex');
+  if (!slug || slug.length < 2 || RESERVED_AGENT_IDS.has(slug)) return hexId();
+  if (/^[a-z0-9_]+$/.test(slug) === false) return hexId();
+  // Collision check across THIS user's roster + the global roster. Agent IDs
+  // are globally unique by convention (skillAssignments stores raw ids).
+  const all = [...loadUserAgents(ownerId ?? 'shared'), ...loadCustomAgents()];
+  if (all.some(a => a.id === slug)) return hexId();
+  return slug;
+}
+
 export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, maxTokens, contextSize, ownerId = null }) {
-  const id = 'agent_' + randomBytes(4).toString('hex');
+  const id = pickAgentId(name, ownerId);
   const agent = {
     id, name, emoji,
     model:    model    ?? getCoordinatorModel().model,

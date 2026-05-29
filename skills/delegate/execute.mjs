@@ -17,15 +17,32 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const { getScheduledNote } = await import('../../lib/scheduled-context.mjs');
 
   const agents = getAgentsForUser(userId);
-  // Accept either the real id (agent_2dfdf5ca) or the display name ("Ada").
+  // Accept either the real id (agent_2dfdf5ca) or the display name.
   // Some models (notably gpt-5.x via the Codex backend) hallucinate names even
-  // when the tool description lists real ids, so we fall back to a
-  // case-insensitive name match before giving up.
+  // when the tool description lists real ids, so we fall back through several
+  // normalizations before giving up:
+  //   1. exact id match (agent_2dfdf5ca, slug ids like "mira")
+  //   2. case-insensitive name match
+  //   3. id ends with _<needle> (rare hand-typed id endings)
+  //   4. needle stripped of an "agent_" prefix — the model often invents
+  //      "agent_<name>" by extrapolating the hex pattern; strip and match by name
   let agent = agents.find(a => a.id === agent_id);
   if (!agent) {
-    const needle = String(agent_id).toLowerCase();
+    const raw = String(agent_id);
+    const needle = raw.toLowerCase();
     agent = agents.find(a => a.name?.toLowerCase() === needle)
          ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle));
+    if (!agent && /^agent_[a-z0-9_]+$/i.test(raw)) {
+      const stripped = raw.replace(/^agent_/i, '').toLowerCase();
+      // Hex suffixes are 8 chars of [0-9a-f] — leave those to the exact-id
+      // path above (already failed). Only retry when the stripped form looks
+      // like a name (has at least one non-hex char, or is too long/short for
+      // our 4-byte hex IDs).
+      if (stripped && stripped.length !== 8 || /[g-z_]/.test(stripped)) {
+        agent = agents.find(a => a.name?.toLowerCase() === stripped)
+             ?? agents.find(a => a.id.toLowerCase() === stripped);
+      }
+    }
   }
   if (!agent) { yield { type: 'result', text: `Agent '${agent_id}' not found or not available.` }; return; }
 
