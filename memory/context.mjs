@@ -7,8 +7,20 @@
 import { TOKEN_BUDGET } from './shared.mjs';
 import { embed } from './embedding.mjs';
 import { recall, TEMPORAL_RE, parseTimeAnchor } from './recall.mjs';
+import { shouldSkipRecall, filterByConfidence } from './predictive-context.mjs';
 
 export async function buildAgentContext(agentId, currentQuery, userId = 'default') {
+  // Predictive pre-filter — confirmations, slash commands, voice-control
+  // utterances and ultra-short reactions don't benefit from cortex recall.
+  // Skip the embed + 3 LanceDB queries entirely. Returns the same empty
+  // shape buildAgentContext produces when nothing relevant surfaces, so the
+  // caller's `formatContext(ctx) || ''` already drops the block.
+  const skip = shouldSkipRecall(currentQuery);
+  if (skip.skip) {
+    return { systemInstructions: '', episodeHistory: '', userContext: '',
+      _meta: { paramsLoaded: 0, episodesLoaded: 0, immortalCount: 0, skipped: skip.reason } };
+  }
+
   // Pre-embed the query once and reuse for all parallel recalls
   const queryVec = await embed(currentQuery);
   const isTemporal = TEMPORAL_RE.test(currentQuery);
@@ -26,12 +38,20 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
     myRoles = getAgentRoles(agentId, userId);
   } catch (e) { /* roles module unavailable in tests — default to unscoped only */ }
 
-  const [params, episodes, userFacts] = await Promise.all([
+  const [paramsRaw, episodes, userFactsRaw] = await Promise.all([
     recall({ agentId, type: 'params', query: currentQuery, queryVec, topK: paramsTopK, includeShared: false, userId }),
     recall({ agentId, type: 'episodes', query: currentQuery, queryVec, topK: episodeTopK, includeShared: false, recencyBoost: isTemporal, timeAnchor, userId }),
     recall({ agentId: 'shared', type: 'user_facts', query: currentQuery, queryVec, topK: 4, includeShared: false, userId, myRoles })
       .catch(() => []),
   ]);
+
+  // Confidence post-filter — drop weak hits before they reach the LLM.
+  // Immortal rows pass through unconditionally (filterByConfidence preserves
+  // them) so user-pinned preferences are never silently disabled by a
+  // tangential query. Episodes intentionally skip the filter: the recency
+  // boost in temporal queries depends on the full top-K being available.
+  const params    = filterByConfidence(paramsRaw);
+  const userFacts = filterByConfidence(userFactsRaw);
 
   // System instructions: immortal params always included, normal params trimmed if needed
   const immortalParams = params.filter(p => p.immortal);
