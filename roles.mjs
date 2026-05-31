@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync
 import { pathToFileURL } from 'url';
 import path from 'path';
 import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir } from './lib/paths.mjs';
+import { buildProposeMonitor } from './lib/monitor-helper.mjs';
 import { log } from './logger.mjs';
 
 // Wrapper shape: { manifest, userId, dir }
@@ -631,6 +632,14 @@ async function buildCtx(userId, agentId) {
       return watchers.unregisterMatchingWatchers(userId, predicate);
     } catch (e) { console.warn('[ctx.unwatchMatching]', e.message); return 0; }
   };
+  // proposeMonitor: high-level wrapper around ctx.watch that handles cadence
+  // presets ('daily', 'weekly', …), default expiresAt=null for open-ended
+  // monitors, default onFire shape, and dedup so "propose after N uses"
+  // heuristics don't stack N copies of the same watcher. Lives in
+  // lib/monitor-helper.mjs so skill-builder can teach the LLM a single
+  // call shape for "ping me when X changes" instead of forcing every skill
+  // to re-learn registerWatcher's arg layout.
+  ctx.proposeMonitor = buildProposeMonitor({ userId, agentId: wsAgentId });
   return ctx;
 }
 

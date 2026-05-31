@@ -37,10 +37,11 @@ setInterval(() => {
  */
 export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId, agentName, agentEmoji = '🤖') {
   const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  activeTasks.set(taskId, { agentId: scopedAgent.id, userId, agentName, startedAt: Date.now() });
+  const summary = (task || '').slice(0, 120);
+  activeTasks.set(taskId, { agentId: scopedAgent.id, userId, agentName, agentEmoji, startedAt: Date.now(), summary });
 
   // Notify UI that the task has started (activity panel spinner)
-  _broadcast?.({ type: 'task_update', taskId, agentName, agentEmoji, status: 'running', summary: task.slice(0, 80) });
+  _broadcast?.({ type: 'task_update', taskId, agentName, agentEmoji, status: 'running', summary });
 
   // Fire and forget — do not await
   (async () => {
@@ -59,8 +60,40 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       // was called from within scheduledContext.run(...). null in non-scheduled chats.
       const scheduledNote = getScheduledNote();
       let fullText = '';
+      let toolsUsed = 0;
+      let currentTool = null;
       for await (const ev of streamChat(scopedAgent, task, null, null, userId, null, scheduledNote)) {
         if (ev.type === 'token') fullText += ev.text;
+        // Track in-flight tool calls so list_active_agents can report "Ada is
+        // currently running coder_edit_file" instead of just an opaque spinner.
+        // Also push an incremental task_update so the activity panel renders
+        // a live progress line per tool, matching what the user would see if
+        // they had typed the same prompt to Ada synchronously.
+        if (ev.type === 'tool_call' && ev.name) {
+          toolsUsed++;
+          currentTool = ev.name;
+          const rec = activeTasks.get(taskId);
+          if (rec) {
+            rec.toolsUsed = toolsUsed;
+            rec.currentTool = ev.name;
+            rec.lastUpdateAt = Date.now();
+          }
+          _broadcast?.({
+            type: 'task_update', taskId, agentName, agentEmoji,
+            status: 'running',
+            currentTool: ev.name,
+            toolsUsed,
+            summary: `running ${ev.name}`,
+          });
+        }
+        if (ev.type === 'tool_result' && ev.name) {
+          const rec = activeTasks.get(taskId);
+          if (rec) {
+            rec.currentTool = null;
+            rec.lastResultPreview = (ev.text || '').slice(0, 80);
+            rec.lastUpdateAt = Date.now();
+          }
+        }
         if (ev.type === 'error') throw new Error(ev.message);
       }
       await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, fullText.trim() || `${agentName} completed the task.`);

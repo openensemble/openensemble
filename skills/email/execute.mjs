@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
+import { isVoiceSource } from '../../lib/voice-context.mjs';
 
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BASE_DIR  = path.resolve(SKILL_DIR, '../..');
@@ -362,6 +363,52 @@ async function execImap(name, args, account, userId) {
   }
 }
 
+// ── Voice-device output compaction ────────────────────────────────────────────
+// When the originating chat is from a voice device, the user only HEARS the
+// reply — so Date/Thread metadata and 4 KB email bodies are pure waste. Strip
+// the noise before the LLM has to summarize it. Keeps the message ID intact
+// so follow-ups ("trash it", "reply to that") still work.
+const VOICE_BODY_MAX = 800;
+
+function compactForVoice(text, toolName) {
+  if (typeof text !== 'string') return text;
+  if (toolName === 'email_list') {
+    const lines = text.split('\n')
+      .filter(l => !/^\s*(Date|Thread)\s*:/i.test(l))
+      .map(l => l.replace(/^(\s*)Preview\s*:\s*/i, '$1'));
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n');
+  }
+  if (toolName === 'email_read') {
+    const lines = text.split('\n');
+    const kept = lines.filter(l => !/^\s*Date\s*:/i.test(l));
+    let out = kept.join('\n');
+    // Body starts after the headers; truncate so the LLM gives a summary
+    // instead of reading the whole message verbatim.
+    const splitIdx = out.indexOf('\n\n');
+    if (splitIdx > 0 && splitIdx < 400) {
+      const head = out.slice(0, splitIdx);
+      const body = out.slice(splitIdx + 2);
+      if (body.length > VOICE_BODY_MAX) {
+        out = `${head}\n\n${body.slice(0, VOICE_BODY_MAX)}…`;
+      }
+    } else if (out.length > VOICE_BODY_MAX + 200) {
+      out = `${out.slice(0, VOICE_BODY_MAX + 200)}…`;
+    }
+    return out;
+  }
+  if (toolName === 'email_thread') {
+    const blocks = text.split(/\n-{3,}\n/);
+    const compacted = blocks.map(b => {
+      const lines = b.split('\n').filter(l => !/^\s*Date\s*:/i.test(l));
+      let block = lines.join('\n');
+      if (block.length > VOICE_BODY_MAX) block = block.slice(0, VOICE_BODY_MAX) + '…';
+      return block;
+    });
+    return compacted.join('\n\n---\n\n');
+  }
+  return text;
+}
+
 // ── Untrusted-content marker ──────────────────────────────────────────────────
 // Email bodies / threads / list snippets are external content — wrap them so
 // the LLM treats embedded "instructions" as data rather than commands.
@@ -404,8 +451,9 @@ export default async function execute(name, args, userId) {
   }
 
   const result = await _executeInner(name, args, userId);
-  if (UNTRUSTED_RESULTS.has(name)) return wrapUntrusted(result);
-  return result;
+  const compacted = isVoiceSource() ? compactForVoice(result, name) : result;
+  if (UNTRUSTED_RESULTS.has(name)) return wrapUntrusted(compacted);
+  return compacted;
 }
 
 async function _executeInner(name, args, userId) {

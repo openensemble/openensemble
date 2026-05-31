@@ -1,0 +1,32 @@
+{
+  "id": "active-agents",
+  "name": "Active Agents",
+  "description": "Lets the coordinator see what other agents are doing right now — which background ask_agent dispatches are still running, the task summary, and how long they've been at it.",
+  "icon": "🛰️",
+  "category": "service",
+  "always_on": true,
+  "enabled_by_default": true,
+  "coordinator_scope": "include",
+  "intent_examples": [
+    "what is the coder doing",
+    "is the coder still working",
+    "how's the background task going",
+    "what are the other agents up to",
+    "is anyone running a task right now",
+    "check on the background work",
+    "what's in flight right now",
+    "is the email agent still working on that",
+    "how is the deep research going",
+    "any agents still busy"
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_active_agents",
+        "description": "Returns the list of currently-running background agent tasks across the user's session: which agent is working, what task it was given, and how long it has been running. Use this when the user asks 'what is X doing', 'is X still working', 'how's the background job', 'who's busy right now', or similar status-check intents — never guess; always call this tool.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    }
+  ]
+}

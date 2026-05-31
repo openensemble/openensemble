@@ -6,6 +6,28 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-05-31
+
+**Voice-friendly email output**
+When you ask a voice device about your latest email or have one read aloud, the reply no longer recites IDs, dates, thread IDs, or "→ summary" prefixes that the email formatting rules tell the model to include on web. The response just states the sender, subject, and a short summary, with long bodies trimmed so the device summarizes instead of reading the whole message verbatim. Message IDs are still in the tool result for follow-ups ("trash it", "reply to that") — they're just no longer spoken.
+
+**Skills can now poll automatically and notify by voice, email, or Telegram**
+A new monitoring primitive lets any skill — including ones the skill builder writes for you on demand — set up a recurring check on an external source (a feed, a page, a price, a queue, an inbox) and notify you when it changes. The skill picks a cadence preset (`minutely` / `5-min` / `hourly` / `daily` / `weekly`) and a delivery mode. The default runs a coordinator turn so it can speak the news on a voice device. Email delivery sends from your connected Gmail / Outlook / IMAP account directly to your inbox — zero AI tokens spent composing it. Telegram delivery messages you via your linked bot chat — also zero tokens. Switching delivery on an existing watcher works the same way: ask again with the new preference and the old registration is replaced so you don't end up with duplicates.
+
+**Skill builder learned the monitored-source pattern**
+When you ask for a recurring watcher ("make a tracker for [thing]", "ping me when [source] changes", "watch [feed] for new posts"), the skill builder now scaffolds a four-piece proactive skill in one shot: a fetcher for the source, an appropriate cadence (weekly for store ads, hourly for channels, fast for prices), a filter that reads your stored preferences from memory so you only hear about items you care about, and a notification path of your choice. No more manually wiring up polling, filter logic, and delivery each time you describe a watcher.
+
+**Auto-offer monitoring on the kinds of questions you ask repeatedly**
+When you ask the coordinator something time-varying ("any new uploads from [channel]?", "what's on sale at [store]?", "is [thing] back in stock?", "did [person] post yet?"), the coordinator now recognizes the shape of the question and offers — after answering — to set up automatic monitoring. Decline once and the offer goes away for that turn; the next topical question will offer again. Recognized via a small embedding classifier, no extra AI round-trip.
+
+**See what other agents are doing**
+Asking the coordinator "is [agent] still working?" or "what's [agent] doing?" now returns concrete detail: which background dispatches are in flight, the task they were given, which tool they're currently running, and how many tools they've used. The activity panel in the corner of the chat also shows live "running [tool name]" updates as background agents work, replacing the static spinner that was there before.
+
+**AirPlay pause / resume reliability + iPhone UI sync (firmware 0.2.28 – 0.2.29)**
+Voice-pausing AirPlay music now both updates the iPhone Music app to show "Paused" AND locally mutes the speaker as a safety net. The hybrid means voice-resume works reliably even after long pauses (the local-mute side stays good even if iOS would otherwise tear down the stream), and tapping pause in the iPhone Music app silences the speaker within ~10 ms instead of waiting for the local audio buffer to drain. Devices on 0.2.27 or older will auto-OTA to 0.2.29 on their next chat round-trip; USB flash also works.
+
+---
+
 ## 2026-05-28
 
 **Voice control of AirPlay sessions (firmware 0.2.24 – 0.2.27)**

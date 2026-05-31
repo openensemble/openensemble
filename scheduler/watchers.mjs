@@ -600,7 +600,45 @@ function finalizeWatcher(record, status, finalText) {
 // scheduler.mjs's [SCHEDULED RUN] note — same constraint (no human present).
 async function executeOnFire(record) {
   const cfg = record.onFire;
-  if (!cfg || cfg.type !== 'agent') return;
+  if (!cfg) return;
+
+  // ── Email delivery — no LLM, no agent turn ───────────────────────────────
+  // cfg shape: { type: 'email', subject?, to?, account? }
+  // body is the watcher's lastStatusText (or label as fallback).
+  if (cfg.type === 'email') {
+    try {
+      const { sendEmailToUser } = await import('../lib/email-delivery.mjs');
+      const subject = cfg.subject || `Monitor: ${record.label}`;
+      const body    = record.lastStatusText || `Your monitor "${record.label}" fired.`;
+      const r = await sendEmailToUser(record.userId, {
+        subject, body, to: cfg.to, account: cfg.account,
+      });
+      if (!r.ok) log.warn('watchers', 'email onFire failed', { id: record.id, err: r.message });
+      else log.info('watchers', 'email onFire sent', { id: record.id, to: cfg.to || '(self)' });
+    } catch (e) {
+      log.warn('watchers', 'email onFire threw', { id: record.id, err: e.message });
+    }
+    return;
+  }
+
+  // ── Telegram delivery — no LLM, no agent turn ────────────────────────────
+  // cfg shape: { type: 'telegram', prefix? }
+  // text = (cfg.prefix ?? '') + record.lastStatusText (or label as fallback).
+  if (cfg.type === 'telegram') {
+    try {
+      const { sendTelegramToUser } = await import('../routes/telegram.mjs');
+      const body = record.lastStatusText || `Your monitor "${record.label}" fired.`;
+      const text = cfg.prefix ? `${cfg.prefix}\n\n${body}` : body;
+      const ok = await sendTelegramToUser(record.userId, text);
+      if (!ok) log.warn('watchers', 'telegram onFire failed', { id: record.id });
+      else log.info('watchers', 'telegram onFire sent', { id: record.id });
+    } catch (e) {
+      log.warn('watchers', 'telegram onFire threw', { id: record.id, err: e.message });
+    }
+    return;
+  }
+
+  if (cfg.type !== 'agent') return;
 
   const { getAgent } = await import('../agents.mjs');
   const { streamChat } = await import('../chat.mjs');
@@ -759,6 +797,58 @@ function handlerHelpers(record) {
         data: opts.data || {},
         ts,
       });
+    },
+    // Trigger this watcher's onFire delivery WITHOUT finalising the watcher.
+    // Use when the watcher should keep polling after delivering a notification
+    // (channel feeds, recurring deal alerts) — returning done=true would
+    // archive the record and only fire onFire once. Dispatches based on
+    // record.onFire.type so handlers stay delivery-agnostic: a channel
+    // watcher registered with deliver='email' emails the user; the SAME
+    // handler registered with deliver='agent' runs an agent turn.
+    //
+    // `messageOverride` is a string. For 'agent', it becomes the prompt
+    // injected into the agent run. For 'email', it becomes the email body
+    // (the watcher's `lastStatusText` is used as the default for email when
+    // no override is provided — see executeOnFire).
+    fire: async (messageOverride) => {
+      if (!record.onFire?.type) return false;
+      const cfg = record.onFire;
+      let tempCfg = cfg;
+      if (messageOverride) {
+        if (cfg.type === 'agent')      tempCfg = { ...cfg, prompt: messageOverride };
+        else if (cfg.type === 'email') tempCfg = { ...cfg, _bodyOverride: messageOverride };
+      }
+      const synth = { ...record, onFire: tempCfg };
+      // executeOnFire's email/telegram branches read lastStatusText for the
+      // body; surface the override through there so the handler doesn't have
+      // to mutate persisted state.
+      if (messageOverride && (cfg.type === 'email' || cfg.type === 'telegram')) {
+        synth.lastStatusText = messageOverride;
+      }
+      try {
+        await executeOnFire(synth);
+        return true;
+      } catch (e) {
+        log.warn('watchers', 'fire threw', { id: record.id, err: e.message });
+        return false;
+      }
+    },
+    // Back-compat alias — older handlers (publix-bogo, youtube channel watch)
+    // call fireAgent directly. Keep the old gate-on-agent semantics so they
+    // never accidentally email when they meant to narrate.
+    fireAgent: async (promptOverride) => {
+      if (!record.onFire || record.onFire.type !== 'agent') return false;
+      const tempCfg = promptOverride
+        ? { ...record.onFire, prompt: promptOverride }
+        : record.onFire;
+      const synth = { ...record, onFire: tempCfg };
+      try {
+        await executeOnFire(synth);
+        return true;
+      } catch (e) {
+        log.warn('watchers', 'fireAgent threw', { id: record.id, err: e.message });
+        return false;
+      }
     },
   };
 }

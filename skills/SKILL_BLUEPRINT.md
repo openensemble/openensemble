@@ -377,6 +377,98 @@ Soft cap of 10 active watchers per user. If a registration would exceed it, `ctx
 
 ---
 
+## Monitored-source pattern (`ctx.proposeMonitor`)
+
+**Use this for any skill the user describes proactively** — "make a tracker for X", "ping me when new Y arrive", "monitor Z weekly". It's a thin wrapper around `ctx.watch` that handles cadence presets, sensible defaults, and dedup so skills stay short.
+
+### Four-piece recipe
+
+Every proactive skill has the same four pieces — design them in this order:
+
+1. **Fetcher** — a tool (or a private helper) that retrieves the current state of the source. Prefer RSS > public JSON API > JSON-LD scrape > full HTML scrape.
+2. **Cadence** — pass a preset string to `proposeMonitor`. Skill picks the right one based on how fast the source changes:
+   - `minutely` — rare; only for build/queue polling
+   - `fast` (5 min) — prices, stock alerts
+   - `hourly` — feeds, channels, social
+   - `daily` — release notes, blogs, store ads (when the day-of-week matters, see below)
+   - `weekly` — slow-rotating sources
+3. **Pref-aware filter** — read the user's cortex memory before notifying so the user only hears about items they care about. Example:
+   ```js
+   const { searchMemory } = await import('../../memory.mjs');
+   const prefs = await searchMemory(userId, 'grocery preferences', 8);
+   ```
+   Use the returned facts to filter the fetched items inside your watcher handler. **Skipping this step means the user gets noisy notifications about everything.**
+4. **Delivery** — pick `deliver` based on the user's explicit ask:
+   - `deliver: 'agent'` (default) — injects a `[WATCHER FIRED]` system note and runs an agent turn so the LLM summarizes naturally (good for voice + chat). Pair with `agentPrompt: '...'`.
+   - `deliver: 'email'` — when the user says "email me when X" / "send it to my email" / "notify me by email". Sends FROM the user's primary connected account TO their profile email — **no agent turn, no `ask_agent` round-trip**. Pair with `emailSubject: '...'`. **Never route email delivery through `ask_agent` to an email agent**; this branch handles it directly via `lib/email-delivery.mjs`.
+   - `deliver: 'telegram'` — when the user says "text me when X" / "send me a telegram" / "message me on telegram" / "ping me on telegram". Sends via the user's linked Telegram bot — **no agent turn, no `ask_agent` round-trip**. Optionally pair with `telegramPrefix: '...'` for a header line. **Never route Telegram delivery through `ask_agent`**; this branch handles it directly via `routes/telegram.mjs:sendTelegramToUser`. If the user hasn't linked Telegram yet, the send returns false and the watcher logs a warning; the watcher itself keeps running.
+   - `deliver: 'notify'` — quiet status bubble. Reserve for "just a notification, don't read it to me" cases.
+
+   In your handler, call `await helpers.fire(message)` instead of `helpers.fireAgent` — `fire` dispatches based on whatever `deliver` was chosen at registration. The same handler emails OR speaks depending on the mode. Write `message` as plain prose when `deliver: 'email'` (it becomes the email body) and as a TTS-friendly instruction when `deliver: 'agent'` (it becomes the LLM prompt).
+
+### Changing delivery mode for an existing watcher
+
+If the user changes their mind ("actually, email me instead"), the kickoff tool must accept a `deliver` param and drop the existing watcher before re-registering — `proposeMonitor`'s `dedupKey` will otherwise no-op and silently keep the old delivery mode:
+
+```js
+// Drop the existing watcher for this dedup identity if delivery is changing
+const existing = await listMonitorsForSkill(userId, SKILL_ID);
+const stale = existing.find(w =>
+  w.kind === KIND &&
+  w?.state?.dedupKey === dedupKey &&
+  w?.onFire?.type !== (newDeliver === 'email' ? 'email' : 'agent')
+);
+if (stale) await ctx.unwatchMatching((r) => r.id === stale.id);
+
+await ctx.proposeMonitor({ /* …, deliver: newDeliver */ });
+```
+
+### `ctx.proposeMonitor` signature
+
+```js
+const { watcherId, deduped } = await ctx.proposeMonitor({
+  kind:         'mysite_check',   // must match a key in your watcherHandlers
+  state:        { url, lastSeenId: null /* arbitrary, passed to handler */ },
+  cadence:      'weekly',         // preset or number-seconds or { sec: N }
+  label:        'Watch mysite for new posts',
+  expiresAt:    null,             // null = indefinite (typical for monitors)
+  deliver:      'agent',          // 'agent' | 'email' | 'telegram' | 'notify'
+  agentPrompt:  'Summarize new mysite posts in 1-2 spoken sentences.',
+  // ── email-only fields ───────────────────────────────────────────────
+  emailSubject: 'New posts on mysite',           // when deliver='email'
+  emailTo:      undefined,                       // optional, defaults to profile email
+  emailAccount: undefined,                       // optional, defaults to primary
+  // ── telegram-only fields ────────────────────────────────────────────
+  telegramPrefix: '🆕 mysite update',             // when deliver='telegram'; optional header line
+  // ────────────────────────────────────────────────────────────────────
+  skillId:      'mysite',         // your skill's id
+  dedupKey:     'mysite-default', // skip if already-watching same identity
+});
+```
+
+Returns `{ watcherId, deduped }`. When `deduped: true`, an existing watcher for the same `(skillId, kind, dedupKey)` was reused — no new registration.
+
+### Day-of-week scheduling without a cron primitive
+
+When the source has a known refresh day (e.g. Publix circulars rotate Wednesdays), pick a `daily` cadence and check `new Date().getDay()` at the top of your handler — return `{}` (no `textUpdate`) on non-matching days. That's cheaper than a real cron and reuses the existing supervisor.
+
+```js
+export const watcherHandlers = {
+  publix_bogo_check: async (state) => {
+    const day = new Date().getDay();          // 0=Sun, 3=Wed
+    if (day !== 3) return {};                  // silent no-op until Wednesday
+    // ...fetch + filter + return { textUpdate, newState }
+  },
+};
+```
+
+### When to use `proposeMonitor` vs `ctx.watch`
+
+- `ctx.proposeMonitor` — proactive "ping me when…" skills (this section).
+- `ctx.watch` — internal job/poll loops where you already know the exact `cadenceSec`, `expiresAt`, and `onFire` shape (e.g. an image-generation skill polling a render job to completion).
+
+---
+
 ## Importing app internals
 
 If you need app internals (e.g. `roles.mjs`, `_helpers.mjs`), use **dynamic imports inside the function body** — never at the top level. This avoids circular initialization (roles.mjs loads your executor; if your executor imports roles.mjs at module load time, it creates a circular init).

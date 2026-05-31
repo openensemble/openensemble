@@ -26,6 +26,7 @@ import { getUserFilesDir } from './lib/paths.mjs';
 import { log } from './logger.mjs';
 import { trimToolsForTurn, recordTurnRouting } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
+import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 
 import {
@@ -264,6 +265,13 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // context (and downstream awaits / tool dispatches), so the executor in
   // skills/coordinator/execute.mjs can reach it without us threading agent
   // refs through every provider's tool-loop call site.
+  // Voice-device source/deviceId — exposed to skill executors via ALS so
+  // verbose tools (email_list, email_read, …) can compact their output for
+  // voice replies. Set even when voiceCtx fields are null so executors can
+  // tell "called from a voice path" vs "called from web".
+  if (voiceCtx) {
+    voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
+  }
   /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, addedSkills: Set<string>} | null} */
   let _routerStore = null;
   if (agent.skillCategory === 'coordinator' && Array.isArray(agent.tools) && agent.tools.length > 0) {
@@ -405,9 +413,31 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // render it and the session doesn't persist it into history.
   const noteBlock = systemNote ? `\n\n${systemNote}` : '';
   const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
+
+  // Monitorable-intent classifier — embedding-based judge that fires when
+  // the user's message looks like "any new X from Y?", "what's on sale at Z?",
+  // "is the item back in stock?", etc. On a hit, append a one-line system
+  // note telling the LLM to ask the user (after answering) if they'd like
+  // automatic monitoring set up. Stateless — re-runs every turn; if the user
+  // ignores the offer once, the next topic-relevant turn will offer again.
+  // Skipped for ephemeral agents (no value in one-shot research) and slash
+  // commands. ~5-10ms when the cortex embedder is warm.
+  let monitorableBlock = '';
+  if (!agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/')) {
+    try {
+      const { classifyMonitorable, buildMonitorableSystemNote } = await import('./lib/monitorable-classifier.mjs');
+      const hit = await classifyMonitorable(userText);
+      if (hit.monitorable) {
+        monitorableBlock = buildMonitorableSystemNote(hit);
+        log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched });
+      }
+    } catch (e) {
+      console.debug('[monitorable-classifier] failed:', e.message);
+    }
+  }
   const systemPrompt = memBlock
-    ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}`
-    : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}`;
+    ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`
+    : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`;
 
   // 2. Build message history (strip ts field — Ollama doesn't want it).
   // Filter out UI-only role types — `status` (watcher progress bubbles),

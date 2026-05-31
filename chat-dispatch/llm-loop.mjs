@@ -28,6 +28,7 @@ import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { sendToDevice } from '../ws-handler.mjs';
 import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
+import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
 
 // ── Specialist router (pre-LLM) ───────────────────────────────────────────────
 // Skip the coordinator's reasoning turn when the user's message clearly
@@ -179,7 +180,7 @@ export async function runSpecialistRoute({
       const todayStr   = now.toISOString().slice(0, 10);
       const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
       const yearStart  = `${now.getFullYear()}-01-01`;
-      scopedSpec.systemPrompt = `${target.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}`;
+      scopedSpec.systemPrompt = `${target.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}${buildVoiceSystemAddition(source)}`;
     }
     console.log(`[chat] specialist-router: → ${route.name} (${route.skillId}) agent=${route.agentId}`);
     let routerBuf = '';

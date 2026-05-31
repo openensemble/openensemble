@@ -46,6 +46,7 @@ import {
 import { extractTransactions } from './skills/expenses/execute.mjs';
 import { getRoleAssignments } from './roles.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
+import { buildVoiceSystemAddition } from './lib/voice-context.mjs';
 import {
   loadConfig, getAgentsForUser,
   getUser, getUserCoordinatorAgentId, recordActivity,
@@ -238,15 +239,10 @@ export async function handleChatMessage({
     const financeExtra = agent.skillCategory === 'finance'
       ? `\nUser ID: ${userId ?? 'default'}\nAlways pass this exact User ID to every expense tool call.`
       : '';
-    // Voice-device chats: instruct the LLM to ALWAYS end clarification
-    // replies with a question mark. The firmware uses that as the signal
-    // to open a follow-up listen window so the user can answer without
-    // saying the wake word again. Phrase deliberately as a hard rule —
-    // without it we'd be sniffing reply text for "?" anywhere, which
-    // false-positives on quoted questions.
-    const voiceExtra = source === 'voice-device'
-      ? `\n\n## Voice device follow-up\nThis chat is coming from a voice device with a microphone. When you need ANY clarification, confirmation, or further info from the user — ALWAYS phrase the LAST sentence of your reply as a direct question ending with "?". Don't trail off with imperative "say X" or "let me know" without a closing "?". The device uses this trailing "?" as the signal to keep listening for the user's answer; without it they have to say the wake word again to respond.`
-      : '';
+    // Voice-device chats: inject formatting + follow-up-listening rules.
+    // Centralised in lib/voice-context.mjs so the specialist-router path
+    // (chat-dispatch/llm-loop.mjs) gets the identical block.
+    const voiceExtra = buildVoiceSystemAddition(source);
     scopedAgent.systemPrompt = `${agent.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}${financeExtra}${voiceExtra}`;
   }
 
