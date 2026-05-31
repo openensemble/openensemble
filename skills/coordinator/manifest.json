@@ -34,6 +34,7 @@
     "cancel_reminder",
     "create_watch",
     "list_watches",
+    "update_watch",
     "cancel_watch",
     "create_routine",
     "list_routines",

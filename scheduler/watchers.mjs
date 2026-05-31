@@ -206,6 +206,49 @@ export function registerWatcher(opts) {
   return record.id;
 }
 
+/**
+ * Mutate an active watcher in place. Returns the updated record or null if not
+ * found. Supports changing cadence, label, expiresAt, and onFire (delivery
+ * mode + delivery-specific fields). The skill-defined `state` is intentionally
+ * NOT exposed here — that's per-watcher private data; changing it would
+ * usually mean "re-register with different state", not "edit in place".
+ *
+ * Resets `nextTickAt` to a short window after now (≤60 s) when cadence changes
+ * so the watcher doesn't tick on the OLD schedule one more time before
+ * adopting the new one. Same jitter spread as registerWatcher uses for new
+ * registrations.
+ *
+ * @param {string} userId
+ * @param {string} watcherId
+ * @param {{cadenceSec?: number, label?: string, expiresAt?: number|null, onFire?: object}} patch
+ * @returns {object|null} updated record or null
+ */
+export function updateWatcher(userId, watcherId, patch) {
+  const data = loadUserWatchers(userId);
+  const w = data.active.find(x => x.id === watcherId);
+  if (!w) return null;
+
+  if (typeof patch.cadenceSec === 'number' && patch.cadenceSec >= 5) {
+    w.cadenceSec = patch.cadenceSec;
+    w.nextTickAt = Date.now() + Math.min(patch.cadenceSec * 1000, 60_000);
+  }
+  if (patch.label && typeof patch.label === 'string') {
+    w.label = patch.label.slice(0, 200);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'expiresAt')) {
+    if (patch.expiresAt === null) {
+      w.expiresAt = null;
+    } else if (typeof patch.expiresAt === 'number' && patch.expiresAt > Date.now()) {
+      w.expiresAt = patch.expiresAt;
+    }
+  }
+  if (patch.onFire && typeof patch.onFire === 'object' && patch.onFire.type) {
+    w.onFire = patch.onFire;
+  }
+  persistUser(userId);
+  return w;
+}
+
 export function unregisterWatcher(userId, watcherId, reason = 'cancelled') {
   const data = loadUserWatchers(userId);
   const idx = data.active.findIndex(w => w.id === watcherId);

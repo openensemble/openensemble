@@ -281,6 +281,33 @@ async function execCreateWatch(args, userId, agentId, ctx) {
   return `Watch "${label}" created — ${describeWatch({ kind: source, state })} ${predStr}, every ${cadence}s${expStr}${fireStr}. id=${watcherId}`;
 }
 
+function _fmtCadence(sec) {
+  if (sec < 60)      return `every ${sec}s`;
+  if (sec < 3600)   { const m = Math.round(sec / 60);    return `every ${m} min`; }
+  if (sec < 86400)  { const h = Math.round(sec / 3600);  return `every ${h} hour${h === 1 ? '' : 's'}`; }
+  const d = Math.round(sec / 86400);
+  if (d === 7)      return 'weekly';
+  return `every ${d} day${d === 1 ? '' : 's'}`;
+}
+function _fmtRelTime(ms) {
+  const diff = ms - Date.now();
+  if (diff <= 0) return 'now';
+  const sec = Math.round(diff / 1000);
+  if (sec < 60)    return `in ${sec}s`;
+  if (sec < 3600) { const m = Math.round(sec / 60);   return `in ${m} min`; }
+  if (sec < 86400){ const h = Math.round(sec / 3600); return `in ${h} hour${h === 1 ? '' : 's'}`; }
+  const d = Math.round(sec / 86400);
+  return `in ${d} day${d === 1 ? '' : 's'}`;
+}
+function _fmtDeliver(onFire) {
+  const t = onFire?.type;
+  if (t === 'email')    return `delivers by email${onFire.to ? ` to ${onFire.to}` : ''}`;
+  if (t === 'telegram') return 'delivers by Telegram';
+  if (t === 'agent')    return 'notifies via the coordinator (voice/chat)';
+  if (t === 'notify')   return 'status bubble only';
+  return 'no delivery configured';
+}
+
 async function execListWatches(userId) {
   if (!userId) return 'Error: no user context.';
   const { listWatchers } = await import('../../scheduler/watchers.mjs');
@@ -290,8 +317,13 @@ async function execListWatches(userId) {
   if (active.length) {
     lines.push('Active:');
     for (const w of active) {
-      const last = w.lastStatusText ? ` — ${w.lastStatusText}` : '';
-      lines.push(`- "${w.label}" [${w.kind}] every ${w.cadenceSec}s (id: ${w.id})${last}`);
+      const cadence = _fmtCadence(w.cadenceSec);
+      const nextTick = w.nextTickAt ? `, next check ${_fmtRelTime(w.nextTickAt)}` : '';
+      const deliver = `, ${_fmtDeliver(w.onFire)}`;
+      const ticks = ` (${w.ticks ?? 0} checks so far${w.failures ? `, ${w.failures} failure${w.failures === 1 ? '' : 's'}` : ''})`;
+      const last = w.lastStatusText ? `\n    last: ${w.lastStatusText}` : '';
+      const expiry = (w.expiresAt === null) ? '' : `, expires ${_fmtRelTime(w.expiresAt)}`;
+      lines.push(`- "${w.label}" [${w.kind}${w.skillId ? ` · ${w.skillId}` : ''}] — ${cadence}${nextTick}${deliver}${expiry}${ticks} (id: ${w.id})${last}`);
     }
   }
   if (recent.length) {
@@ -301,6 +333,109 @@ async function execListWatches(userId) {
     }
   }
   return lines.join('\n');
+}
+
+// Resolve a friendly cadence input ("hourly", "every 3 hours", "300", { sec })
+// into seconds. Returns null if the input is missing/empty; throws on garbage.
+const _CADENCE_PRESETS = { minutely: 60, fast: 300, hourly: 3600, daily: 86400, weekly: 604800 };
+function _parseCadenceInput(input) {
+  if (input == null || input === '') return null;
+  if (typeof input === 'number') return Math.max(5, Math.floor(input));
+  if (typeof input === 'object' && typeof input.sec === 'number') return Math.max(5, Math.floor(input.sec));
+  const s = String(input).trim().toLowerCase();
+  if (_CADENCE_PRESETS[s]) return _CADENCE_PRESETS[s];
+  // "300" or "300s"
+  const bareNum = s.match(/^(\d+)\s*s?$/);
+  if (bareNum) return Math.max(5, parseInt(bareNum[1], 10));
+  // "every N <unit>" / "N <unit>" / "N min" / "N hour"
+  const m = s.match(/(\d+)\s*(s|sec|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    const unit = m[2];
+    if (/^s|sec/.test(unit)) return Math.max(5, n);
+    if (/^m|min/.test(unit)) return Math.max(5, n * 60);
+    if (/^h/.test(unit))      return n * 3600;
+    if (/^d/.test(unit))      return n * 86400;
+    if (/^w/.test(unit))      return n * 604800;
+  }
+  return null;
+}
+
+async function execUpdateWatch(args, userId) {
+  if (!userId)  return 'Error: no user context.';
+  if (!args?.id) return 'Error: id is required (call list_watches to find it).';
+
+  const { listWatchers, updateWatcher } = await import('../../scheduler/watchers.mjs');
+  const existing = (listWatchers(userId)?.active || []).find(w => w.id === args.id);
+  if (!existing) return `Error: no active watch with id "${args.id}".`;
+
+  /** @type {{cadenceSec?: number, label?: string, expiresAt?: number|null, onFire?: object}} */
+  const patch = {};
+  const changes = [];
+
+  // Cadence
+  if (args.cadence !== undefined) {
+    const sec = _parseCadenceInput(args.cadence);
+    if (sec == null) return `Error: could not parse cadence "${args.cadence}". Try a preset ('hourly', 'daily'), a number of seconds, or "every N hours".`;
+    if (sec !== existing.cadenceSec) {
+      patch.cadenceSec = sec;
+      changes.push(`cadence ${existing.cadenceSec}s → ${sec}s`);
+    }
+  }
+
+  // Label
+  if (args.label && typeof args.label === 'string' && args.label.trim() !== existing.label) {
+    patch.label = args.label.trim();
+    changes.push(`label "${existing.label}" → "${patch.label}"`);
+  }
+
+  // Expiry
+  if (args.expires_in_hours !== undefined) {
+    if (typeof args.expires_in_hours !== 'number' || args.expires_in_hours <= 0) {
+      patch.expiresAt = null;
+      changes.push('expiry cleared (indefinite)');
+    } else {
+      patch.expiresAt = Date.now() + args.expires_in_hours * 3600 * 1000;
+      changes.push(`expires in ${args.expires_in_hours}h`);
+    }
+  }
+
+  // Delivery — only build a new onFire if deliver was passed, otherwise leave alone
+  if (args.deliver) {
+    let onFire;
+    if (args.deliver === 'email') {
+      onFire = {
+        type: 'email',
+        subject: args.email_subject || existing.onFire?.subject || `Monitor: ${existing.label}`,
+        ...(args.email_to      ? { to: args.email_to }           : (existing.onFire?.to      ? { to: existing.onFire.to }           : {})),
+        ...(args.email_account ? { account: args.email_account } : (existing.onFire?.account ? { account: existing.onFire.account } : {})),
+      };
+    } else if (args.deliver === 'telegram') {
+      onFire = {
+        type: 'telegram',
+        ...(args.telegram_prefix ? { prefix: args.telegram_prefix } : (existing.onFire?.prefix ? { prefix: existing.onFire.prefix } : {})),
+      };
+    } else if (args.deliver === 'agent') {
+      onFire = {
+        type: 'agent',
+        prompt: args.agent_prompt || existing.onFire?.prompt || `Your monitor "${existing.label}" fired. Summarize and report.`,
+      };
+    } else if (args.deliver === 'notify') {
+      onFire = { type: 'notify' };
+    }
+    if (onFire && JSON.stringify(onFire) !== JSON.stringify(existing.onFire || {})) {
+      patch.onFire = onFire;
+      changes.push(`delivery → ${args.deliver}`);
+    }
+  }
+
+  if (!Object.keys(patch).length) {
+    return `No changes — every requested value matches the current watcher.`;
+  }
+
+  const updated = updateWatcher(userId, args.id, patch);
+  if (!updated) return `Error: updateWatcher failed for id "${args.id}".`;
+  return `Updated "${updated.label}": ${changes.join('; ')}.`;
 }
 
 async function execCancelWatch(id, userId) {
@@ -351,6 +486,7 @@ export default async function execute(name, args, userId, agentId, ctx) {
   if (name === 'cancel_reminder') return execCancelReminder(args.id, userId);
   if (name === 'create_watch')    return execCreateWatch(args || {}, userId, agentId, ctx);
   if (name === 'list_watches')    return execListWatches(userId);
+  if (name === 'update_watch')    return execUpdateWatch(args, userId);
   if (name === 'cancel_watch')    return execCancelWatch(args?.id, userId);
   return `Unknown tool: ${name}`;
 }

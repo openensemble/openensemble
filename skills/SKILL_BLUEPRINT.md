@@ -448,6 +448,8 @@ const { watcherId, deduped } = await ctx.proposeMonitor({
 
 Returns `{ watcherId, deduped }`. When `deduped: true`, an existing watcher for the same `(skillId, kind, dedupKey)` was reused — no new registration.
 
+> ⚠️ **`skillId` must equal your manifest `id` verbatim.** The legacy `usr_<id>` prefix is dropped by the migration; if you pass `'usr_my-skill'` when your manifest declares `"id": "my-skill"`, the supervisor will log `Handler not found` every tick and the watcher will fail out after 3 attempts. Declare a single `const SKILL_ID = '<exact-manifest-id>';` at the top of `execute.mjs` and reuse it.
+
 ### Day-of-week scheduling without a cron primitive
 
 When the source has a known refresh day (e.g. Publix circulars rotate Wednesdays), pick a `daily` cadence and check `new Date().getDay()` at the top of your handler — return `{}` (no `textUpdate`) on non-matching days. That's cheaper than a real cron and reuses the existing supervisor.
