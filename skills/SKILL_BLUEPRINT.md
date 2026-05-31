@@ -494,7 +494,56 @@ Relative paths from `~/.openensemble/skills/usr_myskill/execute.mjs`:
 
 ## Storing configuration / secrets
 
-Use `userId` to scope data to the user. Store config under the user's dir:
+Two distinct stores depending on what kind of value you're keeping:
+
+| What you're storing | Use | Where it lives |
+|---|---|---|
+| API keys, passwords, OAuth tokens, webhook secrets | `lib/credentials.mjs` primitive | `users/<id>/credentials/<credId>.json`, encrypted with per-user key |
+| Non-secret config (URLs, IDs, user preferences, last-fetched timestamps) | Plaintext JSON in user dir | `users/<id>/usr_<skillId>-config.json` |
+
+**NEVER** write API keys / passwords / tokens to a plaintext config file. The credential primitive gives you AES-256-GCM at-rest encryption + a chat-prompt widget for getting the value from the user in the first place — no need to invent your own flow.
+
+### Secrets: the credential primitive
+
+The executor's `ctx` parameter (5th arg) exposes the credential primitive — **never import `lib/credentials.mjs` directly from a user skill**. Direct imports require a relative path whose depth differs between built-in skills (`skills/<id>/`, two up) and user skills (`users/<id>/skills/<id>/`, four up); LLMs miscount the dots, the module fails to resolve, and the tool errors out. `ctx.*` always works.
+
+```js
+export async function executeSkillTool(name, args, userId, agentId, ctx) {
+  if (name === 'my_call') {
+    // 1. Try the user's stored credential (decrypted on read).
+    let apiKey = await ctx.getCredential('myskill_api_key');
+
+    // 2. If missing, prompt via the chat widget. The plaintext value is sent
+    //    over the WS in a protected frame — it NEVER enters the LLM message
+    //    history, never gets logged, never echoes back. `persist: true`
+    //    stores it encrypted; the next call hits the fast path above.
+    if (!apiKey) {
+      apiKey = await ctx.requestCredential({
+        id:    'myskill_api_key',
+        label: 'My Service API key',
+        kind:  'api_key',
+        persist: true,
+      });
+    }
+
+    // 3. Use the value. Don't return it in the tool result — see below.
+    const res = await fetch('https://api.myservice.com/...', {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    return await res.json();
+  }
+}
+```
+
+**If your tool result must reference the credential** (e.g. you're returning a command line that includes the key), mark it `{ isCredential: true, credentialId: 'myskill_api_key', ... }` so the per-provider substitution in `chat/providers/*.mjs` replaces it with a placeholder before the LLM sees it. The placeholder gets re-substituted at the next executor call. Without this flag, the plaintext key flows through the LLM history and shows up in chat logs.
+
+`kind` options:
+- `'api_key'` — persisted encrypted (default for long-lived creds)
+- `'sudo'` / `'confirm'` — held in RAM only, expires after use (for one-shot sensitive actions)
+
+### Non-secret config
+
+For URLs, account IDs, user preferences, last-fetched timestamps — anything that wouldn't be a problem if it appeared in a backup tarball — use the plaintext per-user file pattern:
 
 ```js
 import { readFileSync, writeFileSync, existsSync } from 'fs';

@@ -723,11 +723,27 @@ loadPersistedSessions();
 // restore works without manual key handling.
 (async () => {
   try {
-    const { bootstrapEncryption } = await import('./lib/config-secrets.mjs');
+    const { bootstrapEncryption, bootstrapProfileEncryption } = await import('./lib/config-secrets.mjs');
     const { atomicWriteSync } = await import('./routes/_helpers/io-lock.mjs');
     const { CFG_PATH } = await import('./routes/_helpers/paths.mjs');
     const { log } = await import('./logger.mjs');
     await bootstrapEncryption({ cfgPath: CFG_PATH, atomicWriteSync, log });
+    // Same migration for per-user profile.json (telegram.botToken,
+    // telegram.webhookSecret). Runs after the config bootstrap so the
+    // master key already exists when this needs to decide "create key?"
+    // vs "encrypt existing".
+    await bootstrapProfileEncryption({ atomicWriteSync, log });
+    // And the OAuth/Microsoft token files. They'd otherwise stay plaintext
+    // until their next refresh (~1h for Google access tokens, longer for
+    // dormant services). The threat model (git commit / log snippet /
+    // casual disk read) wants them encrypted now, not eventually.
+    const { bootstrapTokenFileEncryption } = await import('./lib/encrypted-file.mjs');
+    const { USERS_DIR } = await import('./routes/_helpers/paths.mjs');
+    await bootstrapTokenFileEncryption({
+      usersDir: USERS_DIR,
+      prefixes: ['gmail-token', 'gcal-token', 'ms-token'],
+      log,
+    });
   } catch (e) {
     console.warn('[config-secrets] bootstrap migration failed:', e.message);
   }

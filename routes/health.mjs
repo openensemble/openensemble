@@ -16,6 +16,7 @@ import { isWatcherRunning } from '../gmail-autolabel.mjs';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
 import { readToken as readOpenAIOAuthToken } from '../lib/openai-codex-auth.mjs';
 import { getCachedState as getUpdateState } from '../lib/update.mjs';
+import { readEncryptedJsonFile } from '../lib/encrypted-file.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const startedAt = Date.now();
@@ -94,7 +95,7 @@ function gmailTokenStatus(userId) {
           const tp = path.join(dir, `gmail-token-${a.id}.json`);
           if (!fs.existsSync(tp)) continue;
           try {
-            const tokens = JSON.parse(fs.readFileSync(tp, 'utf8'));
+            const tokens = readEncryptedJsonFile(tp);
             const expired = tokens.expiry_date ? Date.now() > tokens.expiry_date : true;
             if (!expired || tokens.refresh_token) return { exists: true, expired: false, hasRefresh: !!tokens.refresh_token };
           } catch (e) { console.warn('[health] Failed to read Gmail account token for', userId + ':', e.message); }
@@ -107,7 +108,7 @@ function gmailTokenStatus(userId) {
   const tokenPath = path.join(dir, 'gmail-token.json');
   if (!fs.existsSync(tokenPath)) return { exists: false, expired: true };
   try {
-    const tokens = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+    const tokens = readEncryptedJsonFile(tokenPath);
     const expired = tokens.expiry_date ? Date.now() > tokens.expiry_date : true;
     return { exists: true, expired, hasRefresh: !!tokens.refresh_token };
   } catch (e) { console.warn('[health] Failed to read Gmail token for', userId + ':', e.message); return { exists: false, expired: true }; }

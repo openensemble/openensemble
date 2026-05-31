@@ -27,7 +27,7 @@ import {
   getUserDir,
 } from './_helpers/paths.mjs';
 import { withLock, atomicWriteSync, makeModify } from './_helpers/io-lock.mjs';
-import { encryptConfigSecrets, decryptedConfigView } from '../lib/config-secrets.mjs';
+import { encryptConfigSecrets, decryptedConfigView, encryptProfileSecrets, decryptedProfileView } from '../lib/config-secrets.mjs';
 import { listAgents, getAgent, getAgentScope, loadCustomAgents, updateAgentMeta, invalidateModelOverridesCache } from '../agents.mjs';
 import { getDefaultRoles, listRoles, getRoleAssignments } from '../roles.mjs';
 import { log } from '../logger.mjs';
@@ -197,7 +197,7 @@ export function loadUsers() {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const profilePath = path.join(dir, entry.name, 'profile.json');
-      try { users.push(JSON.parse(fs.readFileSync(profilePath, 'utf8'))); }
+      try { users.push(decryptedProfileView(JSON.parse(fs.readFileSync(profilePath, 'utf8')))); }
       catch (e) { console.warn('[users] Failed to parse profile for', entry.name + ':', e.message); }
     }
     _usersCache = users;
@@ -221,7 +221,13 @@ export function invalidateUsersCache() { _usersCache = null; _usersDirMtime = 0;
 export function saveUser(user) {
   const dir = getUserDir(user.id);
   fs.mkdirSync(dir, { recursive: true });
-  atomicWriteSync(path.join(dir, 'profile.json'), JSON.stringify(user, null, 2));
+  // Encrypt PROFILE_SECRET_PATHS (telegram.botToken, etc.) before writing.
+  // Caller still passes us a plaintext user object — encryption is a disk
+  // concern only. Cloning so we don't mutate the caller's reference (which
+  // may keep being used after the write, e.g. modifyUser returns it).
+  const onDisk = JSON.parse(JSON.stringify(user));
+  encryptProfileSecrets(onDisk);
+  atomicWriteSync(path.join(dir, 'profile.json'), JSON.stringify(onDisk, null, 2));
   invalidateUsersCache();
 }
 
@@ -266,7 +272,15 @@ export function saveUsers(list) {
 export function getUser(id) {
   if (!id) return null;
   const p = path.join(getUserDir(id), 'profile.json');
-  try { if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8')); }
+  try {
+    if (fs.existsSync(p)) {
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+      // Decrypt PROFILE_SECRET_PATHS so callers see plaintext (telegram send,
+      // webhook validate). Legacy plaintext profile.json passes through
+      // unchanged — the envelope detector skips non-encrypted fields.
+      return decryptedProfileView(parsed);
+    }
+  }
   catch (e) { console.warn('[users] Failed to load user', id + ':', e.message); }
   return null;
 }

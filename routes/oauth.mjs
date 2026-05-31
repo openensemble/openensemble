@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import { requireAuth, readBody, getUserDir, loadConfig } from './_helpers.mjs';
 import { seedGmailAccount } from './email-accounts.mjs';
 import { ensureFreshToken, resolveTokenPath, getClientCredentials, CREDS_PATH, GOOGLE_AUTH_BASE_DIR as BASE_DIR } from '../lib/google-auth.mjs';
+import { readEncryptedJsonFile, writeEncryptedJsonFile } from '../lib/encrypted-file.mjs';
 import { msTokenPath } from '../lib/ms-graph.mjs';
 import { testConnection as testImapConnection } from '../lib/imap-client.mjs';
 import { decrypt } from '../lib/email-crypto.mjs';
@@ -182,7 +183,7 @@ export async function handle(req, res) {
       if (!tokens.access_token) throw new Error(tokens.error_description ?? 'Token exchange failed');
       tokens.expiry_date = Date.now() + tokens.expires_in * 1000;
       const _tp = tokenPath(userId, service, accountId);
-      fs.writeFileSync(_tp, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+      writeEncryptedJsonFile(_tp, tokens, { mode: 0o600 });
       try { fs.chmodSync(_tp, 0o600); } catch {}
       if (service === 'gmail') { try { await seedGmailAccount(userId, accountId); } catch (_) {} }
       res.writeHead(302, { Location: `/?oauth=success&service=${service}` });
@@ -209,7 +210,7 @@ export async function handle(req, res) {
           const tp = tokenPath(userId, 'gmail', a.id);
           if (!fs.existsSync(tp)) { gmailHealth[a.id] = 'missing'; continue; }
           try {
-            const tokens = JSON.parse(fs.readFileSync(tp, 'utf8'));
+            const tokens = readEncryptedJsonFile(tp);
             if (!tokens.refresh_token) { gmailHealth[a.id] = 'no_refresh'; continue; }
             await ensureFreshToken(tp);
             gmailHealth[a.id] = 'ok';
@@ -219,7 +220,7 @@ export async function handle(req, res) {
           const tp = msTokenPath(userId, a.id);
           if (!fs.existsSync(tp)) { msHealth[a.id] = 'missing'; continue; }
           try {
-            const tokens = JSON.parse(fs.readFileSync(tp, 'utf8'));
+            const tokens = readEncryptedJsonFile(tp);
             if (!tokens.access_token) { msHealth[a.id] = 'missing'; continue; }
             if (!tokens.refresh_token) { msHealth[a.id] = 'no_refresh'; continue; }
             msHealth[a.id] = 'ok';

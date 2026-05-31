@@ -12,6 +12,7 @@ import { randomBytes, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { requireAuth, loadConfig, safeError } from './_helpers.mjs';
 import { msTokenPath } from '../lib/ms-graph.mjs';
+import { writeEncryptedJsonFile } from '../lib/encrypted-file.mjs';
 
 const BASE_DIR   = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const CREDS_FILE = path.join(BASE_DIR, 'microsoft-credentials.json');

@@ -61,7 +61,14 @@ export async function handle(req, res) {
     if (!userId) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Unauthorized' })); return true; }
     const user = getUser(userId);
     if (!user) { res.writeHead(404); res.end(JSON.stringify({ error: 'User not found' })); return true; }
-    const { passwordHash: _ph, ...safe } = user;
+    // Strip secrets from the response. passwordHash is hashed, but never
+    // ship it; the in-memory user object also has telegram.botToken and
+    // telegram.webhookSecret in plaintext (decrypted-at-read for runtime
+    // use). Don't echo those to JS — an XSS bug elsewhere would exfiltrate
+    // the live bot token via /api/me. UI only needs "is telegram set up";
+    // chatId is fine to expose (used to render "linked to chat X").
+    const { passwordHash: _ph, telegram: _tg, ...safe } = user;
+    if (_tg) safe.telegram = { configured: !!_tg.botToken, chatId: _tg.chatId ?? null };
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(safe)); return true;
   }
 

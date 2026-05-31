@@ -640,6 +640,39 @@ async function buildCtx(userId, agentId) {
   // call shape for "ping me when X changes" instead of forcing every skill
   // to re-learn registerWatcher's arg layout.
   ctx.proposeMonitor = buildProposeMonitor({ userId, agentId: wsAgentId });
+
+  // Encrypted credential primitive — wraps lib/credentials.mjs so user skills
+  // don't have to know the install-root-relative import depth (four-up from
+  // users/<id>/skills/<id>/execute.mjs, two-up from built-in skills/<id>/
+  // execute.mjs — easy to miscount). Plaintext values from requestCredential
+  // never enter the LLM message history; the chat-providers substitute a
+  // placeholder when the tool result is flagged { isCredential: true }.
+  //
+  //   const key = await ctx.getCredential('myskill_api_key')
+  //              ?? await ctx.requestCredential({
+  //                   id: 'myskill_api_key',
+  //                   label: 'My Service API key',
+  //                   kind: 'api_key', persist: true,
+  //                 });
+  ctx.getCredential = async (id) => {
+    try {
+      const m = await import('./lib/credentials.mjs');
+      return m.getCredentialValue(userId, id);
+    } catch (e) { console.warn('[ctx.getCredential]', e.message); return null; }
+  };
+  ctx.requestCredential = async (opts = {}) => {
+    try {
+      const m = await import('./lib/credentials.mjs');
+      return m.requestCredential({ ...opts, userId });
+    } catch (e) { console.warn('[ctx.requestCredential]', e.message); return null; }
+  };
+  ctx.storeCredential = async (opts = {}) => {
+    try {
+      const m = await import('./lib/credentials.mjs');
+      return m.storeCredential(userId, opts);
+    } catch (e) { console.warn('[ctx.storeCredential]', e.message); return null; }
+  };
+
   return ctx;
 }
 
