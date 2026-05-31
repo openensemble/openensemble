@@ -190,6 +190,7 @@ export function registerWatcher(opts) {
     expiresAt: resolvedExpires,
     lastStatusText: null,
     lastChangeAt: Date.now(),
+    lastTickAt: null,
     failures: 0,
     ticks: 0,
     status: 'active', // active | done | error | expired | cancelled
@@ -503,6 +504,7 @@ async function tickOne(record) {
 
     record.failures = 0;
     record.ticks++;
+    record.lastTickAt = Date.now();
 
     if (result && typeof result === 'object') {
       if (result.newState !== undefined) {

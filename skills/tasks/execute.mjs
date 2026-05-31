@@ -299,6 +299,16 @@ function _fmtRelTime(ms) {
   const d = Math.round(sec / 86400);
   return `in ${d} day${d === 1 ? '' : 's'}`;
 }
+function _fmtAgo(ms) {
+  const diff = Date.now() - ms;
+  if (diff <= 0) return 'just now';
+  const sec = Math.round(diff / 1000);
+  if (sec < 60)    return `${sec}s ago`;
+  if (sec < 3600) { const m = Math.round(sec / 60);   return `${m} min ago`; }
+  if (sec < 86400){ const h = Math.round(sec / 3600); return `${h}h ago`; }
+  const d = Math.round(sec / 86400);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
+}
 function _fmtDeliver(onFire) {
   const t = onFire?.type;
   if (t === 'email')    return `delivers by email${onFire.to ? ` to ${onFire.to}` : ''}`;
@@ -318,12 +328,14 @@ async function execListWatches(userId) {
     lines.push('Active:');
     for (const w of active) {
       const cadence = _fmtCadence(w.cadenceSec);
+      const lastRanAt = w.lastTickAt || (w.ticks > 0 ? w.lastChangeAt : null);
+      const lastRan = lastRanAt ? `, last ran ${_fmtAgo(lastRanAt)}` : ', not yet run';
       const nextTick = w.nextTickAt ? `, next check ${_fmtRelTime(w.nextTickAt)}` : '';
       const deliver = `, ${_fmtDeliver(w.onFire)}`;
       const ticks = ` (${w.ticks ?? 0} checks so far${w.failures ? `, ${w.failures} failure${w.failures === 1 ? '' : 's'}` : ''})`;
       const last = w.lastStatusText ? `\n    last: ${w.lastStatusText}` : '';
       const expiry = (w.expiresAt === null) ? '' : `, expires ${_fmtRelTime(w.expiresAt)}`;
-      lines.push(`- "${w.label}" [${w.kind}${w.skillId ? ` · ${w.skillId}` : ''}] — ${cadence}${nextTick}${deliver}${expiry}${ticks} (id: ${w.id})${last}`);
+      lines.push(`- "${w.label}" [${w.kind}${w.skillId ? ` · ${w.skillId}` : ''}] — ${cadence}${lastRan}${nextTick}${deliver}${expiry}${ticks} (id: ${w.id})${last}`);
     }
   }
   if (recent.length) {

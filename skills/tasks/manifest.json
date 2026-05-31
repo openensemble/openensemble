@@ -24,6 +24,13 @@
     "how often is this watcher polling",
     "what cadence is my monitor set to",
     "when does the etb watcher next check",
+    "when was the last time the pokemon etb skill ran",
+    "when did my watcher last run",
+    "when did the skill last fire",
+    "when did the etb skill last check",
+    "how long ago did the watcher run",
+    "last time the monitor ran",
+    "has my watcher run yet today",
     "change polling to every 3 hours",
     "change the cadence to every hour",
     "make it check every 30 minutes",
@@ -171,7 +178,7 @@
       "type": "function",
       "function": {
         "name": "list_watches",
-        "description": "List all active watch monitors for the current user — call this whenever the user asks how a monitor works, how often it polls, when it checks next, how it notifies them, what cadence is set, or for the current state of any watcher (Pokemon ETB, YouTube channel, Publix BOGO, price alert, anything in flight). Returns label, watcher kind, owning skill, poll cadence in seconds (so you can translate to 'every hour' / 'every 5 minutes'), delivery mode (agent/email/telegram/notify), next-tick wall-clock time, expiry, total ticks, failures, and last status text. Do NOT delegate to ask_agent for these questions — this tool already has every status field the user could ask about.",
+        "description": "List all active watch monitors for the current user — call this whenever the user asks ANY status question about a running monitor or its owning skill: how often it polls, when it checks next, **when it last ran / last fired / last checked**, how it notifies them, what cadence is set, total runs so far, or for the current state of any watcher (Pokemon ETB, YouTube channel, Publix BOGO, price alert, anything in flight). If the user names a skill (e.g. 'when did the pokemon etb skill last run') and that skill owns a watcher, this is still the right tool — the watcher carries the skill id. Returns label, watcher kind, owning skill, poll cadence in seconds (translate to 'every hour' / 'every 5 minutes'), **last-run timestamp as relative time** ('3h ago'), delivery mode (agent/email/telegram/notify), next-tick wall-clock time, expiry, total ticks, failures, and last status text. Do NOT delegate to ask_agent or ask the coder for these questions — this tool already has every status field the user could ask about; delegating just adds a multi-second round-trip.",
         "parameters": { "type": "object", "properties": {} }
       }
     },
