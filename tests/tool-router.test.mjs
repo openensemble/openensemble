@@ -50,8 +50,13 @@ vi.mock('../roles.mjs', () => {
   return {
     listRoles: vi.fn(() => manifests),
     getRoleManifest: vi.fn((id) => manifests.find(m => m.id === id)),
+    getAgentRoles: vi.fn(() => _mockedHeldRoles),
   };
 });
+
+// Mocked role assignments — set per test to simulate which service roles
+// the agent under test currently holds.
+let _mockedHeldRoles = [];
 
 // Mocked classifier — returns whatever the test sets.
 let _mockedTop = null;
@@ -61,8 +66,9 @@ vi.mock('../lib/specialist-embed-router.mjs', () => ({
 
 const { trimToolsForTurn, expandToolsByReason } = await import('../lib/tool-router.mjs');
 
-function buildAgent(toolNames) {
+function buildAgent(toolNames, id = 'sydney') {
   return {
+    id,
     skillCategory: 'coordinator',
     tools: toolNames.map(n => ({ type: 'function', function: { name: n, description: 'x', parameters: { type: 'object', properties: {} } } })),
   };
@@ -80,7 +86,7 @@ const ALL_TOOLS = [
 ];
 
 describe('trimToolsForTurn', () => {
-  beforeEach(() => { _mockedTop = null; });
+  beforeEach(() => { _mockedTop = null; _mockedHeldRoles = []; });
 
   it('keeps always-on tools + default-scoped custom tools when classifier misses', async () => {
     const agent = buildAgent(ALL_TOOLS);
@@ -142,6 +148,25 @@ describe('trimToolsForTurn', () => {
     const agent = buildAgent(ALL_TOOLS);
     const r = await trimToolsForTurn({ agent, userText: 'hi', userId: 'u1' });
     expect(r.fullTools.length).toBe(ALL_TOOLS.length);
+  });
+
+  // Regression: after `claim_role` transfers a service role to the
+  // coordinator, the role's tools must ship on that agent's turns even
+  // when the user's next message is too vague for the embed classifier
+  // to fire (e.g. "ok do it"). Without this, the held role is unusable
+  // until the user re-phrases.
+  it('keeps tools for service roles the agent currently holds, even on classifier miss', async () => {
+    _mockedHeldRoles = ['email', 'oe-admin'];
+    const agent = buildAgent(ALL_TOOLS);
+    const r = await trimToolsForTurn({ agent, userText: 'ok do it', userId: 'u1' });
+    const names = r.trimmedTools.map(t => t.function.name);
+    expect(names).toContain('email_list');
+    expect(names).toContain('email_compose');
+    expect(names).toContain('install_integration');
+    expect(r.initiallyIncludedSkills.has('email')).toBe(true);
+    expect(r.initiallyIncludedSkills.has('oe-admin')).toBe(true);
+    // Roles NOT held should still be trimmed out.
+    expect(names).not.toContain('ha_call_service');
   });
 });
 

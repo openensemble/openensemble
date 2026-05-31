@@ -16,6 +16,7 @@ import { userRoleRulesPath } from '../../lib/paths.mjs';
 import { listAgents } from '../../agents.mjs';
 import {
   resolveAgentTools, getDefaultRoles, listRoles, getRoleAssignments, getRoleManifest,
+  getAgentRoles,
 } from '../../roles.mjs';
 import { getUser, modifyUser } from '../_helpers.mjs';
 import { getLanAddress } from '../../discovery.mjs';
@@ -161,9 +162,22 @@ export function getAgentsForUser(userId) {
           .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
           .filter(Boolean)
       );
+      // Held service-role tools also bypass the allowlist. `claim_role` is an
+      // explicit delegation — the user told this agent to do that job. If the
+      // coordinator's hand-curated defaultToolIds doesn't list e.g. node_exec
+      // (it doesn't), the held role would be unusable. Same precedent as
+      // custom-skill tools above. Without this, "take Remote Nodes" succeeds
+      // but the agent never sees node_*.
+      const heldRoleTools = new Set(
+        getAgentRoles(a.id, userId)
+          .map(rid => getRoleManifest(rid, userId))
+          .filter(Boolean)
+          .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
+          .filter(Boolean)
+      );
       tools = tools.filter(t => {
         const name = t.function?.name;
-        return allowed.has(name) || userSkillTools.has(name);
+        return allowed.has(name) || userSkillTools.has(name) || heldRoleTools.has(name);
       });
     }
 
