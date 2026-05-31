@@ -666,7 +666,7 @@ async function buildCtx(userId, agentId) {
       return m.requestCredential({ ...opts, userId });
     } catch (e) { console.warn('[ctx.requestCredential]', e.message); return null; }
   };
-  ctx.storeCredential = async (opts = {}) => {
+  ctx.storeCredential = async (opts = /** @type {any} */ ({})) => {
     try {
       const m = await import('./lib/credentials.mjs');
       return m.storeCredential(userId, opts);
