@@ -19,6 +19,9 @@ import { pathToFileURL } from 'url';
 import path from 'path';
 import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir } from './lib/paths.mjs';
 import { buildProposeMonitor } from './lib/monitor-helper.mjs';
+import { mergeDefaults, recordToolCall, recordPinUsage } from './lib/tool-defaults.mjs';
+import { recordToolFailure } from './lib/tool-failures.mjs';
+import { isSkillDisabled, getHiddenTools } from './lib/skill-overrides.mjs';
 import { log } from './logger.mjs';
 
 // Wrapper shape: { manifest, userId, dir }
@@ -212,7 +215,12 @@ function migrateLegacyUserSkills() {
 export function listRoles(userId = null) {
   const out = [];
   for (const wrap of _manifests.values()) {
-    if (wrap.userId === null || wrap.userId === userId) out.push(wrap.manifest);
+    if (wrap.userId === null || wrap.userId === userId) {
+      // Phase-10: user can disable any non-always_on skill. The override is
+      // read at runtime from disk — manifests stay immutable in the cache.
+      if (userId && isSkillDisabled(userId, wrap.manifest.id, !!wrap.manifest.always_on)) continue;
+      out.push(wrap.manifest);
+    }
   }
   return out;
 }
@@ -257,7 +265,17 @@ export function clearExecutorCache(skillId, userId = null) {
 }
 
 export function getRoleTools(id, userId = null) {
-  return getRoleManifest(id, userId)?.tools ?? [];
+  const tools = getRoleManifest(id, userId)?.tools ?? [];
+  // Phase-10: per-user hidden-tools filter. Removes any tool whose
+  // function.name appears in users/<id>/skill-overrides.json[id].hiddenTools.
+  if (userId && tools.length) {
+    const hidden = getHiddenTools(userId, id);
+    if (hidden.length) {
+      const set = new Set(hidden);
+      return tools.filter(t => !set.has(t?.function?.name));
+    }
+  }
+  return tools;
 }
 
 export function getToolsForRoleIds(roleIds, userId = null) {
@@ -774,12 +792,41 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       return;
     }
   }
+
+  // Phase-10: defense-in-depth. listRoles/getRoleTools already filter the
+  // catalog the LLM sees, but if a tool name leaks via aliasing, manual
+  // request_tools, or a delegated turn that pre-resolved its toolset, we
+  // still want disabled-skill/hidden-tool overrides to win at the gate.
+  if (userId && owningSkillId) {
+    const owningManifest = _manifests.get(resolveKey(owningSkillId, userId))?.manifest;
+    if (isSkillDisabled(userId, owningSkillId, !!owningManifest?.always_on)) {
+      yield { type: 'result', text: `Tool "${name}" is from a disabled skill.` };
+      return;
+    }
+    if (getHiddenTools(userId, owningSkillId).includes(resolvedName)) {
+      yield { type: 'result', text: `Tool "${name}" is hidden by your settings.` };
+      return;
+    }
+  }
   // Use resolvedName for actual execution
   name = resolvedName;
 
+  // Phase-2: merge accepted default-arg pins before invocation. User-provided
+  // args win over pins — mergeDefaults only fills keys absent from `args`.
+  // Sync read (small JSON, cached at OS level) so we don't add an await before
+  // the LLM-visible dispatch yield.
+  const mergedArgs = (args && typeof args === 'object') ? mergeDefaults(userId, name, args) : args;
+
+  // Phase-4.5: record fill/reaffirm/override events for the default_arg
+  // outcome measurer. Fire-and-forget — never blocks dispatch.
+  if (args && typeof args === 'object') {
+    recordPinUsage(userId, name, args)
+      .catch(e => console.warn('[tool-defaults] pin-usage record failed:', e.message));
+  }
+
   const _toolStart = Date.now();
   try {
-    const result = skillExec(name, args, userId, agentId, await buildCtx(userId, agentId));
+    const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId));
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
       for await (const chunk of result) yield chunk;
     } else {
@@ -787,9 +834,51 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       yield { type: 'result', text };
     }
     log.info('tool', 'tool complete', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart });
+
+    // Phase-2: count the call (only the args the model actually supplied —
+    // not mergedArgs — so pinned values don't re-count themselves). Fire-and-
+    // forget so a slow disk write doesn't block the LLM stream. If the
+    // threshold tripped, emit a default_arg proposal off the same async tick.
+    if (args && typeof args === 'object') {
+      recordToolCall(userId, name, args).then(async signal => {
+        if (signal?.proposed) {
+          try {
+            const { proposeDefaultArg } = await import('./lib/proposals.mjs');
+            await proposeDefaultArg({
+              userId, agentId: agentId || '',
+              tool: signal.tool, arg: signal.arg, value: signal.value, count: signal.count,
+            });
+          } catch (e) {
+            console.warn('[tool-defaults] propose failed:', e.message);
+          }
+        }
+      }).catch(e => console.warn('[tool-defaults] record failed:', e.message));
+    }
   } catch (e) {
     console.error(`[skills] Runtime error in tool "${name}":`, e.message);
     log.error('tool', 'tool threw', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: e.message });
     yield { type: 'result', text: `Tool error (${name}): ${e.message}` };
+
+    // Phase-3: count the failure. Fire-and-forget so the user's bubble lands
+    // immediately. On threshold trip we emit a tool_failure proposal — the
+    // owning-skill id is captured here because the proposer needs to know
+    // whether to route the remedy through refine (user skill) or a diagnostic
+    // (built-in).
+    recordToolFailure(userId, name, e.message).then(async signal => {
+      if (signal?.proposed) {
+        try {
+          const { proposeToolFailure } = await import('./lib/proposals.mjs');
+          await proposeToolFailure({
+            userId, agentId: agentId || '',
+            tool: signal.tool,
+            skillId: owningSkillId,
+            recentErrors: signal.recentErrors,
+            count: signal.count,
+          });
+        } catch (err) {
+          console.warn('[tool-failures] propose failed:', err.message);
+        }
+      }
+    }).catch(err => console.warn('[tool-failures] record failed:', err.message));
   }
 }

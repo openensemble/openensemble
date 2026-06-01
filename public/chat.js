@@ -268,6 +268,9 @@ function appendProposalBubble(proposal, scroll = true) {
   const el = document.createElement('div');
   el.className = 'msg proposal';
   el.dataset.proposalId = id;
+  // Phase-11a: stash the kind so applyProposalOutcome can render a
+  // kind-specific "Learned: X" chip distinct from generic accept.
+  if (proposal.kind) el.dataset.proposalKind = proposal.kind;
   el.style.cssText = 'padding:10px 12px;margin:6px 0;font-size:13px;border-left:3px solid var(--accent, #6c8cff);background:rgba(108,140,255,0.06);border-radius:4px';
 
   const header = document.createElement('div');
@@ -360,6 +363,48 @@ function applyProposalOutcome(proposalId, status, outcome) {
     el.style.borderLeftColor = 'var(--green, #4caf50)';
     el.style.background = 'rgba(76,175,80,0.06)';
     outcomeEl.textContent = `✓ Accepted${outcome ? ` — ${outcome}` : ''}`;
+    // Phase-13: inline undo button for kinds we can revoke. Visible for 24h
+    // after acceptance; after that the user uses the Learn drawer's revoke.
+    const UNDOABLE_KINDS = new Set(['rule_promotion', 'alias_proposal', 'routine_proposal', 'default_arg', 'routing_override']);
+    if (UNDOABLE_KINDS.has(el.dataset.proposalKind)) {
+      const undoBtn = document.createElement('button');
+      undoBtn.textContent = 'Undo';
+      undoBtn.style.cssText = 'margin-left:8px;background:transparent;border:1px solid var(--border);border-radius:3px;padding:1px 8px;font-size:11px;color:var(--muted);cursor:pointer;vertical-align:middle';
+      undoBtn.title = 'Revert within 24h';
+      undoBtn.onclick = async () => {
+        undoBtn.disabled = true; undoBtn.textContent = '…';
+        try {
+          const r = await fetch(`/api/proposals/${encodeURIComponent(el.dataset.proposalId)}/undo`, { method: 'POST' });
+          if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            alert(`Undo failed: ${e.error || r.statusText}`);
+            undoBtn.disabled = false; undoBtn.textContent = 'Undo';
+          }
+        } catch (e) { alert(`Undo failed: ${e.message}`); undoBtn.disabled = false; undoBtn.textContent = 'Undo'; }
+      };
+      outcomeEl.appendChild(undoBtn);
+    }
+    // Phase-11a: NL chip — kind-specific badge for accepted learnings. Tells
+    // the user at a glance what category of customization just stuck.
+    const LEARNING_KIND_LABELS = {
+      rule_promotion:   'Rule learned',
+      alias_proposal:   'Alias learned',
+      routine_proposal: 'Routine learned',
+      default_arg:      'Default pinned',
+      routing_override: 'Routing learned',
+      location_fact:    'Location learned',
+      skill_proposal:   'Skill built',
+    };
+    const kind = el.dataset.proposalKind;
+    const label = LEARNING_KIND_LABELS[kind];
+    if (label && !el.querySelector('.learning-chip')) {
+      const chip = document.createElement('span');
+      chip.className = 'learning-chip';
+      chip.textContent = label;
+      chip.style.cssText = 'display:inline-block;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;background:var(--green,#4caf50);color:#fff;padding:1px 6px;border-radius:3px;margin-left:8px;vertical-align:middle';
+      const header = el.querySelector('div');   // first <div> = bubble header row
+      if (header) header.appendChild(chip);
+    }
   } else if (status === 'dismissed') {
     el.style.opacity = '0.6';
     outcomeEl.textContent = '✕ Dismissed';
@@ -367,6 +412,14 @@ function applyProposalOutcome(proposalId, status, outcome) {
     el.style.borderLeftColor = 'var(--red, #f44336)';
     el.style.background = 'rgba(244,67,54,0.06)';
     outcomeEl.textContent = `⚠ ${outcome || 'Failed'}`;
+  } else if (status === 'undone') {
+    el.style.borderLeftColor = 'var(--border)';
+    el.style.background = 'transparent';
+    el.style.opacity = '0.55';
+    // Remove any prior learning-chip badge — the learning has been reverted
+    const chip = el.querySelector('.learning-chip');
+    if (chip) chip.remove();
+    outcomeEl.textContent = `↩ ${outcome || 'Reverted'}`;
   } else {
     outcomeEl.textContent = `· ${status}`;
   }

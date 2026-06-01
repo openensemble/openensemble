@@ -21,6 +21,7 @@
 import { streamChat } from '../chat.mjs';
 import { appendToSession, writeStreamBuffer, loadSession } from '../sessions.mjs';
 import { getRoleAssignments, listRoles, getRoleTools } from '../roles.mjs';
+import { matchOverride as matchRoutingOverride, logFire as logRoutingFire } from '../lib/routing-overrides.mjs';
 import {
   loadConfig, getAgentsForUser, recordActivity, recordTokenUsage,
 } from '../routes/_helpers.mjs';
@@ -133,7 +134,29 @@ export async function runSpecialistRoute({
   }
   try {
     /** @type {{ skillId: string, agentId: string, name: string, strategy?: string, sim?: number, phrase?: string } | null} */
-    let route = classifySpecialistIntent(userText, userId, agentId);
+    let route = null;
+
+    // Phase-6 routing overrides: take precedence over the classifier. These
+    // are populated via the proposal accept flow when the user has
+    // redirected similar phrasings to a specific agent enough times. Skip
+    // override when it targets the current agent (no-op routing) or when the
+    // forced agent isn't visible to this user.
+    const override = matchRoutingOverride(userId, userText);
+    if (override?.forcedAgent && override.forcedAgent !== agentId) {
+      const forced = getAgentsForUser(userId).find(a => a.id === override.forcedAgent);
+      if (forced) {
+        route = {
+          skillId: null,
+          agentId: override.forcedAgent,
+          name: forced.name || override.forcedAgent,
+          strategy: 'override',
+        };
+        logRoutingFire(userId, override.id, userText).catch(() => {});
+        console.log(`[chat] routing-override: → ${forced.name || override.forcedAgent} (pattern: "${override.pattern}")`);
+      }
+    }
+
+    if (!route) route = classifySpecialistIntent(userText, userId, agentId);
     // Embedding fallback: when regex misses, try semantic similarity against
     // the loaded intent_examples. Catches paraphrases regex can't enumerate.
     // ~20ms added cost only when we'd otherwise fall through to Sydney.
@@ -166,7 +189,9 @@ export async function runSpecialistRoute({
     const fullToolCount = target.tools?.length ?? 0;
     let usedToolCount = fullToolCount;
     const trimEnabled = getSpecialistTrim();
-    if (trimEnabled) {
+    if (trimEnabled && route.skillId) {
+      // Override-driven routes don't carry a specialist skill — keep the
+      // forced agent's full tool surface so it can answer the actual query.
       const skillTools = getRoleTools(route.skillId, userId);
       if (skillTools.length) {
         scopedSpec.tools = skillTools;

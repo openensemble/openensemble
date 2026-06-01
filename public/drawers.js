@@ -19,6 +19,7 @@ function toggleDrawer(drawerId, btnId) {
   if (drawerId === 'drawerTutorToday' && typeof loadTutorToday === 'function') loadTutorToday();
   if (drawerId === 'drawerSettings') openSettingsDrawer(false);
   if (drawerId === 'drawerTasks') openTasksDrawer(false);
+  if (drawerId === 'drawerLearn' && typeof loadLearnDrawer === 'function') loadLearnDrawer();
   if (drawerId === 'drawerNotes') openNotesDrawer();
   if (drawerId === 'drawerMessages') openMessagesDrawer();
   if (drawerId === 'drawerExpenses') openExpensesDrawer();

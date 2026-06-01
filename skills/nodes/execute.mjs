@@ -166,6 +166,12 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!command) { yield { type: 'result', text: 'This tool needs a command. Call it again with command specified.' }; return; }
 
+    // Phase-11c: log the invocation for the location_fact outcome measurer.
+    // Fire-and-forget — never blocks dispatch.
+    import('../../lib/node-exec-paths.mjs').then(m =>
+      m.appendNodeExec(userId, { nodeId: node_id, command })
+    ).catch(e => console.warn('[node-exec-paths] log failed:', e.message));
+
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list to see available nodes.` }; return; }
 

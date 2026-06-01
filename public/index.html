@@ -124,6 +124,11 @@
       <span class="strip-tooltip">Tasks</span>
       <span class="strip-badge" id="tasksBadge" style="display:none"></span>
     </button>
+    <button class="strip-btn" id="sbtnLearn" data-action="toggleDrawer" data-args="[&quot;drawerLearn&quot;, &quot;sbtnLearn&quot;]" title="Learn">
+      <i data-lucide="sparkles"></i>
+      <span class="strip-tooltip">Learn</span>
+      <span class="strip-badge" id="learnBadge" style="display:none"></span>
+    </button>
     <button class="strip-btn" id="sbtnNotes" data-action="toggleDrawer" data-args="[&quot;drawerNotes&quot;, &quot;sbtnNotes&quot;]" title="Docs">
       <i data-lucide="folder"></i>
       <span class="strip-tooltip">Docs</span>
@@ -362,6 +367,19 @@
           <button class="btn-add-task" id="btnAddTask">Add Task</button>
           <div id="tParseError" style="display:none;color:var(--err,#c33);font-size:12px;margin-top:4px"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- Drawer: Learn (proposal inbox + audit of accepted learnings) -->
+    <div class="desk-drawer" id="drawerLearn">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="sparkles"></i></span>
+        <span class="drawer-label">Learn</span>
+        <button class="drawer-refresh" data-action="loadLearnDrawer">↻</button>
+        <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
+      </div>
+      <div class="desk-drawer-body" id="learnBody">
+        <div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Loading…</div>
       </div>
     </div>
 
@@ -1576,6 +1594,7 @@
 <script src="/invites.js"></script>
 <script src="/backup.js"></script>
 <script src="/tasks.js"></script>
+<script src="/learn.js"></script>
 <script src="/dashboard.js"></script>
 <script src="/markets.js"></script>
 <script src="/inbox.js"></script>

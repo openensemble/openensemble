@@ -28,7 +28,9 @@ async function saveThreads(threads) {
 import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
 import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
-import { acceptProposal, dismissProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
+import { acceptProposal, dismissProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
+import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, resetSalienceKind, applySkillOverride, revokeSkillOverride } from '../lib/learnings.mjs';
+import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../lib/week1-sweep.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
 import { getGmailAuthHeader } from './gmail.mjs';
@@ -184,7 +186,29 @@ export async function handle(req, res) {
     res.end(JSON.stringify({ pending: listUserProposals(authId, 'pending') }));
     return true;
   }
-  const propMatch = req.url.match(/^\/api\/proposals\/([^/?]+)\/(accept|dismiss)$/);
+  // Bulk endpoints (must match before the single-id regex)
+  if ((req.url === '/api/proposals/bulk/accept' || req.url === '/api/proposals/bulk/dismiss') && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      const ids = Array.isArray(body?.ids) ? body.ids : [];
+      const isAccept = req.url.endsWith('/accept');
+      const results = [];
+      for (const id of ids) {
+        const existing = getProposal(id);
+        if (!existing || existing.userId !== authId) { results.push({ id, ok: false, error: 'not found or forbidden' }); continue; }
+        const r = isAccept ? await acceptProposal(id) : await dismissProposal(id);
+        results.push({ id, ...r });
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, results }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+  const propMatch = req.url.match(/^\/api\/proposals\/([^/?]+)\/(accept|dismiss|snooze|undo)$/);
   if (propMatch && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const id = propMatch[1];
@@ -192,8 +216,136 @@ export async function handle(req, res) {
     const existing = getProposal(id);
     if (!existing) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not found' })); return true; }
     if (existing.userId !== authId) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'forbidden' })); return true; }
-    const result = action === 'accept' ? await acceptProposal(id) : await dismissProposal(id);
+    const result = action === 'accept'  ? await acceptProposal(id)
+                 : action === 'snooze'  ? await snoozeProposal(id)
+                 : action === 'undo'    ? await undoProposal(id)
+                                        : await dismissProposal(id);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+
+  // Learn drawer — aggregated read of everything OE has learned about the
+  // user (rules, aliases, routines, custom skills, recent accepted proposals).
+  // Revokes happen via DELETE on kind-specific paths.
+  if (req.url === '/api/learnings' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    // Phase-8: fire-and-forget lazy sweep. After day 7, this runs detectors
+    // against accumulated signals once and emits a batch of proposals.
+    // Never blocks the response — sweep result will surface in the NEXT GET.
+    maybeRunSweep(authId).catch(e => console.warn('[week1-sweep] hook failed:', e.message));
+    const learnings = readLearnings(authId);
+    learnings.week1Sweep = getSweepStatus(authId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(learnings));
+    return true;
+  }
+  if (req.url === '/api/learnings/sweep/run' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const result = await forceWeek1Sweep(authId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const revokeRuleMatch = req.url.match(/^\/api\/learnings\/rules\/([^/?]+)\/(\d+)$/);
+  if (revokeRuleMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const roleId = revokeRuleMatch[1];
+    const idx = Number(revokeRuleMatch[2]);
+    const result = revokeRule(authId, roleId, idx);
+    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const revokeAliasMatch = req.url.match(/^\/api\/learnings\/aliases\/([^?]+)$/);
+  if (revokeAliasMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const phrase = decodeURIComponent(revokeAliasMatch[1]);
+    const result = await revokeAlias(authId, phrase);
+    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const revokeRoutineMatch = req.url.match(/^\/api\/learnings\/routines\/([^/?]+)$/);
+  if (revokeRoutineMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const result = await revokeRoutine(authId, revokeRoutineMatch[1]);
+    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const revokeDefaultMatch = req.url.match(/^\/api\/learnings\/defaults\/([^/?]+)\/([^/?]+)$/);
+  if (revokeDefaultMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const tool = decodeURIComponent(revokeDefaultMatch[1]);
+    const arg  = decodeURIComponent(revokeDefaultMatch[2]);
+    const result = await revokeDefault(authId, tool, arg);
+    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  if (req.url === '/api/learnings/routing-overrides' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      if (!body?.pattern || !body?.forcedAgent) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'pattern and forcedAgent required' }));
+        return true;
+      }
+      const { addOverride } = await import('../lib/routing-overrides.mjs');
+      const result = await addOverride(authId, {
+        pattern: body.pattern,
+        forcedAgent: body.forcedAgent,
+        mode: body.mode === 'regex' ? 'regex' : 'contains',
+        addedBy: 'manual',
+        examples: [],
+      });
+      res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+  const revokeRoutingMatch = req.url.match(/^\/api\/learnings\/routing-overrides\/([^/?]+)$/);
+  if (revokeRoutingMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const result = await revokeRoutingOverride(authId, revokeRoutingMatch[1]);
+    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const resetSalienceMatch = req.url.match(/^\/api\/learnings\/salience\/([^/?]+)\/reset$/);
+  if (resetSalienceMatch && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const kind = decodeURIComponent(resetSalienceMatch[1]);
+    const result = await resetSalienceKind(authId, kind);
+    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const skillOverrideMatch = req.url.match(/^\/api\/learnings\/skill-overrides\/([^/?]+)$/);
+  if (skillOverrideMatch && req.method === 'PUT') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const skillId = decodeURIComponent(skillOverrideMatch[1]);
+    try {
+      const body = JSON.parse(await readBody(req));
+      const result = await applySkillOverride(authId, skillId, body);
+      res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+  if (skillOverrideMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const skillId = decodeURIComponent(skillOverrideMatch[1]);
+    const result = await revokeSkillOverride(authId, skillId);
+    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
     return true;
   }
