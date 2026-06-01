@@ -177,6 +177,37 @@ export async function handle(req, res) {
     return true;
   }
 
+  // Phase-14b: reply to a task_proxy watcher's awaiting_input prompt.
+  // First-write-wins (multi-tab dedup). Resolves the in-process awaitUserReply
+  // promise that the agent's tool is blocked on.
+  const replyMatch = req.url.match(/^\/api\/watchers\/([^/?]+)\/reply$/);
+  if (replyMatch && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      const watcher = getWatcher(authId, replyMatch[1]);
+      if (!watcher) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'watcher not found' }));
+        return true;
+      }
+      if (watcher.userId !== authId) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forbidden' }));
+        return true;
+      }
+      const { submitReply } = await import('../lib/task-proxy-context.mjs');
+      const result = submitReply(replyMatch[1], body?.reply || '');
+      const status = result.ok && result.accepted ? 200 : (result.ok ? 409 : 404);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+
   // Friction-as-proposer endpoints — accept/dismiss proposals surfaced by
   // the cortex friction tracker. Proposals are in-memory; ownership check
   // matches the proposal's userId against the auth cookie.

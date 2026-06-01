@@ -1,0 +1,30 @@
+{
+  "id": "task-bridge",
+  "name": "Task Bridge",
+  "description": "Lets an agent pause mid-task and ask the user a question via the coordinator's chat. The user's reply lands as the tool's result and the agent continues.",
+  "icon": "🌉",
+  "category": "service",
+  "always_on": true,
+  "enabled_by_default": true,
+  "coordinator_scope": "include",
+  "intent_examples": [],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "ask_user_via_task",
+        "description": "Pause mid-task to ask the user a question through the coordinator's chat. Use this when you're running as a background task (the user delegated work to you and isn't watching your direct chat) and you need clarification before continuing. The question lands as an inline reply prompt on your task's chip. When the user replies, this tool returns the reply text and you continue your turn. The wait can be indefinite — if the user is away, your task keeps waiting. Call this sparingly: most decisions should be made with reasonable defaults rather than blocking on a question.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "description": "The question to ask the user. Be specific — they'll only see this one line plus your earlier work, not your full reasoning."
+            }
+          },
+          "required": ["question"]
+        }
+      }
+    }
+  ]
+}

@@ -83,6 +83,34 @@ function loadUserWatchers(userId) {
   } catch (e) {
     log.warn('watchers', `Failed to load ${userId} watchers`, { err: e.message });
   }
+
+  // Phase-14c: boot-reap stale task_proxy watchers. A task_proxy in `active`
+  // state with no recent activity (>1h) AND not awaiting input is almost
+  // certainly a zombie from a server crash mid-task. Mark it failed and
+  // move to recent so the chip shows an honest "task interrupted" outcome.
+  const TASK_PROXY_BOOT_REAP_MS = 60 * 60 * 1000;
+  const now = Date.now();
+  let reaped = 0;
+  data.active = data.active.filter(w => {
+    if (w.kind !== 'task_proxy') return true;
+    if (w.state?.awaiting_input) return true;   // user was just being slow
+    const lastActivity = w.state?.lastActivityAt || w.lastChangeAt || w.createdAt || 0;
+    if (lastActivity && now - lastActivity > TASK_PROXY_BOOT_REAP_MS) {
+      reaped++;
+      w.status = 'error';
+      w.endedAt = now;
+      w.lastStatusText = `⚠ Task interrupted by server restart (was running for ${Math.round((now - lastActivity) / 60000)}min)`;
+      if (Array.isArray(w.history)) {
+        w.history.push({ text: w.lastStatusText, ts: now, final: true, finalStatus: 'error' });
+      }
+      data.recent.unshift(w);
+      return false;
+    }
+    return true;
+  });
+  if (data.recent.length > 20) data.recent = data.recent.slice(0, 20);
+  if (reaped > 0) log.info('watchers', `boot-reaped ${reaped} stale task_proxy watcher(s)`, { userId });
+
   _byUser.set(userId, data);
   return data;
 }
@@ -261,6 +289,55 @@ export function unregisterWatcher(userId, watcherId, reason = 'cancelled') {
   data.recent.unshift(w);
   data.recent = data.recent.slice(0, 20);
   persistUser(userId);
+  return true;
+}
+
+/**
+ * Push a status update to a watcher from OUTSIDE a handler tick. Used by
+ * detached workers (background-tasks.mjs etc) that drive their own watcher's
+ * state. Mirrors the postStatus helper but callable from any context.
+ *
+ * Caller passes optional `extraState` (merged into state) plus the text. The
+ * watcher's history is appended and a WS status event is broadcast to all
+ * tabs. No-op if the watcher doesn't exist.
+ */
+export function pushWatcherStatus(userId, watcherId, text, extraState = null) {
+  const data = _byUser.get(userId);
+  if (!data) return false;
+  const record = data.active.find(w => w.id === watcherId);
+  if (!record) return false;
+  if (extraState && typeof extraState === 'object') {
+    record.state = { ...(record.state || {}), ...extraState };
+  }
+  if (record.state) record.state.lastActivityAt = Date.now();
+  if (text && text !== record.lastStatusText) {
+    record.lastStatusText = text;
+    record.lastChangeAt = Date.now();
+    pushHistory(record, { text, ts: Date.now() });
+    _sendStatusFn?.(userId, {
+      type: 'status', agent: record.agentId, watcherId: record.id,
+      kind: record.kind, label: record.label, text, ts: Date.now(),
+      // Phase-14b: surface awaiting_input + pending_question so the chip
+      // UI can render an inline reply box. task_proxy-only fields; other
+      // watcher kinds leave these undefined.
+      awaiting_input: record.state?.awaiting_input || false,
+      pending_question: record.state?.pending_question || null,
+    });
+  }
+  persistUser(userId);
+  return true;
+}
+
+/**
+ * Finalize a watcher as done/error from outside a handler. Same shape as
+ * the internal finalizeWatcher but callable from background-tasks etc.
+ */
+export function completeWatcher(userId, watcherId, { status = 'done', finalText = '' } = {}) {
+  const data = _byUser.get(userId);
+  if (!data) return false;
+  const record = data.active.find(w => w.id === watcherId);
+  if (!record) return false;
+  finalizeWatcher(record, status, finalText || record.lastStatusText || `${record.label} ${status}`);
   return true;
 }
 
@@ -457,6 +534,40 @@ function comparePayload(value, comparator, target) {
   }
 }
 _systemHandlers.set('event_subscription', eventSubscriptionHandler);
+
+// task_proxy: state-container for in-flight background-agent runs (Phase 14).
+// The actual work runs in a detached promise outside this loop. The handler
+// here is a heartbeat — every tick, check whether the underlying task has
+// gone silent (no activity in 5min) and flip to failed. That's the third
+// crash-detection layer (the first two are promise-catch + boot-reap).
+const TASK_PROXY_SILENCE_MS = 5 * 60 * 1000;
+const TASK_PROXY_NUDGE_MS = 60 * 60 * 1000;   // 1h re-broadcast when awaiting input
+function taskProxyHandler(state, helpers) {
+  // Phase-14d: awaiting_input watchers sit indefinitely, but periodically
+  // re-broadcast the question so a forgotten chip surfaces again.
+  if (state?.awaiting_input) {
+    const lastNudge = state.lastNudgeAt || state.questionPostedAt || state.lastActivityAt || 0;
+    if (lastNudge && Date.now() - lastNudge > TASK_PROXY_NUDGE_MS) {
+      const question = state.pending_question || 'a question';
+      return {
+        newState: { ...state, lastNudgeAt: Date.now() },
+        textUpdate: `⏳ Still waiting on your reply: ${question}`,
+      };
+    }
+    return { newState: state };
+  }
+  if (state?.completed) return { newState: state, done: true };
+  const lastActivity = state?.lastActivityAt || state?.startedAt || 0;
+  if (lastActivity && Date.now() - lastActivity > TASK_PROXY_SILENCE_MS) {
+    return {
+      newState: { ...state, failed: true, failureReason: 'no progress in 5min — may have crashed' },
+      textUpdate: `⚠ Task went silent for >5 min: ${state.label || state.targetAgentName || 'unknown task'}`,
+      done: true,
+    };
+  }
+  return { newState: state };   // benign heartbeat tick
+}
+_systemHandlers.set('task_proxy', taskProxyHandler);
 
 // ── supervisor loop ──────────────────────────────────────────────────────────
 

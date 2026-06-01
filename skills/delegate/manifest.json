@@ -25,7 +25,7 @@
             },
             "background": {
               "type": "boolean",
-              "description": "If true, dispatch the task immediately and return without waiting for completion. The user and coordinator will be notified with the agent's name and full result when it finishes. Use when the user does not need to review the result before the coordinator responds."
+              "description": "STRONGLY RECOMMENDED — set to TRUE for any task that will take more than a few seconds: skill creation, code refactoring, multi-step file edits, research, configuration changes, deployments, ANYTHING where the specialist will call multiple tools or write code. Setting true returns IMMEDIATELY with a 'started' message — the user can keep chatting with you while the specialist works in the background, and a live task chip appears in chat showing progress. When the specialist finishes, their result lands as a follow-up message you can read on your next turn. ONLY use background:false (synchronous, BLOCKS the chat until the specialist responds) for quick Q&A where the answer feeds directly into your next sentence: looking up a single value, checking a single fact, simple one-tool-call lookups. If in doubt, set true. Synchronous mode is the wrong default — it locks the user out of chatting with you for the full duration of the specialist's work."
             },
             "no_confirm": {
               "type": "boolean",

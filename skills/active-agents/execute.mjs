@@ -20,7 +20,44 @@ function fmtElapsed(ms) {
   return remMin ? `${hr}h ${remMin}m` : `${hr}h`;
 }
 
-export async function executeSkillTool(name, _args, userId) {
+export async function executeSkillTool(name, args, userId) {
+  // Phase-14d: deep-dive on a single task_proxy watcher
+  if (name === 'get_task_log') {
+    const watcherId = args?.watcherId;
+    if (!watcherId) return 'Missing watcherId. Call list_active_agents (or list_watches) first to find the id.';
+    try {
+      const { getWatcher } = await import('../../scheduler/watchers.mjs');
+      const w = getWatcher(userId, watcherId);
+      if (!w) return `No watcher found with id ${watcherId}.`;
+      const lines = [];
+      lines.push(`Task: ${w.label || w.kind} (${w.status})`);
+      if (w.state?.targetAgentName) lines.push(`Agent: ${w.state.targetAgentEmoji || ''} ${w.state.targetAgentName}`);
+      const elapsed = w.endedAt
+        ? fmtElapsed(w.endedAt - (w.createdAt || w.endedAt))
+        : fmtElapsed(Date.now() - (w.createdAt || Date.now()));
+      lines.push(`Elapsed: ${elapsed}`);
+      if (w.state?.awaiting_input && w.state?.pending_question) {
+        lines.push(`⏳ Awaiting your reply: "${w.state.pending_question}"`);
+      }
+      if (w.lastStatusText) lines.push(`Last status: ${w.lastStatusText}`);
+      const history = Array.isArray(w.history) ? w.history : [];
+      if (history.length) {
+        lines.push('');
+        lines.push(`Progress (${history.length} event${history.length === 1 ? '' : 's'}):`);
+        for (const h of history) {
+          const t = String(h.text || '').replace(/\s+/g, ' ').slice(0, 160);
+          const stamp = h.ts ? new Date(h.ts).toISOString().slice(11, 19) : '';
+          lines.push(`  [${stamp}] ${t}`);
+        }
+      } else {
+        lines.push('(no history yet)');
+      }
+      return lines.join('\n');
+    } catch (e) {
+      return `Error reading task log: ${e?.message || String(e)}`;
+    }
+  }
+
   if (name !== 'list_active_agents') return null;
   try {
     const { getActiveTasks } = await import('../../background-tasks.mjs');

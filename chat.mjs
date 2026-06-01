@@ -49,7 +49,7 @@ export { OPENAI_COMPAT_PROVIDERS };
 // unless the message actually contains preference/correction wording.
 const SIGNAL_WORDS_RE = /prefer|like|love|hate|want|don'?t like|remember|decided|will use|choose|chose|my name|i am|i'm|my \w+ is|call me|always|never|make sure|correction/i;
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], voiceCtx = null } = {}) {
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], voiceCtx = null, hideTurn = false, hideTaskId = null } = {}) {
   // Record a compact summary of which tools fired this turn so future loads
   // of this session can show the assistant what it actually did, not just
   // what it said. Without this, short follow-ups ("send", "again", "do that
@@ -63,11 +63,18 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
         return args ? `${t.name}(${args})` : t.name;
       })
     : null;
+  // Phase-14 chip-replaces-turn: when the turn dispatched a backgrounded
+  // tool whose chip IS the visible reply, mark the assistant entry as
+  // hidden so renderSession skips it on reload. The chip's own session
+  // entry (status role) remains visible.
+  const assistantEntry = toolsSummary
+    ? { role: 'assistant', content: assistantContent, ts: Date.now(), toolsUsed: toolsSummary }
+    : { role: 'assistant', content: assistantContent, ts: Date.now() };
+  if (hideTurn) assistantEntry.hidden = true;
+  if (hideTaskId) assistantEntry.hideTaskId = hideTaskId;
   appendToSession(agent.id,
     { role: 'user', content: sessionText, ts: Date.now() },
-    toolsSummary
-      ? { role: 'assistant', content: assistantContent, ts: Date.now(), toolsUsed: toolsSummary }
-      : { role: 'assistant', content: assistantContent, ts: Date.now() });
+    assistantEntry);
 
   // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
   // toolsUsed, before any other gate. It's about repeat-detection, not
@@ -235,12 +242,18 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
 async function* consumeProvider(providerGen) {
   let assistantContent = '';
   let errored = false;
+  // Phase-14 chip-replaces-turn: tools may yield `__hide_turn` to indicate
+  // their result is a backgrounded task with a live chat chip — the
+  // assistant's text reply for this turn is redundant and should be hidden.
+  let hideTurn = false;
+  let hideTaskId = null;
   const toolsUsed = [];
   // Latest tool_call args by name, attached to the matching tool_result so
   // downstream proposers (routine-proposer) can inspect what the LLM passed.
   let _lastCallArgsByName = Object.create(null);
   for await (const event of providerGen) {
     if (event.type === '__content') { assistantContent = event.content; continue; }
+    if (event.type === '__hide_turn') { hideTurn = true; hideTaskId = event.taskId || null; continue; }
     if (event.type === 'tool_call' && event.name) {
       _lastCallArgsByName[event.name] = event.args ?? null;
     }
@@ -251,7 +264,9 @@ async function* consumeProvider(providerGen) {
     yield event;
     if (event.type === 'error') { errored = true; break; }
   }
-  return errored ? { assistantContent: '', errored: true, toolsUsed } : { assistantContent, errored: false, toolsUsed };
+  return errored
+    ? { assistantContent: '', errored: true, toolsUsed, hideTurn: false, hideTaskId: null }
+    : { assistantContent, errored: false, toolsUsed, hideTurn, hideTaskId };
 }
 
 // ── Main chat generator ───────────────────────────────────────────────────────
@@ -786,7 +801,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
 
   const _llmStart = Date.now();
-  const { assistantContent, errored, toolsUsed } = yield* consumeProvider(providerGen);
+  const { assistantContent, errored, toolsUsed, hideTurn, hideTaskId } = yield* consumeProvider(providerGen);
   const _llmMeta = {
     userId,
     agentId: agent.id,
@@ -821,8 +836,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     }).catch(() => {});
   }
   if (assistantContent) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, voiceCtx });
-    yield { type: '__content', content: assistantContent };
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, voiceCtx, hideTurn, hideTaskId });
+    // Phase-14 chip-replaces-turn: emit __content only when we're NOT
+    // hiding the turn. The browser would otherwise render Sydney's
+    // assistant bubble alongside the chip — redundant.
+    if (!hideTurn) {
+      yield { type: '__content', content: assistantContent };
+    } else {
+      yield { type: 'hide_turn', taskId: hideTaskId };
+    }
   }
   yield { type: 'done' };
 }

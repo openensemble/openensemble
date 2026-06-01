@@ -44,7 +44,7 @@
       "type": "function",
       "function": {
         "name": "node_exec",
-        "description": "Execute a shell command on a remote computer (Linux/Windows/macOS server, VM, or workstation) connected via oe-node-agent. Returns stdout, stderr, and exit code. Use for system administration: package updates, service management, file operations, etc. Shell is auto-detected (bash for Linux/macOS, PowerShell for Windows). NOT for Home Assistant.",
+        "description": "Execute a shell command on a remote computer (Linux/Windows/macOS server, VM, or workstation) connected via oe-node-agent. Returns stdout, stderr, and exit code. Use for system administration: package updates, service management, file operations, etc. Shell is auto-detected (bash for Linux/macOS, PowerShell for Windows). NOT for Home Assistant. STRONGLY RECOMMENDED to set `background: true` for any long-running command (package upgrades, builds, downloads, installs) — returns immediately, shows a live progress chip in chat, and lets the user keep talking to you while the command runs. Sync mode blocks the chat for the entire duration.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -59,6 +59,14 @@
             "timeout": {
               "type": "integer",
               "description": "Timeout in seconds. Default 60, max 300."
+            },
+            "background": {
+              "type": "boolean",
+              "description": "Set to true for long-running commands (apt/dnf/yum install or upgrade, npm/pip install, docker pull/build, make, downloads, etc.). Tool returns immediately with a 'started' message and the command runs in the background. A live task chip appears in chat showing progress; when the command finishes its result lands as a follow-up message you read on your next turn. The user can keep chatting with you while it runs. Use false (default) only for QUICK read-only commands whose output you need to act on immediately in this same turn (ls, df, uptime, single greps, status checks). If you're updating, installing, building, downloading, or deploying anything — set this true."
+            },
+            "label": {
+              "type": "string",
+              "description": "Short human-readable description of what the task is doing — used as the title of the live chat chip when background:true. The user sees this, not the raw command. Phrase it in terms of intent: \"Updating Cesium09\", \"Installing nginx on shareserver06\", \"Building OE on test-vm\", \"Restarting pihole DNS\". Keep it under 60 chars. The chip + this label become the user's primary acknowledgment that work started — you don't need to also write a confirmation reply, just say \"On it\" or one short word."
             }
           },
           "required": ["node_id", "command"]

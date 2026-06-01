@@ -1,9 +1,13 @@
 /**
  * Background agent task dispatcher.
  * Fires ask_agent calls without blocking the coordinator's turn.
- * On completion, injects a notification into the coordinator's session
- * and sends a real-time WebSocket task_update event to the UI.
+ * Live progress surfaces via the task_proxy watcher chip in chat; on
+ * completion a notification is injected into the coordinator's session
+ * and an agent_report card is broadcast to the UI.
  */
+
+import { registerWatcher, pushWatcherStatus, completeWatcher } from './scheduler/watchers.mjs';
+import { runInTaskContext } from './lib/task-proxy-context.mjs';
 
 let _broadcast = null;
 export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
@@ -21,7 +25,6 @@ setInterval(() => {
     if (info.startedAt && (now - info.startedAt) > TASK_TTL_MS) {
       console.warn('[background-tasks] Reaping stale task:', taskId, 'agent:', info.agentName);
       activeTasks.delete(taskId);
-      _broadcast?.({ type: 'task_update', taskId, agentName: info.agentName, status: 'error', content: 'Task timed out (>24h)' });
     }
   }
 }, 60 * 60 * 1000).unref();
@@ -40,8 +43,36 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const summary = (task || '').slice(0, 120);
   activeTasks.set(taskId, { agentId: scopedAgent.id, userId, agentName, agentEmoji, startedAt: Date.now(), summary });
 
-  // Notify UI that the task has started (activity panel spinner)
-  _broadcast?.({ type: 'task_update', taskId, agentName, agentEmoji, status: 'running', summary });
+  // Phase 14: register a task_proxy watcher so the task surfaces as a chat
+  // chip + becomes inspectable via list_watches. The watcher's history
+  // accumulates progress events; on completion completeWatcher transitions
+  // it to done/error. The activeTasks record gets the watcherId so progress
+  // callbacks can update the same watcher.
+  let watcherId = null;
+  try {
+    watcherId = registerWatcher({
+      userId,
+      agentId: coordinatorAgentId,   // chip lives in the coordinator's chat
+      kind: 'task_proxy',
+      label: `${agentEmoji} ${agentName}: ${summary.slice(0, 60)}${summary.length > 60 ? '…' : ''}`,
+      state: {
+        taskId,
+        targetAgentId: scopedAgent.id,
+        targetAgentName: agentName,
+        targetAgentEmoji: agentEmoji,
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
+      },
+      cadenceSec: 30,
+      expiresAt: null,   // indefinite — task runs as long as it takes
+      // No skillId: system-handler (registered via _systemHandlers in watchers.mjs)
+    });
+    const rec = activeTasks.get(taskId);
+    if (rec) rec.watcherId = watcherId;
+    pushWatcherStatus(userId, watcherId, `Started: ${summary}`);
+  } catch (e) {
+    console.warn('[background-tasks] task_proxy watcher registration failed:', e.message);
+  }
 
   // Fire and forget — do not await
   (async () => {
@@ -62,13 +93,15 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       let fullText = '';
       let toolsUsed = 0;
       let currentTool = null;
+      // Phase-14b: wrap the streamChat loop in a task_proxy context so
+      // ask_user_via_task (called inside the agent's tool chain) can find
+      // this run's watcherId without any extra parameter threading.
+      const taskCtx = { taskId, watcherId, userId, agentId: scopedAgent.id };
+      await runInTaskContext(taskCtx, async () => {
       for await (const ev of streamChat(scopedAgent, task, null, null, userId, null, scheduledNote)) {
         if (ev.type === 'token') fullText += ev.text;
         // Track in-flight tool calls so list_active_agents can report "Ada is
         // currently running coder_edit_file" instead of just an opaque spinner.
-        // Also push an incremental task_update so the activity panel renders
-        // a live progress line per tool, matching what the user would see if
-        // they had typed the same prompt to Ada synchronously.
         if (ev.type === 'tool_call' && ev.name) {
           toolsUsed++;
           currentTool = ev.name;
@@ -78,13 +111,12 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
             rec.currentTool = ev.name;
             rec.lastUpdateAt = Date.now();
           }
-          _broadcast?.({
-            type: 'task_update', taskId, agentName, agentEmoji,
-            status: 'running',
-            currentTool: ev.name,
-            toolsUsed,
-            summary: `running ${ev.name}`,
-          });
+          // Push to the watcher chip — the chip is the user-visible surface.
+          // History accumulates each tool call so list_watches/get_task_log
+          // can replay what happened.
+          if (rec?.watcherId) {
+            pushWatcherStatus(userId, rec.watcherId, `→ ${ev.name}`, { currentTool: ev.name, toolsUsed });
+          }
         }
         if (ev.type === 'tool_result' && ev.name) {
           const rec = activeTasks.get(taskId);
@@ -96,6 +128,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         }
         if (ev.type === 'error') throw new Error(ev.message);
       }
+      });   // end runInTaskContext
       await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, fullText.trim() || `${agentName} completed the task.`);
     } catch (err) {
       console.error('[background-tasks] error in task', taskId, err.message);
@@ -107,26 +140,47 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
 }
 
 async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null) {
+  const rec = activeTasks.get(taskId);
   activeTasks.delete(taskId);
 
-  const status  = errorMsg ? 'error' : 'done';
+  // Phase 14: finalize the task_proxy watcher (chip) so it shows done/error
+  // and slides into the "recent" pile. Lives independently of the activity-
+  // panel broadcast below — the chip is the user's primary visible surface.
+  if (rec?.watcherId) {
+    try {
+      const finalText = errorMsg
+        ? `⚠ ${agentName} failed: ${errorMsg}`
+        : `✓ ${agentName} done`;
+      completeWatcher(userId, rec.watcherId, {
+        status: errorMsg ? 'error' : 'done',
+        finalText,
+      });
+    } catch (e) {
+      console.warn('[background-tasks] watcher complete failed:', e.message);
+    }
+  }
+
   const content = errorMsg ?? result;
 
-  // 1. Inject into coordinator's session so it has context on next user message
+  // 1. Inject into coordinator's session so it has context on next user message.
+  //    Include the original task summary so the user (and the LLM on its next
+  //    turn) can see WHICH task Ada is replying to — important when multiple
+  //    background tasks are in flight at once.
   try {
     const { appendToSession } = await import('./sessions.mjs');
+    const taskSummary = rec?.summary || '';
+    const taskRef = taskSummary
+      ? ` — re: "${taskSummary.length > 80 ? taskSummary.slice(0, 80) + '…' : taskSummary}"`
+      : '';
     const notice = errorMsg
-      ? `[${agentName} ran into a problem]\n${errorMsg}`
-      : `[${agentName} replied]\n${result}`;
+      ? `[${agentName} ran into a problem${taskRef}]\n${errorMsg}`
+      : `[${agentName} replied${taskRef}]\n${result}`;
     await appendToSession(coordinatorAgentId, { role: 'assistant', content: notice, ts: Date.now() });
   } catch (e) {
     console.error('[background-tasks] failed to inject session notice:', e.message);
   }
 
-  // 2. Activity panel: update row to done/error
-  _broadcast?.({ type: 'task_update', taskId, agentName, agentEmoji, status, content });
-
-  // 3. Agent report card: render directly in the user's current chat as a notification from the agent
+  // 2. Agent report card: render directly in the user's current chat as a notification from the agent
   _broadcast?.({
     type:       'agent_report',
     agentName,
@@ -154,7 +208,7 @@ export function getActiveTasks() {
  * @param {string} userId
  * @param {object} [opts]
  * @param {(tokenText:string)=>void} [opts.onProgress] - per-token callback (for UI streaming)
- * @param {string} [opts.agentEmoji] - icon for task_update events (default 🔎)
+ * @param {string} [opts.agentEmoji] - icon (default 🔎)
  * @returns {Promise<string>} final concatenated text
  */
 export async function dispatchEphemeral(agent, task, userId, opts = {}) {
@@ -162,7 +216,6 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
   const agentName = agent.name ?? 'Worker';
   const agentEmoji = opts.agentEmoji ?? '🔎';
   activeTasks.set(taskId, { agentId: agent.id, userId, agentName, startedAt: Date.now() });
-  _broadcast?.({ type: 'task_update', taskId, agentName, agentEmoji, status: 'running', summary: task.slice(0, 80) });
 
   try {
     const { streamChat } = await import('./chat.mjs');
@@ -175,11 +228,9 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
       if (ev.type === 'error') throw new Error(ev.message);
     }
     activeTasks.delete(taskId);
-    _broadcast?.({ type: 'task_update', taskId, agentName, agentEmoji, status: 'done', content: out.slice(0, 200) });
     return out.trim();
   } catch (err) {
     activeTasks.delete(taskId);
-    _broadcast?.({ type: 'task_update', taskId, agentName, agentEmoji, status: 'error', content: err.message });
     throw err;
   }
 }

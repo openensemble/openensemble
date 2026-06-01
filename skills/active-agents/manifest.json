@@ -24,8 +24,25 @@
       "type": "function",
       "function": {
         "name": "list_active_agents",
-        "description": "Returns the list of currently-running background agent tasks across the user's session: which agent is working, what task it was given, and how long it has been running. Use this when the user asks 'what is X doing', 'is X still working', 'how's the background job', 'who's busy right now', or similar status-check intents — never guess; always call this tool.",
+        "description": "Returns the list of currently-running background agent tasks across the user's session: which agent is working, what task it was given, and how long it has been running. Use this when the user asks 'what is X doing', 'is X still working', 'how's the background job', 'who's busy right now', or similar status-check intents — never guess; always call this tool. For deeper inspection of a specific task (full progress history), call get_task_log with the watcherId.",
         "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_task_log",
+        "description": "Returns the full progress history for one task_proxy watcher — every tool call and status update the running agent has emitted so far. Use this when the user asks 'show me what Ada has done', 'walk me through what the task has been doing', or after list_active_agents shows a task in flight and they want details. Returns the watcher's label, target agent, status, lastStatusText, history entries, and elapsed time.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "watcherId": {
+              "type": "string",
+              "description": "The watcher id returned by list_active_agents (or list_watches) for the task you want to inspect."
+            }
+          },
+          "required": ["watcherId"]
+        }
       }
     }
   ]

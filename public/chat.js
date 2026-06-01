@@ -166,7 +166,193 @@ function appendImageBubble(image, ts = Date.now(), scroll = true) {
 // Update-in-place: each watcher gets ONE bubble that mutates as new statuses
 // arrive. Looked up by data-watcher-id. New watchers append a fresh bubble;
 // repeat updates for the same watcherId rewrite the existing one in place.
+// ── Task chip (Phase 14) — card-style bubble for in-flight background tasks
+// One chip per task_proxy watcher. Survives multiple status updates by
+// updating in place via data-watcher-id. Renders:
+//   - Header: agent emoji + name + status badge (running/awaiting/done/error)
+//   - Subhead: task summary (the original prompt)
+//   - Progress line: latest status text (current tool, last result, etc)
+//   - Reply input (only when awaiting_input=true)
+//   - Final outcome text (when done/error)
+function appendTaskChip(status, ts = Date.now(), scroll = true) {
+  const watcherId = status.watcherId || '';
+  let el = watcherId ? document.querySelector(`.msg.task-chip[data-watcher-id="${CSS.escape(watcherId)}"]`) : null;
+  const isUpdate = !!el;
+  const final = !!status.final;
+  const finalStatus = status.finalStatus;
+
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'msg task-chip';
+    el.dataset.watcherId = watcherId;
+    el.style.cssText = 'padding:10px 12px;margin:6px 0;border:1px solid var(--border);border-left:3px solid var(--accent,#6c8cff);background:rgba(108,140,255,0.04);border-radius:6px;font-size:13px';
+  }
+
+  // Pull agent + task from the label (format: "<emoji> <agent name>: <task>")
+  const label = status.label || '';
+  const dashIdx = label.indexOf(': ');
+  const agentPart = dashIdx > 0 ? label.slice(0, dashIdx) : label;
+  const taskPart  = dashIdx > 0 ? label.slice(dashIdx + 2) : '';
+
+  // Status badge color/text based on phase
+  let badge, badgeColor;
+  if (status.awaiting_input) {
+    badge = '⏳ awaiting reply';
+    badgeColor = 'var(--orange,#c80)';
+  } else if (final && finalStatus === 'done') {
+    badge = '✓ done';
+    badgeColor = 'var(--green,#3a7)';
+  } else if (final && finalStatus === 'error') {
+    badge = '⚠ error';
+    badgeColor = 'var(--red,#c33)';
+  } else if (final) {
+    badge = '· finished';
+    badgeColor = 'var(--muted)';
+  } else {
+    badge = '⏵ running';
+    badgeColor = 'var(--accent,#6c8cff)';
+  }
+
+  // Rebuild header + body on every update (preserve any reply input form)
+  let header = el.querySelector('.task-chip-header');
+  if (!header) {
+    header = document.createElement('div');
+    header.className = 'task-chip-header';
+    header.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:4px;cursor:pointer';
+    header.title = 'Click to view progress history';
+    if (watcherId) {
+      header.addEventListener('click', (ev) => {
+        if (window.getSelection?.().toString()) return;
+        toggleWatcherHistory(el, watcherId);
+        ev.stopPropagation();
+      });
+    }
+    el.appendChild(header);
+  }
+  header.innerHTML = '';
+
+  const agentEl = document.createElement('span');
+  agentEl.style.cssText = 'font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  agentEl.textContent = agentPart || 'Task';
+  header.appendChild(agentEl);
+
+  const badgeEl = document.createElement('span');
+  badgeEl.textContent = badge;
+  badgeEl.style.cssText = `font-size:11px;color:${badgeColor};font-weight:600;white-space:nowrap`;
+  header.appendChild(badgeEl);
+
+  // Task summary (the prompt) — shown only when present
+  let taskLine = el.querySelector('.task-chip-task');
+  if (!taskLine) {
+    taskLine = document.createElement('div');
+    taskLine.className = 'task-chip-task';
+    taskLine.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:6px;line-height:1.4';
+    el.insertBefore(taskLine, header.nextSibling);
+  }
+  if (taskPart) {
+    taskLine.textContent = taskPart;
+    taskLine.style.display = '';
+  } else {
+    taskLine.style.display = 'none';
+  }
+
+  // Latest status line (current tool, last result, awaiting question, final
+  // output). Capped at ~10 lines visible with internal scrollbar so a long
+  // node_exec output (apt upgrade dumping 500 lines) doesn't blow up the
+  // chip height. white-space:pre-wrap preserves newlines; monospace for
+  // shell-output legibility; overscroll-contain isolates the scroll so the
+  // outer chat doesn't scroll when you wheel inside the chip.
+  let statusLine = el.querySelector('.task-chip-status');
+  if (!statusLine) {
+    statusLine = document.createElement('div');
+    statusLine.className = 'task-chip-status';
+    statusLine.style.cssText = 'font-size:12px;color:var(--text);padding:6px 8px;background:var(--bg1);border-radius:4px;line-height:1.4;font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:14em;overflow-y:auto;overscroll-behavior:contain';
+    el.appendChild(statusLine);
+  }
+  // Track scroll-anchoring: if user has scrolled away from the bottom, don't
+  // auto-jump on each new status push. If they're AT the bottom (live tail),
+  // keep them there.
+  const wasAtBottom = statusLine.scrollHeight - statusLine.scrollTop - statusLine.clientHeight < 4;
+  statusLine.textContent = status.text || '';
+  if (wasAtBottom) statusLine.scrollTop = statusLine.scrollHeight;
+
+  // Final-state border + background tint
+  if (final) {
+    if (finalStatus === 'done') {
+      el.style.borderLeftColor = 'var(--green, #4caf50)';
+      el.style.background = 'rgba(76,175,80,0.06)';
+    } else if (finalStatus === 'error') {
+      el.style.borderLeftColor = 'var(--red, #f44336)';
+      el.style.background = 'rgba(244,67,54,0.06)';
+    } else {
+      el.style.opacity = '0.75';
+    }
+  }
+
+  // Reply input — appears ONLY when awaiting_input, removed otherwise.
+  // Multi-tab: when the server WS reports awaiting_input=false (another tab
+  // already replied), this branch removes the form so neither tab can
+  // submit again. First-write-wins is enforced server-side too.
+  let replyBox = el.querySelector('.task-chip-reply');
+  if (status.awaiting_input) {
+    if (!replyBox) {
+      replyBox = document.createElement('div');
+      replyBox.className = 'task-chip-reply';
+      replyBox.style.cssText = 'margin-top:8px;display:flex;gap:6px;align-items:center';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'Your reply…';
+      input.style.cssText = 'flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:12px;color:var(--text)';
+      const btn = document.createElement('button');
+      btn.textContent = 'Send';
+      btn.style.cssText = 'background:var(--accent,#4f82ff);color:#fff;border:none;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500';
+      const send = async () => {
+        const reply = input.value.trim();
+        if (!reply) return;
+        input.disabled = true; btn.disabled = true; btn.textContent = '…';
+        try {
+          const r = await fetch(`/api/watchers/${encodeURIComponent(watcherId)}/reply`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reply }),
+          });
+          if (!r.ok && r.status !== 409) {
+            input.disabled = false; btn.disabled = false; btn.textContent = 'Send';
+            const err = await r.json().catch(() => ({}));
+            alert(`Reply failed: ${err.error || r.statusText}`);
+          }
+          // On success the server broadcasts a new status with
+          // awaiting_input=false; the next applyStatus tick will remove
+          // the reply box from BOTH tabs.
+        } catch (e) {
+          input.disabled = false; btn.disabled = false; btn.textContent = 'Send';
+          alert(`Reply failed: ${e.message}`);
+        }
+      };
+      btn.addEventListener('click', send);
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); send(); } });
+      replyBox.appendChild(input);
+      replyBox.appendChild(btn);
+      el.appendChild(replyBox);
+      // Focus the input so the user can just type and Enter
+      setTimeout(() => input.focus(), 50);
+    }
+  } else if (replyBox) {
+    replyBox.remove();
+  }
+
+  if (!isUpdate) {
+    insertBefore(el);
+    if (scroll) scrollToBottom();
+  }
+}
+
 function appendStatusBubble(status, ts = Date.now(), scroll = true) {
+  // Phase-14: task_proxy watchers get their own richer card treatment
+  // (agent header + task line + reply input when awaiting), distinct from
+  // the muted-italic generic watcher status.
+  if (status.kind === 'task_proxy') {
+    return appendTaskChip(status, ts, scroll);
+  }
   const watcherId = status.watcherId || '';
   let el = watcherId ? document.querySelector(`.msg.watcher-status[data-watcher-id="${CSS.escape(watcherId)}"]`) : null;
   const isUpdate = !!el;
@@ -236,6 +422,56 @@ function appendStatusBubble(status, ts = Date.now(), scroll = true) {
       el.style.borderLeftColor = 'var(--muted)';
       el.style.opacity = '0.7';
     }
+  }
+
+  // Phase-14b: when a task_proxy watcher is awaiting input, render an
+  // inline reply form on the chip. Multi-tab dedup: when the server WS
+  // reports awaiting_input=false (because another tab replied), clear the
+  // form. First-write-wins is enforced server-side.
+  let replyBox = el.querySelector('.watcher-reply-box');
+  if (status.awaiting_input && status.kind === 'task_proxy') {
+    if (!replyBox) {
+      replyBox = document.createElement('div');
+      replyBox.className = 'watcher-reply-box';
+      replyBox.style.cssText = 'margin-top:6px;display:flex;gap:6px;align-items:center';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'Your reply…';
+      input.style.cssText = 'flex:1;background:var(--bg1);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;color:var(--text);font-style:normal';
+      const btn = document.createElement('button');
+      btn.textContent = 'Send';
+      btn.style.cssText = 'background:var(--accent,#4f82ff);color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer';
+      const send = async () => {
+        const reply = input.value.trim();
+        if (!reply) return;
+        input.disabled = true; btn.disabled = true; btn.textContent = '…';
+        try {
+          const r = await fetch(`/api/watchers/${encodeURIComponent(watcherId)}/reply`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reply }),
+          });
+          if (!r.ok && r.status !== 409) {
+            input.disabled = false; btn.disabled = false; btn.textContent = 'Send';
+            const err = await r.json().catch(() => ({}));
+            alert(`Reply failed: ${err.error || r.statusText}`);
+          }
+          // On success the server broadcasts a new status with awaiting_input=false;
+          // the next applyStatus tick will remove the reply box.
+        } catch (e) {
+          input.disabled = false; btn.disabled = false; btn.textContent = 'Send';
+          alert(`Reply failed: ${e.message}`);
+        }
+      };
+      btn.addEventListener('click', send);
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); send(); } });
+      replyBox.appendChild(input);
+      replyBox.appendChild(btn);
+      el.appendChild(replyBox);
+    }
+  } else if (replyBox) {
+    // No longer awaiting — server-side state cleared (replied, timed out,
+    // task finalized). Remove the input form so neither tab can submit again.
+    replyBox.remove();
   }
 
   if (!isUpdate) {
@@ -786,91 +1022,6 @@ function appendNotification(msg) {
     showToast(`${fromName} via ${agentName}: ${msg.content}`);
   }
 }
-// ── Agent Activity Panel ───────────────────────────────────────────────────────
-const _activityTasks  = new Map(); // taskId -> { agentName, status, summary, content, startedAt, el, intervalId }
-
-function handleTaskUpdate(msg) {
-  const { taskId, agentName, status, summary, content } = msg;
-  const panel = document.getElementById('agentActivityPanel');
-  if (!panel) return;
-
-  let task = _activityTasks.get(taskId);
-
-  if (!task) {
-    // Create new row
-    const el = document.createElement('div');
-    el.className = `activity-row ${status}`;
-    el.title = 'Click to expand result';
-    el.addEventListener('click', () => {
-      const t = _activityTasks.get(taskId);
-      if (!t || t.status === 'running') return;
-      el.classList.toggle('expanded');
-    });
-    panel.appendChild(el);
-    task = { agentName, status, summary: summary ?? '', content: content ?? '', startedAt: Date.now(), el, intervalId: null };
-    _activityTasks.set(taskId, task);
-  }
-
-  task.status  = status;
-  task.content = content ?? task.content;
-  task.summary = summary ?? task.summary;
-
-  _renderActivityRow(taskId, task);
-
-  // Show panel
-  panel.style.display = _activityTasks.size > 0 ? 'flex' : 'none';
-
-  // Auto-fade done rows after 8s
-  if (status === 'done') {
-    if (task.intervalId) clearInterval(task.intervalId);
-    task.intervalId = setTimeout(() => {
-      task.el?.classList.add('fading');
-      setTimeout(() => _dismissActivity(taskId), 400);
-    }, 8000);
-  }
-}
-
-function _renderActivityRow(taskId, task) {
-  const { agentName, status, summary, content, startedAt, el } = task;
-  const elapsed = _formatElapsed(Date.now() - startedAt);
-  const statusIcon = status === 'running' ? '' : status === 'done' ? '✓' : '✗';
-  el.className = `activity-row ${status}`;
-  el.innerHTML = `
-    <div class="activity-dot"></div>
-    <div class="activity-label">
-      <strong>${statusIcon ? statusIcon + ' ' : ''}${escHtml(agentName)}</strong>
-      <span class="activity-summary">${escHtml(summary.slice(0, 60))}</span>
-      ${content && status !== 'running' ? `<div class="activity-detail">${escHtml(content)}</div>` : ''}
-    </div>
-    <span class="activity-elapsed">${elapsed}</span>
-    <button class="activity-dismiss" title="Dismiss" data-action="_dismissActivity" data-args='${JSON.stringify([taskId]).replace(/'/g, "&#39;")}' data-stop-propagation>×</button>
-  `;
-}
-
-function _dismissActivity(taskId) {
-  const task = _activityTasks.get(taskId);
-  if (!task) return;
-  if (task.intervalId) clearTimeout(task.intervalId);
-  task.el?.remove();
-  _activityTasks.delete(taskId);
-  const panel = document.getElementById('agentActivityPanel');
-  if (panel && _activityTasks.size === 0) panel.style.display = 'none';
-}
-
-function _formatElapsed(ms) {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60), rs = s % 60;
-  return `${m}:${String(rs).padStart(2, '0')}`;
-}
-
-// Keep elapsed timers ticking for running tasks
-setInterval(() => {
-  for (const [taskId, task] of _activityTasks) {
-    if (task.status === 'running') _renderActivityRow(taskId, task);
-  }
-}, 5000);
-
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
   const { agentName, agentEmoji, content, ts } = msg;

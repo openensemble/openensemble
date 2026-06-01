@@ -266,6 +266,17 @@ function handleServerMessage(msg) {
         }
       }
       break;
+    case 'hide_turn':
+      // Phase-14: server tells us this assistant turn's bubble should NOT
+      // render — the task_proxy chip IS the user-visible reply. Drop the
+      // in-flight streamEl from the chat and clear the buffer so the
+      // subsequent 'done' doesn't persist the redundant text.
+      if (streamEl) {
+        try { streamEl.closest('.msg')?.remove(); } catch {}
+      }
+      streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
+      setTyping(false);
+      break;
     case 'done':
       if (msg.agent !== activeAgent) {
         // Background agent finished — save to session, clear stream state
@@ -349,8 +360,18 @@ function handleServerMessage(msg) {
       // Session history is also deduped: we replace the existing entry for
       // this watcher rather than appending, so a page reload renders one
       // bubble instead of N stacked ones.
-      if (!msg.agent || msg.agent === activeAgent) {
-        appendStatusBubble({ text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus }, msg.ts || Date.now());
+      //
+      // Agent-match: msg.agent often arrives in scoped form ("user_X_sydney")
+      // while activeAgent is the raw id ("sydney"). Compare both forms so
+      // live updates land in the right tab regardless of which side scoped.
+      {
+        const stripped = typeof msg.agent === 'string' ? msg.agent.replace(/^.*?_/, '') : msg.agent;
+        const matches = !msg.agent || msg.agent === activeAgent
+          || stripped === activeAgent
+          || (`${_currentUser?.id}_${activeAgent}`) === msg.agent;
+        if (matches) {
+          appendStatusBubble({ text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question }, msg.ts || Date.now());
+        }
       }
       if (msg.agent) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
@@ -433,9 +454,6 @@ function handleServerMessage(msg) {
         if (typeof loadNodes === 'function') loadNodes();
       }
       break;
-    case 'task_update':
-      if (typeof handleTaskUpdate === 'function') handleTaskUpdate(msg);
-      break;
     case 'agent_report':
       if (typeof handleAgentReport === 'function') handleAgentReport(msg);
       break;
@@ -494,12 +512,6 @@ function handleServerMessage(msg) {
       // If the active agent is NOT in the list, it finished while we were away
       if (!activeIds.has(activeAgent)) {
         setStreaming(false); setTyping(false);
-      }
-      // Restore background task activity panel
-      for (const task of (msg.tasks ?? [])) {
-        if (typeof handleTaskUpdate === 'function') {
-          handleTaskUpdate({ ...task, status: 'running' });
-        }
       }
       buildTabs();
       buildAgentDrawer();

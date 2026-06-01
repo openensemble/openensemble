@@ -24,6 +24,20 @@ import { recordToolFailure } from './lib/tool-failures.mjs';
 import { isSkillDisabled, getHiddenTools } from './lib/skill-overrides.mjs';
 import { log } from './logger.mjs';
 
+// Resolve the agent id we should attribute background-task surfaces to
+// (chip, session injection) when the caller didn't pass one. Uses the
+// user's configured coordinator agent — works regardless of what each
+// user named their coordinator. Falls back to userId only if the user has
+// no coordinator assigned (edge case during onboarding).
+async function _resolveAttributionAgent(userId, agentId) {
+  if (agentId) return agentId;
+  try {
+    const { getUserCoordinatorAgentId } = await import('./routes/_helpers.mjs');
+    const coordId = getUserCoordinatorAgentId(userId);
+    return coordId ? `${userId}_${coordId}` : userId;
+  } catch { return userId; }
+}
+
 // Wrapper shape: { manifest, userId, dir }
 //   userId: null for global, userId string for per-user
 //   dir:    absolute path to the skill directory on disk
@@ -825,13 +839,200 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   }
 
   const _toolStart = Date.now();
+  // Phase-14e: any tool taking longer than this auto-backgrounds. The
+  // network/promise stays alive — events just get redirected to a
+  // task_proxy chip instead of yielding up to the LLM. Sydney's turn
+  // finishes immediately with a "still running, see chip" synthetic result.
+  const AUTO_BG_MS = 10_000;
   try {
     const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId));
+
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
-      for await (const chunk of result) yield chunk;
+      // ── Streaming path ──────────────────────────────────────────────────
+      const iter = result[Symbol.asyncIterator]();
+      const startedAt = Date.now();
+      let backgrounded = false;
+      let watcherId = null;
+      let watchersMod = null;
+
+      while (true) {
+        let next;
+        try { next = await iter.next(); }
+        catch (err) {
+          // Tool threw during iteration — bubble up. The outer catch handles
+          // background-mode case separately via the detached IIFE below.
+          throw err;
+        }
+        if (next.done) break;
+        const value = next.value;
+
+        // First time crossing 10s: register chip, yield deferred result,
+        // hand the iterator to a detached worker, and return.
+        if (!backgrounded && Date.now() - startedAt >= AUTO_BG_MS) {
+          try {
+            watchersMod = await import('./scheduler/watchers.mjs');
+            watcherId = watchersMod.registerWatcher({
+              userId,
+              agentId: await _resolveAttributionAgent(userId, agentId),
+              kind: 'task_proxy',
+              label: `⏵ ${name}`,
+              state: {
+                taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                targetAgentName: name,
+                targetAgentEmoji: '⏵',
+                tool: name,
+                startedAt,
+                lastActivityAt: Date.now(),
+              },
+              cadenceSec: 30,
+              expiresAt: null,
+            });
+            backgrounded = true;
+            // Push the just-yielded value into the chip too
+            if (value?.type === 'tool_progress' && value.text) {
+              watchersMod.pushWatcherStatus(userId, watcherId, String(value.text).slice(-200));
+            }
+          } catch (e) {
+            console.warn('[auto-bg] watcher register failed; staying foreground:', e.message);
+            // If we can't register the watcher, fall through to normal yield
+          }
+
+          if (backgrounded) {
+            // Inform Sydney's LLM the tool was backgrounded — her turn ends
+            // gracefully with this message in place of the real result.
+            yield { type: 'result', text: `\`${name}\` is taking longer than 10s — moved to background. A live progress chip is in the chat; you don't need to reply about it.` };
+            yield { type: '__hide_turn', reason: 'bg_chip', taskId: watcherId };
+
+            // Detached worker: continue draining iter, push to chip, finalize
+            // when done. The tool's network/promise stays alive — we just
+            // route its output to a different sink.
+            const captured = { name, watcherId, userId, agentId, owningSkillId, startedAt };
+            (async () => {
+              let finalText = '';
+              try {
+                while (true) {
+                  const r = await iter.next();
+                  if (r.done) break;
+                  const v = r.value;
+                  if (v?.type === 'tool_progress' && v.text) {
+                    watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-200));
+                  } else if (v?.type === 'result' && v.text) {
+                    finalText = String(v.text);
+                  }
+                }
+                watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                  status: 'done',
+                  finalText: `✓ ${captured.name} done${finalText ? `: ${finalText.slice(-1200)}` : ''}`,
+                });
+                // Append the result into the agent session so the next LLM
+                // turn has context. Best-effort; chip is the primary surface.
+                if (captured.agentId) {
+                  try {
+                    const { appendToSession } = await import('./sessions.mjs');
+                    const key = captured.agentId.startsWith(`${captured.userId}_`) ? captured.agentId : `${captured.userId}_${captured.agentId}`;
+                    await appendToSession(key, { role: 'assistant', content: `[${captured.name} finished in background]\n${(finalText || '').slice(0, 4000)}`, ts: Date.now() });
+                  } catch (_) { /* best-effort */ }
+                }
+                // Broadcast a notification so the user sees the result land
+                // even if the task chip is scrolled out of view. Same path
+                // dispatchBackground uses for background ask_agent results.
+                try {
+                  const { sendToUser } = await import('./ws-handler.mjs');
+                  sendToUser(captured.userId, {
+                    type: 'agent_report',
+                    agentName: captured.name,
+                    agentEmoji: '⏵',
+                    content: finalText || `${captured.name} completed.`,
+                    taskId: `autobg_${captured.watcherId}`,
+                    ts: Date.now(),
+                  });
+                } catch (_) { /* best-effort */ }
+                log.info('tool', 'auto-bg tool complete', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, durationMs: Date.now() - captured.startedAt });
+              } catch (err) {
+                watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                  status: 'error',
+                  finalText: `⚠ ${captured.name} failed: ${err.message}`,
+                });
+                log.warn('tool', 'auto-bg tool threw', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, err: err.message });
+              }
+            })();
+            return;   // outer generator ends — LLM sees the deferred result + turn finishes
+          }
+          // else: fall through to normal yield (registration failed)
+        }
+
+        yield value;
+      }
     } else {
-      const text = String((await result) ?? '');
-      yield { type: 'result', text };
+      // ── Single-promise path ─────────────────────────────────────────────
+      // Race the await against a 10s timer. If the timer wins, register a
+      // chip, yield deferred result, let the promise resolve into the chip.
+      const racePromise = Promise.resolve(result);
+      const TIMER_TOKEN = Symbol('AUTO_BG_TIMER');
+      const winner = await Promise.race([
+        racePromise,
+        new Promise(resolve => setTimeout(() => resolve(TIMER_TOKEN), AUTO_BG_MS)),
+      ]);
+
+      if (winner === TIMER_TOKEN) {
+        const watchersMod = await import('./scheduler/watchers.mjs');
+        const attribAgentId = await _resolveAttributionAgent(userId, agentId);
+        const wid = watchersMod.registerWatcher({
+          userId,
+          agentId: attribAgentId,
+          kind: 'task_proxy',
+          label: `⏵ ${name}`,
+          state: {
+            taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            targetAgentName: name,
+            targetAgentEmoji: '⏵',
+            tool: name,
+            startedAt: _toolStart,
+            lastActivityAt: Date.now(),
+          },
+          cadenceSec: 30,
+          expiresAt: null,
+        });
+        yield { type: 'result', text: `\`${name}\` is taking longer than 10s — moved to background. A live progress chip is in the chat; you don't need to reply about it.` };
+        yield { type: '__hide_turn', reason: 'bg_chip', taskId: wid };
+
+        racePromise.then(async (val) => {
+          const text = String(val ?? '');
+          watchersMod.completeWatcher(userId, wid, {
+            status: 'done',
+            finalText: `✓ ${name} done${text ? `: ${text.slice(-1200)}` : ''}`,
+          });
+          if (agentId) {
+            try {
+              const { appendToSession } = await import('./sessions.mjs');
+              const key = agentId.startsWith(`${userId}_`) ? agentId : `${userId}_${agentId}`;
+              await appendToSession(key, { role: 'assistant', content: `[${name} finished in background]\n${text.slice(0, 4000)}`, ts: Date.now() });
+            } catch (_) { /* best-effort */ }
+          }
+          try {
+            const { sendToUser } = await import('./ws-handler.mjs');
+            sendToUser(userId, {
+              type: 'agent_report',
+              agentName: name,
+              agentEmoji: '⏵',
+              content: text || `${name} completed.`,
+              taskId: `autobg_${wid}`,
+              ts: Date.now(),
+            });
+          } catch (_) { /* best-effort */ }
+          log.info('tool', 'auto-bg tool complete', { skill: owningSkillId, tool: name, userId, durationMs: Date.now() - _toolStart });
+        }).catch((err) => {
+          watchersMod.completeWatcher(userId, wid, {
+            status: 'error',
+            finalText: `⚠ ${name} failed: ${err.message}`,
+          });
+          log.warn('tool', 'auto-bg tool threw', { skill: owningSkillId, tool: name, userId, err: err.message });
+        });
+        return;
+      }
+
+      // Won the race — normal sync result
+      yield { type: 'result', text: String(winner ?? '') };
     }
     log.info('tool', 'tool complete', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart });
 

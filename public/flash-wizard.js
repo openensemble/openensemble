@@ -417,15 +417,23 @@
     } catch (_) { /* fall through to first-flash copy */ }
 
     const firstFlashCopy = `
-      <div style="margin-bottom:10px">The device is rebooting. On first boot it comes up as the Wi-Fi AP <code>oe-voice-XXXX</code>.</div>
+      <div style="margin-bottom:10px">The device should reboot into AP mode: <code>oe-voice-XXXX</code>.</div>
+      <div style="margin-bottom:10px;padding:8px 10px;background:rgba(255,193,7,0.1);border-left:3px solid var(--orange,#ffc107);border-radius:4px;font-size:12px">
+        <strong>⚠ If the AP doesn't appear within ~10 seconds:</strong> unplug the device from USB and plug it back in. The soft-reset after flashing isn't reliable on every ESP32-S3 board, but a physical power cycle always works.
+      </div>
       <ol style="margin:0 0 12px 18px;padding:0;font-size:12.5px;line-height:1.7">
-        <li>Join that AP from your phone.</li>
-        <li>Fill in the captive portal: Wi-Fi creds, OE server URL, and an 8-char pairing code.</li>
-        <li>Generate the pairing code with the button below.</li>
+        <li>On your phone (or any Wi-Fi device), join the <code>oe-voice-XXXX</code> network.</li>
+        <li>A captive portal should open automatically — if not, browse to <code>http://192.168.4.1</code>.</li>
+        <li>Fill in: your Wi-Fi creds, the OE server URL, and an 8-char pairing code.</li>
+        <li>Generate the pairing code with the button below, then enter it in the captive portal.</li>
+        <li>The device will reboot, join your Wi-Fi, and appear in the <strong>Voice devices</strong> drawer.</li>
       </ol>
     `;
     const reflashCopy = `
       <div style="margin-bottom:10px">The device is rebooting. Its existing Wi-Fi creds and pairing token are preserved in NVS — it should reconnect to OE on its own within ~30 s.</div>
+      <div style="margin-bottom:10px;padding:8px 10px;background:rgba(255,193,7,0.1);border-left:3px solid var(--orange,#ffc107);border-radius:4px;font-size:12px">
+        <strong>⚠ If it doesn't reconnect within a minute:</strong> unplug and re-plug the device. The soft-reset after flashing isn't 100% reliable.
+      </div>
       <ul style="margin:0 0 12px 18px;padding:0;font-size:12.5px;line-height:1.7">
         <li>Watch the <strong>Voice devices</strong> drawer — your device should appear as connected.</li>
         <li>If it doesn't come back (rare — usually means the partition layout changed and NVS is unreadable), use <em>+ Pair this device</em> below to enter the captive-portal flow.</li>

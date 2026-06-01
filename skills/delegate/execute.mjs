@@ -6,9 +6,26 @@
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null) {
   if (name !== 'ask_agent') { yield { type: 'result', text: null }; return; }
 
-  const { agent_id, task: rawTask, background = false, no_confirm = false, _parallel = false } = args;
+  const { agent_id, task: rawTask, no_confirm = false, _parallel = false } = args;
   let task = rawTask;
   if (!agent_id || !task) { yield { type: 'result', text: 'Missing agent_id or task.' }; return; }
+
+  // Auto-default `background` to true for task-shaped delegations when the
+  // LLM didn't pass an explicit value. Coordinators that ignore the SPA
+  // recommendation still end up backgrounding skill-creation / refactor /
+  // multi-step work. Sync remains the default ONLY for quick lookups
+  // (single-tool-call shapes). Distinguish "explicit false" (honor) from
+  // "undefined" (apply heuristic) by reading args.background directly.
+  const LONG_TASK_RE = /\b(create|build|make|generate|refactor|rewrite|fix|update|modify|change|delete|remove|install|deploy|configure|setup|set up|investigate|debug|trace|run|execute|test|download|upload|patch|migrate|optimize|implement|write|edit|read|search|analyze|review)\b/i;
+  let background;
+  if (typeof args.background === 'boolean') {
+    background = args.background;     // LLM was explicit — honor it
+  } else {
+    background = LONG_TASK_RE.test(rawTask);
+    if (background) {
+      console.log('[delegate] auto-background:true (task-shaped keyword match) for', agent_id);
+    }
+  }
 
   // Dynamic imports — by the time this executes, all modules are fully initialized
   const { streamChat } = await import('../../chat.mjs');
@@ -31,7 +48,13 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     const raw = String(agent_id);
     const needle = raw.toLowerCase();
     agent = agents.find(a => a.name?.toLowerCase() === needle)
-         ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle));
+         ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle))
+         // LLMs frequently pass the agent's ROLE (e.g. "coder" instead of
+         // Ada's hex id). Accept that — there's usually one agent per role
+         // on a given install, and if multiple exist we take the first
+         // (matches the implicit "default agent for role" mental model).
+         ?? agents.find(a => a.role?.toLowerCase() === needle)
+         ?? agents.find(a => a.skillCategory?.toLowerCase() === needle);
     if (!agent && /^agent_[a-z0-9_]+$/i.test(raw)) {
       const stripped = raw.replace(/^agent_/i, '').toLowerCase();
       // Hex suffixes are 8 chars of [0-9a-f] — leave those to the exact-id
@@ -40,7 +63,8 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       // our 4-byte hex IDs).
       if (stripped && stripped.length !== 8 || /[g-z_]/.test(stripped)) {
         agent = agents.find(a => a.name?.toLowerCase() === stripped)
-             ?? agents.find(a => a.id.toLowerCase() === stripped);
+             ?? agents.find(a => a.id.toLowerCase() === stripped)
+             ?? agents.find(a => a.role?.toLowerCase() === stripped);
       }
     }
   }

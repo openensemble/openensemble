@@ -102,6 +102,44 @@ function isSafeServiceName(name) {
   return typeof name === 'string' && /^[a-zA-Z0-9._-]{1,40}$/.test(name);
 }
 
+// Derive a human-friendly chip title from a shell command + node hostname.
+// Used when the LLM didn't pass an explicit `label` arg. Heuristics cover
+// the most common long commands; everything else falls back to the
+// truncated command itself prefixed with the hostname.
+function _friendlyCommandLabel(command, hostname) {
+  const c = String(command || '').toLowerCase();
+  const host = hostname || 'node';
+  if (/\bapt(?:-get)?\s+(?:dist-)?upgrade\b/.test(c) || /\bapt(?:-get)?\s+full-upgrade\b/.test(c))     return `Updating ${host}`;
+  if (/\bapt(?:-get)?\s+(?:install|reinstall)\b/.test(c)) {
+    const pkg = c.match(/apt(?:-get)?\s+(?:install|reinstall)\s+(?:-y\s+)?([a-z0-9.+-]+)/i);
+    return pkg ? `Installing ${pkg[1]} on ${host}` : `Installing packages on ${host}`;
+  }
+  if (/\b(yum|dnf)\s+(?:update|upgrade)\b/.test(c))   return `Updating ${host}`;
+  if (/\b(yum|dnf)\s+install\b/.test(c)) {
+    const pkg = c.match(/(?:yum|dnf)\s+install\s+(?:-y\s+)?([a-z0-9.+-]+)/i);
+    return pkg ? `Installing ${pkg[1]} on ${host}` : `Installing packages on ${host}`;
+  }
+  if (/\bnpm\s+install\b/.test(c))                     return `npm install on ${host}`;
+  if (/\bpip3?\s+install\b/.test(c))                   return `pip install on ${host}`;
+  if (/\bdocker\s+pull\b/.test(c))                     return `Pulling Docker image on ${host}`;
+  if (/\bdocker\s+build\b/.test(c))                    return `Building Docker image on ${host}`;
+  if (/\bdocker\s+(?:compose\s+)?(?:up|run)\b/.test(c)) return `Starting Docker on ${host}`;
+  if (/\bmake\b/.test(c))                              return `Building on ${host}`;
+  if (/\bgit\s+clone\b/.test(c))                       return `Cloning repo on ${host}`;
+  if (/\bsystemctl\s+restart\b/.test(c)) {
+    const svc = c.match(/systemctl\s+restart\s+([a-z0-9._@-]+)/i);
+    return svc ? `Restarting ${svc[1]} on ${host}` : `Restarting service on ${host}`;
+  }
+  if (/\bsystemctl\s+reload\b/.test(c)) {
+    const svc = c.match(/systemctl\s+reload\s+([a-z0-9._@-]+)/i);
+    return svc ? `Reloading ${svc[1]} on ${host}` : `Reloading service on ${host}`;
+  }
+  if (/curl\s.+\|\s*(?:sudo\s+)?(?:sh|bash)/.test(c)) return `Running installer on ${host}`;
+  // Fallback: truncated command after the hostname
+  const trimmed = command.length > 50 ? command.slice(0, 50) + '…' : command;
+  return `${host}: ${trimmed}`;
+}
+
 function shellEscape(s) {
   // single-quote escape for bash
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -162,7 +200,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
   }
 
   if (name === 'node_exec') {
-    const { node_id, command, timeout = 60 } = args;
+    const { node_id, command, timeout = 60, label: providedLabel = null } = args;
     if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!command) { yield { type: 'result', text: 'This tool needs a command. Call it again with command specified.' }; return; }
 
@@ -174,6 +212,112 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list to see available nodes.` }; return; }
+
+    // Phase 14e: auto-background for long-shaped commands. Either the LLM
+    // sets background:true explicitly, OR the command matches a long-running
+    // pattern (package managers, builds, downloads). Sync mode is kept as
+    // the default so quick reads still work inline.
+    const LONG_CMD_RE = /\b(apt|apt-get|dnf|yum)\s+(install|upgrade|update|dist-upgrade|full-upgrade|autoremove)\b|\b(npm|pip|pip3|cargo|gem|composer|brew)\s+(install|upgrade|update)\b|\b(make|cmake|cargo\s+build|go\s+build|mvn|gradle)\b|\b(docker)\s+(pull|build|run|compose)\b|\bcurl\s.+\|\s*(sudo\s+)?(sh|bash)\b|\b(git\s+clone|wget|rsync)\b|\bsystemctl\s+(restart|reload)\b|\b(snap|flatpak)\s+(install|update|refresh)\b/i;
+    const wantBackground = typeof args.background === 'boolean'
+      ? args.background
+      : (LONG_CMD_RE.test(command) || timeout > 60);
+
+    if (wantBackground) {
+      const { registerWatcher, pushWatcherStatus, completeWatcher } = await import('../../scheduler/watchers.mjs');
+      const cmdPreview = command.length > 80 ? command.slice(0, 80) + '…' : command;
+      // Friendly chip title — Sydney can pass an intent-shaped label
+      // ("Updating Cesium09"). Fall back to a heuristic derived from the
+      // command if she didn't (apt → "package updates", make → "build", etc.)
+      const friendly = providedLabel || _friendlyCommandLabel(command, node.hostname || node_id);
+      let watcherId = null;
+      // Resolve attribution agent OUTSIDE the try so the detached IIFE
+      // below (line 225+) captures it. Each user names their coordinator
+      // differently — we read the user's role assignment to find theirs.
+      let attribAgentId = agentId;
+      if (!attribAgentId) {
+        try {
+          const { getUserCoordinatorAgentId } = await import('../../routes/_helpers.mjs');
+          const coordId = getUserCoordinatorAgentId(userId);
+          attribAgentId = coordId ? `${userId}_${coordId}` : userId;
+        } catch { attribAgentId = userId; }
+      }
+      try {
+        watcherId = registerWatcher({
+          userId,
+          agentId: attribAgentId,
+          kind: 'task_proxy',
+          label: `🖥 ${friendly}`,
+          state: {
+            taskId: `nx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            targetAgentName: node.hostname || node_id,
+            targetAgentEmoji: '🖥',
+            command, node_id,
+            startedAt: Date.now(),
+            lastActivityAt: Date.now(),
+          },
+          cadenceSec: 30,
+          expiresAt: null,
+        });
+        pushWatcherStatus(userId, watcherId, `Started: ${cmdPreview}`);
+      } catch (e) {
+        console.warn('[node_exec] background watcher register failed, falling through to sync:', e.message);
+      }
+
+      if (watcherId) {
+        // Detach the streaming exec. Push progress into the watcher chip; on
+        // completion finalize with the result text. Catch any throws so the
+        // chip lands as 'error' rather than vanishing.
+        (async () => {
+          const chunks = { stdout: '', stderr: '' };
+          let cmdResult = null;
+          try {
+            cmdResult = await sendCommandStreaming(node.nodeId, userId, {
+              type: 'exec', command, timeout: Math.min(timeout, 300),
+            }, (stream, data) => {
+              if (stream === 'stderr') chunks.stderr += data;
+              else                     chunks.stdout += data;
+              // Throttled status update — last 200 chars of stdout/stderr
+              const tail = ((chunks.stdout + chunks.stderr).slice(-200)).replace(/\s+/g, ' ').trim();
+              if (tail) pushWatcherStatus(userId, watcherId, `running… ${tail}`);
+            });
+          } catch (e) {
+            completeWatcher(userId, watcherId, {
+              status: 'error',
+              finalText: `⚠ Command failed: ${e.message}`,
+            });
+            return;
+          }
+          let output = '';
+          if (cmdResult?.stdout) output += truncate(cmdResult.stdout);
+          if (cmdResult?.stderr) output += (output ? '\n\n' : '') + `STDERR:\n${truncate(cmdResult.stderr)}`;
+          output += `\n\nExit code: ${cmdResult?.exitCode ?? '?'} (${cmdResult?.duration ?? 0}ms)`;
+          const status = cmdResult?.exitCode === 0 ? 'done' : 'error';
+          const prefix = status === 'done' ? '✓' : '⚠';
+          completeWatcher(userId, watcherId, {
+            status,
+            finalText: `${prefix} ${cmdPreview}\n${output.slice(-2000)}`,
+          });
+          // Inject into the coordinator's session so a future turn has the
+          // result for context (matches dispatchBackground's pattern).
+          try {
+            const { appendToSession } = await import('../../sessions.mjs');
+            const notice = `[node_exec completed on ${node.hostname || node_id} — re: "${cmdPreview}"]\n${output}`;
+            await appendToSession(attribAgentId, { role: 'assistant', content: notice, ts: Date.now() });
+          } catch (e) {
+            console.warn('[node_exec] failed to inject completion notice:', e.message);
+          }
+        })();
+
+        // Terse result so the LLM doesn't echo the whole "started in background"
+        // sentence back to the user — the chip is already visible. The
+        // __hide_turn meta event tells chat.mjs to suppress the assistant
+        // bubble entirely; the chip BECOMES the assistant's reply visually.
+        yield { type: 'result', text: `[task chip rendered: "${friendly}"] OK — the chip is the user-visible reply. You don't need to reply with text; if you do, keep it to one short word.` };
+        yield { type: '__hide_turn', reason: 'bg_chip', taskId: watcherId };
+        return;
+      }
+      // If watcher registration failed, fall through to sync exec below
+    }
 
     // Bridge the chunk callback (from the registry's WS stream) into yieldable
     // events. A simple promise-queue: callback pushes, generator awaits next.

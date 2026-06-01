@@ -541,7 +541,15 @@ async function maybePushVoiceConfig(ws) {
   try {
     const cfg = readVoiceConfig(ws._userId);
     const lastPushed = getDeviceVoiceConfigVersion(ws._userId, ws._deviceId);
-    if (lastPushed === cfg.version) return;
+    // Always push on every WS (re)connect — a boot can wipe NVS without the
+    // server knowing, so the version-match optimization was misleading us
+    // into skipping pushes after real device reboots. Bandwidth cost is
+    // amortized across rare-event boots; the device's per-slot ack throttle
+    // already keeps the push from overrunning the firmware's WS recv path.
+    const isSameVersion = lastPushed === cfg.version;
+    if (isSameVersion) {
+      console.log(`[ws] voice-config push to ${ws._deviceId}: version unchanged (v${cfg.version}) but pushing anyway in case device NVS was reset`);
+    }
     const r = await pushConfigToDevice(ws._deviceId, ws._userId);
     const fullySucceeded =
       r.pushedSlots.length > 0 &&
