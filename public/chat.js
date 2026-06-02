@@ -32,8 +32,28 @@ async function handleChatFileSelect(file) {
 
 // ── Send ──────────────────────────────────────────────────────────────────────
 async function send() {
-  const text = $('input').value.trim();
+  let text = $('input').value.trim();
   if ((!text && !pendingAttachment) || (streaming && !awaitingPermission) || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  // @-mention redirect: "@ada make me a skill" switches the active agent
+  // BEFORE we push the user bubble so the message + reply both land in
+  // ada's chat panel. The server's chat-dispatch also handles the prefix
+  // (strip + redirect) as defense for clients that don't pre-switch.
+  const mention = text.match(/^@(\S+)\s+([\s\S]+)$/);
+  if (mention) {
+    const handle = mention[1].toLowerCase();
+    const target = agents.find(a => {
+      const nameKey = String(a.name || '').toLowerCase().replace(/\s+/g, '');
+      const idSuffix = String(a.id || '').split('_').pop().toLowerCase();
+      return nameKey === handle || idSuffix === handle;
+    });
+    if (target && target.id !== activeAgent) {
+      switchAgent(target.id);
+      text = mention[2];  // stripped body; server will see no @-prefix
+    } else if (target) {
+      text = mention[2];  // same agent, just strip the prefix
+    }
+  }
 
   const attachment = pendingAttachment;
   const displayText = text || (attachment ? `[${attachment.name}]` : '');
@@ -1164,6 +1184,150 @@ function updateSlashMenu() {
 }
 
 function hideSlashMenu() { $('slashMenu').style.display = 'none'; slashMenuItems = []; slashMenuIdx = 0; }
+
+// ── @-Mention Menu ─────────────────────────────────────────────────────────
+// Two modes:
+//   `@<handle>`       → agent picker, completes to "@<handle> "
+//   `@<kind>/<file>`  → file picker (video/audio/image), completes to
+//                       "@<kind>/<exact-filename> ". Server's chat-dispatch
+//                       resolves the @-tokens to absolute filesystem paths
+//                       and injects them as a system note so transcribe_file
+//                       (and any other path-based tool) can act on them.
+let atMenuIdx = 0, atMenuItems = [];
+
+// File-menu cache — populated lazily from /api/desktop/{videos,audio,images}.
+// Invalidated on agent switch (see switchAgent). Per-folder so a slow images
+// list doesn't block videos.
+const _atFileCache = {};
+const _AT_KIND_MAP = {
+  video: 'videos', videos: 'videos',
+  audio: 'audio', audios: 'audio',
+  image: 'images', images: 'images', photo: 'images', photos: 'images',
+};
+const _AT_KIND_ICON = { videos: '🎬', audio: '🎙️', images: '🖼️' };
+window.invalidateAtFileCache = () => { for (const k of Object.keys(_atFileCache)) delete _atFileCache[k]; };
+
+async function _atFetchFileList(folder) {
+  try {
+    const r = await fetch(`/api/desktop/${folder}`);
+    _atFileCache[folder] = r.ok ? await r.json() : [];
+  } catch { _atFileCache[folder] = []; }
+}
+
+function _atGetItems(val) {
+  // File-reference branch: @<kind>/<partial>
+  const fileMatch = val.match(/^@(video|audio|image|images|videos|photo|photos|audios)\/(\S*)$/i);
+  if (fileMatch) {
+    const rawKind = fileMatch[1].toLowerCase();
+    const filter = fileMatch[2].toLowerCase();
+    const folder = _AT_KIND_MAP[rawKind];
+    if (!folder) return [];
+    if (!_atFileCache[folder]) {
+      // Trigger fetch; menu repopulates on the next keystroke or via a
+      // direct re-render once the fetch resolves.
+      _atFetchFileList(folder).then(() => updateAtMenu());
+      return [];
+    }
+    const icon = _AT_KIND_ICON[folder] || '📎';
+    return _atFileCache[folder]
+      .filter(f => !filter || f.filename.toLowerCase().includes(filter))
+      .slice(0, 10)
+      .map(f => ({
+        label: `${icon} ${f.filename}`,
+        desc: f.size ? `${(f.size / 1024 / 1024).toFixed(1)} MB` : '',
+        action: () => {
+          hideAtMenu();
+          const completed = `@${rawKind}/${f.filename} `;
+          $('input').value = completed;
+          $('input').focus();
+          resizeTextarea();
+          $('input').setSelectionRange(completed.length, completed.length);
+        },
+      }));
+  }
+
+  // Agent branch: @<handle> (no slash yet). Also surface file-kind
+  // shortcuts ("video/", "audio/", "image/") so users discover the file
+  // mode by typing the first letter — e.g. `@a` shows both Ada (agent)
+  // AND audio/ (kind shortcut). Picking a kind drills into its file list.
+  const m = val.match(/^@(\S*)$/);
+  if (!m) return [];
+  const filter = m[1].toLowerCase();
+  const KIND_SHORTCUTS = [
+    { kind: 'video', icon: '🎬', desc: 'browse videos' },
+    { kind: 'audio', icon: '🎙️', desc: 'browse audio'  },
+    { kind: 'image', icon: '🖼️', desc: 'browse images' },
+  ];
+  const kindItems = KIND_SHORTCUTS
+    .filter(k => !filter || k.kind.startsWith(filter))
+    .map(k => ({
+      label: `${k.icon} ${k.kind}/`,
+      desc: k.desc,
+      action: () => {
+        const completed = `@${k.kind}/`;
+        $('input').value = completed;
+        $('input').focus();
+        $('input').setSelectionRange(completed.length, completed.length);
+        // Re-fire input handler so updateAtMenu repopulates with files.
+        $('input').dispatchEvent(new Event('input', { bubbles: true }));
+      },
+    }));
+  const agentItems = agents
+    .filter(a => {
+      const handle = String(a.name || '').toLowerCase().replace(/\s+/g, '');
+      const idSuffix = String(a.id || '').split('_').pop().toLowerCase();
+      return !filter || handle.includes(filter) || idSuffix.includes(filter);
+    })
+    .slice(0, 10)
+    .map(a => {
+      const handle = String(a.name || '').toLowerCase().replace(/\s+/g, '');
+      return {
+        label: `${a.emoji || '🤖'} ${a.name}`,
+        desc: `@${handle}`,
+        action: () => {
+          hideAtMenu();
+          $('input').value = `@${handle} `;
+          $('input').focus();
+          resizeTextarea();
+          $('input').setSelectionRange(handle.length + 2, handle.length + 2);
+        },
+      };
+    });
+  return [...kindItems, ...agentItems];
+}
+
+function updateAtMenu() {
+  const val = $('input').value;
+  if (!val.startsWith('@')) { hideAtMenu(); return; }
+  atMenuItems = _atGetItems(val);
+  const menu = $('atMenu');
+  if (!atMenuItems.length) { hideAtMenu(); return; }
+  if (atMenuIdx >= atMenuItems.length) atMenuIdx = 0;
+  menu.style.display = 'block';
+  menu.innerHTML = atMenuItems.map((item, i) =>
+    `<div class="slash-menu-item${i === atMenuIdx ? ' active' : ''}" data-idx="${i}">
+       <span class="smi-label">${escHtml(item.label)}</span>
+       <span class="smi-desc">${escHtml(item.desc)}</span>
+     </div>`
+  ).join('');
+  menu.querySelectorAll('.slash-menu-item').forEach((el, i) => {
+    el.addEventListener('mousedown', e => { e.preventDefault(); atMenuItems[i]?.action(); });
+  });
+}
+
+function hideAtMenu() { $('atMenu').style.display = 'none'; atMenuItems = []; atMenuIdx = 0; }
+function atMenuNav(dir) {
+  if (!atMenuItems.length) return;
+  atMenuIdx = (atMenuIdx + dir + atMenuItems.length) % atMenuItems.length;
+  updateAtMenu();
+}
+window.updateAtMenu = updateAtMenu;
+window.hideAtMenu = hideAtMenu;
+window.atMenuNav = atMenuNav;
+window._atMenuItems = () => atMenuItems;
+window._atMenuIdx = () => atMenuIdx;
+window._atMenuAction = () => atMenuItems[atMenuIdx]?.action();
+
 function slashMenuNav(dir) {
   if (!slashMenuItems.length) return;
   slashMenuIdx = (slashMenuIdx + dir + slashMenuItems.length) % slashMenuItems.length;

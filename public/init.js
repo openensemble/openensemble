@@ -63,6 +63,8 @@ async function init() {
       resizeTextarea();
       if ($('input').value.startsWith('/')) { slashMenuIdx = 0; updateSlashMenu(); }
       else hideSlashMenu();
+      if ($('input').value.startsWith('@')) { updateAtMenu(); }
+      else hideAtMenu();
       // If we're in recall mode and the user just typed (current value diverges
       // from what we set), exit recall so the next ArrowUp restarts at newest.
       // Programmatic .value sets do NOT fire 'input', so this only catches
@@ -79,6 +81,20 @@ async function init() {
         if (e.key === 'Escape')    { e.preventDefault(); hideSlashMenu();   return; }
         if (e.key === 'Tab')       { e.preventDefault(); slashMenuItems[slashMenuIdx]?.action(); return; }
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); slashMenuItems[slashMenuIdx]?.action(); return; }
+      }
+      // @-menu nav: Tab completes the handle, Enter completes (doesn't send),
+      // Escape closes the menu. Once the user has typed a space after the
+      // handle the menu auto-hides via the input handler, so Enter goes back
+      // to its normal "send" behavior for the rest of the message.
+      if (window._atMenuItems && window._atMenuItems().length) {
+        if (e.key === 'ArrowUp')   { e.preventDefault(); atMenuNav(-1); return; }
+        if (e.key === 'ArrowDown') { e.preventDefault(); atMenuNav(1);  return; }
+        if (e.key === 'Escape')    { e.preventDefault(); hideAtMenu();   return; }
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+          e.preventDefault();
+          window._atMenuAction?.();
+          return;
+        }
       }
       // Terminal-style multi-step recall: ArrowUp walks back through the last
       // 10 user messages in this agent's session (newest first); ArrowDown
@@ -138,7 +154,7 @@ async function init() {
       }
       if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 640) { e.preventDefault(); send(); }
     });
-    $('input').addEventListener('blur', () => hideSlashMenu());
+    $('input').addEventListener('blur', () => { hideSlashMenu(); hideAtMenu(); });
     $('btnSend').addEventListener('click', send);
     $('btnStop').addEventListener('click', () => {
       if (ws && ws.readyState === WebSocket.OPEN)

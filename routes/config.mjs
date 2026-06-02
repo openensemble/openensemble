@@ -23,12 +23,55 @@ import { ambientFilePath } from '../lib/routines.mjs';
 import { supportsVision } from '../lib/model-capabilities.mjs';
 import {
   probePiperAvailable,
+  probeKittenttsAvailable,
+  probeFasterWhisperAvailable,
   probeFfmpegAvailable,
   getTtsAvailability,
   invalidateVoiceDepsCache,
 } from '../lib/voice-deps.mjs';
 import { log } from '../logger.mjs';
 import { OPENAI_COMPAT_PROVIDERS } from '../chat/providers/_shared.mjs';
+
+// KittenTTS nano-0.2 ships 8 preset voices (no cloning). Listed here so the
+// UI dropdown and /api/tts/info can surface them without round-tripping to
+// the kittentts subprocess.
+const KITTENTTS_VOICES = [
+  'expr-voice-2-m', 'expr-voice-2-f',
+  'expr-voice-3-m', 'expr-voice-3-f',
+  'expr-voice-4-m', 'expr-voice-4-f',
+  'expr-voice-5-m', 'expr-voice-5-f',
+];
+const KITTENTTS_DEFAULT_VOICE = 'expr-voice-2-f';
+
+// Piper voice catalog — what the Settings/Providers UI offers users to
+// download once the Piper service is installed. Each entry is downloadable
+// independently (POST /api/provider-config/install-piper-voice). The
+// multivoice server in scripts/piper-multivoice-server.py picks up new files
+// automatically (no service restart needed). `source: 'openensemble'` voices
+// live in our own HF repo; everything else falls back to rhasspy/piper-voices.
+const PIPER_VOICE_CATALOG = [
+  { id: 'en_AU-OE_custom-medium',      label: 'OE Custom AU (Australian female)',    lang: 'en_AU', gender: 'female', quality: 'medium', size_mb: 61,  multi_speaker: false, source: 'openensemble' },
+  { id: 'en_US-amy-medium',            label: 'Amy (American female)',                lang: 'en_US', gender: 'female', quality: 'medium', size_mb: 63,  multi_speaker: false, source: 'rhasspy' },
+  { id: 'en_US-lessac-medium',         label: 'Lessac (American female)',             lang: 'en_US', gender: 'female', quality: 'medium', size_mb: 63,  multi_speaker: false, source: 'rhasspy' },
+  { id: 'en_US-ryan-medium',           label: 'Ryan (American male)',                 lang: 'en_US', gender: 'male',   quality: 'medium', size_mb: 63,  multi_speaker: false, source: 'rhasspy' },
+  { id: 'en_US-libritts_r-medium',     label: 'LibriTTS-R (904-speaker multi)',       lang: 'en_US', gender: 'mixed',  quality: 'medium', size_mb: 75,  multi_speaker: true,  source: 'rhasspy' },
+  { id: 'en_GB-alba-medium',           label: 'Alba (Scottish female)',               lang: 'en_GB', gender: 'female', quality: 'medium', size_mb: 63,  multi_speaker: false, source: 'rhasspy' },
+  { id: 'en_GB-jenny_dioco-medium',    label: 'Jenny (British RP female)',            lang: 'en_GB', gender: 'female', quality: 'medium', size_mb: 63,  multi_speaker: false, source: 'rhasspy' },
+  { id: 'en_GB-cori-high',             label: 'Cori (British female, high quality)',  lang: 'en_GB', gender: 'female', quality: 'high',   size_mb: 109, multi_speaker: false, source: 'rhasspy' },
+];
+
+// Derive the HF base URL for a voice id (mirrors install-piper.sh URL logic).
+function piperVoiceUrlBase(voiceId) {
+  const repo = voiceId.startsWith('en_AU-OE_custom-')
+    ? 'https://huggingface.co/openensemble/piper-voices/resolve/main'
+    : 'https://huggingface.co/rhasspy/piper-voices/resolve/main';
+  // Convention: <lang_REGION>-<name>-<quality> → /<lang>/<lang_REGION>/<name>/<quality>/
+  const [langRegion, ...rest] = voiceId.split('-');
+  const quality = rest[rest.length - 1];
+  const name = rest.slice(0, -1).join('-');
+  const lang = langRegion.split('_')[0];
+  return `${repo}/${lang}/${langRegion}/${name}/${quality}`;
+}
 import { loadUserProviders } from '../lib/user-providers.mjs';
 
 // Tailored URL gate for admin-writable provider endpoints (LM Studio, local
@@ -131,8 +174,10 @@ export async function handle(req, res) {
       // vs "running" status without a separate round-trip. ffmpegAvailable
       // gates every TTS provider (we always resample/encode through ffmpeg)
       // so Settings → Providers can disable options when ffmpeg is missing.
-      const [piperAvailable, ffmpegAvailable] = await Promise.all([
+      const [piperAvailable, kittenttsAvailable, fasterWhisperAvailable, ffmpegAvailable] = await Promise.all([
         probePiperAvailable(cfg),
+        probeKittenttsAvailable(cfg),
+        probeFasterWhisperAvailable(cfg),
         probeFfmpegAvailable(),
       ]);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -157,7 +202,17 @@ export async function handle(req, res) {
         ttsModel:     cfg.ttsModel    ?? '',
         ttsVoice:     cfg.ttsVoice    ?? '',
         ttsProvider:  cfg.ttsProvider ?? 'openai',
+        // sttMode controls where /api/stt sends audio. 'remote' uses
+        // sttApiUrl + sttApiKey (the default OpenAI-compat path). 'local'
+        // forces 127.0.0.1:5154 (the Faster-Whisper service) regardless of
+        // the URL field, so users can keep their remote credentials saved
+        // while flipping between local and remote without losing either.
+        sttMode:      cfg.sttMode === 'local' ? 'local' : 'remote',
+        piperLengthScale: Number.isFinite(cfg.piperLengthScale) ? cfg.piperLengthScale : 1.1,
         piperAvailable,
+        kittenttsAvailable,
+        fasterWhisperAvailable,
+        fasterWhisperProfile: cfg.integrations?.faster_whisper?.profile ?? null,
         ffmpegAvailable,
         elevenlabsKeySet: !!cfg.elevenlabsApiKey,
         elevenlabsModel:  cfg.elevenlabsModel ?? '',
@@ -242,12 +297,18 @@ export async function handle(req, res) {
           if (body.ttsApiUrl   !== undefined)      cfg.ttsApiUrl   = body.ttsApiUrl;
           if (body.ttsModel    !== undefined)      cfg.ttsModel    = body.ttsModel;
           if (body.ttsVoice    !== undefined)      cfg.ttsVoice    = body.ttsVoice;
+          if (body.piperLengthScale !== undefined) {
+            // Clamp to [0.7, 1.6]: below 0.7 sounds chipmunked, above 1.6
+            // sounds drunk. UI slider exposes 0.8-1.5 inside this safe band.
+            const n = Number(body.piperLengthScale);
+            if (Number.isFinite(n) && n >= 0.7 && n <= 1.6) cfg.piperLengthScale = n;
+          }
           if (body.ttsProvider !== undefined) {
             // f5-tts was removed 2026-05-15 — the UI no longer offers it and
             // the server-side handler below silently falls back to openai if
             // an old config still has it. The handler block for f5-tts is
             // kept as dead code for now in case we re-add it.
-            const allowed = ['openai', 'piper', 'elevenlabs'];
+            const allowed = ['openai', 'piper', 'kittentts', 'elevenlabs'];
             if (allowed.includes(body.ttsProvider)) cfg.ttsProvider = body.ttsProvider;
           }
           if (body.elevenlabsApiKey)               cfg.elevenlabsApiKey = body.elevenlabsApiKey;
@@ -255,6 +316,7 @@ export async function handle(req, res) {
           if (body.sttApiKey)                      cfg.sttApiKey   = body.sttApiKey;
           if (body.sttApiUrl   !== undefined)      cfg.sttApiUrl   = body.sttApiUrl;
           if (body.sttModel    !== undefined)      cfg.sttModel    = body.sttModel;
+          if (body.sttMode === 'remote' || body.sttMode === 'local') cfg.sttMode = body.sttMode;
           if (body.enabledProviders !== undefined) cfg.enabledProviders = { ...(cfg.enabledProviders ?? {}), ...body.enabledProviders };
           if (body.providerFailover !== undefined) cfg.providerFailover = body.providerFailover;
           if (body.clearMicrosoftCreds) { delete cfg.msClientId; delete cfg.msClientSecret; delete cfg.msTenant; }
@@ -291,6 +353,29 @@ export async function handle(req, res) {
       return true;
     }
 
+    // Optional body: { voice: "<id from catalog>" } picks which voice is
+    // installed as the default. Empty body = libritts_r (legacy default,
+    // matches the bare-install path from install.sh).
+    let initialVoice = '';
+    try {
+      const raw = await readBody(req);
+      if (raw) {
+        const body = JSON.parse(raw);
+        if (body && typeof body.voice === 'string' && body.voice) {
+          if (!PIPER_VOICE_CATALOG.find(v => v.id === body.voice)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `unknown voice id: ${body.voice}` }));
+            return true;
+          }
+          initialVoice = body.voice;
+        }
+      }
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `bad request body: ${e.message}` }));
+      return true;
+    }
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -301,7 +386,11 @@ export async function handle(req, res) {
     const child = spawn('/usr/bin/env', ['bash', scriptPath], {
       // Run as the OE process owner so systemctl --user targets the right
       // user manager (whoever runs OE is the user Piper installs for).
-      env: { ...process.env, HOME: os.homedir() },
+      env: {
+        ...process.env,
+        HOME: os.homedir(),
+        ...(initialVoice ? { PIPER_VOICE: initialVoice } : {}),
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -338,6 +427,188 @@ export async function handle(req, res) {
     // Best-effort: kill the install if the client disconnects mid-stream.
     // Idempotent re-run from the UI picks up wherever the previous run left
     // off (venv exists / pip cached / model already downloaded).
+    req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
+    return true;
+  }
+
+  // POST /api/provider-config/uninstall-piper
+  // POST /api/provider-config/uninstall-kittentts
+  // Admin-only. Spawn the matching uninstall-*.sh, wait for completion,
+  // return a JSON envelope with the captured stdout. Plain JSON (no SSE)
+  // because uninstall runs in <1 s — streaming would be theater. The
+  // voice-deps cache is invalidated on success so the next
+  // /api/provider-config GET reflects the change immediately.
+  {
+    const uninstallMatch = req.url.match(/^\/api\/provider-config\/uninstall-(piper|kittentts|faster-whisper)$/);
+    if (uninstallMatch && req.method === 'POST') {
+      const authId = requirePrivileged(req, res);
+      if (!authId) return true;
+      const which = uninstallMatch[1];
+      const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
+                                      '..', 'scripts', `uninstall-${which}.sh`);
+      if (!fs.existsSync(scriptPath)) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `uninstall-${which}.sh not found at ${scriptPath}` }));
+        return true;
+      }
+      const child = spawn('/usr/bin/env', ['bash', scriptPath], {
+        env: { ...process.env, HOME: os.homedir() },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const chunks = [];
+      child.stdout.on('data', c => chunks.push(c));
+      child.stderr.on('data', c => chunks.push(c));
+      child.on('exit', (code) => {
+        const ok = code === 0;
+        if (ok) invalidateVoiceDepsCache();
+        res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok, code, output: Buffer.concat(chunks).toString('utf8') }));
+      });
+      child.on('error', (err) => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      });
+      return true;
+    }
+  }
+
+  // POST /api/provider-config/install-faster-whisper  body: { profile: "cpu" | "cuda" }
+  // Same SSE shape as install-piper/install-kittentts. profile picks the
+  // installer's FW_DEVICE env: cpu = distil-large-v3 int8, cuda =
+  // large-v3-turbo float16 (needs NVIDIA driver — the script bails early
+  // if nvidia-smi isn't present so the failure is visible in the SSE log).
+  if (req.url === '/api/provider-config/install-faster-whisper' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res);
+    if (!authId) return true;
+
+    const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
+                                    '..', 'scripts', 'install-faster-whisper.sh');
+    if (!fs.existsSync(scriptPath)) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `install-faster-whisper.sh not found at ${scriptPath}` }));
+      return true;
+    }
+
+    let profile = 'cpu';
+    try {
+      const raw = await readBody(req);
+      if (raw) {
+        const body = JSON.parse(raw);
+        if (body?.profile === 'cuda' || body?.profile === 'cpu') profile = body.profile;
+        else if (body?.profile != null) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `profile must be "cpu" or "cuda", got ${body.profile}` }));
+          return true;
+        }
+      }
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `bad request body: ${e.message}` }));
+      return true;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const child = spawn('/usr/bin/env', ['bash', scriptPath], {
+      env: { ...process.env, HOME: os.homedir(), FW_DEVICE: profile },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const send = (event, data) => {
+      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+    send('start', { script: scriptPath, profile });
+
+    const onLine = (kind) => (chunk) => {
+      const lines = chunk.toString('utf8').split(/\r?\n/);
+      for (const line of lines) {
+        if (line) send('log', { kind, line });
+      }
+    };
+    child.stdout.on('data', onLine('stdout'));
+    child.stderr.on('data', onLine('stderr'));
+
+    child.on('exit', (code, signal) => {
+      if (code === 0) {
+        invalidateVoiceDepsCache();
+        // Persist which profile is installed so /api/provider-config can
+        // surface it in the UI without re-probing the systemd unit file.
+        modifyConfig(cfg => {
+          cfg.integrations ??= {};
+          cfg.integrations.faster_whisper ??= {};
+          cfg.integrations.faster_whisper.installed = true;
+          cfg.integrations.faster_whisper.profile = profile;
+        });
+      }
+      send('done', { code, signal: signal ?? null, ok: code === 0 });
+      try { res.end(); } catch {}
+    });
+    child.on('error', (err) => {
+      send('done', { code: -1, error: err.message, ok: false });
+      try { res.end(); } catch {}
+    });
+    req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
+    return true;
+  }
+
+  // POST /api/provider-config/install-kittentts
+  // Same shape as install-piper: SSE-stream the install script's output.
+  // KittenTTS is the no-GPU / no-API-key fallback tier; install is CPU-only,
+  // ~50 MB, and finishes in under a minute on first run.
+  if (req.url === '/api/provider-config/install-kittentts' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res);
+    if (!authId) return true;
+
+    const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
+                                    '..', 'scripts', 'install-kittentts.sh');
+    if (!fs.existsSync(scriptPath)) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `install-kittentts.sh not found at ${scriptPath}` }));
+      return true;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const child = spawn('/usr/bin/env', ['bash', scriptPath], {
+      env: { ...process.env, HOME: os.homedir() },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const send = (event, data) => {
+      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+
+    send('start', { script: scriptPath });
+
+    const onLine = (kind) => (chunk) => {
+      const lines = chunk.toString('utf8').split(/\r?\n/);
+      for (const line of lines) {
+        if (line) send('log', { kind, line });
+      }
+    };
+    child.stdout.on('data', onLine('stdout'));
+    child.stderr.on('data', onLine('stderr'));
+
+    child.on('exit', (code, signal) => {
+      if (code === 0) invalidateVoiceDepsCache();
+      send('done', { code, signal: signal ?? null, ok: code === 0 });
+      try { res.end(); } catch {}
+    });
+    child.on('error', (err) => {
+      send('done', { code: -1, error: err.message, ok: false });
+      try { res.end(); } catch {}
+    });
+
     req.on('close', () => { try { child.kill('SIGTERM'); } catch {} });
     return true;
   }
@@ -813,7 +1084,7 @@ export async function handle(req, res) {
   if (req.url === '/api/tts/info' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
-    const ALLOWED = ['openai', 'piper', 'elevenlabs'];
+    const ALLOWED = ['openai', 'piper', 'kittentts', 'elevenlabs'];
     const provider = ALLOWED.includes(cfg.ttsProvider) ? cfg.ttsProvider : 'openai';
     // Runtime availability snapshot — lets the devices drawer show a
     // banner when the configured provider can't actually fulfill TTS
@@ -826,6 +1097,7 @@ export async function handle(req, res) {
       defaultVoice: cfg.ttsVoice ?? null,
       available,
       ...(provider === 'piper' ? { speakerCount: 904 } : {}),
+      ...(provider === 'kittentts' ? { voices: KITTENTTS_VOICES } : {}),
       ...(provider === 'elevenlabs' ? { keySet: !!cfg.elevenlabsApiKey } : {}),
     }));
     return true;
@@ -862,6 +1134,77 @@ export async function handle(req, res) {
     return true;
   }
 
+  // GET /api/tts/piper/catalog
+  // Static list of Piper voices the UI offers for download. Anyone authed
+  // can read it; the install action below is admin-only.
+  if (req.url === '/api/tts/piper/catalog' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ voices: PIPER_VOICE_CATALOG }));
+    return true;
+  }
+
+  // GET /api/tts/piper/voices
+  // Proxy to the multivoice server's /voices endpoint — list what's *installed*
+  // on this box right now. Voice Devices uses this to populate slot dropdowns.
+  if (req.url === '/api/tts/piper/voices' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const cfg = loadConfig();
+    const base = (cfg.piperUrl || 'http://127.0.0.1:5151/').replace(/\/+$/, '');
+    try {
+      const pr = await fetch(`${base}/voices`, { signal: AbortSignal.timeout(3000) });
+      if (!pr.ok) throw new Error(`piper service returned ${pr.status}`);
+      const installed = await pr.json();
+      // Enrich each installed entry with catalog label/gender/etc when known.
+      const catIndex = Object.fromEntries(PIPER_VOICE_CATALOG.map(v => [v.id, v]));
+      const voices = installed.map(v => ({ ...v, ...(catIndex[v.id] ?? {}) }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ voices }));
+    } catch (e) {
+      // Piper service down → return empty list rather than 500, so UI degrades
+      // to "no voices installed" instead of breaking the Voice Devices panel.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ voices: [], error: e.message }));
+    }
+    return true;
+  }
+
+  // POST /api/provider-config/install-piper-voice  body: { voice: "<voice-id>" }
+  // Downloads one Piper voice (onnx + onnx.json) into models/tts/. The
+  // multivoice server hot-picks it up on the next /voices request — no
+  // systemd restart needed. Admin-only because it writes shared system state.
+  if (req.url === '/api/provider-config/install-piper-voice' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    try {
+      const { voice } = JSON.parse(await readBody(req));
+      const entry = PIPER_VOICE_CATALOG.find(v => v.id === voice);
+      if (!entry) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `unknown voice id: ${voice}` }));
+        return true;
+      }
+      const modelDir = path.join(os.homedir(), '.openensemble', 'models', 'tts');
+      fs.mkdirSync(modelDir, { recursive: true });
+      const base = piperVoiceUrlBase(voice);
+      const targets = [
+        { url: `${base}/${voice}.onnx`,      dest: path.join(modelDir, `${voice}.onnx`) },
+        { url: `${base}/${voice}.onnx.json`, dest: path.join(modelDir, `${voice}.onnx.json`) },
+      ];
+      const { pipeline } = await import('node:stream/promises');
+      const { Readable } = await import('node:stream');
+      for (const { url, dest } of targets) {
+        if (fs.existsSync(dest) && fs.statSync(dest).size > 0) continue; // resumable
+        const dl = await fetch(url, { signal: AbortSignal.timeout(120000) });
+        if (!dl.ok) throw new Error(`download failed (${dl.status}) for ${url}`);
+        await pipeline(Readable.fromWeb(dl.body), fs.createWriteStream(dest));
+      }
+      invalidateVoiceDepsCache();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, voice }));
+    } catch (e) { safeError(res, e); }
+    return true;
+  }
+
   // TTS endpoint — generates audio from text using configured TTS provider
   if (req.url === '/api/tts' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
@@ -872,7 +1215,8 @@ export async function handle(req, res) {
     //   'openai'      — remote OpenAI-compatible (named voice)
     //   'elevenlabs'  — remote ElevenLabs (voice_id, including user-cloned)
     //   'piper'       — local libritts_r multi-speaker via piper-tts.service:5151
-    const ALLOWED = ['openai', 'piper', 'elevenlabs'];
+    //   'kittentts'   — local 25M-param ONNX (CPU) via kittentts.service:5153
+    const ALLOWED = ['openai', 'piper', 'kittentts', 'elevenlabs'];
     const provider = ALLOWED.includes(cfg.ttsProvider) ? cfg.ttsProvider : 'openai';
     if (provider === 'openai' && (!cfg.ttsApiKey || !cfg.ttsApiUrl)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -975,6 +1319,7 @@ export async function handle(req, res) {
       const defaultVoice =
         provider === 'f5-tts' ? 'default-en' :
         provider === 'piper' ? '0' :
+        provider === 'kittentts' ? KITTENTTS_DEFAULT_VOICE :
         provider === 'elevenlabs' ? '21m00Tcm4TlvDq8ikWAM' : // Rachel — EL stock voice id
         'alloy';
       let voice = cfg.ttsVoice || defaultVoice;
@@ -1099,18 +1444,77 @@ export async function handle(req, res) {
         res.end(mp3Buf);
         return true;
       }
+      if (provider === 'kittentts') {
+        // KittenTTS HTTP server speaks {text, voice} → WAV (24 kHz mono).
+        // Voice is a preset name from the 8 baked-in choices; we let the
+        // server fall back to its default if the caller passes something
+        // unrecognized. ffmpeg resamples to the device's 16 kHz I²S bus.
+        const kittenttsUrl = cfg.kittenttsUrl || 'http://127.0.0.1:5153/';
+        const kRes = await fetch(kittenttsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, voice }),
+          signal: AbortSignal.timeout(30000),
+        });
+        if (!kRes.ok) throw new Error(`KittenTTS returned ${kRes.status}`);
+        const wavBuf = Buffer.from(await kRes.arrayBuffer());
+        const { spawn } = await import('child_process');
+        const ff = spawn('ffmpeg', [
+          '-loglevel', 'error',
+          '-f', 'wav', '-i', 'pipe:0',
+          // Device I²S is fixed at 16 kHz (audio_io.h AUDIO_BUS_SAMPLE_RATE).
+          '-ac', '1', '-ar', '16000', '-b:a', '48k',
+          '-f', 'mp3', 'pipe:1',
+        ]);
+        const chunks = [];
+        ff.stdout.on('data', c => chunks.push(c));
+        const ffPromise = new Promise((resolve, reject) => {
+          ff.on('error', reject);
+          ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
+        });
+        ff.stdin.end(wavBuf);
+        await ffPromise;
+        const mp3Buf = Buffer.concat(chunks);
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': mp3Buf.length });
+        res.end(mp3Buf);
+        return true;
+      }
       if (provider === 'piper') {
-        // Piper HTTP server speaks {text, speaker_id} → WAV. We translate
-        // OpenAI-shape, run through ffmpeg to get MP3 (matches the device's
-        // existing decode path), and return base64 + audio/mpeg.
-        const speakerId = Number.parseInt(voice, 10);
-        const piperUrl = cfg.piperUrl || 'http://127.0.0.1:5151/';
-        const pRes = await fetch(piperUrl, {
+        // Piper multivoice server speaks {text, voice, speaker_id?} → WAV.
+        // We translate OpenAI-shape, run through ffmpeg to get MP3 (matches
+        // the device's existing decode path), and return audio/mpeg.
+        //
+        // The stored slot voice has three shapes:
+        //   "en_AU-OE_custom-medium"     → single-speaker voice, no speaker_id
+        //   "en_US-libritts_r-medium:42" → multi-speaker voice + speaker_id
+        //   "42"                         → legacy bare-numeric, maps to libritts_r:42
+        let voiceId = '', speakerId = null;
+        if (voice) {
+          if (/^\d+$/.test(voice)) {
+            voiceId = 'en_US-libritts_r-medium';
+            speakerId = Number.parseInt(voice, 10);
+          } else if (voice.includes(':')) {
+            const [v, s] = voice.split(':', 2);
+            voiceId = v;
+            const n = Number.parseInt(s, 10);
+            if (Number.isFinite(n)) speakerId = n;
+          } else {
+            voiceId = voice;
+          }
+        }
+        const piperBase = (cfg.piperUrl || 'http://127.0.0.1:5151/').replace(/\/+$/, '');
+        // length_scale > 1.0 slows speech; 1.1 takes ~10% longer (Piper VITS
+        // voices ship a touch fast for most listeners). Override via
+        // cfg.piperLengthScale in config.json.
+        const lengthScale = Number.isFinite(cfg.piperLengthScale) ? cfg.piperLengthScale : 1.1;
+        const pRes = await fetch(piperBase + '/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             text,
-            speaker_id: Number.isFinite(speakerId) ? speakerId : 0,
+            ...(voiceId ? { voice: voiceId } : {}),
+            ...(Number.isFinite(speakerId) ? { speaker_id: speakerId } : {}),
+            length_scale: lengthScale,
           }),
           signal: AbortSignal.timeout(15000),
         });
@@ -1222,14 +1626,22 @@ export async function handle(req, res) {
         console.log(`[stt] dump: ${audioBuf.length} bytes (${audioMime}) → /tmp/oe-stt-last-*`);
       } catch (e) { console.warn('[stt] dump failed:', e.message); }
 
-      // Send to configured STT provider (OpenAI-compatible multipart)
+      // Send to configured STT provider (OpenAI-compatible multipart).
+      // sttMode=local routes to the Faster-Whisper service regardless of the
+      // configured remote URL/key, so users can keep their Groq/OpenAI
+      // credentials saved while flipping between local and remote.
       const form = new FormData();
       form.append('file', new Blob([audioBuf], { type: audioMime }), audioName);
       form.append('model', cfg.sttModel || 'whisper-1');
       if (lang) form.append('language', lang);
-      const sttRes = await fetch(cfg.sttApiUrl, {
+      const isLocal = cfg.sttMode === 'local';
+      const sttUrl = isLocal
+        ? 'http://127.0.0.1:5154/v1/audio/transcriptions'
+        : cfg.sttApiUrl;
+      const sttKey = isLocal ? 'local' : cfg.sttApiKey;
+      const sttRes = await fetch(sttUrl, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${cfg.sttApiKey}` },
+        headers: { 'Authorization': `Bearer ${sttKey}` },
         body: form,
         signal: AbortSignal.timeout(30000),
       });

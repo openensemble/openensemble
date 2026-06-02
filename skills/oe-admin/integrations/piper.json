@@ -1,0 +1,27 @@
+{
+  "name": "piper",
+  "description": "Install Piper, a local text-to-speech service for OpenEnsemble voice devices. ~80 MB total install (libritts_r multi-speaker ONNX model + Python venv + piper-tts/flask). 904 speaker voices selectable by numeric ID, no API key. Lives at 127.0.0.1:5151 as a systemd --user service. Same installer is reachable from install.sh and Settings → Providers → Text-to-Speech; oe-admin runs it via this recipe. Re-running is safe — existing venv/model/service are detected and skipped.",
+  "version": 1,
+  "credentials": [],
+  "steps": [
+    {
+      "id": "run-installer",
+      "cmd": ["bash", "{{env.OE_BASE_DIR}}/scripts/install-piper.sh"],
+      "timeoutMs": 600000
+    }
+  ],
+  "configWrites": [
+    { "path": "integrations.piper.installed", "value": true }
+  ],
+  "verify": {
+    "cmd": ["curl", "-fsS", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:5151/"],
+    "expect": { "kind": "exit_zero" }
+  },
+  "rollback": [
+    {
+      "id": "run-uninstaller",
+      "cmd": ["bash", "{{env.OE_BASE_DIR}}/scripts/uninstall-piper.sh"],
+      "timeoutMs": 60000
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "name": "faster-whisper",
+  "description": "Install Faster-Whisper, a local speech-to-text service for OpenEnsemble. Both profiles run large-v3-turbo (~810 MB on disk); the difference is runtime: 'cpu' uses int8 quantization (~2 GB RAM, speed varies by CPU — ~2-3× realtime on modern desktops, near-realtime on low-end), 'cuda' uses float16 (~2.5 GB VRAM, ~14-40× realtime, needs NVIDIA GPU + driver). Speaks the OpenAI /v1/audio/transcriptions API so it slots into OE's STT path with sttApiUrl=http://127.0.0.1:5154/v1/audio/transcriptions. Re-running is safe — existing venv/model/service are detected and skipped. Pass profile='cuda' in the recipe args to install the GPU build (else CPU).",
+  "version": 1,
+  "credentials": [],
+  "args": {
+    "profile": {
+      "type": "string",
+      "enum": ["cpu", "cuda"],
+      "default": "cpu",
+      "description": "cpu = distil-large-v3 int8 (no GPU). cuda = large-v3-turbo float16 (NVIDIA GPU required)."
+    }
+  },
+  "steps": [
+    {
+      "id": "run-installer",
+      "cmd": ["bash", "{{env.OE_BASE_DIR}}/scripts/install-faster-whisper.sh"],
+      "env": { "FW_DEVICE": "{{args.profile}}" },
+      "timeoutMs": 900000
+    }
+  ],
+  "configWrites": [
+    { "path": "integrations.faster_whisper.installed", "value": true },
+    { "path": "integrations.faster_whisper.profile", "value": "{{args.profile}}" }
+  ],
+  "verify": {
+    "cmd": ["curl", "-fsS", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:5154/"],
+    "expect": { "kind": "exit_zero" }
+  },
+  "rollback": [
+    {
+      "id": "run-uninstaller",
+      "cmd": ["bash", "{{env.OE_BASE_DIR}}/scripts/uninstall-faster-whisper.sh"],
+      "timeoutMs": 60000
+    }
+  ]
+}

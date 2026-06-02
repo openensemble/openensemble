@@ -361,8 +361,8 @@ function handleServerMessage(msg) {
       // this watcher rather than appending, so a page reload renders one
       // bubble instead of N stacked ones.
       //
-      // Agent-match: msg.agent often arrives in scoped form ("user_X_sydney")
-      // while activeAgent is the raw id ("sydney"). Compare both forms so
+      // Agent-match: msg.agent often arrives in scoped form ("user_X_coordinator")
+      // while activeAgent is the raw id ("coordinator"). Compare both forms so
       // live updates land in the right tab regardless of which side scoped.
       {
         const stripped = typeof msg.agent === 'string' ? msg.agent.replace(/^.*?_/, '') : msg.agent;

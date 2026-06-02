@@ -52,6 +52,10 @@ vendor/
 !public/vendor/
 unsloth_compiled_cache/
 venv/
+runtime/
+
+# --- Claude session scratch ---
+.claude-revert-log-*.md
 *.safetensors
 *.ckpt
 *.gguf

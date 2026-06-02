@@ -588,6 +588,33 @@ if [[ "$HAVE_SERVICE" == "true" ]] && [ -t 0 ] && [ -t 1 ]; then
   esac
 fi
 
+# ─── Optional: install KittenTTS local TTS ────────────────────────────────────
+# KittenTTS is the lightest local TTS option — 25M-param ONNX model, runs on
+# CPU, no GPU needed, no API key. ~50 MB install. Quality is functional but
+# not on par with GPU-class options (Chatterbox, Kyutai, ElevenLabs) — it's
+# the right pick for low-end hardware or users who want zero ongoing cost.
+# 8 preset voices, no voice cloning. Reachable later from Settings → Providers.
+if [[ "$HAVE_SERVICE" == "true" ]] && [ -t 0 ] && [ -t 1 ]; then
+  header "Optional: install KittenTTS local TTS"
+  info "KittenTTS is a tiny CPU-only TTS engine — no GPU, no API key required."
+  info "  Trade-off: 8 preset voices only (no voice cloning). Quality is functional."
+  info "  Download: ~50 MB.  You can also install later from Settings → Providers."
+  echo
+  read -r -p "  Install KittenTTS now? [y/N] " _kittentts_yn
+  case "${_kittentts_yn:-}" in
+    [Yy]|[Yy][Ee][Ss])
+      if bash "$INSTALL_DIR/scripts/install-kittentts.sh"; then
+        success "KittenTTS installed and running on 127.0.0.1:5153"
+      else
+        warn "KittenTTS install did not complete — retry later from Settings → Providers"
+      fi
+      ;;
+    *)
+      info "Skipping KittenTTS install (selectable later in Settings → Providers)"
+      ;;
+  esac
+fi
+
 # ─── oe CLI Wrapper ───────────────────────────────────────────────────────────
 # Installed to ~/.local/bin/oe so users get a single unified command for
 # start/stop/restart/status/logs/update/uninstall — no sudo needed because

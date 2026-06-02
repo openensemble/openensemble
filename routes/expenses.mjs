@@ -13,7 +13,10 @@ import {
   EXPENSES_DB, safeError,
 } from './_helpers.mjs';
 import { extractTransactions } from '../skills/expenses/execute.mjs';
-import { addDocument } from '../lib/profile-files.mjs';
+import { addDocument, addDocumentFromPath } from '../lib/profile-files.mjs';
+import busboy from 'busboy';
+import os from 'os';
+import { pipeline } from 'stream/promises';
 
 async function extractText(fileData, ext) {
   const isPdf = ext.toLowerCase() === '.pdf';
@@ -46,43 +49,132 @@ export async function handle(req, res) {
   // Chat file upload (images + docs for any agent)
   if (req.url === '/api/chat-upload' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    // Streaming multipart parse via busboy — body goes straight from socket
+    // to a temp file on disk, then gets moved into its final folder once
+    // we know the MIME. Avoids buffering 500 MB in RAM (the old buffer-
+    // then-parse pattern) and matches the same shape /api/shared-docs uses.
+    const MAX_UPLOAD = 500 * 1024 * 1024;
+    const ct = req.headers['content-type'] ?? '';
+    if (!ct.startsWith('multipart/form-data')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Expected multipart/form-data' }));
+      return true;
+    }
+    const advertised = Number(req.headers['content-length']) || 0;
+    if (advertised && advertised > MAX_UPLOAD) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `File too large — limit is ${MAX_UPLOAD / 1024 / 1024} MB, got ${(advertised / 1024 / 1024).toFixed(1)} MB` }));
+      return true;
+    }
+
     try {
-      const ct = req.headers['content-type'] ?? '';
-      const boundary = ct.match(/boundary=([^\s;]+)/)?.[1];
-      if (!boundary) throw new Error('No multipart boundary');
-      const MAX_UPLOAD = 10 * 1024 * 1024; // 10 MB
-      const chunks = [];
-      let size = 0;
-      for await (const chunk of req) {
-        size += chunk.length;
-        if (size > MAX_UPLOAD) throw new Error('File too large (max 10MB)');
-        chunks.push(chunk);
-      }
-      const raw = Buffer.concat(chunks);
-      const parsed = parseMultipart(raw, boundary);
-      if (!parsed) throw new Error('No file found in upload');
-      const { fileData, fileName, mimeType } = parsed;
+      // Stream to a tmpfile first so we can route by MIME after we see the
+      // file header. Move (rename) into final destination once we know.
+      const tmpPath = path.join(os.tmpdir(), `oe-chat-upload-${Date.now()}-${randomBytes(4).toString('hex')}`);
+      const parsed = await new Promise((resolve, reject) => {
+        const bb = busboy({ headers: req.headers, limits: { fileSize: MAX_UPLOAD, files: 1 } });
+        let landed = false;
+        let cleanupTmp = null;
+        let captured = null;
+
+        bb.on('file', (_field, stream, info) => {
+          if (landed) { stream.resume(); return; }
+          landed = true;
+          const fileName = info.filename || 'upload.bin';
+          const mimeType = info.mimeType || info.mime || 'application/octet-stream';
+          cleanupTmp = tmpPath;
+          let truncated = false;
+          stream.on('limit', () => { truncated = true; });
+          const out = fs.createWriteStream(tmpPath);
+          pipeline(stream, out)
+            .then(() => {
+              if (truncated) {
+                try { fs.unlinkSync(tmpPath); } catch {}
+                reject(new Error(`File too large (max ${MAX_UPLOAD / 1024 / 1024} MB)`));
+                return;
+              }
+              captured = { fileName, mimeType, tmpPath };
+              resolve(captured);
+            })
+            .catch(err => {
+              try { fs.unlinkSync(tmpPath); } catch {}
+              reject(err);
+            });
+        });
+        bb.on('error', err => {
+          if (cleanupTmp) { try { fs.unlinkSync(cleanupTmp); } catch {} }
+          reject(err);
+        });
+        bb.on('close', () => { if (!landed) reject(new Error('No file found in upload')); });
+        req.on('aborted', () => {
+          if (cleanupTmp) { try { fs.unlinkSync(cleanupTmp); } catch {} }
+          reject(new Error('Upload aborted'));
+        });
+        req.pipe(bb);
+      });
+
+      const { fileName, mimeType, tmpPath: srcPath } = parsed;
       const ext       = path.extname(fileName) || '.bin';
       const lowerMime = mimeType.toLowerCase();
-      const isImage   = lowerMime.includes('image') || ['.jpg','.jpeg','.png','.webp','.gif','.heic'].includes(ext.toLowerCase());
+      const isImage   = lowerMime.startsWith('image/') || ['.jpg','.jpeg','.png','.webp','.gif','.heic'].includes(ext.toLowerCase());
       const isPdf     = lowerMime.includes('pdf') || ext.toLowerCase() === '.pdf';
       const isCsv     = lowerMime.includes('csv') || ext.toLowerCase() === '.csv';
+      const isVideo   = lowerMime.startsWith('video/');
+      const isAudio   = lowerMime.startsWith('audio/');
       const isFinanceFile = isPdf || isCsv || isImage;
-      const extractedText = await extractText(fileData, ext);
-      // Persist into the user's profile-files registry so the file is
-      // reachable later via list_profile_files / read_profile_file and via
-      // file_id from email/sharing skills. Backwards-compat: still return
-      // base64 + extractedText for existing inline-vision dispatch in chat.
-      const saved = await addDocument(authId, {
-        fileData, fileName, mimeType,
-        kind: 'chat_upload',
-        description: `Uploaded from chat on ${new Date().toLocaleDateString()}`,
-      });
+
+      // Route by MIME — same destinations as before, just via rename
+      // rather than re-writing the buffer.
+      let file_id;
+      const renameToMedia = async (kind) => {
+        const { getUserFilesDir } = await import('../lib/paths.mjs');
+        const targetDir = getUserFilesDir(authId, kind);
+        fs.mkdirSync(targetDir, { recursive: true });
+        const safeName = `chat-${Date.now()}-${fileName.replace(/[^\w.-]/g, '_')}`;
+        const dest = path.join(targetDir, safeName);
+        try { fs.renameSync(srcPath, dest); }
+        catch (e) {
+          if (e.code === 'EXDEV') { fs.copyFileSync(srcPath, dest); fs.unlinkSync(srcPath); }
+          else throw e;
+        }
+        return `${kind}:${safeName}`;
+      };
+      if (isImage && !isPdf && !isCsv) {
+        file_id = await renameToMedia('images');
+      } else if (isVideo) {
+        file_id = await renameToMedia('videos');
+      } else if (isAudio) {
+        file_id = await renameToMedia('audio');
+      } else {
+        // PDFs / CSVs / docs → documents/ via the path-based addDocument.
+        const saved = await addDocumentFromPath(authId, {
+          srcPath, fileName, mimeType,
+          kind: 'chat_upload',
+          description: `Uploaded from chat on ${new Date().toLocaleDateString()}`,
+        });
+        file_id = saved.file_id;
+      }
+
+      // extractText needs an in-memory buffer; only fetch it back when the
+      // chat-side caller will actually use it (images for vision, PDFs/CSVs
+      // for the finance preprocessor). For media headed to transcribe,
+      // skip the read — saves 60-500 MB of bounce.
+      const { getProfileFilePath } = await import('../lib/profile-files.mjs');
+      let extractedText = null;
+      let base64 = null;
+      if (isImage && !isVideo && !isAudio) {
+        const buf = fs.readFileSync(getProfileFilePath(authId, file_id));
+        base64 = buf.toString('base64');
+        extractedText = await extractText(buf, ext);
+      } else if (isPdf || isCsv) {
+        const buf = fs.readFileSync(getProfileFilePath(authId, file_id));
+        extractedText = await extractText(buf, ext);
+      }
+
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         name: fileName, mimeType, isImage, isFinanceFile,
-        file_id: saved.file_id,
-        base64: isImage ? fileData.toString('base64') : null,
+        file_id, base64,
         extractedText: extractedText || null,
       }));
     } catch (e) {

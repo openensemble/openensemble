@@ -349,7 +349,10 @@ const httpServer = http.createServer(async (req, res) => {
     const exemptFromBodyCap =
       req.url === '/api/admin/restore' ||
       req.url === '/api/admin/restore-initial' ||
-      (req.method === 'POST' && req.url.startsWith('/api/shared-docs'));
+      (req.method === 'POST' && req.url.startsWith('/api/shared-docs')) ||
+      // Chat attachments (audio/video for transcription, large images, etc.)
+      // — enforced at 500 MB by the route-level busboy parser.
+      (req.method === 'POST' && req.url === '/api/chat-upload');
     if (!exemptFromBodyCap) {
       const declared = parseInt(req.headers['content-length'] || '0', 10);
       if (declared > API_BODY_CAP) {

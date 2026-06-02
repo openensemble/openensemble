@@ -45,6 +45,7 @@ let _elevenlabsVoices = [];
 // KittenTTS preset-voice list (8 baked-in names) — populated from /api/tts/info
 // when ttsProvider='kittentts'. Empty otherwise.
 let _kittenttsVoices = [];
+let _piperVoices = []; // installed Piper voices for the per-slot picker.
 // Voice routines (trigger phrase → action list) and the ambient sound library
 // they draw from. Both per-user; the Routines panel below the voice-config
 // section in the drawer is the sole UI for both. Server-side persistence in
@@ -203,6 +204,20 @@ async function loadDevices() {
       } catch { _elevenlabsVoices = []; }
     } else {
       _elevenlabsVoices = [];
+    }
+    // Piper installed voices — same provider-conditional pattern. Proxies
+    // the multivoice server's /voices endpoint and enriches with catalog
+    // metadata (label, gender, multi_speaker, etc.).
+    if (_ttsProvider === 'piper') {
+      try {
+        const rP = await fetch('/api/tts/piper/voices');
+        if (rP.ok) {
+          const { voices } = await rP.json();
+          _piperVoices = Array.isArray(voices) ? voices : [];
+        }
+      } catch { _piperVoices = []; }
+    } else {
+      _piperVoices = [];
     }
     if (!rDevices.ok) throw new Error(`HTTP ${rDevices.status}`);
     const { devices } = await rDevices.json();
@@ -806,11 +821,14 @@ function renderVoiceConfigPanel(roster, deviceCount) {
     const a = assignments[slotIdx] ?? assignments[String(slotIdx)];
     const user = roster.find(u => u.id === a.ownerUserId);
     const displayName = escHtml(user?.name || a.ownerUserId);
-    // Stale OpenAI named voices (alloy/echo/onyx/…) sit in legacy configs
-    // from before the piper switch. Number input would reject them — hide
-    // the value so the placeholder shows. Next save replaces it.
+    // Pre-multivoice this filter dropped any non-numeric ttsVoice when
+    // provider=piper, on the theory that only libritts_r speaker-ids were
+    // valid. Post-multivoice, ttsVoice can be "<voice-id>" or
+    // "<voice-id>:<speaker_id>" — the Piper render branch handles all three
+    // shapes (bare number, voice id, voice:speaker). Trust the saved value
+    // and let unrecognized values render as no-selection.
     const rawVoice = a?.ttsVoice || '';
-    const curVoice = (_ttsProvider === 'piper' && rawVoice && !/^\d+$/.test(rawVoice)) ? '' : rawVoice;
+    const curVoice = rawVoice;
     // Voice-control flavor depends on the install's TTS provider — same as
     // before, just now keyed by slot index alone instead of {deviceId, slot}.
     let voiceControl;
@@ -841,21 +859,52 @@ function renderVoiceConfigPanel(roster, deviceCount) {
         .join('');
       voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${ktOpts}</select>`;
     } else if (_ttsProvider === 'piper') {
-      // Number input + a tiny preview button. Piper has 904 speakers and
-      // there's no useful label per ID, so users need to audition before
-      // committing. Preview synthesizes a short sample server-side and
-      // plays it through the BROWSER (not the voice device) so iteration
-      // is fast and doesn't wake the device.
+      // Voice picker now lists installed voices (from /api/tts/piper/voices).
+      // Multi-speaker voices (libritts_r) expose a secondary speaker_id field.
+      // Stored format: "voice-id" or "voice-id:speaker_id". Legacy bare-numeric
+      // values from before the multivoice migration are auto-mapped to
+      // en_US-libritts_r-medium:<num> at render time.
+      let voiceId = '', speakerId = '';
+      if (curVoice) {
+        if (/^\d+$/.test(curVoice)) {
+          voiceId = 'en_US-libritts_r-medium';
+          speakerId = curVoice;
+        } else if (curVoice.includes(':')) {
+          [voiceId, speakerId] = curVoice.split(':');
+        } else {
+          voiceId = curVoice;
+        }
+      }
+      const selectedMeta = _piperVoices.find(v => v.id === voiceId);
+      const isMulti = !!selectedMeta?.multi_speaker;
+      const maxSpk = Math.max((selectedMeta?.num_speakers ?? 1) - 1, 0);
+      const slotArgs = JSON.stringify([slotIdx]).replace(/'/g, '&#39;');
+      const voiceOpts = ['<option value="">(device default)</option>']
+        .concat(_piperVoices.map(v => `<option value="${escHtml(v.id)}" ${v.id === voiceId ? 'selected' : ''}>${escHtml(v.label || v.id)}</option>`))
+        .join('');
+      const noVoicesHint = _piperVoices.length === 0
+        ? '<div style="font-size:10px;color:var(--muted)">No voices installed — Settings → Providers → Piper to download.</div>'
+        : '';
+      const speakerInput = isMulti
+        ? `<input type="number" class="cdraw-input piper-speaker-input" min="0" max="${maxSpk}" step="1"
+              placeholder="speaker 0-${maxSpk}" value="${escHtml(speakerId)}"
+              data-action="setSlotPiperVoice" data-args='${slotArgs}'
+              style="padding:4px 6px;font-size:12px;min-width:0">`
+        : '';
+      const previewBtn = voiceId
+        ? `<button type="button" class="cdraw-btn"
+              data-action="previewSlotVoice" data-args='${slotArgs}'
+              title="Preview this voice in your browser"
+              style="font-size:11px;padding:3px 8px;flex:0 0 auto">Preview</button>`
+        : '';
       voiceControl = `
-        <div style="display:flex;gap:4px;align-items:center;min-width:0">
-          <input type="number" min="0" max="903" step="1" class="cdraw-input piper-voice-input"
-            placeholder="0-903" value="${escHtml(curVoice)}"
-            data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
-            style="padding:4px 6px;font-size:12px;width:70px;flex:0 0 auto">
-          <button type="button" class="cdraw-btn piper-voice-preview"
-            data-action="previewSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
-            title="Preview this speaker in your browser"
-            style="font-size:11px;padding:3px 8px;flex:0 0 auto">Preview</button>
+        <div class="piper-slot-controls" data-slot="${slotIdx}" style="display:flex;flex-direction:column;gap:4px;min-width:0">
+          <div style="display:flex;gap:4px;align-items:center;min-width:0">
+            <select class="cdraw-input piper-voice-select" data-action="setSlotPiperVoice" data-args='${slotArgs}' style="flex:1;min-width:0;padding:4px 6px;font-size:12px">${voiceOpts}</select>
+            ${previewBtn}
+          </div>
+          ${speakerInput}
+          ${noVoicesHint}
         </div>`;
     } else {
       voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${['<option value="">(device default)</option>'].concat(OPENAI_TTS_VOICES.map(v => `<option value="${v}" ${v === curVoice ? 'selected' : ''}>${v}</option>`)).join('')}</select>`;
@@ -1130,22 +1179,43 @@ window.setSlotVoice = function (slot, ev) {
   saveVoiceConfig();
 };
 
+// Piper voice + speaker picker. Two-input control (voice select + optional
+// speaker_id input for multi-speaker voices) collapses to one stored
+// "voice-id" or "voice-id:speaker_id" string. Bound to both the select and
+// the input, so either change recomputes the combined value. Calls
+// renderDevices() at the end so the speaker_id field appears/disappears
+// when the selected voice's multi_speaker flag changes.
+window.setSlotPiperVoice = function (slot) {
+  const existing = _voiceConfig.slot_assignments?.[slot] ?? _voiceConfig.slot_assignments?.[String(slot)];
+  if (!existing?.ownerUserId) return;
+  const wrap = document.querySelector(`.piper-slot-controls[data-slot="${slot}"]`);
+  const voiceId = wrap?.querySelector('.piper-voice-select')?.value || '';
+  const speakerStr = (wrap?.querySelector('.piper-speaker-input')?.value || '').trim();
+  const meta = _piperVoices.find(v => v.id === voiceId);
+  const combined = !voiceId ? null
+    : (meta?.multi_speaker && speakerStr ? `${voiceId}:${speakerStr}` : voiceId);
+  if ((existing.ttsVoice ?? null) === combined) return;
+  _voiceConfig.slot_assignments[slot] = { ...existing, ttsVoice: combined };
+  saveVoiceConfig();
+  renderDevices();              // re-render so the multi-speaker input shows/hides
+  populateCoordinatorLabels();  // re-render erases the agent labels — refill them
+};
+
 // Slot voice preview: play a short sample using the slot's currently
-// selected voice. Lets the admin audition a libritts_r speaker before
-// committing it. Pulls the voice value from the live input element (not
-// the persisted slot_assignments) so unsaved tweaks are previewable too.
+// selected voice. Lets the admin audition a Piper voice before committing.
+// Pulls the voice value from the live select+speaker inputs (not the
+// persisted slot_assignments) so unsaved tweaks are previewable too.
 //
-// `this` is the button element (per event-delegation.js's fn.apply(el, ...)).
-// The Piper voice control wraps its <input> + <button> in a <div>, so we
-// find the input via the parent's `.piper-voice-input` class rather than
-// previousElementSibling. /api/tts returns raw audio/mpeg bytes (NOT a
-// JSON wrapper — the old version of this function decoded base64 and was
-// silently broken after the TTS path was refactored to stream).
+// `this` is the button element. The Piper voice control wraps its select +
+// optional speaker input + button in a `.piper-slot-controls` div; we find
+// them via the closest wrapper. /api/tts returns raw audio bytes.
 window.previewSlotVoice = function (slot) {
   const btn = this;
   if (!btn) return;
-  const input = btn.parentElement?.querySelector('.piper-voice-input');
-  const voice = (input?.value || '').trim();
+  const wrap = btn.closest('.piper-slot-controls');
+  const voiceId = (wrap?.querySelector('.piper-voice-select')?.value || '').trim();
+  const speaker = (wrap?.querySelector('.piper-speaker-input')?.value || '').trim();
+  const voice = voiceId && speaker ? `${voiceId}:${speaker}` : voiceId;
   // Update the label so the user has feedback while the request is in flight.
   const originalLabel = btn.textContent;
   btn.disabled = true;
@@ -1154,7 +1224,13 @@ window.previewSlotVoice = function (slot) {
   fetch('/api/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: `Hello, I am speaker ${voice || 0}.`, voice }),
+    body: JSON.stringify({
+      // Short showcase phrase: greeting, pangram-style consonant coverage,
+      // and a final question to exercise rising intonation. Same across all
+      // voices so they're directly comparable.
+      text: 'Hi there. The quick brown fox jumps over the lazy dog. How does this voice sound to you?',
+      voice,
+    }),
   }).then(async r => {
     if (!r.ok) {
       const errText = await r.text().catch(() => '');

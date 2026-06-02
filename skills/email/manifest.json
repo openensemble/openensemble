@@ -147,7 +147,7 @@
             "subject": { "type": "string", "description": "Email subject." },
             "body": { "type": "string", "description": "Plain text email body (used as fallback when html_body is provided)." },
             "html_body": { "type": "string", "description": "Optional HTML email body. When provided, sends a rich HTML email with images, links, and formatting. The plain text `body` is used as fallback for clients that don't render HTML." },
-            "attachment_doc_ids": { "type": "array", "items": { "type": "string" }, "description": "Optional list of file IDs to attach. Accepts profile-file IDs from list_profile_files (e.g. 'images:sunset.png', 'videos:clip.mp4', 'documents:doc_abc', 'research:doc_xyz'). Use this whenever the user asks to email/send an image, video, or document — never just mention the file in the body without attaching it." }
+            "attachment_doc_ids": { "type": "array", "items": { "type": "string" }, "description": "Optional list of file IDs to attach. Accepts profile-file IDs from list_profile_files (e.g. 'images:sunset.png', 'videos:clip.mp4', 'audio:recording.wav', 'documents:doc_abc', 'research:doc_xyz'). Use this whenever the user asks to email/send an image, video, audio clip, or document — never just mention the file in the body without attaching it." }
           },
           "required": ["to", "subject", "body"]
         }

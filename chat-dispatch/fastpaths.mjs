@@ -267,6 +267,208 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
  *
  * @returns {Promise<{ handled: true } | null>}
  */
+/**
+ * Voice-device empty-transcript guard. STT sometimes returns "", whitespace,
+ * or 1-2 character noise when a wake word fires on something that wasn't
+ * actually a command — TV noise, a cough, a sentence ending in the wake
+ * word. The default path then runs an LLM turn with empty userText, which
+ * errors or returns nothing, and the device sits in THINKING forever
+ * waiting for tokens that never arrive.
+ *
+ * Catch this upstream: if the source is voice-device AND the trimmed
+ * transcript has fewer than 2 alphabetic characters, emit a polite
+ * "didn't catch that" reply so the device gets a `done` event and unblocks.
+ *
+ * The session is left untouched — false-positive wakes shouldn't pollute
+ * the user's chat history. Browser-typed chats are unaffected since the
+ * source guard filters them out (a typed "ok" is a legit short reply).
+ *
+ * @returns {Promise<{ handled: true } | null>}
+ */
+export async function tryVoiceEmptyFastpath({ source, userText, userId, agentId, onEvent }) {
+  if (source !== 'voice-device') return null;
+  const trimmed = typeof userText === 'string' ? userText.trim() : '';
+  const alpha = trimmed.replace(/[^a-zA-Z]/g, '');
+  if (alpha.length >= 2) return null;
+  const reply = "I'm sorry, I didn't catch that.";
+  onEvent({ type: 'token', text: reply, agent: agentId });
+  onEvent({ type: 'done', agent: agentId });
+  console.log(`[chat] voice-empty-fastpath: trimmed=${JSON.stringify(trimmed.slice(0, 40))}`);
+  return { handled: true };
+}
+
+/**
+ * Audio/video transcribe fast-path. Handles two entry points uniformly:
+ *
+ *   1. Bare attachment (user dropped a media file in chat).
+ *   2. `@audio/<file>` / `@video/<file>` tokens in the user text (file
+ *      already lives in the user's profile-files audio/ or videos/ folder).
+ *
+ * Both surface the same way: collect the resolved audio/video paths, then
+ * fork on intent + STT availability:
+ *
+ *   - transcribe intent present AND STT configured  → fast-path: run STT
+ *     on every audio/video file, return the concatenated transcripts as
+ *     the assistant turn. No LLM round-trip.
+ *
+ *   - transcribe intent BUT STT not configured      → fall through to the
+ *     LLM after rewriting the user text to strip the @-tokens and append
+ *     a "Referenced files:" note. Coordinator's `transcribe_file` tool
+ *     will surface a clean "STT is not configured" error to the user
+ *     instead of silently failing. (Some multi-modal LLMs may also be
+ *     able to act on audio paths via other tools — the LLM decides.)
+ *
+ *   - no transcribe intent                          → same fall-through:
+ *     strip @-refs, inject path note, let the LLM decide what to do.
+ *
+ * Image and document @-refs are stripped + injected as path notes the
+ * same way, but never trigger fast-path transcription (different tools).
+ *
+ * @returns {Promise<{ handled: true } | null>}
+ */
+const TRANSCRIBE_INTENT_RE = /\b(transcribe|transcription|transcript|read (this|it|them|aloud)|read out|tell me what (this|it|they) says?|give me (a |the )?transcript|do a transcript|put (this|it) into text)\b/i;
+
+const _AT_KIND_MAP = {
+  video: 'videos', videos: 'videos',
+  audio: 'audio', audios: 'audio',
+  image: 'images', images: 'images', photo: 'images', photos: 'images',
+};
+const _AT_REF_RE = /@(video|audio|image|images|videos|photo|photos|audios)\/([\w.\-]+)/gi;
+
+function _isAudioVideoFolder(folder) { return folder === 'audio' || folder === 'videos'; }
+
+async function _sttAvailable(cfg) {
+  if (cfg.sttMode === 'local') {
+    try {
+      const { probeFasterWhisperAvailable } = await import('../lib/voice-deps.mjs');
+      return await probeFasterWhisperAvailable(cfg);
+    } catch { return false; }
+  }
+  return !!(cfg.sttApiUrl && cfg.sttApiKey && cfg.sttApiKey !== 'local');
+}
+
+export async function tryTranscribeAttachmentFastpath(ctx) {
+  const { userText, attachment, userId, agentId, onEvent } = ctx;
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { USERS_DIR } = await import('../lib/paths.mjs');
+  const { getProfileFilePath } = await import('../lib/profile-files.mjs');
+
+  // ── 1. Collect resolved files from attachment + @-refs ─────────────────────
+  const resolved = []; // [{ filename, path, folder, mime, fromAttachment }]
+  if (attachment?.file_id) {
+    const p = getProfileFilePath(userId, attachment.file_id);
+    if (p) {
+      const mime = String(attachment.mimeType || '').toLowerCase();
+      const folder = mime.startsWith('audio/') ? 'audio'
+                   : mime.startsWith('video/') ? 'videos'
+                   : mime.startsWith('image/') ? 'images'
+                   : 'documents';
+      resolved.push({ filename: attachment.name || path.basename(p), path: p, folder, mime, fromAttachment: true });
+    }
+  }
+  // Pull @-refs out of the visible text. Only typed chats — voice STT can't
+  // emit "@", and the regex would never match a transcribed wake-word reply.
+  let cleanedText = String(userText || '');
+  if (ctx.source !== 'voice-device') {
+    cleanedText = cleanedText.replace(_AT_REF_RE, (match, rawKind, filename) => {
+      const folder = _AT_KIND_MAP[rawKind.toLowerCase()];
+      if (!folder) return match;
+      const p = path.join(USERS_DIR, userId, folder, filename);
+      if (fs.existsSync(p)) {
+        const ext = path.extname(filename).toLowerCase();
+        const mime = folder === 'audio' ? `audio/${ext.slice(1) || 'wav'}`
+                   : folder === 'videos' ? `video/${ext.slice(1) || 'mp4'}`
+                   : folder === 'images' ? `image/${ext.slice(1) || 'png'}`
+                   : 'application/octet-stream';
+        resolved.push({ filename, path: p, folder, mime, fromAttachment: false });
+        return ''; // strip token from visible text
+      }
+      return match; // unresolved → leave so user notices
+    }).trim();
+  }
+
+  if (resolved.length === 0) return null;
+
+  const audioVideo = resolved.filter(r => _isAudioVideoFolder(r.folder));
+  const wantsTranscribe = !cleanedText || TRANSCRIBE_INTENT_RE.test(cleanedText);
+
+  // ── 2. Decide: fast-path or fall-through ───────────────────────────────────
+  //
+  // Fall-through cases: no audio/video, no transcribe intent, or STT not
+  // available. In all of those we rewrite userText so the LLM sees clean
+  // text + the resolved paths, then return null.
+  const fallThrough = () => {
+    if (resolved.length) {
+      const list = resolved.map(r => `  - ${r.folder}/${r.filename} → ${r.path}`).join('\n');
+      ctx.userText = `${cleanedText}\n\n[Referenced files (call transcribe_file or other path-based tools to read them):\n${list}\n]`.trim();
+    }
+    return null;
+  };
+
+  if (audioVideo.length === 0 || !wantsTranscribe) return fallThrough();
+
+  const { loadConfig } = await import('../routes/_helpers.mjs');
+  const cfg = loadConfig();
+  if (!await _sttAvailable(cfg)) {
+    console.log('[chat] transcribe fast-path: STT not configured — falling through');
+    return fallThrough();
+  }
+
+  // ── 3. Run STT on each audio/video file ───────────────────────────────────
+  const { extractAudio, sttUpload, MAX_BYTES } = await import('../skills/transcribe/execute.mjs');
+  const transcripts = [];
+  const errors = [];
+  for (const ref of audioVideo) {
+    let stat;
+    try { stat = fs.statSync(ref.path); } catch { errors.push(`${ref.filename}: file gone`); continue; }
+    if (stat.size === 0) { errors.push(`${ref.filename}: empty`); continue; }
+    if (stat.size > MAX_BYTES) {
+      errors.push(`${ref.filename}: ${(stat.size / 1024 / 1024).toFixed(0)} MB — too large`);
+      continue;
+    }
+    let uploadPath = ref.path;
+    let extracted = null;
+    try {
+      if (ref.folder === 'videos') {
+        try { extracted = await extractAudio(ref.path); uploadPath = extracted; }
+        catch (e) { errors.push(`${ref.filename}: ffmpeg failed (${e.message})`); continue; }
+      }
+      const started = Date.now();
+      const result = await sttUpload(uploadPath);
+      const text = (result.text ?? result.transcript ?? '').trim();
+      const elapsedSec = ((Date.now() - started) / 1000).toFixed(1);
+      transcripts.push({ filename: ref.filename, text, elapsedSec, bytes: stat.size });
+    } catch (e) {
+      errors.push(`${ref.filename}: ${e.message}`);
+    } finally {
+      if (extracted) { try { fs.unlinkSync(extracted); } catch {} }
+    }
+  }
+
+  // ── 4. Format + emit ──────────────────────────────────────────────────────
+  let reply;
+  if (transcripts.length === 1 && errors.length === 0) {
+    const t = transcripts[0];
+    reply = t.text
+      ? `**Transcript of ${t.filename}** (${t.elapsedSec}s, ${(t.bytes / 1024).toFixed(0)} KB):\n\n${t.text}`
+      : `Transcribed ${t.filename} (${t.elapsedSec}s) but didn't detect any speech.`;
+  } else {
+    const parts = transcripts.map(t => `**${t.filename}** (${t.elapsedSec}s):\n${t.text || '(no speech detected)'}`);
+    if (errors.length) parts.push(`**Errors:**\n${errors.map(e => `- ${e}`).join('\n')}`);
+    reply = parts.join('\n\n---\n\n');
+  }
+
+  appendToSession(`${userId}_${agentId}`,
+    { role: 'user', content: cleanedText || `[Transcribe: ${audioVideo.map(r => r.filename).join(', ')}]`, ts: Date.now() },
+    { role: 'assistant', content: reply, ts: Date.now() },
+  );
+  onEvent({ type: 'token', text: reply, agent: agentId });
+  onEvent({ type: 'done', agent: agentId });
+  console.log(`[chat] transcribe fast-path: ${transcripts.length} ok, ${errors.length} err`);
+  return { handled: true };
+}
+
 export async function tryTriviaFastpath({ userText, userId, agentId, onEvent }) {
   if (!userText) return null;
   try {

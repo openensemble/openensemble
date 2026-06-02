@@ -237,10 +237,11 @@
     <!-- Input area -->
     <div class="input-area" style="position:relative">
       <div class="slash-menu" id="slashMenu" style="display:none"></div>
+      <div class="slash-menu" id="atMenu" style="display:none"></div>
       <div class="attach-preview" id="attachPreview" style="display:none"></div>
       <div class="input-row">
         <button class="btn-attach" id="btnAttach" title="Attach file"><i data-lucide="paperclip"></i></button>
-        <input type="file" id="chatFileInput" accept="image/*,.pdf,.csv" style="display:none">
+        <input type="file" id="chatFileInput" accept="image/*,audio/*,video/*,.pdf,.csv" style="display:none">
         <textarea id="input" placeholder="Message…" rows="1"></textarea>
         <button class="btn-stop" id="btnStop" title="Stop generating">■</button>
         <button class="btn-send" id="btnSend"><i data-lucide="arrow-up"></i></button>
@@ -421,6 +422,7 @@
           <button id="docFilter-all"    data-action="switchDocFilter" data-args="[&quot;all&quot;]"    style="flex:1;padding:7px 4px;font-size:12px;font-weight:600;border:none;border-bottom:2px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer">Documents</button>
           <button id="docFilter-photos" data-action="switchDocFilter" data-args="[&quot;photos&quot;]" style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Images</button>
           <button id="docFilter-videos" data-action="switchDocFilter" data-args="[&quot;videos&quot;]" style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Videos</button>
+          <button id="docFilter-audio"  data-action="switchDocFilter" data-args="[&quot;audio&quot;]"  style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Audio</button>
           <button id="docFilter-code"   data-action="switchDocFilter" data-args="[&quot;code&quot;]"   style="flex:1;padding:7px 4px;font-size:12px;font-weight:400;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer">Code</button>
         </div>
         <!-- Document list -->
@@ -880,7 +882,8 @@
               <select id="providerTtsProvider" data-change-action="updateTtsProviderFields" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
                 <option value="openai">OpenAI-compatible (remote, API key)</option>
                 <option value="elevenlabs">ElevenLabs (remote, API key — voice cloning)</option>
-                <option value="piper">Piper (local, libritts_r multi-speaker)</option>
+                <option value="piper">Piper (local, multi-voice — download voices below)</option>
+                <option value="kittentts">KittenTTS (local, CPU, ~50 MB — 8 preset voices, no GPU needed)</option>
               </select>
 
               <div id="providerTtsFields_openai">
@@ -908,8 +911,56 @@
 
               <div id="providerTtsFields_piper" style="display:none">
                 <div id="providerPiperStatus" class="settings-section-desc" style="font-size:11px;color:var(--muted);margin-bottom:8px">Piper runs locally — no API key required. Checking service…</div>
-                <button id="providerPiperInstallBtn" data-action="installPiper" type="button" style="display:none;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600;margin-bottom:8px">Install Piper (~80 MB)</button>
+                <!-- Initial-voice picker shown only when Piper isn't yet installed.
+                     Populated by populatePiperFirstVoiceDropdown() from
+                     /api/tts/piper/catalog; choosing one sends body.voice along
+                     with the install POST so the script's PIPER_VOICE env is set. -->
+                <div id="providerPiperFirstVoiceWrap" style="display:none;flex-direction:column;gap:4px;margin-bottom:8px">
+                  <label style="font-size:11px;color:var(--muted)">Initial voice to download:</label>
+                  <select id="providerPiperFirstVoice" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:12px"></select>
+                  <div style="font-size:10px;color:var(--muted)">More voices can be downloaded from the catalog after install — no service restart needed.</div>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                  <button id="providerPiperInstallBtn" data-action="installPiper" type="button" style="display:none;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Install Piper (~80 MB)</button>
+                  <button id="providerPiperUninstallBtn" data-action="uninstallPiper" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Uninstall</button>
+                </div>
                 <pre id="providerPiperLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:200px;overflow:auto;margin:0 0 8px;white-space:pre-wrap"></pre>
+
+                <!-- Speech-pace slider. Maps to Piper's length_scale param
+                     (server-side validated to [0.7, 1.6]). Auto-saves on
+                     `change` so the user sees the next /api/tts call already
+                     at the new pace. Visible alongside the catalog once Piper
+                     is installed. -->
+                <div id="providerPiperPaceWrap" style="display:none;flex-direction:column;gap:4px;margin:8px 0">
+                  <div style="display:flex;justify-content:space-between;align-items:baseline">
+                    <label for="providerPiperPace" style="font-size:11px;color:var(--muted)">Speech pace</label>
+                    <span id="providerPiperPaceValue" style="font-size:11px;color:var(--text);font-family:ui-monospace,monospace">1.10×</span>
+                  </div>
+                  <input id="providerPiperPace" type="range" min="0.8" max="1.5" step="0.05" value="1.1"
+                    data-input-action="onPiperPaceInput" data-change-action="onPiperPaceChange"
+                    style="width:100%;accent-color:var(--accent)">
+                  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted)">
+                    <span>faster</span><span>default 1.0</span><span>slower</span>
+                  </div>
+                </div>
+
+                <!-- Voice catalog (visible once Piper service is installed). Populated by
+                     renderPiperVoiceCatalog() in oauth.js — cross-references
+                     /api/tts/piper/catalog (what's downloadable) against
+                     /api/tts/piper/voices (what's installed). -->
+                <div id="providerPiperVoices" style="display:none;margin-top:4px">
+                  <div class="settings-section-desc" style="font-size:11px;color:var(--muted);margin:8px 0 6px">Voice catalog — downloaded voices appear automatically and become selectable per slot in Voice Devices.</div>
+                  <div id="providerPiperVoicesList" style="display:flex;flex-direction:column;gap:4px"></div>
+                </div>
+              </div>
+
+              <div id="providerTtsFields_kittentts" style="display:none">
+                <div id="providerKittenttsStatus" class="settings-section-desc" style="font-size:11px;color:var(--muted);margin-bottom:8px">KittenTTS is a tiny CPU-only TTS engine (no GPU, no API key). 8 preset voices, no voice cloning. Checking service…</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                  <button id="providerKittenttsInstallBtn" data-action="installKittentts" type="button" style="display:none;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Install KittenTTS (~50 MB)</button>
+                  <button id="providerKittenttsUninstallBtn" data-action="uninstallKittentts" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Uninstall</button>
+                </div>
+                <pre id="providerKittenttsLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:200px;overflow:auto;margin:0 0 8px;white-space:pre-wrap"></pre>
               </div>
 
               <div style="display:flex;gap:8px;align-items:center">
@@ -926,20 +977,68 @@
               <label class="provider-toggle"><input type="checkbox" id="providerToggle_stt" checked data-change-action="toggleProvider" data-change-args="[&quot;stt&quot;, &quot;$checked&quot;]"><span class="provider-toggle-slider"></span></label>
             </div>
             <div id="providerBody_stt">
-              <div class="settings-section-desc" style="margin-bottom:8px">Required for voice devices (XVF3800 etc.) to transcribe captured speech. Uses OpenAI-compatible /audio/transcriptions API format.</div>
-              <input type="text" id="providerSttUrl" placeholder="https://api.openai.com/v1/audio/transcriptions"
-                style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-                <input type="password" id="providerSttKey" placeholder="API key" autocomplete="new-password"
-                  style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+              <div class="settings-section-desc" style="margin-bottom:8px">Required for voice devices to transcribe captured speech.</div>
+
+              <!-- Mode selector — Remote API vs Local Faster-Whisper. The
+                   active mode is persisted as cfg.sttMode so the user's
+                   remote credentials survive a switch to Local and back. -->
+              <select id="providerSttMode" data-change-action="updateSttModeFields" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+                <option value="remote">Remote API (OpenAI / Groq / etc. — needs API key)</option>
+                <option value="local">Local — Faster-Whisper large-v3-turbo (no key, runs on this server)</option>
+              </select>
+
+              <!-- Remote API fields -->
+              <div id="providerSttFields_remote">
+                <div class="settings-section-desc" style="font-size:11px;color:var(--muted);margin-bottom:6px">OpenAI-compatible <code>/audio/transcriptions</code> endpoint.</div>
+                <input type="text" id="providerSttUrl" placeholder="https://api.openai.com/v1/audio/transcriptions"
+                  style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                  <input type="password" id="providerSttKey" placeholder="API key" autocomplete="new-password"
+                    style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <input type="text" id="providerSttModel" placeholder="Model (e.g. whisper-1, whisper-large-v3-turbo)"
+                    style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                  <button data-action="saveProviderStt"
+                    style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+                </div>
+                <div id="providerSttStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
               </div>
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <input type="text" id="providerSttModel" placeholder="Model (e.g. whisper-1)"
-                  style="flex:1;min-width:120px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
-                <button data-action="saveProviderStt"
-                  style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
+
+              <!-- Local Faster-Whisper fields. The picker + info card pair
+                   only renders when Faster-Whisper isn't installed yet; once
+                   it is, only the status line and Uninstall button remain. -->
+              <div id="providerSttFields_local" style="display:none">
+                <div id="providerFwStatus" class="settings-section-desc" style="font-size:11px;color:var(--muted);margin-bottom:8px">Checking service…</div>
+
+                <div id="providerFwPicker" style="display:none;flex-direction:column;gap:8px;margin-bottom:8px">
+                  <div class="settings-section-desc" style="font-size:11px;color:var(--muted);margin:0">Faster-Whisper isn't installed yet. Pick a profile to install:</div>
+                  <select id="providerFwProfile" data-change-action="onFwProfileChange" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                    <option value="">— Select profile —</option>
+                    <option value="cpu">CPU (works on any system)</option>
+                    <option value="cuda">GPU (NVIDIA + driver required)</option>
+                  </select>
+
+                  <!-- CPU info card (toggled by onFwProfileChange) -->
+                  <div id="providerFwInfoCpu" style="display:none;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);line-height:1.5">
+                    <b style="color:var(--text)">CPU profile</b> · <b style="color:var(--text)">Disk:</b> ~810 MB · <b style="color:var(--text)">RAM at runtime:</b> ~2 GB · <b style="color:var(--text)">No GPU required.</b><br>
+                    Speed depends heavily on your CPU. Modern desktop CPUs run ~2-3× faster than realtime on long clips. Older / low-end CPUs (laptops, SBCs) land near realtime. For short voice-device utterances (3-10 sec), per-request overhead dominates either way — expect ~10 sec to transcribe a 3-sec utterance.
+                  </div>
+
+                  <!-- GPU info card (toggled by onFwProfileChange) -->
+                  <div id="providerFwInfoGpu" style="display:none;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);line-height:1.5">
+                    <b style="color:var(--text)">GPU profile</b> · <b style="color:var(--text)">Disk:</b> ~810 MB model + ~2 GB NVIDIA CUDA libs · <b style="color:var(--text)">VRAM at runtime:</b> ~2.5 GB · <b style="color:var(--text)">Requires an NVIDIA GPU + driver</b> (install fails fast if <code>nvidia-smi</code> isn't on PATH).<br>
+                    14-40× faster than realtime depending on GPU. A 3-sec utterance transcribes in ~400 ms. Recommended whenever you have a discrete GPU with ~3 GB free VRAM.<br>
+                    <b style="color:var(--text)">Not supported:</b> AMD GPUs (no ROCm), Intel GPUs (no oneAPI), macOS (no CUDA). Use the CPU profile on those systems.
+                  </div>
+
+                  <button id="providerFwInstallBtn" data-action="installFwFromPicker" type="button" disabled style="background:var(--muted);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:not-allowed;font-weight:600;align-self:flex-start">Save & install</button>
+                </div>
+
+                <button id="providerFwUninstallBtn" data-action="uninstallFasterWhisper" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;align-self:flex-start">Uninstall</button>
+
+                <pre id="providerFwLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:240px;overflow:auto;margin:8px 0 0;white-space:pre-wrap"></pre>
               </div>
-              <div id="providerSttStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
             </div>
           </div>
 

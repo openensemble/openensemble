@@ -19,9 +19,16 @@
 #   2 — missing prerequisite (python3, python3-venv, systemd, etc.)
 #
 # Env overrides (all optional):
-#   OE_HOME            default $HOME/.openensemble
-#   PIPER_VOICE        default en_US-libritts_r-medium
-#   PIPER_PORT         default 5151
+#   OE_HOME              default $HOME/.openensemble
+#   PIPER_VOICE          default en_US-libritts_r-medium. Naming convention is
+#                        <lang_REGION>-<name>-<quality>; HF layout
+#                        /<lang>/<lang_REGION>/<name>/<quality>/ is derived from
+#                        the voice name. en_AU-OE_custom-* maps to OE's HF repo
+#                        (openensemble/piper-voices); everything else uses
+#                        rhasspy/piper-voices.
+#   PIPER_VOICE_URL_BASE override the HF base URL entirely (no trailing slash).
+#                        Useful for self-hosted voices or unreleased forks.
+#   PIPER_PORT           default 5151
 
 set -eu
 
@@ -33,8 +40,22 @@ PIPER_PORT="${PIPER_PORT:-5151}"
 SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_NAME="piper-tts.service"
 
-# Pieces of the HF Piper-voices URL. Keep this in sync with PIPER_VOICE.
-HF_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium"
+# Derive the HF model path from PIPER_VOICE. Convention is
+# <lang_REGION>-<name>-<quality>, mirrored on HF as /<lang>/<lang_REGION>/<name>/<quality>/.
+voice_lang_region="${PIPER_VOICE%%-*}"          # en_US
+voice_rest="${PIPER_VOICE#*-}"                  # libritts_r-medium
+voice_quality="${voice_rest##*-}"               # medium
+voice_name="${voice_rest%-*}"                   # libritts_r
+voice_lang="${voice_lang_region%_*}"            # en
+
+# OE-hosted custom voices live under openensemble/piper-voices; everything else
+# falls back to the official rhasspy/piper-voices repo. PIPER_VOICE_URL_BASE
+# overrides both for self-hosted setups.
+case "$PIPER_VOICE" in
+  en_AU-OE_custom-*) default_repo="https://huggingface.co/openensemble/piper-voices/resolve/main" ;;
+  *)                 default_repo="https://huggingface.co/rhasspy/piper-voices/resolve/main" ;;
+esac
+HF_BASE="${PIPER_VOICE_URL_BASE:-$default_repo}/$voice_lang/$voice_lang_region/$voice_name/$voice_quality"
 
 step()  { echo "[piper-install] $*"; }
 fail()  { echo "[piper-install] FAIL: $*" >&2; exit "${2:-1}"; }
@@ -67,11 +88,11 @@ fi
 step "Upgrading pip..."
 "$PIPER_VENV/bin/pip" install --quiet --upgrade pip wheel
 
-# `piper-tts` includes piper.http_server. flask is a transitive but pinning
-# avoids surprises if the piper-tts version ever drops it. Idempotent: pip
-# no-ops on already-satisfied packages.
-step "Installing piper-tts + flask (this can take a minute the first time)..."
-"$PIPER_VENV/bin/pip" install --quiet piper-tts flask
+# piper-tts gives us PiperVoice/SynthesisConfig for in-process synthesis;
+# fastapi+uvicorn is what scripts/piper-multivoice-server.py runs on (replaces
+# the upstream piper.http_server which can't multi-voice). Idempotent.
+step "Installing piper-tts + fastapi + uvicorn (this can take a minute the first time)..."
+"$PIPER_VENV/bin/pip" install --quiet piper-tts fastapi "uvicorn[standard]" pydantic
 
 # ── model download ────────────────────────────────────────────────────────────
 mkdir -p "$MODEL_DIR"
@@ -89,7 +110,7 @@ download() {
 }
 
 if [ ! -s "$model_path" ]; then
-  step "Downloading $PIPER_VOICE.onnx (~80 MB) from HuggingFace..."
+  step "Downloading $PIPER_VOICE.onnx from $HF_BASE..."
   download "$HF_BASE/$PIPER_VOICE.onnx" "$model_path" \
     || { rm -f "$model_path"; fail "model .onnx download failed"; }
 fi
@@ -105,17 +126,18 @@ unit_path="$SERVICE_DIR/$SERVICE_NAME"
 step "Writing $unit_path..."
 cat > "$unit_path" <<UNIT
 [Unit]
-Description=Piper TTS HTTP server (local libritts_r multi-speaker) — OpenEnsemble
+Description=Piper TTS HTTP server ($PIPER_VOICE) — OpenEnsemble
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$PIPER_VENV/bin/python -m piper.http_server \\
-    --host 127.0.0.1 --port $PIPER_PORT \\
-    --model $model_path
+ExecStart=$PIPER_VENV/bin/python $OE_HOME/scripts/piper-multivoice-server.py
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+Environment=PIPER_MODEL_DIR=$MODEL_DIR
+Environment=PIPER_PORT=$PIPER_PORT
+Environment=PIPER_DEFAULT_VOICE=$PIPER_VOICE
 
 [Install]
 WantedBy=default.target

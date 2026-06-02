@@ -16,8 +16,8 @@
           "properties": {
             "folder": {
               "type": "string",
-              "enum": ["all", "documents", "research", "images", "videos", "code"],
-              "description": "Which folder to list. 'all' (default — use this for any non-specific request including 'my documents'). 'documents' = uploaded files (use only when user explicitly says 'just docs' / 'only documents folder'). 'research' = saved research markdowns. 'images' / 'videos' = AI-generated media. 'code' = coder workspace files."
+              "enum": ["all", "documents", "research", "images", "videos", "audio", "code"],
+              "description": "Which folder to list. 'all' (default — use this for any non-specific request including 'my documents'). 'documents' = uploaded files (use only when user explicitly says 'just docs' / 'only documents folder'). 'research' = saved research markdowns. 'images' / 'videos' / 'audio' = media (AI-generated or chat-uploaded). 'code' = coder workspace files."
             },
             "query": {
               "type": "string",

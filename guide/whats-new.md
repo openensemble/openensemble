@@ -6,6 +6,42 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-06-02
+
+**Local Faster-Whisper STT — keep transcription private and offline**
+Speech-to-text now has a local option alongside the existing remote-API one. Settings → Providers → Speech-to-Text has a top-level **Provider** dropdown: pick **Remote API** for OpenAI/Groq/etc. or **Local — Faster-Whisper large-v3-turbo** to run on this server. Local mode offers two profiles you choose at install:
+- **CPU profile** — large-v3-turbo int8, ~810 MB on disk, ~2 GB RAM at runtime. Works on any system without a GPU. Speed varies by CPU: modern desktops run ~2-3× real-time; older laptops/SBCs land near real-time.
+- **GPU profile** — large-v3-turbo float16, ~810 MB model + ~2 GB NVIDIA CUDA libs (auto-installed via pip into a dedicated venv), ~2.5 GB VRAM. Requires an NVIDIA GPU + driver (installer fails fast with a clear error if `nvidia-smi` isn't present). 14-40× real-time. Not supported: AMD/Intel GPUs and macOS — use CPU profile there.
+
+Switching between CPU and GPU re-runs the installer (1-2 min); switching between Remote and Local preserves your API credentials for next time so you can flip back without re-entering them.
+
+**Transcribe audio and video in chat**
+Drop an audio or video file into the chat and say "transcribe this" — the transcript comes back without an LLM round-trip (the fast-path runs your configured STT directly). Supports common audio formats (wav, mp3, flac, ogg, m4a, aac, opus) and video formats (mp4, mov, mkv, webm, avi — audio is extracted via ffmpeg first). 500 MB upload cap; the previous 10 MB cap that blocked large videos has been lifted. If your STT isn't configured, the request falls through to the coordinator instead of erroring silently.
+
+**Audio is now its own profile folder**
+Chat-uploaded audio used to land in your Documents folder mixed with PDFs and CSVs. Now it goes to a dedicated **Audio** folder (alongside Images and Videos), with its own tab in the Docs drawer and an inline player so you can preview clips without opening a viewer. Existing files in Documents stay where they are.
+
+**`@-mentions` in chat: agents and files**
+Two new chat-input behaviors. Type `@` and an autocomplete menu drops in:
+- `@ada` (or any agent name) routes the message to that agent and auto-switches your active chat tab to theirs. Works from any agent's chat panel — useful for quickly delegating without opening a different drawer first.
+- `@audio/foo.wav`, `@video/clip.mp4`, `@image/sunset.png` references a file already in your profile folders. Tab-completes to the exact filename and the server resolves it to an absolute path so transcribe (or any path-aware tool) can act on it. Typing `@a` shows both Ada-the-agent and `audio/` as completion options.
+
+`@audio/<file> transcribe this` fires the transcribe fast-path on your saved files the same way attaching a fresh file does.
+
+**Wake-word false-positive recovery**
+When a voice device fires a wake word on noise (TV, a cough, a sentence ending in the wake word) and the STT comes back empty or near-empty, the device used to sit in THINKING forever waiting for a reply that never arrived. Now a server-side fast-path catches these and replies *"I'm sorry, I didn't catch that"* so the device immediately returns to listening. Doesn't pollute your chat history — false-positive wakes don't appear as turns.
+
+**Speech pace slider for Piper voices**
+Settings → Providers → Text-to-Speech → Piper has a new **Speech pace** slider when Piper is installed. Range 0.80×-1.50× (Piper's default is 1.00×; OE ships at 1.10× because the VITS voices read a little fast for most listeners). Saves on release so the next TTS call uses the new pace immediately.
+
+**Piper TTS goes multi-voice with a downloadable voice catalog**
+Piper now runs as a multi-voice service instead of being locked to a single model at install time. Settings → Providers → Text-to-Speech → Piper shows a catalog of voices you can download independently — including a custom OpenEnsemble Australian female voice (`en_AU-OE_custom-medium`) hosted on our HuggingFace repo, plus seven popular voices from the public Piper catalog (Amy, Lessac, Ryan, LibriTTS-R, Alba, Jenny, and Cori-high). You pick which voice to install when you first set up Piper; additional voices download independently from the same catalog. The service hot-picks new voices up without a restart. In Voice Devices, each slot now has a dropdown of installed Piper voices instead of a numeric speaker ID, so different users / different wake-word slots can talk in different voices simultaneously. Multi-speaker voices like LibriTTS-R get an extra speaker-id field after voice selection. Existing numeric voice values keep working — they're auto-mapped to LibriTTS-R behind the scenes.
+
+**KittenTTS — a tiny local TTS option for machines without a GPU**
+A new text-to-speech provider lands alongside OpenAI, ElevenLabs, and Piper. KittenTTS is a 25 M-parameter ONNX model that runs on CPU — no GPU, no API key, ~50 MB total install. It ships 8 preset voices (`expr-voice-2-f` through `expr-voice-5-m`); voice cloning is *not* supported, which is the trade-off for being so small. Quality is functional, not class-leading — the right pick when the alternatives are "pay for a remote API" or "buy a GPU". Three ways to install: tick the prompt during a fresh `install.sh`, click "Install KittenTTS" in Settings → Providers → Text-to-Speech, or ask the coordinator ("install kittentts on this server").
+
+---
+
 ## 2026-05-31
 
 **Voice-friendly email output**

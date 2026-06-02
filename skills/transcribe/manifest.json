@@ -1,0 +1,45 @@
+{
+  "id": "transcribe",
+  "name": "Transcribe Audio & Video",
+  "description": "Transcribe speech from an audio or video file on the server's filesystem. Routes through the configured STT provider (local Faster-Whisper or remote API). Video files are decoded to audio first via ffmpeg.",
+  "icon": "🎙️",
+  "category": "utility",
+  "enabled_by_default": true,
+  "intent_patterns": [
+    "transcribe",
+    "transcript of",
+    "what does (?:this|the) (?:audio|video|recording|file) say",
+    "what's in (?:this|the) (?:audio|video|recording)"
+  ],
+  "intent_examples": [
+    "transcribe this video",
+    "what does this audio say",
+    "give me the transcript of /home/me/recording.mp3",
+    "transcribe all three files",
+    "what's on the recording"
+  ],
+  "systemPromptAddition": "## Transcription\n\nWhen the user asks you to transcribe an audio or video file, call `transcribe_file` with the absolute path to the file. The tool handles common audio formats (wav, mp3, flac, ogg, m4a) and video formats (mp4, mov, mkv, webm) — for video, it extracts the audio track via ffmpeg first.\n\nIf the user references a file by name (e.g. \"transcribe the meeting recording\"), the path may have been passed in a prior turn as a system note (look for `Files referenced:` lines) or in the user's chat as `@video/<name>` / `@audio/<name>` which the server resolves to an absolute path before you see the message. Use those paths verbatim.\n\nReturn the transcript to the user in clean prose — strip leading/trailing whitespace, fix obvious time-formatting (7.23 → 7:23 AM if context suggests a time), and offer a short summary when the transcript runs over ~500 words.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "transcribe_file",
+        "description": "Transcribe speech in an audio or video file. Returns the transcript text plus basic metadata (duration, detected language). Common formats supported: wav/mp3/flac/ogg/m4a for audio, mp4/mov/mkv/webm for video.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path to the audio or video file on the server's filesystem."
+            },
+            "language": {
+              "type": "string",
+              "description": "Optional language hint as a BCP-47 / ISO-639-1 code (e.g. 'en', 'es', 'fr'). Whisper auto-detects when omitted."
+            }
+          },
+          "required": ["path"]
+        }
+      }
+    }
+  ]
+}

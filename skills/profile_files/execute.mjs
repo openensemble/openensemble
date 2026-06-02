@@ -201,6 +201,7 @@ async function execList(args, userId) {
   if (folder === 'all' || folder === 'research')  items.push(...listResearch(userId));
   if (folder === 'all' || folder === 'images')    items.push(...listMedia(userId, 'images'));
   if (folder === 'all' || folder === 'videos')    items.push(...listMedia(userId, 'videos'));
+  if (folder === 'all' || folder === 'audio')     items.push(...listMedia(userId, 'audio'));
   if (folder === 'all' || folder === 'code')      items.push(...listCode(userId));
 
   if (query) {
@@ -222,7 +223,7 @@ async function execList(args, userId) {
   for (const i of items) (grouped[i.folder] ||= []).push(i);
 
   const sections = [];
-  for (const f of ['documents', 'research', 'images', 'videos', 'code']) {
+  for (const f of ['documents', 'research', 'images', 'videos', 'audio', 'code']) {
     const list = grouped[f];
     if (!list?.length) continue;
     const lines = list.map(i => {

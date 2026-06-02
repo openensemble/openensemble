@@ -8,6 +8,7 @@ import path from 'path';
 import { requireAuth, safeId as safeIdFn, BASE_DIR, getUserDir, readBody, withLock } from './_helpers.mjs';
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
 const VIDEO_EXTS  = new Set(['.mp4', '.webm', '.mov']);
+const AUDIO_EXTS  = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga', '.m4a', '.aac', '.opus']);
 
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
 function loadSharing() {
@@ -28,8 +29,9 @@ function resolveSharedFile(userId, filename, fileType) {
     // Search all possible directories for the file
     const searchDirs = fileType === 'image' ? ['images', 'documents']
                      : fileType === 'video' ? ['videos', 'documents']
+                     : fileType === 'audio' ? ['audio', 'documents']
                      : fileType === 'research' ? ['research']
-                     : ['documents', 'images', 'videos'];
+                     : ['documents', 'images', 'videos', 'audio'];
     for (const dir of searchDirs) {
       // Try the actual filename
       let candidate = path.join(getUserDir(s.ownerId), dir, safeFilename);
@@ -196,6 +198,78 @@ export async function handle(req, res) {
     videos.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(videos));
+    return true;
+  }
+
+  // ── GET /api/desktop/audio ── list audio files in users/<id>/audio/
+  // Same shape as /api/desktop/videos. Audio is the newest media kind —
+  // chat-upload of audio/* mime types lands here, as do future
+  // chat-side voice memos, TTS exports, etc.
+  if (req.url === '/api/desktop/audio' && req.method === 'GET') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    const audio = [];
+    const dir = path.join(getUserDir(userId), 'audio');
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        const ext = path.extname(f).toLowerCase();
+        if (!AUDIO_EXTS.has(ext)) continue;
+        try {
+          const stat = fs.statSync(path.join(dir, f));
+          audio.push({ filename: f, dir, createdAt: stat.mtime.toISOString(), size: stat.size });
+        } catch {}
+      }
+    } catch {}
+    audio.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(audio));
+    return true;
+  }
+
+  // ── GET /api/desktop/audio/:filename?token=xxx ── serve an audio file with range support
+  const audMatch = req.url.match(/^\/api\/desktop\/audio\/([^?]+)/);
+  if (audMatch && req.method === 'GET') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    const safeName = path.basename(decodeURIComponent(audMatch[1]));
+    const userAudPath = path.join(getUserDir(userId), 'audio', safeName);
+    if (!fs.existsSync(userAudPath)) { res.writeHead(404); res.end('Not found'); return true; }
+    const ext = path.extname(safeName).toLowerCase();
+    const mime = ext === '.mp3' ? 'audio/mpeg'
+               : ext === '.wav' ? 'audio/wav'
+               : ext === '.flac' ? 'audio/flac'
+               : ext === '.ogg' || ext === '.oga' ? 'audio/ogg'
+               : ext === '.m4a' || ext === '.aac' ? 'audio/mp4'
+               : ext === '.opus' ? 'audio/opus'
+               : 'application/octet-stream';
+    const stat = fs.statSync(userAudPath);
+    const total = stat.size;
+    const rangeHeader = req.headers['range'];
+    if (rangeHeader) {
+      const [, startStr, endStr] = rangeHeader.match(/bytes=(\d+)-(\d*)/) || [];
+      const start = parseInt(startStr, 10);
+      const end = endStr ? parseInt(endStr, 10) : total - 1;
+      const chunkSize = end - start + 1;
+      res.writeHead(206, {
+        'Content-Type': mime,
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunkSize,
+      });
+      fs.createReadStream(userAudPath, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, { 'Content-Type': mime, 'Content-Length': total, 'Accept-Ranges': 'bytes' });
+      fs.createReadStream(userAudPath).pipe(res);
+    }
+    return true;
+  }
+
+  // ── DELETE /api/desktop/audio/:filename ── delete an audio file
+  if (audMatch && req.method === 'DELETE') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    const safeName = path.basename(decodeURIComponent(audMatch[1]));
+    const filePath = path.join(getUserDir(userId), 'audio', safeName);
+    if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return true; }
+    try { fs.unlinkSync(filePath); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true })); }
+    catch (e) { res.writeHead(500); res.end(String(e.message || e)); }
     return true;
   }
 

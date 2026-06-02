@@ -10,6 +10,9 @@
  * files in, add `// @ts-check` and run `npm run typecheck`.
  */
 
+import fs from 'fs';
+import path from 'path';
+import { USERS_DIR } from './lib/paths.mjs';
 import { appendToSession } from './sessions.mjs';
 import {
   markAgentBusy, openTurn, finalizeTurn,
@@ -33,6 +36,8 @@ import {
   tryHaFastpath,
   tryRoutineFastpath,
   tryTriviaFastpath,
+  tryVoiceEmptyFastpath,
+  tryTranscribeAttachmentFastpath,
 } from './chat-dispatch/fastpaths.mjs';
 import {
   runSpecialistRoute,
@@ -171,6 +176,44 @@ export async function handleChatMessage({
   userId = effectiveUserId;
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
 
+  // @-mention redirect (typed chat only): "@ada make me a skill" routes
+  // to ada's agent regardless of which agent's chat panel the user is in.
+  // Match handle against agent name (lowercased, whitespace stripped) or
+  // the trailing segment of the agent id. Voice STT can't reliably
+  // transcribe the @ symbol, so skip for voice — verbal redirects ("ask
+  // ada", "use ada") go through router-mistakes instead.
+  if (source !== 'voice-device' && typeof rawText === 'string') {
+    const mention = rawText.match(/^@(\S+)\s+([\s\S]+)$/);
+    if (mention) {
+      const handle = mention[1].toLowerCase();
+      const rest = mention[2];
+      const target = getAgentsForUser(userId).find(a => {
+        const nameKey = String(a.name || '').toLowerCase().replace(/\s+/g, '');
+        const idSuffix = String(a.id || '').split('_').pop().toLowerCase();
+        return nameKey === handle || idSuffix === handle;
+      });
+      if (target) {
+        if (target.id !== agentId) {
+          console.log(`[chat] @-mention redirect: @${handle} → ${target.id} (was ${agentId})`);
+          agentId = target.id;
+        }
+        // Strip the @-handle whether or not the agent changed — it's a
+        // routing directive, not part of the conversation content. Without
+        // this, a client that pre-switched agents would persist
+        // "@ada foo" verbatim into the destination session.
+        rawText = rest;
+      }
+    }
+  }
+
+  // @-file references handled inside the transcribe fast-path (see
+  // tryTranscribeAttachmentFastpath in chat-dispatch/fastpaths.mjs). That
+  // fast-path now also covers the "@video/foo transcribe this" case in
+  // addition to the bare-attachment case, AND falls through to the LLM
+  // when no STT backend is configured (after injecting the resolved paths
+  // as a system note). Centralizing both flows there keeps STT-availability
+  // and intent-matching in one place.
+
   // Voice-device pre-LLM detectors — yes/no on a pending proposal, timer
   // create/cancel/extend, and the volume / pause / stop control regex.
   // Each returns {handled} on match; we just return.
@@ -301,6 +344,15 @@ export async function handleChatMessage({
   // LLM, then the natural-language fast-paths and the specialist router get
   // their crack. Anything not handled falls through to runLlmTurn.
   const INTERCEPTORS = [
+    // Voice-only: catch empty / 1-char STT transcripts before they reach the
+    // LLM and cause the device to hang in THINKING. Must run before every
+    // other interceptor because the others assume a non-empty userText.
+    tryVoiceEmptyFastpath,
+    // Audio/video attachment + "transcribe this" (or bare attachment) goes
+    // straight to STT — no LLM round-trip needed. Falls through to the
+    // coordinator when the user's text suggests something else (e.g. "what's
+    // the duration", "extract the chords") so the LLM can pick the right tool.
+    tryTranscribeAttachmentFastpath,
     tryApprovalIntercept,
     slashAdapter,
     financePreprocess,

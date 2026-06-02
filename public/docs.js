@@ -5,7 +5,7 @@ let _docShareSel     = new Set();
 let _docPendingFile  = null;
 let _docAskId        = null;
 let _docAskMime      = '';
-let _docFilter       = 'all'; // 'all' | 'photos' | 'videos' | 'code'
+let _docFilter       = 'all'; // 'all' | 'photos' | 'videos' | 'audio' | 'code'
 let _docAllDocs      = [];
 let _docShareModalId  = null;
 let _docShareModalSel = new Set();
@@ -54,10 +54,11 @@ async function loadDocList() {
   const list = $('docList');
   list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Loading…</div>';
   try {
-    const [uploadedDocs, aiImages, aiVideos, researchDocs, shares, codeResp] = await Promise.all([
+    const [uploadedDocs, aiImages, aiVideos, audioFiles, researchDocs, shares, codeResp] = await Promise.all([
       fetch('/api/shared-docs').then(r => r.json()).catch(() => []),
       fetch('/api/desktop/images').then(r => r.json()).catch(() => []),
       fetch('/api/desktop/videos').then(r => r.json()).catch(() => []),
+      fetch('/api/desktop/audio').then(r => r.json()).catch(() => []),
       fetch('/api/research').then(r => r.json()).catch(() => []),
       fetch('/api/sharing').then(r => r.json()).catch(() => []),
       fetch('/api/coder/projects').then(r => r.json()).catch(() => ({ projects: [] })),
@@ -112,6 +113,32 @@ async function loadDocList() {
       };
     }).filter(d => !seen.has(d.id));
 
+    // Normalize audio files (chat-uploaded or otherwise) into the same shape
+    const audDocs = audioFiles.map(aud => {
+      const ext = '.' + (aud.filename.split('.').pop() || 'wav');
+      const mt = ext === '.mp3' ? 'audio/mpeg'
+               : ext === '.wav' ? 'audio/wav'
+               : ext === '.flac' ? 'audio/flac'
+               : ext === '.ogg' || ext === '.oga' ? 'audio/ogg'
+               : ext === '.m4a' || ext === '.aac' ? 'audio/mp4'
+               : ext === '.opus' ? 'audio/opus'
+               : 'audio/mpeg';
+      const fileId = 'audio_' + aud.filename;
+      const share = _sharesByFileId[fileId];
+      return {
+        id: fileId,
+        filename: aud.filename,
+        ext, mimeType: mt,
+        size: aud.size,
+        uploadedBy: null,
+        uploadedByName: 'Audio',
+        sharedWith: share?.sharedWith ?? [],
+        createdAt: aud.createdAt,
+        isOwn: true,
+        _source: 'audio',
+      };
+    }).filter(d => !seen.has(d.id));
+
     // Normalize research documents
     const resDocs = researchDocs.map(doc => {
       const share = _sharesByFileId[doc.id];
@@ -158,7 +185,7 @@ async function loadDocList() {
           _sharedOwnerId: s.ownerId,
         };
       })
-      .filter(d => !seen.has(d.id) && !imgDocs.some(x => x.id === d.id) && !vidDocs.some(x => x.id === d.id) && !resDocs.some(x => x.id === d.id));
+      .filter(d => !seen.has(d.id) && !imgDocs.some(x => x.id === d.id) && !vidDocs.some(x => x.id === d.id) && !audDocs.some(x => x.id === d.id) && !resDocs.some(x => x.id === d.id));
 
     // Coder projects (users/{id}/documents/code/). Render as folder-like entries
     // in the Documents tab so users can download/delete them without leaving the
@@ -180,7 +207,7 @@ async function loadDocList() {
       _fileCount: p.fileCount ?? 0,
     }));
 
-    _docAllDocs = [...uploadedDocs, ...imgDocs, ...vidDocs, ...resDocs, ...codeDocs, ...sharedWithMe];
+    _docAllDocs = [...uploadedDocs, ...imgDocs, ...vidDocs, ...audDocs, ...resDocs, ...codeDocs, ...sharedWithMe];
     applyDocFilter(_docFilter);
   } catch {
     list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;text-align:center">Failed to load documents</div>';
@@ -190,7 +217,7 @@ async function loadDocList() {
 function switchDocFilter(filter) {
   _docFilter = filter;
   // Update tab styles
-  ['all','photos','videos','code'].forEach(f => {
+  ['all','photos','videos','audio','code'].forEach(f => {
     const btn = $('docFilter-' + f);
     if (!btn) return;
     const active = f === filter;
@@ -209,14 +236,17 @@ function applyDocFilter(filter) {
   let docs = _docAllDocs;
   if (filter === 'photos')      docs = docs.filter(d => d.mimeType.startsWith('image/'));
   else if (filter === 'videos') docs = docs.filter(d => d.mimeType.startsWith('video/'));
+  else if (filter === 'audio')  docs = docs.filter(d => d.mimeType.startsWith('audio/'));
   else if (filter === 'code')   docs = docs.filter(d => d._source === 'code');
-  else docs = docs.filter(d => d._source !== 'code' && !d.mimeType.startsWith('image/') && !d.mimeType.startsWith('video/'));
+  else docs = docs.filter(d => d._source !== 'code' && !d.mimeType.startsWith('image/') && !d.mimeType.startsWith('video/') && !d.mimeType.startsWith('audio/'));
   renderDocList(docs, filter);
 }
 
 function _docIcon(mimeType, filename) {
   const ext = (filename.split('.').pop() ?? '').toLowerCase();
   if (mimeType.startsWith('image/')) return '🖼️';
+  if (mimeType.startsWith('audio/')) return '🎙️';
+  if (mimeType.startsWith('video/')) return '🎬';
   if (mimeType.includes('pdf') || ext === 'pdf') return '📄';
   if (['csv','xlsx','xls'].includes(ext) || mimeType.includes('spreadsheet')) return '📊';
   if (['doc','docx'].includes(ext) || mimeType.includes('word')) return '📝';
@@ -238,6 +268,7 @@ function _viewUrl(doc) {
   if (typeof doc === 'string') return `/api/shared-docs/${doc}/view?token=${token}`;
   if (doc._source === 'ai-image') return `/api/desktop/images/${encodeURIComponent(doc.filename)}?token=${token}${doc._agentId ? '&agent=' + encodeURIComponent(doc._agentId) : ''}`;
   if (doc._source === 'ai-video') return `/api/desktop/videos/${encodeURIComponent(doc.filename)}?token=${token}`;
+  if (doc._source === 'audio')    return `/api/desktop/audio/${encodeURIComponent(doc.filename)}?token=${token}`;
   return `/api/shared-docs/${doc.id}/view?token=${token}`;
 }
 
@@ -246,6 +277,7 @@ function renderDocList(docs, filter) {
   if (!docs.length) {
     const msg = filter === 'photos' ? 'No images yet.'
               : filter === 'videos' ? 'No videos yet.'
+              : filter === 'audio'  ? 'No audio files yet.'
               : filter === 'code'   ? 'No code projects yet.'
               : 'No documents yet.';
     const hint = filter === 'code' ? 'Start one from the Coder agent.' : 'Upload one above to get started.';
@@ -294,6 +326,13 @@ function renderDocList(docs, filter) {
         <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
           <div style="width:36px;height:36px;border-radius:50%;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;font-size:16px;color:#fff">▶</div>
         </div>
+      </div>`;
+    } else if (doc.mimeType.startsWith('audio/')) {
+      // Audio thumbnail: waveform glyph + inline mini-player. Compact card
+      // that still lets the user preview the file without opening the viewer.
+      thumbHtml = `<div ${clickAttr} style="width:100%;aspect-ratio:4/3;overflow:hidden;cursor:pointer;background:var(--bg2);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px">
+        <span style="font-size:44px">🎙️</span>
+        <audio controls preload="none" src="${viewUrl}" style="width:90%;max-width:240px" data-stop-propagation="true"></audio>
       </div>`;
     } else if (doc._source === 'research') {
       thumbHtml = `<div ${clickAttr} data-research-preview="${safeId}" style="width:100%;aspect-ratio:4/3;overflow:hidden;cursor:pointer;background:var(--bg2);padding:8px;box-sizing:border-box">

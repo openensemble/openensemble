@@ -479,8 +479,24 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       return name ? { role, content: body, name } : { role, content: body };
     });
 
-  // For session storage, store text only (no base64 — too large and not replayable)
-  const sessionText = attachment ? `[Attached: ${attachment.name}]\n${userText}`.trim() : userText;
+  // For session storage, store text only (no base64 — too large and not replayable).
+  // For audio/video attachments, also surface the on-disk path so the LLM's
+  // transcribe_file tool can act on the file without first calling
+  // list_profile_files to look up the doc id. Images/PDFs/CSVs continue
+  // through their existing inline-text / inline-vision paths above.
+  let attachmentNote = attachment ? `[Attached: ${attachment.name}]` : '';
+  if (attachment?.file_id && typeof attachment.mimeType === 'string') {
+    const mime = attachment.mimeType.toLowerCase();
+    if (mime.startsWith('audio/') || mime.startsWith('video/')) {
+      const { getProfileFilePath } = await import('./lib/profile-files.mjs');
+      const filePath = getProfileFilePath(userId, attachment.file_id);
+      if (filePath) {
+        const kind = mime.startsWith('audio/') ? 'audio' : 'video';
+        attachmentNote = `[Attached ${kind} "${attachment.name}" saved at ${filePath} — call transcribe_file with that path to read it]`;
+      }
+    }
+  }
+  const sessionText = attachment ? `${attachmentNote}\n${userText}`.trim() : userText;
 
   // Working copy for the tool loop (no ts fields).
   // Trim history if it gets too long — rough token estimate: 1 token ≈ 4 chars.

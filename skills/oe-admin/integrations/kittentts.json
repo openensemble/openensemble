@@ -1,0 +1,27 @@
+{
+  "name": "kittentts",
+  "description": "Install KittenTTS, a local CPU-only text-to-speech service for OpenEnsemble. ~50 MB total install (25 MB model + ONNX runtime + bundled espeak-ng), 8 preset voices (no voice cloning), no GPU, no API key. Targets the low-end-hardware tier — users without a discrete GPU who don't want to pay for a remote TTS API. The same script can be re-run safely; existing venv/model/service are detected and skipped.",
+  "version": 1,
+  "credentials": [],
+  "steps": [
+    {
+      "id": "run-installer",
+      "cmd": ["bash", "{{env.OE_BASE_DIR}}/scripts/install-kittentts.sh"],
+      "timeoutMs": 600000
+    }
+  ],
+  "configWrites": [
+    { "path": "integrations.kittentts.installed", "value": true }
+  ],
+  "verify": {
+    "cmd": ["curl", "-fsS", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:5153/"],
+    "expect": { "kind": "exit_zero" }
+  },
+  "rollback": [
+    {
+      "id": "run-uninstaller",
+      "cmd": ["bash", "{{env.OE_BASE_DIR}}/scripts/uninstall-kittentts.sh"],
+      "timeoutMs": 60000
+    }
+  ]
+}

@@ -900,17 +900,103 @@ async function loadProviderConfig() {
     // field block's status line + install-button visibility before we
     // call updateTtsProviderFields() (which only handles show/hide of the
     // whole block by provider).
-    const piperStatus = $('providerPiperStatus');
-    const piperBtn    = $('providerPiperInstallBtn');
-    if (piperStatus && piperBtn) {
+    const piperStatus      = $('providerPiperStatus');
+    const piperInstallBtn  = $('providerPiperInstallBtn');
+    const piperUninstallBtn = $('providerPiperUninstallBtn');
+    if (piperStatus && piperInstallBtn) {
+      const piperVoicesWrap = $('providerPiperVoices');
+      const piperFirstWrap  = $('providerPiperFirstVoiceWrap');
+      const piperPaceWrap   = $('providerPiperPaceWrap');
       if (cfg.piperAvailable) {
         piperStatus.textContent = 'Piper is running on 127.0.0.1:5151 — no further setup needed.';
         piperStatus.style.color = 'var(--success, #4caf50)';
-        piperBtn.style.display = 'none';
+        piperInstallBtn.style.display = 'none';
+        if (piperUninstallBtn) piperUninstallBtn.style.display = '';
+        if (piperFirstWrap) piperFirstWrap.style.display = 'none';
+        if (piperPaceWrap) piperPaceWrap.style.display = 'flex';
+        // Seed slider from server-reported piperLengthScale (defaults to 1.1).
+        const paceSlider = $('providerPiperPace');
+        const paceLabel  = $('providerPiperPaceValue');
+        if (paceSlider && Number.isFinite(cfg.piperLengthScale)) {
+          paceSlider.value = cfg.piperLengthScale;
+          if (paceLabel) paceLabel.textContent = Number(cfg.piperLengthScale).toFixed(2) + '×';
+        }
+        window.renderPiperVoiceCatalog?.();
       } else {
         piperStatus.textContent = 'Piper is not installed on this server. Install it locally (~80 MB download, no API key).';
         piperStatus.style.color = 'var(--muted)';
-        piperBtn.style.display = '';
+        piperInstallBtn.style.display = '';
+        if (piperUninstallBtn) piperUninstallBtn.style.display = 'none';
+        if (piperVoicesWrap) piperVoicesWrap.style.display = 'none';
+        if (piperPaceWrap) piperPaceWrap.style.display = 'none';
+        if (piperFirstWrap) piperFirstWrap.style.display = 'flex';
+        window.populatePiperFirstVoiceDropdown?.();
+      }
+    }
+
+    // Same shape as Piper — kittenttsAvailable from /api/provider-config
+    // toggles the install/uninstall buttons + status line in the kittentts
+    // field block.
+    const kittenttsStatus      = $('providerKittenttsStatus');
+    const kittenttsInstallBtn  = $('providerKittenttsInstallBtn');
+    const kittenttsUninstallBtn = $('providerKittenttsUninstallBtn');
+    if (kittenttsStatus && kittenttsInstallBtn) {
+      if (cfg.kittenttsAvailable) {
+        kittenttsStatus.textContent = 'KittenTTS is running on 127.0.0.1:5153 — no further setup needed.';
+        kittenttsStatus.style.color = 'var(--success, #4caf50)';
+        kittenttsInstallBtn.style.display = 'none';
+        if (kittenttsUninstallBtn) kittenttsUninstallBtn.style.display = '';
+      } else {
+        kittenttsStatus.textContent = 'KittenTTS is not installed on this server. Install it locally (~50 MB, CPU only, no API key).';
+        kittenttsStatus.style.color = 'var(--muted)';
+        kittenttsInstallBtn.style.display = '';
+        if (kittenttsUninstallBtn) kittenttsUninstallBtn.style.display = 'none';
+      }
+    }
+
+    // STT mode dropdown — Remote API vs Local Faster-Whisper. Mode is
+    // persisted as cfg.sttMode; remote URL/Key/Model and local install
+    // state live independently so the user can switch between them
+    // without losing the other's settings.
+    const sttModeSel = $('providerSttMode');
+    if (sttModeSel) sttModeSel.value = cfg.sttMode === 'local' ? 'local' : 'remote';
+    const remoteFields = $('providerSttFields_remote');
+    const localFields  = $('providerSttFields_local');
+    if (remoteFields) remoteFields.style.display = sttModeSel?.value === 'remote' ? '' : 'none';
+    if (localFields)  localFields.style.display  = sttModeSel?.value === 'local'  ? '' : 'none';
+
+    // Faster-Whisper sub-state inside the Local section. Picker is ALWAYS
+    // visible so the user can switch profiles even after install; when FW
+    // is installed we pre-select the current profile + relabel the install
+    // button to "Switch profile". Picker stays hidden via CSS until the user
+    // picks an option that differs from what's already running.
+    const fwStatus       = $('providerFwStatus');
+    const fwPicker       = $('providerFwPicker');
+    const fwUninstallBtn = $('providerFwUninstallBtn');
+    const fwProfileSel   = $('providerFwProfile');
+    const fwInstallBtn   = $('providerFwInstallBtn');
+    if (fwStatus) {
+      window._fwInstalledProfile = cfg.fasterWhisperAvailable ? cfg.fasterWhisperProfile : null;
+      if (cfg.fasterWhisperAvailable) {
+        const profile = cfg.fasterWhisperProfile || '?';
+        fwStatus.textContent = `Faster-Whisper is running on 127.0.0.1:5154 (${profile} profile). Pick a different profile below to switch.`;
+        fwStatus.style.color = 'var(--success, #4caf50)';
+        if (fwPicker) fwPicker.style.display = 'flex';
+        if (fwUninstallBtn) fwUninstallBtn.style.display = '';
+        // Pre-select the currently-running profile so the user sees its info
+        // card and can compare before switching.
+        if (fwProfileSel && (cfg.fasterWhisperProfile === 'cpu' || cfg.fasterWhisperProfile === 'cuda')) {
+          fwProfileSel.value = cfg.fasterWhisperProfile;
+          window.onFwProfileChange?.();
+        }
+      } else {
+        fwStatus.textContent = 'Faster-Whisper is not installed.';
+        fwStatus.style.color = 'var(--muted)';
+        if (fwPicker) fwPicker.style.display = 'flex';
+        if (fwUninstallBtn) fwUninstallBtn.style.display = 'none';
+        // Reset the dropdown so the user picks fresh.
+        if (fwProfileSel) fwProfileSel.value = '';
+        window.onFwProfileChange?.();
       }
     }
 
@@ -1160,7 +1246,7 @@ function updateTtsProviderFields() {
   const sel = document.getElementById('providerTtsProvider');
   if (!sel) return;
   const active = sel.value || 'openai';
-  for (const p of ['openai', 'elevenlabs', 'piper']) {
+  for (const p of ['openai', 'elevenlabs', 'piper', 'kittentts']) {
     const block = document.getElementById(`providerTtsFields_${p}`);
     if (block) block.style.display = (p === active) ? '' : 'none';
   }
@@ -1179,6 +1265,7 @@ function updateTtsProviderAvailability(cfg) {
     openai:     sel.querySelector('option[value="openai"]'),
     elevenlabs: sel.querySelector('option[value="elevenlabs"]'),
     piper:      sel.querySelector('option[value="piper"]'),
+    kittentts:  sel.querySelector('option[value="kittentts"]'),
   };
   // Cache the original labels so we can re-decorate on every refresh
   // without compounding " — reason" suffixes.
@@ -1189,12 +1276,20 @@ function updateTtsProviderAvailability(cfg) {
   const reasons = {
     openai:     !ffmpeg ? 'ffmpeg not installed' : (!cfg.ttsKeySet ? 'API key not set' : ''),
     elevenlabs: !ffmpeg ? 'ffmpeg not installed' : (!cfg.elevenlabsKeySet ? 'API key not set' : ''),
-    piper:      !ffmpeg ? 'ffmpeg not installed' : (!cfg.piperAvailable ? 'service not running' : ''),
+    piper:      !ffmpeg ? 'ffmpeg not installed' : (!cfg.piperAvailable ? 'install needed' : ''),
+    kittentts:  !ffmpeg ? 'ffmpeg not installed' : (!cfg.kittenttsAvailable ? 'install needed' : ''),
   };
+  // For locally-installable providers (piper, kittentts) the user MUST be able
+  // to select the option in order to reach the install button inside the
+  // provider's field block — so we never `disabled` them just for "service not
+  // running". ffmpeg-missing is the one fatal condition that disables every
+  // option (no TTS branch works without it). For remote providers, missing
+  // key still leaves the fields panel reachable (the key input is in there).
+  const fatal = (reason) => reason === 'ffmpeg not installed';
   for (const [k, opt] of Object.entries(opts)) {
     if (!opt) continue;
     const reason = reasons[k];
-    opt.disabled    = !!reason;
+    opt.disabled    = fatal(reason);
     opt.textContent = reason ? `${opt.dataset.baseLabel} — ${reason}` : opt.dataset.baseLabel;
   }
   // Top-of-section banner — shown only when ffmpeg itself is missing,
@@ -1234,9 +1329,17 @@ async function installPiper() {
   log.textContent = '';
   if (status) status.textContent = 'Installing Piper…';
 
+  // Initial-voice picker: blank value falls back to the script's default
+  // (en_US-libritts_r-medium); non-blank values must match an entry in the
+  // server-side PIPER_VOICE_CATALOG or the route returns 400.
+  const firstVoice = document.getElementById('providerPiperFirstVoice')?.value || '';
   let resp;
   try {
-    resp = await fetch('/api/provider-config/install-piper', { method: 'POST' });
+    resp = await fetch('/api/provider-config/install-piper', {
+      method: 'POST',
+      headers: firstVoice ? { 'Content-Type': 'application/json' } : undefined,
+      body:    firstVoice ? JSON.stringify({ voice: firstVoice }) : undefined,
+    });
   } catch (e) {
     log.textContent += `\n[error] ${e.message}\n`;
     btn.disabled = false;
@@ -1291,7 +1394,7 @@ async function installPiper() {
     showToast?.('Piper installed');
     // Re-fetch config so piperAvailable + UI block stay in sync if the
     // user navigates away and comes back.
-    loadConfig?.();
+    loadProviderConfig();
   } else {
     btn.disabled = false;
     btn.textContent = 'Retry install';
@@ -1299,6 +1402,433 @@ async function installPiper() {
   }
 }
 window.installPiper = installPiper;
+
+// Render the Piper voice catalog under the Piper provider section. Called
+// after the service-availability probe reports piperAvailable=true (the
+// catalog only makes sense once the service is up). Cross-references
+// /api/tts/piper/catalog (downloadable) against /api/tts/piper/voices
+// (installed) and produces one row per catalog entry.
+async function renderPiperVoiceCatalog() {
+  const wrap = document.getElementById('providerPiperVoices');
+  const list = document.getElementById('providerPiperVoicesList');
+  if (!wrap || !list) return;
+  try {
+    const [catRes, instRes] = await Promise.all([
+      fetch('/api/tts/piper/catalog'),
+      fetch('/api/tts/piper/voices'),
+    ]);
+    const { voices: catalog } = await catRes.json();
+    const { voices: installed = [] } = await instRes.json();
+    const installedIds = new Set(installed.map(v => v.id));
+    wrap.style.display = '';
+    list.innerHTML = '';
+    for (const v of catalog) {
+      const isInstalled = installedIds.has(v.id);
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px';
+      const meta = document.createElement('div');
+      meta.style.cssText = 'flex:1;min-width:0';
+      const tags = [v.size_mb ? `${v.size_mb} MB` : null, v.multi_speaker ? 'multi-speaker' : null].filter(Boolean).join(' · ');
+      meta.innerHTML =
+        `<div style="font-weight:600;color:var(--text);font-size:12px">${v.label}</div>` +
+        `<div style="color:var(--muted);font-size:10px;font-family:ui-monospace,monospace">${v.id}${tags ? ' · ' + tags : ''}</div>`;
+      const action = document.createElement('div');
+      action.style.cssText = 'flex-shrink:0';
+      if (isInstalled) {
+        action.innerHTML = '<span style="color:var(--success,#4caf50);font-weight:600;font-size:11px">✓ Installed</span>';
+      } else {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.action = 'installPiperVoice';
+        btn.dataset.args = JSON.stringify([v.id]);
+        btn.style.cssText = 'background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600';
+        btn.textContent = 'Download';
+        action.appendChild(btn);
+      }
+      row.appendChild(meta);
+      row.appendChild(action);
+      list.appendChild(row);
+    }
+  } catch (e) {
+    list.innerHTML = `<div style="color:var(--danger,#e53935);font-size:11px;padding:6px">Failed to load voice catalog: ${e.message}</div>`;
+  }
+}
+window.renderPiperVoiceCatalog = renderPiperVoiceCatalog;
+
+// Populate the install-time voice picker (shown only when Piper isn't yet
+// installed). Idempotent — uses sel._populated to skip re-fetching once we
+// have a list. Defaults to libritts_r so the bare "Install Piper" flow
+// stays backward-compatible with pre-multivoice installs.
+async function populatePiperFirstVoiceDropdown() {
+  const sel = document.getElementById('providerPiperFirstVoice');
+  if (!sel || sel._populated) return;
+  try {
+    const r = await fetch('/api/tts/piper/catalog');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const { voices } = await r.json();
+    sel.innerHTML = voices.map(v =>
+      `<option value="${v.id}" ${v.id === 'en_US-libritts_r-medium' ? 'selected' : ''}>${v.label}${v.size_mb ? ` — ${v.size_mb} MB` : ''}</option>`
+    ).join('');
+    sel._populated = true;
+  } catch (e) {
+    // Hide the picker so the install button still works with default libritts_r.
+    const wrap = document.getElementById('providerPiperFirstVoiceWrap');
+    if (wrap) wrap.style.display = 'none';
+  }
+}
+window.populatePiperFirstVoiceDropdown = populatePiperFirstVoiceDropdown;
+
+// Speech-pace slider handlers. `input` fires every notch while dragging
+// (live label update, no network), `change` fires on release (one POST).
+// We could debounce input + POST, but Piper synth happens per-utterance so
+// users hear the new pace on the next TTS call regardless — release-only
+// save matches that mental model + saves a stack of cancelled requests.
+window.onPiperPaceInput = function (ev) {
+  const v = Number(ev.target.value);
+  const label = document.getElementById('providerPiperPaceValue');
+  if (label && Number.isFinite(v)) label.textContent = v.toFixed(2) + '×';
+};
+window.onPiperPaceChange = async function (ev) {
+  const v = Number(ev.target.value);
+  if (!Number.isFinite(v)) return;
+  try {
+    await fetch('/api/provider-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ piperLengthScale: v }),
+    });
+  } catch (e) {
+    showToast?.(`Failed to save speech pace: ${e.message}`);
+  }
+};
+
+// Download a single Piper voice. The multivoice server hot-picks up new
+// files on the next /voices request, so no service restart is needed —
+// once this resolves we re-render the catalog and the row flips to ✓ Installed.
+async function installPiperVoice(voiceId) {
+  const list = document.getElementById('providerPiperVoicesList');
+  const btn  = list?.querySelector(`button[data-args='${CSS.escape(JSON.stringify([voiceId]))}']`)
+            ?? list?.querySelector(`button[data-args*='${voiceId}']`);
+  const origText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = 'Downloading…'; btn.style.background = 'var(--muted)'; }
+  try {
+    const r = await fetch('/api/provider-config/install-piper-voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voice: voiceId }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.error || `HTTP ${r.status}`);
+    }
+    await renderPiperVoiceCatalog();
+  } catch (e) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+      btn.style.background = 'var(--danger,#e53935)';
+      btn.title = `Failed: ${e.message}`;
+    }
+  }
+}
+window.installPiperVoice = installPiperVoice;
+
+// Install-KittenTTS button handler. Identical SSE-streaming shape as installPiper
+// — different endpoint + UI element ids. Two installers stayed parallel rather
+// than abstracted into one helper because each handles its own status/log
+// elements; pulling them apart would obscure how the UI updates land.
+async function installKittentts() {
+  const btn = document.getElementById('providerKittenttsInstallBtn');
+  const log = document.getElementById('providerKittenttsLog');
+  const status = document.getElementById('providerKittenttsStatus');
+  if (!btn || !log) return;
+  btn.disabled = true;
+  btn.textContent = 'Installing…';
+  log.style.display = '';
+  log.textContent = '';
+  if (status) status.textContent = 'Installing KittenTTS…';
+
+  let resp;
+  try {
+    resp = await fetch('/api/provider-config/install-kittentts', { method: 'POST' });
+  } catch (e) {
+    log.textContent += `\n[error] ${e.message}\n`;
+    btn.disabled = false;
+    btn.textContent = 'Install KittenTTS (~50 MB)';
+    return;
+  }
+  if (!resp.ok || !resp.body) {
+    log.textContent += `\n[error] HTTP ${resp.status}\n`;
+    btn.disabled = false;
+    btn.textContent = 'Install KittenTTS (~50 MB)';
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let success = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let evName = 'message';
+      const dataLines = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event: ')) evName = line.slice(7).trim();
+        else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+      }
+      let data = {};
+      try { data = JSON.parse(dataLines.join('\n')); } catch {}
+      if (evName === 'log') {
+        log.textContent += data.line + '\n';
+        log.scrollTop = log.scrollHeight;
+      } else if (evName === 'done') {
+        success = !!data.ok;
+        log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`;
+      }
+    }
+  }
+
+  if (success) {
+    if (status) {
+      status.textContent = 'KittenTTS installed and running.';
+      status.style.color = 'var(--success, #4caf50)';
+    }
+    btn.style.display = 'none';
+    showToast?.('KittenTTS installed');
+    loadProviderConfig();
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Retry install';
+    if (status) status.textContent = 'KittenTTS install failed — see log below.';
+  }
+}
+window.installKittentts = installKittentts;
+
+// Shared uninstall handler for the local-TTS providers. Each provider has its
+// own status/log/button DOM ids but the flow is identical: confirm, POST,
+// show the captured output, refresh the panel. Unlike install (which streams
+// via SSE because it can take ~60 s on slow networks), uninstall runs in
+// well under a second so a single POST + JSON response is plenty.
+//
+// `which` is the provider key as it appears in the route + DOM ids:
+// 'piper' or 'kittentts'.
+async function _uninstallLocalTts(which, displayName, idPrefix) {
+  // Default ID convention: provider<CapitalizedSlug>{Uninstall,Log,Status}Btn.
+  // Hyphenated slugs (e.g. "faster-whisper") don't capitalize cleanly so
+  // callers can pass an explicit idPrefix that maps to the actual DOM ids.
+  const prefix = idPrefix || `provider${which[0].toUpperCase()}${which.slice(1)}`;
+  const btn    = document.getElementById(`${prefix}UninstallBtn`);
+  const log    = document.getElementById(`${prefix}Log`);
+  const status = document.getElementById(`${prefix}Status`);
+  if (!btn) return;
+  if (!confirm(`Uninstall ${displayName}? This stops the local service and removes the venv + model files. You can reinstall later from this same panel.`)) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Uninstalling…';
+  if (log) { log.style.display = ''; log.textContent = ''; }
+  if (status) status.textContent = `Uninstalling ${displayName}…`;
+
+  let resp;
+  try {
+    resp = await fetch(`/api/provider-config/uninstall-${which}`, { method: 'POST' });
+  } catch (e) {
+    if (log) log.textContent += `\n[error] ${e.message}\n`;
+    btn.disabled = false;
+    btn.textContent = 'Uninstall';
+    return;
+  }
+  let data = {};
+  try { data = await resp.json(); } catch {}
+  if (log) log.textContent = (data.output || '') + (data.error ? `\n[error] ${data.error}\n` : '');
+
+  if (resp.ok && data.ok) {
+    showToast?.(`${displayName} uninstalled`);
+    // loadProviderConfig flips the UI back into "install needed" state and
+    // re-runs updateTtsProviderAvailability so the dropdown label reverts.
+    loadProviderConfig();
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Retry uninstall';
+    if (status) status.textContent = `${displayName} uninstall failed — see log below.`;
+  }
+}
+
+function uninstallPiper()     { return _uninstallLocalTts('piper',     'Piper'); }
+function uninstallKittentts() { return _uninstallLocalTts('kittentts', 'KittenTTS'); }
+window.uninstallPiper     = uninstallPiper;
+window.uninstallKittentts = uninstallKittentts;
+
+// Install-Faster-Whisper handler. Same SSE-stream shape as installPiper; the
+// extra wrinkle is the CPU/GPU profile arg from data-args and auto-pointing
+// OE's STT config at the local server when the install succeeds (no API key
+// required — local server ignores the Authorization header but Express's
+// /api/stt insists on one being non-empty, so we send "local").
+async function installFasterWhisper(profile /* 'cpu' | 'cuda' */) {
+  const btn    = document.getElementById('providerFwInstallBtn');
+  const log    = document.getElementById('providerFwLog');
+  const status = document.getElementById('providerFwStatus');
+  if (!log) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Installing…';
+    btn.style.cursor = 'not-allowed';
+    btn.style.background = 'var(--muted)';
+  }
+  log.style.display = '';
+  log.textContent = '';
+  if (status) status.textContent = `Installing Faster-Whisper (${profile})…`;
+
+  let resp;
+  try {
+    resp = await fetch('/api/provider-config/install-faster-whisper', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile }),
+    });
+  } catch (e) {
+    log.textContent += `\n[error] ${e.message}\n`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Save & install'; btn.style.background = 'var(--accent)'; btn.style.cursor = 'pointer'; }
+    return;
+  }
+  if (!resp.ok || !resp.body) {
+    log.textContent += `\n[error] HTTP ${resp.status}\n`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Save & install'; btn.style.background = 'var(--accent)'; btn.style.cursor = 'pointer'; }
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let success = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let evName = 'message';
+      const dataLines = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event: ')) evName = line.slice(7).trim();
+        else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+      }
+      let data = {};
+      try { data = JSON.parse(dataLines.join('\n')); } catch {}
+      if (evName === 'log') {
+        log.textContent += data.line + '\n';
+        log.scrollTop = log.scrollHeight;
+      } else if (evName === 'done') {
+        success = !!data.ok;
+        log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`;
+      }
+    }
+  }
+
+  if (success) {
+    // Flip OE into Local STT mode. We persist the mode separately from the
+    // remote sttApiUrl/Key/Model so the user's saved API credentials survive
+    // a swap to Local (and back). /api/stt picks based on cfg.sttMode.
+    try {
+      await fetch('/api/provider-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sttMode: 'local' }),
+      });
+    } catch (e) {
+      console.warn('[faster-whisper] sttMode update failed:', e);
+    }
+    if (status) {
+      status.textContent = `Faster-Whisper installed (${profile}). STT is now routing locally.`;
+      status.style.color = 'var(--success, #4caf50)';
+    }
+    showToast?.(`Faster-Whisper installed (${profile})`);
+    loadProviderConfig();
+  } else {
+    if (status) status.textContent = `Faster-Whisper install failed — see log below.`;
+    const pickBtn = document.getElementById('providerFwInstallBtn');
+    if (pickBtn) {
+      pickBtn.disabled = false;
+      pickBtn.textContent = 'Save & install';
+      pickBtn.style.background = 'var(--accent)';
+      pickBtn.style.cursor = 'pointer';
+    }
+  }
+}
+window.installFasterWhisper = installFasterWhisper;
+
+function uninstallFasterWhisper() { return _uninstallLocalTts('faster-whisper', 'Faster-Whisper', 'providerFw'); }
+window.uninstallFasterWhisper = uninstallFasterWhisper;
+
+// STT mode dropdown handler. Toggling between Remote API and Local
+// Faster-Whisper persists the choice immediately so /api/stt routes
+// correctly without waiting for a Save click. Local mode only takes effect
+// for STT when the service is actually running — the route falls back to
+// returning errors if cfg.sttMode='local' but the service is down.
+window.updateSttModeFields = async function () {
+  const mode = document.getElementById('providerSttMode')?.value || 'remote';
+  const remoteFields = document.getElementById('providerSttFields_remote');
+  const localFields  = document.getElementById('providerSttFields_local');
+  if (remoteFields) remoteFields.style.display = mode === 'remote' ? '' : 'none';
+  if (localFields)  localFields.style.display  = mode === 'local'  ? '' : 'none';
+  try {
+    await fetch('/api/provider-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sttMode: mode }),
+    });
+  } catch (e) {
+    showToast?.(`Failed to save STT mode: ${e.message}`);
+  }
+};
+
+// Profile dropdown inside the Local section. Toggles the matching info
+// card, relabels the install button based on the current install state
+// (Install / Switch / Already running), and disables it when there's
+// nothing to do.
+window.onFwProfileChange = function () {
+  const profile = document.getElementById('providerFwProfile')?.value || '';
+  const cpuInfo = document.getElementById('providerFwInfoCpu');
+  const gpuInfo = document.getElementById('providerFwInfoGpu');
+  const btn     = document.getElementById('providerFwInstallBtn');
+  if (cpuInfo) cpuInfo.style.display = profile === 'cpu'  ? '' : 'none';
+  if (gpuInfo) gpuInfo.style.display = profile === 'cuda' ? '' : 'none';
+  if (!btn) return;
+  const installed = window._fwInstalledProfile || null; // set by loadProviderConfig
+  if (profile && installed && profile === installed) {
+    btn.textContent = 'Already running';
+    btn.disabled = true;
+    btn.style.background = 'var(--muted)';
+    btn.style.cursor = 'not-allowed';
+  } else if (profile === 'cpu' || profile === 'cuda') {
+    btn.textContent = installed
+      ? `Switch to ${profile === 'cpu' ? 'CPU' : 'GPU'}`
+      : 'Save & install';
+    btn.disabled = false;
+    btn.style.background = 'var(--accent)';
+    btn.style.cursor = 'pointer';
+  } else {
+    btn.textContent = 'Save & install';
+    btn.disabled = true;
+    btn.style.background = 'var(--muted)';
+    btn.style.cursor = 'not-allowed';
+  }
+};
+
+// Save&install handler — reads profile dropdown and hands off to the
+// existing installFasterWhisper (which streams SSE log into providerFwLog).
+window.installFwFromPicker = function () {
+  const profile = document.getElementById('providerFwProfile')?.value;
+  if (profile !== 'cpu' && profile !== 'cuda') return;
+  return window.installFasterWhisper(profile);
+};
 
 async function saveProviderTts() {
   const provider = $('providerTtsProvider')?.value || 'openai';
