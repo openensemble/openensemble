@@ -42,6 +42,9 @@ let _ttsProvider = 'openai';
 let _ttsAvailable = null;
 // ElevenLabs voice catalog — populated lazily when ttsProvider='elevenlabs'.
 let _elevenlabsVoices = [];
+// KittenTTS preset-voice list (8 baked-in names) — populated from /api/tts/info
+// when ttsProvider='kittentts'. Empty otherwise.
+let _kittenttsVoices = [];
 // Voice routines (trigger phrase → action list) and the ambient sound library
 // they draw from. Both per-user; the Routines panel below the voice-config
 // section in the drawer is the sole UI for both. Server-side persistence in
@@ -177,8 +180,10 @@ async function loadDevices() {
       const info = await rTts.json();
       _ttsProvider = info.provider || 'openai';
       _ttsAvailable = info.available || null;
+      _kittenttsVoices = Array.isArray(info.voices) ? info.voices : [];
     } else {
       _ttsAvailable = null;
+      _kittenttsVoices = [];
     }
     if (rRefs.ok) {
       const { refs } = await rRefs.json();
@@ -285,9 +290,11 @@ function renderTtsAvailabilityBanner() {
     ? 'ffmpeg is not installed on this server. All TTS providers need it. Install with: <code>sudo apt install ffmpeg</code> (or your distro equivalent), then restart OE.'
     : _ttsProvider === 'piper'
       ? 'The local Piper service is not running. Reinstall or restart it from Settings → Providers → Text-to-Speech.'
-      : _ttsProvider === 'elevenlabs'
-        ? 'The ElevenLabs API key is missing. Set it in Settings → Providers → Text-to-Speech.'
-        : 'The OpenAI-compatible TTS provider is not configured. Set the URL and API key in Settings → Providers → Text-to-Speech.';
+      : _ttsProvider === 'kittentts'
+        ? 'The local KittenTTS service is not running. Install or restart it from Settings → Providers → Text-to-Speech.'
+        : _ttsProvider === 'elevenlabs'
+          ? 'The ElevenLabs API key is missing. Set it in Settings → Providers → Text-to-Speech.'
+          : 'The OpenAI-compatible TTS provider is not configured. Set the URL and API key in Settings → Providers → Text-to-Speech.';
   return `
     <div style="padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--warning,#d97706);color:var(--warning,#d97706);font-size:12px;line-height:1.5">
       <strong>Voice replies disabled:</strong> ${reason}
@@ -826,6 +833,13 @@ function renderVoiceConfigPanel(roster, deviceCount) {
           .map(r => `<option value="${escHtml(r.id)}" ${r.id === curVoice ? 'selected' : ''}>${escHtml(r.label)}</option>`))
         .join('');
       voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${refOpts}</select>`;
+    } else if (_ttsProvider === 'kittentts') {
+      // KittenTTS exposes 8 preset voices (expr-voice-{2,3,4,5}-{m,f}). No
+      // cloning, no numeric speaker ids — just a fixed dropdown.
+      const ktOpts = ['<option value="">(device default)</option>']
+        .concat(_kittenttsVoices.map(v => `<option value="${escHtml(v)}" ${v === curVoice ? 'selected' : ''}>${escHtml(v)}</option>`))
+        .join('');
+      voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${ktOpts}</select>`;
     } else if (_ttsProvider === 'piper') {
       // Number input + a tiny preview button. Piper has 904 speakers and
       // there's no useful label per ID, so users need to audition before
@@ -850,6 +864,30 @@ function renderVoiceConfigPanel(roster, deviceCount) {
     const wwOpts = ['<option value="">(no wake word — pick one)</option>']
       .concat(_wakewordLibrary.map(w => `<option value="${escHtml(w.id)}" ${w.id === curWw ? 'selected' : ''}>${escHtml(w.wake_word || w.id)}</option>`))
       .join('');
+    const wwEntry = curWw ? _wakewordLibrary.find(w => w.id === curWw) : null;
+    const defaultCutoff = wwEntry?.probability_cutoff;
+    const effectiveCutoff = (typeof a?.probability_cutoff === 'number')
+      ? a.probability_cutoff
+      : defaultCutoff;
+    const probInput = curWw && typeof effectiveCutoff === 'number'
+      ? `
+            <label style="font-size:11px;color:var(--muted)">Cutoff</label>
+            <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+              <div style="display:flex;gap:6px;align-items:center">
+                <input type="number" class="cdraw-input" min="0.5" max="0.99" step="0.01"
+                  value="${effectiveCutoff}"
+                  data-change-action="setSlotProbability"
+                  data-change-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
+                  style="padding:4px 6px;font-size:12px;width:80px"
+                  title="Wake-word probability cutoff (0.5–0.99). Lower = fires more easily.">
+                <button class="cdraw-btn" data-action="pushSlotProbability"
+                  data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
+                  style="font-size:11px;padding:3px 8px"
+                  title="Push this cutoff to the device's SPIFFS">Push</button>
+              </div>
+              <span style="font-size:10px;color:var(--muted);line-height:1.3">Lowering can cause more false positives.</span>
+            </div>`
+      : '';
     return `
         <div style="background:var(--bg2);border-radius:6px;padding:8px 10px">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
@@ -862,6 +900,7 @@ function renderVoiceConfigPanel(roster, deviceCount) {
             ${voiceControl}
             <label style="font-size:11px;color:var(--muted)">Wake</label>
             <select class="cdraw-input" data-action="setSlotWakeword" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0" title="Wake word that fires this slot — pushed OTA to every device">${wwOpts}</select>
+            ${probInput}
           </div>
         </div>
     `;
@@ -1150,7 +1189,29 @@ window.setSlotWakeword = function (slot, ev) {
   // Re-selecting the same option still fires `change` — skip the PUT (and
   // its OTA push) to avoid pointless flash writes when nothing changed.
   if ((existing.wakewordId ?? null) === next) return;
-  _voiceConfig.slot_assignments[slot] = { ...existing, wakewordId: next };
+  // Switching wake words drops any cutoff override — the new word has its
+  // own manifest default that the UI re-displays automatically.
+  _voiceConfig.slot_assignments[slot] = { ...existing, wakewordId: next, probability_cutoff: null };
+  saveVoiceConfig();
+};
+
+// Cutoff input is in-memory only — typing into it shouldn't fire an OTA on
+// every keystroke. The user clicks "Push" to commit. Re-renders the slot
+// card immediately so a subsequent wake-word change sees the pending value.
+window.setSlotProbability = function (slot, ev) {
+  const existing = _voiceConfig.slot_assignments?.[slot] ?? _voiceConfig.slot_assignments?.[String(slot)];
+  if (!existing?.ownerUserId) return;
+  const raw = parseFloat(ev.target.value);
+  const next = Number.isFinite(raw) && raw >= 0.5 && raw <= 0.99
+    ? Math.round(raw * 100) / 100
+    : null;
+  _voiceConfig.slot_assignments[slot] = { ...existing, probability_cutoff: next };
+};
+
+// Push the slot's current cutoff to the device. saveVoiceConfig is the same
+// path used by every other slot change — it PUTs the whole config and the
+// server fans out the OTA push to every paired device.
+window.pushSlotProbability = function (slot) {
   saveVoiceConfig();
 };
 

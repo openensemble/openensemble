@@ -233,7 +233,11 @@ export function listRoles(userId = null) {
       // Phase-10: user can disable any non-always_on skill. The override is
       // read at runtime from disk — manifests stay immutable in the cache.
       if (userId && isSkillDisabled(userId, wrap.manifest.id, !!wrap.manifest.always_on)) continue;
-      out.push(wrap.manifest);
+      // userScope: null = global skill, <userId> = user-scoped custom skill.
+      // Surfaced so admin UIs can filter out user-scoped skills when rendering
+      // cross-user permission grids — granting another user access to a
+      // user-scoped skill is a no-op since the registry won't yield it to them.
+      out.push({ ...wrap.manifest, userScope: wrap.userId });
     }
   }
   return out;

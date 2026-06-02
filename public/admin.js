@@ -23,8 +23,13 @@ async function loadUserManagement() {
       const isOwner = u.role === 'owner';
       // Roles + Skills checkboxes split — checked = granted access; null = unrestricted (all checked)
       const allowedSkills = u.allowedSkills ?? null;
-      const roleSkills  = skills.filter(s => s.service);
-      const toolSkills  = skills.filter(s => !s.service && s.category !== 'delegate');
+      // Filter to globals only. User-scoped custom skills (userScope = creator's id)
+      // are private to their owner — the role registry won't yield them to any
+      // other user, so showing them in another user's row would just be a
+      // misleading no-op checkbox.
+      const grantable = skills.filter(s => s.userScope == null);
+      const roleSkills  = grantable.filter(s => s.service);
+      const toolSkills  = grantable.filter(s => !s.service && s.category !== 'delegate');
       function skillCheck(s) {
         const checked = allowedSkills == null || allowedSkills.includes(s.id);
         return `<label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text);cursor:pointer">

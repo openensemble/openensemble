@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.29-pause-hybrid",
+  "version": "0.2.30-wake-score",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

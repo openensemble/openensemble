@@ -378,6 +378,18 @@ function onConnection(ws, req) {
       const textPreview = typeof msg.text === 'string' ? msg.text.slice(0, 50) : '(no text)';
       console.log('[chat] received, agent:', msg.agent, 'user:', ws._userId, 'text:', textPreview);
       const wakeSlot = Number.isInteger(msg.wake_slot) ? msg.wake_slot : null;
+      // wake_avg_prob is uint8 (0..255), 255 = ~1.0. Logged so app.log can be
+      // grep'd for marginal-vs-confident wake fires when tuning per-slot cutoffs.
+      if (ws._deviceId && wakeSlot !== null && Number.isInteger(msg.wake_avg_prob)) {
+        log.info('voice', 'wake fired', {
+          userId: ws._userId,
+          deviceId: ws._deviceId,
+          slot: wakeSlot,
+          avgProb255: msg.wake_avg_prob,
+          avgProb: Math.round((msg.wake_avg_prob / 255) * 1000) / 1000,
+          textLen: typeof msg.text === 'string' ? msg.text.length : 0,
+        });
+      }
       // Resolve the effective user upfront so onEvent can broadcast chat
       // events to that user's WS connections (their browser tabs). Without
       // this, a wake-slot bound to user B routes the chat through B's
