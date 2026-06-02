@@ -918,6 +918,7 @@ function renderVoiceConfigPanel(roster, deviceCount) {
     const effectiveCutoff = (typeof a?.probability_cutoff === 'number')
       ? a.probability_cutoff
       : defaultCutoff;
+    const avgCutoffVal = typeof a?.avg_prob_cutoff === 'number' ? a.avg_prob_cutoff : '';
     const probInput = curWw && typeof effectiveCutoff === 'number'
       ? `
             <label style="font-size:11px;color:var(--muted)">Cutoff</label>
@@ -935,6 +936,17 @@ function renderVoiceConfigPanel(roster, deviceCount) {
                   title="Push this cutoff to the device's SPIFFS">Push</button>
               </div>
               <span style="font-size:10px;color:var(--muted);line-height:1.3">Lowering can cause more false positives.</span>
+            </div>
+            <label style="font-size:11px;color:var(--muted)">Avg cutoff</label>
+            <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+              <input type="number" class="cdraw-input" min="0.5" max="0.99" step="0.01"
+                value="${avgCutoffVal}"
+                placeholder="off"
+                data-change-action="setSlotAvgProbability"
+                data-change-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
+                style="padding:4px 6px;font-size:12px;width:80px"
+                title="Server-side gate on the firmware's rolling-window avg probability. Filters cross-fires that spike one frame then dip (e.g. TTS playback). Leave blank to disable.">
+              <span style="font-size:10px;color:var(--muted);line-height:1.3">Server-only — drops marginal wakes whose avg dips below this.</span>
             </div>`
       : '';
     return `
@@ -1288,6 +1300,24 @@ window.setSlotProbability = function (slot, ev) {
 // path used by every other slot change — it PUTs the whole config and the
 // server fans out the OTA push to every paired device.
 window.pushSlotProbability = function (slot) {
+  saveVoiceConfig();
+};
+
+// Avg-prob gate is server-only — no OTA fan-out needed, so save on every
+// change instead of behind a Push button. Empty input clears the gate.
+window.setSlotAvgProbability = function (slot, ev) {
+  const existing = _voiceConfig.slot_assignments?.[slot] ?? _voiceConfig.slot_assignments?.[String(slot)];
+  if (!existing?.ownerUserId) return;
+  const raw = ev.target.value.trim();
+  let next = null;
+  if (raw !== '') {
+    const f = parseFloat(raw);
+    if (Number.isFinite(f) && f >= 0.5 && f <= 0.99) {
+      next = Math.round(f * 100) / 100;
+    }
+  }
+  if ((existing.avg_prob_cutoff ?? null) === next) return;
+  _voiceConfig.slot_assignments[slot] = { ...existing, avg_prob_cutoff: next };
   saveVoiceConfig();
 };
 

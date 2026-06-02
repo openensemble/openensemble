@@ -469,13 +469,13 @@ export async function tryTranscribeAttachmentFastpath(ctx) {
   return { handled: true };
 }
 
-export async function tryTriviaFastpath({ userText, userId, agentId, onEvent }) {
+export async function tryTriviaFastpath({ source, userText, userId, agentId, onEvent }) {
   if (!userText) return null;
   try {
     const { classifyTriviaIntent, executeTriviaIntent } = await import('../lib/trivia-fastpath.mjs');
     const triviaIntent = classifyTriviaIntent(userText);
     if (!triviaIntent) return null;
-    const result = executeTriviaIntent(triviaIntent, userId);
+    const result = executeTriviaIntent(triviaIntent, userId, { voice: source === 'voice-device' });
     if (!result?.text) return null;
     appendToSession(`${userId}_${agentId}`,
       { role: 'user', content: userText, ts: Date.now() },

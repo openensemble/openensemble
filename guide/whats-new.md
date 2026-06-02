@@ -8,6 +8,12 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-06-02
 
+**Voice devices: spoken time/date, false-fire gating, and clearer auth errors**
+A handful of voice-device polish items shipped together:
+- "What time is it?" / "What day is it?" now answers in natural spoken form on voice devices ("two fifteen P.M.", "Tuesday, June second") instead of digits-and-colons. Browser and Telegram chats keep the existing compact format. Also fixes a regression where Faster-Whisper's trailing period was breaking the trivia fast-path — any phrasing that worked before still works, plus the punctuated variants STT produces.
+- New **Avg cutoff** field on each wake-word slot in Settings → Voice devices. It's a server-side gate on the firmware's rolling-window average probability — useful for filtering brief cross-fires (e.g. a different slot's wake firing on a TV or on your own TTS playback). Leave blank to disable, or set 0.85–0.95 to drop marginal fires while keeping confident ones. Set independently from the existing peak cutoff.
+- If your coordinator's LLM provider rejects its credentials mid-turn (session revoked elsewhere, refresh token expired, etc.), the device now speaks "Your coordinator's provider needs to be reauthenticated. Please reconnect it in Settings." instead of going silent. OpenAI/ChatGPT OAuth specifically tries one auto-refresh first — if upstream truly revoked the session, you get the spoken reconnect prompt rather than a hung chat.
+
 **Local Faster-Whisper STT — keep transcription private and offline**
 Speech-to-text now has a local option alongside the existing remote-API one. Settings → Providers → Speech-to-Text has a top-level **Provider** dropdown: pick **Remote API** for OpenAI/Groq/etc. or **Local — Faster-Whisper large-v3-turbo** to run on this server. Local mode offers two profiles you choose at install:
 - **CPU profile** — large-v3-turbo int8, ~810 MB on disk, ~2 GB RAM at runtime. Works on any system without a GPU. Speed varies by CPU: modern desktops run ~2-3× real-time; older laptops/SBCs land near real-time.

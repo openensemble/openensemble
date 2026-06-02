@@ -10,7 +10,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { ensureFreshToken } from '../../lib/openai-codex-auth.mjs';
+import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth.mjs';
 import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -172,9 +172,57 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     }
     if (!res.ok) {
       const errText = await res.text();
-      console.error(`[openai-oauth] error ${res.status}: ${errText.slice(0, 500)}`);
-      yield { type: 'error', message: `OpenAI Codex error ${res.status}: ${errText}` };
-      return;
+      // 401 token_invalidated: ChatGPT revoked our session server-side while
+      // our local expires_at says the token is still valid. ensureFreshToken
+      // skipped the refresh because of that, so the request used a dead token.
+      // Force a refresh and retry once — refresh_token is usually still good
+      // unless the user did a full logout, in which case we surface a clear
+      // "please reconnect" instead of looping.
+      if (res.status === 401 && /token_invalidated/i.test(errText)) {
+        // Plain-English message for the user. Used in two spots below: when
+        // refresh itself fails, and when the retry after a successful refresh
+        // still returns 401. Both cases mean the session is unrecoverable
+        // server-side and the user must reconnect their provider. Kept
+        // provider-agnostic because this gets spoken on voice devices where
+        // the user just needs to know what action to take, not the specifics.
+        const REAUTH_MSG = "Your coordinator's provider needs to be reauthenticated. Please reconnect it in Settings.";
+        console.warn(`[openai-oauth] 401 token_invalidated — forcing refresh and retrying once`);
+        try {
+          auth = await forceRefreshToken(userId);
+        } catch (e) {
+          console.warn(`[openai-oauth] refresh_token also invalid for user=${userId}: ${e.message}`);
+          yield { type: 'error', message: REAUTH_MSG };
+          return;
+        }
+        headers.Authorization = `Bearer ${auth.access_token}`;
+        if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
+        try {
+          res = await postWithRetry(`${OPENAI_OAUTH_BASE}/responses`, {
+            method: 'POST', signal, headers, body: JSON.stringify(body),
+          });
+        } catch (e) {
+          if (e?.name === 'AbortError') throw e;
+          yield { type: 'error', message: `OpenAI Codex: ${e.message}` };
+          return;
+        }
+        if (!res.ok) {
+          const retryErr = await res.text();
+          console.error(`[openai-oauth] 401 retry still failed ${res.status}: ${retryErr.slice(0, 500)}`);
+          // If the upstream rejected the brand-new access token too, that's
+          // the same "session truly revoked" signal — show the same reconnect
+          // prompt rather than a raw error blob.
+          if (res.status === 401) {
+            yield { type: 'error', message: REAUTH_MSG };
+          } else {
+            yield { type: 'error', message: `OpenAI Codex error ${res.status} after token refresh: ${retryErr}` };
+          }
+          return;
+        }
+      } else {
+        console.error(`[openai-oauth] error ${res.status}: ${errText.slice(0, 500)}`);
+        yield { type: 'error', message: `OpenAI Codex error ${res.status}: ${errText}` };
+        return;
+      }
     }
 
     let textContent  = '';

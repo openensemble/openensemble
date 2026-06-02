@@ -396,9 +396,33 @@ function onConnection(ws, req) {
       // account server-side but the events still go only to A's WSes,
       // leaving B's UI silently empty.
       let effectiveUserId = ws._userId;
+      let slotAssignment = null;
       if (ws._deviceId && wakeSlot !== null) {
-        const a = getSlotAssignment(ws._userId, ws._deviceId, wakeSlot);
-        if (a) effectiveUserId = a.ownerUserId;
+        slotAssignment = getSlotAssignment(ws._userId, ws._deviceId, wakeSlot);
+        if (slotAssignment) effectiveUserId = slotAssignment.ownerUserId;
+      }
+      // Avg-prob gate: drops wakes whose sliding-window avg probability
+      // falls below the slot's `avg_prob_cutoff`. Firmware fires on PEAK
+      // (its own `probability_cutoff`), so a single 0.96 frame followed by
+      // lower frames can pass firmware but still be a brief cross-fire
+      // (e.g. TTS playback). The avg metric catches those.
+      if (slotAssignment
+          && typeof slotAssignment.avg_prob_cutoff === 'number'
+          && Number.isInteger(msg.wake_avg_prob)) {
+        const avg = msg.wake_avg_prob / 255;
+        if (avg < slotAssignment.avg_prob_cutoff) {
+          log.info('voice', 'wake gated (avg below cutoff)', {
+            userId: ws._userId,
+            deviceId: ws._deviceId,
+            slot: wakeSlot,
+            avgProb: Math.round(avg * 1000) / 1000,
+            avgCutoff: slotAssignment.avg_prob_cutoff,
+          });
+          // Send a done event back so the device unblocks its chat UI even
+          // though no LLM turn ran. agent name isn't critical — use 'system'.
+          try { ws.send(JSON.stringify({ type: 'done', agent: 'system' })); } catch {}
+          return;
+        }
       }
       await handleChatMessage({
         userId:     ws._userId,
@@ -422,8 +446,24 @@ function onConnection(ws, req) {
         // When effectiveUserId == ws._userId (single-user case), step (2)
         // delivers to admin's other browser tabs the same way as before.
         onEvent: (e) => {
+          // Voice-device fan-out: the firmware only TTS's `token` events
+          // (oe_ws.c emits OE_WS_EVT_CHAT_TOKEN → speak). Plain `error`
+          // events arrive but are silently dropped, so a turn that errors
+          // out (e.g. ChatGPT 401 token_invalidated → "please reconnect")
+          // leaves the device blinking with no audible feedback. Convert
+          // error → token + done for the originating voice device so the
+          // message is actually spoken. Other tabs/clients still see the
+          // raw `error` so the UI can render it appropriately.
+          const isVoiceOrigin = !!ws._deviceId;
           if (ws.readyState === ws.OPEN) {
-            try { ws.send(JSON.stringify(e)); } catch {}
+            try {
+              if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
+                ws.send(JSON.stringify({ type: 'token', text: e.message, agent: e.agent ?? 'system' }));
+                ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system' }));
+              } else {
+                ws.send(JSON.stringify(e));
+              }
+            } catch {}
           }
           for (const client of _wss.clients) {
             if (client === ws) continue;
