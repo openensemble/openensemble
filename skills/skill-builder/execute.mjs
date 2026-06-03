@@ -522,6 +522,9 @@ async function handleDelete(args, userId) {
     } catch (e) { console.warn('[skill-builder] intent embedding refresh failed:', e.message); }
   }
 
+  // Alias cascade-delete: handled by skill-alias-framework via the manifest's
+  // cascade_on_tools entry on skill_delete. No explicit call needed here.
+
   return `Skill "${manifest.name}" (${skillId}) deleted and unloaded.`;
 }
 
@@ -570,3 +573,27 @@ export async function executeSkillTool(name, args, userId, agentId) {
 }
 
 export default executeSkillTool;
+
+/**
+ * Catalog source for the alias framework. Returns the list of skills this
+ * user can reference, with id + name + description for the resolver.
+ * Filters mirror the visibility rules in roles.listAllRoles + custom-skill
+ * scoping (only the creator sees their own custom skills).
+ */
+export async function listAliasEntries(userId) {
+  try {
+    const { listAllRoles } = await import('../../roles.mjs');
+    const all = listAllRoles();
+    return all
+      .filter(m => !m.custom || m.createdBy === userId)
+      .map(m => ({
+        id: m.id,
+        name: m.name || m.id,
+        description: m.description || '',
+        custom: !!m.custom,
+      }));
+  } catch (e) {
+    console.warn('[skill-builder] listAliasEntries failed:', e.message);
+    return [];
+  }
+}

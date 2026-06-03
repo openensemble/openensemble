@@ -7,6 +7,25 @@
   "service": true,
   "always_on": false,
   "enabled_by_default": true,
+  "alias_catalog": {
+    "entity_kind":   "node",
+    "noun_singular": "node",
+    "noun_plural":   "nodes",
+    "extra_phrase_patterns": [
+      "\\b([A-Za-z][A-Za-z0-9_-]{1,30})\\.(?:local|lan|home|internal)\\b",
+      "\\bthe\\s+([A-Za-z][A-Za-z0-9_-]{1,30}?)\\s+(?:server|host|machine|box)\\b",
+      "\\b([A-Za-z][A-Za-z0-9_-]{1,30}?)\\s+(?:server|host|machine|box)\\b",
+      "\\b(?:on|to|at|from)\\s+([A-Za-z][A-Za-z0-9_-]{2,30})\\b"
+    ],
+    "catalog_source": {
+      "type": "exported_function",
+      "function": "listAliasEntries"
+    },
+    "id_field":     "nodeId",
+    "name_fields":  ["hostname", "nodeId"],
+    "id_arg_names": ["node_id", "nodeId"],
+    "cascade_on_tools": []
+  },
   "intent_patterns": [
     "^(?:ssh|connect)\\s+(?:to|into)\\s+(?:my\\s+)?\\S+\\s+(?:node|server|host|machine|box)\\b",
     "^(?:check|monitor)\\s+(?:the\\s+)?(?:status\\s+of\\s+)?(?:my\\s+)?(?:nodes?|servers?|machines?)\\b",

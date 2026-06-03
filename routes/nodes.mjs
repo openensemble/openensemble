@@ -157,13 +157,21 @@ export async function handle(req, res) {
 
     // Step 2: give the agent a moment to spawn the detached self-destruct
     // process before we close its WS in removeNode().
-    setTimeout(() => {
+    setTimeout(async () => {
       const result = removeNode(nodeId, userId);
       if (!result.removed) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: result.reason || 'not found' }));
         return;
       }
+      // Cascade-delete the user's node aliases. routes/* deletions don't go
+      // through tool dispatch, so the framework's manifest cascade_on_tools
+      // doesn't fire here — call the public helper directly instead.
+      try {
+        const { deleteAliasesByEntityId } = await import('../lib/skill-alias-framework.mjs');
+        const removed = deleteAliasesByEntityId(userId, 'node', nodeId);
+        if (removed > 0) console.log(`[nodes] dropped ${removed} alias(es) for "${nodeId}"`);
+      } catch (e) { console.warn('[nodes] alias cascade-delete failed:', e.message); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ removed: true, uninstallRequested: true }));
     }, 1000);

@@ -6,6 +6,26 @@
   "category": "email",
   "service": true,
   "enabled_by_default": false,
+  "alias_catalog": {
+    "entity_kind":   "email_account",
+    "noun_singular": "account",
+    "noun_plural":   "accounts",
+    "extra_phrase_patterns": [
+      "\\bmy\\s+([A-Za-z][A-Za-z0-9 _-]{1,30}?)\\s+(?:email|emails|mail|account|acct|inbox)\\b",
+      "\\bthe\\s+([A-Za-z][A-Za-z0-9 _-]{1,30}?)\\s+(?:email|account|inbox)\\b",
+      "\\bfrom\\s+(?:my\\s+|the\\s+)?([A-Za-z][A-Za-z0-9 _-]{1,30}?)\\s+(?:email|account)\\b",
+      "\\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})\\b"
+    ],
+    "catalog_source": {
+      "type":      "config_file",
+      "path":      "users/{userId}/email-accounts.json",
+      "format":    "array"
+    },
+    "id_field":     "id",
+    "name_fields":  ["label", "username", "smtpUsername"],
+    "id_arg_names": ["account_id", "accountId"],
+    "cascade_on_tools": []
+  },
   "intent_patterns": [
     "^(?:check|read|show|list|summarize|recap|triage|give\\s+me)(?:\\s+\\S+){0,4}\\s+(?:emails?|inbox|messages|mail)\\b",
     "^(?:any\\s+|got\\s+any\\s+)?new\\s+(?:emails?|messages|mail)\\b",

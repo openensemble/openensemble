@@ -78,6 +78,8 @@ ensure_build_tools() {
   command -v pdftoppm &>/dev/null || need+=(poppler-utils)
   command -v rg       &>/dev/null || need+=(ripgrep)
   command -v fuser    &>/dev/null || need+=(psmisc)
+  command -v ffmpeg   &>/dev/null || need+=(ffmpeg)
+  command -v openssl  &>/dev/null || need+=(openssl)
   [[ ${#need[@]} -eq 0 ]] && return 0
 
   warn "Missing build/runtime tools: ${need[*]}"

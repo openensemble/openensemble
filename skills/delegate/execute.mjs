@@ -77,6 +77,15 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // so that path keeps its persistent ${agent_id}.jsonl.
   const delegId = `ephemeral_deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${agent_id}`;
   const scopedAgent = { ...agent, id: delegId, ephemeral: true };
+
+  // Seed the ephemeral session's tool-call cache + task embedding so the
+  // dispatcher in roles.mjs:executeToolStreaming can short-circuit repeat
+  // reads and embed-rank list-style results against this exact task.
+  // No-op if delegId pattern doesn't match (guards inside).
+  try {
+    const { initSession } = await import('../../lib/ephemeral-tool-cache.mjs');
+    initSession(delegId, task);
+  } catch (_) { /* best-effort; absent module = no caching, no breakage */ }
   const agentName   = agent.name  ?? agent_id;
   const agentEmoji  = agent.emoji ?? '🤖';
 

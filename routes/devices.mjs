@@ -116,6 +116,20 @@ export function dropAmbientForDevice(deviceId) {
   }
 }
 
+/**
+ * Inspect the per-device ambient state. Returns the active marker + meta
+ * (userId/file/loop) or null. Used by chat-dispatch to detect "wake fired
+ * mid-ambient, never restarted" and resend play_ambient so the device picks
+ * the stream back up.
+ */
+export function getAmbientForDevice(deviceId) {
+  const marker = _ambientByDevice.get(deviceId);
+  if (!marker) return null;
+  const meta = _ambientStreamCache.get(marker);
+  if (!meta) return null;
+  return { marker, meta };
+}
+
 // Slot wake-word push moved to routes/voice-config.mjs as of 2026-05-13:
 // slot routing is now per-user (voice-config), not per-device. The save
 // path there pushes wake words to every device paired to the user.

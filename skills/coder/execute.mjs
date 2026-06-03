@@ -363,6 +363,8 @@ async function deleteProject(name, userId) {
   // Clear active project if it was the one deleted
   if (_activeProject.get(userId) === name) _activeProject.delete(userId);
   appendWorkspaceLog(`Deleted project "${name}"`, userId);
+  // Alias cascade-delete: handled by skill-alias-framework via manifest's
+  // cascade_on_tools entry on coder_delete_project. No explicit call here.
   return `Deleted project "${name}" and all its contents.`;
 }
 
@@ -835,3 +837,20 @@ export async function* executeSkillTool(name, args, userId = 'default') {
 }
 
 export default executeSkillTool;
+
+/**
+ * Catalog source for the alias framework. Lists projects under the user's
+ * workspace as `{name}` entries (project name is both id and display).
+ */
+export async function listAliasEntries(userId) {
+  try {
+    const ws = getWorkspace(userId);
+    if (!existsSync(ws)) return [];
+    return readdirSync(ws, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => ({ name: e.name }));
+  } catch (e) {
+    console.warn('[coder] listAliasEntries failed:', e.message);
+    return [];
+  }
+}

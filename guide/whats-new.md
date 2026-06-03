@@ -6,6 +6,32 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-06-03
+
+**Aliases — say "the kitchen lights" once, OE remembers it**
+OpenEnsemble now learns the names you use for things. Reference a skill, agent, node, email account, project, or watched YouTube channel by friendly name ("ask Ada", "the pihole server", "my Renovo email", "the snake game project", "any new videos from twice") and the coordinator skips the usual list-then-filter dance — it goes straight to the right tool with the right id. Aliases auto-save the first time they're resolved (so the second mention is instant) and cascade-delete when the underlying thing is removed. If the LLM asks "did you mean X?" and you reply "yes", that learns the alias too. Custom skills with their own catalogs can opt in via a small `alias_catalog` block in their manifest — Skill Builder knows the pattern.
+
+**Routine HA actions no longer hang on slow Home Assistant**
+Routines that touch Home Assistant (like the `goodnight` routine doing `light.turn_off entity_id=light.all`) used to block up to 15 seconds per action when HA was slow to acknowledge — typical when one call expands to many bulbs. Now those calls are fire-and-forget: OE waits 1.5 s for transport-level errors (HA actually down) then moves on, treating slow responses as "queued, will finish async." Same change applies to the HA fast-path ("turn off the kitchen lights") so you get an immediate spoken confirmation instead of a 15-second silence followed by a confused LLM paraphrase.
+
+**Ambient sound resumes on its own after a wake interruption**
+If you say a wake word while ambient audio is playing (rain, white noise, sleep sounds from the goodnight routine), the firmware interrupts playback so it can listen. Previously the ambient stayed off after the wake handler completed — even if no new ambient was started by the resulting turn. Now the server snapshots the device's ambient state at the start of a voice turn, and if nothing this turn started or explicitly stopped ambient, the same stream resumes ~3 seconds later (long enough for any TTS reply to finish first).
+
+**Voice-device firmware 0.2.33: end mp3 decoder pitch glitches**
+Two related fixes for the brief audio glitches some users heard on long ambient playback:
+- libhelix occasionally mis-parses an mp3 frame header during network jitter and reports a phantom sample rate (22050 or 32000 on a 44100 file — caused by a flipped MPEG-version bit). The firmware now locks the stream rate on the first valid frame and ignores subsequent rate reports, so a brief misparse no longer plays the recovery buffer at the wrong pitch.
+- The same lock pattern applies to TTS playback — covers different providers cleanly (Piper 22050, OpenAI 24000, ElevenLabs 44100), resets between sentences so a provider switch picks up the new rate.
+
+Update via the Devices drawer when a paired device shows 0.2.33 available.
+
+**Routine editor: long ambient filenames no longer overflow the panel**
+The play_ambient action's filename dropdown stretched its grid column to fit the longest option, pushing the whole routine editor off-screen for files with long names. Constrained to its container width with a hover-tooltip showing the full filename.
+
+**install.sh: ffmpeg now detected on existing-tool systems**
+A fresh install on a system that already had build-essential, python3, etc. would skip the ffmpeg install entirely (the detection loop didn't check for it), then Voice Devices would later complain `ffmpeg is not installed`. ffmpeg + openssl now in the detection list alongside the other tools.
+
+---
+
 ## 2026-06-02
 
 **Voice devices: spoken time/date, false-fire gating, and clearer auth errors**

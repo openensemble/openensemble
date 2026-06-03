@@ -22,6 +22,13 @@ import { buildProposeMonitor } from './lib/monitor-helper.mjs';
 import { mergeDefaults, recordToolCall, recordPinUsage } from './lib/tool-defaults.mjs';
 import { recordToolFailure } from './lib/tool-failures.mjs';
 import { isSkillDisabled, getHiddenTools } from './lib/skill-overrides.mjs';
+import {
+  isEphemeralAgentId as _isEphem,
+  cacheGet as _ephemCacheGet,
+  cacheSet as _ephemCacheSet,
+  rerankListResult as _ephemRerank,
+  isListStyleTool as _ephemIsListTool,
+} from './lib/ephemeral-tool-cache.mjs';
 import { log } from './logger.mjs';
 
 // Resolve the agent id we should attribute background-task surfaces to
@@ -121,6 +128,68 @@ export function loadRoleManifests() {
       }
     }
   }
+
+  // Alias-framework: scan every loaded manifest for an `alias_catalog` block
+  // and register a resolver for each. Done after both passes so user-skill
+  // declarations are picked up alongside global ones. Lazy-imports the
+  // framework so installs without it (none today) still boot cleanly.
+  try {
+    import('./lib/skill-alias-framework.mjs').then(async (fw) => {
+      const allManifests = [..._manifests.values()].map(v => v.manifest);
+      const importerFor = (skillId) => {
+        const entry = [..._manifests.values()].find(v => v.manifest.id === skillId);
+        if (!entry) return Promise.resolve({});
+        // Reuse getExecutorByKey so we hit the same executor cache the
+        // dispatcher uses; ensures exported_function catalog sources see
+        // the same fresh code as live tool dispatches.
+        const key = entry.userId ? userKey(entry.userId, skillId) : globalKey(skillId);
+        return getExecutorByKey(key).then(execFn => {
+          // execFn IS the skill's executeSkillTool. We need the WHOLE module
+          // export object so exported_function can find named exports. Open
+          // the file path and dynamic-import directly.
+          const filePath = path.join(entry.dir, 'execute.mjs');
+          return import(pathToFileURL(filePath).href + `?bust=${_executorBust.get(key) || 0}`)
+            .catch(() => ({}));
+        });
+      };
+      fw.registerFromManifests(allManifests, importerFor);
+
+      // System-level "agent" catalog — no skill manifest owns agents, so
+      // we register a runtime spec with an inline function that calls
+      // getAgentsForUser. Same shape as a manifest-declared catalog but
+      // the listEntries is a JS function, not a config-file path.
+      try {
+        const { getAgentsForUser } = await import('./routes/_helpers/agent-resolver.mjs');
+        fw.registerAliasCatalog({
+          entity_kind:   'agent',
+          noun_singular: 'agent',
+          noun_plural:   'agents',
+          extra_phrase_patterns: [
+            "\\bask\\s+([A-Za-z][A-Za-z0-9 _-]{1,30})\\b",
+            "\\btalk\\s+to\\s+([A-Za-z][A-Za-z0-9 _-]{1,30})\\b",
+            "\\btell\\s+([A-Za-z][A-Za-z0-9 _-]{1,30})\\s+to\\b",
+            "\\bdelegate\\s+(?:this\\s+)?to\\s+([A-Za-z][A-Za-z0-9 _-]{1,30})\\b",
+          ],
+          catalog_source: {
+            type: 'inline_function',
+            fn: (userId) => {
+              const agents = getAgentsForUser(userId) || [];
+              return agents.map(a => ({
+                id: a.id,
+                name: a.name || a.id,
+                role: a.role || a.skillCategory || 'specialist',
+                description: a.description || '',
+              }));
+            },
+          },
+          id_field:     'id',
+          name_fields:  ['name', 'id'],
+          id_arg_names: ['agent_id', 'agentId'],
+          cascade_on_tools: [],
+        }, null);
+      } catch (e) { console.warn('[roles] agent-alias system register failed:', e.message); }
+    }).catch(e => console.warn('[roles] alias-framework boot register failed:', e.message));
+  } catch (e) { /* framework optional */ }
 }
 
 // ── Legacy migration: /skills/usr_* → /users/{createdBy}/skills/{slug} ────────
@@ -257,18 +326,43 @@ export function getRoleManifest(id, userId = null) {
 /** Add or replace a manifest. If `userId` is given, stores as a per-user skill. */
 export function addRoleManifest(manifest, userId = null) {
   const id = manifest.id;
+  let dir;
   if (userId) {
-    const dir = path.join(userSkillsDir(userId), id);
+    dir = path.join(userSkillsDir(userId), id);
     _manifests.set(userKey(userId, id), { manifest, userId, dir });
   } else {
-    const dir = path.join(SKILLS_DIR, id);
+    dir = path.join(SKILLS_DIR, id);
     _manifests.set(globalKey(id), { manifest, userId: null, dir });
+  }
+  // Register the alias catalog if this manifest declares one. Mirrors the
+  // boot-time registration in loadRoleManifests so newly-created skills
+  // (via skill-builder skill_create) pick up alias support immediately.
+  if (manifest.alias_catalog) {
+    import('./lib/skill-alias-framework.mjs').then(fw => {
+      const filePath = path.join(dir, 'execute.mjs');
+      const key = userId ? userKey(userId, id) : globalKey(id);
+      const importer = () => import(pathToFileURL(filePath).href + `?bust=${_executorBust.get(key) || 0}`).catch(() => ({}));
+      // Unregister first in case this is a replace (skill_update_code) — the
+      // entity_kind may have changed, or the catalog source may differ.
+      try { fw.unregisterAliasCatalog(manifest.alias_catalog.entity_kind); } catch {}
+      fw.registerAliasCatalog(manifest.alias_catalog, importer);
+    }).catch(e => console.warn('[roles] alias-framework register failed:', e.message));
   }
 }
 
 /** Remove a manifest from the registry. Pass `userId` to target a per-user skill. */
 export function removeRoleManifest(id, userId = null) {
   const key = userId ? userKey(userId, id) : globalKey(id);
+  const entry = _manifests.get(key);
+  // Drop the alias-framework registration BEFORE clearing the manifest so we
+  // can read the entity_kind off the about-to-be-removed entry. Without this,
+  // a deleted skill's alias resolver keeps trying to load its catalog on
+  // every chat turn and logs a noisy file-not-found.
+  if (entry?.manifest?.alias_catalog?.entity_kind) {
+    import('./lib/skill-alias-framework.mjs')
+      .then(fw => fw.unregisterAliasCatalog(entry.manifest.alias_catalog.entity_kind))
+      .catch(() => {});
+  }
   _manifests.delete(key);
   _executors.delete(key);
   _executorBust.delete(key);
@@ -835,6 +929,21 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // the LLM-visible dispatch yield.
   const mergedArgs = (args && typeof args === 'object') ? mergeDefaults(userId, name, args) : args;
 
+  // Ephemeral-delegation memoization: same (toolName, args) within one
+  // delegated session returns the prior result, skipping skill execution +
+  // the LLM turn that would parse the round-trip. Only fires for the small
+  // read-only whitelist defined in lib/ephemeral-tool-cache.mjs — anything
+  // that can mutate state is never memoized. Cache initialized by
+  // skills/delegate/execute.mjs at delegation entry.
+  if (_isEphem(agentId)) {
+    const hit = _ephemCacheGet(agentId, name, mergedArgs);
+    if (hit) {
+      log.info('tool', 'ephemeral cache hit', { tool: name, agentId });
+      yield { type: 'result', text: `[cached from earlier ${name} this session]\n${hit.text}` };
+      return;
+    }
+  }
+
   // Phase-4.5: record fill/reaffirm/override events for the default_arg
   // outcome measurer. Fire-and-forget — never blocks dispatch.
   if (args && typeof args === 'object') {
@@ -848,6 +957,27 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // task_proxy chip instead of yielding up to the LLM. Sydney's turn
   // finishes immediately with a "still running, see chip" synthetic result.
   const AUTO_BG_MS = 10_000;
+
+  // Ephemeral-delegation post-processor for the final `{type:'result'}` yield.
+  // Two things happen here, only when agentId is an ephemeral_deleg_* session:
+  //   (a) For list-style tools (list_files, search_files, grep), the result
+  //       text is run through the embedder ranker so the most task-relevant
+  //       lines surface first with a ★ prefix. Ordering hint only — never
+  //       drops items, falls back to original text on any embed failure.
+  //   (b) The (possibly-reranked) text is memoized under (toolName, args).
+  //       Future identical calls within the same session short-circuit at
+  //       the cache check above this function in the dispatcher.
+  const _postProcessResult = async (value) => {
+    if (!_isEphem(agentId)) return value;
+    if (value?.type !== 'result' || typeof value.text !== 'string') return value;
+    let outText = value.text;
+    if (_ephemIsListTool(name)) {
+      try { outText = await _ephemRerank(agentId, name, outText); }
+      catch { /* embedder error → keep original */ }
+    }
+    _ephemCacheSet(agentId, name, mergedArgs, outText);
+    return outText === value.text ? value : { ...value, text: outText };
+  };
   try {
     const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId));
 
@@ -965,7 +1095,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           // else: fall through to normal yield (registration failed)
         }
 
-        yield value;
+        yield await _postProcessResult(value);
       }
     } else {
       // ── Single-promise path ─────────────────────────────────────────────
@@ -1036,9 +1166,19 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       }
 
       // Won the race — normal sync result
-      yield { type: 'result', text: String(winner ?? '') };
+      yield await _postProcessResult({ type: 'result', text: String(winner ?? '') });
     }
     log.info('tool', 'tool complete', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart });
+
+    // Alias-framework cascade: any registered manifest can declare
+    // cascade_on_tools — when one of those tools succeeds, drop user-stored
+    // aliases for the corresponding entity id. Fire-and-forget; never
+    // blocks the main flow.
+    if (userId) {
+      import('./lib/skill-alias-framework.mjs')
+        .then(fw => fw.maybeCascadeOnToolSuccess(userId, name, mergedArgs))
+        .catch(() => {});
+    }
 
     // Phase-2: count the call (only the args the model actually supplied —
     // not mergedArgs — so pinned values don't re-count themselves). Fire-and-

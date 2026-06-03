@@ -55,6 +55,16 @@ let _ambientFiles = [];
 // HA scene + script entities — populated on drawer open from the HA cache.
 // Drives the ha_scene action picker so users don't have to type entity ids.
 let _haSceneEntities = [];
+// Broader HA actionable-entity list (light/switch/fan/cover/lock/media_player/
+// climate/input_boolean/automation/group + scenes/scripts) used by the ha_call
+// action editor's entity-picker dropdown. Same shape as _haSceneEntities:
+// [{entity_id, domain, friendly_name}, ...]. Sourced from the same cache as
+// scenes — the entities endpoint filters server-side by ?domain=…
+let _haActionEntities = [];
+// HA service catalog — {domain: [serviceName, ...]}. Drives the cascading
+// domain + service dropdowns in the ha_call action editor so users pick
+// from real services instead of guessing at strings.
+let _haServiceCatalog = {};
 
 // Resolve the current user's coordinator agent name for routine-editor UI
 // strings. Reads the global `agents` array set up in init.js — every user
@@ -155,7 +165,7 @@ async function loadDevices() {
     // refs, OE user roster, AND the per-user voice-config (sole source
     // of truth for slot routing since 2026-05-13 — applies to all of
     // this user's voice devices).
-    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw, rChime, rRoutines, rAmbient, rHaEnts] = await Promise.all([
+    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw, rChime, rRoutines, rAmbient, rHaEnts, rHaCall, rHaSvc] = await Promise.all([
       fetch('/api/devices'),
       fetch('/api/devices/incoming-slots'),
       fetch('/api/wakewords'),
@@ -168,6 +178,9 @@ async function loadDevices() {
       fetch('/api/routines'),
       fetch('/api/devices/ambient-library'),
       fetch('/api/home-assistant/entities?domain=scene,script,group'),
+      // Broader actionable-entity list for the ha_call entity picker.
+      fetch('/api/home-assistant/entities?domain=light,switch,fan,cover,lock,media_player,climate,input_boolean,automation,group,scene,script'),
+      fetch('/api/home-assistant/services'),
     ]);
     // Firmware manifest is best-effort — if it's missing (no flash wizard
     // bundled, etc.) the Update button just doesn't appear. Don't fail the
@@ -257,6 +270,14 @@ async function loadDevices() {
       try { const j = await rHaEnts.json(); _haSceneEntities = Array.isArray(j.entities) ? j.entities : []; }
       catch { _haSceneEntities = []; }
     } else { _haSceneEntities = []; }
+    if (rHaCall && rHaCall.ok) {
+      try { const j = await rHaCall.json(); _haActionEntities = Array.isArray(j.entities) ? j.entities : []; }
+      catch { _haActionEntities = []; }
+    } else { _haActionEntities = []; }
+    if (rHaSvc && rHaSvc.ok) {
+      try { const j = await rHaSvc.json(); _haServiceCatalog = (j.services && typeof j.services === 'object') ? j.services : {}; }
+      catch { _haServiceCatalog = {}; }
+    } else { _haServiceCatalog = {}; }
     renderDevices();
     // Coordinator-name labels are populated lazily after render — we don't
     // know which user(s) are assigned to slots until the DOM is in place,
@@ -720,12 +741,72 @@ function renderActionEditor(a, idx, ambientOpts) {
         <button class="cdraw-btn" data-action="refreshHaEntities" title="Re-fetch scenes/scripts/groups from Home Assistant (skips the 5-min cache)" style="font-size:11px;padding:4px 8px">↻</button>
       </div>${verbPicker}${emptyHint}`;
   } else if (a.type === 'ha_call') {
+    // Cascading dropdowns sourced from the live HA service catalog + entity
+    // cache so users pick instead of guessing strings. Saved values that
+    // aren't in the catalog (HA offline, integration removed, etc.) are
+    // preserved as a "(saved value)" option so a stale edit doesn't silently
+    // drop the routine on next save.
+    const curDomain  = (a.domain || '').toLowerCase();
+    const curService = (a.service || '').toLowerCase();
+    const data = (a.data && typeof a.data === 'object') ? a.data : {};
+    const curEntityId = typeof data.entity_id === 'string' ? data.entity_id : '';
+    // Extra-params JSON shows everything except entity_id — that's the
+    // picker's job. Keeps the JSON box scoped to the actual "advanced" stuff
+    // (brightness, color, target, etc.).
+    const extraParams = { ...data };
+    delete extraParams.entity_id;
+    const extraStr = Object.keys(extraParams).length ? JSON.stringify(extraParams) : '';
+
+    const allDomains = Object.keys(_haServiceCatalog).sort();
+    const hasCurDomain = !curDomain || allDomains.includes(curDomain);
+    const domainOpts = ['<option value="">Pick a domain…</option>']
+      .concat(hasCurDomain ? [] : [`<option value="${escHtml(curDomain)}" selected>${escHtml(curDomain)} (not in catalog)</option>`])
+      .concat(allDomains.map(d => `<option value="${escHtml(d)}" ${d === curDomain ? 'selected' : ''}>${escHtml(d)}</option>`))
+      .join('');
+
+    const serviceList = (_haServiceCatalog[curDomain] || []);
+    const hasCurService = !curService || serviceList.includes(curService);
+    const serviceOpts = curDomain
+      ? ['<option value="">Pick a service…</option>']
+          .concat(hasCurService ? [] : [`<option value="${escHtml(curService)}" selected>${escHtml(curService)} (not in catalog)</option>`])
+          .concat(serviceList.map(s => `<option value="${escHtml(s)}" ${s === curService ? 'selected' : ''}>${escHtml(s)}</option>`))
+          .join('')
+      : '<option value="">Pick a domain first</option>';
+
+    // Entity picker is per-domain. For domains we don't cache entities for
+    // (notify, button, etc.) the picker collapses to "(no entities cached)"
+    // and the user can still put entity_id in Extra params if their service
+    // needs one.
+    const matchEntities = curDomain
+      ? _haActionEntities.filter(e => e.domain === curDomain || (curDomain !== 'group' && e.entity_id.split('.', 1)[0] === curDomain))
+      : [];
+    const hasCurEntity = !curEntityId || matchEntities.some(e => e.entity_id === curEntityId);
+    const entityOpts = curDomain
+      ? ['<option value="">— No entity (or specify in Extra params) —</option>']
+          .concat(hasCurEntity ? [] : [`<option value="${escHtml(curEntityId)}" selected>${escHtml(curEntityId)} (not in cache)</option>`])
+          .concat(matchEntities
+            .slice()
+            .sort((x, y) => (x.friendly_name || x.entity_id).localeCompare(y.friendly_name || y.entity_id))
+            .map(e => {
+              const lbl = e.friendly_name && e.friendly_name !== e.entity_id ? `${e.friendly_name} (${e.entity_id})` : e.entity_id;
+              return `<option value="${escHtml(e.entity_id)}" ${e.entity_id === curEntityId ? 'selected' : ''}>${escHtml(lbl)}</option>`;
+            }))
+          .join('')
+      : '<option value="">Pick a domain first</option>';
+
+    const emptyHint = allDomains.length === 0
+      ? '<div style="font-size:10px;color:var(--amber,#d49a44);margin-top:4px">No HA services loaded. Check the Home Assistant integration is configured + reachable, or hit ↻ to refresh.</div>'
+      : '';
+
     body = `
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-        <input type="text" class="cdraw-input" data-action-field="${idx}.domain" value="${escHtml(a.domain || '')}" placeholder="domain (e.g. light)" style="font-family:monospace;font-size:12px;padding:4px 6px">
-        <input type="text" class="cdraw-input" data-action-field="${idx}.service" value="${escHtml(a.service || '')}" placeholder="service (e.g. turn_off)" style="font-family:monospace;font-size:12px;padding:4px 6px">
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:stretch">
+        <select class="cdraw-input" data-action-field="${idx}.domain" data-change-action="changeHaCallDomain" data-change-args='[${idx},"$value"]' style="font-family:monospace;font-size:12px;padding:4px 6px;min-width:0">${domainOpts}</select>
+        <select class="cdraw-input" data-action-field="${idx}.service" style="font-family:monospace;font-size:12px;padding:4px 6px;min-width:0">${serviceOpts}</select>
+        <button class="cdraw-btn" data-action="refreshHaEntities" title="Re-fetch service catalog + entities from Home Assistant (skips the 5-min cache)" style="font-size:11px;padding:4px 8px">↻</button>
       </div>
-      <input type="text" class="cdraw-input" data-action-field="${idx}.data" value="${escHtml(JSON.stringify(a.data || {}))}" placeholder='{"entity_id":"light.kitchen"}' style="width:100%;font-family:monospace;font-size:11px;padding:4px 6px;margin-top:4px" title="JSON payload for the service call">
+      <select class="cdraw-input" data-action-field="${idx}.entity_id" style="width:100%;font-family:monospace;font-size:12px;padding:4px 6px;margin-top:4px" title="Entity this service call targets — auto-merged into the data payload as entity_id.">${entityOpts}</select>
+      <input type="text" class="cdraw-input" data-action-field="${idx}.data" value="${escHtml(extraStr)}" placeholder='Extra params (optional, e.g. {"brightness":200})' style="width:100%;font-family:monospace;font-size:11px;padding:4px 6px;margin-top:4px" title="Extra fields beyond entity_id (brightness, color, etc.) as a JSON object.">
+      ${emptyHint}
     `;
   } else if (a.type === 'play_ambient') {
     // If a.file points at something no longer in the library, prepend a
@@ -736,8 +817,8 @@ function renderActionEditor(a, idx, ambientOpts) {
     const hasCur = !cur || _ambientFiles.some(f => f.name === cur);
     const missingOpt = hasCur ? '' : `<option value="${escHtml(cur)}" selected>${escHtml(cur)} (missing — upload or re-pick)</option>`;
     body = `
-      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;align-items:center">
-        <select class="cdraw-input" data-action-field="${idx}.file" style="font-size:12px;padding:4px 6px">
+      <div style="display:grid;grid-template-columns:minmax(0,2fr) 1fr 1fr;gap:6px;align-items:center">
+        <select class="cdraw-input" data-action-field="${idx}.file" style="font-size:12px;padding:4px 6px;min-width:0;max-width:100%" title="${escHtml(cur || '(no sound picked)')}">
           <option value="">Pick a sound…</option>
           ${missingOpt}
           ${ambientOpts.replace(`value="${escHtml(a.file || '')}"`, `value="${escHtml(a.file || '')}" selected`)}
@@ -1611,9 +1692,16 @@ function _readEditorIntoBuffer() {
     } else if (a.type === 'ha_call') {
       a.domain = (f('domain')?.value || '').trim().toLowerCase();
       a.service = (f('service')?.value || '').trim().toLowerCase();
+      // entity_id is a first-class picker now; Extra params holds everything
+      // else as JSON. Merge so the persisted action.data still matches the
+      // {entity_id, ...rest} shape HA service calls expect.
+      const entityId = (f('entity_id')?.value || '').trim();
       const raw = (f('data')?.value || '').trim();
-      try { a.data = raw ? JSON.parse(raw) : {}; }
-      catch { /* leave as previous on parse fail; server will reject and surface */ }
+      let extra = {};
+      try { extra = raw ? JSON.parse(raw) : {}; }
+      catch { extra = a.data && typeof a.data === 'object' ? { ...a.data } : {}; delete extra.entity_id; }
+      if (!extra || typeof extra !== 'object' || Array.isArray(extra)) extra = {};
+      a.data = entityId ? { ...extra, entity_id: entityId } : { ...extra };
     } else if (a.type === 'play_ambient') {
       a.file = (f('file')?.value || '').trim();
       a.loop = !!f('loop')?.checked;
@@ -1878,19 +1966,62 @@ window.refreshHaEntities = async function (_ignored, ev) {
   try {
     const r = await fetch('/api/home-assistant/refresh', { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const r2 = await fetch('/api/home-assistant/entities?domain=scene,script,group');
+    // Re-pull every catalog the routine editor uses: scenes/scripts/groups
+    // (ha_scene picker), broader actionable entities + service catalog
+    // (ha_call cascading dropdowns).
+    const [r2, r3, r4] = await Promise.all([
+      fetch('/api/home-assistant/entities?domain=scene,script,group'),
+      fetch('/api/home-assistant/entities?domain=light,switch,fan,cover,lock,media_player,climate,input_boolean,automation,group,scene,script'),
+      fetch('/api/home-assistant/services'),
+    ]);
     if (r2.ok) {
       const j = await r2.json();
       _haSceneEntities = Array.isArray(j.entities) ? j.entities : [];
     }
+    if (r3.ok) {
+      const j = await r3.json();
+      _haActionEntities = Array.isArray(j.entities) ? j.entities : [];
+    }
+    if (r4.ok) {
+      const j = await r4.json();
+      _haServiceCatalog = (j.services && typeof j.services === 'object') ? j.services : {};
+    }
     // Persist edits to the editor's working buffer so the re-render keeps them.
     _flushBufferToRoutines();
-    showDeviceToast(`HA refreshed — ${_haSceneEntities.length} scene/script/group entities.`);
+    const svcDomains = Object.keys(_haServiceCatalog).length;
+    showDeviceToast(`HA refreshed — ${_haSceneEntities.length} scenes/scripts/groups, ${_haActionEntities.length} entities, ${svcDomains} service domains.`);
     renderDevices();
     populateCoordinatorLabels();
   } catch (e) {
     showDeviceToast(`HA refresh failed: ${e.message}`, { variant: 'error' });
   }
+};
+
+// Cascading domain → service handler for ha_call actions. When the user
+// picks a domain we need a re-render to repopulate the service dropdown and
+// the entity-picker filter — the buffer already captures the new domain via
+// _readEditorIntoBuffer (data-action-field on the same <select>).
+window.changeHaCallDomain = function (_idx, _value) {
+  _readEditorIntoBuffer();
+  if (!_routineEditBuffer) return;
+  // Picking a new domain almost always invalidates the previously-chosen
+  // service (different domains have different service names). Clear it so
+  // the user is forced to pick a real value instead of saving a stale one.
+  const action = _routineEditBuffer.actions?.[_idx];
+  if (action && action.type === 'ha_call') {
+    action.service = '';
+    // Drop the previous entity_id too — it almost certainly belongs to a
+    // different domain. The Extra params JSON is preserved (it may carry
+    // domain-agnostic fields like brightness, color, etc. that still apply).
+    if (action.data && typeof action.data === 'object') {
+      const next = { ...action.data };
+      delete next.entity_id;
+      action.data = next;
+    }
+  }
+  _flushBufferToRoutines();
+  renderDevices();
+  populateCoordinatorLabels();
 };
 
 window.moveRoutineAction = function (idx, delta) {

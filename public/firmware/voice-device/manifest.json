@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.30-wake-score",
+  "version": "0.2.33-rate-lock-tts",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

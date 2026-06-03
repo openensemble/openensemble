@@ -1083,3 +1083,23 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 }
 
 export default executeSkillTool;
+
+/**
+ * Catalog source for the alias framework. Returns one entry per node the
+ * user has registered. hostname is the friendly name, nodeId the canonical
+ * id. Cascade-delete fires from routes/nodes.mjs DELETE (not a tool call) so
+ * the manifest's cascade_on_tools list is empty — see the route for the
+ * explicit deleteAliasesByEntityId call.
+ */
+export async function listAliasEntries(userId) {
+  try {
+    const { getNodes } = await import('./node-registry.mjs');
+    const list = getNodes(userId);
+    return Array.isArray(list)
+      ? list.map(n => ({ nodeId: n.nodeId, hostname: n.hostname, platform: n.platform }))
+      : [];
+  } catch (e) {
+    console.warn('[nodes] listAliasEntries failed:', e.message);
+    return [];
+  }
+}

@@ -51,6 +51,8 @@ import {
 import { extractTransactions } from './skills/expenses/execute.mjs';
 import { getRoleAssignments } from './roles.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
+import { getAmbientForDevice } from './routes/devices.mjs';
+import { playAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { buildVoiceSystemAddition } from './lib/voice-context.mjs';
 import {
   loadConfig, getAgentsForUser,
@@ -175,6 +177,18 @@ export async function handleChatMessage({
   }
   userId = effectiveUserId;
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
+
+  // Snapshot ambient state for voice-device turns. The firmware kills any
+  // playing ambient when a wake fires (s_ambient_stop in main.c — barge-in
+  // behavior). If this turn doesn't deliberately start a new ambient or
+  // stop the existing one, the user is left in silence even though the
+  // ambient stream is still cached server-side. The finally below re-emits
+  // play_ambient after a short delay to restore the experience.
+  const _ambientAtStart = (source === 'voice-device' && deviceId)
+    ? (getAmbientForDevice(deviceId)?.marker || null)
+    : null;
+
+  try {
 
   // @-mention redirect (typed chat only): "@ada make me a skill" routes
   // to ada's agent regardless of which agent's chat panel the user is in.
@@ -390,15 +404,91 @@ export async function handleChatMessage({
   // follow-up listening window. It never throws; finalizeTurn cleans up the
   // busy-slot / abort-controller / active-stream registry afterwards.
   const schedulerNote = await buildSchedulerNote({ userId, agentId, userText: ctx.userText });
+
+  // Pre-LLM alias learning: if the previous turn ended with a "did you mean X?"
+  // and this turn is a short affirmation ("yes"), consume the pending
+  // clarification and persist the alias before we run the next turn. Runs
+  // BEFORE the resolver so the next call already benefits from the new alias.
+  try {
+    const { maybeConsumeAffirmation } = await import('./lib/alias-learner.mjs');
+    await maybeConsumeAffirmation(userId, ctx.userText);
+  } catch (e) { console.warn('[chat-dispatch] consume-affirmation failed:', e.message); }
+
+  // Context resolvers — skill-aliases, agent-aliases, etc. Each scans the
+  // user's text for entity references (e.g. "the youtube downloader skill",
+  // "ask Sydney"), resolves to a concrete id via stored aliases + catalog
+  // fallback, and contributes a one-line system note so the LLM can call
+  // the right tool without enumerating. First-time fallback hits auto-save
+  // as new aliases. See lib/context-resolvers.mjs to add new entity types.
+  let resolvedNote = schedulerNote;
+  try {
+    const { buildContextHints } = await import('./lib/context-resolvers.mjs');
+    const { hints } = await buildContextHints(userId, ctx.userText);
+    if (hints) resolvedNote = resolvedNote ? `${resolvedNote}\n${hints}` : hints;
+  } catch (e) {
+    console.warn('[chat-dispatch] context-resolvers failed:', e.message);
+  }
+  // Capture the assistant's final reply so the learner can scan it for
+  // "did you mean X?" patterns and stash a pending clarification.
+  let finalAssistantText = '';
+  const wrappedOnEvent = (ev) => {
+    if (ev?.type === 'token' && typeof ev.text === 'string') finalAssistantText += ev.text;
+    if (typeof onEvent === 'function') return onEvent(ev);
+  };
   try {
     await runLlmTurn({
       userId, agentId, scopedAgent, scopedSessionKey,
       userText: ctx.userText, attachment: ctx.attachment,
-      schedulerNote, source, deviceId,
-      ac, onEvent, onNotify,
+      schedulerNote: resolvedNote, source, deviceId,
+      ac, onEvent: wrappedOnEvent, onNotify,
     });
   } finally {
     finalizeTurn(scopedSessionKey, busySlot);
+  }
+
+  // Post-turn alias learning — fire-and-forget, never blocks return.
+  //   Path A: if the LLM called ask_agent or any skill-owned tool and the
+  //           user message had a name-like phrase that didn't pre-resolve,
+  //           learn the new alias.
+  //   Path B: if the LLM's reply asked "did you mean X?", stash a pending
+  //           clarification keyed by userId. The next turn's affirmation
+  //           check (above) consumes it.
+  (async () => {
+    try {
+      const learner = await import('./lib/alias-learner.mjs');
+      await learner.observeTurnAndLearn(userId, ctx.userText, scopedSessionKey);
+      if (finalAssistantText) {
+        await learner.maybeStashClarification(userId, ctx.userText, finalAssistantText);
+      }
+    } catch (e) { console.warn('[chat-dispatch] post-turn learn failed:', e.message); }
+  })();
+
+  } finally {
+    // Ambient auto-restore: voice-device wakes interrupt ambient playback
+    // (XVF3800 firmware sets s_ambient_stop on wake — barge-in). If this
+    // turn neither started a new ambient nor explicitly stopped the old
+    // one, the user is left in silence. Re-emit play_ambient after a short
+    // grace period so any TTS reply finishes first. Marker-identity check
+    // ensures we never resurrect an ambient the routine intentionally
+    // replaced (different marker) or the user said "stop" to (null marker).
+    if (_ambientAtStart && deviceId) {
+      setTimeout(async () => {
+        try {
+          const now = getAmbientForDevice(deviceId);
+          if (now?.marker === _ambientAtStart && now.meta) {
+            await playAmbientOnDevice({
+              userId: now.meta.userId,
+              deviceId,
+              file: now.meta.file,
+              loop: now.meta.loop,
+            });
+            console.log(`[chat-dispatch] auto-restored ambient on ${deviceId} after wake (file=${now.meta.file})`);
+          }
+        } catch (e) {
+          console.warn('[chat-dispatch] ambient auto-restore failed:', e.message);
+        }
+      }, 3000);
+    }
   }
 }
 

@@ -202,6 +202,14 @@ export async function handle(req, res) {
     // Clean up Microsoft token file if present
     const tp = msTokenPath(userId, acctId);
     if (fs.existsSync(tp)) fs.unlinkSync(tp);
+    // Cascade-delete the user's email-account aliases. routes/* deletions
+    // don't go through tool dispatch, so the framework's manifest
+    // cascade_on_tools doesn't fire — call the public helper directly.
+    try {
+      const { deleteAliasesByEntityId } = await import('../lib/skill-alias-framework.mjs');
+      const removedAliases = deleteAliasesByEntityId(userId, 'email_account', acctId);
+      if (removedAliases > 0) console.log(`[email-accounts] dropped ${removedAliases} alias(es) for "${acctId}"`);
+    } catch (e) { console.warn('[email-accounts] alias cascade-delete failed:', e.message); }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ removed }));
     return true;

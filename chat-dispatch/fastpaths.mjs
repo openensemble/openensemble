@@ -144,7 +144,19 @@ async function executeHaIntent(intent) {
   const serviceDomain = intent.serviceDomain || intent.domain;
   const payload = { entity_id: intent.entity_id, ...(intent.data || {}) };
   const res = await haRequest(haCfg, `/services/${serviceDomain}/${intent.service}`, 'POST', payload);
-  if (res?.__err) return { error: res.__err };
+  // Treat HA's response timeout the same way routines do: optimistically
+  // confirm and let HA finish async. The interactive path's 15-second wait
+  // followed by an LLM-fallback was producing a confusing "no confirmation
+  // and then a paraphrased reply" UX whenever HA happened to be slow to
+  // ack (common with bulk service calls like light.all). Real transport
+  // failures (ECONNREFUSED / 4xx auth / DNS) still propagate.
+  if (res?.__err) {
+    if (/timeout/i.test(res.__err)) {
+      console.log(`[chat] ha-fastpath: HA didn't ack ${serviceDomain}.${intent.service} on ${intent.entity_id} within 15s — speaking optimistic confirmation`);
+    } else {
+      return { error: res.__err };
+    }
+  }
   let confirm;
   if (intent.service === 'turn_on'  && !intent.data) confirm = `${intent.friendly_name} on.`;
   else if (intent.service === 'turn_off')             confirm = `${intent.friendly_name} off.`;
@@ -312,17 +324,17 @@ export async function tryVoiceEmptyFastpath({ source, userText, userId, agentId,
  *     the assistant turn. No LLM round-trip.
  *
  *   - transcribe intent BUT STT not configured      → fall through to the
- *     LLM after rewriting the user text to strip the @-tokens and append
- *     a "Referenced files:" note. Coordinator's `transcribe_file` tool
- *     will surface a clean "STT is not configured" error to the user
+ *     LLM after rewriting the user text to strip the at-mention tokens
+ *     and append a "Referenced files:" note. Coordinator's `transcribe_file`
+ *     tool will surface a clean "STT is not configured" error to the user
  *     instead of silently failing. (Some multi-modal LLMs may also be
  *     able to act on audio paths via other tools — the LLM decides.)
  *
  *   - no transcribe intent                          → same fall-through:
- *     strip @-refs, inject path note, let the LLM decide what to do.
+ *     strip at-mention refs, inject path note, let the LLM decide what to do.
  *
- * Image and document @-refs are stripped + injected as path notes the
- * same way, but never trigger fast-path transcription (different tools).
+ * Image and document at-mention refs are stripped + injected as path notes
+ * the same way, but never trigger fast-path transcription (different tools).
  *
  * @returns {Promise<{ handled: true } | null>}
  */
@@ -435,7 +447,7 @@ export async function tryTranscribeAttachmentFastpath(ctx) {
         catch (e) { errors.push(`${ref.filename}: ffmpeg failed (${e.message})`); continue; }
       }
       const started = Date.now();
-      const result = await sttUpload(uploadPath);
+      const result = /** @type {{text?: string, transcript?: string}} */ (await sttUpload(uploadPath));
       const text = (result.text ?? result.transcript ?? '').trim();
       const elapsedSec = ((Date.now() - started) / 1000).toFixed(1);
       transcripts.push({ filename: ref.filename, text, elapsedSec, bytes: stat.size });
