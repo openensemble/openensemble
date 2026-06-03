@@ -49,7 +49,19 @@
   background: rgba(137,180,250,0.1);
 }
 .agent-report-time { color: var(--muted); font-weight: 400; }
-.agent-report-body { border-radius: 0 0 8px 8px; margin: 0; border: none; }
+/* Cap the report bubble height so a long specialist reply (e.g. "top 3
+   videos from N watchers") doesn't push the rest of the chat off-screen.
+   Use dvh on small screens so address-bar resize doesn't clip the bubble.
+   The scroll lives inside the bubble — the page scroll still works for the
+   conversation around it. */
+.agent-report-body {
+  border-radius: 0 0 8px 8px;
+  margin: 0;
+  border: none;
+  max-height: min(60vh, 60dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 
 /* ── Collapsible <details> chevron ───────────────────────────────────────── */
 details > summary::-webkit-details-marker { display: none; }

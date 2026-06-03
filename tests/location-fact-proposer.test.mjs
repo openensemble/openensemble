@@ -116,7 +116,7 @@ describe('flushPendingLocationFact', () => {
     ];
 
     await lfp.maybeProposeLocationFact({
-      userId: 'u2', agentId: 'a2', agentName: 'Sydney',
+      userId: 'u2', agentId: 'a2', agentName: 'Coordinator',
       userMessage: 'find the pxe boot tree', toolsUsed: tools,
     });
 

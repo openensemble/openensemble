@@ -93,8 +93,8 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   'ask_agent',
   // Scheduler family — actual tool names per skills/tasks/manifest.json.
   // The previous entry "create_task" was wrong (no such tool exists), which
-  // is why Sydney told users "the alarm tool isn't available to me in this
-  // turn" on voice-device requests like "set an alarm for 11:22 AM today".
+  // is why the coordinator told users "the alarm tool isn't available to me
+  // in this turn" on voice-device requests like "set an alarm for 11:22 AM".
   'set_reminder',
   'set_alarm',
   'schedule_task',
@@ -108,7 +108,7 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   'ha_list_areas',
   'ha_list_services',
   // Voice routines — let users bind/edit/delete routines by speaking
-  // ("Sydney, when I say goodnight, turn off the lights and play
+  // ("<wake-word>, when I say goodnight, turn off the lights and play
   // thunderstorm sounds"). Fast-path executes matched routines pre-LLM;
   // these tools are the AUTHORING path that lands on the same store.
   'create_routine',
@@ -154,8 +154,8 @@ export async function handleChatMessage({
   //
   // When a voice device fires a wake word, the slot index identifies which
   // *user* the resulting chat belongs to. slot 0 might be the admin saying
-  // "Sydney" → admin's coordinator; slot 1 might be a roommate saying
-  // "Hey Ensemble" → roommate's coordinator. Per-user data isolation comes
+  // "Hey Ensemble" → admin's coordinator; slot 1 might be a roommate saying
+  // "Computer" → roommate's coordinator. Per-user data isolation comes
   // for free because every downstream call (memory, sessions, agents,
   // persist) is keyed off `userId`, so swapping it here is enough.
   //
@@ -190,12 +190,12 @@ export async function handleChatMessage({
 
   try {
 
-  // @-mention redirect (typed chat only): "@ada make me a skill" routes
-  // to ada's agent regardless of which agent's chat panel the user is in.
+  // @-mention redirect (typed chat only): "@<agent> make me a skill" routes
+  // to that agent regardless of which agent's chat panel the user is in.
   // Match handle against agent name (lowercased, whitespace stripped) or
   // the trailing segment of the agent id. Voice STT can't reliably
-  // transcribe the @ symbol, so skip for voice — verbal redirects ("ask
-  // ada", "use ada") go through router-mistakes instead.
+  // transcribe the @ symbol, so skip for voice — verbal redirects
+  // ("ask <name>", "use <name>") go through router-mistakes instead.
   if (source !== 'voice-device' && typeof rawText === 'string') {
     const mention = rawText.match(/^@(\S+)\s+([\s\S]+)$/);
     if (mention) {
@@ -214,7 +214,7 @@ export async function handleChatMessage({
         // Strip the @-handle whether or not the agent changed — it's a
         // routing directive, not part of the conversation content. Without
         // this, a client that pre-switched agents would persist
-        // "@ada foo" verbatim into the destination session.
+        // "@<name> foo" verbatim into the destination session.
         rawText = rest;
       }
     }
@@ -258,8 +258,8 @@ export async function handleChatMessage({
   // Voice-device source → slim tool subset. Reasoning effort kept at the
   // agent default (typically 'high' for gpt-5.x — required for reliable
   // custom tool calling). The tool reduction alone trimmed a "what time
-  // is it" round-trip from 61 s to ~3 s on sydney; dropping reasoning to
-  // low was tested but caused the model to skip useful tool calls.
+  // is it" round-trip from 61 s to ~3 s on the coordinator; dropping reasoning
+  // to low was tested but caused the model to skip useful tool calls.
   if (source === 'voice-device' && Array.isArray(agent.tools) && agent.tools.length) {
     const originalCount = agent.tools.length;
     const slim = agent.tools.filter(t => VOICE_DEVICE_TOOL_ALLOWLIST.has(t.function?.name));
@@ -315,8 +315,8 @@ export async function handleChatMessage({
     onEvent, onBroadcast, onNotify,
   };
 
-  // Phase-6 router-as-learner: explicit redirects ("@ada", "use coder",
-  // "ask sydney") in the incoming user message are logged against the
+  // Phase-6 router-as-learner: explicit redirects ("@<name>", "use coder",
+  // "ask <name>") in the incoming user message are logged against the
   // previous turn's pickedAgent so we can propose a routing override after
   // threshold. Fire-and-forget — detection never blocks dispatch.
   if (ctx.userText) {
@@ -416,7 +416,7 @@ export async function handleChatMessage({
 
   // Context resolvers — skill-aliases, agent-aliases, etc. Each scans the
   // user's text for entity references (e.g. "the youtube downloader skill",
-  // "ask Sydney"), resolves to a concrete id via stored aliases + catalog
+  // "ask <agent>"), resolves to a concrete id via stored aliases + catalog
   // fallback, and contributes a one-line system note so the LLM can call
   // the right tool without enumerating. First-time fallback hits auto-save
   // as new aliases. See lib/context-resolvers.mjs to add new entity types.

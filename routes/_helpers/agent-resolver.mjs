@@ -147,27 +147,34 @@ export function getAgentsForUser(userId) {
       ?? (skillCategory ? getRoleManifest(skillCategory, userId)?.defaultToolIds : null);
     if (toolIds?.length) {
       const allowed = new Set(toolIds);
-      // The user's own custom skills always bypass the allowlist — they asked for them
-      // explicitly via skill-builder. Scoped to listRoles(userId) so other users'
-      // custom skills are never considered here. Exception: a custom skill can
-      // opt out of being shared with the coordinator by setting
-      // `coordinator_scope: "exclude"` in its manifest — useful for heavyweight
-      // skills (runpod, thunder-compute) that belong on a specialist agent
-      // (image_generator, role_video_generator) but pollute the coordinator's
-      // surface. The skill stays available to other agents normally.
-      const isCoordinatorAgent = skillCategory === 'coordinator';
-      const userSkillTools = new Set(
-        listRoles(userId)
-          .filter(m => m.custom === true && !(isCoordinatorAgent && m.coordinator_scope === 'exclude'))
+      // Custom user-skills are NO LONGER auto-bypassed. A custom skill only
+      // reaches an agent when the user explicitly assigned it via
+      // skillAssignments[skillId] = agentId. This is the lockdown: specialists
+      // are specialists. Previously, every custom skill flowed to every
+      // agent — a specialist's tool count could balloon to 100+, half
+      // irrelevant. Now: skill-builder asks "which
+      // agent gets this?" at creation; existing custom skills get
+      // auto-assigned to the coordinator on first boot after this change
+      // (see roles.mjs:loadRoleManifests migration).
+      //
+      // Tools from explicitly-assigned skills (custom or otherwise) flow
+      // through the assignedTools bucket inside resolveAgentTools, but the
+      // defaultToolIds filter below would still drop them since their tool
+      // names aren't in the primary skill's defaultToolIds. So we compute
+      // the names of explicitly-assigned-skill tools and let those bypass
+      // the filter too — assignment is a deliberate user action.
+      const assignedSkillToolNames = new Set(
+        assignedSkillIds
+          .map(id => getRoleManifest(id, userId))
+          .filter(Boolean)
           .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
           .filter(Boolean)
       );
-      // Held service-role tools also bypass the allowlist. `claim_role` is an
-      // explicit delegation — the user told this agent to do that job. If the
-      // coordinator's hand-curated defaultToolIds doesn't list e.g. node_exec
-      // (it doesn't), the held role would be unusable. Same precedent as
-      // custom-skill tools above. Without this, "take Remote Nodes" succeeds
-      // but the agent never sees node_*.
+      // Held service-role tools also bypass the allowlist. `claim_role` is
+      // an explicit delegation — the user told this agent to do that job.
+      // If the coordinator's hand-curated defaultToolIds doesn't list e.g.
+      // node_exec (it doesn't), the held role would be unusable. Same
+      // precedent as explicit assignment above.
       const heldRoleTools = new Set(
         getAgentRoles(a.id, userId)
           .map(rid => getRoleManifest(rid, userId))
@@ -175,9 +182,44 @@ export function getAgentsForUser(userId) {
           .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
           .filter(Boolean)
       );
+      // Bundled tools — manifests that declare `bundled_with_role: <id>`
+      // are inherent to the role's tool surface (active-agents → coordinator,
+      // skill-builder → coder). They bypass defaultToolIds for the same
+      // reason heldRoleTools do: the role IS the assignment.
+      const bundledForCategory = (() => {
+        if (!skillCategory) return [];
+        const out = [];
+        for (const m of listRoles(userId)) {
+          if (m.bundled_with_role === skillCategory) {
+            out.push(...(m.tools ?? []).map(t => t.function?.name).filter(Boolean));
+          }
+        }
+        return out;
+      })();
+      const bundledRoleTools = new Set(bundledForCategory);
+      // Delegate-category tools (ask_agent) bypass the defaultToolIds filter
+      // unconditionally. Every agent — coordinator or specialist — gets to
+      // call ask_agent now: coordinators route to any specialist, specialists
+      // escalate UP to the coordinator only. Without this bypass, a
+      // specialist whose role manifest doesn't list ask_agent in
+      // defaultToolIds (most of them — only coordinator's manifest does)
+      // wouldn't see the tool even though resolveAgentTools provides it.
+      const delegateToolNames = new Set();
+      for (const m of listRoles(userId)) {
+        if (m.category === 'delegate') {
+          for (const t of (m.tools ?? [])) {
+            const n = t?.function?.name;
+            if (n) delegateToolNames.add(n);
+          }
+        }
+      }
       tools = tools.filter(t => {
         const name = t.function?.name;
-        return allowed.has(name) || userSkillTools.has(name) || heldRoleTools.has(name);
+        return allowed.has(name)
+          || assignedSkillToolNames.has(name)
+          || heldRoleTools.has(name)
+          || bundledRoleTools.has(name)
+          || delegateToolNames.has(name);
       });
     }
 
@@ -204,10 +246,15 @@ export function getAgentsForUser(userId) {
     const basePrompt = isChild
       ? childPrompt + rawPrompt
       : rawPrompt;
-    // For the coordinator agent, inject a dynamic roster of all other agents
-    let expandedPrompt = basePrompt;
-    if (basePrompt.includes('{{AGENT_ROSTER}}')) {
-      const roster = visibleBase
+    // For the coordinator agent, inject a dynamic roster of all other agents.
+    // Older coordinators stored before this feature shipped don't have the
+    // `{{AGENT_ROSTER}}` placeholder in their saved systemPrompt, but they
+    // still NEED the roster so they don't claim "you only have X agents" when
+    // a user just created a new one. So: build the roster string once, then
+    // either splice it into the placeholder OR append it for any coordinator
+    // skill that's missing the placeholder.
+    const rosterBlock = (() => {
+      const lines = visibleBase
         .filter(other => other.id !== a.id)
         .map(other => {
           const desc = other.description || '';
@@ -226,7 +273,16 @@ export function getAgentsForUser(userId) {
           return `- **${other.name}** (use ask_agent with id="${other.id}") — ${info || 'general assistant'}`;
         })
         .join('\n');
-      expandedPrompt = basePrompt.replace('{{AGENT_ROSTER}}', roster ? `## Available specialists\n${roster}` : '');
+      return lines ? `## Your agents (ALL of them — list every one of these when the user asks "who are my agents?", even ones with no assigned skills yet)\n${lines}` : '';
+    })();
+    let expandedPrompt = basePrompt;
+    if (basePrompt.includes('{{AGENT_ROSTER}}')) {
+      expandedPrompt = basePrompt.replace('{{AGENT_ROSTER}}', rosterBlock);
+    } else if (skillCategory === 'coordinator' && rosterBlock) {
+      // Auto-append for coordinators whose stored prompt predates the
+      // placeholder. Without this, "who are my agents?" misses agents the
+      // user has created after the coordinator was first saved.
+      expandedPrompt = `${basePrompt}\n\n${rosterBlock}`;
     }
     // Universal parallel-tools guidance — applies to any agent with 2+ tools.
     // The provider layer auto-parallelizes tool calls emitted together in one
@@ -240,7 +296,20 @@ export function getAgentsForUser(userId) {
     // in any URL you share points at the user's own computer and fails with
     // connection refused. Always use the server's LAN IP when sharing URLs.
     const serverUrlGuidance = `## Server URLs\n\nThis OpenEnsemble server's LAN address is \`${serverIp}\`. When you share any URL that points at this server (dev servers, preview links, running processes, etc.), always use \`http://${serverIp}:<port>\` — NEVER \`http://localhost:<port>\` or \`http://127.0.0.1:<port>\`. The user's browser runs on a different machine than this server, so localhost resolves to their own computer and fails with "connection refused".`;
-    const selfReferenceGuidance = `## Speaking about yourself\n\nSpeak in the first person — "I", "me", "my". Do not refer to yourself in the third person by your own name (e.g. don't say "${agentName} sees that..." — say "I see that..."). You may refer to OTHER agents by their name when delegating or quoting them (e.g. "I asked Gina and she found...").`;
+    const selfReferenceGuidance = `## Speaking about yourself\n\nSpeak in the first person — "I", "me", "my". Do not refer to yourself in the third person by your own name (e.g. don't say "${agentName} sees that..." — say "I see that..."). You may refer to OTHER agents by their name when delegating or quoting them (e.g. "I asked the email agent and they found...").`;
+
+    // Escalation guidance for specialists. Coordinators already have a full
+    // ask_agent roster and don't need this nudge; specialists need to know
+    // that when they hit a wall (asked for an email when they don't own
+    // email tools, asked to edit a skill when skill-builder is bundled to
+    // the coder, etc.) they should call ask_agent with agent_id="coordinator"
+    // instead of giving up. Only injected when ask_agent is actually in the
+    // agent's toolset (avoids confusing prompts on agents with no delegate).
+    const isCoordinatorAgent = skillCategory === 'coordinator';
+    const hasAskAgent = tools.some(t => t.function?.name === 'ask_agent');
+    const escalationGuidance = (!isCoordinatorAgent && hasAskAgent)
+      ? `## Escalating to the coordinator\n\n**STEP 0 — BEFORE escalating, check your own toolset.** Scan the tools available to you in this turn. If you have a tool whose description matches what the user is asking for, JUST USE IT — do not escalate. Escalation is for cases where you DEMONSTRABLY lack the required tool, not for cases where you're unsure how to interpret the user's wording. If the user's phrasing is ambiguous, prefer asking the user a clarifying question over escalating to the coordinator.\n\nWhen the user's request HAS a part you can finish AND a part you can't:\n\n1. **Do YOUR part first.** Run your own tools to gather data, do the lookups, prepare the result. Don't dump the raw user request to the coordinator before doing your own work — that wastes a turn and the coordinator usually dispatches the same task back to you anyway.\n2. **Then call \`ask_agent\` with \`agent_id="coordinator"\`** with a task description that includes:\n   - what you already gathered/did (paste the data inline)\n   - what's specifically left to finish that requires another agent's tools\n   - example: "I've collected the latest videos from each watched channel (paste list). Please get this sent to the user via email."\n3. The coordinator will route the remainder to the right specialist (email agent, etc.) — you may ONLY call ask_agent with id="coordinator", never another specialist directly.\n\n**When the entire request is outside your domain** (e.g. user asks "what's on my calendar?" and you have zero relevant tools) — skip step 1 and escalate immediately with the raw request.\n\nDo NOT escalate trivia / chit-chat / questions you can answer from training, and do NOT escalate when you actually have the tools to do the job — even if the user's wording is unfamiliar. Only escalate when there's an ACTION the user wants done that you genuinely cannot perform with your current toolset.`
+      : '';
 
     // (User-skill trigger-phrase nudge used to be injected here as a static
     // "show last 3 phrases per skill" block. It moved to chat.mjs so the
@@ -249,22 +318,28 @@ export function getAgentsForUser(userId) {
     // custom skills the user accumulates. See lib/skill-triggers.mjs
     // buildTriggerNudgeBlock.)
 
-    const promptParts = [expandedPrompt, skillPromptAdditions, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance].filter(Boolean);
+    const promptParts = [expandedPrompt, skillPromptAdditions, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(Boolean);
     const systemPrompt = promptParts.join('\n\n');
     // Stash the "shell" + composer inputs so chat.mjs can re-compose the
     // SPA section after per-turn tool trimming (the coordinator's tool
     // surface shrinks per-turn; the SPAs of dropped skills should shrink
     // too). The placeholder appears exactly where skillPromptAdditions
     // sits in the shell — chat.mjs splices the recomposed block in.
-    const _spaShellParts = [expandedPrompt, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance].filter(p => p !== '');
+    const _spaShellParts = [expandedPrompt, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '');
     const _systemPromptShell = _spaShellParts.join('\n\n');
 
-    // Patch ask_agent description with the real agent list
+    // Patch ask_agent's agent_id description per-agent. Coordinators see the
+    // full delegatable-specialist roster; specialists see only the literal
+    // string "coordinator" (which resolves to whichever agent holds the
+    // coordinator role) — they're meant to ESCALATE up, not route sideways.
+    const askAgentDesc = isCoordinatorAgent
+      ? `Which specialist to delegate to: ${delegateAgentDesc}`
+      : `Pass "coordinator" to escalate this task to the coordinator (who will route to whichever specialist can finish it). You may NOT call other specialists directly — only the coordinator.`;
     tools = tools.map(t => {
       if (t.function?.name !== 'ask_agent') return t;
       return { ...t, function: { ...t.function, parameters: { ...t.function.parameters, properties: {
         ...t.function.parameters.properties,
-        agent_id: { type: 'string', description: `Which specialist to delegate to: ${delegateAgentDesc}` }
+        agent_id: { type: 'string', description: askAgentDesc }
       }}}};
     });
     const result = {

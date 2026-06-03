@@ -83,7 +83,7 @@
       "type": "function",
       "function": {
         "name": "list_roles",
-        "description": "List all roles and which agents they're currently assigned to.",
+        "description": "List all roles AND custom skills, with the agent each is currently assigned to. Roles are broad responsibilities (Email, Coder, etc.); custom skills (YouTube Downloader, etc.) are user-installed capabilities that belong to exactly one agent. Call this whenever the user asks who owns/handles a specific capability — do NOT infer ownership from a role's name (e.g. don't assume 'YouTube Downloader' belongs to the Coder because both touch software; check the custom-skills section).",
         "parameters": { "type": "object", "properties": {}, "required": [] }
       }
     },

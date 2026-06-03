@@ -19,7 +19,7 @@ Pairing codes are held in memory and die when the OE server restarts. If you res
 
 Each device has six **wake-word slots**. A slot is a `(wake word, voice, owner user)` triple:
 
-- **Wake word** — what the user says to trigger the device (e.g. "sydney", "hey ensemble"). Slots can use any model from your wake-word library — see *Settings → Wake words*. Each slot loads independently so a device can listen for multiple wake words simultaneously.
+- **Wake word** — what the user says to trigger the device (e.g. "hey ensemble", "computer"). Slots can use any model from your wake-word library — see *Settings → Wake words*. Each slot loads independently so a device can listen for multiple wake words simultaneously.
 - **Voice** — the TTS voice the reply gets spoken in. See the **Text-to-speech** page.
 - **Owner user** — which OE user account the chat runs as. In a single-user install this is always you. In a household, "hey ensemble" might route to your account while "hey roommate" routes to someone else's — same physical device, different per-user agents/memory/data.
 
@@ -59,6 +59,6 @@ Control verbs are matched by a fast server-side regex *before* the LLM dispatch,
 
 ## Useful patterns
 
-- **Voice memo** — Pair a device next to your desk, route slot 0 to your coordinator: *"sydney, remind me to call the dentist tomorrow at 10 a.m."* — Cortex creates the task and sets a reminder.
-- **Hands-free notes** — *"sydney, save: the dehumidifier filter is the AC4150 model"* drops into your skills's memory pipeline; later searchable from any chat.
-- **Read-aloud requests** — *"sydney, what's on my calendar today?"* speaks the answer instead of you reading it.
+- **Voice memo** — Pair a device next to your desk, route slot 0 to your coordinator: *"\<wake-word\>, remind me to call the dentist tomorrow at 10 a.m."* — Cortex creates the task and sets a reminder.
+- **Hands-free notes** — *"\<wake-word\>, save: the dehumidifier filter is the AC4150 model"* drops into your skills's memory pipeline; later searchable from any chat.
+- **Read-aloud requests** — *"\<wake-word\>, what's on my calendar today?"* speaks the answer instead of you reading it.

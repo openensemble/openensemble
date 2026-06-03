@@ -843,7 +843,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 
   // Specialist intent-example embeddings — warm the embed-router cache so the
   // first user query doesn't pay the ~1-3s "embed N example phrases" cost.
-  // Runs async; chat works without it (just falls through to regex/Sydney).
+  // Runs async; chat works without it (just falls through to regex/coordinator).
   loadIntentEmbeddings().catch(e => log.warn?.('embed-router', 'load failed', { err: e.message }));
 
   // Watcher supervisor: per-user polling for long-running async work

@@ -35,10 +35,10 @@ async function send() {
   let text = $('input').value.trim();
   if ((!text && !pendingAttachment) || (streaming && !awaitingPermission) || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-  // @-mention redirect: "@ada make me a skill" switches the active agent
+  // @-mention redirect: "@<agent> make me a skill" switches the active agent
   // BEFORE we push the user bubble so the message + reply both land in
-  // ada's chat panel. The server's chat-dispatch also handles the prefix
-  // (strip + redirect) as defense for clients that don't pre-switch.
+  // that agent's chat panel. The server's chat-dispatch also handles the
+  // prefix (strip + redirect) as defense for clients that don't pre-switch.
   const mention = text.match(/^@(\S+)\s+([\s\S]+)$/);
   if (mention) {
     const handle = mention[1].toLowerCase();
@@ -68,7 +68,7 @@ async function send() {
   toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
   if (awaitingPermission) {
     awaitingPermission = false;
-    // Don't reset streaming — Ada is still running; just show typing indicator
+    // Don't reset streaming — the agent is still running; just show typing indicator
     setTyping(true);
   } else {
     setStreaming(true); setTyping(true);
@@ -92,6 +92,17 @@ function renderSession() {
     else if (m.role === 'status' && m.status)     appendStatusBubble(m.status, m.ts, false);
     else if (m.role === 'proposal' && m.proposalId) appendProposalBubble(m, false);
     else if (m.role === 'proposal_outcome' && m.proposalId) applyProposalOutcome(m.proposalId, m.status, m.outcome);
+    else if (m.role === 'agent_report' || m.kind === 'agent_report') _renderAgentReportEl(m);
+    else if (m.role === 'assistant' && !m.hidden && _legacyAgentReportMatch(m.content)) {
+      // Legacy entries persisted before the kind:'agent_report' field
+      // shipped — content starts with "[<name> finished in background]\n"
+      // or "[<name> replied — re: …]\n". Parse the prefix for the sender
+      // name and render with the same fancy bubble we'd use for fresh
+      // entries; strip the prefix from the body so it isn't displayed
+      // twice (once in the header, once in the body).
+      const { agentName, body } = _legacyAgentReportMatch(m.content);
+      _renderAgentReportEl({ agentName, agentEmoji: '⏵', content: body, ts: m.ts });
+    }
     else if (m.role === 'assistant' && !m.hidden) appendAssistantBubble(m.content, m.ts, false);
   });
   const headers = $('messages').querySelectorAll('.task-header[data-ts]');
@@ -1044,7 +1055,39 @@ function appendNotification(msg) {
 }
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
-  const { agentName, agentEmoji, content, ts } = msg;
+  const { agent, agentName, agentEmoji, content, ts } = msg;
+  // Push into the target coordinator's session cache so the report survives
+  // agent-tab switches. Without this, the DOM bubble is the only copy
+  // browser-side and it gets wiped on the next renderSession (e.g. when
+  // the user switches agents and switches back).
+  if (agent) {
+    if (!sessions[agent]) sessions[agent] = [];
+    // Use role:'agent_report' so renderSession can route this back through
+    // _renderAgentReportEl below. Keep the same shape we just received so
+    // the renderer can reconstruct identical DOM.
+    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, ts: ts ?? Date.now() });
+  }
+  // Only paint into the visible chat panel when the report's target
+  // coordinator is the agent currently being viewed. A report fired while
+  // the user is on a different agent's tab should NOT appear there.
+  if (!agent || agent === activeAgent) {
+    _renderAgentReportEl({ agentName, agentEmoji, content, ts });
+  }
+}
+
+// Parse pre-kind:'agent_report' background-completion messages so they
+// render as a tagged bubble on reload. Two historical formats:
+//   "[<name> finished in background]\n<body>"
+//   "[<name> replied — re: \"<task>…\"]\n<body>"
+// Returns { agentName, body } on match, null otherwise.
+function _legacyAgentReportMatch(content) {
+  if (typeof content !== 'string') return null;
+  const m = content.match(/^\[([^\]]+?)\s+(?:finished in background|replied(?:\s+—\s+re:[^\]]*)?)\]\n([\s\S]*)$/);
+  if (!m) return null;
+  return { agentName: m[1].trim(), body: m[2] };
+}
+
+function _renderAgentReportEl({ agentName, agentEmoji, content, ts }) {
   const timeStr = new Date(ts ?? Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const el = document.createElement('div');
   el.className = 'msg agent-report';
@@ -1130,27 +1173,35 @@ function _slashGetItems(val) {
         action: () => { hideSlashMenu(); $('input').value = ''; switchAgent(a.id); closeAllDrawers(); }
       }));
   }
-  // /claim <filter> → roles only (same filter as Roles tab: s.service === true)
+  // /claim and /release pickers — include both roles AND user-installed
+  // custom skills. Custom skills are non-service utility-category, so the
+  // old `s.service` filter excluded them; users couldn't see e.g. their
+  // youtube-downloader in the picker. Same shape as Settings → Skills:
+  // roles (service=true) + custom skills (userScope set, non-service).
+  const isAssignable = (s) =>
+    s.category !== 'delegate' && !s.hidden && (s.service || (!!s.userScope && !s.service));
+  const kindLabel = (s) => s.service ? 'Role' : 'Custom skill';
   if (/^\/claim\s/.test(val)) {
     const f = val.slice(7).toLowerCase();
     const cached = _skillsCache || [];
     if (!_skillsCache) { _loadSkills().then(() => updateSlashMenu()); }
     return cached
-      .filter(s => s.service && (!f || s.id.toLowerCase().includes(f) || s.name.toLowerCase().includes(f)))
+      .filter(s => isAssignable(s) && (!f || s.id.toLowerCase().includes(f) || s.name.toLowerCase().includes(f)))
       .map(s => ({
-        label: s.name, desc: (s.assignment ? `claimed by ${agents.find(a=>a.id===s.assignment)?.name ?? s.assignment}` : 'unclaimed') + (s.description ? ' · ' + s.description : ''),
+        label: s.name,
+        desc: `${kindLabel(s)} · ` + (s.assignment ? `claimed by ${agents.find(a=>a.id===s.assignment)?.name ?? s.assignment}` : 'unclaimed') + (s.description ? ' · ' + s.description : ''),
         action: () => { hideSlashMenu(); $('input').value = `/claim ${s.id}`; _skillsCache = null; send(); }
       }));
   }
-  // /release <filter> → roles only
   if (/^\/release\s/.test(val)) {
     const f = val.slice(9).toLowerCase();
     const cached = _skillsCache || [];
     if (!_skillsCache) { _loadSkills().then(() => updateSlashMenu()); }
     return cached
-      .filter(s => s.service && (!f || s.id.toLowerCase().includes(f) || s.name.toLowerCase().includes(f)))
+      .filter(s => isAssignable(s) && (!f || s.id.toLowerCase().includes(f) || s.name.toLowerCase().includes(f)))
       .map(s => ({
-        label: s.name, desc: s.assignment ? `claimed by ${agents.find(a=>a.id===s.assignment)?.name ?? s.assignment}` : 'unclaimed',
+        label: s.name,
+        desc: `${kindLabel(s)} · ` + (s.assignment ? `claimed by ${agents.find(a=>a.id===s.assignment)?.name ?? s.assignment}` : 'unclaimed'),
         action: () => { hideSlashMenu(); $('input').value = `/release ${s.id}`; _skillsCache = null; send(); }
       }));
   }
@@ -1248,8 +1299,9 @@ function _atGetItems(val) {
 
   // Agent branch: @<handle> (no slash yet). Also surface file-kind
   // shortcuts ("video/", "audio/", "image/") so users discover the file
-  // mode by typing the first letter — e.g. `@a` shows both Ada (agent)
-  // AND audio/ (kind shortcut). Picking a kind drills into its file list.
+  // mode by typing the first letter — e.g. `@a` shows both any agent
+  // whose name starts with `a` and the `audio/` kind shortcut. Picking a
+  // kind drills into its file list.
   const m = val.match(/^@(\S*)$/);
   if (!m) return [];
   const filter = m[1].toLowerCase();

@@ -69,7 +69,7 @@ let _haServiceCatalog = {};
 // Resolve the current user's coordinator agent name for routine-editor UI
 // strings. Reads the global `agents` array set up in init.js — every user
 // names their coordinator something different, so the "Ask <name>" labels
-// must NOT hardcode "Sydney".
+// must NOT hardcode any specific name; resolve at render time.
 function _coordinatorLabel() {
   const list = (typeof agents !== 'undefined' && Array.isArray(agents)) ? agents : [];
   const coord = list.find(a => a?.skillCategory === 'coordinator');
@@ -362,7 +362,8 @@ function renderDevices() {
   // picker shows the device-OWNER's library entries.
   //
   // This library section shows ONLY the user's custom uploads. OE-shipped
-  // stock wake words (sydney, athena, etc.) are not listed here — they're
+  // stock wake words (the .tflite files under wakewords/stock/) are not
+  // listed here — they're
   // available in the per-slot wake-word dropdown below alongside any
   // custom entries the user has uploaded. The intent: this section is
   // for "what have I personally added", while slot pickers show "what
@@ -455,7 +456,7 @@ function renderDevices() {
   // "Shared with you" — wake-slots on other users' devices pointing at me.
   // Rendered above the paired-device list (or above the empty state) so the
   // section is visible even for users who don't own any device themselves.
-  const SLOT_PHRASES = ['Sydney', 'Hey Ensemble'];
+  const SLOT_PHRASES = ['Hey Ensemble', 'Computer'];
   const incomingHtml = (_incomingSlots && _incomingSlots.length) ? `
     <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Shared with you</div>
@@ -563,7 +564,7 @@ function renderRoutinesPanel() {
         <button class="cdraw-btn cdraw-btn-primary" data-action="addRoutine" style="font-size:11px;padding:4px 10px">+ New routine</button>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.45">
-        Say the trigger phrase after your wake word ("hey sydney, goodnight") to fire the actions in order.
+        Say the trigger phrase after your wake word ("hey ensemble, goodnight") to fire the actions in order.
       </div>
       ${rows}
     </div>

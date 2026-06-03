@@ -1052,11 +1052,16 @@
           </div>
         </div>
 
-        <!-- ── Skills tab (Roles + Tools) ── -->
+        <!-- ── Skills tab (Roles + Custom skills + Tools) ── -->
         <div class="stab-panel" id="stab-panel-skills">
           <div class="settings-section-title" style="margin-bottom:8px">Roles</div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Roles define what each agent is responsible for. Claim a role to assign it exclusively to one agent.</div>
           <div id="rolesList" style="display:flex;flex-direction:column;gap:8px">
+            <div style="color:var(--muted);font-size:12px">Loading…</div>
+          </div>
+          <div class="settings-section-title" style="margin-top:24px;margin-bottom:8px">Custom skills</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Skills you built or installed. Each one belongs to a single agent — pick which one below, or chat with an agent and say <code>/claim &lt;skill-id&gt;</code>.</div>
+          <div id="customSkillsList" style="display:flex;flex-direction:column;gap:8px">
             <div style="color:var(--muted);font-size:12px">Loading…</div>
           </div>
           <div class="settings-section-title" style="margin-top:24px;margin-bottom:8px">Tools</div>

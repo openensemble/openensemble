@@ -34,7 +34,7 @@ The two paths produce slightly different titles right now — interceptor-create
 
 Each task is essentially: *"send this prompt to this agent on this schedule"*. The agent runs the prompt as if you'd typed it yourself, with all the same skills available. If the prompt asks for an email to be sent, it's sent. If it asks for a research doc, the doc is created and shows up in **Documents**.
 
-Scheduled tasks always use the agent's **current** model — there's no model snapshot at schedule time. If you change Sydney from gpt-5.5 to claude-sonnet-4.6 today, tomorrow's morning briefing fires on the new model. Same applies if you swap providers entirely.
+Scheduled tasks always use the agent's **current** model — there's no model snapshot at schedule time. If you change your coordinator from gpt-5.5 to claude-sonnet-4.6 today, tomorrow's morning briefing fires on the new model. Same applies if you swap providers entirely.
 
 If a scheduled run fails (transient network blip, provider 5xx, etc.), it retries 3 times with a 30-second gap before giving up. Final failures leave a visible **⚠️ Scheduled task failed** message in the agent's chat with the underlying error — no more silent orphan headers. The task stays scheduled and tries again at its next normal time.
 

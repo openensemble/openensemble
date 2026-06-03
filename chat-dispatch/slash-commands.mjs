@@ -75,6 +75,42 @@ export async function tryHandleSlashCommand({ userText, userId, agentId, agent }
     return { handled: true, reply };
   }
 
+  // Bare /claim or /release with no skill id → list what's assignable so
+  // the user can pick. Without this, typing just "/claim" matched no
+  // regex and fell through to the LLM with no useful response.
+  const bareClaimMatch = userText.match(/^\/?(claim|release)\s*$/i);
+  if (bareClaimMatch) {
+    const action = bareClaimMatch[1].toLowerCase();
+    const assignments = getRoleAssignments(userId);
+    const all = listRoles(userId).filter(m => m.category !== 'delegate' && !m.hidden);
+    const customSkills = all.filter(m => !!m.userScope && !m.service);
+    const roles = all.filter(m => m.service);
+    const ownerLabel = (id) => {
+      const owner = assignments[id];
+      if (!owner) return '_unassigned_';
+      if (owner === agentId) return `**this agent**`;
+      return owner;
+    };
+    const fmt = (m) => `• \`${m.id}\` — ${m.name} → ${ownerLabel(m.id)}`;
+    const lines = [];
+    if (action === 'claim') {
+      lines.push(`Type \`/claim <id>\` from this chat to move a skill or role to **${agent.name}**.`);
+    } else {
+      lines.push(`Type \`/release <id>\` from this chat to un-assign one of **${agent.name}**'s skills/roles.`);
+    }
+    lines.push('');
+    if (customSkills.length) {
+      lines.push('**Custom skills**');
+      for (const m of customSkills) lines.push(fmt(m));
+    }
+    if (roles.length) {
+      if (customSkills.length) lines.push('');
+      lines.push('**Roles**');
+      for (const m of roles) lines.push(fmt(m));
+    }
+    return { handled: true, reply: lines.join('\n') };
+  }
+
   // /claim <skillId> and /release <skillId>
   const claimMatch = userText.match(/^\/?(claim|release)\s+(\S+)/i);
   if (claimMatch) {
@@ -83,8 +119,13 @@ export async function tryHandleSlashCommand({ userText, userId, agentId, agent }
     const manifest = getRoleManifest(skillId, userId);
     let reply;
     if (!manifest) {
-      const available = listRoles(userId).filter(m => m.category !== 'delegate' && !m.hidden).map(m => m.id).join(', ');
-      reply = `No role found with id "${skillId}". Available roles: ${available}`;
+      const all = listRoles(userId).filter(m => m.category !== 'delegate' && !m.hidden);
+      const cs = all.filter(m => !!m.userScope && !m.service).map(m => m.id);
+      const rs = all.filter(m => m.service).map(m => m.id);
+      const parts = [`No skill or role found with id "${skillId}".`];
+      if (cs.length) parts.push(`**Custom skills:** ${cs.join(', ')}`);
+      if (rs.length) parts.push(`**Roles:** ${rs.join(', ')}`);
+      reply = parts.join('\n');
     } else if (manifest.category === 'delegate') {
       reply = `${manifest.name} is a system role and cannot be assigned.`;
     } else if (action === 'release') {
@@ -95,7 +136,9 @@ export async function tryHandleSlashCommand({ userText, userId, agentId, agent }
           : `${manifest.name} isn't assigned to anyone.`;
       } else {
         setRoleAssignment(skillId, null, userId);
-        reply = `✓ Released **${manifest.name}** — now available to all agents.`;
+        reply = manifest.custom
+          ? `✓ Released **${manifest.name}** — no agent will see its tools until you /claim it from another agent.`
+          : `✓ Released **${manifest.name}** — now unassigned.`;
       }
     } else {
       const assignments = getRoleAssignments(userId);

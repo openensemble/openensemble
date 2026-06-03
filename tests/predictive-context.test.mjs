@@ -47,7 +47,7 @@ describe('shouldSkipRecall', () => {
     expect(r.reason).toBe('confirmation');
   });
 
-  it.each(['/trim', '/threshold 0.5', '/claim sydney', '   /release'])(
+  it.each(['/trim', '/threshold 0.5', '/claim coder', '   /release'])(
     'skips slash command: "%s"',
     (msg) => {
       const r = shouldSkipRecall(msg);

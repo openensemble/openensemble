@@ -55,7 +55,7 @@ Use the built in skill builder to have your coding agent add functionality to Op
 
 <img width="562" height="887" alt="nodes" src="https://github.com/user-attachments/assets/006a0158-50fa-4efc-9e0f-3b573b41d80d" />
 
-**Voice devices (beta).** Pair a physical wake-word device — say "Sydney" (or any of the bundled wake words) and talk to your agents hands-free; the reply gets spoken back through the device's speaker or 3.5 mm jack. Includes a browser-based flash wizard (WebUSB + Web Serial — no `dfu-util` or `esptool` needed), per-slot voice and wake-word routing, household sharing (one device can route "hey roommate" to a different user's account), and a fast-path voice-control router for "volume up / pause / stop" without an LLM round-trip. Currently the only supported hardware is the **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. See the in-app Guide → Voice devices section for pairing + flashing.
+**Voice devices (beta).** Pair a physical wake-word device — say "hey ensemble" (or any of the bundled wake words) and talk to your agents hands-free; the reply gets spoken back through the device's speaker or 3.5 mm jack. Includes a browser-based flash wizard (WebUSB + Web Serial — no `dfu-util` or `esptool` needed), per-slot voice and wake-word routing, household sharing (one device can route "hey roommate" to a different user's account), and a fast-path voice-control router for "volume up / pause / stop" without an LLM round-trip. Currently the only supported hardware is the **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. See the in-app Guide → Voice devices section for pairing + flashing.
 
 **Expenses.** Groups, books, receipt parsing, and per-user / per-group activity.
 

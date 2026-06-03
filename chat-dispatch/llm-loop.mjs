@@ -159,7 +159,7 @@ export async function runSpecialistRoute({
     if (!route) route = classifySpecialistIntent(userText, userId, agentId);
     // Embedding fallback: when regex misses, try semantic similarity against
     // the loaded intent_examples. Catches paraphrases regex can't enumerate.
-    // ~20ms added cost only when we'd otherwise fall through to Sydney.
+    // ~20ms added cost only when we'd otherwise fall through to the coordinator.
     if (!route && userText.length >= 6) {
       try {
         const { classifyByEmbedding } = await import('../lib/specialist-embed-router.mjs');
@@ -173,6 +173,19 @@ export async function runSpecialistRoute({
       }
     }
     if (!route) return null;
+    // If the router would route to the agent the user is ALREADY on, skip
+    // the specialist hop entirely. Without this guard, every message in a
+    // direct chat with a specialist (e.g. on a specialist's chat tab) got dispatched
+    // through a fresh `ephemeral_router_*` session — losing the persistent
+    // history entirely. Follow-ups like "delete it" then have no context
+    // because the prior turn lived in a different (ephemeral) session.
+    // Fall through to null so chat-dispatch hands the message to the normal
+    // LLM-turn path on the user's actual agent, which has persistent
+    // session history.
+    if (route.agentId === agentId) {
+      console.log(`[chat] specialist-router: skipped (already on ${route.agentId})`);
+      return null;
+    }
     const target = getAgentsForUser(userId).find(a => a.id === route.agentId);
     if (!target) return null;
 
@@ -207,6 +220,24 @@ export async function runSpecialistRoute({
       const yearStart  = `${now.getFullYear()}-01-01`;
       scopedSpec.systemPrompt = `${target.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}${buildVoiceSystemAddition(source)}`;
     }
+
+    // Alias-framework hint propagation. The specialist router bypasses
+    // chat-dispatch.mjs:handleChatMessage's resolver, so without this block
+    // the embed-routed specialist (email agent for email, coder agent for
+    // code, etc.) never sees the user's resolved entity references. Without
+    // it, "whats my latest email in <account-label>" still chains
+    // email_list_accounts → email_list inside the email specialist because
+    // it has no idea which account id the label maps to. This block runs
+    // the same buildContextHints used on the coordinator path and prepends
+    // the hints to the spec agent's ephemeral system prompt so it goes
+    // straight to the right tool args.
+    try {
+      const { buildContextHints } = await import('../lib/context-resolvers.mjs');
+      const { hints } = await buildContextHints(userId, userText);
+      if (hints) {
+        scopedSpec.systemPrompt = `${scopedSpec.systemPrompt}\n\n## Pre-resolved references\n${hints}`;
+      }
+    } catch (_) { /* best-effort */ }
     console.log(`[chat] specialist-router: → ${route.name} (${route.skillId}) agent=${route.agentId}`);
     let routerBuf = '';
     try {

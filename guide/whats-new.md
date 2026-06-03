@@ -8,8 +8,43 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-06-03
 
+**Specialists can now escalate to the coordinator**
+Until today, only the coordinator could call `ask_agent`. If you asked a specialist for something just outside its domain — "send me an email of the latest videos from my channels" to your YouTube agent, for instance — it would respond with "I can't email" and stop. Now every specialist has `ask_agent` restricted to one target: `coordinator`. The specialist does its part of the work, then escalates with a task description that includes what it gathered, and the coordinator routes the remainder to whoever can finish (the email agent, the coder, etc.). Two safeguards prevent chains from spiraling: max delegation depth is 2 hops, and specialists can only escalate up (never to another specialist directly). The coordinator's full delegate roster is unchanged.
+
+**Background-task replies stay around after a reload**
+When an agent delegated work to a specialist in the background, the specialist's final reply used to render as a tagged bubble for the rest of the session — but on a browser refresh it would either disappear or render as a flat assistant message with a `[<name> finished in background]` prefix and no sender styling. Now the persisted entry carries enough metadata that the same tagged bubble renders on reload, with the agent name in the header and the body cleaned up. The bubble also has a height cap with internal scrolling, so a long reply (e.g. "top 3 videos from each of N channels") no longer pushes the rest of the conversation off-screen. Older entries from before this fix get the same treatment retroactively via prefix detection.
+
+**Settings → Skills now separates Roles, Custom Skills, and Tools**
+Three independent sections instead of one mixed list. Custom skills (the ones you or your coder built) live in their own section with an agent-picker dropdown per skill, so you can see at a glance who owns what and reassign in one click. Built-in tools (Web Search, Task Scheduler, Profile Files, etc.) are listed below, with a clear "available to any agent" label. A handful of internal capabilities — Active Agents, Skill Builder — are now bundled with the coordinator and coder roles respectively and no longer appear in the Tools list (they were never user-assignable in any meaningful way, and listing them confused things).
+
+**New-agent and `/claim` pickers now show custom skills**
+When you create a new agent, the Role dropdown groups choices under "Roles" and "Custom skills" — picking a custom skill assigns it to the new agent immediately, transferring ownership from whoever held it before. Same fix applies to the `/claim` / `/release` slash-command picker in chat: typing `/claim ` now shows both roles and custom skills, each tagged with their kind and current owner. Typing `/claim` with no argument lists everything that's assignable so you can browse.
+
+**Coordinator always sees a full roster of your agents**
+"Who are my agents?" used to miss any agent you created after your coordinator was first set up — because the coordinator's stored system prompt was written before the dynamic-roster feature shipped. Now the roster is auto-appended on every turn for any agent whose primary role is `coordinator`, regardless of what the stored prompt says. Includes unassigned agents too (a newly-created "Test" agent shows up immediately, even without any skills).
+
+**Agent description edits no longer revert**
+Editing an agent's description and saving used to look successful but the value would re-render to the old text on the next load — the PATCH route's allowlist silently dropped the `description` and `systemPrompt` fields. Fixed; both fields now persist, and changing the description also rebuilds the agent's stored system prompt so the new wording reflects in the agent's behavior on its next turn.
+
+**HA "turn on X" no longer matches entities named "<X> None"**
+A handful of HA integrations create entities whose `friendly_name` ends in the literal word `None` (a misconfigured subentity label that the integration stringifies as Python's `None`). When you said "turn on window ac", the fast-path could match `Window AC None` instead of your real window AC entity, fire `turn_on` on the wrong device, and report success even though nothing happened. These entities are now filtered out of the fast-path index at load time, so the resolver picks a properly-named sibling (or misses and falls back to the LLM, which lists devices and asks you to confirm).
+
+**Skill Builder now keeps the manifest in sync with the code**
+A new `skill_update_tool_def` tool lets the skill author update one tool's `description` or `parameters` in an existing skill's manifest without rewriting the whole file. Crucially, the skill-builder system prompt now requires this call any time a code patch changes what a tool returns or what arguments it accepts — without it, the calling agent reads the stale description, doesn't trust the new behavior, and either reproduces the work with generic fallback tools (`fetch_url`, `web_search`) or skips the change entirely. End-result: when you ask the coder to update one of your custom skills, the next time the owning agent calls one of its tools, it actually uses the new behavior instead of working around it.
+
+**Voice-device firmware 0.2.36: quieter serial log (developer)**
+The wake-word `audio_lvl=…` periodic stats line moved from INFO to DEBUG. Same data still streams server-side via the wake_avg_prob telemetry channel; the local print was clutter at the default log level. No user-visible behavior change — only relevant if you've been watching serial output.
+
+**Voice-device firmware 0.2.35: bigger task stacks + per-task stack diagnostics**
+Voice devices were occasionally panicking after long uptimes with a FreeRTOS `vApplicationStackOverflowHook` trap — typically when several heavy audio paths (TTS playback, ambient streaming, wake interruption) chained in quick succession. The mp3 decoder + audio resampler combined can carry ~5-6 KB of stack frames, and a few tasks were sized at 4 KB or 8 KB — close enough to the limit that an unlucky deep call would tip over. Bumped five tasks (`tts_worker`, `drive`, `ambient_w` to 12 KB; `audio_play`, `audio_cap` to 6 KB; `hb` to 4 KB) and added per-task stack-high-water-mark logging to the heartbeat task (`[hb] stack hwm ...`) every minute so future overflows can be pinned to a specific task name. (0.2.34 shipped the diagnostic but blew the heartbeat task's own stack — 0.2.35 fixes that.) Update via the Devices drawer when a paired device shows 0.2.35 available.
+
+**Custom skills now belong to one agent — pick which one in Settings**
+Specialists used to silently inherit every custom skill you'd ever built — so an email specialist might end up with 70 tools in its context even though only 13 were email-related. That bloated every turn and made the LLM more likely to grab a wrong tool. Now each custom skill is assigned to exactly one agent, and only that agent sees its tools. Settings → Skills has a new "Custom skills" section with a dropdown per skill — pick the agent that should own it (defaults to your coordinator). You can also chat with an agent and say `/claim <skill-id>` to move a skill to it, or `/release <skill-id>` to clear the assignment.
+
+If you're updating from a previous version, all of your existing custom skills get auto-assigned to your coordinator on first boot — nothing disappears, but if you had a custom skill that you specifically wanted on a specialist, move it via the new Settings UI or `/claim` it from a chat with that agent.
+
 **Aliases — say "the kitchen lights" once, OE remembers it**
-OpenEnsemble now learns the names you use for things. Reference a skill, agent, node, email account, project, or watched YouTube channel by friendly name ("ask Ada", "the pihole server", "my Renovo email", "the snake game project", "any new videos from twice") and the coordinator skips the usual list-then-filter dance — it goes straight to the right tool with the right id. Aliases auto-save the first time they're resolved (so the second mention is instant) and cascade-delete when the underlying thing is removed. If the LLM asks "did you mean X?" and you reply "yes", that learns the alias too. Custom skills with their own catalogs can opt in via a small `alias_catalog` block in their manifest — Skill Builder knows the pattern.
+OpenEnsemble now learns the names you use for things. Reference a skill, agent, node, email account, project, or watched YouTube channel by a friendly name — e.g. "ask the researcher", "the pihole server", "my work email", "the side project repo", "any new videos from that channel I added last week" — and the coordinator skips the usual list-then-filter dance and goes straight to the right tool with the right id. Aliases auto-save the first time they're resolved (so the second mention is instant) and cascade-delete when the underlying thing is removed. If the LLM asks "did you mean X?" and you reply "yes", that learns the alias too. Custom skills with their own catalogs can opt in via a small `alias_catalog` block in their manifest — Skill Builder knows the pattern.
 
 **Routine HA actions no longer hang on slow Home Assistant**
 Routines that touch Home Assistant (like the `goodnight` routine doing `light.turn_off entity_id=light.all`) used to block up to 15 seconds per action when HA was slow to acknowledge — typical when one call expands to many bulbs. Now those calls are fire-and-forget: OE waits 1.5 s for transport-level errors (HA actually down) then moves on, treating slow responses as "queued, will finish async." Same change applies to the HA fast-path ("turn off the kitchen lights") so you get an immediate spoken confirmation instead of a 15-second silence followed by a confused LLM paraphrase.
@@ -55,8 +90,8 @@ Chat-uploaded audio used to land in your Documents folder mixed with PDFs and CS
 
 **`@-mentions` in chat: agents and files**
 Two new chat-input behaviors. Type `@` and an autocomplete menu drops in:
-- `@ada` (or any agent name) routes the message to that agent and auto-switches your active chat tab to theirs. Works from any agent's chat panel — useful for quickly delegating without opening a different drawer first.
-- `@audio/foo.wav`, `@video/clip.mp4`, `@image/sunset.png` references a file already in your profile folders. Tab-completes to the exact filename and the server resolves it to an absolute path so transcribe (or any path-aware tool) can act on it. Typing `@a` shows both Ada-the-agent and `audio/` as completion options.
+- `@<agent-name>` routes the message to that agent and auto-switches your active chat tab to theirs. Works from any agent's chat panel — useful for quickly delegating without opening a different drawer first.
+- `@audio/foo.wav`, `@video/clip.mp4`, `@image/sunset.png` references a file already in your profile folders. Tab-completes to the exact filename and the server resolves it to an absolute path so transcribe (or any path-aware tool) can act on it. Typing `@a` shows both any agent whose name starts with `a` and the `audio/` folder as completion options.
 
 `@audio/<file> transcribe this` fires the transcribe fast-path on your saved files the same way attaching a fresh file does.
 
@@ -149,7 +184,7 @@ After opening an email in the Inbox drawer, clicking the **←** back button wou
 A pre-existing bug in the bulk-user-save helper would `rm -rf` any subdirectory of `users/` that wasn't a current user — including the system-only `users/_system/` directory that holds the master key used to encrypt your API keys in `config.json`. Triggers included `/claim` in chat, setting a news preference via chat ("only show me science news"), renaming an agent via chat ("call yourself Iris"), and any admin user-management action. If you've ever lost API keys after typing one of those, this was why. After updating, those actions are safe. If your `config.json` already has encrypted blobs that won't decrypt, you'll need to re-enter the affected keys in Settings → Providers; there's no way to recover them without a backup of the original `users/_system/.master-key` file.
 
 **Providers added by OE Admin show up in Settings + the model picker**
-When you (or an OE Admin–assigned agent like Sydney) add a new OpenAI-compatible provider via the OE Admin tools, it now renders as its own provider card under Settings → Providers and appears as a labelled group in every agent's model dropdown — alongside the built-in providers. Previously the provider worked in chat dispatch but was invisible to the UI, so users couldn't actually select its models for their agents.
+When you (or any OE Admin–assigned agent) add a new OpenAI-compatible provider via the OE Admin tools, it now renders as its own provider card under Settings → Providers and appears as a labelled group in every agent's model dropdown — alongside the built-in providers. Previously the provider worked in chat dispatch but was invisible to the UI, so users couldn't actually select its models for their agents.
 
 **Voice routines now have webhook triggers**
 Every routine gets its own webhook URL. Open Settings → Voice devices → Routines, edit a routine, and copy the **Webhook URL** at the bottom. POST to that URL from anywhere — including an iPhone NFC tag via Shortcuts ("When NFC tag is scanned" → "Get contents of URL") — and the routine fires. Anyone with the URL can trigger it, so don't share it widely; the "Regen" button revokes the old URL if you need to rotate.
@@ -160,7 +195,7 @@ Each routine now has a **Target device** dropdown in the editor. When set, the r
 **Webhook + Test work with idle devices**
 Reminders, the Test button, and webhook fires now push spoken replies via the same one-shot MP3 path as scheduled reminders, so a target device doesn't need an active chat session to speak.
 
-**Sydney can install Tailscale on the OE host**
+**Your OE Admin agent can install Tailscale on the OE host**
 If you have the **OE Admin** role assigned to an agent (Settings → Agents → edit → Role: OE Admin), ask it to "install Tailscale on this server" and it walks the install: prompts for your auth key via the secure widget, runs the installer with sudo, enables `tailscaled`, and brings up the node. Same path works for Cloudflared. The system restarts when needed, with auto-revert if the server fails to come back.
 
 **Ambient preview is now a play/stop toggle**

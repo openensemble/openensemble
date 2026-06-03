@@ -30,7 +30,7 @@ The Coordinator picks specialists based on each agent's:
 - **Description** (your one-line "what is this agent for?")
 - The user's message
 
-If it's picking the wrong one, the cheapest fix is to write clearer agent descriptions. ("Sydney — image and video generation" is more useful than "Sydney — creative agent".)
+If it's picking the wrong one, the cheapest fix is to write clearer agent descriptions. ("image and video generation specialist" is more useful than "creative agent".)
 
 ## When to talk to a specialist directly
 

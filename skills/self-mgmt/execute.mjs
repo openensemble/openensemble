@@ -133,14 +133,36 @@ export default async function execute(name, args, userId, agentId) {
     const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
     const assignments = getRoleAssignments(userId);
     const allAgents = getAgentsForUser(userId);
-    const roles = listRoles().filter(s => s.service);
-    if (!roles.length) return 'No roles defined yet.';
-    return roles.map(r => {
-      const agentId = assignments[r.id];
-      const agent = agentId ? allAgents.find(a => a.id === agentId) : null;
-      const who = agent ? `${agent.emoji ?? ''} ${agent.name}`.trim() : 'unassigned';
-      return `• ${r.icon ?? ''} ${r.name} — ${who}${r.description ? ` (${r.description})` : ''}`;
-    }).join('\n');
+    const all = listRoles(userId);
+    const roles = all.filter(s => s.service);
+    // Custom skills (per-user, non-service) are now SCOPED to one agent via
+    // the same skillAssignments map. They're invisible to the LLM unless
+    // surfaced here, which is how "who owns the youtube downloader skill?"
+    // gets a correct answer instead of being inferred from role descriptions.
+    const customSkills = all.filter(s =>
+      !s.service && s.category !== 'delegate' && !s.hidden && s.userScope === userId
+    );
+    const fmtOwner = (skillId) => {
+      const agentId = assignments[skillId];
+      if (!agentId) return 'unassigned';
+      const agent = allAgents.find(a => a.id === agentId);
+      return agent ? `${agent.emoji ?? ''} ${agent.name}`.trim() : agentId;
+    };
+    const lines = [];
+    if (roles.length) {
+      lines.push('## Roles');
+      for (const r of roles) {
+        lines.push(`• ${r.icon ?? ''} ${r.name} — ${fmtOwner(r.id)}${r.description ? ` (${r.description})` : ''}`);
+      }
+    }
+    if (customSkills.length) {
+      if (lines.length) lines.push('');
+      lines.push('## Custom skills (one owner each)');
+      for (const s of customSkills) {
+        lines.push(`• ${s.icon ?? ''} ${s.name} (id: ${s.id}) — ${fmtOwner(s.id)}${s.description ? ` (${s.description})` : ''}`);
+      }
+    }
+    return lines.length ? lines.join('\n') : 'No roles or custom skills defined yet.';
   }
 
   if (name === 'create_role') {

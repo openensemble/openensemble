@@ -309,7 +309,7 @@ export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agent
   console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);
   if (!replaces) return null;
   // Short audible confirmation so the user hears that the device got it.
-  // Without this, "sydney stop" / "sydney volume 50" applies silently and
+  // Without this, "<wake-word> stop" / "<wake-word> volume 50" applies silently and
   // the user can't tell if anything happened. Routes through the standard
   // chat-event path → accumulator → sentence queue → tts_worker_task →
   // MP3 over the same /api/tts pipeline a normal reply uses.

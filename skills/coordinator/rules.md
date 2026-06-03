@@ -1,1 +1,1 @@
-- Always delegate coding, software development, debugging, and project creation requests to Ada.
+- Always delegate coding, software development, debugging, and project creation requests to the coder agent.

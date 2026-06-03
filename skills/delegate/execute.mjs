@@ -3,6 +3,38 @@
  * Uses dynamic imports to avoid circular dependency: chat.mjs → roles.mjs → here → chat.mjs
  */
 
+// Max nested delegation depth. user→A→coordinator→B = 2 hops, which is
+// the deepest useful chain (specialist escalates to coordinator who then
+// re-dispatches). Anything deeper is almost certainly a loop or the LLM
+// getting confused — reject with a clear error so the chain unwinds.
+const MAX_DELEGATION_DEPTH = 2;
+
+// Parse an ephemeral session id like `ephemeral_deleg_d2_<ts>_<rand>_<suffix>`
+// (or the legacy `ephemeral_deleg_<ts>_<rand>_<suffix>` which we treat as
+// depth 1). Returns { effectiveAgentId, depth }. The suffix is the agent
+// that the previous delegate call targeted — i.e. the agent currently
+// running this ephemeral session. For a non-ephemeral caller, depth = 0.
+//
+// Direct WS chats arrive with a `${userId}_${agentId}` prefix applied by
+// chat-dispatch.mjs:290 for session isolation (so two users chatting with
+// the same-named agent don't share state). Strip that prefix so the agent
+// lookup below finds the raw agent record by its real id.
+function _parseCallerSession(callerAgentId) {
+  if (!callerAgentId) return { effectiveAgentId: null, depth: 0 };
+  // New format with explicit depth marker.
+  let m = String(callerAgentId).match(/^ephemeral_deleg_d(\d+)_\d+_[a-z0-9]+_(.+)$/);
+  if (m) return { effectiveAgentId: m[2], depth: parseInt(m[1], 10) };
+  // Legacy format (no depth marker) — treat as depth 1.
+  m = String(callerAgentId).match(/^ephemeral_deleg_\d+_[a-z0-9]+_(.+)$/);
+  if (m) return { effectiveAgentId: m[1], depth: 1 };
+  // Direct (non-ephemeral) caller — may carry a `user_<id>_` prefix from
+  // chat-dispatch's per-user session-key wrapper. Strip it so the agents
+  // lookup finds the bare agent id.
+  m = String(callerAgentId).match(/^user_[a-z0-9]+_(.+)$/);
+  if (m) return { effectiveAgentId: m[1], depth: 0 };
+  return { effectiveAgentId: callerAgentId, depth: 0 };
+}
+
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null) {
   if (name !== 'ask_agent') { yield { type: 'result', text: null }; return; }
 
@@ -38,7 +70,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // Some models (notably gpt-5.x via the Codex backend) hallucinate names even
   // when the tool description lists real ids, so we fall back through several
   // normalizations before giving up:
-  //   1. exact id match (agent_2dfdf5ca, slug ids like "mira")
+  //   1. exact id match (agent_<hex>, or a slug id like "coder")
   //   2. case-insensitive name match
   //   3. id ends with _<needle> (rare hand-typed id endings)
   //   4. needle stripped of an "agent_" prefix — the model often invents
@@ -50,7 +82,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     agent = agents.find(a => a.name?.toLowerCase() === needle)
          ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle))
          // LLMs frequently pass the agent's ROLE (e.g. "coder" instead of
-         // Ada's hex id). Accept that — there's usually one agent per role
+         // the coder agent's hex id). Accept that — there's usually one agent per role
          // on a given install, and if multiple exist we take the first
          // (matches the implicit "default agent for role" mental model).
          ?? agents.find(a => a.role?.toLowerCase() === needle)
@@ -70,12 +102,44 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   }
   if (!agent) { yield { type: 'result', text: `Agent '${agent_id}' not found or not available.` }; return; }
 
+  // ── Delegation-chain enforcement ───────────────────────────────────────
+  // Two rules:
+  //   1. Specialists may ONLY escalate to the coordinator. They cannot
+  //      sidestep the hierarchy by calling each other directly.
+  //   2. Max chain depth is MAX_DELEGATION_DEPTH (=2). Beyond that we're
+  //      either in a loop or the LLM is getting confused.
+  const { effectiveAgentId: callerEffectiveId, depth: currentDepth } = _parseCallerSession(callerAgentId);
+  const callerAgent = callerEffectiveId
+    ? agents.find(a => a.id === callerEffectiveId)
+    : null;
+  const callerIsCoordinator = callerAgent?.skillCategory === 'coordinator';
+  if (!callerIsCoordinator && agent.skillCategory !== 'coordinator') {
+    yield {
+      type: 'result',
+      text: `Specialists may only escalate to the coordinator (use agent_id="coordinator"). Direct specialist-to-specialist delegation is not allowed — ask the coordinator to route this.`,
+    };
+    return;
+  }
+  if (currentDepth >= MAX_DELEGATION_DEPTH) {
+    yield {
+      type: 'result',
+      text: `Delegation chain is already ${currentDepth} hops deep (max ${MAX_DELEGATION_DEPTH}). Cannot delegate further from here — respond to the caller with what you have.`,
+    };
+    return;
+  }
+  const newDepth = currentDepth + 1;
+
   // Every coordinator delegation is ephemeral: a fresh session per call with no
   // prior history loaded and nothing persisted back. Prevents cross-task context
   // bleed (e.g. stale file references from a completed delegation steering the
   // next run into a recon loop). Direct user↔agent WS chat bypasses this skill,
   // so that path keeps its persistent ${agent_id}.jsonl.
-  const delegId = `ephemeral_deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${agent_id}`;
+  // The `d${depth}` marker lets a nested executeSkillTool call read its own
+  // depth via _parseCallerSession (chat.mjs passes the running scoped-agent
+  // id straight through as callerAgentId on tool dispatch). The suffix uses
+  // the RESOLVED agent.id rather than the LLM-supplied agent_id so the
+  // parser can later look up the agent in getAgentsForUser by exact id.
+  const delegId = `ephemeral_deleg_d${newDepth}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${agent.id}`;
   const scopedAgent = { ...agent, id: delegId, ephemeral: true };
 
   // Seed the ephemeral session's tool-call cache + task embedding so the
@@ -101,6 +165,23 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       : '';
     scopedAgent.systemPrompt = `${agent.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}${financeExtra}`;
   }
+
+  // Hint propagation: when the coordinator delegates a task that references
+  // a named entity (e.g. "Delete the latest email from my <account-label>
+  // account"), the alias resolver fires on the coordinator's turn but the
+  // resulting hint doesn't automatically reach the delegated agent — its
+  // ephemeral session starts fresh with just the task as the first user
+  // message. Without this block it would call email_list_accounts to
+  // discover the account_id all over again. We re-resolve here against the
+  // task text and prepend any hints to the delegated agent's system prompt
+  // so it goes straight to the right tool.
+  try {
+    const { buildContextHints } = await import('../../lib/context-resolvers.mjs');
+    const { hints } = await buildContextHints(userId, task);
+    if (hints) {
+      scopedAgent.systemPrompt = `${scopedAgent.systemPrompt}\n\n## Pre-resolved references\n${hints}`;
+    }
+  } catch (_) { /* best-effort — never block the delegation */ }
 
   // Expand any doc_XXXXXXXX references in the task so the target agent gets
   // the actual content — most specialist agents don't have get_research access.

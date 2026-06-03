@@ -85,7 +85,8 @@ You have access to persistent memory — relevant facts from past conversations 
 }
 
 // Slug a display name into an agent id candidate. We try this first so an
-// agent called "Mira" becomes id "mira" instead of "agent_bad1a5f9" — readable
+// agent called e.g. "Researcher" becomes id "researcher" instead of
+// "agent_<hex>" — readable
 // IDs are easier for the coordinator's LLM to call (it stops inventing wrong
 // hex ids like "agent_mira" by extrapolating the hex pattern from the tool
 // description). Falls back to a hex id when the slug is empty, too short,

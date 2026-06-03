@@ -174,13 +174,14 @@ function handleReadBlueprint() {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, assign_to } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
   if (!description?.trim()) return 'description is required.';
   if (!Array.isArray(tools) || !tools.length) return 'tools must be a non-empty array.';
   if (!code?.trim()) return 'code is required.';
+  if (!assign_to?.trim()) return 'assign_to is required. Specify the agent id that should own this skill (e.g. "coordinator" for general helpers, or a specialist agent\'s id for scoped skills). Custom skills no longer auto-flow to every agent — they must be explicitly assigned.';
 
   const idErr = validateId(rawId.trim());
   if (idErr) return `Invalid id: ${idErr}`;
@@ -260,6 +261,24 @@ async function handleCreate(args, userId) {
     user.skills = user.skills ?? [];
     if (!user.skills.includes(skillId)) user.skills.push(skillId);
   });
+
+  // Persist the user-supplied assign_to mapping. Specialists no longer
+  // inherit custom skills automatically — the skill reaches the named
+  // agent only via this skillAssignments entry. Resolves "coordinator"
+  // shorthand to the user's actual coordinator agent id so the user
+  // doesn't have to remember the unique slug. Other ids pass through.
+  try {
+    const { setRoleAssignment } = await import('../../roles.mjs');
+    let targetAgentId = assign_to.trim();
+    if (targetAgentId.toLowerCase() === 'coordinator') {
+      const { getUserCoordinatorAgentId } = await import('../../routes/_helpers.mjs');
+      const resolved = getUserCoordinatorAgentId(userId);
+      if (resolved) targetAgentId = resolved;
+    }
+    setRoleAssignment(skillId, targetAgentId, userId);
+  } catch (e) {
+    console.warn('[skill-builder] assign failed:', e.message);
+  }
 
   // Optional drawer — rolled back on failure so we never leave a half-built state.
   let drawerNote = '';
@@ -467,6 +486,95 @@ async function handlePatchCode(args, userId) {
   return `Skill "${manifest.name}" (${skillId}) patched (${n} edit${n === 1 ? '' : 's'}) and hot-reloaded. New code is active immediately.`;
 }
 
+async function handleUpdateToolDef(args, userId) {
+  const { id, tool_name, description, parameters } = args;
+  if (!id?.trim() || !tool_name?.trim()) {
+    return 'Both `id` (skill id) and `tool_name` are required.';
+  }
+  if (description == null && parameters == null) {
+    return 'Provide at least one of `description` or `parameters` to update.';
+  }
+  if (parameters != null && typeof parameters !== 'object') {
+    return '`parameters` must be a JSON-schema object (or omit it entirely).';
+  }
+
+  const skillId = id.trim();
+  const { getRoleManifest, listAllRoles, clearExecutorCache, addRoleManifest } = await import('../../roles.mjs');
+
+  let manifest = getRoleManifest(skillId, userId);
+  if (manifest && !manifest.custom) {
+    return 'Only user-created skills can be updated.';
+  }
+  if (!manifest && isPrivileged(userId)) {
+    manifest = listAllRoles().find(m => m.id === skillId && m.custom) ?? null;
+  }
+  if (!manifest) {
+    return `Skill "${skillId}" not found. Use skill_list to see your skills.`;
+  }
+
+  const ownerId  = manifest.createdBy;
+  const skillDir = path.join(userSkillsDir(ownerId), skillId);
+  const manifestPath = path.join(skillDir, 'manifest.json');
+  if (!existsSync(manifestPath)) return `Skill "${skillId}" has no manifest.json on disk.`;
+
+  let disk;
+  try {
+    disk = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (e) {
+    return `Could not parse manifest.json: ${e.message}`;
+  }
+
+  const tools = Array.isArray(disk.tools) ? disk.tools : [];
+  const toolIdx = tools.findIndex(t => t?.function?.name === tool_name.trim());
+  if (toolIdx === -1) {
+    const known = tools.map(t => t?.function?.name).filter(Boolean).join(', ');
+    return `Tool "${tool_name}" not found in this skill's manifest. Existing tools: ${known || '(none)'}.`;
+  }
+  const target = tools[toolIdx].function;
+  const changed = [];
+  if (typeof description === 'string') {
+    target.description = description;
+    changed.push('description');
+  }
+  if (parameters != null) {
+    target.parameters = parameters;
+    changed.push('parameters');
+  }
+  if (!changed.length) {
+    return 'No fields applied — nothing to update.';
+  }
+
+  // Atomic write with backup so a write failure mid-stream can be recovered.
+  const backupPath = manifestPath + '.bak';
+  const original = readFileSync(manifestPath, 'utf8');
+  writeFileSync(backupPath, original);
+  try {
+    writeFileSync(manifestPath, JSON.stringify(disk, null, 2) + '\n');
+    // Re-register so the in-memory manifest matches disk. Doesn't reload the
+    // executor (no code changed); does refresh the tool list every agent sees
+    // on its next resolveAgentTools call.
+    addRoleManifest(disk, ownerId);
+    // Clear executor cache too: belt-and-suspenders for skills that read
+    // their own manifest at runtime. Cheap; the executor reloads on next call.
+    clearExecutorCache(skillId, ownerId);
+  } catch (e) {
+    writeFileSync(manifestPath, original);
+    rmSync(backupPath, { force: true });
+    return `Manifest write failed — reverted to previous version: ${e.message}`;
+  }
+  rmSync(backupPath, { force: true });
+
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    appendEntry(ownerId, skillId, {
+      kind: 'manifest_update',
+      summary: `Updated tool "${tool_name}" — fields: ${changed.join(', ')}`,
+    });
+  } catch (e) { console.debug('[skill-builder] log append (manifest_update) failed:', e.message); }
+
+  return `Skill "${manifest.name}" (${skillId}) — tool "${tool_name}" manifest updated (${changed.join(' + ')}). The new description/parameters take effect on every agent's next turn.`;
+}
+
 async function handleDelete(args, userId) {
   const { id: skillId } = args;
   if (!skillId?.trim()) return 'id is required.';
@@ -552,19 +660,20 @@ export async function executeSkillTool(name, args, userId, agentId) {
   // network privilege. Until validation is sandboxed (worker thread or static
   // analysis), restrict authorship to owner/admin so a prompt-injected child
   // or guest account can't write code-execution into the install.
-  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_delete']);
+  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_update_tool_def', 'skill_delete']);
   if (CODE_AUTHORING.has(name) && !isPrivileged(userId)) {
     return 'Permission denied: skill authoring (create/update/patch/delete) is restricted to admin/owner accounts.';
   }
 
   try {
-    if (name === 'skill_read_blueprint') return handleReadBlueprint();
-    if (name === 'skill_create')         return await handleCreate(args, userId);
-    if (name === 'skill_update_code')    return await handleUpdateCode(args, userId);
-    if (name === 'skill_read_code')      return await handleReadCode(args, userId);
-    if (name === 'skill_patch_code')     return await handlePatchCode(args, userId);
-    if (name === 'skill_delete')         return await handleDelete(args, userId);
-    if (name === 'skill_list')           return await handleList(userId);
+    if (name === 'skill_read_blueprint')    return handleReadBlueprint();
+    if (name === 'skill_create')            return await handleCreate(args, userId);
+    if (name === 'skill_update_code')       return await handleUpdateCode(args, userId);
+    if (name === 'skill_read_code')         return await handleReadCode(args, userId);
+    if (name === 'skill_patch_code')        return await handlePatchCode(args, userId);
+    if (name === 'skill_update_tool_def')   return await handleUpdateToolDef(args, userId);
+    if (name === 'skill_delete')            return await handleDelete(args, userId);
+    if (name === 'skill_list')              return await handleList(userId);
     return null;
   } catch (e) {
     console.error(`[skill-builder] ${name}:`, e.message);

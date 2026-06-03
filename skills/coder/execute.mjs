@@ -142,8 +142,8 @@ function getProjectDir(userId) {
 }
 
 // Snapshot of the current coder state for a user — used by the nodes skill to
-// deploy whatever Ada is currently working on. Returns null if no project is
-// active yet. Never throws: callers handle the "nothing to push" case.
+// deploy whatever the coder is currently working on. Returns null if no project
+// is active yet. Never throws: callers handle the "nothing to push" case.
 export function getActiveProjectInfo(userId) {
   try {
     const project = _activeProject.get(userId);

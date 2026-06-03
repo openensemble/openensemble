@@ -100,8 +100,9 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       await runInTaskContext(taskCtx, async () => {
       for await (const ev of streamChat(scopedAgent, task, null, null, userId, null, scheduledNote)) {
         if (ev.type === 'token') fullText += ev.text;
-        // Track in-flight tool calls so list_active_agents can report "Ada is
-        // currently running coder_edit_file" instead of just an opaque spinner.
+        // Track in-flight tool calls so list_active_agents can report e.g.
+        // "the coder is currently running coder_edit_file" instead of just
+        // an opaque spinner.
         if (ev.type === 'tool_call' && ev.name) {
           toolsUsed++;
           currentTool = ev.name;
@@ -164,8 +165,8 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
 
   // 1. Inject into coordinator's session so it has context on next user message.
   //    Include the original task summary so the user (and the LLM on its next
-  //    turn) can see WHICH task Ada is replying to — important when multiple
-  //    background tasks are in flight at once.
+  //    turn) can see WHICH task the specialist is replying to — important when
+  //    multiple background tasks are in flight at once.
   try {
     const { appendToSession } = await import('./sessions.mjs');
     const taskSummary = rec?.summary || '';
@@ -175,14 +176,30 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     const notice = errorMsg
       ? `[${agentName} ran into a problem${taskRef}]\n${errorMsg}`
       : `[${agentName} replied${taskRef}]\n${result}`;
-    await appendToSession(coordinatorAgentId, { role: 'assistant', content: notice, ts: Date.now() });
+    // Keep role:'assistant' so the LLM reads this as part of the
+    // conversation on its next turn (it needs to know what the specialist
+    // reported back). Add kind:'agent_report' so the browser knows to
+    // render it with the fancier sender-tagged bubble on reload — same
+    // visual as the live broadcast that fires immediately on completion.
+    await appendToSession(coordinatorAgentId, {
+      role: 'assistant',
+      kind: 'agent_report',
+      agentName, agentEmoji,
+      content: notice,
+      ts: Date.now(),
+    });
   } catch (e) {
     console.error('[background-tasks] failed to inject session notice:', e.message);
   }
 
-  // 2. Agent report card: render directly in the user's current chat as a notification from the agent
+  // 2. Agent report card: render directly in the user's current chat as a notification from the agent.
+  //    coordinatorAgentId is the chat the report belongs to — the browser
+  //    uses it to push the report into sessions[coordinatorAgentId] so the
+  //    bubble survives agent-tab switches (without it, the report only
+  //    exists in the DOM until the next renderSession wipes it).
   _broadcast?.({
     type:       'agent_report',
+    agent:      coordinatorAgentId,
     agentName,
     agentEmoji,
     content,

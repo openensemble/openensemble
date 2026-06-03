@@ -95,6 +95,14 @@ export async function handle(req, res) {
       const globalChanges = {};
       if (changes.name)     uiChanges.name     = changes.name;
       if (changes.emoji)    uiChanges.emoji    = changes.emoji;
+      // `in` (not truthy check) so an empty string explicitly clears the
+      // value — both fields are user-editable in the agent settings panel,
+      // and a blank description should be saveable. Without these two
+      // entries the PATCH silently dropped description/systemPrompt edits
+      // and the UI would re-render the old value on next load, looking
+      // like the change had "reverted".
+      if ('description' in changes)  uiChanges.description  = changes.description;
+      if ('systemPrompt' in changes) uiChanges.systemPrompt = changes.systemPrompt;
       if (changes.model)     globalChanges.model     = changes.model;
       if (changes.provider)  globalChanges.provider  = changes.provider;
       if ('maxTokens' in changes) globalChanges.maxTokens = changes.maxTokens ? parseInt(changes.maxTokens, 10) : null;

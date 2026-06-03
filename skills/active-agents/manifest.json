@@ -4,7 +4,8 @@
   "description": "Lets the coordinator see what other agents are doing right now — which background ask_agent dispatches are still running, the task summary, and how long they've been at it.",
   "icon": "🛰️",
   "category": "service",
-  "always_on": true,
+  "hidden": true,
+  "bundled_with_role": "coordinator",
   "enabled_by_default": true,
   "coordinator_scope": "include",
   "intent_examples": [
@@ -32,7 +33,7 @@
       "type": "function",
       "function": {
         "name": "get_task_log",
-        "description": "Returns the full progress history for one task_proxy watcher — every tool call and status update the running agent has emitted so far. Use this when the user asks 'show me what Ada has done', 'walk me through what the task has been doing', or after list_active_agents shows a task in flight and they want details. Returns the watcher's label, target agent, status, lastStatusText, history entries, and elapsed time.",
+        "description": "Returns the full progress history for one task_proxy watcher — every tool call and status update the running agent has emitted so far. Use this when the user asks 'show me what the coder has done', 'walk me through what the task has been doing', or after list_active_agents shows a task in flight and they want details. Returns the watcher's label, target agent, status, lastStatusText, history entries, and elapsed time.",
         "parameters": {
           "type": "object",
           "properties": {

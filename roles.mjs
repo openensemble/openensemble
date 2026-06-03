@@ -154,6 +154,65 @@ export function loadRoleManifests() {
       };
       fw.registerFromManifests(allManifests, importerFor);
 
+      // Lockdown migration (one-shot per user): every CUSTOM skill that
+      // currently has no entry in the user's skillAssignments gets pinned
+      // to that user's coordinator. Preserves today's effective behavior —
+      // coordinators see the user's custom skills as before — while shutting
+      // off the auto-bypass to specialists that was added in agent-resolver
+      // (commit "lockdown specialist toolset"). After this runs once,
+      // newly-created skills go through skill-builder's `assign_to` flow,
+      // and existing skills can be reassigned via setRoleAssignment.
+      try {
+        const { getUserCoordinatorAgentId } = await import('./routes/_helpers.mjs');
+        const seenUsers = new Set();
+        for (const wrap of _manifests.values()) {
+          const m = wrap.manifest;
+          if (!m?.custom || !wrap.userId) continue;
+          if (seenUsers.has(wrap.userId + ':' + m.id)) continue;
+          seenUsers.add(wrap.userId + ':' + m.id);
+          const assignments = getRoleAssignments(wrap.userId) || {};
+          if (assignments[m.id]) continue;  // already assigned somewhere
+          const coordId = getUserCoordinatorAgentId(wrap.userId);
+          if (!coordId) continue;
+          setRoleAssignment(m.id, coordId, wrap.userId);
+          console.log(`[roles] lockdown-migration: assigned custom skill "${m.id}" to coordinator "${coordId}" for user ${wrap.userId}`);
+        }
+      } catch (e) { console.warn('[roles] lockdown-migration failed:', e.message); }
+
+      // Cleanup: an earlier iteration tried to make active-agents and
+      // skill-builder user-assignable (with a Settings UI dropdown). That
+      // was the wrong model — they're inherent to the coordinator and coder
+      // roles, not separately-assignable. The current design uses
+      // `bundled_with_role` in the manifest (see resolveAgentTools). Strip
+      // any leftover skillAssignments entries so they don't ghost in the UI.
+      try {
+        const { loadUsers, modifyUser } = await import('./routes/_helpers.mjs');
+        const stale = ['active-agents', 'skill-builder'];
+        // Owner / admin scoped assignments live in config.json.
+        try {
+          const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+          let dirty = false;
+          for (const skillId of stale) {
+            if (cfg.skillAssignments?.[skillId]) {
+              delete cfg.skillAssignments[skillId];
+              dirty = true;
+              console.log(`[roles] cleanup: removed stale skillAssignments["${skillId}"] from config.json`);
+            }
+          }
+          if (dirty) writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2));
+        } catch (e) { console.debug('[roles] cleanup: config.json read/write skipped:', e.message); }
+        // Plain-user scoped assignments live in users/<id>/profile.json.
+        for (const u of loadUsers()) {
+          if (!u.skillAssignments) continue;
+          const needsClean = stale.some(k => u.skillAssignments[k]);
+          if (!needsClean) continue;
+          modifyUser(u.id, p => {
+            for (const skillId of stale) delete p.skillAssignments?.[skillId];
+          });
+          console.log(`[roles] cleanup: removed stale scoped-tool assignments for user ${u.id}`);
+        }
+      } catch (e) { console.warn('[roles] scoped-tools-cleanup failed:', e.message); }
+
       // System-level "agent" catalog — no skill manifest owns agents, so
       // we register a runtime spec with an inline function that calls
       // getAgentsForUser. Same shape as a manifest-declared catalog but
@@ -418,7 +477,7 @@ export function getRoleAssignment(roleId, userId) {
 
 /**
  * Return all service role ids currently held by a given agent for this user.
- * Accepts either a scoped agent id ("user_XYZ_ada") or a bare one ("ada").
+ * Accepts either a scoped agent id ("user_XYZ_coder") or a bare one ("coder").
  * Only `service: true` roles are returned — delegate/system roles are skipped.
  */
 export function getAgentRoles(agentId, userId) {
@@ -532,6 +591,24 @@ function getAlwaysOnTools() {
   return tools;
 }
 
+// Tools that ride along with a primary role — e.g. active-agents is "the
+// coordinator's job" and skill-builder is "the coder's job". The manifest
+// declares `bundled_with_role: <roleId>` and the resolver auto-injects
+// those tools whenever an agent's skillCategory matches. Treated as part
+// of the role, not a separately-assignable skill (so they're also marked
+// `hidden: true` so they don't show up in Settings → Skills).
+function getBundledRoleTools(skillCategory) {
+  if (!skillCategory) return [];
+  const tools = [];
+  for (const wrap of _manifests.values()) {
+    if (wrap.userId !== null) continue;
+    if (wrap.manifest.bundled_with_role === skillCategory) {
+      tools.push(...(wrap.manifest.tools ?? []));
+    }
+  }
+  return tools;
+}
+
 // Resolve what tools an agent gets based on its skillCategory and the user's enabled roles
 export function resolveAgentTools(skillCategory, userSkills, agentId = null, userId = null) {
   const assignments = getRoleAssignments(userId);
@@ -567,6 +644,11 @@ export function resolveAgentTools(skillCategory, userSkills, agentId = null, use
   // Primary role is always a global skill category (coder, email, etc.).
   const primaryTools = skillCategory ? (getRoleManifest(skillCategory)?.tools ?? []) : [];
 
+  // Tools bundled with the primary role (e.g. active-agents → coordinator,
+  // skill-builder → coder). These are treated as inherent to the role, not
+  // as separately-assignable skills, so they're auto-injected here.
+  const bundledTools = getBundledRoleTools(skillCategory);
+
   const dedup = tools => {
     const seen = new Set();
     return tools.filter(t => {
@@ -577,17 +659,20 @@ export function resolveAgentTools(skillCategory, userSkills, agentId = null, use
     });
   };
 
-  if (skillCategory === 'general' || skillCategory === 'web') {
-    // Delegate tools are global-only by design (agent roster is global).
-    const delegateTools = [];
-    for (const wrap of _manifests.values()) {
-      if (wrap.userId !== null) continue;
-      if (wrap.manifest.category === 'delegate') delegateTools.push(...(wrap.manifest.tools ?? []));
-    }
-    return dedup([...alwaysOn, ...utilityTools, ...assignedTools, ...delegateTools]);
+  // Delegate tools (ask_agent etc.) flow to EVERY agent now — not just the
+  // coordinator. Specialists can escalate to the coordinator when they hit
+  // a wall (no email tool, no skill-edit tool, etc.). The actual restriction
+  // ("specialists may only target the coordinator") and the depth cap are
+  // enforced inside skills/delegate/execute.mjs at call time.
+  const delegateTools = [];
+  for (const wrap of _manifests.values()) {
+    if (wrap.userId !== null) continue;
+    if (wrap.manifest.category === 'delegate') delegateTools.push(...(wrap.manifest.tools ?? []));
   }
-
-  return dedup([...alwaysOn, ...utilityTools, ...assignedTools, ...primaryTools]);
+  if (skillCategory === 'general' || skillCategory === 'web') {
+    return dedup([...alwaysOn, ...utilityTools, ...assignedTools, ...delegateTools, ...bundledTools]);
+  }
+  return dedup([...alwaysOn, ...utilityTools, ...assignedTools, ...primaryTools, ...bundledTools, ...delegateTools]);
 }
 
 // Get default role IDs for new users — globals only.
@@ -954,7 +1039,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   const _toolStart = Date.now();
   // Phase-14e: any tool taking longer than this auto-backgrounds. The
   // network/promise stays alive — events just get redirected to a
-  // task_proxy chip instead of yielding up to the LLM. Sydney's turn
+  // task_proxy chip instead of yielding up to the LLM. The coordinator's turn
   // finishes immediately with a "still running, see chip" synthetic result.
   const AUTO_BG_MS = 10_000;
 
@@ -1032,8 +1117,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           }
 
           if (backgrounded) {
-            // Inform Sydney's LLM the tool was backgrounded — her turn ends
-            // gracefully with this message in place of the real result.
+            // Inform the coordinator's LLM the tool was backgrounded — its turn
+            // ends gracefully with this message in place of the real result.
             yield { type: 'result', text: `\`${name}\` is taking longer than 10s — moved to background. A live progress chip is in the chat; you don't need to reply about it.` };
             yield { type: '__hide_turn', reason: 'bg_chip', taskId: watcherId };
 
@@ -1064,18 +1149,34 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   try {
                     const { appendToSession } = await import('./sessions.mjs');
                     const key = captured.agentId.startsWith(`${captured.userId}_`) ? captured.agentId : `${captured.userId}_${captured.agentId}`;
-                    await appendToSession(key, { role: 'assistant', content: `[${captured.name} finished in background]\n${(finalText || '').slice(0, 4000)}`, ts: Date.now() });
+                    // Persist with kind:'agent_report' + sender metadata so a
+                    // hard browser reload re-renders the same fancy bubble
+                    // the live broadcast paints. Without kind, the entry
+                    // renders as a flat assistant bubble with the literal
+                    // "[<name> finished in background]" prefix and loses
+                    // the sender-tagged styling.
+                    await appendToSession(key, {
+                      role: 'assistant',
+                      kind: 'agent_report',
+                      agentName: captured.name,
+                      agentEmoji: captured.agentEmoji ?? '⏵',
+                      content: `[${captured.name} finished in background]\n${(finalText || '').slice(0, 4000)}`,
+                      ts: Date.now(),
+                    });
                   } catch (_) { /* best-effort */ }
                 }
                 // Broadcast a notification so the user sees the result land
                 // even if the task chip is scrolled out of view. Same path
                 // dispatchBackground uses for background ask_agent results.
+                // `agent` field tells the browser which coordinator's session
+                // this report belongs to so it persists in sessions[<id>].
                 try {
                   const { sendToUser } = await import('./ws-handler.mjs');
                   sendToUser(captured.userId, {
                     type: 'agent_report',
+                    agent: captured.agentId ?? null,
                     agentName: captured.name,
-                    agentEmoji: '⏵',
+                    agentEmoji: captured.agentEmoji ?? '⏵',
                     content: finalText || `${captured.name} completed.`,
                     taskId: `autobg_${captured.watcherId}`,
                     ts: Date.now(),
@@ -1140,13 +1241,21 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             try {
               const { appendToSession } = await import('./sessions.mjs');
               const key = agentId.startsWith(`${userId}_`) ? agentId : `${userId}_${agentId}`;
-              await appendToSession(key, { role: 'assistant', content: `[${name} finished in background]\n${text.slice(0, 4000)}`, ts: Date.now() });
+              await appendToSession(key, {
+                role: 'assistant',
+                kind: 'agent_report',
+                agentName: name,
+                agentEmoji: '⏵',
+                content: `[${name} finished in background]\n${text.slice(0, 4000)}`,
+                ts: Date.now(),
+              });
             } catch (_) { /* best-effort */ }
           }
           try {
             const { sendToUser } = await import('./ws-handler.mjs');
             sendToUser(userId, {
               type: 'agent_report',
+              agent: agentId ?? null,
               agentName: name,
               agentEmoji: '⏵',
               content: text || `${name} completed.`,

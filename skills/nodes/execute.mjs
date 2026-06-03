@@ -225,9 +225,10 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     if (wantBackground) {
       const { registerWatcher, pushWatcherStatus, completeWatcher } = await import('../../scheduler/watchers.mjs');
       const cmdPreview = command.length > 80 ? command.slice(0, 80) + '…' : command;
-      // Friendly chip title — Sydney can pass an intent-shaped label
-      // ("Updating Cesium09"). Fall back to a heuristic derived from the
-      // command if she didn't (apt → "package updates", make → "build", etc.)
+      // Friendly chip title — the calling agent can pass an intent-shaped
+      // label (e.g. "Updating <hostname>"). Fall back to a heuristic derived
+      // from the command if it didn't (apt → "package updates", make →
+      // "build", etc.)
       const friendly = providedLabel || _friendlyCommandLabel(command, node.hostname || node_id);
       let watcherId = null;
       // Resolve attribution agent OUTSIDE the try so the detached IIFE
@@ -988,8 +989,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     // ── NFS ──────────────────────────────────────────────────────────────
     // Emit even on boxes that also run Samba — letting it ride on a samba
     // profile means a node that's NFS-only (e.g. a PXE root server) gets
-    // missed. The user / Sydney can decide whether to onboard one combined
-    // file-sharing profile or split nfs and samba.
+    // missed. The user (or the calling agent) can decide whether to onboard
+    // one combined file-sharing profile or split nfs and samba.
     const nfsServiceRunning = sections.services.some(s =>
       s.startsWith('nfs-server') || s.startsWith('nfs-kernel-server') || s === 'nfsd.service',
     );

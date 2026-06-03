@@ -267,7 +267,11 @@ async function openNewAgentModal(agent = null) {
   $('aDesc').value   = agent?.description ?? '';
   $('aToolSet').value = agent?.toolSet ?? 'web';
 
-  // Populate role picker (creation only)
+  // Populate role picker (creation only). Includes both built-in roles
+  // (s.service === true) AND user-installed custom skills (userScope set
+  // and non-service). Custom skills are first-class assignments via the
+  // same skillAssignments map, so picking one at creation time has the
+  // same effect as assigning it later via Settings → Skills.
   const roleLabel = $('aRoleLabel');
   const roleSel = $('aRole');
   if (agent) {
@@ -276,12 +280,27 @@ async function openNewAgentModal(agent = null) {
     roleLabel.style.display = '';
     roleSel.innerHTML = '<option value="">— General Assistant —</option>';
     fetch('/api/roles').then(r => r.json()).then(skills => {
-      skills.filter(s => s.service && !s.hidden).forEach(s => {
+      const visible = skills.filter(s => !s.hidden && s.category !== 'delegate');
+      const roles = visible.filter(s => s.service);
+      const customs = visible.filter(s => !!s.userScope && !s.service);
+      const addOpt = (s) => {
         const opt = document.createElement('option');
         opt.value = s.id;
         opt.textContent = `${s.icon ?? ''} ${s.name}`.trim();
-        roleSel.appendChild(opt);
-      });
+        return opt;
+      };
+      if (roles.length) {
+        const g = document.createElement('optgroup');
+        g.label = 'Roles';
+        for (const s of roles) g.appendChild(addOpt(s));
+        roleSel.appendChild(g);
+      }
+      if (customs.length) {
+        const g = document.createElement('optgroup');
+        g.label = 'Custom skills';
+        for (const s of customs) g.appendChild(addOpt(s));
+        roleSel.appendChild(g);
+      }
     }).catch(() => {});
   }
 

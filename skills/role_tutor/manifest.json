@@ -5,7 +5,6 @@
   "icon": "🎓",
   "category": "custom",
   "service": true,
-  "custom": true,
   "enabled_by_default": false,
   "intent_patterns": [
     "^(?:quiz|test)\\s+me\\s+on\\b",

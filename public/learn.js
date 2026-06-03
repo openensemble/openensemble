@@ -262,14 +262,14 @@ function _renderRoutingOverridesSection(overrides) {
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
       <input id="rovrAddPattern" type="text" placeholder="text contained in message" style="flex:1;min-width:140px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px;color:var(--text)">
       <span style="color:var(--muted);font-size:11px">→</span>
-      <input id="rovrAddAgent" type="text" placeholder="agent id (e.g. ada)" style="width:140px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px;color:var(--text)">
+      <input id="rovrAddAgent" type="text" placeholder="agent id (e.g. coder)" style="width:140px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px;color:var(--text)">
       <button data-action="learnManualAddRoutingOverride" style="background:var(--accent,#4f82ff);color:#fff;border:none;border-radius:4px;padding:3px 10px;font-size:12px;cursor:pointer">Add</button>
     </div>
   </div>`;
 
   let body = addForm;
   if (!overrides.length) {
-    body += _renderEmptyHint('No routing overrides yet. When you redirect similar messages to the same agent (e.g. "@ada" or "use coder") twice, OE will offer to make it a permanent route. Or add one manually above.');
+    body += _renderEmptyHint('No routing overrides yet. When you redirect similar messages to the same agent (e.g. "@coder" or "use coder") twice, OE will offer to make it a permanent route. Or add one manually above.');
   } else {
     body += overrides.map(o => {
       const args = JSON.stringify([o.id, o.pattern]).replace(/"/g, '&quot;');
@@ -407,7 +407,7 @@ async function learnRevokeRoutine(id, trigger) {
 function _renderSkillsSection(skills) {
   let body = '';
   if (!skills.length) {
-    body = _renderEmptyHint('No custom skills yet. Ask Sydney or your coder agent to "make a skill that…" to build one.');
+    body = _renderEmptyHint('No custom skills yet. Ask your coordinator or your coder agent to "make a skill that…" to build one.');
   } else {
     body = skills.map(s => {
       return `<div style="padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px">

@@ -102,7 +102,7 @@ describe('routine matcher unchanged by the new action type', () => {
     }]);
     expect(classifyRoutineIntent('news', TEST_USER)?.id).toBe('news');
     expect(classifyRoutineIntent('latest news', TEST_USER)?.id).toBe('news');
-    expect(classifyRoutineIntent('hey sydney, news', TEST_USER)?.id).toBe('news');
+    expect(classifyRoutineIntent('hey ensemble, news', TEST_USER)?.id).toBe('news');
     expect(classifyRoutineIntent('something else entirely', TEST_USER)).toBeNull();
   });
 });

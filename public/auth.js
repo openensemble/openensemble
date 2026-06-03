@@ -329,7 +329,8 @@ async function saveNewsPreference() {
 async function loadSkillsList() {
   const rolesEl = $('rolesList');
   const skillsEl = $('skillsList');
-  if (!rolesEl && !skillsEl) return;
+  const customEl = $('customSkillsList');
+  if (!rolesEl && !skillsEl && !customEl) return;
   const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
   try {
     const [skills, allAgents, cfg] = await Promise.all([
@@ -338,7 +339,15 @@ async function loadSkillsList() {
       fetch('/api/config-public').then(r => r.json()).catch(() => ({})),
     ]);
     const roles = skills.filter(s => s.service);
-    const tools = skills.filter(s => !s.service && s.category !== 'delegate');
+    // A skill is "custom" iff it was installed under users/<id>/skills/ — the
+    // API surfaces that as userScope=<id>. The manifest's `custom` field is
+    // unreliable (some built-in role manifests historically set it too), so
+    // we trust userScope as the single source of truth. Service roles are
+    // always shown in the Roles section, never duplicated under Custom.
+    const isCustom = (s) => !!s.userScope && !s.service && s.category !== 'delegate';
+    const tools = skills.filter(s => !s.service && s.category !== 'delegate' && !isCustom(s));
+    const customSkills = skills.filter(isCustom);
+    const assignableAgents = (allAgents ?? []).filter(a => !a.archived);
 
     function roleCard(s) {
       const owner = s.assignment ? (allAgents.find(a => a.id === s.assignment) ?? null) : null;
@@ -375,6 +384,33 @@ async function loadSkillsList() {
       </div>`;
     }
 
+    function customSkillCard(s) {
+      const owner = s.assignment ? assignableAgents.find(a => a.id === s.assignment) : null;
+      const ownerLabel = owner
+        ? `${escHtml(owner.emoji ?? '')} ${escHtml(owner.name)}`
+        : `<span style="color:var(--red)">Unassigned — no agent can use this</span>`;
+      const options = ['<option value="">— Unassigned —</option>']
+        .concat(assignableAgents.map(a =>
+          `<option value="${escHtml(a.id)}"${a.id === s.assignment ? ' selected' : ''}>${escHtml(a.emoji ?? '')} ${escHtml(a.name)}</option>`
+        )).join('');
+      return `<div style="background:var(--bg3);border-radius:8px;padding:10px 12px">
+        <div style="display:flex;align-items:flex-start;gap:12px">
+          <span style="font-size:18px;flex-shrink:0;margin-top:1px">${s.icon ?? '🧩'}</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;color:var(--text)">${escHtml(s.name)}</div>
+            ${s.description ? `<div style="font-size:11px;color:var(--muted)">${escHtml(s.description)}</div>` : ''}
+            <div style="font-size:10px;color:var(--muted);margin-top:4px">Assigned to: ${ownerLabel}</div>
+            <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+              <select data-change-action="assignCustomSkill" data-args='${JSON.stringify([s.id]).replace(/'/g, "&#39;")}'
+                style="flex:1;min-width:0;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 7px;font-size:11px">
+                ${options}
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+
     const noAccessMsg = `<div style="color:var(--muted);font-size:12px;font-style:italic">Access is managed by your administrator.</div>`;
 
     // ── Roles panel ──
@@ -392,7 +428,18 @@ async function loadSkillsList() {
       }
     }
 
-    // ── Skills panel ──
+    // ── Custom skills panel ──
+    if (customEl) {
+      if (!isPriv && customSkills.length === 0) {
+        customEl.innerHTML = `<div style="color:var(--muted);font-size:12px;font-style:italic">No custom skills yet. Ask the coordinator: "create a skill that …" to build one.</div>`;
+      } else if (customSkills.length === 0) {
+        customEl.innerHTML = `<div style="color:var(--muted);font-size:12px">No custom skills installed. Ask the coordinator to create one, or install one from the community catalog.</div>`;
+      } else {
+        customEl.innerHTML = `<div style="display:flex;flex-direction:column;gap:8px">` + customSkills.map(customSkillCard).join('') + `</div>`;
+      }
+    }
+
+    // ── Tools panel — built-in (non-custom) tools only ──
     if (skillsEl) {
       if (!isPriv && tools.length === 0) {
         skillsEl.innerHTML = noAccessMsg;
@@ -420,6 +467,21 @@ async function deleteRole(id) {
     _skillsCache = null;
     loadSkillsList();
   } catch (e) { showToast(e.message || 'Failed to delete'); }
+}
+
+async function assignCustomSkill(skillId, ev) {
+  const agentId = ev?.target?.value || null;
+  try {
+    const r = await fetch('/api/roles/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skillId, agentId }),
+    });
+    if (!r.ok) throw new Error((await r.json()).error ?? 'Assignment failed');
+    showToast(agentId ? 'Skill assigned' : 'Skill unassigned');
+    _skillsCache = null;
+    loadSkillsList();
+  } catch (e) { showToast(e.message || 'Failed to assign'); loadSkillsList(); }
 }
 
 function openNewRoleModal() {

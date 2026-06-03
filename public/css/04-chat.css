@@ -28,7 +28,14 @@
 .msg { max-width: 820px; width: 100%; }
 .msg.user { align-self: flex-end; }
 .msg.assistant { align-self: flex-start; }
-.msg-bubble { padding: 10px 14px; border-radius: var(--radius); line-height: 1.55; font-size: 14px; }
+.msg-bubble { padding: 10px 14px; border-radius: var(--radius); line-height: 1.55; font-size: 14px;
+  /* Allow mid-word breaking for unbreakable strings (long URLs, base64 ids,
+     Microsoft Graph message-ids, hashes). Without this, a plain-text token
+     with no spaces/hyphens stretches the bubble past its container — visible
+     when an email summary inlines a Graph message-id. The existing
+     :not(pre) > code rule below handles inline-code tokens; this covers
+     prose. `pre` blocks keep their own overflow-x: auto. */
+  word-break: break-word; overflow-wrap: anywhere; }
 .msg.user .msg-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
 .msg.assistant .msg-bubble { background: var(--bg3); border-bottom-left-radius: 4px; }
 

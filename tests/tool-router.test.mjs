@@ -66,7 +66,7 @@ vi.mock('../lib/specialist-embed-router.mjs', () => ({
 
 const { trimToolsForTurn, expandToolsByReason } = await import('../lib/tool-router.mjs');
 
-function buildAgent(toolNames, id = 'sydney') {
+function buildAgent(toolNames, id = 'coordinator') {
   return {
     id,
     skillCategory: 'coordinator',

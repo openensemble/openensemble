@@ -49,6 +49,38 @@ export { OPENAI_COMPAT_PROVIDERS };
 // unless the message actually contains preference/correction wording.
 const SIGNAL_WORDS_RE = /prefer|like|love|hate|want|don'?t like|remember|decided|will use|choose|chose|my name|i am|i'm|my \w+ is|call me|always|never|make sure|correction/i;
 
+/**
+ * Map a known model name to its context-window size in tokens. Returns null
+ * for unknown models so the caller can fall through to the modern-default
+ * floor (128k). Numbers are conservative — pick the smaller end of each
+ * family's range so the budget math doesn't overshoot the actual limit.
+ */
+function _modelContextWindow(model) {
+  if (typeof model !== 'string' || !model) return null;
+  const m = model.toLowerCase();
+  // OpenAI: gpt-5.x family ships at 200k+; gpt-4.1/4o-class at 128k; old 3.5 at 16k
+  if (/^gpt-5/.test(m))                     return 272000;
+  if (/^gpt-4o/.test(m) || /^gpt-4\.1/.test(m) || /^gpt-4-turbo/.test(m)) return 128000;
+  if (/^gpt-4/.test(m))                     return 8192;
+  if (/^gpt-3\.5/.test(m))                  return 16385;
+  if (/^o\d/.test(m))                       return 200000;          // o1 / o3 family
+  // Anthropic
+  if (/claude.*opus.*4.*1m/.test(m))        return 1000000;          // explicit 1M opt-in
+  if (/claude.*4/.test(m))                  return 200000;
+  if (/claude.*3\.5|claude.*3\.7/.test(m))  return 200000;
+  if (/claude.*3/.test(m))                  return 200000;
+  // Google
+  if (/gemini.*2/.test(m))                  return 1000000;
+  if (/gemini.*1\.5/.test(m))               return 1000000;
+  // Open-source
+  if (/llama.*3\.\d/.test(m))               return 128000;
+  if (/llama.*70b|llama.*8b/.test(m))       return 128000;
+  if (/mistral/.test(m))                    return 32000;
+  if (/qwen/.test(m))                       return 128000;
+  if (/deepseek/.test(m))                   return 128000;
+  return null;
+}
+
 function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], voiceCtx = null, hideTurn = false, hideTaskId = null } = {}) {
   // Record a compact summary of which tools fired this turn so future loads
   // of this session can show the assistant what it actually did, not just
@@ -63,12 +95,28 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
         return args ? `${t.name}(${args})` : t.name;
       })
     : null;
+  // Save the raw tool result body for each call (capped at 10 KB/result) so
+  // the next turn's LLM can act on follow-ups like "delete it" / "reply to
+  // that" / "open the second one" — those need to read message ids / file
+  // paths / urls from the prior tool return, which the assistant's prose
+  // summary doesn't usually echo. The 10 KB cap + session prune keep
+  // long-term file size bounded. Loaded back to the LLM via the history
+  // mapper below as `[prior-turn tool results]` appended to the assistant
+  // body. Doesn't render in the chat UI (only the assistant content does).
+  const toolResults = toolsUsed.length
+    ? toolsUsed.map(t => ({ name: t.name, text: String(t.text ?? '').slice(0, 10000) }))
+        .filter(r => r.text.length > 0)
+    : null;
   // Phase-14 chip-replaces-turn: when the turn dispatched a backgrounded
   // tool whose chip IS the visible reply, mark the assistant entry as
   // hidden so renderSession skips it on reload. The chip's own session
   // entry (status role) remains visible.
   const assistantEntry = toolsSummary
-    ? { role: 'assistant', content: assistantContent, ts: Date.now(), toolsUsed: toolsSummary }
+    ? {
+        role: 'assistant', content: assistantContent, ts: Date.now(),
+        toolsUsed: toolsSummary,
+        ...(toolResults && toolResults.length ? { toolResults } : {}),
+      }
     : { role: 'assistant', content: assistantContent, ts: Date.now() };
   if (hideTurn) assistantEntry.hidden = true;
   if (hideTaskId) assistantEntry.hideTaskId = hideTaskId;
@@ -104,7 +152,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
   // to catch the case where Helen runs as an ephemeral router delegate and
   // resolves an ambiguous "turn off X" via ha_call_service — that turn is
   // exactly the alias-learning signal we want. Keyed by userId because the
-  // FLUSH happens on Sydney's next turn (different agentId).
+  // FLUSH happens on the coordinator's next turn (different agentId).
   import('./lib/routine-proposer.mjs')
     .then(m => m.maybeProposeRoutine({
       userId, agentId: agent.id, agentName: agent.name,
@@ -468,13 +516,25 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
   const history = loadSession(agent.id)
     .filter(m => LLM_ROLES.has(m.role))
-    .map(({ role, content, name, toolsUsed, via, viaName }) => {
+    .map(({ role, content, name, toolsUsed, toolResults, via, viaName }) => {
       let body = content;
       if (role === 'assistant' && via) {
         body = `${body || ''}\n[note: this reply was produced by the ${viaName ?? via} specialist via the pre-LLM router — you (the coordinator) did not run a turn]`;
       }
       if (role === 'assistant' && Array.isArray(toolsUsed) && toolsUsed.length) {
         body = `${body || ''}\n[tools used this turn: ${toolsUsed.join(', ')}]`;
+      }
+      // Append the raw tool result bodies persisted by chat.mjs:persist()
+      // (capped at 10 KB each at save time). Lets the LLM read message ids,
+      // file paths, urls, etc. from prior tool returns — required for
+      // follow-ups like "delete it" / "reply to that" / "open the second
+      // one" to work without the assistant's user-facing prose having to
+      // echo those handles back to the user.
+      if (role === 'assistant' && Array.isArray(toolResults) && toolResults.length) {
+        const formatted = toolResults
+          .map(r => `${r.name} →\n${r.text}`)
+          .join('\n\n---\n\n');
+        body = `${body || ''}\n\n[prior-turn tool results]\n${formatted}`;
       }
       return name ? { role, content: body, name } : { role, content: body };
     });
@@ -508,7 +568,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Underestimating by 3× pushed every coordinator turn over budget and
   // caused trimmed-history to drop to zero. Compute from the actual schema
   // bytes — one JSON.stringify at turn boundary, not in the tool loop.
-  const ctxWindow  = agent.contextSize ?? 32768;
+  // Resolve the model's actual context window. agent.contextSize wins when
+  // explicitly set; otherwise fall back to a model-name lookup; otherwise
+  // a conservative 128k modern-model floor (the old 32k default was a
+  // pre-128k-default assumption and now drops history entirely for
+  // tool-heavy specialists: with 103 tools ≈ 19k tool tokens,
+  // 32k×0.55 − 19k = NEGATIVE, so the budget clamps to 1000 and everything
+  // in history gets trimmed.).
+  const ctxWindow  = agent.contextSize ?? _modelContextWindow(agent.model) ?? 131072;
   const toolsBytes = JSON.stringify(agent.tools ?? []).length;
   const toolTokens = Math.ceil(toolsBytes / 4);
   const TOKEN_BUDGET = Math.max(1000, Math.floor(ctxWindow * 0.55) - toolTokens);
@@ -854,7 +921,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (assistantContent) {
     if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, voiceCtx, hideTurn, hideTaskId });
     // Phase-14 chip-replaces-turn: emit __content only when we're NOT
-    // hiding the turn. The browser would otherwise render Sydney's
+    // hiding the turn. The browser would otherwise render the coordinator's
     // assistant bubble alongside the chip — redundant.
     if (!hideTurn) {
       yield { type: '__content', content: assistantContent };

@@ -75,8 +75,8 @@ describe('toolsetKey', () => {
 // ── 2-6. Detector gates ──────────────────────────────────────────────────────
 
 describe('maybeProposeSkill — gates', () => {
-  it('returns null below MIN_TOOLS=4 interesting tools', () => {
-    const res = maybeProposeSkill({
+  it('returns null below MIN_TOOLS=4 interesting tools', async () => {
+    const res = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'A',
       userMessage: 'do a thing', assistantContent: 'done',
       toolsUsed: baseTools.slice(0, 3),
@@ -84,8 +84,8 @@ describe('maybeProposeSkill — gates', () => {
     expect(res).toBeNull();
   });
 
-  it('returns null when only memory/rule mutation tools fired', () => {
-    const res = maybeProposeSkill({
+  it('returns null when only memory/rule mutation tools fired', async () => {
+    const res = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'A',
       userMessage: 'remember some stuff', assistantContent: 'done',
       toolsUsed: [
@@ -98,8 +98,8 @@ describe('maybeProposeSkill — gates', () => {
     expect(res).toBeNull();
   });
 
-  it('returns null when any skill_* tool fired (already authoring)', () => {
-    const res = maybeProposeSkill({
+  it('returns null when any skill_* tool fired (already authoring)', async () => {
+    const res = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'A',
       userMessage: 'make a skill that does X', assistantContent: 'done',
       toolsUsed: [
@@ -110,8 +110,8 @@ describe('maybeProposeSkill — gates', () => {
     expect(res).toBeNull();
   });
 
-  it('returns null on destructive verb in user message', () => {
-    const res = maybeProposeSkill({
+  it('returns null on destructive verb in user message', async () => {
+    const res = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'A',
       userMessage: 'delete all the old logs', assistantContent: 'done',
       toolsUsed: baseTools,
@@ -119,8 +119,8 @@ describe('maybeProposeSkill — gates', () => {
     expect(res).toBeNull();
   });
 
-  it('stashes a candidate on a qualifying turn (no proposal yet)', () => {
-    const res = maybeProposeSkill({
+  it('stashes a candidate on a qualifying turn (no proposal yet)', async () => {
+    const res = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'Coder',
       userMessage: 'research X then email Sam',
       assistantContent: 'Done.',
@@ -136,7 +136,7 @@ describe('maybeProposeSkill — gates', () => {
 
   it('enforces a per-agent rate limit (7 days) — second stash is dropped', async () => {
     // Stash + flush the first candidate so the rate-limit timer arms.
-    const first = maybeProposeSkill({
+    const first = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'Coder',
       userMessage: 'one workflow', assistantContent: 'done',
       toolsUsed: baseTools,
@@ -149,7 +149,7 @@ describe('maybeProposeSkill — gates', () => {
     expect(emitted.kind).toBe('skill_proposal');
 
     // A different tool combo so cooldown wouldn't fire — but rate cap should.
-    const second = maybeProposeSkill({
+    const second = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'Coder',
       userMessage: 'a different workflow', assistantContent: 'done',
       toolsUsed: [
@@ -167,7 +167,7 @@ describe('maybeProposeSkill — gates', () => {
 
 describe('flushPendingSkillCandidate', () => {
   it('emits the proposal on a non-corrective follow-up', async () => {
-    maybeProposeSkill({
+    await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'Coder',
       userMessage: 'research X', assistantContent: 'done',
       toolsUsed: baseTools,
@@ -184,7 +184,7 @@ describe('flushPendingSkillCandidate', () => {
   });
 
   it('drops the candidate on a corrective follow-up', async () => {
-    maybeProposeSkill({
+    await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'Coder',
       userMessage: 'research X', assistantContent: 'done',
       toolsUsed: baseTools,
