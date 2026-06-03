@@ -23,13 +23,19 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { USERS_DIR } from '../lib/paths.mjs';
+import { USERS_DIR, userSkillsDir } from '../lib/paths.mjs';
 import {
   maybeProposeSkill, flushPendingSkillCandidate, toolsetKey, _resetForTests,
 } from '../lib/skill-proposer.mjs';
 import {
   proposeSkill, getProposal, dismissProposal, listUserProposals,
 } from '../lib/proposals.mjs';
+import {
+  addRoleManifest, removeRoleManifest, listRoles,
+} from '../roles.mjs';
+import {
+  recordToolInvocations, _resetForTests as resetTelemetry,
+} from '../lib/skill-telemetry.mjs';
 
 const USER = 'user_skillprop_test';
 const AGENT = 'agent_skillprop_test';
@@ -37,11 +43,38 @@ const AGENT = 'agent_skillprop_test';
 function cleanupUser() {
   const dir = path.join(USERS_DIR, USER);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  // Drop any user-scoped manifests left in the in-memory registry.
+  for (const m of listRoles(USER)) {
+    if (m.userScope === USER) removeRoleManifest(m.id, USER);
+  }
+}
+
+// Register a fake user-scoped custom skill: both in the in-memory roles
+// registry (so listRoles picks it up) AND on disk (so skill-telemetry's
+// tool-index can resolve tool→skill on recordToolInvocations).
+function installCustomSkill(skillId, tools, { createdAt } = {}) {
+  const manifest = {
+    id: skillId,
+    name: skillId,
+    description: 'test',
+    custom: true,
+    createdBy: USER,
+    createdAt: createdAt ?? new Date().toISOString(),
+    tools: tools.map(name => ({
+      type: 'function',
+      function: { name, description: name, parameters: { type: 'object', properties: {} } },
+    })),
+  };
+  addRoleManifest(manifest, USER);
+  const dir = path.join(userSkillsDir(USER), skillId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
 }
 
 beforeEach(() => {
   cleanupUser();
   _resetForTests();
+  resetTelemetry();
   for (const p of listUserProposals(USER, null)) {
     p.status = 'cleared_for_test';
   }
@@ -245,5 +278,72 @@ describe('proposeSkill — cooldown keyed by toolsKey', () => {
     });
     expect(third).toBeTruthy();
     expect(getProposal(third.id)?.kind).toBe('skill_proposal');
+  });
+});
+
+// ── 13-16. Jaccard overlap + telemetry-aware skip ────────────────────────────
+
+describe('maybeProposeSkill — overlap with existing custom skills', () => {
+  it('does NOT skip on trivial single-tool overlap (Jaccard < 0.5)', async () => {
+    // Existing skill uses only `web_search`. New turn fires 4 tools that
+    // happen to include web_search — Jaccard = 1/4 = 0.25, below threshold.
+    // Old code would skip ('some' matched); new code should still stash.
+    installCustomSkill('usr_trivial_overlap', ['web_search']);
+    const res = await maybeProposeSkill({
+      userId: USER, agentId: AGENT, agentName: 'Coder',
+      userMessage: 'research X then email Sam',
+      assistantContent: 'done',
+      toolsUsed: baseTools, // web_search + fetch_url + send_email + schedule_task
+    });
+    expect(res).toEqual({ stashed: true, agentId: AGENT });
+  });
+
+  it('skips with reason=overlaps_active_skill when overlapping skill has ≥3 invocations', async () => {
+    // Same tool set as baseTools → Jaccard = 1.0.
+    const SKILL = 'usr_active_dup';
+    installCustomSkill(SKILL, ['web_search', 'fetch_url', 'send_email', 'schedule_task']);
+    // Bump invocations to active threshold.
+    recordToolInvocations({ userId: USER, toolsUsed: [{ name: 'web_search' }] });
+    recordToolInvocations({ userId: USER, toolsUsed: [{ name: 'web_search' }] });
+    recordToolInvocations({ userId: USER, toolsUsed: [{ name: 'web_search' }] });
+    await new Promise(r => setTimeout(r, 30)); // persistence is async
+
+    const res = await maybeProposeSkill({
+      userId: USER, agentId: AGENT, agentName: 'Coder',
+      userMessage: 'research X then email Sam',
+      assistantContent: 'done',
+      toolsUsed: baseTools,
+    });
+    expect(res).toEqual({ skipped: 'overlaps_active_skill', overlapWith: SKILL });
+  });
+
+  it('skips with reason=overlaps_dormant_skill when overlapping skill is unused and >7d old', async () => {
+    const SKILL = 'usr_dormant_dup';
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    installCustomSkill(SKILL, ['web_search', 'fetch_url', 'send_email', 'schedule_task'],
+      { createdAt: eightDaysAgo });
+    // No recordToolInvocations → invocations stays 0.
+
+    const res = await maybeProposeSkill({
+      userId: USER, agentId: AGENT, agentName: 'Coder',
+      userMessage: 'research X then email Sam',
+      assistantContent: 'done',
+      toolsUsed: baseTools,
+    });
+    expect(res).toEqual({ skipped: 'overlaps_dormant_skill', overlapWith: SKILL });
+  });
+
+  it('skips with reason=overlaps_fresh_skill when overlapping skill is recent and barely used', async () => {
+    const SKILL = 'usr_fresh_dup';
+    installCustomSkill(SKILL, ['web_search', 'fetch_url', 'send_email', 'schedule_task']);
+    // Created just now (default createdAt), zero invocations → fresh.
+
+    const res = await maybeProposeSkill({
+      userId: USER, agentId: AGENT, agentName: 'Coder',
+      userMessage: 'research X then email Sam',
+      assistantContent: 'done',
+      toolsUsed: baseTools,
+    });
+    expect(res).toEqual({ skipped: 'overlaps_fresh_skill', overlapWith: SKILL });
   });
 });
