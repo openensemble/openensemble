@@ -92,6 +92,8 @@ function renderSession() {
     else if (m.role === 'status' && m.status)     appendStatusBubble(m.status, m.ts, false);
     else if (m.role === 'proposal' && m.proposalId) appendProposalBubble(m, false);
     else if (m.role === 'proposal_outcome' && m.proposalId) applyProposalOutcome(m.proposalId, m.status, m.outcome);
+    else if (m.role === 'attachment_decision' && m.decisionId) appendAttachmentDecisionBubble(m, false);
+    else if (m.role === 'attachment_decision_outcome' && m.decisionId) applyAttachmentDecisionOutcome(m.decisionId, m.decision);
     else if (m.role === 'agent_report' || m.kind === 'agent_report') _renderAgentReportEl(m);
     else if (m.role === 'assistant' && !m.hidden && _legacyAgentReportMatch(m.content)) {
       // Legacy entries persisted before the kind:'agent_report' field
@@ -715,6 +717,80 @@ async function respondToProposal(el, id, action, acceptBtn, dismissBtn) {
   }
 }
 
+// Attachment save/discard prompt. Emitted by chat-dispatch at the end of any
+// turn that had a file attachment (drag-drop, paste, or attach button). The
+// upload always lands in users/<id>/profile-files/{kind}/ — this bubble is
+// the only "did you mean to keep that?" gate so casual one-shot uploads don't
+// silently pile up in Docs. Persisted as role:'attachment_decision' so a
+// reload still shows the choice; outcome arrives as role:'attachment_decision_outcome'.
+function appendAttachmentDecisionBubble(decision, scroll = true) {
+  const id = decision.decisionId;
+  if (!id) return;
+  if (document.querySelector(`.msg.attachment-decision[data-decision-id="${CSS.escape(id)}"]`)) return;
+
+  const el = document.createElement('div');
+  el.className = 'msg attachment-decision';
+  el.dataset.decisionId = id;
+  el.dataset.fileId = decision.file_id || '';
+  el.style.cssText = 'padding:8px 12px;margin:6px 0;font-size:13px;border-left:3px solid var(--muted, #888);background:rgba(128,128,128,0.06);border-radius:4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap';
+
+  const label = document.createElement('span');
+  label.style.cssText = 'flex:1;min-width:0;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  const safeName = escHtml(decision.name || 'attachment');
+  label.innerHTML = `Keep <strong style="color:var(--text)">${safeName}</strong> in your files?`;
+  el.appendChild(label);
+
+  const keepBtn = document.createElement('button');
+  keepBtn.textContent = 'Keep';
+  keepBtn.style.cssText = 'padding:4px 12px;border:1px solid var(--accent, #6c8cff);background:var(--accent, #6c8cff);color:#fff;border-radius:4px;cursor:pointer;font-size:12px';
+  keepBtn.addEventListener('click', () => respondToAttachmentDecision(el, id, decision.file_id, 'keep', keepBtn, discardBtn));
+  el.appendChild(keepBtn);
+
+  const discardBtn = document.createElement('button');
+  discardBtn.textContent = 'Discard';
+  discardBtn.style.cssText = 'padding:4px 12px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;cursor:pointer;font-size:12px';
+  discardBtn.addEventListener('click', () => respondToAttachmentDecision(el, id, decision.file_id, 'discard', keepBtn, discardBtn));
+  el.appendChild(discardBtn);
+
+  insertBefore(el);
+  if (scroll) scrollToBottom();
+}
+
+function applyAttachmentDecisionOutcome(decisionId, decision) {
+  const el = document.querySelector(`.msg.attachment-decision[data-decision-id="${CSS.escape(decisionId)}"]`);
+  if (!el) return;
+  if (el.dataset.appliedOutcome === decision) return;
+  el.dataset.appliedOutcome = decision;
+  // Strip the buttons, leave a one-line resolved note.
+  [...el.querySelectorAll('button')].forEach(b => b.remove());
+  const label = el.querySelector('span');
+  if (label) {
+    const name = label.querySelector('strong')?.textContent || 'attachment';
+    label.innerHTML = decision === 'keep'
+      ? `✓ Kept <strong style="color:var(--text)">${escHtml(name)}</strong> in your files.`
+      : `✕ Discarded <strong style="color:var(--text)">${escHtml(name)}</strong>.`;
+  }
+  el.style.borderLeftColor = decision === 'keep' ? 'var(--green, #4caf50)' : 'var(--border)';
+}
+
+async function respondToAttachmentDecision(el, decisionId, fileId, decision, keepBtn, discardBtn) {
+  keepBtn.disabled = true; discardBtn.disabled = true;
+  keepBtn.style.opacity = '0.5'; discardBtn.style.opacity = '0.5';
+  try {
+    const r = await fetch('/api/chat-attachment-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisionId, file_id: fileId, decision, agent: activeAgent }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    applyAttachmentDecisionOutcome(decisionId, decision);
+  } catch (e) {
+    keepBtn.disabled = false; discardBtn.disabled = false;
+    keepBtn.style.opacity = '1'; discardBtn.style.opacity = '1';
+    alert('Couldn’t save your choice: ' + e.message);
+  }
+}
+
 async function toggleWatcherHistory(el, watcherId) {
   let panel = el.querySelector('.watcher-history');
   if (panel && el.dataset.historyOpen === '1') {
@@ -1026,7 +1102,14 @@ function ensureToolModal() {
 function openToolModal(name, text) {
   const { backdrop, title, body } = ensureToolModal();
   title.textContent = name;
-  body.textContent = text;
+  // MCP tool results can include markdown images and resource links —
+  // render through the markdown pipeline so `![](data:image/png;base64,...)`
+  // becomes an actual <img>. For non-MCP tools we still want markdown
+  // rendering for things like code fences and headings the LLM might
+  // include; if a tool emits raw output that markdown would mangle, the
+  // tool can wrap its result in ``` code fences. renderMarkdown is the
+  // same HTML-escaping renderer used everywhere else in chat.
+  body.innerHTML = renderMarkdown(text ?? '');
   backdrop.classList.add('open');
 }
 function appendError(msg) {

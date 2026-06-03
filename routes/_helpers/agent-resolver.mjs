@@ -21,6 +21,7 @@ import {
 import { getUser, modifyUser } from '../_helpers.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import { composeSkillSpaBlock } from '../../lib/skill-prompt-composer.mjs';
+import { getCachedMcpToolDefsForAgent } from '../../lib/mcp-tools.mjs';
 
 const TOOL_SETS_COMPAT = {
   web: 'general', general: 'general', gmail: 'email', email: 'email', none: 'none',
@@ -223,6 +224,16 @@ export function getAgentsForUser(userId) {
       });
     }
 
+    // MCP tools — tools from MCP servers the user has assigned to this agent
+    // (via users/<id>/mcp.json's assignedToAgents). The cache is warmed at
+    // boot by lib/mcp-tools.warmAllUsersAtBoot, and refreshed when the
+    // user edits their mcp.json. They're namespaced `mcp_<server>_<tool>`
+    // and routed at dispatch time to skills/mcp/execute.mjs.
+    const mcpToolDefs = getCachedMcpToolDefsForAgent(userId, a.id);
+    if (mcpToolDefs.length) {
+      tools = [...tools, ...mcpToolDefs];
+    }
+
     // Tool-presence SPA injection lives in lib/skill-prompt-composer.mjs so
     // chat.mjs can re-compose after per-turn tool trimming. See module
     // docstring for why: without the post-trim recompose, big SPAs (notably
@@ -318,15 +329,31 @@ export function getAgentsForUser(userId) {
     // custom skills the user accumulates. See lib/skill-triggers.mjs
     // buildTriggerNudgeBlock.)
 
-    const promptParts = [expandedPrompt, skillPromptAdditions, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(Boolean);
-    const systemPrompt = promptParts.join('\n\n');
+    // Three-tier prompt for upstream cache-control:
+    //   stable   — session-stable; persona + guidance blocks. Never changes
+    //              within a session unless the agent or role is edited.
+    //   context  — recomposable per turn by chat.mjs's tool-router (drops
+    //              SPAs whose tools just got trimmed). Sits between stable
+    //              and volatile so Anthropic's cache_control marker on
+    //              stable still hits even when context shifts.
+    //   volatile — populated in chat.mjs per turn (date + memory recall +
+    //              monitorable note + scheduler note + …). Never marked
+    //              cacheable.
+    // systemPrompt below is the legacy flat concatenation for callers that
+    // haven't migrated to the tier-aware path yet (every non-Anthropic
+    // provider — the bytes still match what we used to send).
+    const _stableShellParts = [expandedPrompt, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p);
+    const _promptTiers = {
+      stable: _stableShellParts.join('\n\n'),
+      context: skillPromptAdditions || '',
+      volatile: '',
+    };
+    const systemPrompt = [_promptTiers.stable, _promptTiers.context].filter(Boolean).join('\n\n');
     // Stash the "shell" + composer inputs so chat.mjs can re-compose the
-    // SPA section after per-turn tool trimming (the coordinator's tool
-    // surface shrinks per-turn; the SPAs of dropped skills should shrink
-    // too). The placeholder appears exactly where skillPromptAdditions
-    // sits in the shell — chat.mjs splices the recomposed block in.
-    const _spaShellParts = [expandedPrompt, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '');
-    const _systemPromptShell = _spaShellParts.join('\n\n');
+    // SPA section after per-turn tool trimming. Kept for back-compat with
+    // the legacy single-string path; new code reads _promptTiers.context
+    // directly.
+    const _systemPromptShell = [expandedPrompt, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '').join('\n\n');
 
     // Patch ask_agent's agent_id description per-agent. Coordinators see the
     // full delegatable-specialist roster; specialists see only the literal
@@ -348,6 +375,10 @@ export function getAgentsForUser(userId) {
       // Underscored to signal "internal — not for clients of the agent
       // record." Safe to omit from JSON serialization to the UI if needed.
       _systemPromptShell, _composerInputs: composerInputs,
+      // Three-tier prompt for cache_control-aware providers (Anthropic).
+      // Other providers concatenate stable+context+volatile into
+      // systemPrompt and ignore the tiers field.
+      _promptTiers,
     };
     // Child containment: never let agents cross-read each other's sessions.
     // Amplifies jailbreak persistence if enabled.

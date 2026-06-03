@@ -145,12 +145,66 @@ function shellEscape(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-const OUTPUT_CAP = 50 * 1024; // 50KB max for LLM context
+const OUTPUT_CAP = 50 * 1024; // 50KB final cap; cleaning usually brings us under this.
 
-function truncate(text, max = OUTPUT_CAP) {
-  if (!text || text.length <= max) return text;
-  return text.slice(0, max) + `\n\n… [truncated, ${text.length - max} bytes omitted]`;
+// Strip dense progress noise that apt/pip/docker/npm spray into stdout.
+// Carriage-return redraws collapse to their final state; line-level filters
+// drop the per-package and per-layer chatter that costs hundreds of tokens
+// while telling the LLM nothing it can act on. Errors, real diagnostic
+// output, and the final summary lines (e.g. "5 upgraded, 0 newly installed")
+// are intentionally not in any filter.
+function stripExecNoise(text) {
+  if (!text) return text;
+  // Strip ANSI escape sequences (color, cursor movement) — the LLM doesn't
+  // render them and they waste tokens.
+  let t = text.replace(/\[[0-9;?]*[a-zA-Z]/g, '');
+  // Collapse \r-redraws within each line: keep only what comes after the
+  // LAST carriage return on each line.
+  t = t.split('\n').map(line => {
+    if (line.indexOf('\r') < 0) return line;
+    const segments = line.split('\r');
+    return segments[segments.length - 1];
+  }).join('\n');
+  // Line-level noise filters. These are all "progress" output — the verb
+  // happens and the LLM doesn't need to read each one. Final summaries
+  // ("N packages newly installed", "Successfully installed X-Y.Z") are
+  // NOT matched and pass through.
+  t = t.split('\n').filter(line => {
+    // apt: per-package download/unpack/setup progress (the noisiest source)
+    if (/^(Get|Hit|Ign|Fetched|Err):\s*\d+/.test(line)) return false;
+    if (/^(Reading database|Preparing to unpack|Unpacking|Setting up|Processing triggers for|Selecting previously unselected package)\b/.test(line)) return false;
+    // docker pull / push layer chatter
+    if (/^[a-f0-9]{12}:\s+(Pulling fs layer|Waiting|Downloading|Extracting|Verifying Checksum|Download complete|Pull complete|Pushing|Pushed|Layer already exists|Mounted from)/.test(line)) return false;
+    // pip / cargo / similar unicode progress bars
+    if (/^\s*[━─=#█▓▒░]{5,}/.test(line)) return false;
+    // pip "Downloading X (NN MB)" + "  ━━━━ 30.0/100.0 MB ETA 00:01"
+    if (/^\s*\d+(\.\d+)?\s*(K|M|G)?B?\/\s*\d+(\.\d+)?\s*(K|M|G)?B?\b/.test(line)) return false;
+    // npm/yarn/pnpm individual fetch lines
+    if (/^npm (http|notice|info|verb|sill|warn)\b/i.test(line) && !/error|err!|fail/i.test(line)) return false;
+    return true;
+  }).join('\n');
+  // Squash 3+ blank lines to 2.
+  t = t.replace(/\n{3,}/g, '\n\n');
+  return t;
 }
+
+// Head + tail truncation. Apt/build output's signal usually sits at the END
+// (success/failure summary, error message, exit code context). Head-only
+// truncation throws that away. We keep 40% head + 60% tail with a marker
+// telling the LLM the middle was dropped — head shows what was attempted,
+// tail shows how it ended.
+function compactExecOutput(text, max = OUTPUT_CAP) {
+  if (!text) return text;
+  const cleaned = stripExecNoise(text);
+  if (cleaned.length <= max) return cleaned;
+  const headChars = Math.floor(max * 0.4);
+  const tailChars = max - headChars - 80;
+  const dropped = cleaned.length - headChars - tailChars;
+  return `${cleaned.slice(0, headChars)}\n\n… [${dropped} bytes of middle output omitted — head and tail kept] …\n\n${cleaned.slice(-tailChars)}`;
+}
+
+// Back-compat alias so the existing call sites keep working unchanged.
+const truncate = compactExecOutput;
 
 function formatBytes(bytes) {
   if (!bytes || bytes < 0) return '0B';

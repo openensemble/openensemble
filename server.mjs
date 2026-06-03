@@ -67,6 +67,7 @@ import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
 import { handle as handleHomeAssistant }  from './routes/home-assistant.mjs';
+import { handle as handleMcp }            from './routes/mcp.mjs';
 import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
 import { speakReminder, pickReminderDevices } from './lib/voice-reminder.mjs';
 import { registerAlarm, getCachedAlarmTts, sendAlarmArm } from './lib/alarms.mjs';
@@ -210,6 +211,7 @@ const routeHandlers = [
   handleCoder,
   handleGuide,
   handleHomeAssistant,
+  handleMcp,
 ];
 
 // CSP. Inline event handlers are no longer used — the public/event-delegation.js
@@ -744,7 +746,7 @@ loadPersistedSessions();
     const { USERS_DIR } = await import('./routes/_helpers/paths.mjs');
     await bootstrapTokenFileEncryption({
       usersDir: USERS_DIR,
-      prefixes: ['gmail-token', 'gcal-token', 'ms-token'],
+      prefixes: ['gmail-token', 'gcal-token', 'ms-token', 'mcp'],
       log,
     });
   } catch (e) {
@@ -799,6 +801,12 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // the server is now responding, this commits the change (or reverts +
   // exits if the deadline expires). Safe no-op when no pending marker.
   runBootCheck({ port: PORT }).catch(e => console.warn('[oe-admin] boot-check failed:', e.message));
+
+  // MCP tools — warm each user's tool cache from their registered servers.
+  // Fire-and-forget so the listen callback doesn't block; users without
+  // mcp.json (the vast majority right now) finish in ~0ms.
+  import('./lib/mcp-tools.mjs').then(m => m.warmAllUsersAtBoot())
+    .catch(e => console.warn('[mcp-tools] boot warm failed:', e.message));
 
   // HTTPS listener (port 3739) for browser features that need a secure
   // context — WebUSB / Web Serial for the voice-device flash wizard.

@@ -1,0 +1,11 @@
+{
+  "id": "mcp",
+  "name": "MCP Servers",
+  "description": "Bridges Model Context Protocol (MCP) servers into OpenEnsemble. Each user can register MCP servers in their mcp.json; the tools those servers expose get merged into assigned agents' toolsets at resolve time. Per-user scope only in phase 1 (no shared/admin servers yet).",
+  "icon": "🔌",
+  "category": "utility",
+  "service": true,
+  "enabled_by_default": false,
+  "tools": [],
+  "systemPromptAddition": "## MCP-backed tools\n\nSome of your tools are provided by external MCP (Model Context Protocol) servers — they're named with the prefix `mcp_<server>_<tool>`. Use them exactly like any other tool; the dispatcher routes the call to the right MCP server and returns the result. If a server is offline or its tool call fails, you'll get an error result back — surface that to {{USER_NAME}} concisely and don't retry blindly."
+}

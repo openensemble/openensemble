@@ -967,11 +967,29 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
 
   let skillExec = null;
   let owningSkillId = null;
-  for (const [key, wrap] of visibleEntries(userId)) {
-    if (wrap.manifest.tools?.some(t => t.function?.name === resolvedName)) {
-      owningSkillId = wrap.manifest.id;
-      skillExec = await getExecutorByKey(key);
-      break;
+  // MCP-namespaced server tools (mcp_<server>__<tool>) route to skills/mcp/.
+  // Detected by the `__` namespace separator — NOT just the `mcp_` prefix,
+  // because the mcp-admin skill's tools (mcp_list_servers, mcp_add_server,
+  // mcp_remove_server, mcp_assign_server, mcp_unassign_server, mcp_refresh)
+  // share the prefix but live in a static manifest and resolve normally
+  // through the manifest scan below. The double-underscore is the
+  // unambiguous marker that this tool came from a third-party MCP server.
+  if (resolvedName.startsWith('mcp_') && resolvedName.includes('__')) {
+    for (const [key, wrap] of visibleEntries(userId)) {
+      if (wrap.manifest.id === 'mcp') {
+        owningSkillId = 'mcp';
+        skillExec = await getExecutorByKey(key);
+        break;
+      }
+    }
+  }
+  if (!skillExec) {
+    for (const [key, wrap] of visibleEntries(userId)) {
+      if (wrap.manifest.tools?.some(t => t.function?.name === resolvedName)) {
+        owningSkillId = wrap.manifest.id;
+        skillExec = await getExecutorByKey(key);
+        break;
+      }
     }
   }
 

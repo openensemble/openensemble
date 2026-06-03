@@ -92,6 +92,37 @@ The validator accepts either a 4-param or 5-param signature. Anything else is re
 - Tool names must be **globally unique** — always prefix them with the skill id (e.g. `ha_turn_on`, not `turn_on`)
 - `category` should be `"utility"` for user-created skills
 
+### Mark destructive tools
+
+The skill-builder runs every declared tool through a smoke test after writing the code — with generated args and a stub `ctx`. Crashes, hangs (3s timeout), and wrong-typed returns block the create. This is free safety for read-only tools (weather lookups, listings, searches).
+
+For tools that mutate external state, add `"destructive": true` on the per-tool manifest entry so the smoke runner skips it:
+
+```json
+{
+  "type": "function",
+  "destructive": true,
+  "function": {
+    "name": "myskill_send_email",
+    "description": "Send an email to a recipient",
+    "parameters": {...}
+  }
+}
+```
+
+**Set `destructive: true` for tools that:**
+- Send email / SMS / push notifications
+- POST/PUT/DELETE to a remote API that has side effects (booking, paying, posting)
+- Delete files, rows, or records
+- Trigger physical actions (smart-home device control, hardware)
+
+**Don't mark these destructive** (let them get smoke-tested for free):
+- Read-only API lookups (weather, search, list)
+- Pure data transforms (parse, format, summarize)
+- Cache reads, file reads
+
+Skipped destructive tools surface as a warning in the success message so you remember what wasn't covered.
+
 ### intent_examples + coordinator_scope (tool-router)
 
 The coordinator's per-turn tool list is trimmed by an embedding classifier — only skills whose `intent_examples` match the user's prompt get loaded as tools that turn. Without examples your skill's tools are reachable only after the LLM explicitly calls `request_tools`, which costs one extra round-trip.

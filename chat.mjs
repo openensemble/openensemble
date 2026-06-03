@@ -349,10 +349,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       toolRouterContext.enterWith(_routerStore);
       // Recompose the SPA portion of the system prompt against the trimmed
       // tool set. Without this, SPAs for skills whose tools just got dropped
-      // (e.g. the ~10 KB profiles SPA) keep shipping. The "shell" was
-      // stashed on the agent record in agent-resolver with %%SKILL_SPAS%%
-      // marking where the SPAs live.
-      if (agent._systemPromptShell && agent._composerInputs) {
+      // (e.g. the ~10 KB profiles SPA) keep shipping. Three-tier path:
+      // the recomposed SPAs go in the context tier so the stable tier stays
+      // byte-identical across turns and Anthropic's cache marker on stable
+      // continues to hit. Legacy path: splice into the shell as before.
+      if (agent._promptTiers && agent._composerInputs) {
+        const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
+        agent._promptTiers = { ...agent._promptTiers, context: newSpa || '' };
+        agent.systemPrompt = [agent._promptTiers.stable, agent._promptTiers.context, agent._promptTiers.volatile].filter(Boolean).join('\n\n');
+      } else if (agent._systemPromptShell && agent._composerInputs) {
         const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
         agent.systemPrompt = agent._systemPromptShell.replace('%%SKILL_SPAS%%', newSpa);
       }
@@ -498,9 +503,47 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       console.debug('[monitorable-classifier] failed:', e.message);
     }
   }
-  const systemPrompt = memBlock
-    ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`
-    : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`;
+  // Three-tier assembly for cache_control-aware providers (Anthropic).
+  // Other providers concatenate the same three strings into systemPrompt
+  // and ignore the tiers field — byte-identical to the legacy path.
+  //
+  //   stable    — agent persona + guidance + nameHeader + per-agent-type
+  //               appendages (userId/email/finance/voice). Reused across
+  //               all turns within a session unless agent metadata changes.
+  //   context   — SPA block (recomposes when the tool-router trims). Sits
+  //               between stable and volatile so the stable cache marker
+  //               keeps hitting when context shifts.
+  //   volatile  — date block (seeded in chat-dispatch.mjs) + per-turn
+  //               additions: cortex recall, cross-agent activity, skill
+  //               triggers, scheduler/resolved note, monitorable hint.
+  //               Never cacheable.
+  const _tiers = agent._promptTiers;
+  // Per-agent-type stable appendages — these don't change per turn so they
+  // belong in the stable tier when the tier path is available.
+  const stableAppend = `${userIdBlock}${userEmailBlock}`;
+  // Per-turn volatile additions — order matches the legacy concatenation
+  // so the byte sequence under non-Anthropic providers is unchanged.
+  // (memBlock previously inserted between userEmail and crossAgent with a
+  // leading "\n\n"; preserve that boundary in the volatile string.)
+  const _volatileFromTurn = `${memBlock ? '\n\n' + memBlock : ''}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`;
+  let systemPrompt;
+  if (_tiers) {
+    // The agent.systemPrompt that chat-dispatch built already includes
+    // stable + context + volatile-seed concatenated. To rebuild from
+    // tiers we need each part standalone — pull from _tiers directly.
+    // Volatile = the seed (date block) + this-turn additions.
+    const stableTier = `${nameHeader}${_tiers.stable}${stableAppend}`;
+    const contextTier = _tiers.context || '';
+    const volatileTier = `${_tiers.volatile || ''}${_volatileFromTurn}`;
+    // Stash on agent so the provider can read them after streamChat
+    // dispatches into provider.mjs. Underscored = internal.
+    agent._promptTiersAssembled = { stable: stableTier, context: contextTier, volatile: volatileTier };
+    systemPrompt = [stableTier, contextTier, volatileTier].filter(Boolean).join('\n\n');
+  } else {
+    systemPrompt = memBlock
+      ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`
+      : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`;
+  }
 
   // 2. Build message history (strip ts field — Ollama doesn't want it).
   // Filter out UI-only role types — `status` (watcher progress bubbles),

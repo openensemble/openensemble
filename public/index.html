@@ -723,6 +723,7 @@
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;providers&quot;]" id="stab-providers" style="display:none">Providers</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;profile&quot;]" id="stab-profile">Profile</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;system&quot;]"  id="stab-system" style="display:none">System</button>
+        <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;mcp&quot;]"      id="stab-mcp">MCP</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;backup&quot;]" id="stab-backup" style="display:none">Backup</button>
       </div>
       <div class="desk-drawer-body">
@@ -1223,6 +1224,7 @@
             <div class="settings-section-desc" style="margin:8px 0 10px">Join this install to your tailnet for a stable private IP reachable from any device on your Tailscale network — no public port exposure. Server-wide setting — owner/admin only.</div>
             <div id="tailscaleAccessBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
           </details>
+
           <details class="settings-group" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
             <summary class="settings-group-summary">
               <i data-lucide="chevron-right" style="width:14px;height:14px;flex-shrink:0" class="details-chevron"></i>
@@ -1341,6 +1343,12 @@
               </div>
             </div>
           </details>
+        </div>
+
+        <!-- ── MCP Servers tab ── -->
+        <div class="stab-panel" id="stab-panel-mcp">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:16px">Register Model Context Protocol servers and assign them to your agents. Each server runs as a subprocess on this host with the env vars you provide (encrypted at rest); the tools it exposes get merged into the agents you assign. Adult accounts only.</div>
+          <div id="mcpServersBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
         </div>
 
         <!-- ── Backup & Restore tab (admin/owner only) ── -->

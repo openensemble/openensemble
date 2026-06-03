@@ -12,6 +12,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { randomBytes } from 'crypto';
 import { USERS_DIR } from './lib/paths.mjs';
 import { appendToSession } from './sessions.mjs';
 import {
@@ -188,6 +189,15 @@ export async function handleChatMessage({
     ? (getAmbientForDevice(deviceId)?.marker || null)
     : null;
 
+  // Snapshot the upload (file_id + display name) BEFORE the interceptor
+  // chain mutates ctx.attachment. financePreprocess clears it; transcribe
+  // fast-path consumes it; the file itself stays on disk regardless. After
+  // the turn lands, ask the user whether to keep or discard it (see the
+  // attachment_decision emit in the finally block below).
+  const _attachmentForDecision = (rawAttachment?.file_id && source !== 'voice-device' && !_isRoutineFollowup)
+    ? { file_id: rawAttachment.file_id, name: rawAttachment.name, mimeType: rawAttachment.mimeType }
+    : null;
+
   try {
 
   // @-mention redirect (typed chat only): "@<agent> make me a skill" routes
@@ -293,6 +303,7 @@ export async function handleChatMessage({
     const todayStr   = now.toISOString().slice(0, 10);
     const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
     const yearStart  = `${now.getFullYear()}-01-01`;
+    const dateBlock  = `## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}`;
     const financeExtra = agent.skillCategory === 'finance'
       ? `\nUser ID: ${userId ?? 'default'}\nAlways pass this exact User ID to every expense tool call.`
       : '';
@@ -300,7 +311,28 @@ export async function handleChatMessage({
     // Centralised in lib/voice-context.mjs so the specialist-router path
     // (chat-dispatch/llm-loop.mjs) gets the identical block.
     const voiceExtra = buildVoiceSystemAddition(source);
-    scopedAgent.systemPrompt = `${agent.systemPrompt}\n\n## Current Date\nToday: ${todayStr}\nThis month: ${monthStart} to ${todayStr}\nThis year: ${yearStart} to ${todayStr}${financeExtra}${voiceExtra}`;
+    // Three-tier wiring for prompt caching:
+    //   - finance / voice modifiers don't change per turn for a given
+    //     (agent, source) pair → stay in the stable tier.
+    //   - date changes daily → goes in volatile so cache doesn't bust at
+    //     midnight (or every turn if pre-volatile got rebuilt fresh).
+    // Other per-turn notes (scheduler, resolved hints, attachment) get
+    // appended to volatile later by chat.mjs.
+    if (scopedAgent._promptTiers) {
+      scopedAgent._promptTiers = {
+        ...scopedAgent._promptTiers,
+        stable: [scopedAgent._promptTiers.stable, financeExtra && financeExtra.trim(), voiceExtra && voiceExtra.trim()].filter(Boolean).join('\n\n'),
+        // Seed volatile with the date block — chat.mjs will append further
+        // per-turn additions onto this string.
+        volatile: dateBlock,
+      };
+      // Rebuild the legacy flat systemPrompt to match what providers that
+      // don't read tiers expect.
+      scopedAgent.systemPrompt = [scopedAgent._promptTiers.stable, scopedAgent._promptTiers.context, scopedAgent._promptTiers.volatile].filter(Boolean).join('\n\n');
+    } else {
+      // Old-shape agent (no tier metadata) — preserve original behavior.
+      scopedAgent.systemPrompt = `${agent.systemPrompt}\n\n${dateBlock}${financeExtra}${voiceExtra}`;
+    }
   }
 
   // Shared interceptor context. Mutable: financePreprocess rewrites
@@ -464,6 +496,40 @@ export async function handleChatMessage({
   })();
 
   } finally {
+    // Post-turn attachment save/discard prompt. Chat-upload always persists
+    // to users/<id>/profile-files/{images,videos,audio,documents}/ — the
+    // ✕ on the preview pill clears client state but not the on-disk file.
+    // Ask the user once the turn lands whether to keep or discard, so casual
+    // "ask about this image" uploads don't silently accumulate. Skipped for
+    // voice-device (no screen) and routine follow-ups (the original turn
+    // already showed the prompt).
+    if (_attachmentForDecision) {
+      try {
+        const decisionId = 'att_' + randomBytes(6).toString('hex');
+        const ts = Date.now();
+        const entry = {
+          role: 'attachment_decision',
+          decisionId,
+          file_id: _attachmentForDecision.file_id,
+          name: _attachmentForDecision.name,
+          mimeType: _attachmentForDecision.mimeType,
+          ts,
+        };
+        appendToSession(`${userId}_${agentId}`, entry);
+        onEvent({
+          type: 'attachment_decision',
+          decisionId,
+          agent: agentId,
+          file_id: _attachmentForDecision.file_id,
+          name: _attachmentForDecision.name,
+          mimeType: _attachmentForDecision.mimeType,
+          ts,
+        });
+      } catch (e) {
+        console.warn('[chat-dispatch] attachment_decision emit failed:', e.message);
+      }
+    }
+
     // Ambient auto-restore: voice-device wakes interrupt ambient playback
     // (XVF3800 firmware sets s_ambient_stop on wake — barge-in). If this
     // turn neither started a new ambient nor explicitly stopped the old

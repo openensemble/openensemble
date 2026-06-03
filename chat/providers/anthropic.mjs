@@ -65,10 +65,30 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // cache_control breakpoint, so the bulk of the input still cache-hits;
     // only the tools portion takes a partial miss when expanded.
     const anthropicTools = agent.tools?.length ? toAnthropicTools(agent.tools) : undefined;
+    // Three-tier system message for cache locality. When chat.mjs has built
+    // the tier breakdown (stable / context / volatile), emit them as separate
+    // blocks with cache_control markers on stable + context. The cache hit
+    // on the stable tier survives even when the tool-router recomposes the
+    // context tier or per-turn additions land in volatile. Falls back to a
+    // single-block marker when the agent record predates the tier split.
+    //
+    // Uses up to 4 Anthropic cache slots: tools (1) + system stable (1) +
+    // system context (1) + message tail (1) — exactly at the limit. If a
+    // future change needs another slot, drop the context marker first
+    // (volatile changes per turn anyway, so caching stable alone retains
+    // most of the win).
+    const tiers = agent._promptTiersAssembled;
+    const systemBlocks = tiers
+      ? [
+          { type: 'text', text: tiers.stable, cache_control: { type: 'ephemeral' } },
+          tiers.context ? { type: 'text', text: tiers.context, cache_control: { type: 'ephemeral' } } : null,
+          tiers.volatile ? { type: 'text', text: tiers.volatile } : null,
+        ].filter(Boolean)
+      : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
     const body = {
       model:      agent.model,
       max_tokens: agent.maxTokens ?? 8192,
-      system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      system:     systemBlocks,
       messages:   markTailCacheBreakpoint(working),
       stream:     true,
     };
@@ -126,8 +146,15 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       if (event.type === 'message_stop') break;
     }
 
-    if (cacheCreated || cacheRead) {
-      console.log(`[anthropic] cache: created=${cacheCreated} read=${cacheRead} input=${totalInputTokens}`);
+    {
+      // Always log so we can spot misses too (created>0+read=0 = first turn or
+      // cache TTL expired). hitRate is over cached tokens only (created+read);
+      // raw input_tokens is the uncached portion (volatile tier + new
+      // messages). tierMode tags whether the agent supplied the 3-block split.
+      const totalCacheable = cacheCreated + cacheRead;
+      const hitRate = totalCacheable ? (cacheRead / totalCacheable) : 0;
+      const tierMode = agent._promptTiersAssembled ? 'tiered' : 'flat';
+      console.log(`[anthropic] cache: mode=${tierMode} created=${cacheCreated} read=${cacheRead} uncached=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
     }
 
     // ── Tool use ──────────────────────────────────────────────────────────────

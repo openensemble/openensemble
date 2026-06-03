@@ -43,7 +43,12 @@
 .msg-bubble p  { margin-bottom: 8px; }
 .msg-bubble p:last-child { margin-bottom: 0; }
 .msg-bubble pre { background: #111; border: 1px solid var(--border); border-radius: 6px;
-  padding: 10px 12px; overflow-x: auto; margin: 8px 0; max-width: 100%; }
+  padding: 10px 12px; overflow-x: auto; margin: 8px 0; max-width: 100%;
+  /* Cap tall code blocks (e.g. a verbatim `apt list` dump from node_exec)
+     so the bubble doesn't take over the chat. Scroll lives inside the
+     <pre>, so the conversation around it stays usable. dvh on small
+     screens so the address-bar resize doesn't clip the block. */
+  max-height: min(50vh, 50dvh); overflow-y: auto; overscroll-behavior: contain; }
 .msg-bubble pre code { white-space: pre; }
 .msg-bubble code { font-family: 'Fira Code', monospace; font-size: 12px; }
 .msg-bubble :not(pre) > code { background: #111; padding: 2px 5px; border-radius: 4px;

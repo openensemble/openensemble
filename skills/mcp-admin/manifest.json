@@ -1,0 +1,110 @@
+{
+  "id": "mcp-admin",
+  "name": "MCP Server Management",
+  "description": "Manage Model Context Protocol (MCP) servers conversationally — list, add, remove, and assign servers to agents without editing JSON files. Each user manages their own servers (stored in users/<id>/mcp.json). After any mutation the tool cache is refreshed so changes take effect immediately, no server restart needed.",
+  "icon": "🔌",
+  "category": "service",
+  "service": true,
+  "bundled_with_role": "coordinator",
+  "enabled_by_default": true,
+  "always_on": true,
+  "intent_examples": [
+    "list my MCP servers",
+    "show my MCP servers",
+    "what MCP servers do I have",
+    "add an MCP server",
+    "connect the GitHub MCP",
+    "set up the filesystem MCP",
+    "install the Notion MCP",
+    "remove the everything MCP server",
+    "delete the MCP server",
+    "unregister an MCP server",
+    "assign the MCP server to my coder",
+    "give the MCP tools to Sydney",
+    "refresh my MCP servers",
+    "reconnect to the MCP server"
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_list_servers",
+        "description": "List the user's currently registered MCP servers, including which agents each is assigned to. Returns id, displayName, transport, command, args, env keys (values redacted), and assignedToAgents for each.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_add_server",
+        "description": "Register a new MCP server for this user. Supports two transports:\n\n**stdio** — launches a subprocess on the OE host. Required: command + args.\n  Example (GitHub):\n    id: \"github\"\n    transport: \"stdio\"\n    command: \"npx\"\n    args: [\"-y\", \"@modelcontextprotocol/server-github\"]\n    env: { \"GITHUB_PERSONAL_ACCESS_TOKEN\": \"ghp_xxx\" }\n\n**http** — connects to a remote MCP server over HTTP/SSE. Required: url. Auth via headers (typically `Authorization: Bearer <token>`).\n  Example (remote server):\n    id: \"my-remote\"\n    transport: \"http\"\n    url: \"https://mcp.example.com/sse\"\n    headers: { \"Authorization\": \"Bearer xxx\" }\n\nAfter adding, the tool cache is refreshed automatically — assigned agents see the new tools on their next turn. If the server fails to connect, you'll get an error message; the entry is still persisted so you can fix the config later.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id":               { "type": "string", "description": "Short unique id for this server within the user's config. Letters, digits, hyphens only. NO double-underscores (reserved as namespace separator)." },
+            "displayName":      { "type": "string", "description": "Friendly name shown to the user. Optional — defaults to the id." },
+            "transport":        { "type": "string", "enum": ["stdio", "http"], "description": "Transport: 'stdio' for local subprocesses or 'http' for remote MCP servers." },
+            "command":          { "type": "string", "description": "stdio only: program to spawn (e.g. \"npx\")." },
+            "args":             { "type": "array", "items": { "type": "string" }, "description": "stdio only: args passed to the command." },
+            "env":              { "type": "object", "description": "stdio only: env vars passed to the subprocess (e.g. API keys). Sensitive values are encrypted at rest." },
+            "url":              { "type": "string", "description": "http only: server endpoint URL." },
+            "headers":          { "type": "object", "description": "http only: request headers, typically including Authorization for auth. Encrypted at rest." },
+            "assignedToAgents": { "type": "array", "items": { "type": "string" }, "description": "Agent ids that should receive this server's tools." }
+          },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_remove_server",
+        "description": "Remove an MCP server from this user's config. The server is unregistered and its tools disappear from all assigned agents on the next refresh (triggered automatically). Idempotent — removing an unknown id is a no-op.",
+        "parameters": {
+          "type": "object",
+          "properties": { "id": { "type": "string", "description": "Server id to remove." } },
+          "required": ["id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_assign_server",
+        "description": "Add an agent to a server's assignedToAgents list (so the agent sees the server's tools). Idempotent. Refresh fires automatically.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "server_id": { "type": "string", "description": "MCP server id." },
+            "agent_id":  { "type": "string", "description": "Agent id to assign." }
+          },
+          "required": ["server_id", "agent_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_unassign_server",
+        "description": "Remove an agent from a server's assignedToAgents list. Idempotent. Refresh fires automatically.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "server_id": { "type": "string", "description": "MCP server id." },
+            "agent_id":  { "type": "string", "description": "Agent id to unassign." }
+          },
+          "required": ["server_id", "agent_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_refresh",
+        "description": "Re-read this user's mcp.json from disk, reconnect to each server, and refresh the tool cache. Useful after manual edits to mcp.json or when a server was restarted out-of-band. The other mutation tools (add/remove/assign/unassign) refresh automatically — you don't need to call this after them.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    }
+  ],
+  "systemPromptAddition": "## MCP server management — USE THESE TOOLS YOURSELF\n\nAny question or command involving \"MCP\" / \"MCP server\" / \"Model Context Protocol\" — list, add, remove, assign, unassign, refresh — is handled by the `mcp_*` tools listed in your toolset (`mcp_list_servers`, `mcp_add_server`, `mcp_remove_server`, `mcp_assign_server`, `mcp_unassign_server`, `mcp_refresh`). **CALL THEM DIRECTLY. DO NOT DELEGATE to Ada, the coder, or any specialist.** These tools mutate `users/<id>/mcp.json` through proper writers; the coder editing the JSON file by hand would corrupt the format and bypass cache refresh.\n\nExamples:\n- \"remove the everything MCP server\" → call `mcp_remove_server({id:\"everything\"})` immediately.\n- \"list my MCP servers\" → call `mcp_list_servers()` immediately.\n- \"add github\" / \"connect my notion\" / \"set up the filesystem MCP\" — look up the official server's npm package via WebSearch / WebFetch if you don't already know it, then call `mcp_add_server` with the right command + args + env hints. For sensitive values (API tokens, OAuth secrets), ASK {{USER_NAME}} for the value explicitly — don't guess and don't read from the environment.\n\nAfter adding a server, briefly confirm which agents now have its tools, and offer to demonstrate one of them so {{USER_NAME}} sees it work."
+}

@@ -50,7 +50,7 @@
             "icon": { "type": "string", "description": "Single emoji icon" },
             "tools": {
               "type": "array",
-              "description": "OpenAI-compatible tool schemas. Each: {type:'function', function:{name, description, parameters}}. Always prefix tool names with the skill id (e.g. ha_turn_on for skill id 'ha').",
+              "description": "OpenAI-compatible tool schemas. Each: {type:'function', function:{name, description, parameters}}. Always prefix tool names with the skill id (e.g. ha_turn_on for skill id 'ha').\n\n**Optional per-tool field `destructive: true`** — set on any tool that mutates external state (sends email, calls a remote write API, deletes files, posts to a webhook). When set, the smoke runner skips that tool with a warning instead of invoking it. Read-only tools (weather lookups, listing things, search) should NOT be marked destructive — they get safety-tested for free.",
               "items": { "type": "object" }
             },
             "watchers": {
@@ -92,6 +92,18 @@
                 "serverCode": { "type": "string", "description": "OPTIONAL ESM source for plugins/usr_{id}/server.mjs. Must export: async function handleRequest(req, res, cfg). Return true if handled, false otherwise. Only needed if the drawer needs custom HTTP endpoints." }
               },
               "required": ["name", "html"]
+            },
+            "skip_lsp": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false (the default), the skill's code is type-checked before being written to disk; any error (wrong import depth, missing `ctx` parameter, missing `await` on async ctx helpers, etc.) blocks the create and the error is returned so you can fix it and retry. Set true ONLY when you've already read a diagnostic and confirmed it's a false positive (e.g., a dynamic `import()` or runtime-resolved name that tsc can't follow). Never set true just because the check is annoying — that defeats the purpose."
+            },
+            "skip_validator": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false (the default), a structural diff runs between manifest.tools[] and execute.mjs's `if (name === '...')`/`case '...':` patterns. Mismatched tool names block; orphan handlers warn. Set true only when the code dispatches via a helper function the regex can't see — never as a general bypass."
+            },
+            "skip_smoke": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false, every tool in the manifest is imported and called with generated args (and a stub ctx that returns undefined for credentials and no-ops on showImage/watch/etc.). Crashes, hangs (3s timeout), and wrong-typed returns block the create. Annotate individual tools with `destructive: true` in the manifest to skip them surgically. Set this flag to true only as a nuclear option when most tools legitimately can't be smoke-tested."
             }
           },
           "required": ["id", "name", "description", "tools", "code", "assign_to"]
@@ -107,7 +119,19 @@
           "type": "object",
           "properties": {
             "id": { "type": "string", "description": "Full skill id including usr_ prefix (e.g. usr_homeassistant)" },
-            "code": { "type": "string", "description": "Complete new execute.mjs source code" }
+            "code": { "type": "string", "description": "Complete new execute.mjs source code" },
+            "skip_lsp": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false, the new code is type-checked before being written; any error blocks the update and the original file is left untouched. Set true only when you've confirmed a diagnostic is a false positive."
+            },
+            "skip_validator": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false, runs the manifest/code structural check (every tool declared in the on-disk manifest must have a handler in the new code). Set true only when the code dispatches via a helper the regex can't see."
+            },
+            "skip_smoke": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false, every tool gets smoke-tested with generated args after the new code is written; any crash, hang (3s timeout), or wrong return type reverts the update. Annotate destructive tools with `destructive:true` in the manifest to skip them individually."
+            }
           },
           "required": ["id", "code"]
         }
@@ -148,6 +172,18 @@
                 "required": ["find", "replace"]
               },
               "minItems": 1
+            },
+            "skip_lsp": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false, the post-patch code is type-checked in memory before the file is written; any error blocks the patch and the original is left untouched. Set true only when you've confirmed a diagnostic is a false positive."
+            },
+            "skip_validator": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false, runs the manifest/code structural check on the post-patch code (every declared tool must have a handler). Set true only when the code dispatches via a helper the regex can't see."
+            },
+            "skip_smoke": {
+              "type": "boolean",
+              "description": "OPTIONAL. Default false. When false, every tool is smoke-tested with generated args after the patch is written; any crash, hang, or wrong return type reverts to the previous version. Annotate destructive tools with `destructive:true` in the manifest to skip them individually."
             }
           },
           "required": ["id", "edits"]

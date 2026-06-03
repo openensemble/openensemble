@@ -354,6 +354,28 @@ function handleServerMessage(msg) {
         applyProposalOutcome(msg.proposalId, msg.status, msg.outcome);
       }
       break;
+    case 'attachment_decision':
+      // Post-turn save/discard prompt for a chat-upload. Renders Keep/Discard
+      // buttons; the file is already on disk so 'keep' is a no-op and
+      // 'discard' deletes via /api/chat-attachment-decision. Persisted to
+      // session jsonl so reload preserves the choice.
+      if (!msg.agent || msg.agent === activeAgent) {
+        // Stash on the active session so renderSession picks it up post-reload.
+        if (sessions[activeAgent]) {
+          sessions[activeAgent].push({
+            role: 'attachment_decision',
+            decisionId: msg.decisionId, file_id: msg.file_id,
+            name: msg.name, mimeType: msg.mimeType, ts: msg.ts,
+          });
+        }
+        appendAttachmentDecisionBubble(msg);
+      }
+      break;
+    case 'attachment_decision_outcome':
+      // Fan-out from another tab (or this tab's click). Mutate the bubble
+      // in place to the resolved state.
+      applyAttachmentDecisionOutcome(msg.decisionId, msg.decision);
+      break;
     case 'status':
       // Watcher supervisor pushes these — muted/italic bubble outside any
       // agent assistant turn. One bubble per watcherId, updated in place.

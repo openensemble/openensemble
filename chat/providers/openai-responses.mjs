@@ -119,7 +119,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   const working = [...messages];
 
   let assistantContent = '';
-  let totalInputTokens = 0, totalOutputTokens = 0;
+  let totalInputTokens = 0, totalOutputTokens = 0, totalCachedTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
 
   while (guard.tick()) {
@@ -285,8 +285,11 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       if (t === 'response.completed') {
         const usage = ev.response?.usage;
         if (usage) {
-          totalInputTokens  += usage.input_tokens  ?? 0;
-          totalOutputTokens += usage.output_tokens ?? 0;
+          totalInputTokens   += usage.input_tokens  ?? 0;
+          totalOutputTokens  += usage.output_tokens ?? 0;
+          // Responses API spells this `input_tokens_details.cached_tokens`
+          // (vs Chat Completions' `prompt_tokens_details.cached_tokens`).
+          totalCachedTokens  += usage.input_tokens_details?.cached_tokens ?? 0;
         }
         finalized = true;
         continue;
@@ -379,6 +382,11 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
   yield { type: '__content', content: assistantContent };
   if (totalInputTokens || totalOutputTokens) {
-    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: 'openai-oauth', model: agent.model };
+    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cachedTokens: totalCachedTokens, provider: 'openai-oauth', model: agent.model };
+  }
+  if (totalInputTokens) {
+    const hitRate = totalCachedTokens / totalInputTokens;
+    const tierMode = agent._promptTiersAssembled ? 'tiered' : 'flat';
+    console.log(`[openai-oauth] cache: mode=${tierMode} cached=${totalCachedTokens} input=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
   }
 }

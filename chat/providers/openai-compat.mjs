@@ -69,11 +69,19 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     let tokenCount   = 0;
     const startedAt  = Date.now();
     let firstTokenAt = null;
+    let cachedTokens = 0;
 
     for await (const event of readAnthropicSSE(res.body)) {
       if (event.usage) {
         totalInputTokens  += event.usage.prompt_tokens     ?? 0;
         totalOutputTokens += event.usage.completion_tokens ?? 0;
+        // OpenAI-shape providers expose prefix-cache hits via the optional
+        // `prompt_tokens_details.cached_tokens` field on the final usage
+        // chunk. Capture so we can log a hit rate parallel to Anthropic's
+        // explicit cache_control telemetry — and measure whether the
+        // three-tier system-prompt reorder is actually buying us anything.
+        // Not all OpenAI-compat providers populate this; missing field = 0.
+        cachedTokens += event.usage.prompt_tokens_details?.cached_tokens ?? 0;
       }
       const choice = event.choices?.[0];
       if (!choice) continue;
@@ -176,6 +184,11 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
 
   yield { type: '__content', content: assistantContent };
   if (totalInputTokens || totalOutputTokens) {
-    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: providerKey, model: agent.model };
+    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cachedTokens, provider: providerKey, model: agent.model };
+  }
+  if (totalInputTokens) {
+    const hitRate = totalInputTokens ? (cachedTokens / totalInputTokens) : 0;
+    const tierMode = agent._promptTiersAssembled ? 'tiered' : 'flat';
+    console.log(`[${providerKey}] cache: mode=${tierMode} cached=${cachedTokens} input=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
   }
 }

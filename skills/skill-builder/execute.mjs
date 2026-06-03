@@ -43,49 +43,72 @@ function validateId(id) {
   return null;
 }
 
-// Try-import the executor and run two behavioural checks:
-//   1. Unknown tool name → must return null (not throw, not return object)
-//   2. First declared tool name → must return a string (not object, not undefined)
-// Returns error string on failure, null on success.
-async function validateExecutor(skillDir, toolNames = []) {
-  const execPath = path.join(skillDir, 'execute.mjs');
-  const url = pathToFileURL(execPath).href + `?validate=${Date.now()}`;
-  try {
-    const mod = await import(url);
-    const fn = mod.default ?? mod.executeSkillTool;
-    if (typeof fn !== 'function') {
-      return 'execute.mjs must export executeSkillTool as a named or default export';
-    }
+/**
+ * Pre-write gates: LSP type-check + manifest/code structural validator.
+ * Both run together so a single fix-and-retry covers both bug classes
+ * (no "fix LSP, re-try, hit validator, re-try" round-trip).
+ *
+ * Returns `{ block, warnings }`:
+ *   - block: non-empty string when there are blocking errors — caller
+ *     should return this to the LLM.
+ *   - warnings: non-empty string when there are non-blocking warnings —
+ *     caller should append to the success message.
+ *
+ * Infrastructure failures (LSP timeout, TS missing, etc.) never block.
+ *
+ * @param {string} skillDir
+ * @param {any} manifest
+ * @param {string} code
+ * @param {{ skip_lsp?: boolean, skip_validator?: boolean, opName: string, skillId: string }} opts
+ * @returns {Promise<{block: string|null, warnings: string|null}>}
+ */
+async function runPreWriteGates(skillDir, manifest, code, opts) {
+  const blockParts = [];
+  const warnParts = [];
 
-    // Check 0: must declare 4 or 5 parameters. The 5th (ctx) is optional —
-    // skills that show images/videos inline take it; everything else uses 4.
-    if (fn.length !== 4 && fn.length !== 5) {
-      return `executeSkillTool must declare 4 or 5 parameters (name, args, userId, agentId[, ctx]) but yours declares ${fn.length}. Copy the signature from the blueprint exactly.`;
-    }
-
-    // Check 1: unknown tool name must return null
-    let unknownResult;
-    try { unknownResult = await fn('__unknown_tool_check__', {}, 'test', null); }
-    catch (e) { return `Function throws on unknown tool name — it must return null instead: ${e.message}`; }
-    if (unknownResult !== null && unknownResult !== undefined) {
-      return `Function returned ${JSON.stringify(unknownResult)} for an unknown tool name but must return null. Check your if/else logic — the final fallthrough must be "return null".`;
-    }
-
-    // Check 2: first real tool name must return a string (not an object, not undefined)
-    if (toolNames.length > 0) {
-      let realResult;
-      try { realResult = await fn(toolNames[0], {}, 'test', null); }
-      catch (_) { realResult = null; } // network errors etc. are acceptable
-      if (realResult !== null && realResult !== undefined && typeof realResult !== 'string') {
-        return `Function returned a ${typeof realResult} (${JSON.stringify(realResult).slice(0, 80)}) for tool "${toolNames[0]}" but must return a plain string or null. Do not return objects — return a formatted string instead.`;
+  if (!opts.skip_lsp) {
+    try {
+      const { lspDiagnose, formatDiagnostics } = await import('../../lib/lsp-diagnose.mjs');
+      const diag = await lspDiagnose(skillDir, {
+        'execute.mjs': code,
+        'manifest.json': JSON.stringify(manifest, null, 2),
+      });
+      if (diag.skipped) {
+        console.log(`[skill-builder] LSP skipped for ${opts.skillId}: ${diag.skipped.reason}`);
+      } else if (!diag.ok) {
+        blockParts.push('Type-check (LSP) found issues:\n' + formatDiagnostics(diag.diagnostics));
+      } else if (diag.diagnostics.length) {
+        warnParts.push('Type-check warnings (non-blocking):\n' + formatDiagnostics(diag.diagnostics));
       }
+    } catch (e) {
+      console.warn('[skill-builder] LSP threw, proceeding without diagnostics:', e.message);
     }
-
-    return null;
-  } catch (e) {
-    return e.message;
   }
+
+  if (!opts.skip_validator) {
+    try {
+      const { validateManifestCode, formatManifestDiagnostics } = await import('../../lib/manifest-validator.mjs');
+      const r = validateManifestCode(manifest, code);
+      if (!r.ok) {
+        blockParts.push('Manifest/code consistency check failed:\n' + formatManifestDiagnostics(r.diagnostics));
+      } else if (r.diagnostics.length) {
+        warnParts.push('Manifest/code warnings (non-blocking):\n' + formatManifestDiagnostics(r.diagnostics));
+      }
+    } catch (e) {
+      console.warn('[skill-builder] validator threw, proceeding:', e.message);
+    }
+  }
+
+  const block = blockParts.length
+    ? `${opts.opName} blocked — fix the issues below and retry. If a check is a false positive, set skip_lsp:true and/or skip_validator:true to bypass that specific gate only:\n\n${blockParts.join('\n\n')}`
+    : null;
+  const warnings = warnParts.length ? warnParts.join('\n\n') : null;
+  return { block, warnings };
 }
+
+// The old `validateExecutor` (signature + unknown-tool fallthrough + first-
+// tool empty-args check) has been superseded by `lib/skill-smoke.mjs` which
+// covers the same ground AND exercises every tool with generated args.
 
 // ── Drawer helpers ────────────────────────────────────────────────────────────
 
@@ -174,7 +197,7 @@ function handleReadBlueprint() {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, assign_to } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, assign_to, skip_lsp, skip_validator, skip_smoke } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -244,15 +267,45 @@ async function handleCreate(args, userId) {
     manifest.coordinator_scope = coordinator_scope;
   }
 
+  // Pre-write gates: LSP type-check + manifest/code structural validator.
+  // Both run together so a single fix-and-retry handles both. Strict
+  // default — errors block; coder can pass skip_lsp / skip_validator to
+  // bypass a specific gate after confirming a false positive.
+  const gates = await runPreWriteGates(skillDir, manifest, code, {
+    skip_lsp, skip_validator, opName: `Create of "${skillId}"`, skillId,
+  });
+  if (gates.block) return gates.block;
+  if (gates.warnings) args._gateWarnings = gates.warnings;
+
   mkdirSync(skillDir, { recursive: true });
   writeFileSync(path.join(skillDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   writeFileSync(path.join(skillDir, 'execute.mjs'), code);
 
-  // Validate the code by trying to import it — catch syntax/export errors and signature issues
-  const importErr = await validateExecutor(skillDir, newNames);
-  if (importErr) {
-    rmSync(skillDir, { recursive: true, force: true });
-    return `Skill code has an error — files removed. Fix the issue and try again:\n\n${importErr}`;
+  // Post-write smoke: import the freshly-written skill and exercise
+  // every declared tool with schema-generated args. Catches handler
+  // crashes, wrong-typed returns, hangs, and arg-name mismatches that
+  // the static gates (LSP, manifest validator) can't see because they
+  // don't execute the code. Strict default — any failure rolls back
+  // the disk write. skip_smoke bypasses; tools marked `destructive:true`
+  // in the manifest are skipped individually (see SKILL_BLUEPRINT).
+  {
+    const { runSkillSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
+    const report = await runSkillSmoke(skillDir, manifest);
+    if (report.setupError) {
+      rmSync(skillDir, { recursive: true, force: true });
+      return `Skill failed to load — files removed. Fix the issue and try again:\n\n${report.setupError}`;
+    }
+    if (!report.ok && !skip_smoke) {
+      rmSync(skillDir, { recursive: true, force: true });
+      return `Smoke-test failures (tool handlers crashed, hung, or returned the wrong type) — skill files removed. Fix and retry, or pass skip_smoke:true if these are tools the smoke test legitimately can't run (network-only, destructive, etc.):\n\n${formatSmokeReport(report)}`;
+    }
+    // Surface skipped tools (destructive, returned-null) and non-blocking
+    // failures (when skip_smoke is set) as warnings on the success message.
+    const hasNotes = report.results.some(r => r.outcome !== 'pass');
+    if (hasNotes) {
+      const smokeWarnings = 'Smoke notes:\n' + formatSmokeReport(report);
+      args._gateWarnings = args._gateWarnings ? args._gateWarnings + '\n\n' + smokeWarnings : smokeWarnings;
+    }
   }
 
   addRoleManifest(manifest, userId);
@@ -318,11 +371,12 @@ async function handleCreate(args, userId) {
     } catch (e) { console.warn('[skill-builder] intent embedding refresh failed:', e.message); }
   }
 
-  return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}.${manifest.intent_examples?.length ? ` Tool-router classifier picked up ${manifest.intent_examples.length} intent example(s).` : ''} The skill persists across server restarts.${drawerNote}`;
+  const warningTail = args._gateWarnings ? `\n\nNote — warnings (non-blocking):\n${args._gateWarnings}` : '';
+  return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}.${manifest.intent_examples?.length ? ` Tool-router classifier picked up ${manifest.intent_examples.length} intent example(s).` : ''} The skill persists across server restarts.${drawerNote}${warningTail}`;
 }
 
 async function handleUpdateCode(args, userId) {
-  const { id: skillId, code } = args;
+  const { id: skillId, code, skip_lsp, skip_validator, skip_smoke } = args;
   if (!skillId?.trim()) return 'id is required.';
   if (!code?.trim())    return 'code is required.';
   if (!code.includes('executeSkillTool')) {
@@ -349,19 +403,45 @@ async function handleUpdateCode(args, userId) {
   if (!existsSync(execPath)) {
     return `Skill "${skillId}" has no execute.mjs on disk.`;
   }
+
+  // Pre-write gates: LSP + manifest/code validator on the new code
+  // against the current on-disk manifest. Runs BEFORE any file is
+  // touched so a broken update leaves the prior good version intact.
+  /** @type {any} */
+  let onDiskManifest = manifest;
+  try { onDiskManifest = JSON.parse(readFileSync(path.join(skillDir, 'manifest.json'), 'utf8')); }
+  catch { /* fall back to the in-memory manifest from roles */ }
+  const gates = await runPreWriteGates(skillDir, onDiskManifest, code, {
+    skip_lsp, skip_validator, opName: `Update of "${skillId}"`, skillId,
+  });
+  if (gates.block) return gates.block;
+  const gateWarnings = gates.warnings ?? '';
+
   const backupPath = execPath + '.bak';
 
   // Back up current code before overwriting
   writeFileSync(backupPath, readFileSync(execPath));
   writeFileSync(execPath, code);
 
-  // Validate — roll back on error
-  const toolNames = (manifest.tools ?? []).map(t => t.function?.name).filter(Boolean);
-  const importErr = await validateExecutor(skillDir, toolNames);
-  if (importErr) {
-    writeFileSync(execPath, readFileSync(backupPath));
-    rmSync(backupPath, { force: true });
-    return `Updated code has an error — reverted to previous version:\n\n${importErr}`;
+  // Post-write smoke against the on-disk manifest. On any failure we
+  // restore from backup before returning the error.
+  let smokeWarnings = '';
+  {
+    const { runSkillSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
+    const report = await runSkillSmoke(skillDir, onDiskManifest);
+    if (report.setupError) {
+      writeFileSync(execPath, readFileSync(backupPath));
+      rmSync(backupPath, { force: true });
+      return `Updated code failed to load — reverted to previous version:\n\n${report.setupError}`;
+    }
+    if (!report.ok && !skip_smoke) {
+      writeFileSync(execPath, readFileSync(backupPath));
+      rmSync(backupPath, { force: true });
+      return `Smoke-test failures on the updated code — reverted to previous version. Fix and retry, or pass skip_smoke:true if the failing tools can't be smoke-tested:\n\n${formatSmokeReport(report)}`;
+    }
+    if (report.results.some(r => r.outcome !== 'pass')) {
+      smokeWarnings = 'Smoke notes:\n' + formatSmokeReport(report);
+    }
   }
   rmSync(backupPath, { force: true });
 
@@ -375,7 +455,9 @@ async function handleUpdateCode(args, userId) {
     });
   } catch (e) { console.debug('[skill-builder] log append (update) failed:', e.message); }
 
-  return `Skill "${manifest.name}" (${skillId}) updated and hot-reloaded. New code is active immediately.`;
+  const combinedWarnings = [gateWarnings, smokeWarnings].filter(Boolean).join('\n\n');
+  const warningTail = combinedWarnings ? `\n\nNote — warnings (non-blocking):\n${combinedWarnings}` : '';
+  return `Skill "${manifest.name}" (${skillId}) updated and hot-reloaded. New code is active immediately.${warningTail}`;
 }
 
 async function handleReadCode(args, userId) {
@@ -403,7 +485,7 @@ async function handleReadCode(args, userId) {
 }
 
 async function handlePatchCode(args, userId) {
-  const { id: skillId, edits } = args;
+  const { id: skillId, edits, skip_lsp, skip_validator, skip_smoke } = args;
   if (!skillId?.trim()) return 'id is required.';
   if (!Array.isArray(edits) || !edits.length) return 'edits must be a non-empty array.';
   for (let i = 0; i < edits.length; i++) {
@@ -455,16 +537,41 @@ async function handlePatchCode(args, userId) {
     return 'Patched code must still export executeSkillTool. Edit rejected.';
   }
 
+  // Pre-write gates on the post-patch content vs the on-disk manifest.
+  /** @type {any} */
+  let onDiskManifest = manifest;
+  try { onDiskManifest = JSON.parse(readFileSync(path.join(skillDir, 'manifest.json'), 'utf8')); }
+  catch { /* fall back to roles' in-memory manifest */ }
+  const gates = await runPreWriteGates(skillDir, onDiskManifest, current, {
+    skip_lsp, skip_validator, opName: `Patch of "${skillId}"`, skillId,
+  });
+  if (gates.block) return gates.block;
+  const gateWarnings = gates.warnings ?? '';
+
   const backupPath = execPath + '.bak';
   writeFileSync(backupPath, original);
   writeFileSync(execPath, current);
 
-  const toolNames = (manifest.tools ?? []).map(t => t.function?.name).filter(Boolean);
-  const importErr = await validateExecutor(skillDir, toolNames);
-  if (importErr) {
-    writeFileSync(execPath, original);
-    rmSync(backupPath, { force: true });
-    return `Patched code has an error — reverted to previous version:\n\n${importErr}`;
+  // Post-write smoke against the on-disk manifest. Revert from backup
+  // on any failure so a broken patch never leaves the user with worse
+  // code than they had before.
+  let smokeWarnings = '';
+  {
+    const { runSkillSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
+    const report = await runSkillSmoke(skillDir, onDiskManifest);
+    if (report.setupError) {
+      writeFileSync(execPath, original);
+      rmSync(backupPath, { force: true });
+      return `Patched code failed to load — reverted to previous version:\n\n${report.setupError}`;
+    }
+    if (!report.ok && !skip_smoke) {
+      writeFileSync(execPath, original);
+      rmSync(backupPath, { force: true });
+      return `Smoke-test failures on the patched code — reverted to previous version. Fix and retry, or pass skip_smoke:true if the failing tools can't be smoke-tested:\n\n${formatSmokeReport(report)}`;
+    }
+    if (report.results.some(r => r.outcome !== 'pass')) {
+      smokeWarnings = 'Smoke notes:\n' + formatSmokeReport(report);
+    }
   }
   rmSync(backupPath, { force: true });
 
@@ -483,7 +590,9 @@ async function handlePatchCode(args, userId) {
     });
   } catch (e) { console.debug('[skill-builder] log append (patch) failed:', e.message); }
 
-  return `Skill "${manifest.name}" (${skillId}) patched (${n} edit${n === 1 ? '' : 's'}) and hot-reloaded. New code is active immediately.`;
+  const combinedWarnings = [gateWarnings, smokeWarnings].filter(Boolean).join('\n\n');
+  const warningTail = combinedWarnings ? `\n\nNote — warnings (non-blocking):\n${combinedWarnings}` : '';
+  return `Skill "${manifest.name}" (${skillId}) patched (${n} edit${n === 1 ? '' : 's'}) and hot-reloaded. New code is active immediately.${warningTail}`;
 }
 
 async function handleUpdateToolDef(args, userId) {

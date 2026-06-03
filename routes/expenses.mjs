@@ -18,6 +18,46 @@ import busboy from 'busboy';
 import os from 'os';
 import { pipeline } from 'stream/promises';
 
+// Delete a chat-upload from the user's profile-files. Handles the four file_id
+// flavors that /api/chat-upload produces: images:, videos:, audio:, documents:.
+// Documents also need their docs-index.json entry pruned so list_profile_files
+// stops surfacing the now-missing file. Best-effort — missing files are not
+// an error (the user may have already discarded via the Docs drawer).
+async function discardProfileFile(userId, fileId) {
+  if (!userId || typeof fileId !== 'string') return;
+  const { USERS_DIR } = await import('../lib/paths.mjs');
+  const colonIdx = fileId.indexOf(':');
+  if (colonIdx < 0) return;
+  const kind = fileId.slice(0, colonIdx);
+  const rest = fileId.slice(colonIdx + 1);
+  if (!rest || rest.includes('/') || rest.includes('..')) return;
+  if (kind === 'images' || kind === 'videos' || kind === 'audio') {
+    const p = path.join(USERS_DIR, userId, kind, rest);
+    try { fs.unlinkSync(p); } catch (e) {
+      if (e.code !== 'ENOENT') console.warn(`[discard] unlink ${p} failed:`, e.message);
+    }
+    return;
+  }
+  if (kind === 'documents') {
+    const docsDir = path.join(USERS_DIR, userId, 'documents');
+    const idxPath = path.join(docsDir, 'docs-index.json');
+    let entries = [];
+    try { entries = JSON.parse(fs.readFileSync(idxPath, 'utf8')); } catch {}
+    const doc = entries.find(d => d.id === rest);
+    if (doc) {
+      try { fs.unlinkSync(path.join(docsDir, doc.id + doc.ext)); } catch (e) {
+        if (e.code !== 'ENOENT') console.warn(`[discard] unlink doc failed:`, e.message);
+      }
+      const next = entries.filter(d => d.id !== rest);
+      try {
+        await withLock(idxPath, () => fs.writeFileSync(idxPath, JSON.stringify(next, null, 2)));
+      } catch (e) {
+        console.warn('[discard] rewrite docs-index failed:', e.message);
+      }
+    }
+  }
+}
+
 async function extractText(fileData, ext) {
   const isPdf = ext.toLowerCase() === '.pdf';
   const isCsv = ext.toLowerCase() === '.csv';
@@ -177,6 +217,60 @@ export async function handle(req, res) {
         file_id, base64,
         extractedText: extractedText || null,
       }));
+    } catch (e) {
+      safeError(res, e);
+    }
+    return true;
+  }
+
+  // Chat-upload keep/discard decision. Posted by the client when the user
+  // clicks Keep or Discard on the attachment_decision bubble emitted at the
+  // end of a turn that had an attachment. 'keep' is a no-op (the file is
+  // already on disk); 'discard' deletes from the appropriate profile-files
+  // folder + prunes docs-index for documents. Outcome is persisted to the
+  // session so a reload shows the resolved state.
+  if (req.url === '/api/chat-attachment-decision' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const { decisionId, file_id, decision, agent } = body;
+      if (!decisionId || !file_id || !decision) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'decisionId, file_id, decision required' }));
+        return true;
+      }
+      if (decision !== 'keep' && decision !== 'discard') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'decision must be keep|discard' }));
+        return true;
+      }
+      if (decision === 'discard') {
+        await discardProfileFile(authId, file_id);
+      }
+      const ts = Date.now();
+      try {
+        const { appendToSession } = await import('../sessions.mjs');
+        const agentId = String(agent || '');
+        if (agentId) {
+          const key = agentId.startsWith(`${authId}_`) ? agentId : `${authId}_${agentId}`;
+          appendToSession(key, {
+            role: 'attachment_decision_outcome',
+            decisionId, decision, ts,
+          });
+        }
+      } catch (e) {
+        console.warn('[chat-attachment-decision] persist outcome failed:', e.message);
+      }
+      // Fan out to the user's other tabs so they update in-place too.
+      try {
+        const { sendToUser } = await import('../ws-handler.mjs');
+        sendToUser(authId, {
+          type: 'attachment_decision_outcome',
+          decisionId, decision, agent: agent || null, ts,
+        });
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, decision }));
     } catch (e) {
       safeError(res, e);
     }
