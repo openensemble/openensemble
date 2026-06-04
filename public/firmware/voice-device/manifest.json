@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.36-quiet-ww",
+  "version": "0.2.42-pcm-buf-256k",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

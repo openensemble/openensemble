@@ -32,6 +32,29 @@ import {
 import { log } from '../logger.mjs';
 import { OPENAI_COMPAT_PROVIDERS } from '../chat/providers/_shared.mjs';
 
+// Live ffmpeg processes for ambient streams keyed by marker. Lets the
+// /api/tts handler reattach a new HTTP response to an existing ffmpeg
+// when the device reconnects after a wake (no cold ffmpeg restart, no
+// PassThrough warmup, no decode-error burst on resume). Entries are
+// removed on explicit stop (forceKill) or grace timeout.
+//   marker → { ff, ff_buf, killTimer, forceKill }
+const _ambientStreams = new Map();
+const STREAM_GRACE_MS = 10_000;
+
+// Start the grace timer when the current ambient response closes. ffmpeg
+// keeps encoding into ff_buf until the buffer fills (then it back-pressures
+// and pauses). If the device re-requests this marker within the window,
+// the /api/tts handler clears the timer and pipes ff_buf to the new res.
+function startAmbientGrace(streamEntry, marker, res) {
+  if (streamEntry.killTimer) return; // already in grace from a prior close
+  try { streamEntry.ff_buf.unpipe(res); } catch {}
+  streamEntry.killTimer = setTimeout(() => {
+    if (streamEntry.killTimer) streamEntry.forceKill?.();
+    console.log(`[tts] ambient stream EXPIRED after ${STREAM_GRACE_MS / 1000}s grace marker=${marker}`);
+  }, STREAM_GRACE_MS);
+  console.log(`[tts] ambient stream PAUSED (grace ${STREAM_GRACE_MS / 1000}s) marker=${marker}`);
+}
+
 // KittenTTS nano-0.2 ships 8 preset voices (no cloning). Listed here so the
 // UI dropdown and /api/tts/info can surface them without round-tripping to
 // the kittentts subprocess.
@@ -1281,30 +1304,91 @@ export async function handle(req, res) {
             res.end(JSON.stringify({ error: 'ambient source missing' }));
             return true;
           }
+          // Grace-period stream reattach: when a wake fires during ambient,
+          // the device closes the HTTP response, but we DON'T tear down ffmpeg
+          // immediately — we hold it warm in `_ambientStreams` for
+          // STREAM_GRACE_MS. If the device re-requests the SAME marker within
+          // the grace window (auto-restore after wake), we re-pipe the same
+          // ff_buf to the new response — no ffmpeg cold start, no buffer
+          // warmup, no decode-error burst at resume. Only explicit stop
+          // (dropAmbientMp3 → forceKill) or grace expiry kills ffmpeg.
+          const existing = _ambientStreams.get(trimmedText);
+          if (existing) {
+            if (existing.killTimer) {
+              clearTimeout(existing.killTimer);
+              existing.killTimer = null;
+            }
+            res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Transfer-Encoding': 'chunked' });
+            existing.ff_buf.pipe(res);
+            const onResClose = () => startAmbientGrace(existing, trimmedText, res);
+            res.on('close', onResClose);
+            res.on('error', onResClose);
+            registerAmbientResponse(trimmedText, res, existing.forceKill);
+            console.log(`[tts] ambient stream RESUMED (warm reattach) marker=${trimmedText}`);
+            return true;
+          }
           const { spawn } = await import('child_process');
-          const args = ['-loglevel', 'error'];
+          const { PassThrough } = await import('stream');
+          // Bumped from 'error' → 'warning' so encoder issues surface in
+          // server logs. libhelix decode errors on device come from frame
+          // issues; ffmpeg's own warnings often correlate. Drop back to
+          // 'error' once we're confident the stream is clean.
+          const args = ['-loglevel', 'warning'];
           if (meta.loop !== false) args.push('-stream_loop', '-1');
+          // Strict CBR + bit-reservoir disabled. libhelix on the device
+          // chokes on:
+          //   - bit reservoir: frames borrowing bits from prior frames
+          //     (errors -2 MAINDATA_UNDERFLOW) — any TCP hiccup loses the
+          //     borrowed bits and the decoder can't reassemble the frame.
+          //   - VBR / ABR: even within "CBR target" mode libmp3lame varies
+          //     frame sizes to maintain quality. Forcing min/max equal to
+          //     target makes every frame the same size, eliminating
+          //     reservoir trickery entirely.
+          //   - bufsize: 16k VBV window matches a tight per-frame budget so
+          //     no rate-shaping juggling happens.
+          // Cost: marginal audio quality loss vs ABR, fine for ambient
+          // thunderstorm / sleep sounds.
           args.push('-i', sourcePath,
-                    '-ac', '2', '-ar', '48000', '-b:a', '160k',
+                    '-ac', '2', '-ar', '48000',
+                    '-c:a', 'libmp3lame',
+                    '-b:a', '160k',
+                    '-minrate', '160k', '-maxrate', '160k', '-bufsize', '16k',
+                    '-reservoir', '0',
                     '-f', 'mp3', 'pipe:1');
           const ff = spawn('ffmpeg', args);
           res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Transfer-Encoding': 'chunked' });
-          // Wire ffmpeg stdout → response; ffmpeg stderr → console (rarely
-          // chatty since -loglevel error). Close cleanup is critical: we
-          // must always kill the ffmpeg process when the response ends so
-          // we don't leak a runaway child per stop-without-restart.
-          ff.stdout.pipe(res);
+          // 1 MB buffer between ffmpeg stdout and the HTTP response. Without
+          // this, transient network slowness fills the kernel TCP send buffer,
+          // backpressures the response stream, and stalls ff.stdout — ffmpeg
+          // pauses encoding mid-frame. When the network catches up ffmpeg
+          // bursts the backlog and the device sees byte-rate spikes that
+          // libhelix mis-decodes as INVALID_HUFFCODES / FRAMEHEADER errors.
+          // Holds ~50s of 160k stereo (1MB ÷ 20 KB/s), enough to absorb
+          // realistic Wi-Fi hiccups. During grace this also lets ffmpeg keep
+          // encoding without a consumer until full, after which it pauses via
+          // backpressure — bytes are preserved for the reattach on resume.
+          const ff_buf = new PassThrough({ highWaterMark: 1024 * 1024 });
+          ff.stdout.pipe(ff_buf).pipe(res);
           ff.stderr.on('data', d => console.warn(`[tts] ambient ffmpeg: ${d.toString().trim()}`));
-          const cleanup = () => {
+          const streamEntry = { ff, ff_buf, killTimer: null, forceKill: null };
+          const forceKill = () => {
+            if (streamEntry.killTimer) {
+              clearTimeout(streamEntry.killTimer);
+              streamEntry.killTimer = null;
+            }
             try { ff.kill('SIGKILL'); } catch {}
+            _ambientStreams.delete(trimmedText);
             unregisterAmbientResponse(trimmedText);
           };
-          ff.on('error', cleanup);
-          ff.on('exit', cleanup);
-          res.on('close', cleanup);
-          res.on('error', cleanup);
-          registerAmbientResponse(trimmedText, res, cleanup);
-          console.log(`[tts] ambient stream started marker=${trimmedText} file=${meta.file} loop=${meta.loop !== false}`);
+          streamEntry.forceKill = forceKill;
+          _ambientStreams.set(trimmedText, streamEntry);
+          const onResClose = () => startAmbientGrace(streamEntry, trimmedText, res);
+          ff.on('error', forceKill);
+          ff.on('exit', forceKill);
+          res.on('close', onResClose);
+          res.on('error', onResClose);
+          registerAmbientResponse(trimmedText, res, forceKill);
+          console.log(`[tts] ambient stream started (cold) marker=${trimmedText} file=${meta.file} loop=${meta.loop !== false}`);
           return true;
         }
         console.warn(`[tts] ambient marker=${trimmedText} missed cache (TTL expired or never cached)`);

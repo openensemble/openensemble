@@ -53,7 +53,7 @@ import { extractTransactions } from './skills/expenses/execute.mjs';
 import { getRoleAssignments } from './roles.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
-import { playAmbientOnDevice } from './lib/ambient-playback.mjs';
+import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { buildVoiceSystemAddition } from './lib/voice-context.mjs';
 import {
   loadConfig, getAgentsForUser,
@@ -241,9 +241,27 @@ export async function handleChatMessage({
   // Voice-device pre-LLM detectors — yes/no on a pending proposal, timer
   // create/cancel/extend, and the volume / pause / stop control regex.
   // Each returns {handled} on match; we just return.
-  if (await tryVoiceProposalReply({ source, deviceId, rawText, agentId, onEvent })) return;
-  if (await tryVoiceTimerIntent({ source, deviceId, rawText, userId, agentId, onEvent })) return;
-  if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent })) return;
+  //
+  // Per-interceptor trace lines for voice-device turns so silent fall-throughs
+  // are visible — without these, a missed regex (e.g. "Volume 70" not matching
+  // the volume_set pattern) just goes straight to LLM dispatch with no
+  // breadcrumb showing which interceptor passed it on.
+  const _vTrace = source === 'voice-device';
+  if (await tryVoiceProposalReply({ source, deviceId, rawText, agentId, onEvent })) {
+    if (_vTrace) console.log(`[voice-trace] proposal-reply: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
+    return;
+  }
+  if (_vTrace) console.log(`[voice-trace] proposal-reply: miss device=${deviceId}`);
+  if (await tryVoiceTimerIntent({ source, deviceId, rawText, userId, agentId, onEvent })) {
+    if (_vTrace) console.log(`[voice-trace] timer-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
+    return;
+  }
+  if (_vTrace) console.log(`[voice-trace] timer-intent: miss device=${deviceId}`);
+  if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent })) {
+    if (_vTrace) console.log(`[voice-trace] control-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
+    return;
+  }
+  if (_vTrace) console.log(`[voice-trace] control-intent: miss device=${deviceId} text="${(rawText || '').slice(0, 60)}" — falling through to LLM`);
 
   const chatUser = getUser(userId);
   const isChild = chatUser?.role === 'child';
@@ -542,13 +560,16 @@ export async function handleChatMessage({
         try {
           const now = getAmbientForDevice(deviceId);
           if (now?.marker === _ambientAtStart && now.meta) {
-            await playAmbientOnDevice({
-              userId: now.meta.userId,
+            // Reuse the existing marker so the device's new HTTP request
+            // reattaches to the warm ffmpeg in the server's grace window
+            // (config.mjs _ambientStreams). Eliminates the cold-restart
+            // decode errors that minted-a-fresh-marker would produce.
+            await resumeAmbientOnDevice({
               deviceId,
-              file: now.meta.file,
+              marker: now.marker,
               loop: now.meta.loop,
             });
-            console.log(`[chat-dispatch] auto-restored ambient on ${deviceId} after wake (file=${now.meta.file})`);
+            console.log(`[chat-dispatch] auto-restored ambient on ${deviceId} after wake (file=${now.meta.file}, marker reused)`);
           }
         } catch (e) {
           console.warn('[chat-dispatch] ambient auto-restore failed:', e.message);

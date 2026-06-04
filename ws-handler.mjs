@@ -31,6 +31,7 @@ import {
 } from './routes/_helpers.mjs';
 import { getSessionMeta, setSessionDeviceId } from './routes/_helpers/auth-sessions.mjs';
 import { getSlotAssignment, findDeviceByTokenPrefix, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice } from './lib/voice-devices.mjs';
+import { getAmbientForDevice } from './routes/devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
 import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
 
@@ -406,11 +407,35 @@ function onConnection(ws, req) {
       // (its own `probability_cutoff`), so a single 0.96 frame followed by
       // lower frames can pass firmware but still be a brief cross-fire
       // (e.g. TTS playback). The avg metric catches those.
+      //
+      // Ambient-active BYPASS (NOT just relaxation): when the device has an
+      // in-flight ambient stream, the user's own speaker is sustained-bleeding
+      // into the mic. AEC catches most of it but the rolling avg sits in
+      // the 0.80-0.90 range for the entire ambient duration. The original
+      // 0.05 relaxation was way too timid — sustained ambient noise drags
+      // the avg down for the FULL window the gate inspects, not just
+      // briefly. Stop / volume commands during ambient are exactly when
+      // the user needs the device to listen, and missed-stop is the worst
+      // possible UX (the noise blocks the user from stopping the noise).
+      //
+      // Trust the firmware peak gate during ambient. False positives during
+      // an actively-playing ambient stream are bounded — the user can
+      // re-issue the command. False negatives are silent and catastrophic.
       if (slotAssignment
           && typeof slotAssignment.avg_prob_cutoff === 'number'
           && Number.isInteger(msg.wake_avg_prob)) {
+        const ambientActive = ws._deviceId ? !!getAmbientForDevice(ws._deviceId) : false;
         const avg = msg.wake_avg_prob / 255;
-        if (avg < slotAssignment.avg_prob_cutoff) {
+        if (ambientActive) {
+          // Log the pass for telemetry, but DON'T enforce the cutoff.
+          log.info('voice', 'wake passed (ambient bypass)', {
+            userId: ws._userId,
+            deviceId: ws._deviceId,
+            slot: wakeSlot,
+            avgProb: Math.round(avg * 1000) / 1000,
+            avgCutoff: slotAssignment.avg_prob_cutoff,
+          });
+        } else if (avg < slotAssignment.avg_prob_cutoff) {
           log.info('voice', 'wake gated (avg below cutoff)', {
             userId: ws._userId,
             deviceId: ws._deviceId,
@@ -555,11 +580,19 @@ export function sendToDevice(deviceId, msg) {
   if (!_wss || !deviceId) return 0;
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   let delivered = 0;
+  let sendError = null;
   for (const client of _wss.clients) {
     if (client.readyState === client.OPEN && client._deviceId === deviceId) {
-      try { client.send(data); delivered++; } catch {}
+      try { client.send(data); delivered++; }
+      catch (e) { sendError = e.message; }
     }
   }
+  // Trace every voice-device send so silent failures (device offline,
+  // WS write threw, deviceId typo) are visible. Always-on — these are
+  // event-driven control messages, not chatty enough to log-spam.
+  const type = (typeof msg === 'object' && msg && typeof msg.type === 'string') ? msg.type : 'string-msg';
+  const tail = sendError ? ` error=${sendError}` : '';
+  console.log(`[ws-send] device=${deviceId} type=${type} delivered=${delivered} bytes=${data.length}${tail}`);
   return delivered;
 }
 
