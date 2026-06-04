@@ -241,6 +241,33 @@ async function connect() {
     if (msg.type === 'auth_ok') {
       _extId = msg.extId || null;
       setStatus({ connected: true, lastError: null, server: cfg.serverUrl, since: Date.now(), extId: _extId, userId: msg.userId });
+      // Self-reload on source-version mismatch. The OE server hashes the
+      // on-disk extension files (background.js, popup.*, manifest.json)
+      // at startup and sends us the hash. If we've seen a DIFFERENT hash
+      // before, the on-disk source has changed since our SW loaded — call
+      // chrome.runtime.reload() to make Chrome re-read the files. Next
+      // boot of the SW will see the new hash, store it, and continue
+      // without reloading until source changes again.
+      // First connect (no stored version): just record what the server
+      // said and continue. Don't auto-reload on first boot.
+      if (msg.sourceVersion) {
+        try {
+          const { lastSourceVersion } = await chrome.storage.local.get(['lastSourceVersion']);
+          if (lastSourceVersion && lastSourceVersion !== msg.sourceVersion) {
+            console.log(`[OE Bridge] source version changed (${lastSourceVersion} → ${msg.sourceVersion}), reloading extension`);
+            await chrome.storage.local.set({ lastSourceVersion: msg.sourceVersion });
+            // Give the status frame a moment to render in any open popup
+            // before we yank the SW.
+            setTimeout(() => chrome.runtime.reload(), 250);
+            return;
+          }
+          if (!lastSourceVersion) {
+            await chrome.storage.local.set({ lastSourceVersion: msg.sourceVersion });
+          }
+        } catch (e) {
+          console.warn('[OE Bridge] source version compare failed:', e?.message || e);
+        }
+      }
       return;
     }
     if (msg.type === 'error') {

@@ -168,7 +168,7 @@ function initBrowserExtWss() {
 
     // Lazy imports — browser-bus + getSessionMeta are not needed unless an
     // extension actually connects.
-    const { registerBrowser, dropBrowser, handleResult, updateTabs } = await import('./lib/browser-bus.mjs');
+    const { registerBrowser, dropBrowser, handleResult, updateTabs, getExtensionSourceVersion } = await import('./lib/browser-bus.mjs');
 
     ws.on('message', async (raw) => {
       let msg;
@@ -197,7 +197,12 @@ function initBrowserExtWss() {
             version: msg.version,
             tabs: msg.tabs,
           });
-          ws.send(JSON.stringify({ type: 'auth_ok', extId, userId: meta.userId }));
+          ws.send(JSON.stringify({
+            type: 'auth_ok',
+            extId,
+            userId: meta.userId,
+            sourceVersion: getExtensionSourceVersion(),
+          }));
         } catch (e) {
           try { ws.send(JSON.stringify({ type: 'error', message: String(e?.message || e) })); } catch {}
           ws.close(4003, 'register failed');
