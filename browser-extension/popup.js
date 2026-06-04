@@ -31,6 +31,79 @@ function renderStatus(status) {
     el.className = 'status idle';
     el.textContent = 'Waiting for config…';
   }
+  // Show the chat panel only when connected — no point asking Sydney
+  // if the bridge can't reach OE.
+  const panel = $('chatPanel');
+  if (panel) panel.style.display = status.connected ? 'block' : 'none';
+}
+
+// ── Chat with Sydney from the popup ──────────────────────────────────────
+let _chatRequestId = null;
+function appendReply(text, replace = false) {
+  const el = $('chatReply');
+  if (!el) return;
+  if (replace) el.textContent = text;
+  else el.textContent += text;
+  el.scrollTop = el.scrollHeight;
+}
+function setReplyLabel(label) { appendReply(label, true); }
+
+async function sendChat(text) {
+  const t = String(text || '').trim();
+  if (!t) return;
+  setReplyLabel('…');
+  const input = $('chatInput');
+  if (input) input.value = '';
+  _chatRequestId = `pp_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'chat_send', requestId: _chatRequestId, text: t });
+    if (!resp?.ok) appendReply(`\n\n[error: ${resp?.error || 'send failed'}]`, true);
+  } catch (e) {
+    appendReply(`\n\n[error: ${e?.message || String(e)}]`, true);
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.requestId !== _chatRequestId) return;
+  if (msg.type === 'chat_event') {
+    const ev = msg.event || {};
+    if (ev.type === 'token' && typeof ev.text === 'string') {
+      const el = $('chatReply');
+      if (el && el.textContent === '…') el.textContent = '';
+      appendReply(ev.text);
+    } else if (ev.type === 'tool_call') {
+      appendReply(`\n\n[${ev.name}…]\n`);
+    } else if (ev.type === 'tool_result') {
+      // Tool results are usually long — show a one-line preview, the
+      // full text already lands as token events in the next assistant
+      // turn anyway.
+      const preview = (ev.preview || ev.text || '').slice(0, 120);
+      appendReply(`\n  ↳ ${preview}${(ev.text||'').length > 120 ? '…' : ''}\n`);
+    } else if (ev.type === 'error') {
+      appendReply(`\n\n[error: ${ev.message || 'unknown'}]`);
+    }
+  } else if (msg.type === 'chat_done') {
+    // Final newline so the reply doesn't run into the next user turn.
+    appendReply('\n');
+  } else if (msg.type === 'chat_error') {
+    appendReply(`\n\n[server error: ${msg.message || 'unknown'}]`);
+  }
+});
+
+const sendBtn = $('chatSend');
+const clearBtn = $('chatClear');
+const askPageBtn = $('askThisPage');
+const chatInput = $('chatInput');
+if (sendBtn) sendBtn.addEventListener('click', () => sendChat($('chatInput')?.value));
+if (clearBtn) clearBtn.addEventListener('click', () => setReplyLabel(''));
+if (askPageBtn) askPageBtn.addEventListener('click', () => sendChat("Take a screenshot of the tab I'm looking at right now and tell me what you see."));
+if (chatInput) {
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChat(chatInput.value);
+    }
+  });
 }
 
 async function refresh() {

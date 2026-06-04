@@ -509,6 +509,14 @@ async function connect() {
     }
     if (msg.type === 'pong') return;
 
+    // Chat-from-popup wire frames. Relay verbatim to any open popup; the
+    // popup's chat_event/chat_done/chat_error handlers filter by
+    // requestId so frames for a stale request are ignored cleanly.
+    if (msg.type === 'chat_event' || msg.type === 'chat_done' || msg.type === 'chat_error') {
+      try { chrome.runtime.sendMessage(msg); } catch {}
+      return;
+    }
+
     if (msg.type === 'cmd' && msg.cmdId && msg.action) {
       try {
         const data = await dispatch(msg.action, msg.args || {});
@@ -583,6 +591,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       _shouldReconnect = false;
       try { _ws?.close(); } catch {}
       sendResponse({ ok: true });
+      return;
+    }
+    if (msg?.type === 'chat_send') {
+      // Popup wants to ask Sydney something. Forward over the same WS
+      // we use for command results. Server replies stream back as
+      // chat_event/chat_done frames keyed by requestId, which the WS
+      // message handler below relays to the popup via runtime.sendMessage.
+      if (!_ws || _ws.readyState !== 1) {
+        sendResponse({ ok: false, error: 'not connected to OE — open the extension popup and check the status pill.' });
+        return;
+      }
+      try {
+        _ws.send(JSON.stringify({ type: 'chat', requestId: msg.requestId, text: msg.text }));
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
       return;
     }
     if (msg?.type === 'auto_pair') {

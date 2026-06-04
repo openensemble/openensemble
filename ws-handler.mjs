@@ -222,6 +222,32 @@ function initBrowserExtWss() {
         try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch {}
         return;
       }
+      // Chat from the extension popup — runs the user's coordinator
+      // through the normal chat-dispatch path and streams the events back
+      // over this WS so the popup can render Sydney's reply without the
+      // user opening the OE web UI. Lets Shawn ask "what's on this page"
+      // from any browser tab.
+      if (msg.type === 'chat' && typeof msg.text === 'string') {
+        const requestId = String(msg.requestId || Date.now());
+        try {
+          const { handleChatMessage } = await import('./chat-dispatch.mjs');
+          await handleChatMessage({
+            userId: ws._userId,
+            agentId: getUserCoordinatorAgentId(ws._userId),
+            text: msg.text,
+            source: 'browser-ext',
+            onEvent: (ev) => {
+              try {
+                ws.send(JSON.stringify({ type: 'chat_event', requestId, event: ev }));
+              } catch {}
+            },
+          });
+          try { ws.send(JSON.stringify({ type: 'chat_done', requestId })); } catch {}
+        } catch (e) {
+          try { ws.send(JSON.stringify({ type: 'chat_error', requestId, message: e?.message || String(e) })); } catch {}
+        }
+        return;
+      }
       // Unknown frame — log + drop.
       log.warn('browser-ext', 'unknown frame type', { type: msg.type, userId: ws._userId });
     });
