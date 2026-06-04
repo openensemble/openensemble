@@ -129,3 +129,6 @@ scripts/*.failures.jsonl
 REVERT_*.md
 REVERT_*.patch
 MIGRATION_per-user-encryption.md
+
+# Browser extension — kept out of the repo until fully developed (see commit msg)
+/browser-extension/
