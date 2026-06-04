@@ -284,18 +284,19 @@ describe('proposeSkill — cooldown keyed by toolsKey', () => {
 // ── 13-16. Jaccard overlap + telemetry-aware skip ────────────────────────────
 
 describe('maybeProposeSkill — overlap with existing custom skills', () => {
-  it('does NOT skip on trivial single-tool overlap (Jaccard < 0.5)', async () => {
-    // Existing skill uses only `web_search`. New turn fires 4 tools that
-    // happen to include web_search — Jaccard = 1/4 = 0.25, below threshold.
-    // Old code would skip ('some' matched); new code should still stash.
-    installCustomSkill('usr_trivial_overlap', ['web_search']);
+  it('skips even on single-tool overlap (custom-skill tool presence wins)', async () => {
+    // Reverted from the prior Jaccard threshold: any tool from a CUSTOM
+    // user skill in the turn means the user is operating in that skill's
+    // domain. Even one shared tool out of many → skip.
+    const SKILL = 'usr_single_tool_skill';
+    installCustomSkill(SKILL, ['web_search']);
     const res = await maybeProposeSkill({
       userId: USER, agentId: AGENT, agentName: 'Coder',
       userMessage: 'research X then email Sam',
       assistantContent: 'done',
       toolsUsed: baseTools, // web_search + fetch_url + send_email + schedule_task
     });
-    expect(res).toEqual({ stashed: true, agentId: AGENT });
+    expect(res).toEqual({ skipped: 'overlaps_fresh_skill', overlapWith: SKILL });
   });
 
   it('skips with reason=overlaps_active_skill when overlapping skill has ≥3 invocations', async () => {
