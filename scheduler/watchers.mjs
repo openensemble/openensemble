@@ -294,7 +294,11 @@ export const COLLECTION_TICK_SEC = 60;
 const ITEM_MIN_CADENCE_SEC = 60;
 
 function _findCollectionWatcher(userId, { watcherId, skillId, kind }) {
-  const data = _byUser.get(userId);
+  // Use loadUserWatchers so out-of-process callers (CLI scripts, isolated
+  // test harnesses) — and the in-process supervisor — get the same view.
+  // _byUser starts empty in fresh processes; loadUserWatchers hydrates it
+  // from disk on first read.
+  const data = loadUserWatchers(userId);
   if (!data) return null;
   if (watcherId) return data.active.find(w => w.id === watcherId) ?? null;
   // (skillId, kind) is the natural key — there's one collection per pair.
@@ -401,7 +405,7 @@ export function getCollectionItem(userId, ref, itemId) {
  * Used by the generic `list_watch_items` tool.
  */
 export function listAllCollections(userId, filter = {}) {
-  const data = _byUser.get(userId);
+  const data = loadUserWatchers(userId);
   if (!data) return [];
   return data.active
     .filter(w =>
