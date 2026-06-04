@@ -1,10 +1,77 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, unlinkSync } from 'fs';
 import { pathToFileURL, fileURLToPath } from 'url';
 import path from 'path';
+import { randomBytes } from 'crypto';
 import { SKILLS_DIR, USERS_DIR, userSkillsDir } from '../../lib/paths.mjs';
 import { PLUGINS_DIR, registerDrawerManifest, unregisterDrawerManifest } from '../../plugins.mjs';
 
 const BLUEPRINT = path.join(SKILLS_DIR, 'SKILL_BLUEPRINT.md');
+const CAPABILITIES = path.join(SKILLS_DIR, 'skill-builder', 'CAPABILITIES.md');
+
+// ── Skill draft storage ─────────────────────────────────────────────────────
+//
+// A draft is a file-backed work-in-progress skill spec at
+//   users/<uid>/skill-drafts/<draftId>.json
+// Skill-builder mutates it across turns until the user says "build it",
+// at which point skill_draft_build collapses it into a skill_create call
+// and deletes the draft. The shape is intentionally loose — every field
+// is optional except `id` and `name` — so the LLM can grow the draft as
+// the conversation reveals more, without ever needing a schema migration.
+const DRAFT_SCHEMA_VERSION = 1;
+
+function draftsDir(userId) {
+  return path.join(USERS_DIR, userId, 'skill-drafts');
+}
+
+function draftPath(userId, draftId) {
+  return path.join(draftsDir(userId), `${draftId}.json`);
+}
+
+function loadDraft(userId, draftId) {
+  const p = draftPath(userId, draftId);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; }
+}
+
+function saveDraft(draft) {
+  if (!draft?.userId || !draft?.draftId) throw new Error('saveDraft: userId + draftId required');
+  mkdirSync(draftsDir(draft.userId), { recursive: true });
+  writeFileSync(draftPath(draft.userId, draft.draftId), JSON.stringify(draft, null, 2));
+}
+
+function listDrafts(userId) {
+  const dir = draftsDir(userId);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter(f => f.endsWith('.json'))
+    .map(f => loadDraft(userId, f.slice(0, -5)))
+    .filter(Boolean)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+function deleteDraft(userId, draftId) {
+  const p = draftPath(userId, draftId);
+  if (existsSync(p)) { unlinkSync(p); return true; }
+  return false;
+}
+
+// "Has the user got a draft for this skill id?" — used by skill_create
+// to refuse a direct create when a draft is open, forcing the LLM through
+// skill_draft_build instead.
+function findOpenDraftForSkillId(userId, skillId) {
+  return listDrafts(userId).find(d => (d.spec?.id || '').toLowerCase() === skillId.toLowerCase()) || null;
+}
+
+function newDraftId() {
+  return 'draft_' + randomBytes(4).toString('hex');
+}
+
+function shortSkillId(name) {
+  return String(name || 'untitled').trim().toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50) || 'untitled';
+}
 
 // ── Profile helpers ───────────────────────────────────────────────────────────
 
@@ -197,7 +264,7 @@ function handleReadBlueprint() {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, assign_to, skip_lsp, skip_validator, skip_smoke } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -208,6 +275,17 @@ async function handleCreate(args, userId) {
 
   const idErr = validateId(rawId.trim());
   if (idErr) return `Invalid id: ${idErr}`;
+
+  // Draft discipline: if a draft is open for this skill id, refuse direct
+  // skill_create — the LLM must go through skill_draft_build (which sets
+  // from_draft) so the conversation state stays consistent. Without this
+  // an LLM that forgets the draft pattern can silently bypass it.
+  if (!from_draft) {
+    const openDraft = findOpenDraftForSkillId(userId, rawId.trim());
+    if (openDraft) {
+      return `Refusing to create — a draft for skill id "${rawId.trim()}" is open (\`${openDraft.draftId}\`). Either:\n- Call \`skill_draft_build({draftId: "${openDraft.draftId}"})\` to ship the drafted spec.\n- Or \`skill_draft_discard({draftId: "${openDraft.draftId}"})\` if you've decided to start fresh.\n- Or pick a different id for this skill.`;
+    }
+  }
 
   if (!code.includes('executeSkillTool')) {
     return 'code must export executeSkillTool. Did you read the blueprint?';
@@ -763,6 +841,256 @@ async function handleList(userId) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+// ── Draft handlers ──────────────────────────────────────────────────────────
+//
+// Each turn the LLM uses these to grow/shape the draft instead of going
+// straight to skill_create. The user sees a polished, structured draft
+// state across the conversation; the LLM has a single artifact to consult
+// and patch. Building is gated to explicit user intent — calling
+// skill_create when a draft is open returns an error pointing at the
+// draftId to build (or to discard) first.
+
+function renderDraftSummary(draft) {
+  const s = draft.spec;
+  const lines = [];
+  lines.push(`### ${s.name || '(unnamed skill)'} — draft ${draft.draftId}`);
+  if (s.description) lines.push(`*${s.description}*`);
+  lines.push('');
+
+  if (s.tools?.length) {
+    lines.push(`**Tools** (${s.tools.length}):`);
+    for (const t of s.tools) {
+      const status = t.status === 'proposed' ? '◯' : t.status === 'rejected' ? '✗' : '✓';
+      lines.push(`- ${status} \`${t.name}\` — ${t.purpose || '(no purpose set)'}`);
+    }
+    lines.push('');
+  }
+
+  if (s.collection) {
+    lines.push(`**Collection mode** — single watcher with per-item ${s.collection.itemNoun || 'items'}; default cadence ${s.collection.defaultCadenceSec || 3600}s, default delivery ${s.collection.defaultDeliver || 'agent'}.`);
+    lines.push('');
+  } else if (s.watcher) {
+    lines.push(`**Background watcher** — cadence ${s.watcher.cadence || 'hourly'}, delivery ${s.watcher.deliver || 'agent'}.`);
+    lines.push('');
+  }
+
+  if (s.sources?.length) {
+    lines.push(`**Sources**: ${s.sources.map(src => `${src.name}${src.status === 'validated' ? ' ✓' : src.status === 'rejected' ? ' ✗' : ''}`).join(', ')}.`);
+    lines.push('');
+  }
+
+  if (s.credentials?.length) {
+    lines.push(`**Credentials needed**:`);
+    for (const c of s.credentials) lines.push(`- \`${c.id}\` — ${c.label || c.id}${c.note ? ` (${c.note})` : ''}`);
+    lines.push('');
+  }
+
+  if (s.aliasCatalog) {
+    lines.push(`**User-named catalog** — entity kind \`${s.aliasCatalog.entity_kind}\` so the user can refer to ${s.aliasCatalog.noun_plural || 'them'} by name.`);
+    lines.push('');
+  }
+
+  if (s.dataStorage) lines.push(`**Stores data at**: \`${s.dataStorage}\``);
+  if (s.assignTo)   lines.push(`**Will be owned by**: \`${s.assignTo}\``);
+  lines.push('');
+
+  if (s.sampleDialogs?.length) {
+    lines.push(`**Sample dialogs** (${s.sampleDialogs.length}):`);
+    for (const d of s.sampleDialogs.slice(0, 3)) lines.push(`- "${d}"`);
+    lines.push('');
+  }
+
+  const openQs = (s.openQuestions || []).filter(q => !q.answered);
+  if (openQs.length) {
+    lines.push(`**Open questions** (${openQs.length}):`);
+    for (const q of openQs) lines.push(`- ${q.q}${q.suggestedDefault ? ` _(default: ${q.suggestedDefault})_` : ''}`);
+    lines.push('');
+  } else if (s.tools?.length) {
+    lines.push(`*No open questions. Say "build it" to ship.*`);
+  }
+
+  if (s.rejectedCapabilities?.length) {
+    lines.push(`<sub>declined: ${s.rejectedCapabilities.join(', ')}</sub>`);
+  }
+  return lines.join('\n');
+}
+
+async function handleDraftStart(args, userId) {
+  const { name, description, id: hintId } = args || {};
+  if (!name?.trim()) return 'name is required (the human-readable name for the skill).';
+  if (!description?.trim()) return 'description is required (one short sentence describing what the skill does).';
+  const draftId = newDraftId();
+  const skillId = (hintId && hintId.trim()) || shortSkillId(name);
+  const now = Date.now();
+  const draft = {
+    schema: DRAFT_SCHEMA_VERSION,
+    draftId,
+    userId,
+    createdAt: now,
+    updatedAt: now,
+    spec: {
+      id: skillId,
+      name: name.trim(),
+      description: description.trim(),
+      tools: [],
+      openQuestions: [],
+      rejectedCapabilities: [],
+      // Everything below is added lazily by skill_draft_update calls as
+      // the conversation reveals the right shape.
+    },
+    capabilitiesConsulted: false,
+  };
+  saveDraft(draft);
+  // First read includes the capability menu so the LLM can advise from
+  // turn one. Subsequent skill_draft_show calls don't re-include it (the
+  // LLM can re-read CAPABILITIES.md via skill_read_blueprint if needed).
+  try { draft._capabilities = readFileSync(CAPABILITIES, 'utf8'); } catch { /* missing capabilities file is non-fatal */ }
+  return `Draft \`${draftId}\` created for skill \`${skillId}\`.
+
+${renderDraftSummary(draft)}
+
+---
+
+# Capability menu (consult before next reply)
+
+${draft._capabilities || '(CAPABILITIES.md missing — using built-in knowledge)'}
+
+---
+
+Talk to the user. Cross-reference their ask against the menu above. Surface 1-3 matched capabilities as concrete choices. Use \`skill_draft_update\` to grow the draft. Do NOT call \`skill_create\` until the user explicitly says "build it".`;
+}
+
+async function handleDraftShow(args, userId) {
+  const { draftId } = args || {};
+  if (!draftId) {
+    const drafts = listDrafts(userId);
+    if (!drafts.length) return 'No drafts in progress.';
+    return `${drafts.length} draft(s) in progress:\n` + drafts.map(d => `- \`${d.draftId}\` → \`${d.spec.id}\` (${d.spec.name}) — ${(d.spec.tools || []).length} tool(s), updated ${new Date(d.updatedAt).toLocaleString()}`).join('\n');
+  }
+  const draft = loadDraft(userId, draftId);
+  if (!draft) return `No draft with id \`${draftId}\`.`;
+  return renderDraftSummary(draft);
+}
+
+async function handleDraftUpdate(args, userId) {
+  const { draftId, patch } = args || {};
+  if (!draftId) return 'draftId is required.';
+  if (!patch || typeof patch !== 'object') return 'patch is required (object of fields to merge into the draft spec).';
+  const draft = loadDraft(userId, draftId);
+  if (!draft) return `No draft with id \`${draftId}\`.`;
+
+  // Reserved top-level fields the LLM doesn't get to overwrite — they're
+  // framework state, not skill spec. Everything else is opaque to the
+  // framework: the LLM grows the spec however it wants and the build step
+  // collapses it into a skill_create call.
+  const RESERVED = new Set(['draftId', 'userId', 'createdAt', 'updatedAt', 'schema']);
+  for (const k of Object.keys(patch)) {
+    if (RESERVED.has(k)) continue;
+    // Array fields with semantic merge: tools (add/update by name),
+    // openQuestions (add new, mark answered), credentials (add by id),
+    // sources (add by name), rejectedCapabilities (de-dupe). Everything
+    // else is a straight overwrite — the LLM passes a whole replacement
+    // when it wants to change a scalar (description, dataStorage, …).
+    if (k === 'tools' && Array.isArray(patch.tools)) {
+      const existing = new Map((draft.spec.tools || []).map(t => [t.name, t]));
+      for (const t of patch.tools) {
+        if (!t?.name) continue;
+        existing.set(t.name, { ...existing.get(t.name), ...t });
+      }
+      draft.spec.tools = [...existing.values()];
+    } else if (k === 'openQuestions' && Array.isArray(patch.openQuestions)) {
+      const byQ = new Map((draft.spec.openQuestions || []).map(q => [q.q, q]));
+      for (const q of patch.openQuestions) {
+        if (!q?.q) continue;
+        byQ.set(q.q, { ...byQ.get(q.q), ...q });
+      }
+      draft.spec.openQuestions = [...byQ.values()];
+    } else if (k === 'credentials' && Array.isArray(patch.credentials)) {
+      const byId = new Map((draft.spec.credentials || []).map(c => [c.id, c]));
+      for (const c of patch.credentials) {
+        if (!c?.id) continue;
+        byId.set(c.id, { ...byId.get(c.id), ...c });
+      }
+      draft.spec.credentials = [...byId.values()];
+    } else if (k === 'sources' && Array.isArray(patch.sources)) {
+      const byName = new Map((draft.spec.sources || []).map(s => [s.name, s]));
+      for (const s of patch.sources) {
+        if (!s?.name) continue;
+        byName.set(s.name, { ...byName.get(s.name), ...s });
+      }
+      draft.spec.sources = [...byName.values()];
+    } else if (k === 'rejectedCapabilities' && Array.isArray(patch.rejectedCapabilities)) {
+      const set = new Set([...(draft.spec.rejectedCapabilities || []), ...patch.rejectedCapabilities]);
+      draft.spec.rejectedCapabilities = [...set];
+    } else {
+      draft.spec[k] = patch[k];
+    }
+  }
+  draft.updatedAt = Date.now();
+  saveDraft(draft);
+  return `Updated. Current state:\n\n${renderDraftSummary(draft)}`;
+}
+
+async function handleDraftBuild(args, userId) {
+  const { draftId } = args || {};
+  if (!draftId) return 'draftId is required.';
+  const draft = loadDraft(userId, draftId);
+  if (!draft) return `No draft with id \`${draftId}\`.`;
+  const s = draft.spec;
+
+  // Minimum coherence checks. The LLM is supposed to gate "ready to
+  // build?" on these but defense-in-depth is cheap. Bail with a clear
+  // pointer at what to fix; the LLM can do another skill_draft_update
+  // and retry.
+  if (!s.id) return `Draft has no id. Run \`skill_draft_update({draftId:'${draftId}', patch:{id:'<slug>'}})\` first.`;
+  if (!s.name) return `Draft has no name.`;
+  if (!s.description) return `Draft has no description.`;
+  if (!s.tools?.length) return `Draft has zero tools. A skill needs at least one tool the agent can call.`;
+  if (!s.code) return `Draft has no \`code\` field. You need to write the executeSkillTool implementation and skill_draft_update it onto the draft before building. (The capability spec is just the brief; code is the deliverable.)`;
+  if (!s.assignTo) return `Draft has no assignTo. Set it to the agent id that should own this skill ('coordinator' for general helpers, or a specialist agent id).`;
+  if (!s.systemPromptAddition) return `Draft has no systemPromptAddition. Every skill MUST include one — it teaches the owning agent how to operate the skill (kickoff tool, workflow rules, state location). Read the OWNING-AGENT GUIDANCE section of the blueprint.`;
+
+  // Hand off to skill_create with the draft fully materialised. Use the
+  // from_draft marker so handleCreate doesn't refuse on the "draft is
+  // still open for this id" guard below.
+  const createArgs = {
+    id: s.id,
+    name: s.name,
+    description: s.description,
+    icon: s.icon,
+    tools: s.tools.filter(t => t.status !== 'rejected').map(t => t.toolDef).filter(Boolean),
+    code: s.code,
+    drawer: s.drawer,
+    watchers: s.watchers,
+    intent_examples: s.intentExamples,
+    coordinator_scope: s.coordinatorScope,
+    assign_to: s.assignTo,
+    from_draft: draftId,
+  };
+  const result = await handleCreate(createArgs, userId);
+
+  // Only delete the draft on a clean success — handleCreate returns a
+  // sentence-style message; "successfully" / "created" in the response
+  // signals the write landed. On failure the draft persists so the LLM
+  // can patch and retry without re-collecting the user's decisions.
+  if (typeof result === 'string' && /created|added|registered/i.test(result) && !/error|failed|rejected/i.test(result)) {
+    deleteDraft(userId, draftId);
+    return `${result}\n\n_Draft \`${draftId}\` finalised and removed._`;
+  }
+  return `Build attempt returned a problem — draft \`${draftId}\` kept so you can patch and retry:\n\n${result}`;
+}
+
+async function handleDraftDiscard(args, userId) {
+  const { draftId } = args || {};
+  if (!draftId) return 'draftId is required.';
+  const ok = deleteDraft(userId, draftId);
+  return ok ? `Discarded draft \`${draftId}\`.` : `No draft with id \`${draftId}\`.`;
+}
+
+async function handleDraftList(args, userId) {
+  return handleDraftShow({}, userId);
+}
+
 export async function executeSkillTool(name, args, userId, agentId) {
   // Skill code is import()'ed by the validator at create/update time, which
   // runs any top-level code in the OE server process with full FS / secret /
@@ -783,6 +1111,12 @@ export async function executeSkillTool(name, args, userId, agentId) {
     if (name === 'skill_update_tool_def')   return await handleUpdateToolDef(args, userId);
     if (name === 'skill_delete')            return await handleDelete(args, userId);
     if (name === 'skill_list')              return await handleList(userId);
+    if (name === 'skill_draft_start')       return await handleDraftStart(args, userId);
+    if (name === 'skill_draft_show')        return await handleDraftShow(args, userId);
+    if (name === 'skill_draft_update')      return await handleDraftUpdate(args, userId);
+    if (name === 'skill_draft_build')       return await handleDraftBuild(args, userId);
+    if (name === 'skill_draft_discard')     return await handleDraftDiscard(args, userId);
+    if (name === 'skill_draft_list')        return await handleDraftList(args, userId);
     return null;
   } catch (e) {
     console.error(`[skill-builder] ${name}:`, e.message);
