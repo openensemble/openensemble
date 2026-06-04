@@ -9,10 +9,31 @@
  * this file just adapts the bus surface to OE's tool-call shape.
  */
 
-import { writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import { listBrowsers, sendCommand } from '../../lib/browser-bus.mjs';
-import { getUserFilesDir } from '../../lib/paths.mjs';
+import { getUserFilesDir, userSiteNotesDir, userSiteNotesPath } from '../../lib/paths.mjs';
+
+// Pull the registrable domain out of a URL — strips scheme, www., port,
+// path. Used by browser_screenshot / browser_read_page to find site
+// notes for the current page automatically.
+function _domainOf(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname.replace(/^www\./, '').toLowerCase();
+  } catch { return null; }
+}
+
+// Read the notes for a domain, returning the markdown body or null when
+// no notes exist yet. Safe to call from auto-inject paths — never throws.
+function _readNotes(userId, domain) {
+  if (!domain) return null;
+  try {
+    const p = userSiteNotesPath(userId, domain);
+    if (!existsSync(p)) return null;
+    return readFileSync(p, 'utf8');
+  } catch { return null; }
+}
 
 function _humanList(browsers) {
   if (!browsers.length) {
@@ -97,18 +118,87 @@ export default async function execute(name, args, userId, agentId) {
       const fpath = path.join(outDir, fname);
       writeFileSync(fpath, Buffer.from(png, 'base64'));
       const sizeKb = Math.round(png.length * 0.75 / 1024);
-      // Return an OBJECT with `text` (what the LLM reads) AND `_images`
-      // (raw pixels the provider injects as a synthesised user message
-      // before the next turn). The vision loop works because the model
-      // sees both the description in the tool_result AND the actual
-      // screenshot via the follow-up message.
+      // Auto-inject site notes for the current domain. Every screenshot
+      // is also an opportunity to remind Sydney what she's learned
+      // about this site. If there are no notes yet, the result just
+      // omits that section — no scary prompts to author them.
+      const domain = _domainOf(data.tabUrl);
+      const notes = _readNotes(userId, domain);
+      const notesBlock = notes
+        ? `## What you know about ${domain}\nThese are your own notes from prior visits / teaching sessions. Use them as priors — but trust the screenshot when reality differs, and update the notes via browser_site_notes_write after you learn something new.\n\n${notes}\n\n---\n\n`
+        : domain
+          ? `*No site notes yet for ${domain}. After you finish this task, consider writing some via browser_site_notes_write — your future self (and other turns) will thank you.*\n\n`
+          : '';
       return {
-        text: `Screenshot saved (${sizeKb} KB, ${data.width}×${data.height}) at:\n  ${fpath}\n\nTab: ${data.tabTitle || '(no title)'} — ${data.tabUrl || ''}\n\nThe viewport coordinate space is 0,0 (top-left) to ${data.width},${data.height} (bottom-right). Use browser_click_xy with coordinates in that space. The screenshot itself is attached as a follow-up image — look at it to decide which (x,y) to click next.`,
+        text: `${notesBlock}Screenshot saved (${sizeKb} KB, ${data.width}×${data.height}) at:\n  ${fpath}\n\nTab: ${data.tabTitle || '(no title)'} — ${data.tabUrl || ''}\n\nThe viewport coordinate space is 0,0 (top-left) to ${data.width},${data.height} (bottom-right). Use browser_click_xy with coordinates in that space. The screenshot itself is attached as a follow-up image — look at it to decide which (x,y) to click next.`,
         _images: [{ mediaType: 'image/png', base64: png }],
       };
     } catch (e) {
       return `Failed to screenshot: ${e?.message || String(e)}`;
     }
+  }
+
+  // Site-notes tools — Sydney's institutional memory of how each
+  // website works. Markdown free-form, NOT step-by-step recipes.
+  if (name === 'browser_site_notes_read') {
+    let domain = args?.domain ? String(args.domain).trim() : null;
+    // If no domain passed, default to the active tab. listBrowsers gives
+    // us the currently-tracked tab list — find the one marked active.
+    if (!domain) {
+      const list = listBrowsers(userId);
+      const activeTab = list?.[0]?.tabs?.find(t => t.active);
+      domain = _domainOf(activeTab?.url);
+    }
+    if (!domain) return 'No domain specified, and no active tab to infer from. Pass `domain: "<example.com>"`.';
+    const notes = _readNotes(userId, domain);
+    if (!notes) return `No site notes for ${domain} yet. Use browser_site_notes_write to start building them.`;
+    return `# Site notes for ${domain}\n\n${notes}`;
+  }
+
+  if (name === 'browser_site_notes_write') {
+    let domain = args?.domain ? String(args.domain).trim() : null;
+    const content = typeof args?.content === 'string' ? args.content : '';
+    const mode = args?.mode === 'append' ? 'append' : 'replace';
+    if (!content.trim()) return 'content is required (free-form markdown).';
+    if (!domain) {
+      const list = listBrowsers(userId);
+      const activeTab = list?.[0]?.tabs?.find(t => t.active);
+      domain = _domainOf(activeTab?.url);
+    }
+    if (!domain) return 'No domain specified, and no active tab to infer from.';
+    try {
+      const p = userSiteNotesPath(userId, domain);
+      mkdirSync(userSiteNotesDir(userId), { recursive: true });
+      if (mode === 'append' && existsSync(p)) {
+        const existing = readFileSync(p, 'utf8').replace(/\n+$/, '');
+        const sep = existing ? '\n\n' : '';
+        writeFileSync(p, `${existing}${sep}${content.trim()}\n`);
+      } else {
+        writeFileSync(p, content.trim() + '\n');
+      }
+      const size = statSync(p).size;
+      return `${mode === 'append' ? 'Appended to' : 'Wrote'} site notes for ${domain} (${size} bytes total).`;
+    } catch (e) {
+      return `Failed to write site notes: ${e?.message || String(e)}`;
+    }
+  }
+
+  if (name === 'browser_site_notes_list') {
+    const dir = userSiteNotesDir(userId);
+    if (!existsSync(dir)) return 'No site notes yet.';
+    const files = readdirSync(dir).filter(f => f.endsWith('.md'));
+    if (!files.length) return 'No site notes yet.';
+    const lines = ['Sites you have notes for:'];
+    for (const f of files) {
+      const domain = f.replace(/\.md$/, '');
+      const full = path.join(dir, f);
+      try {
+        const stat = statSync(full);
+        const txt = readFileSync(full, 'utf8').slice(0, 200).replace(/\s+/g, ' ').trim();
+        lines.push(`- **${domain}** — ${stat.size} bytes, updated ${new Date(stat.mtimeMs).toLocaleDateString()}: "${txt.slice(0, 120)}${txt.length > 120 ? '…' : ''}"`);
+      } catch { /* unreadable file — skip */ }
+    }
+    return lines.join('\n');
   }
 
   if (name === 'browser_click_xy') {
@@ -178,13 +268,25 @@ export default async function execute(name, args, userId, agentId) {
       const trunc = (data?.text || '').length > text.length ? `\n…[truncated, ${(data?.text || '').length - text.length} more chars]` : '';
       const links = Array.isArray(data?.links) ? data.links.slice(0, 30) : [];
       const jsonLd = Array.isArray(data?.jsonLd) ? data.jsonLd.slice(0, 5) : [];
-      const out = [
+      const domain = _domainOf(data?.url);
+      const notes = _readNotes(userId, domain);
+      const out = [];
+      if (notes) {
+        out.push(`## What you know about ${domain}`,
+          'These are your own notes from prior visits / teaching sessions. Use them as priors — but trust the page when reality differs, and update via browser_site_notes_write if you learn something new.',
+          '',
+          notes,
+          '',
+          '---',
+          '');
+      }
+      out.push(
         `**${data?.title || '(no title)'}**`,
         `URL: ${data?.url}`,
         '',
         '## Text',
         text + trunc,
-      ];
+      );
       if (links.length) {
         out.push('', '## Links');
         for (const l of links) out.push(`- [${(l.text || '').slice(0, 80)}](${l.href})`);
