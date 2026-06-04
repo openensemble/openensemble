@@ -32,18 +32,18 @@ function isDelegatedCall(agentId, userId) {
 /**
  * Is the caller allowed to act on this watcher?
  *
- * Watchers are scoped to their creating agent. Coordinators can act on any
- * watcher — UNLESS the coordinator is itself being called inside a delegation
- * chain AND the watcher belongs to a different agent than the original
- * delegator, in which case the op must stage for user approval. Specialists
- * can ONLY act on watchers they themselves registered.
+ * **Strict ownership**: the agent that REGISTERED a watcher is the sole
+ * authority over it. The coordinator no longer has a universal bypass —
+ * even direct-from-user "Sydney, cancel that watcher Trixie set up" goes
+ * through ask_agent to Trixie. The only coordinator-side override is the
+ * orphan case: when the creating agent has been deleted AND the watcher's
+ * skill is currently unassigned, the coordinator can clean it up because
+ * there's nobody left to delegate to.
  *
- * Returns { ok: true } to execute, { ok: false, reason } for hard deny, or
- * { ok: false, needsApproval: true, ... } to stage for "APPROVE WATCHER OP".
+ * Returns { ok: true } to execute, { ok: false, reason } to deny.
  *
- * Legacy watchers without agentId (created before scoping landed) are treated
- * as permissive (any caller in the same user scope can touch them) so we
- * don't lock users out of cleaning up their own ancient watchers.
+ * Legacy watchers without agentId (created before scoping landed) are still
+ * permissive so we don't lock users out of cleaning up ancient watchers.
  *
  * @param {any} watcher           the watcher record
  * @param {string} callerAgentId  the agent currently making the tool call
@@ -52,46 +52,55 @@ function isDelegatedCall(agentId, userId) {
  */
 async function canActOnWatcher(watcher, callerAgentId, userId) {
   if (!watcher) return { ok: false, reason: 'watcher not found' };
-  let isCoordinator = false;
-  try {
-    const { getUserCoordinatorAgentId } = await import('../../routes/_helpers.mjs');
-    const coordinatorId = getUserCoordinatorAgentId(userId);
-    const callerUnscoped = unscopeAgentId(callerAgentId, userId);
-    isCoordinator = callerUnscoped === 'coordinator' || callerUnscoped === coordinatorId;
-  } catch { /* coordinator lookup failure shouldn't deny */ }
 
   // Legacy watcher with no recorded owner — be permissive.
   if (!watcher.agentId) return { ok: true };
 
   // Same-agent ops are always allowed (owner can manage own).
   if (watcher.agentId === callerAgentId) return { ok: true };
-  if (unscopeAgentId(watcher.agentId, userId) === unscopeAgentId(callerAgentId, userId)) return { ok: true };
+  const ownerUnscoped = unscopeAgentId(watcher.agentId, userId);
+  const callerUnscoped = unscopeAgentId(callerAgentId, userId);
+  if (ownerUnscoped === callerUnscoped) return { ok: true };
 
-  // Coordinator path. The bypass is split into two cases:
-  //   - Coordinator called by user directly → trusted, execute immediately.
-  //   - Coordinator called inside a delegation chain (specialist asked them
-  //     to do this) → stage for user approval. Prevents the "runaway
-  //     specialist asks coordinator to cancel everything" escalation that
-  //     trivially bypassed the per-agent owner check.
-  if (isCoordinator) {
-    if (isDelegatedCall(callerAgentId, userId)) {
-      return {
-        ok: false,
-        needsApproval: true,
-        watcherLabel: watcher.label || watcher.id,
-        watcherOwner: unscopeAgentId(watcher.agentId, userId) || 'unknown',
-      };
-    }
+  // Non-owner. Two-condition orphan override for the coordinator:
+  //   1. The creating agent no longer exists, AND
+  //   2. The watcher's owning skill is currently unassigned.
+  // If either fails, the caller must defer to the agent who owns the
+  // watcher (or who now holds the skill). Sole-authority is the rule.
+  let watcherAgentExists = true;
+  try {
+    const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+    const all = getAgentsForUser(userId);
+    watcherAgentExists = all.some(a => a.id === ownerUnscoped || a.id === watcher.agentId);
+  } catch { /* lookup failure shouldn't accidentally unlock — keep exists=true */ }
+
+  let skillIsAssigned = false;
+  if (watcher.skillId) {
+    try {
+      const { getRoleAssignments } = await import('../../roles.mjs');
+      const assignments = getRoleAssignments(userId);
+      skillIsAssigned = !!assignments[watcher.skillId];
+    } catch { /* same — keep assigned=true if unknown */ skillIsAssigned = true; }
+  }
+
+  let isCoordinator = false;
+  try {
+    const { getUserCoordinatorAgentId } = await import('../../routes/_helpers.mjs');
+    const coordinatorId = getUserCoordinatorAgentId(userId);
+    isCoordinator = callerUnscoped === 'coordinator' || callerUnscoped === coordinatorId;
+  } catch { /* coordinator lookup failure → not coord */ }
+
+  if (isCoordinator && !watcherAgentExists && !skillIsAssigned) {
     return { ok: true };
   }
 
-  // Specialist asking to touch another agent's watcher → hard deny with
-  // escalation hint. The coordinator-via-ask_agent path is the documented
-  // way to do this, but it'll stage rather than auto-execute (see above).
-  return {
-    ok: false,
-    reason: `watcher belongs to a different agent (${unscopeAgentId(watcher.agentId, userId)}). Only that agent or the coordinator can modify it. Escalate to the coordinator via ask_agent if you need this changed — note that the coordinator will ask the user for explicit approval before touching a cross-agent watcher.`,
-  };
+  // Deny — point the caller at whoever can act.
+  const reason = watcherAgentExists
+    ? `Watcher was created by ${ownerUnscoped || 'another agent'}, who is the sole authority over it. Use ask_agent to delegate this change to ${ownerUnscoped || 'them'} — even the coordinator can't mutate a watcher owned by another live agent.`
+    : (skillIsAssigned
+        ? `Watcher's creating agent (${ownerUnscoped || 'unknown'}) was deleted, but the ${watcher.skillId} skill is now held by another agent. Ask the current skill holder to clean this up.`
+        : `Watcher's creating agent (${ownerUnscoped || 'unknown'}) was deleted and the ${watcher.skillId || 'underlying'} skill is unassigned. Only the coordinator can perform the cleanup — escalate via ask_agent to the coordinator.`);
+  return { ok: false, reason };
 }
 
 // ── Pending cross-agent watcher op (staged for user approval) ──────────────
