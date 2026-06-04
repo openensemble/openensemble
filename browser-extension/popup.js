@@ -1,3 +1,6 @@
+const POPUP_VERSION = '0.1.0-r2';
+console.log(`[OE Bridge popup] script loaded version=${POPUP_VERSION}`);
+
 const $ = (id) => document.getElementById(id);
 
 function render(status, config) {

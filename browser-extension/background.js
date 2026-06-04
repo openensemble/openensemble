@@ -233,15 +233,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // Kick off on service worker startup. Chrome MV3 may park the worker; on
-// wake, the onAlarm or onStartup hooks below will re-fire this. We also
-// keep an idle alarm so the worker doesn't fully evict.
+// wake, the onAlarm or onStartup hooks below will re-fire this.
 chrome.runtime.onStartup.addListener(() => { _shouldReconnect = true; connect(); });
 chrome.runtime.onInstalled.addListener(() => { _shouldReconnect = true; connect(); });
-chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => {
-  // No-op — the act of receiving an alarm event keeps the SW warm.
-  if (_ws && _ws.readyState === 1) send({ type: 'ping' });
-  else if (_shouldReconnect && (!_ws || _ws.readyState >= 2)) connect();
-});
+
+// Keepalive. Guarded against chrome.alarms being undefined — happens when
+// the extension was first registered before the `alarms` permission was
+// granted (manifest updates don't always re-flush permissions until a
+// full remove + reinstall). The defensive branch falls back to setInterval
+// so the SW at least loads + the popup can talk to it; alarms is the
+// preferred path because it survives SW eviction.
+if (typeof chrome?.alarms?.create === 'function') {
+  chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
+  chrome.alarms.onAlarm.addListener(() => {
+    if (_ws && _ws.readyState === 1) send({ type: 'ping' });
+    else if (_shouldReconnect && (!_ws || _ws.readyState >= 2)) connect();
+  });
+} else {
+  console.warn('[OE Bridge] chrome.alarms unavailable — using setInterval fallback. Remove + reinstall the extension at chrome://extensions to pick up the alarms permission for the proper keepalive.');
+  setInterval(() => {
+    if (_ws && _ws.readyState === 1) send({ type: 'ping' });
+    else if (_shouldReconnect && (!_ws || _ws.readyState >= 2)) connect();
+  }, 30_000);
+}
 
 connect();
