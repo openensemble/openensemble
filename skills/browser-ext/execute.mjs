@@ -164,6 +164,57 @@ export default async function execute(name, args, userId, agentId) {
     }
   }
 
+  if (name === 'browser_watch_mode') {
+    const on = !!args?.on;
+    try {
+      const data = await sendCommand(userId, 'set_watch_mode', { on }, { extId: args?.extId, timeoutMs: 5000 });
+      return on
+        ? `Watch mode ON. Every click / input / submit you make in any tab is now visible to me — the orange banner across the top of each page confirms it. When you're done teaching, ask me to turn watch mode OFF and the buffer clears.`
+        : `Watch mode OFF. Observation buffer cleared.`;
+    } catch (e) {
+      return `Failed to set watch mode: ${e?.message || String(e)}`;
+    }
+  }
+
+  if (name === 'browser_observe') {
+    const tabId = args?.tabId != null ? Number(args.tabId) : null;
+    const since_ms = args?.since_ms != null ? Number(args.since_ms) : null;
+    try {
+      const data = await sendCommand(
+        userId,
+        'get_observations',
+        { ...(Number.isFinite(tabId) ? { tabId } : {}), ...(Number.isFinite(since_ms) ? { since_ms } : {}) },
+        { extId: args?.extId, timeoutMs: 5000 },
+      );
+      const events = Array.isArray(data?.events) ? data.events : [];
+      if (!data?.watchMode) {
+        return `Watch mode is OFF — no observations are being captured. Call browser_watch_mode({on:true}) first to start watching the user demonstrate.`;
+      }
+      if (!events.length) {
+        return `Watch mode is ON but no events captured yet on tab ${data?.tabId}. Ask the user to do something on the page and I'll see it.`;
+      }
+      const lines = [`${events.length} observation(s) on tab ${data.tabId} (most recent last):`, ''];
+      for (const e of events) {
+        const ago = Math.max(0, Math.round((Date.now() - e.recvTs) / 1000));
+        const el = e.element || {};
+        const elDesc = `<${el.tag || '?'}${el.id ? '#'+el.id : ''}${el.class ? '.'+el.class : ''}>${el.text ? ` "${el.text}"` : ''}${el.placeholder ? ` placeholder="${el.placeholder}"` : ''}${el.ariaLabel ? ` aria-label="${el.ariaLabel}"` : ''}`;
+        if (e.kind === 'click') {
+          lines.push(`- ${ago}s ago: **clicked** ${elDesc} at (${e.x}, ${e.y})`);
+        } else if (e.kind === 'input') {
+          lines.push(`- ${ago}s ago: **typed** into ${elDesc} → ${e.value == null ? '[sensitive — value redacted]' : `"${e.value}"`}`);
+        } else if (e.kind === 'change') {
+          lines.push(`- ${ago}s ago: **changed** ${elDesc} → ${e.checked != null ? `checked=${e.checked}` : `value="${e.value || ''}"`}`);
+        } else if (e.kind === 'submit') {
+          lines.push(`- ${ago}s ago: **submitted** ${elDesc}`);
+        }
+        if (el.selector) lines.push(`    selector: ${el.selector}`);
+      }
+      return lines.join('\n');
+    } catch (e) {
+      return `Failed to read observations: ${e?.message || String(e)}`;
+    }
+  }
+
   // Site-notes tools — Sydney's institutional memory of how each
   // website works. Markdown free-form, NOT step-by-step recipes.
   if (name === 'browser_site_notes_read') {

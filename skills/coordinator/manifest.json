@@ -56,6 +56,8 @@
     "browser_site_notes_read",
     "browser_site_notes_write",
     "browser_site_notes_list",
+    "browser_watch_mode",
+    "browser_observe",
     "create_routine",
     "list_routines",
     "delete_routine",
