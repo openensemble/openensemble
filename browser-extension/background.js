@@ -229,42 +229,61 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'auto_pair') {
-      // Fetch the setup token from a candidate OE server. The SW request
-      // includes cookies for the target origin (we have <all_urls> host
-      // permission), so if the user is already logged into OE on this
-      // machine, the cookie rides and we get the token straight back.
-      // No copy-paste, no JSON URL hunting.
-      const url = (msg.serverUrl && String(msg.serverUrl).trim()) || 'http://localhost:3737';
+      // Try candidate OE URLs in order. Each fetch carries the user's
+      // existing cookie for that origin (host_permissions: <all_urls>),
+      // so we just need to find an origin where they're logged in and
+      // it serves OE's setup-token endpoint.
+      //
+      // Order of preference:
+      //   1. Caller-supplied URL (if popup passed one explicitly).
+      //   2. Active tab's origin (covers "user is looking at OE in
+      //      another tab right now" — handles LAN OE for free).
+      //   3. Known previous serverUrl (if they've configured before).
+      //   4. http://localhost:3737 (the same-machine default).
+      const candidates = [];
+      const pushUnique = (u) => {
+        if (!u) return;
+        const norm = String(u).trim().replace(/\/+$/, '');
+        if (!/^https?:\/\//i.test(norm)) return;
+        if (!candidates.includes(norm)) candidates.push(norm);
+      };
+      pushUnique(msg.serverUrl);
       try {
-        const r = await fetch(url.replace(/\/+$/, '') + '/api/browser/setup-token', {
-          credentials: 'include',
-          // Cache-Control: no-store keeps Chrome from serving a stale 401
-          // when the user just logged in.
-          cache: 'no-store',
-        });
-        if (r.status === 401) {
-          sendResponse({ ok: false, error: `Not logged into OE at ${url}. Open ${url} in this browser, sign in, then try again.` });
-          return;
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (activeTab?.url) {
+          const u = new URL(activeTab.url);
+          if (u.protocol === 'http:' || u.protocol === 'https:') pushUnique(`${u.protocol}//${u.host}`);
         }
-        if (!r.ok) {
-          sendResponse({ ok: false, error: `OE returned HTTP ${r.status} from ${url}/api/browser/setup-token. Check the server URL.` });
+      } catch { /* no active tab access — skip */ }
+      pushUnique((await getConfig()).serverUrl);
+      pushUnique('http://localhost:3737');
+
+      const tried = [];
+      for (const url of candidates) {
+        tried.push(url);
+        try {
+          const r = await fetch(url + '/api/browser/setup-token', {
+            credentials: 'include',
+            cache: 'no-store',
+          });
+          if (r.status === 401) continue;       // origin is OE but not logged in — try next
+          if (!r.ok) continue;                   // not OE (or different error) — try next
+          const j = await r.json().catch(() => null);
+          if (!j?.token) continue;
+          const config = { serverUrl: url, token: j.token, name: (await getConfig()).name || 'OE Bridge' };
+          await chrome.storage.local.set(config);
+          try { _ws?.close(); } catch {}
+          _backoffIdx = 0;
+          _shouldReconnect = true;
+          setTimeout(connect, 100);
+          sendResponse({ ok: true, config, userId: j.userId, source: url });
           return;
-        }
-        const j = await r.json();
-        if (!j?.token) {
-          sendResponse({ ok: false, error: 'OE response had no token field.' });
-          return;
-        }
-        const config = { serverUrl: url, token: j.token, name: (await getConfig()).name || 'OE Bridge' };
-        await chrome.storage.local.set(config);
-        try { _ws?.close(); } catch {}
-        _backoffIdx = 0;
-        _shouldReconnect = true;
-        setTimeout(connect, 100);
-        sendResponse({ ok: true, config, userId: j.userId });
-      } catch (e) {
-        sendResponse({ ok: false, error: `Couldn't reach ${url}: ${e?.message || String(e)}. If OE is on another machine, paste its full http://<ip>:3737 URL and use Save & connect.` });
+        } catch { /* fetch failed (connection refused, DNS, etc.) — try next */ }
       }
+      sendResponse({
+        ok: false,
+        error: `Auto-detect couldn't find OE. Tried: ${tried.join(', ')}. If OE is on a different machine, open it in this browser first (so the extension can detect it from your active tab), or paste its URL + token manually below.`,
+      });
       return;
     }
   })();

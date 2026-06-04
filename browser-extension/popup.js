@@ -43,14 +43,17 @@ async function refresh() {
 async function autoPair() {
   const el = $('status');
   el.className = 'status idle';
-  el.textContent = 'Detecting OE on http://localhost:3737 …';
+  el.textContent = 'Detecting OE (active tab, localhost) …';
   try {
-    const resp = await chrome.runtime.sendMessage({ type: 'auto_pair', serverUrl: 'http://localhost:3737' });
+    // Don't pass an explicit serverUrl — let background pick from its
+    // candidate list (active tab origin, prior config, localhost). The
+    // active-tab fallback is how this works for LAN OE without manual
+    // entry: open OE in any tab, click Detect & connect, done.
+    const resp = await chrome.runtime.sendMessage({ type: 'auto_pair' });
     if (!resp || resp.ok !== true) {
       showError(resp?.error || 'Auto-pair failed. Try the manual setup below.');
       return;
     }
-    // Force a re-populate from the freshly-saved config.
     _fieldsPopulated = false;
     if (resp.config) populateFields(resp.config);
     setTimeout(refresh, 600);
