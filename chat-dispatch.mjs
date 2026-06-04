@@ -32,6 +32,7 @@ import {
   tryVoiceTimerIntent,
   tryVoiceControlIntent,
   tryApprovalIntercept,
+  wasRecentStopIntent,
 } from './chat-dispatch/voice-preprocess.mjs';
 import {
   tryHaFastpath,
@@ -558,6 +559,16 @@ export async function handleChatMessage({
     if (_ambientAtStart && deviceId) {
       setTimeout(async () => {
         try {
+          // If the user said "stop" in the last 15s — even on a different
+          // (later) turn — don't resurrect ambient. Without this guard, a
+          // burst of TV-driven wakes can queue several restore timers; the
+          // stop that finally lands silences ambient, then the queued
+          // timers fire and bring it back. Pair to the markStopIntent call
+          // in voice-preprocess executeVoiceIntent('stop').
+          if (wasRecentStopIntent(deviceId)) {
+            console.log(`[chat-dispatch] ambient auto-restore SUPPRESSED on ${deviceId} (recent stop intent)`);
+            return;
+          }
           const now = getAmbientForDevice(deviceId);
           if (now?.marker === _ambientAtStart && now.meta) {
             // Reuse the existing marker so the device's new HTTP request

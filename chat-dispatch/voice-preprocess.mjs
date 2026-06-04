@@ -35,6 +35,28 @@ import { sendToDevice } from '../ws-handler.mjs';
 import { updateDevice } from '../lib/voice-devices.mjs';
 import { broadcastAlarmStop, hasActiveAlarms } from '../lib/alarms.mjs';
 import { stopAmbientOnDevice } from '../lib/ambient-playback.mjs';
+import { getAmbientForDevice } from '../routes/devices.mjs';
+
+// Per-device "the user just said stop" marker. Used by chat-dispatch's
+// ambient auto-restore so that 3-second restore setTimeouts queued by
+// prior LLM turns don't resurrect ambient seconds after the user actually
+// silenced it. 15s window covers the worst case where 4-5 TV-driven wakes
+// stacked their finally-block timers before stop landed.
+const _recentStopIntent = new Map(); // deviceId → ts (ms)
+const STOP_INTENT_TTL_MS = 15_000;
+function markStopIntent(deviceId) {
+  if (deviceId) _recentStopIntent.set(deviceId, Date.now());
+}
+export function wasRecentStopIntent(deviceId, withinMs = STOP_INTENT_TTL_MS) {
+  if (!deviceId) return false;
+  const ts = _recentStopIntent.get(deviceId);
+  if (!ts) return false;
+  if (Date.now() - ts > withinMs) {
+    _recentStopIntent.delete(deviceId);
+    return false;
+  }
+  return true;
+}
 import {
   getPendingDelete, clearPendingDelete, executePendingDelete,
 } from '../skills/expenses/execute.mjs';
@@ -62,10 +84,23 @@ import {
  * become a real problem, layer a tiny LLM classifier on top, don't
  * inflate the regex set into something unreadable.
  */
-function classifyVoiceIntent(text) {
+function classifyVoiceIntent(text, { ambientActive = false } = {}) {
   if (typeof text !== 'string') return null;
   const t = text.toLowerCase().trim().replace(/[.,!?]+$/, '');
   if (!t) return null;
+
+  // Loose stop during ambient: STT often picks up the user's "stop" surrounded
+  // by TV / room noise, so the strict ^-anchored regex below misses (e.g.
+  // "you can travel with the ... stop"). When ambient is actively playing on
+  // this device, "stop" anywhere in the transcript almost certainly means
+  // "stop the music" — the cost of a false positive ("don't stop") is bounded
+  // (user just says "play" again) and far smaller than the cost of a missed
+  // stop (the noise blocks the user from stopping the noise). Guarded against
+  // explicit negation ("don't stop", "do not stop", "didn't stop").
+  if (ambientActive && /\b(stop|shut\s+up|enough)\b/.test(t)
+      && !/\b(do\s*n[o']?t|did\s*n[o']?t|never)\s+(stop|shut)/.test(t)) {
+    return { type: 'stop' };
+  }
 
   // Absolute "volume N%" / "set volume to N" — match before the bare
   // up/down regex so "volume 50" doesn't get swallowed as "volume … up".
@@ -157,6 +192,12 @@ function executeVoiceIntent(intent, deviceId, userId) {
       sendToDevice(deviceId, { type: 'resume_playback' });
       return { replaces: true };
     case 'stop':
+      // Mark stop-intent FIRST so any auto-restore setTimeout that fires in
+      // the next 15s (queued by prior LLM turns when TV interference made
+      // their stop attempt look like normal chat) sees the recent stop and
+      // skips. Without this, a stop after several TV-driven wakes would be
+      // immediately undone by 3-second-delayed resumes already in flight.
+      if (deviceId) markStopIntent(deviceId);
       // Local audio was already stopped by the barge-in handler in
       // firmware when the wake fired. Also broadcast alarm_stop to every
       // device holding an active alarm for this user — devices halt their
@@ -309,7 +350,8 @@ export async function tryVoiceTimerIntent({ source, deviceId, rawText, userId, a
  */
 export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent }) {
   if (!(source === 'voice-device' && typeof rawText === 'string')) return null;
-  const intent = classifyVoiceIntent(rawText);
+  const ambientActive = !!(deviceId && getAmbientForDevice(deviceId));
+  const intent = classifyVoiceIntent(rawText, { ambientActive });
   if (!intent) return null;
   const { replaces } = executeVoiceIntent(intent, deviceId, userId);
   console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);
