@@ -10,6 +10,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
+import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 
 // Convert Ollama/OpenAI tool format → Anthropic format (with description compression)
@@ -179,8 +180,8 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
           yield { type: 'tool_call', name: block.name, args: toolArgs };
         }
         const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
-          const { text, _notify, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
-          return { block, toolArgs, result: text, _notify, events };
+          const { text, _notify, _images, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
+          return { block, toolArgs, result: text, _notify, _images, events };
         }));
         for (const { block, result, _notify, events } of results) {
           for (const ev of events) yield ev;
@@ -189,6 +190,16 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         }
         working.push({ role: 'assistant', content: results.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })) });
         working.push({ role: 'user',      content: results.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: applyRedactions(r.result) })) });
+        // After the tool_result message, append any vision attachments
+        // (browser_screenshot etc.) as a synthesized user message so the
+        // model sees the pixels on its next turn. Each call's images
+        // bundle into one message with the tool name as caption so the
+        // model can correlate.
+        for (const { block, _images } of results) {
+          if (_images?.length) {
+            working.push(buildImageUserMessage('anthropic', _images, `[attached: image(s) returned by ${block.name}]`));
+          }
+        }
         const sc1 = guard.check(results.map(r => ({ name: r.block.name, args: r.block.inputJson })), results.map(r => r.result));
         if (sc1.stalled) { console.warn(`[anthropic] stall: ${sc1.reason}`); assistantContent = `Stopped: ${sc1.reason}.`; yield { type: 'token', text: assistantContent }; break; }
         continue;
@@ -203,27 +214,39 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         yield { type: 'tool_call', name: block.name, args: toolArgs };
         let toolResult = '';
         try {
+          let _seqImages = null;
           for await (const chunk of executeToolStreaming(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
             if (chunk.type === 'token')              toolResult += chunk.text;
             if (chunk.type === 'permission_request') yield chunk;
             if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
             if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
             if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
-            if (chunk.type === 'result')             toolResult = chunk.text;
+            if (chunk.type === 'result') {
+              toolResult = chunk.text;
+              if (Array.isArray(chunk._images)) _seqImages = chunk._images;
+            }
           }
+          // Carry images out to the post-tool message-pump below.
+          block._images = _seqImages;
         } catch (e) {
           console.error('[tool error]', block.name, e.stack || e.message);
           toolResult = `Tool error: ${e.message}`;
         }
-        const { text: result, _notify } = normalizeToolResult(toolResult);
+        const { text: result, _notify, _images } = normalizeToolResult(toolResult);
         yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-        seqResults.push({ block, toolArgs, result });
+        seqResults.push({ block, toolArgs, result, _images: block._images ?? _images });
       }
       // Anthropic requires all tool_use blocks in one assistant message
       // and all tool_result blocks in one user message
       working.push({ role: 'assistant', content: seqResults.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })) });
       working.push({ role: 'user',      content: seqResults.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: applyRedactions(r.result) })) });
+      // Vision attachments — same pattern as the parallel path above.
+      for (const { block, _images } of seqResults) {
+        if (_images?.length) {
+          working.push(buildImageUserMessage('anthropic', _images, `[attached: image(s) returned by ${block.name}]`));
+        }
+      }
       const sc2 = guard.check(seqResults.map(r => ({ name: r.block.name, args: r.block.inputJson })), seqResults.map(r => r.result));
       if (sc2.stalled) { console.warn(`[anthropic] stall: ${sc2.reason}`); assistantContent = `Stopped: ${sc2.reason}.`; yield { type: 'token', text: assistantContent }; break; }
       continue;

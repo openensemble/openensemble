@@ -14,6 +14,7 @@ import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth
 import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
+import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 
 export function toResponsesInput(messages) {
@@ -321,8 +322,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           yield { type: 'tool_call', name: block.name, args: toolArgs };
         }
         const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
-          const { text, _notify, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
-          return { block, toolArgs, result: text, _notify, events };
+          const { text, _notify, _images, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
+          return { block, toolArgs, result: text, _notify, _images, events };
         }));
         const assistantToolCalls = results.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
         working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
@@ -332,6 +333,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
           working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         }
+        // Vision attachments: append a synthesized user message carrying
+        // any image data tools returned, so the model can SEE the pixels
+        // on its next turn. The Responses-API input builder converts
+        // image_url → input_image transparently.
+        for (const { block, _images } of results) {
+          if (_images?.length) {
+            working.push(buildImageUserMessage('openai-oauth', _images, `[attached: image(s) returned by ${block.name}]`));
+          }
+        }
         { const sc = guard.check(results.map(r => ({ name: r.block.name, args: r.block.argsJson })), results.map(r => r.result));
           if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
         continue;
@@ -340,24 +350,37 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       const assistantToolCalls = blocks.map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: b.argsJson } }));
       working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
       const seqResults = [];
+      const _imagesByBlockId = new Map();
       for (const block of blocks) {
         let args = {};
         try { args = JSON.parse(block.argsJson || '{}'); } catch (e) { console.warn('[openai-oauth] Failed to parse tool args:', e.message); }
         yield { type: 'tool_call', name: block.name, args };
         let toolResultText = '';
+        let _seqImages = null;
         for await (const chunk of executeToolStreaming(block.name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              toolResultText += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
           if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
           if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
           if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
-          if (chunk.type === 'result')             toolResultText = chunk.text;
+          if (chunk.type === 'result') {
+            toolResultText = chunk.text;
+            if (Array.isArray(chunk._images)) _seqImages = chunk._images;
+          }
         }
-        const { text: result, _notify } = normalizeToolResult(toolResultText);
+        const { text: result, _notify, _images } = normalizeToolResult(toolResultText);
+        const effectiveImages = _seqImages ?? _images;
+        if (effectiveImages?.length) _imagesByBlockId.set(block.id, { name: block.name, images: effectiveImages });
         yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         seqResults.push({ name: block.name, args: block.argsJson, result });
+      }
+      // Vision attachments: append a synthesized user message per tool
+      // call that returned image data. Inserted after all tool results
+      // for this iteration so the LLM's next turn sees them as input.
+      for (const [, payload] of _imagesByBlockId) {
+        working.push(buildImageUserMessage('openai-oauth', payload.images, `[attached: image(s) returned by ${payload.name}]`));
       }
       { const sc = guard.check(seqResults.map(r => ({ name: r.name, args: r.args })), seqResults.map(r => r.result));
         if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }

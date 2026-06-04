@@ -172,3 +172,61 @@ export function stripReasoningPreamble(text) {
   if (i === 0) return text; // nothing stripped
   return paragraphs.slice(i).join('\n\n').trimStart() || text;
 }
+
+/**
+ * Build a synthetic user message that carries images returned by a tool
+ * (browser_screenshot, image-gen previews, etc.) back into the LLM
+ * context for the NEXT model turn. Each provider has its own vision
+ * shape — Anthropic uses {type:'image', source:{type:'base64', ...}},
+ * OpenAI uses image_url with a data URL, Ollama has a top-level `images`
+ * array. Providers that don't support vision get a text-only fallback
+ * describing what would have been attached.
+ *
+ * Returns a `messages`-array entry ready to push onto `working[]`.
+ *
+ * @param {string}  provider  agent.provider
+ * @param {Array<{base64: string, mediaType: string}>} images
+ * @param {string}  text      one-line caption ("Screenshot of <tab title>")
+ */
+export function buildImageUserMessage(provider, images, text) {
+  const safeImages = (images || []).filter(i => i?.base64 && i?.mediaType);
+  if (!safeImages.length) return { role: 'user', content: text };
+  if (provider === 'anthropic') {
+    return {
+      role: 'user',
+      content: [
+        ...safeImages.map(img => ({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
+        })),
+        { type: 'text', text },
+      ],
+    };
+  }
+  if (provider === 'ollama') {
+    return { role: 'user', content: text, images: safeImages.map(i => i.base64) };
+  }
+  // OpenAI Chat-Completions + Responses API both accept image_url parts
+  // in user messages. The Responses converter (chat/providers/openai-
+  // responses.mjs toResponsesInput) reshapes image_url → input_image so
+  // we don't need a separate branch here.
+  const isOpenAiLike =
+    provider === 'openai-oauth' || provider === 'openrouter' ||
+    OPENAI_COMPAT_PROVIDERS[provider === 'grok' ? 'xai' : provider];
+  if (isOpenAiLike) {
+    return {
+      role: 'user',
+      content: [
+        ...safeImages.map(img => ({
+          type: 'image_url',
+          image_url: { url: `data:${img.mediaType};base64,${img.base64}` },
+        })),
+        { type: 'text', text },
+      ],
+    };
+  }
+  // LM Studio + anything else: fall back to a text-only note. The LLM
+  // won't see the pixels but at least won't crash on an unknown content
+  // shape, and will know an image WOULD have been here.
+  return { role: 'user', content: `${text}\n\n[${safeImages.length} image(s) attached but ${provider} doesn't accept vision input in this code path]` };
+}

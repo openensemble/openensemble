@@ -1312,8 +1312,18 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         return;
       }
 
-      // Won the race — normal sync result
-      yield await _postProcessResult({ type: 'result', text: String(winner ?? '') });
+      // Won the race — normal sync result. If the tool returned an object
+      // with a `.text` field, treat it as a structured result and preserve
+      // ancillary fields (`_images` for browser_screenshot, `_notify` for
+      // existing patterns) so the chat dispatcher can forward them. Plain
+      // strings still flow through unchanged.
+      const isStructured = winner && typeof winner === 'object' && typeof winner.text === 'string';
+      yield await _postProcessResult({
+        type: 'result',
+        text: isStructured ? winner.text : String(winner ?? ''),
+        ...(isStructured && winner._notify ? { _notify: winner._notify } : {}),
+        ...(isStructured && Array.isArray(winner._images) ? { _images: winner._images } : {}),
+      });
     }
     log.info('tool', 'tool complete', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart });
 

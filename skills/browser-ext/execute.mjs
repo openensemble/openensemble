@@ -90,16 +90,22 @@ export default async function execute(name, args, userId, agentId) {
       const data = await sendCommand(userId, 'screenshot', args?.tabId != null ? { tabId: Number(args.tabId) } : {}, { extId: args?.extId, timeoutMs: 8000 });
       const png = data?.base64;
       if (!png) return 'Screenshot returned no image data — the tab may be a chrome:// page (not capturable).';
-      // Persist to user's images dir so the user can review it AND so
-      // future vision-loop integration can attach it to the next LLM
-      // turn by path.
+      // Persist to user's images dir so the user can review it.
       const outDir = getUserFilesDir(userId, 'images');
       mkdirSync(outDir, { recursive: true });
       const fname = `browser-screenshot-${Date.now()}.png`;
       const fpath = path.join(outDir, fname);
       writeFileSync(fpath, Buffer.from(png, 'base64'));
       const sizeKb = Math.round(png.length * 0.75 / 1024);
-      return `Screenshot saved (${sizeKb} KB, ${data.width}×${data.height}) at:\n  ${fpath}\n\nTab: ${data.tabTitle || '(no title)'} — ${data.tabUrl || ''}\n\nThe viewport coordinate space is 0,0 (top-left) to ${data.width},${data.height} (bottom-right). Use browser_click_xy with coordinates in that space.`;
+      // Return an OBJECT with `text` (what the LLM reads) AND `_images`
+      // (raw pixels the provider injects as a synthesised user message
+      // before the next turn). The vision loop works because the model
+      // sees both the description in the tool_result AND the actual
+      // screenshot via the follow-up message.
+      return {
+        text: `Screenshot saved (${sizeKb} KB, ${data.width}×${data.height}) at:\n  ${fpath}\n\nTab: ${data.tabTitle || '(no title)'} — ${data.tabUrl || ''}\n\nThe viewport coordinate space is 0,0 (top-left) to ${data.width},${data.height} (bottom-right). Use browser_click_xy with coordinates in that space. The screenshot itself is attached as a follow-up image — look at it to decide which (x,y) to click next.`,
+        _images: [{ mediaType: 'image/png', base64: png }],
+      };
     } catch (e) {
       return `Failed to screenshot: ${e?.message || String(e)}`;
     }

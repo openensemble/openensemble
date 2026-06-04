@@ -96,9 +96,18 @@ const TOOL_PREVIEWS = {
 // Normalize tool results — tools can return a string or { text, _notify }
 export function normalizeToolResult(result) {
   if (typeof result === 'object' && result !== null && typeof result.text === 'string') {
-    return { text: result.text, _notify: result._notify ?? null };
+    // Pass-through for tools that want to attach images to the next LLM
+    // turn (browser_screenshot, image-gen previews, etc.). Each image is
+    // { base64, mediaType }. The provider code picks these up after
+    // emitting the tool_result and synthesises a follow-up user message
+    // with the right vision shape for the active provider.
+    return {
+      text: result.text,
+      _notify: result._notify ?? null,
+      _images: Array.isArray(result._images) ? result._images.filter(i => i?.base64 && i?.mediaType) : null,
+    };
   }
-  return { text: String(result), _notify: null };
+  return { text: String(result), _notify: null, _images: null };
 }
 
 // Drain an async generator tool into a plain string — used for parallel execution
@@ -123,6 +132,12 @@ export async function drainToolResult(name, args, userId, agentId, allowedTools 
 export async function drainToolWithEvents(name, args, userId, agentId, allowedTools = null) {
   const events = [];
   let toolResult = '';
+  // Image attachments carried by the result chunk — used by browser_screenshot
+  // and similar to feed the rendered pixels back to the next LLM turn as
+  // vision input. Provider code (chat/providers/*) checks `_images` after
+  // draining and synthesises a follow-up user message via
+  // buildImageUserMessage in chat/providers/_shared.mjs.
+  let _images = null;
   try {
     for await (const chunk of executeToolStreaming(name, args, userId, agentId, allowedTools)) {
       if (chunk.type === 'token')              toolResult += chunk.text;
@@ -130,12 +145,18 @@ export async function drainToolWithEvents(name, args, userId, agentId, allowedTo
       if (chunk.type === 'tool_call')          events.push({ type: 'tool_call', name: chunk.name, args: chunk.args });
       if (chunk.type === 'tool_progress')      events.push({ type: 'tool_progress', name: chunk.name, text: chunk.text });
       if (chunk.type === 'tool_result')        events.push({ type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) });
-      if (chunk.type === 'result')             toolResult = chunk.text;
+      if (chunk.type === 'result') {
+        toolResult = chunk.text;
+        if (Array.isArray(chunk._images)) _images = chunk._images;
+      }
     }
   } catch (e) {
     console.error('[tool error parallel]', name, e.stack || e.message);
     toolResult = `Tool error: ${e.message}`;
   }
   const norm = normalizeToolResult(toolResult);
-  return { text: norm.text, _notify: norm._notify, events };
+  // Tool could have packaged images either in the result chunk or as an
+  // object return that normalizeToolResult unpacked. Prefer the chunk
+  // path since it's the canonical streaming flow.
+  return { text: norm.text, _notify: norm._notify, _images: _images ?? norm._images, events };
 }
