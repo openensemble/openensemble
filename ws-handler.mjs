@@ -222,18 +222,25 @@ function initBrowserExtWss() {
         try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch {}
         return;
       }
-      // Chat from the extension popup — runs the user's coordinator
-      // through the normal chat-dispatch path and streams the events back
-      // over this WS so the popup can render Sydney's reply without the
-      // user opening the OE web UI. Lets Shawn ask "what's on this page"
-      // from any browser tab.
+      // Chat from the extension popup / side panel — routes to the user's
+      // **Browser Tutor** if they've assigned the role_browser_tutor
+      // role to an agent. Otherwise falls back to the coordinator. The
+      // Browser Tutor exists specifically to keep teach-mode chats fast
+      // — only browser primitives, no specialist tool clutter, no
+      // ask_agent delegation. If unassigned, the coordinator handles it
+      // with the full toolset (slower but always available).
       if (msg.type === 'chat' && typeof msg.text === 'string') {
         const requestId = String(msg.requestId || Date.now());
         try {
+          const { getRoleAssignments } = await import('./roles.mjs');
+          const tutorAgentId =
+            getRoleAssignments(ws._userId)?.['role_browser_tutor'] ||
+            null;
+          const targetAgentId = tutorAgentId || getUserCoordinatorAgentId(ws._userId);
           const { handleChatMessage } = await import('./chat-dispatch.mjs');
           await handleChatMessage({
             userId: ws._userId,
-            agentId: getUserCoordinatorAgentId(ws._userId),
+            agentId: targetAgentId,
             text: msg.text,
             source: 'browser-ext',
             onEvent: (ev) => {
@@ -242,7 +249,7 @@ function initBrowserExtWss() {
               } catch {}
             },
           });
-          try { ws.send(JSON.stringify({ type: 'chat_done', requestId })); } catch {}
+          try { ws.send(JSON.stringify({ type: 'chat_done', requestId, agentId: targetAgentId })); } catch {}
         } catch (e) {
           try { ws.send(JSON.stringify({ type: 'chat_error', requestId, message: e?.message || String(e) })); } catch {}
         }
