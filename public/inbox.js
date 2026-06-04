@@ -80,10 +80,15 @@ async function inboxQuickDelete(msgId, ev) {
   }
   const action = _inboxEmailActions.find(a => a.id === 'trash');
   if (!action?.tool) { showToast?.('Trash action unavailable'); return; }
-  const card = ev?.currentTarget?.closest('.email-card-row');
+  // ev.target works regardless of which inner element of the button (the
+  // svg/path/polyline) actually received the click. ev.currentTarget points
+  // at the delegation listener's host (document), not the button — using it
+  // here used to return null silently, so the optimistic visual updates
+  // never ran even though the server-side delete went through.
+  const card = ev?.target?.closest?.('.email-card-row');
   if (card) { card.style.opacity = '0.5'; card.style.pointerEvents = 'none'; }
   try {
-    await fetch('/api/email/action', {
+    const resp = await fetch('/api/email/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -91,6 +96,7 @@ async function inboxQuickDelete(msgId, ev) {
         args: { account: _activeInboxAccountId ?? undefined, messageId: msgId },
       }),
     });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     if (typeof updateStatusBar === 'function') updateStatusBar();
     // Optimistic remove — drop the card and keep the rest of the list intact.
     delete _inboxEmailMeta[msgId];
