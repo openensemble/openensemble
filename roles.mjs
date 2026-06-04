@@ -19,6 +19,7 @@ import { pathToFileURL } from 'url';
 import path from 'path';
 import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir } from './lib/paths.mjs';
 import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helper.mjs';
+import { buildBrowserHelpers } from './lib/browser-helper.mjs';
 import { mergeDefaults, recordToolCall, recordPinUsage } from './lib/tool-defaults.mjs';
 import { recordToolFailure } from './lib/tool-failures.mjs';
 import { isSkillDisabled, getHiddenTools } from './lib/skill-overrides.mjs';
@@ -866,6 +867,14 @@ async function buildCtx(userId, agentId) {
   // `ensure({ skillId })` arg if they need cross-skill isolation, otherwise
   // the helpers fall back to the (kind) key alone.
   ctx.collection = buildCollectionHelpers({ userId, agentId: wsAgentId });
+
+  // ctx.browser — primitive surface for skills that want to use the user's
+  // connected OE Bridge browser extension. Phase 1 is read-only: list /
+  // openTab / readPage + the Tier 1.5 mediaControl (next/previous/playpause)
+  // because media keys are a tiny, bounded surface that doesn't need the
+  // full per-site permission model. ctx.browser.click / fill / select land
+  // with Phase 2 (Tier 1 writes + permission UX).
+  ctx.browser = buildBrowserHelpers({ userId, agentId: wsAgentId });
 
   // Encrypted credential primitive — wraps lib/credentials.mjs so user skills
   // don't have to know the install-root-relative import depth (four-up from

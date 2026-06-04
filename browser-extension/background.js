@@ -79,11 +79,108 @@ async function openTab(url) {
   return { tabId: tab.id };
 }
 
+// Media control — Tier 1.5 quick win. Prefer the standard Media Session
+// action handlers (the proper browser API for "media keys"), fall back to
+// site-specific selector clicks for popular sites that don't register
+// Media Session actions correctly. Pick the tab with active media first;
+// if none, fall back to the currently focused tab.
+async function findMediaTab() {
+  // Chrome marks tabs that have ever played audio as audible:true (or had
+  // audio:true) — that's the best signal for "this tab is the music."
+  const allTabs = await chrome.tabs.query({});
+  const audible = allTabs.find(t => t.audible);
+  if (audible) return audible;
+  // Tabs that have been muted are sometimes still the music player —
+  // include them as a fallback before resorting to the active tab.
+  const known = allTabs.find(t => /youtube\.com|music\.youtube\.com|open\.spotify\.com|soundcloud\.com|music\.apple\.com|bandcamp\.com/.test(t.url || ''));
+  if (known) return known;
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return active || null;
+}
+
+async function mediaControl(action) {
+  const tab = await findMediaTab();
+  if (!tab?.id) throw new Error('no tab found to control media on');
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (action) => {
+      // 1. Standard path: navigator.mediaSession action handlers. Most
+      //    modern sites register these so OS-level media keys work; we
+      //    can invoke them programmatically too.
+      //    Unfortunately the spec doesn't expose the registered handlers
+      //    for direct invocation — but most sites also have keyboard
+      //    bindings on the document, so dispatch the standard media key
+      //    events first. Browsers will route to mediaSession.
+      const fireMediaKey = (key) => {
+        const ev = new KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true, composed: true });
+        document.dispatchEvent(ev);
+      };
+      const keyMap = { next: 'MediaTrackNext', previous: 'MediaTrackPrevious', playpause: 'MediaPlayPause' };
+      fireMediaKey(keyMap[action]);
+      // The keyboard event is unlikely to be honored on most sites because
+      // synthesized events have isTrusted=false. Fall through to per-site
+      // selector clicks for the popular cases.
+      const host = location.hostname.replace(/^www\./, '');
+      const click = (sel) => {
+        const el = document.querySelector(sel);
+        if (el) { el.click(); return true; }
+        return false;
+      };
+      let matched = null;
+      let method = 'keyboard';
+      if (host === 'music.youtube.com') {
+        matched = 'music.youtube.com';
+        method = 'selector-click';
+        if (action === 'next')      click('tp-yt-paper-icon-button.next-button') || click('.next-button');
+        if (action === 'previous')  click('tp-yt-paper-icon-button.previous-button') || click('.previous-button');
+        if (action === 'playpause') click('tp-yt-paper-icon-button#play-pause-button') || click('#play-pause-button');
+      } else if (host === 'youtube.com') {
+        matched = 'youtube.com';
+        method = 'selector-click';
+        if (action === 'next')      click('a.ytp-next-button') || click('.ytp-next-button');
+        if (action === 'previous')  click('a.ytp-prev-button') || click('.ytp-prev-button');
+        if (action === 'playpause') click('button.ytp-play-button');
+      } else if (host === 'open.spotify.com') {
+        matched = 'open.spotify.com';
+        method = 'selector-click';
+        if (action === 'next')      click('button[data-testid="control-button-skip-forward"]');
+        if (action === 'previous')  click('button[data-testid="control-button-skip-back"]');
+        if (action === 'playpause') click('button[data-testid="control-button-playpause"]');
+      } else if (host === 'soundcloud.com') {
+        matched = 'soundcloud.com';
+        method = 'selector-click';
+        if (action === 'next')      click('button.skipControl__next');
+        if (action === 'previous')  click('button.skipControl__previous');
+        if (action === 'playpause') click('button.playControl');
+      } else if (host === 'music.apple.com') {
+        matched = 'music.apple.com';
+        method = 'selector-click';
+        if (action === 'next')      click('button.web-chrome-playback-controls__next-button') || click('apple-music-playback-controls button[aria-label*="Next" i]');
+        if (action === 'previous')  click('button.web-chrome-playback-controls__previous-button') || click('apple-music-playback-controls button[aria-label*="Previous" i]');
+        if (action === 'playpause') click('button.web-chrome-playback-controls__playback-btn') || click('apple-music-playback-controls button[aria-label*="Play" i]');
+      } else {
+        // Unknown host — last-ditch: try the audio/video element on the
+        // page directly. Pause/play work, next/previous don't (no
+        // playlist semantics on a bare <video>).
+        const media = document.querySelector('video, audio');
+        if (media && action === 'playpause') {
+          if (media.paused) media.play(); else media.pause();
+          method = 'media-element';
+        }
+      }
+      return { matchedHost: matched, method, tabUrl: location.href, tabTitle: document.title };
+    },
+    args: [action],
+  });
+  return result || { tabUrl: tab.url, method: 'unknown' };
+}
+
 async function dispatch(action, args) {
   switch (action) {
-    case 'list_tabs': return await listTabsSnapshot();
-    case 'open_tab':  return await openTab(String(args?.url || ''));
-    case 'read_page': return await readPage(Number(args?.tabId));
+    case 'list_tabs':     return await listTabsSnapshot();
+    case 'open_tab':      return await openTab(String(args?.url || ''));
+    case 'read_page':     return await readPage(Number(args?.tabId));
+    case 'media_control': return await mediaControl(String(args?.action || ''));
     default: throw new Error(`unknown action "${action}"`);
   }
 }

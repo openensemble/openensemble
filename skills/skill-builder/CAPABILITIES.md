@@ -183,7 +183,57 @@ optional and most skills should not include one.
 
 ---
 
-## 10. Scheduled action (cron-style)
+## 10. Browser extension as the fetcher (no-API sites)
+
+**Trigger:** the user wants to monitor or read a site that has NO public
+API, no RSS feed, no structured data export — AND/OR is known for
+aggressive anti-bot (Best Buy, Target, Ticketmaster, Kayak, airline
+sites). Common phrasing: "track Best Buy restocks", "watch this site
+for changes", "scrape this URL", "monitor my school portal".
+
+**User pitch:** "If you've installed the OE Bridge browser extension,
+I can use YOUR browser as the fetcher instead of scraping from the
+server — that means your real session, your real IP, your real cookies.
+Sites that block server-side scrapers don't see this as a bot. Trade-
+off: only works while your browser is open and the OE Bridge extension
+is connected; if you close the browser, the watcher pauses until you
+reopen it."
+
+**Decisions to surface:**
+- Has the user installed the OE Bridge extension? Check first via
+  `browser_list`. If not, offer to talk them through install (see the
+  README at `~/.openensemble/browser-extension/`).
+- For a watcher: should the skill open a fresh tab each cycle, or
+  reuse an existing tab the user is leaving open?
+- What's the page selector / pattern that signals "new state"? (price
+  text, stock badge, headline change, etc.)
+
+**Skip when:** the site has a public API or RSS feed (cheaper, doesn't
+depend on the user keeping a browser open). Order of preference per
+the MONITORED-SOURCE PATTERN stays: RSS > public API > JSON-LD >
+browser-extension scrape > full server-side scrape.
+
+**Skill-side scaffold** (Phase 1 — read-only):
+```
+// in the watcher handler
+const tabs = (await ctx.browser.list())[0]?.tabs || [];
+const targetTab = tabs.find(t => t.url.includes('bestbuy.com/site/x'));
+if (!targetTab) {
+  // no tab open — open one
+  const { tabId } = await ctx.browser.openTab('https://www.bestbuy.com/...');
+  await new Promise(r => setTimeout(r, 3000));
+  page = await ctx.browser.readPage(tabId);
+} else {
+  page = await ctx.browser.readPage(targetTab.tabId);
+}
+const inStock = /add to cart/i.test(page.text);
+if (inStock !== state.lastInStock) {
+  await helpers.fire({ message: `Best Buy: ${inStock ? 'IN STOCK' : 'sold out'}` });
+}
+return { newState: { ...state, lastInStock: inStock } };
+```
+
+## 11. Scheduled action (cron-style)
 
 **Trigger:** user mentions a TIME pattern rather than a condition —
 "every morning at 7", "every Sunday", "the first of each month",

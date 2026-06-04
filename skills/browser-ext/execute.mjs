@@ -40,6 +40,21 @@ export default async function execute(name, args, userId, agentId) {
     }
   }
 
+  if (name === 'browser_media_control') {
+    const action = String(args?.action || '').trim().toLowerCase();
+    if (!['next', 'previous', 'playpause'].includes(action)) {
+      return 'action must be one of: next, previous, playpause.';
+    }
+    try {
+      const data = await sendCommand(userId, 'media_control', { action }, { extId: args?.extId, timeoutMs: 5000 });
+      const where = data?.matchedHost ? `on ${data.matchedHost}` : (data?.tabUrl ? `on ${new URL(data.tabUrl).host}` : 'in the active tab');
+      const verb = action === 'next' ? 'Skipped' : action === 'previous' ? 'Back' : 'Toggled play/pause';
+      return `${verb} ${where}.${data?.method ? ` (via ${data.method})` : ''}`;
+    } catch (e) {
+      return `Failed to control media: ${e?.message || String(e)}`;
+    }
+  }
+
   if (name === 'browser_read_page') {
     const tabId = Number(args?.tabId);
     if (!Number.isFinite(tabId)) return 'tabId is required (integer from browser_list).';

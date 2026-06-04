@@ -59,6 +59,21 @@
           "required": ["tabId"]
         }
       }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_media_control",
+        "description": "Control media playback in the user's browser — skip to next track, go back, or play/pause — on whichever tab is currently playing. Works on YouTube, YouTube Music, Spotify Web, SoundCloud, and any site that registers Media Session handlers. Use this when the user says 'skip', 'next', 'previous', 'pause the music', 'play it', etc. — DON'T tell them you can't control their browser, you CAN do this exact thing. Bounded to three actions for safety (no per-site permission model needed — the action surface is too small to abuse).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": { "type": "string", "enum": ["next", "previous", "playpause"], "description": "next = skip to next track; previous = previous track; playpause = toggle play/pause" },
+            "extId":  { "type": "string", "description": "Optional — target a specific connected extension." }
+          },
+          "required": ["action"]
+        }
+      }
     }
   ]
 }

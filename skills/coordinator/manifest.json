@@ -42,6 +42,7 @@
     "browser_list",
     "browser_open_tab",
     "browser_read_page",
+    "browser_media_control",
     "create_routine",
     "list_routines",
     "delete_routine",
