@@ -222,6 +222,136 @@ async function tabReload(tabId) {
   return { tabId: id, url: tab?.url };
 }
 
+// Vision primitives — screenshot + xy click + type + keypress.
+//
+// browser_screenshot uses chrome.tabs.captureVisibleTab which captures the
+// VISIBLE viewport (not the full scrollable page) of the focused tab in
+// the focused window. We bring the target to the front first so the
+// capture lands on the right tab.
+async function screenshot(tabId) {
+  const id = await resolveTabId(tabId);
+  const tab = await chrome.tabs.get(id);
+  // Make sure the tab is the active one in its window — captureVisibleTab
+  // only captures the focused tab. Don't focus the window itself, the
+  // user doesn't need their desktop disturbed for an offscreen automation.
+  if (!tab.active) await chrome.tabs.update(id, { active: true });
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  // dataUrl is "data:image/png;base64,<b64>" — strip prefix.
+  const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+  // Get viewport dims via a quick scripting probe — captureVisibleTab
+  // doesn't report them.
+  const [{ result: dims } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: id },
+    func: () => ({ width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio || 1 }),
+  });
+  return {
+    base64,
+    width: dims?.width ?? null,
+    height: dims?.height ?? null,
+    devicePixelRatio: dims?.devicePixelRatio ?? 1,
+    tabId: id,
+    tabUrl: tab.url,
+    tabTitle: tab.title,
+  };
+}
+
+// Synthesized events have isTrusted=false, which some sites ignore. Fire
+// the full mousedown/mouseup/click sequence so any of the three handlers
+// land. document.elementFromPoint resolves the element at the coord; we
+// describe it briefly for the tool result so the LLM can sanity-check.
+async function clickXY(tabId, x, y) {
+  const id = await resolveTabId(tabId);
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: id },
+    func: (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return { ok: false, reason: `no element at (${x}, ${y})` };
+      const summarize = (e) => {
+        const tag = e.tagName.toLowerCase();
+        const text = (e.innerText || e.value || e.getAttribute('aria-label') || '').slice(0, 80).trim();
+        const id = e.id ? `#${e.id}` : '';
+        return `<${tag}${id}>${text ? ` "${text}"` : ''}`;
+      };
+      const opts = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, view: window };
+      el.dispatchEvent(new MouseEvent('mousedown', opts));
+      el.dispatchEvent(new MouseEvent('mouseup', opts));
+      el.dispatchEvent(new MouseEvent('click', opts));
+      // Some elements (notably native form inputs) prefer the direct
+      // .click() invocation as the last step — DOM spec.
+      try { if (typeof el.click === 'function') el.click(); } catch {}
+      // If we clicked an input/textarea/contenteditable, leave it focused
+      // so a follow-up browser_type lands there.
+      try { if (el.focus) el.focus(); } catch {}
+      return { ok: true, elementSummary: summarize(el) };
+    },
+    args: [x, y],
+  });
+  if (!result?.ok) throw new Error(result?.reason || 'click failed');
+  return { x, y, elementSummary: result.elementSummary };
+}
+
+// Typing: send keydown/keypress/input/keyup for each character on the
+// currently focused element. Falls back to setting .value if the element
+// doesn't react to input events (some custom widgets).
+async function typeText(tabId, text) {
+  const id = await resolveTabId(tabId);
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: id },
+    func: (text) => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return { ok: false, reason: 'no focused element to type into' };
+      const summarize = (e) => {
+        const tag = e.tagName.toLowerCase();
+        const placeholder = e.getAttribute?.('placeholder') || '';
+        const aria = e.getAttribute?.('aria-label') || '';
+        return `<${tag}${e.id ? '#'+e.id : ''}${placeholder ? ` placeholder="${placeholder.slice(0, 40)}"` : ''}${aria ? ` aria-label="${aria.slice(0, 40)}"` : ''}>`;
+      };
+      const sendChar = (char) => {
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }));
+        el.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true, cancelable: true }));
+        if ('value' in el) {
+          el.value = (el.value || '') + char;
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: char, inputType: 'insertText' }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (el.isContentEditable) {
+          // contenteditable — use execCommand as a fallback
+          try { document.execCommand('insertText', false, char); } catch {}
+        }
+        el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true, cancelable: true }));
+      };
+      for (const ch of text) sendChar(ch);
+      return { ok: true, elementSummary: summarize(el) };
+    },
+    args: [text],
+  });
+  if (!result?.ok) throw new Error(result?.reason || 'type failed');
+  return { length: text.length, elementSummary: result.elementSummary };
+}
+
+async function keypress(tabId, key) {
+  const id = await resolveTabId(tabId);
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: id },
+    func: (key) => {
+      const el = document.activeElement || document.body;
+      const summarize = (e) => `<${(e.tagName || 'document').toLowerCase()}${e.id ? '#'+e.id : ''}>`;
+      const opts = { key, code: key, bubbles: true, cancelable: true };
+      el.dispatchEvent(new KeyboardEvent('keydown', opts));
+      // Some sites listen for keypress (deprecated but real-world common).
+      el.dispatchEvent(new KeyboardEvent('keypress', opts));
+      // Special handling: Enter on form inputs should submit the form
+      // when synthetic key events alone don't carry isTrusted.
+      if (key === 'Enter' && el && el.form && typeof el.form.requestSubmit === 'function') {
+        try { el.form.requestSubmit(); } catch { try { el.form.submit(); } catch {} }
+      }
+      el.dispatchEvent(new KeyboardEvent('keyup', opts));
+      return { ok: true, elementSummary: summarize(el) };
+    },
+    args: [key],
+  });
+  return { key, elementSummary: result?.elementSummary };
+}
+
 async function focusWindow() {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (active?.windowId != null) {
@@ -243,6 +373,7 @@ async function focusWindow() {
 // focus_window are not user-facing per-tab work, so they skip the banner.
 const TAB_TOUCHING_ACTIONS = new Set([
   'read_page', 'media_control', 'back', 'forward', 'reload', 'close_tab', 'focus_tab',
+  'screenshot', 'click_xy', 'type', 'keypress',
 ]);
 
 async function fireActivityBanner(action, tabId) {
@@ -279,6 +410,10 @@ async function dispatch(action, args) {
     case 'forward':       return await tabForward(args?.tabId);
     case 'reload':        return await tabReload(args?.tabId);
     case 'focus_window':  return await focusWindow();
+    case 'screenshot':    return await screenshot(args?.tabId);
+    case 'click_xy':      return await clickXY(args?.tabId, Number(args?.x), Number(args?.y));
+    case 'type':          return await typeText(args?.tabId, String(args?.text || ''));
+    case 'keypress':      return await keypress(args?.tabId, String(args?.key || ''));
     default: throw new Error(`unknown action "${action}"`);
   }
 }

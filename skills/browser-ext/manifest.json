@@ -148,6 +148,69 @@
     {
       "type": "function",
       "function": {
+        "name": "browser_screenshot",
+        "description": "Capture the visible viewport of one tab as a PNG. Use as the FIRST step in a vision-loop: take a screenshot → look at the rendered page → decide which xy coordinates to click / what text to type / which key to press → fire the action → take another screenshot to verify. This is the right primitive for sites that don't make sense from HTML alone (heavy-JS booking flows, weird forms, custom canvas widgets). The PNG gets saved under your Profile Files → images so you can review it; the tool result contains the path + the viewport dimensions so the LLM knows the coordinate space when planning clicks.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id from browser_list. Omit to screenshot the active tab." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_click_xy",
+        "description": "Click at exact pixel coordinates on one tab, in the viewport coordinate space matching the most recent browser_screenshot for that tab. Use this AFTER a screenshot when you can SEE the element you want to click. NEVER guess coordinates blind — take a screenshot first. The click fires both a real DOM click event and the underlying mousedown/mouseup pair so sites that listen for either path respond correctly.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
+            "x":     { "type": "integer", "description": "Pixel x coordinate (0 = left edge of viewport)." },
+            "y":     { "type": "integer", "description": "Pixel y coordinate (0 = top edge of viewport)." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          },
+          "required": ["tabId", "x", "y"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_type",
+        "description": "Type text into whatever element is currently focused on one tab. Pair with a preceding browser_click_xy that focuses the right input field. Useful for filling forms (destination, dates, search queries, login fields) after you've identified the input visually from a screenshot. Does NOT submit — call browser_keypress with 'Enter' if the form needs submitting.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
+            "text":  { "type": "string",  "description": "Text to type. Sent character-by-character so input event listeners fire as if the user typed it." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          },
+          "required": ["tabId", "text"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_keypress",
+        "description": "Send a single key event to one tab — usually to the currently focused element. Use for keys that don't show up via browser_type: Enter (submit), Tab (advance focus), Escape, Arrow keys, Backspace. Multiple-key combinations (Ctrl+C, Shift+Tab) are not supported in Phase 1; use one of the dedicated tab-nav tools (browser_back / browser_forward / browser_reload) for browser-level shortcuts.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
+            "key":   { "type": "string",  "description": "Key name: Enter | Tab | Escape | Backspace | Delete | ArrowUp | ArrowDown | ArrowLeft | ArrowRight | Home | End | PageUp | PageDown" },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          },
+          "required": ["tabId", "key"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
         "name": "browser_media_control",
         "description": "Control media playback in the user's browser — skip to next track, go back, or play/pause — on whichever tab is currently playing. Works on YouTube, YouTube Music, Spotify Web, SoundCloud, and any site that registers Media Session handlers. Use this when the user says 'skip', 'next', 'previous', 'pause the music', 'play it', etc. — DON'T tell them you can't control their browser, you CAN do this exact thing. Bounded to three actions for safety (no per-site permission model needed — the action surface is too small to abuse).",
         "parameters": {

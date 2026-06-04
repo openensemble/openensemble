@@ -1,11 +1,18 @@
 // @ts-check
 /**
- * Browser-extension Tier-0 tools. Read-only — list, open_tab, read_page.
+ * Browser-extension tools. Read-only Tier 0 (list, open_tab, read_page),
+ * media keys + tab nav (Tier 1.5), and vision primitives (screenshot,
+ * click_xy, type, keypress) that set up a screenshot → reason → act loop
+ * for sites that don't make sense from HTML alone.
+ *
  * The wire protocol + connection management lives in lib/browser-bus.mjs;
  * this file just adapts the bus surface to OE's tool-call shape.
  */
 
+import { writeFileSync, mkdirSync } from 'fs';
+import path from 'path';
 import { listBrowsers, sendCommand } from '../../lib/browser-bus.mjs';
+import { getUserFilesDir } from '../../lib/paths.mjs';
 
 function _humanList(browsers) {
   if (!browsers.length) {
@@ -73,6 +80,71 @@ export default async function execute(name, args, userId, agentId) {
       return `Brought the browser window to the front.${data?.windowId ? ` (windowId=${data.windowId})` : ''}`;
     } catch (e) {
       return `Failed to focus browser window: ${e?.message || String(e)}`;
+    }
+  }
+
+  // Vision primitives — screenshot + xy-click + type + keypress. Form the
+  // basis of a "look at the page like a human" loop on arbitrary sites.
+  if (name === 'browser_screenshot') {
+    try {
+      const data = await sendCommand(userId, 'screenshot', args?.tabId != null ? { tabId: Number(args.tabId) } : {}, { extId: args?.extId, timeoutMs: 8000 });
+      const png = data?.base64;
+      if (!png) return 'Screenshot returned no image data — the tab may be a chrome:// page (not capturable).';
+      // Persist to user's images dir so the user can review it AND so
+      // future vision-loop integration can attach it to the next LLM
+      // turn by path.
+      const outDir = getUserFilesDir(userId, 'images');
+      mkdirSync(outDir, { recursive: true });
+      const fname = `browser-screenshot-${Date.now()}.png`;
+      const fpath = path.join(outDir, fname);
+      writeFileSync(fpath, Buffer.from(png, 'base64'));
+      const sizeKb = Math.round(png.length * 0.75 / 1024);
+      return `Screenshot saved (${sizeKb} KB, ${data.width}×${data.height}) at:\n  ${fpath}\n\nTab: ${data.tabTitle || '(no title)'} — ${data.tabUrl || ''}\n\nThe viewport coordinate space is 0,0 (top-left) to ${data.width},${data.height} (bottom-right). Use browser_click_xy with coordinates in that space.`;
+    } catch (e) {
+      return `Failed to screenshot: ${e?.message || String(e)}`;
+    }
+  }
+
+  if (name === 'browser_click_xy') {
+    const tabId = Number(args?.tabId);
+    const x = Number(args?.x);
+    const y = Number(args?.y);
+    if (!Number.isFinite(tabId) || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return 'tabId, x, y are all required and must be integers.';
+    }
+    try {
+      const data = await sendCommand(userId, 'click_xy', { tabId, x, y }, { extId: args?.extId, timeoutMs: 5000 });
+      const what = data?.elementSummary ? ` on ${data.elementSummary}` : '';
+      return `Clicked at (${x}, ${y})${what}. Take another screenshot if you need to verify the result.`;
+    } catch (e) {
+      return `Failed to click at (${x}, ${y}): ${e?.message || String(e)}`;
+    }
+  }
+
+  if (name === 'browser_type') {
+    const tabId = Number(args?.tabId);
+    const text = typeof args?.text === 'string' ? args.text : null;
+    if (!Number.isFinite(tabId)) return 'tabId is required.';
+    if (text == null) return 'text is required.';
+    try {
+      const data = await sendCommand(userId, 'type', { tabId, text }, { extId: args?.extId, timeoutMs: 8000 });
+      const what = data?.elementSummary ? ` into ${data.elementSummary}` : '';
+      return `Typed ${text.length} character(s)${what}. ${text.includes('\n') ? '' : 'If the form needs submitting, call browser_keypress with key="Enter".'}`;
+    } catch (e) {
+      return `Failed to type: ${e?.message || String(e)}`;
+    }
+  }
+
+  if (name === 'browser_keypress') {
+    const tabId = Number(args?.tabId);
+    const key = String(args?.key || '').trim();
+    if (!Number.isFinite(tabId)) return 'tabId is required.';
+    if (!key) return 'key is required.';
+    try {
+      const data = await sendCommand(userId, 'keypress', { tabId, key }, { extId: args?.extId, timeoutMs: 5000 });
+      return `Sent ${key} keypress${data?.elementSummary ? ` to ${data.elementSummary}` : ''}.`;
+    } catch (e) {
+      return `Failed to send ${key}: ${e?.message || String(e)}`;
     }
   }
 

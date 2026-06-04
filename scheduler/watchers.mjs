@@ -1109,6 +1109,10 @@ function handlerHelpers(record) {
     forward:      (...a) => getBrowser().then(b => b.forward(...a)),
     reload:       (...a) => getBrowser().then(b => b.reload(...a)),
     focusWindow:  (...a) => getBrowser().then(b => b.focusWindow(...a)),
+    screenshot:   (...a) => getBrowser().then(b => b.screenshot(...a)),
+    clickXY:      (...a) => getBrowser().then(b => b.clickXY(...a)),
+    type:         (...a) => getBrowser().then(b => b.type(...a)),
+    keypress:     (...a) => getBrowser().then(b => b.keypress(...a)),
   };
   return {
     userId: record.userId,
