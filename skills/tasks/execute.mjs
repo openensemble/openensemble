@@ -634,6 +634,80 @@ async function execCancelWatch(id, userId, agentId) {
   return ok ? `Watch ${id} cancelled.` : `No active watch with id "${id}".`;
 }
 
+// ── collection-watcher item tools (skill-agnostic) ──────────────────────────
+//
+// These three reach inside any collection watcher (a watcher whose state.items
+// is an array of per-item polled entries) and expose list/update/remove of
+// the items themselves — not the watcher record. The underlying framework
+// lives in scheduler/watchers.mjs (addCollectionItem / updateCollectionItem /
+// removeCollectionItem / listAllCollections). Any skill that registers a
+// collection via ctx.collection.ensure is automatically reachable here.
+
+function _humanCadence(sec) {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  if (sec < 86400) return `${Math.round(sec / 3600 * 10) / 10}h`;
+  return `${Math.round(sec / 86400 * 10) / 10}d`;
+}
+
+async function execListWatchItems(args, userId) {
+  if (!userId) return 'Error: no user context.';
+  const { listAllCollections } = await import('../../scheduler/watchers.mjs');
+  const collections = listAllCollections(userId, args.kind ? { kind: args.kind } : {});
+  if (!collections.length) return args.kind ? `No collection watcher of kind "${args.kind}".` : 'No collection watchers active.';
+  const lines = [];
+  for (const c of collections) {
+    lines.push(`### ${c.label} (kind=${c.kind}${c.skillId ? `, skill=${c.skillId}` : ''}) — ${c.items.length} item(s)`);
+    if (!c.items.length) { lines.push('  (empty — add items via the owning skill\'s kickoff tool)'); continue; }
+    for (const it of c.items) {
+      const due = it.nextDueAt && it.nextDueAt > Date.now()
+        ? `due in ${_humanCadence(Math.max(0, Math.round((it.nextDueAt - Date.now()) / 1000)))}`
+        : 'due now';
+      const cad = `every ${_humanCadence(it.cadenceSec || 3600)}`;
+      const extra = Object.entries(it)
+        .filter(([k]) => !['id', 'cadenceSec', 'nextDueAt', 'addedAt', 'deliver'].includes(k))
+        .map(([k, v]) => `${k}=${typeof v === 'string' ? v.slice(0, 60) : JSON.stringify(v).slice(0, 60)}`)
+        .join(', ');
+      lines.push(`  - itemId=\`${it.id}\` ${cad}, ${due}${it.deliver ? `, deliver=${it.deliver}` : ''}${extra ? `\n    ${extra}` : ''}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function execUpdateWatchItem(args, userId) {
+  if (!userId) return 'Error: no user context.';
+  const { kind, item_id: itemId, patch } = args || {};
+  if (!kind)   return 'Error: kind is required (use list_watch_items to see active kinds).';
+  if (!itemId) return 'Error: item_id is required.';
+  if (!patch || typeof patch !== 'object') return 'Error: patch must be an object of fields to overwrite.';
+  const { listAllCollections, updateCollectionItem } = await import('../../scheduler/watchers.mjs');
+  const collections = listAllCollections(userId, { kind });
+  if (!collections.length) return `No collection watcher of kind "${kind}".`;
+  for (const c of collections) {
+    const r = updateCollectionItem(userId, { watcherId: c.watcherId }, itemId, patch);
+    if (r.updated) {
+      const fields = Object.keys(patch).filter(k => !['id', 'addedAt'].includes(k));
+      return `Updated item \`${itemId}\` in ${c.label} (${fields.join(', ') || 'no changes'}).`;
+    }
+  }
+  return `No item with id "${itemId}" in any ${kind} collection.`;
+}
+
+async function execRemoveWatchItem(args, userId) {
+  if (!userId) return 'Error: no user context.';
+  const { kind, item_id: itemId } = args || {};
+  if (!kind)   return 'Error: kind is required.';
+  if (!itemId) return 'Error: item_id is required.';
+  const { listAllCollections, removeCollectionItem } = await import('../../scheduler/watchers.mjs');
+  const collections = listAllCollections(userId, { kind });
+  if (!collections.length) return `No collection watcher of kind "${kind}".`;
+  for (const c of collections) {
+    const r = removeCollectionItem(userId, { watcherId: c.watcherId }, itemId);
+    if (r.removed) return `Removed item \`${itemId}\` from ${c.label}.`;
+  }
+  return `No item with id "${itemId}" in any ${kind} collection.`;
+}
+
 async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once', silent = false }, userId, agentId) {
   if (!userId) return 'Error: no user context.';
   if (!label || typeof label !== 'string') return 'Error: label is required.';
@@ -676,5 +750,8 @@ export default async function execute(name, args, userId, agentId, ctx) {
   if (name === 'list_watches')    return execListWatches(userId, agentId, args || {});
   if (name === 'update_watch')    return execUpdateWatch(args, userId, agentId);
   if (name === 'cancel_watch')    return execCancelWatch(args?.id, userId, agentId);
+  if (name === 'list_watch_items')  return execListWatchItems(args || {}, userId);
+  if (name === 'update_watch_item') return execUpdateWatchItem(args || {}, userId);
+  if (name === 'remove_watch_item') return execRemoveWatchItem(args || {}, userId);
   return `Unknown tool: ${name}`;
 }

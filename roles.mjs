@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync
 import { pathToFileURL } from 'url';
 import path from 'path';
 import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir } from './lib/paths.mjs';
-import { buildProposeMonitor } from './lib/monitor-helper.mjs';
+import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helper.mjs';
 import { mergeDefaults, recordToolCall, recordPinUsage } from './lib/tool-defaults.mjs';
 import { recordToolFailure } from './lib/tool-failures.mjs';
 import { isSkillDisabled, getHiddenTools } from './lib/skill-overrides.mjs';
@@ -855,6 +855,17 @@ async function buildCtx(userId, agentId) {
   // call shape for "ping me when X changes" instead of forcing every skill
   // to re-learn registerWatcher's arg layout.
   ctx.proposeMonitor = buildProposeMonitor({ userId, agentId: wsAgentId });
+
+  // ctx.collection — group many similar items under ONE watcher record with
+  // per-item cadence. Use when a skill needs to monitor N peers (channels,
+  // retailers, stores, products) that share the same handler logic. Each
+  // item polls at its own cadenceSec; the parent watcher ticks at 60s and
+  // the handler iterates due items via helpers.mapItems. See
+  // lib/monitor-helper.mjs:buildCollectionHelpers JSDoc for the full API.
+  // skillIdHint is bound late — skills pass their own SKILL_ID through the
+  // `ensure({ skillId })` arg if they need cross-skill isolation, otherwise
+  // the helpers fall back to the (kind) key alone.
+  ctx.collection = buildCollectionHelpers({ userId, agentId: wsAgentId });
 
   // Encrypted credential primitive — wraps lib/credentials.mjs so user skills
   // don't have to know the install-root-relative import depth (four-up from

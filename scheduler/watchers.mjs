@@ -278,6 +278,146 @@ export function updateWatcher(userId, watcherId, patch) {
   return w;
 }
 
+// ── collection-watcher item operations ───────────────────────────────────────
+//
+// Collection watchers store a flat `state.items` array of `{ id, cadenceSec,
+// nextDueAt, ... }` objects. The parent watcher ticks at COLLECTION_TICK_SEC
+// (60s); the handler filters items by `nextDueAt <= now`, processes due ones
+// in bounded-concurrency parallel (via helpers.mapItems), and writes back
+// `nextDueAt = now + cadenceSec * 1000`.
+//
+// These exports let the owning skill — or the generic list/update/remove tools
+// in skills/tasks — mutate the items array without re-registering the parent
+// watcher. The cadence floor (60s) lives here so changes via update_watch_item
+// can't drop below what the supervisor sweep can deliver.
+export const COLLECTION_TICK_SEC = 60;
+const ITEM_MIN_CADENCE_SEC = 60;
+
+function _findCollectionWatcher(userId, { watcherId, skillId, kind }) {
+  const data = _byUser.get(userId);
+  if (!data) return null;
+  if (watcherId) return data.active.find(w => w.id === watcherId) ?? null;
+  // (skillId, kind) is the natural key — there's one collection per pair.
+  return data.active.find(w =>
+    (w.skillId || null) === (skillId || null) && w.kind === kind && Array.isArray(w?.state?.items),
+  ) ?? null;
+}
+
+function _normalizeCadence(sec) {
+  const n = Number(sec);
+  if (!Number.isFinite(n) || n < ITEM_MIN_CADENCE_SEC) return ITEM_MIN_CADENCE_SEC;
+  return Math.floor(n);
+}
+
+/**
+ * Append an item to a collection watcher's `state.items`. Returns
+ * { added: bool, item } — `added: false` means an item with the same `id` was
+ * already present (the existing item is left untouched). Persists on add.
+ */
+export function addCollectionItem(userId, ref, item) {
+  if (!item || typeof item !== 'object' || !item.id) {
+    throw new Error('addCollectionItem: item.id required');
+  }
+  const w = _findCollectionWatcher(userId, ref);
+  if (!w) return { added: false, item: null, error: 'collection watcher not found' };
+  const items = w.state.items ||= [];
+  if (items.some(x => x.id === item.id)) {
+    return { added: false, item: items.find(x => x.id === item.id) };
+  }
+  const normalized = {
+    ...item,
+    cadenceSec: _normalizeCadence(item.cadenceSec),
+    // First tick: due immediately so the user sees feedback on the next sweep
+    // instead of waiting a full cadence period for the first poll.
+    nextDueAt: 0,
+    addedAt: Date.now(),
+  };
+  items.push(normalized);
+  persistUser(userId);
+  return { added: true, item: normalized };
+}
+
+/**
+ * Remove an item by id. If the collection becomes empty, the parent watcher
+ * is left in place (skill may add more later). Pass `{ finalizeIfEmpty: true }`
+ * to instead cancel the parent on empty.
+ */
+export function removeCollectionItem(userId, ref, itemId, opts = {}) {
+  const w = _findCollectionWatcher(userId, ref);
+  if (!w) return { removed: false, error: 'collection watcher not found' };
+  const items = w.state.items || [];
+  const idx = items.findIndex(x => x.id === itemId);
+  if (idx < 0) return { removed: false };
+  items.splice(idx, 1);
+  persistUser(userId);
+  if (opts.finalizeIfEmpty && !items.length) {
+    unregisterWatcher(userId, w.id, 'cancelled');
+  }
+  return { removed: true };
+}
+
+/**
+ * Patch an item in place. `patch` is shallow-merged; passing `cadenceSec`
+ * resets `nextDueAt = now` so the new cadence applies on the very next
+ * supervisor sweep instead of waiting out the old cadence. Reserved fields
+ * (`id`, `addedAt`) are ignored.
+ */
+export function updateCollectionItem(userId, ref, itemId, patch) {
+  const w = _findCollectionWatcher(userId, ref);
+  if (!w) return { updated: false, error: 'collection watcher not found' };
+  const items = w.state.items || [];
+  const it = items.find(x => x.id === itemId);
+  if (!it) return { updated: false };
+  const { id: _ignore1, addedAt: _ignore2, ...rest } = patch || {};
+  Object.assign(it, rest);
+  if (Object.prototype.hasOwnProperty.call(rest, 'cadenceSec')) {
+    it.cadenceSec = _normalizeCadence(it.cadenceSec);
+    it.nextDueAt = 0;
+  }
+  persistUser(userId);
+  return { updated: true, item: it };
+}
+
+/**
+ * Return the full items array (or null if no collection watcher found).
+ * Caller treats result as read-only — mutating returned objects bypasses
+ * persistence.
+ */
+export function listCollectionItems(userId, ref) {
+  const w = _findCollectionWatcher(userId, ref);
+  if (!w) return null;
+  return [...(w.state.items || [])];
+}
+
+export function getCollectionItem(userId, ref, itemId) {
+  const items = listCollectionItems(userId, ref);
+  if (!items) return null;
+  return items.find(x => x.id === itemId) ?? null;
+}
+
+/**
+ * Enumerate every collection watcher for this user, optionally filtered by
+ * (skillId, kind). Returns `[{ watcherId, skillId, kind, label, items }, …]`.
+ * Used by the generic `list_watch_items` tool.
+ */
+export function listAllCollections(userId, filter = {}) {
+  const data = _byUser.get(userId);
+  if (!data) return [];
+  return data.active
+    .filter(w =>
+      Array.isArray(w?.state?.items) &&
+      (!filter.skillId || (w.skillId || null) === filter.skillId) &&
+      (!filter.kind || w.kind === filter.kind),
+    )
+    .map(w => ({
+      watcherId: w.id,
+      skillId: w.skillId || null,
+      kind: w.kind,
+      label: w.label,
+      items: [...(w.state.items || [])],
+    }));
+}
+
 export function unregisterWatcher(userId, watcherId, reason = 'cancelled') {
   const data = loadUserWatchers(userId);
   const idx = data.active.findIndex(w => w.id === watcherId);
@@ -921,6 +1061,26 @@ export function unregisterMatchingWatchers(userId, predicate, reason = 'cancelle
   return cancelled;
 }
 
+// Construct a one-shot onFire config for a per-item delivery override. Used
+// by helpers.fire when state.items[].deliver disagrees with the watcher's
+// stored onFire — e.g. one channel in a YouTube collection set to 'email'
+// while the rest stay 'agent'. Caller's explicit `deliver` arg flows through
+// the same path.
+function _onFireForDeliver(deliver, record) {
+  switch (deliver) {
+    case 'agent':
+      return { type: 'agent', prompt: `A monitor you set up fired (${record.label || record.kind}). Summarize the change in one or two sentences.` };
+    case 'email':
+      return { type: 'email', subject: `Monitor: ${record.label || record.kind}` };
+    case 'telegram':
+      return { type: 'telegram' };
+    case 'notify':
+      return { type: 'notify' };
+    default:
+      return record.onFire || null;
+  }
+}
+
 function handlerHelpers(record) {
   return {
     userId: record.userId,
@@ -962,24 +1122,51 @@ function handlerHelpers(record) {
     // watcher registered with deliver='email' emails the user; the SAME
     // handler registered with deliver='agent' runs an agent turn.
     //
-    // `messageOverride` is a string. For 'agent', it becomes the prompt
-    // injected into the agent run. For 'email', it becomes the email body
-    // (the watcher's `lastStatusText` is used as the default for email when
-    // no override is provided — see executeOnFire).
-    fire: async (messageOverride) => {
-      if (!record.onFire?.type) return false;
-      const cfg = record.onFire;
-      let tempCfg = cfg;
-      if (messageOverride) {
-        if (cfg.type === 'agent')      tempCfg = { ...cfg, prompt: messageOverride };
-        else if (cfg.type === 'email') tempCfg = { ...cfg, _bodyOverride: messageOverride };
+    // Two call shapes:
+    //   fire('message string')   — legacy, watcher-level onFire only.
+    //   fire({ message, subject, telegramPrefix, itemKey, deliver })
+    //                            — object form. For collection watchers, pass
+    //                            `itemKey` so an item-level `deliver` override
+    //                            (from state.items[].deliver) wins over the
+    //                            watcher-level setting; pass `deliver` to force
+    //                            a delivery mode for this one fire (used by
+    //                            handlers that want one item to email even
+    //                            though the watcher defaults to agent).
+    //
+    // For 'agent': message → prompt. For 'email': message → body, subject
+    // overrides default. For 'telegram': message → body, telegramPrefix
+    // overrides default.
+    fire: async (arg) => {
+      const isObj = arg && typeof arg === 'object';
+      const message    = isObj ? arg.message        : arg;
+      const subject    = isObj ? arg.subject        : null;
+      const tgPrefix   = isObj ? arg.telegramPrefix : null;
+      const itemKey    = isObj ? arg.itemKey        : null;
+      let   forceDeliv = isObj ? arg.deliver        : null;
+
+      // Per-item delivery override (collection mode): if the caller passed
+      // itemKey AND that item carries its own `deliver`, that wins. Caller's
+      // explicit `deliver` still beats item-level — explicit > item > watcher.
+      if (!forceDeliv && itemKey && Array.isArray(record?.state?.items)) {
+        const it = record.state.items.find(x => x.id === itemKey);
+        if (it && typeof it.deliver === 'string') forceDeliv = it.deliver;
+      }
+
+      const baseCfg = forceDeliv ? _onFireForDeliver(forceDeliv, record) : record.onFire;
+      if (!baseCfg?.type) return false;
+
+      let tempCfg = baseCfg;
+      if (message) {
+        if (baseCfg.type === 'agent')         tempCfg = { ...baseCfg, prompt: message };
+        else if (baseCfg.type === 'email')    tempCfg = { ...baseCfg, _bodyOverride: message, ...(subject ? { subject } : {}) };
+        else if (baseCfg.type === 'telegram') tempCfg = { ...baseCfg, ...(tgPrefix ? { prefix: tgPrefix } : {}) };
       }
       const synth = { ...record, onFire: tempCfg };
       // executeOnFire's email/telegram branches read lastStatusText for the
       // body; surface the override through there so the handler doesn't have
       // to mutate persisted state.
-      if (messageOverride && (cfg.type === 'email' || cfg.type === 'telegram')) {
-        synth.lastStatusText = messageOverride;
+      if (message && (baseCfg.type === 'email' || baseCfg.type === 'telegram')) {
+        synth.lastStatusText = message;
       }
       try {
         await executeOnFire(synth);
@@ -988,6 +1175,27 @@ function handlerHelpers(record) {
         log.warn('watchers', 'fire threw', { id: record.id, err: e.message });
         return false;
       }
+    },
+    // Bounded-parallel map over an array. Used by collection-watcher handlers
+    // to process due items without serializing N HTTP fetches (which would
+    // blow the supervisor's per-tick budget at high item counts) and without
+    // unbounded parallelism (which would melt the network on the 100-channels-
+    // all-due-at-once case).
+    mapItems: async (items, fn, opts = {}) => {
+      const concurrency = Math.max(1, Number(opts.concurrency) || 5);
+      const arr = Array.isArray(items) ? items : [];
+      const results = new Array(arr.length);
+      let cursor = 0;
+      async function worker() {
+        for (;;) {
+          const i = cursor++;
+          if (i >= arr.length) return;
+          try { results[i] = await fn(arr[i], i); }
+          catch (e) { results[i] = { _error: e?.message || String(e) }; }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(concurrency, arr.length) }, worker));
+      return results;
     },
     // Back-compat alias — older handlers (publix-bogo, youtube channel watch)
     // call fireAgent directly. Keep the old gate-on-agent semantics so they

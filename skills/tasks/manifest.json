@@ -233,6 +233,50 @@
           "required": ["id"]
         }
       }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_watch_items",
+        "description": "List items inside collection watchers — e.g. every YouTube channel inside the youtube-downloader collection, every retailer inside the pokemon-etb collection. Returns rows of {kind, itemId, label, cadence, nextDue, deliver, ...skillFields}. Optional `kind` filter narrows to one collection. Use BEFORE update_watch_item / remove_watch_item to pick the right itemId. Distinct from list_watches (which lists whole watchers); list_watch_items reaches inside a single watcher with N tracked things.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "description": "Optional collection kind (e.g. 'yt_channel_check'). Omit to list across every collection watcher this user owns." }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "update_watch_item",
+        "description": "Modify ONE item inside a collection watcher — change its per-item cadence, delivery mode, or any skill-specific field, without touching the other items. Use for 'change channel X to every 10 minutes', 'switch Best Buy ETB watching to email', 'rename the Target tracker'. Per-item cadenceSec is enforced ≥ 60 seconds (parent watcher ticks at 60s). Always call list_watch_items FIRST to get the itemId. The patch is a shallow merge — only the fields you pass are changed; everything else is preserved.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind":    { "type": "string", "description": "Collection kind (e.g. 'yt_channel_check')." },
+            "item_id": { "type": "string", "description": "Item id from list_watch_items (channelId, retailer slug, etc.)." },
+            "patch":   { "type": "object", "description": "Object of fields to overwrite on the item. Common: {cadenceSec: 600, deliver: 'email'}. Reserved framework fields (id, addedAt) are ignored if present." }
+          },
+          "required": ["kind", "item_id", "patch"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "remove_watch_item",
+        "description": "Remove ONE item from a collection watcher — e.g. 'stop watching channel X', 'drop Target from the ETB tracker'. The parent watcher stays alive even when it goes empty (so the user can keep adding more later). Always call list_watch_items FIRST to get the itemId.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "kind":    { "type": "string", "description": "Collection kind (e.g. 'yt_channel_check')." },
+            "item_id": { "type": "string", "description": "Item id from list_watch_items." }
+          },
+          "required": ["kind", "item_id"]
+        }
+      }
     }
   ]
 }
