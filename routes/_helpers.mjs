@@ -194,12 +194,44 @@ export function loadUsers() {
     if (_usersCache && dirMtime === _usersDirMtime) return _usersCache;
 
     const users = [];
+    let profileDirsSeen = 0;
+    let failedDirs = [];
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      // Skip the system-only dirs (_system holds the master key, etc.).
+      // They have no profile.json on purpose; don't count as a "failed parse."
+      if (entry.name.startsWith('_')) continue;
       const profilePath = path.join(dir, entry.name, 'profile.json');
+      // Dirs without profile.json belong to fixture/test users; don't count
+      // as a failure either. Only dirs that DO have a profile.json that
+      // failed to parse count as a real read failure.
+      if (!fs.existsSync(profilePath)) continue;
+      profileDirsSeen++;
       try { users.push(decryptedProfileView(JSON.parse(fs.readFileSync(profilePath, 'utf8')))); }
-      catch (e) { console.warn('[users] Failed to parse profile for', entry.name + ':', e.message); }
+      catch (e) {
+        console.warn('[users] Failed to parse profile for', entry.name + ':', e.message);
+        failedDirs.push(entry.name);
+      }
     }
+
+    // Anti-foot-gun: if every profile failed to parse (was producing the
+    // setup-page lockout when a transient FS or decrypt glitch hit ALL
+    // profiles in one read), don't poison the cache with an empty list.
+    // Two recovery paths:
+    //   1. If we have a prior good cache, keep returning it. Whatever
+    //      glitched will heal on the next dir-mtime change.
+    //   2. If no prior cache and dirs exist but none parsed, throw —
+    //      callers will surface an error rather than silently treating
+    //      the install as fresh.
+    if (users.length === 0 && profileDirsSeen > 0) {
+      console.error(`[users] CRITICAL: all ${profileDirsSeen} profile(s) failed to parse (${failedDirs.join(', ')}). Refusing to cache empty list.`);
+      if (_usersCache && _usersCache.length > 0) {
+        console.error('[users] Falling back to last good cache to avoid setup-page lockout.');
+        return _usersCache;
+      }
+      throw new Error(`Refusing to return empty users list when ${profileDirsSeen} profile dirs exist on disk`);
+    }
+
     _usersCache = users;
     _usersDirMtime = dirMtime;
     return users;
