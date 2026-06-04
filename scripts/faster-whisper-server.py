@@ -71,21 +71,59 @@ async def transcribe(
     response_format: str = Form("json"),
     temperature: float = Form(0.0),
     prompt: str = Form(None),
+    timestamp_granularities: list[str] = Form([]),
 ):
     # faster-whisper accepts a file path or BinaryIO; BytesIO works because
     # the underlying PyAV/ffmpeg pipeline handles arbitrary containers.
     raw = await file.read()
     audio_buf = io.BytesIO(raw)
-    segments, _info = globals()["model"].transcribe(  # avoid shadowing the form param
+    # verbose_json + word-level timestamps are needed for callers doing
+    # offline segmentation (training-data builds, subtitle generation,
+    # search-within-audio). word_timestamps=True is a per-call enable on
+    # faster-whisper; it's not a separate model. The plain `text` /
+    # `json` paths skip it to keep latency low.
+    want_words = (
+        response_format == "verbose_json"
+        and (not timestamp_granularities or "word" in timestamp_granularities)
+    )
+    segments_iter, info = globals()["model"].transcribe(  # avoid shadowing the form param
         audio_buf,
         language=language,
         temperature=temperature,
         initial_prompt=prompt,
         beam_size=5,
+        word_timestamps=want_words,
+        vad_filter=True if response_format == "verbose_json" else False,
     )
+    # Materialise the generator once — it can only be iterated once.
+    segments = list(segments_iter)
     text = "".join(s.text for s in segments).strip()
     if response_format == "text":
         return PlainTextResponse(text)
+    if response_format == "verbose_json":
+        seg_list = []
+        word_list = []
+        for s in segments:
+            seg_words = []
+            if want_words and getattr(s, "words", None):
+                for w in s.words:
+                    word = {"word": w.word, "start": float(w.start), "end": float(w.end)}
+                    seg_words.append(word)
+                    word_list.append(word)
+            seg_list.append({
+                "id": s.id,
+                "start": float(s.start),
+                "end": float(s.end),
+                "text": s.text,
+                **({"words": seg_words} if want_words else {}),
+            })
+        return JSONResponse({
+            "text": text,
+            "language": getattr(info, "language", language) or "",
+            "duration": float(getattr(info, "duration", 0.0) or 0.0),
+            "segments": seg_list,
+            **({"words": word_list} if want_words else {}),
+        })
     return JSONResponse({"text": text})
 
 
