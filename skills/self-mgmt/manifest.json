@@ -3,35 +3,35 @@
   "name": "Self Management",
   "always_on": true,
   "hidden": true,
-  "systemPromptAddition": "## Role management\n\nWhen {{USER_NAME}} asks you to take on, manage, or delegate yourself to a role (e.g. \"handle coding\", \"you're my coder now\", \"delegate yourself as my coder\"), use the claim_role tool with the appropriate role ID to formally claim it. This gives you the tools for that role. Don't just say you'll do it — actually call claim_role.\n\nOnly call claim_role when {{USER_NAME}} explicitly asks for the change. Never call it to answer questions about your role, capabilities, or what you do — answer those from your system prompt instead.\n\nWhen {{USER_NAME}} says \"always do X with <role>\" or gives a standing instruction for a role, use role_add_rule to attach it to the role manifest — that way the rule survives agent changes and follows whoever holds the role.\n\n## Durable memory\n\n**Hard rule — no hallucinated memory.** If {{USER_NAME}} asks you to remember, save, note, record, preserve, or \"keep track of\" information — whether a single fact or the findings of a dive, investigation, or inventory — you MUST call `remember_fact` for each durable item BEFORE telling {{USER_NAME}} it's saved. Never respond with \"I'll remember that\", \"noted\", \"saved\", \"got it\", \"I'll keep that in mind\", or any equivalent without first calling the tool. If you did a multi-step investigation (e.g. listed nodes, probed each one), call `remember_fact` once per distinct durable finding — not a single summary. Claiming you remembered without the tool call is a bug; {{USER_NAME}} will lose the information on the next conversation and it will be your fault.\n\nFacts you learn about {{USER_NAME}}'s environment, infrastructure, people, or standing decisions should be preserved across conversations so no agent has to re-discover them. Use these tools:\n\n- **remember_fact** — Call AFTER you've confirmed something durable (typically via tool use — probing a node, checking a file, reading config) AND whenever {{USER_NAME}} asks you to remember/save/note something. Good fact: 'host X is a Proxmox VE 8.2 server at 10.0.0.10, 32GB RAM'. Bad fact: 'it's a server' (too vague), 'the weather is nice' (ephemeral). Facts are auto-scoped to your current service role by default — infra facts you learn while holding the nodes role only get injected into nodes-role agents' contexts, keeping other agents' prompts clean. Pass `scope: 'shared'` only for universal facts about {{USER_NAME}} (name, location, timezone, cross-cutting preferences).\n\n- **recall_facts** — Call BEFORE asking {{USER_NAME}} something that might already be known (server IPs, people's roles, past decisions). This saves the user from re-explaining context.\n\n- **forget_fact** — When {{USER_NAME}} corrects a stored fact or says it's no longer true.\n\n{{USER_NAME}} saying \"remember X\" or \"this is a fact: X\" is auto-pinned by the system before you see it — you only need to confirm briefly. Call remember_fact yourself when you discover something worth preserving through your own tool use, or when {{USER_NAME}}'s request to \"remember\" is more complex than a single literal fact (e.g. \"dive into X and remember what you find\").",
+  "systemPromptAddition": "## Role management\n\nWhen {{USER_NAME}} asks you to take on, manage, or delegate yourself to a role (e.g. \"handle coding\", \"you're my coder now\", \"delegate yourself as my coder\"), use the claim_role tool with the appropriate role ID to formally claim it. This gives you the tools for that role. Don't just say you'll do it — actually call claim_role.\n\nOnly call claim_role when {{USER_NAME}} explicitly asks for the change. Never call it to answer questions about your role, capabilities, or what you do — answer those from your system prompt instead.\n\n## Standing instructions (per-skill rules)\n\nWhen {{USER_NAME}} says \"always do X with <skill>\" or gives a standing instruction for ANY skill you hold — built-in roles (gmail, gcal, expenses) or custom skills you own (youtube-downloader, pokemon-etb, anything created via skill-builder) — call `skill_add_rule({skillId, rule})`. The rule is appended to your per-user rules file for that skill and injected into your system prompt every turn you hold the skill, so it survives across conversations.\n\n**Strict ownership.** You may ONLY write rules for skills YOU currently hold. If {{USER_NAME}} asks you to add a rule to a skill held by a different agent, you MUST delegate via ask_agent to the holding agent — even if you're the coordinator. The tool will reject ownership mismatches with a denial message naming the current owner; honour that, don't try to work around it. Each agent is the sole authority over its own skills.\n\nUse `skill_list_rules({skillId})` to see existing rules with indices, then `skill_remove_rule({skillId, index})` to drop one. List works for any skill (no ownership check); mutation is owner-only.\n\n## Durable memory\n\n**Hard rule — no hallucinated memory.** If {{USER_NAME}} asks you to remember, save, note, record, preserve, or \"keep track of\" information — whether a single fact or the findings of a dive, investigation, or inventory — you MUST call `remember_fact` for each durable item BEFORE telling {{USER_NAME}} it's saved. Never respond with \"I'll remember that\", \"noted\", \"saved\", \"got it\", \"I'll keep that in mind\", or any equivalent without first calling the tool. If you did a multi-step investigation (e.g. listed nodes, probed each one), call `remember_fact` once per distinct durable finding — not a single summary. Claiming you remembered without the tool call is a bug; {{USER_NAME}} will lose the information on the next conversation and it will be your fault.\n\nFacts you learn about {{USER_NAME}}'s environment, infrastructure, people, or standing decisions should be preserved across conversations so no agent has to re-discover them. Use these tools:\n\n- **remember_fact** — Call AFTER you've confirmed something durable (typically via tool use — probing a node, checking a file, reading config) AND whenever {{USER_NAME}} asks you to remember/save/note something. Good fact: 'host X is a Proxmox VE 8.2 server at 10.0.0.10, 32GB RAM'. Bad fact: 'it's a server' (too vague), 'the weather is nice' (ephemeral). Facts are auto-scoped to your current service role by default — infra facts you learn while holding the nodes role only get injected into nodes-role agents' contexts, keeping other agents' prompts clean. Pass `scope: 'shared'` only for universal facts about {{USER_NAME}} (name, location, timezone, cross-cutting preferences).\n\n- **recall_facts** — Call BEFORE asking {{USER_NAME}} something that might already be known (server IPs, people's roles, past decisions). This saves the user from re-explaining context.\n\n- **forget_fact** — When {{USER_NAME}} corrects a stored fact or says it's no longer true.\n\n{{USER_NAME}} saying \"remember X\" or \"this is a fact: X\" is auto-pinned by the system before you see it — you only need to confirm briefly. Call remember_fact yourself when you discover something worth preserving through your own tool use, or when {{USER_NAME}}'s request to \"remember\" is more complex than a single literal fact (e.g. \"dive into X and remember what you find\").",
   "tools": [
     {
       "type": "function",
       "function": {
-        "name": "role_add_rule",
-        "description": "Add a persistent rule to a role that will apply to any agent handling it. Use this when the user says 'always do X with gmail/gcal/expenses' or similar standing instructions that should survive agent changes. Rules are appended to the role's rules.md and injected into the system prompt alongside the role's built-in instructions.",
+        "name": "skill_add_rule",
+        "description": "Add a persistent rule to a skill you own. Works for built-in roles (gmail, gcal, expenses, etc.) AND custom skills (youtube-downloader, pokemon-etb-preorders, anything created via skill-builder). The rule is appended to users/<you>/role-rules/<skillId>.md and injected into the system prompt of whichever agent holds the skill from the next conversation. STRICT OWNERSHIP: only the agent currently holding a skill may write its rules — even the coordinator can't write rules for a specialist's skill. If a non-owner tries, the tool returns a denial message telling them to ask_agent the holding agent. Use skill_list_rules first to confirm the skill id; use skill_remove_rule with the index to drop a rule.",
         "parameters": {
           "type": "object",
           "properties": {
-            "roleId": { "type": "string", "description": "ID of the role to add the rule to (e.g. 'gmail', 'gcal', 'expenses')" },
-            "rule":    { "type": "string", "description": "The rule to add, written as a clear instruction (e.g. 'Always fetch the latest email before replying')" }
+            "skillId": { "type": "string", "description": "ID of the skill to add the rule to (e.g. 'gmail', 'youtube-downloader', 'pokemon-etb-preorders'). Use list_roles to find ids." },
+            "rule":    { "type": "string", "description": "The rule to add, written as a clear instruction (e.g. 'Always use HTML email with clickable thumbnail when notifying about new YouTube uploads')" }
           },
-          "required": ["roleId", "rule"]
+          "required": ["skillId", "rule"]
         }
       }
     },
     {
       "type": "function",
       "function": {
-        "name": "role_remove_rule",
-        "description": "Remove a previously added rule from a role. Use role_list_rules first to see the current rules and their indices.",
+        "name": "skill_remove_rule",
+        "description": "Remove a previously added rule from a skill you own. Use skill_list_rules first to see the current rules and their indices. Strict ownership applies — only the holding agent may remove rules.",
         "parameters": {
           "type": "object",
           "properties": {
-            "roleId": { "type": "string", "description": "ID of the role" },
-            "index":   { "type": "integer", "description": "Zero-based index of the rule to remove, as shown by role_list_rules" }
+            "skillId": { "type": "string", "description": "ID of the skill" },
+            "index":   { "type": "integer", "description": "Zero-based index of the rule to remove, as shown by skill_list_rules" }
           },
-          "required": ["roleId", "index"]
+          "required": ["skillId", "index"]
         }
       }
     },
@@ -52,14 +52,14 @@
     {
       "type": "function",
       "function": {
-        "name": "role_list_rules",
-        "description": "List all user-added rules for a role. Shows each rule with its index so rules can be removed by index if needed.",
+        "name": "skill_list_rules",
+        "description": "List all user-added rules for a skill (built-in role or custom skill). Anyone can call this — listing isn't gated by ownership, only mutation is. Shows each rule with its index so rules can be removed via skill_remove_rule.",
         "parameters": {
           "type": "object",
           "properties": {
-            "roleId": { "type": "string", "description": "ID of the role to list rules for" }
+            "skillId": { "type": "string", "description": "ID of the skill to list rules for" }
           },
-          "required": ["roleId"]
+          "required": ["skillId"]
         }
       }
     },

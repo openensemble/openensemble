@@ -13,7 +13,7 @@
     "email_purge_sender", "email_mark_read", "email_inbox_stats",
     "set_reminder", "schedule_task", "list_watches", "cancel_watch", "update_watch", "create_watch",
     "remember_fact", "recall_facts", "forget_fact",
-    "role_add_rule", "role_remove_rule", "role_list_rules",
+    "skill_add_rule", "skill_remove_rule", "skill_list_rules",
     "list_profile_files", "get_research",
     "fetch_url", "web_search",
     "ask_agent",

@@ -58,20 +58,64 @@ function saveRules(userId, skillId, rules) {
   }
 }
 
+// Resolve a skill manifest from EITHER the built-in skills dir or the
+// caller's user-scoped custom skills. Returns null if neither has it.
+async function resolveSkill(skillId, userId) {
+  const builtin = loadSkillManifest(skillId);
+  if (builtin) return builtin;
+  const { getRoleManifest } = await import('../../roles.mjs');
+  return getRoleManifest(skillId, userId) || null;
+}
+
+// Strict ownership: every agent is the sole authority over the skills it
+// holds. Only the current owner of a skill (via getRoleAssignments for
+// built-in roles, manifest.assign_to for custom skills) may write its
+// rules. Even the coordinator can't write rules for a skill it doesn't
+// own — it must delegate to the holding agent via ask_agent.
+async function checkSkillOwnership(skillId, userId, agentId, manifest) {
+  const { getRoleAssignments } = await import('../../roles.mjs');
+  const assignments = getRoleAssignments(userId);
+  const bareAgentId = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  const assigned = assignments[skillId] ?? null;
+  // Custom skills carry a top-level `assign_to` set by skill-builder when
+  // the skill is created. Fall back to that if the runtime assignment map
+  // doesn't carry it (e.g. the user hasn't reassigned since the skill
+  // was created).
+  const owner = assigned ?? manifest?.assign_to ?? null;
+  if (!owner) {
+    // Unassigned built-in: anyone may write — same legacy semantics as
+    // role_add_rule before this change. Custom skills SHOULD always have
+    // assign_to from skill_create, so this path is rare for them.
+    return { ok: true, owner: null };
+  }
+  if (owner === bareAgentId) return { ok: true, owner };
+  return { ok: false, owner };
+}
+
+function ownershipDenial(manifest, owner) {
+  return `You don't own the ${manifest.name} skill — its rules belong to whoever holds it. Use ask_agent to delegate this rule-write to the holding agent (currently "${owner}"). Each agent is the sole authority over its own skills.`;
+}
+
 export default async function execute(name, args, userId, agentId) {
-  if (name === 'role_add_rule') {
-    const { roleId, rule } = args;
-    const skillId = roleId;
-    if (!skillId || !rule) return 'roleId and rule are required.';
+  // skill_add_rule — generalised from role_add_rule. Works for built-in
+  // roles AND user-scoped custom skills, AND enforces strict ownership:
+  // only the agent currently holding the skill may write its rules. Any
+  // other agent (including the coordinator) must delegate via ask_agent.
+  if (name === 'skill_add_rule' || name === 'role_add_rule') {
+    const { skillId: argSkillId, roleId, rule } = args;
+    const skillId = argSkillId || roleId; // back-compat: accept the old roleId param
+    if (!skillId || !rule) return 'skillId and rule are required.';
     if (!userId) return 'userId is required for per-user rules.';
-    const manifest = loadSkillManifest(skillId);
-    if (!manifest) return `No role found with id "${skillId}".`;
+    const manifest = await resolveSkill(skillId, userId);
+    if (!manifest) return `No skill found with id "${skillId}".`;
+    const own = await checkSkillOwnership(skillId, userId, agentId, manifest);
+    if (!own.ok) return ownershipDenial(manifest, own.owner);
     const rules = loadRules(userId, skillId);
     const incoming = `- ${rule.trim()}`;
     // Normalize for duplicate detection: lowercase, drop punctuation,
-    // collapse whitespace. Catches the coordinator emitting two paraphrases
-    // of the same rule on consecutive corrections (e.g. "<role> may send …"
-    // vs "send it without asking …") as separate adds.
+    // collapse whitespace. Catches paraphrases of the same rule landing
+    // on consecutive corrections (e.g. "X may send …" vs "send X
+    // without asking …") as separate adds.
     const norm = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
     const incomingNorm = norm(incoming);
     if (rules.some(r => norm(r) === incomingNorm)) {
@@ -79,16 +123,18 @@ export default async function execute(name, args, userId, agentId) {
     }
     rules.push(incoming);
     saveRules(userId, skillId, rules);
-    return `Rule added to ${manifest.name} for your account. It will apply to any of your agents handling this role from the next conversation.`;
+    return `Rule added to ${manifest.name} for your account. It applies from the next conversation onward.`;
   }
 
-  if (name === 'role_remove_rule') {
-    const { roleId, index } = args;
-    const skillId = roleId;
-    if (!skillId || index == null) return 'roleId and index are required.';
+  if (name === 'skill_remove_rule' || name === 'role_remove_rule') {
+    const { skillId: argSkillId, roleId, index } = args;
+    const skillId = argSkillId || roleId;
+    if (!skillId || index == null) return 'skillId and index are required.';
     if (!userId) return 'userId is required.';
-    const manifest = loadSkillManifest(skillId);
-    if (!manifest) return `No role found with id "${skillId}".`;
+    const manifest = await resolveSkill(skillId, userId);
+    if (!manifest) return `No skill found with id "${skillId}".`;
+    const own = await checkSkillOwnership(skillId, userId, agentId, manifest);
+    if (!own.ok) return ownershipDenial(manifest, own.owner);
     const rules = loadRules(userId, skillId);
     if (index < 0 || index >= rules.length) return `Index ${index} is out of range. There are ${rules.length} rule(s).`;
     const removed = rules.splice(index, 1)[0];
@@ -116,13 +162,16 @@ export default async function execute(name, args, userId, agentId) {
       : 'Email send-without-confirm turned OFF. The email agent will now show a draft and wait for your explicit approval before every send.';
   }
 
-  if (name === 'role_list_rules') {
-    const { roleId } = args;
-    const skillId = roleId;
-    if (!skillId) return 'roleId is required.';
+  if (name === 'skill_list_rules' || name === 'role_list_rules') {
+    const { skillId: argSkillId, roleId } = args;
+    const skillId = argSkillId || roleId;
+    if (!skillId) return 'skillId is required.';
     if (!userId) return 'userId is required.';
-    const manifest = loadSkillManifest(skillId);
-    if (!manifest) return `No role found with id "${skillId}".`;
+    const manifest = await resolveSkill(skillId, userId);
+    if (!manifest) return `No skill found with id "${skillId}".`;
+    // List doesn't require ownership — any agent can READ what rules
+    // are in place, because that's the same info skill-prompt-composer
+    // surfaces in their own system prompt anyway. Only mutation is gated.
     const rules = loadRules(userId, skillId);
     if (rules.length === 0) return `No custom rules set for ${manifest.name}.`;
     return `Rules for ${manifest.name}:\n${rules.map((r, i) => `[${i}] ${r}`).join('\n')}`;

@@ -43,7 +43,7 @@
     "coder_run_command", "coder_start_server", "coder_stop_server", "coder_server_status",
     "coder_list_files", "coder_search",
     "coder_todo_write", "coder_todo_read",
-    "role_add_rule", "role_remove_rule", "role_list_rules",
+    "skill_add_rule", "skill_remove_rule", "skill_list_rules",
     "skill_read_blueprint", "skill_create", "skill_update_code", "skill_delete", "skill_list"
   ],
   "alias_catalog": {
