@@ -228,6 +228,45 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: true });
       return;
     }
+    if (msg?.type === 'auto_pair') {
+      // Fetch the setup token from a candidate OE server. The SW request
+      // includes cookies for the target origin (we have <all_urls> host
+      // permission), so if the user is already logged into OE on this
+      // machine, the cookie rides and we get the token straight back.
+      // No copy-paste, no JSON URL hunting.
+      const url = (msg.serverUrl && String(msg.serverUrl).trim()) || 'http://localhost:3737';
+      try {
+        const r = await fetch(url.replace(/\/+$/, '') + '/api/browser/setup-token', {
+          credentials: 'include',
+          // Cache-Control: no-store keeps Chrome from serving a stale 401
+          // when the user just logged in.
+          cache: 'no-store',
+        });
+        if (r.status === 401) {
+          sendResponse({ ok: false, error: `Not logged into OE at ${url}. Open ${url} in this browser, sign in, then try again.` });
+          return;
+        }
+        if (!r.ok) {
+          sendResponse({ ok: false, error: `OE returned HTTP ${r.status} from ${url}/api/browser/setup-token. Check the server URL.` });
+          return;
+        }
+        const j = await r.json();
+        if (!j?.token) {
+          sendResponse({ ok: false, error: 'OE response had no token field.' });
+          return;
+        }
+        const config = { serverUrl: url, token: j.token, name: (await getConfig()).name || 'OE Bridge' };
+        await chrome.storage.local.set(config);
+        try { _ws?.close(); } catch {}
+        _backoffIdx = 0;
+        _shouldReconnect = true;
+        setTimeout(connect, 100);
+        sendResponse({ ok: true, config, userId: j.userId });
+      } catch (e) {
+        sendResponse({ ok: false, error: `Couldn't reach ${url}: ${e?.message || String(e)}. If OE is on another machine, paste its full http://<ip>:3737 URL and use Save & connect.` });
+      }
+      return;
+    }
   })();
   return true; // async sendResponse
 });

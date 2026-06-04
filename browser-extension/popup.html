@@ -26,25 +26,29 @@
 
   <div id="status" class="status idle">…</div>
 
-  <label for="serverUrl">OE server URL</label>
-  <input id="serverUrl" placeholder="http://localhost:3737" />
-
-  <label for="token">Auth token</label>
-  <input id="token" type="password" placeholder="paste your OE auth token" />
-
-  <label for="name">Browser name (optional)</label>
-  <input id="name" placeholder="my laptop chrome" />
-
-  <div class="row">
-    <button id="save" class="primary">Save &amp; connect</button>
-    <button id="reconnect">Reconnect</button>
+  <div class="row" style="margin-bottom: 12px;">
+    <button id="autopair" class="primary" title="If you're already logged into OE on this browser, this finds the token for you and connects.">Detect &amp; connect</button>
   </div>
 
   <details>
-    <summary>How to get the token</summary>
-    Open OE in another tab → Settings → Browser Bridge → copy the token. Or, on the OE machine, run:
-    <pre style="margin-top:4px;">curl http://localhost:3737/api/browser/setup-token --cookie-jar /tmp/oe.cookies</pre>
-    (logged-in browser session needed)
+    <summary>Manual setup (OE on a different machine)</summary>
+    <label for="serverUrl">OE server URL</label>
+    <input id="serverUrl" placeholder="http://192.168.1.10:3737" />
+
+    <label for="token">Auth token</label>
+    <input id="token" type="password" placeholder="paste your OE auth token" />
+
+    <label for="name">Browser name (optional)</label>
+    <input id="name" placeholder="my laptop chrome" />
+
+    <div class="row">
+      <button id="save" class="primary">Save &amp; connect</button>
+      <button id="reconnect">Reconnect</button>
+    </div>
+
+    <div class="meta" style="margin-top:8px;">
+      Token: open <code>http://&lt;your-oe&gt;/api/browser/setup-token</code> in a logged-in tab and copy the <code>token</code> field.
+    </div>
   </details>
 
   <script src="popup.js"></script>

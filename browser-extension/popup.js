@@ -40,6 +40,25 @@ async function refresh() {
   renderStatus(resp.status);
 }
 
+async function autoPair() {
+  const el = $('status');
+  el.className = 'status idle';
+  el.textContent = 'Detecting OE on http://localhost:3737 …';
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'auto_pair', serverUrl: 'http://localhost:3737' });
+    if (!resp || resp.ok !== true) {
+      showError(resp?.error || 'Auto-pair failed. Try the manual setup below.');
+      return;
+    }
+    // Force a re-populate from the freshly-saved config.
+    _fieldsPopulated = false;
+    if (resp.config) populateFields(resp.config);
+    setTimeout(refresh, 600);
+  } catch (e) {
+    showError(`Couldn't reach the background service worker: ${e?.message || String(e)}.`);
+  }
+}
+
 function showError(text) {
   const el = $('status');
   el.className = 'status bad';
@@ -78,6 +97,19 @@ $('reconnect').addEventListener('click', async () => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'status') renderStatus(msg.status);
 });
+
+const autopairBtn = $('autopair');
+if (autopairBtn) autopairBtn.addEventListener('click', autoPair);
+
+// First-open: if nothing's saved yet AND OE is on localhost, just do it.
+// Most users never see the manual fields because of this.
+(async () => {
+  const resp = await chrome.runtime.sendMessage({ type: 'get_status' });
+  const cfg = resp?.config || {};
+  if (!cfg.serverUrl && !cfg.token) {
+    autoPair();
+  }
+})();
 
 refresh();
 setInterval(refresh, 3000);
