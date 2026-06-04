@@ -178,8 +178,16 @@
       "type": "function",
       "function": {
         "name": "list_watches",
-        "description": "List all active watch monitors for the current user — call this whenever the user asks ANY status question about a running monitor or its owning skill: how often it polls, when it checks next, **when it last ran / last fired / last checked**, how it notifies them, what cadence is set, total runs so far, or for the current state of any watcher (Pokemon ETB, YouTube channel, Publix BOGO, price alert, anything in flight). If the user names a skill (e.g. 'when did the pokemon etb skill last run') and that skill owns a watcher, this is still the right tool — the watcher carries the skill id. Returns label, watcher kind, owning skill, poll cadence in seconds (translate to 'every hour' / 'every 5 minutes'), **last-run timestamp as relative time** ('3h ago'), delivery mode (agent/email/telegram/notify), next-tick wall-clock time, expiry, total ticks, failures, and last status text. Do NOT delegate to ask_agent or ask the coder for these questions — this tool already has every status field the user could ask about; delegating just adds a multi-second round-trip.",
-        "parameters": { "type": "object", "properties": {} }
+        "description": "List active watch monitors. By default returns only watches THIS agent registered — call this whenever the user asks ANY status question about a running monitor or its owning skill: how often it polls, when it checks next, **when it last ran / last fired / last checked**, how it notifies them, what cadence is set, total runs so far, or for the current state of any watcher (Pokemon ETB, YouTube channel, Publix BOGO, price alert, anything in flight). If the user names a skill (e.g. 'when did the pokemon etb skill last run') and that skill owns a watcher, this is still the right tool — the watcher carries the skill id. Returns label, watcher kind, owning skill, poll cadence in seconds (translate to 'every hour' / 'every 5 minutes'), **last-run timestamp as relative time** ('3h ago'), delivery mode (agent/email/telegram/notify), next-tick wall-clock time, expiry, total ticks, failures, and last status text. Pass all:true to list every watcher across all agents (coordinator-only). Do NOT delegate to ask_agent or ask the coder for these questions — this tool already has every status field the user could ask about; delegating just adds a multi-second round-trip.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "all": {
+              "type": "boolean",
+              "description": "Coordinator-only. true = list every watcher across all agents in this user's account. false/omitted = only watchers this agent registered."
+            }
+          }
+        }
       }
     },
     {

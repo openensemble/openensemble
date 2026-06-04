@@ -11,6 +11,124 @@ function unscopeAgentId(agentId, userId) {
     : agentId;
 }
 
+/**
+ * Is this agentId running inside a delegation chain? Delegation sessions
+ * are wrapped with `ephemeral_deleg_d<N>_<ts>_<rand>_<agentId>` per
+ * project_specialist_escalation. When a specialist asks the coordinator to
+ * act, the coordinator runs with this session-id shape.
+ *
+ * Used to gate cross-agent destructive ops: when the coordinator is being
+ * called BY a specialist (not by the user directly), destructive watcher
+ * ops on watchers owned by other agents stage for user approval instead
+ * of executing immediately — fixes the "runaway specialist asks coordinator
+ * to cancel everything" escalation that bypasses the owner check.
+ */
+function isDelegatedCall(agentId, userId) {
+  if (!agentId || typeof agentId !== 'string') return false;
+  const unscoped = unscopeAgentId(agentId, userId);
+  return typeof unscoped === 'string' && unscoped.startsWith('ephemeral_deleg_');
+}
+
+/**
+ * Is the caller allowed to act on this watcher?
+ *
+ * Watchers are scoped to their creating agent. Coordinators can act on any
+ * watcher — UNLESS the coordinator is itself being called inside a delegation
+ * chain AND the watcher belongs to a different agent than the original
+ * delegator, in which case the op must stage for user approval. Specialists
+ * can ONLY act on watchers they themselves registered.
+ *
+ * Returns { ok: true } to execute, { ok: false, reason } for hard deny, or
+ * { ok: false, needsApproval: true, ... } to stage for "APPROVE WATCHER OP".
+ *
+ * Legacy watchers without agentId (created before scoping landed) are treated
+ * as permissive (any caller in the same user scope can touch them) so we
+ * don't lock users out of cleaning up their own ancient watchers.
+ *
+ * @param {any} watcher           the watcher record
+ * @param {string} callerAgentId  the agent currently making the tool call
+ * @param {string} userId
+ * @returns {Promise<{ok:true} | {ok:false, reason:string} | {ok:false, needsApproval:true, watcherLabel:string, watcherOwner:string}>}
+ */
+async function canActOnWatcher(watcher, callerAgentId, userId) {
+  if (!watcher) return { ok: false, reason: 'watcher not found' };
+  let isCoordinator = false;
+  try {
+    const { getUserCoordinatorAgentId } = await import('../../routes/_helpers.mjs');
+    const coordinatorId = getUserCoordinatorAgentId(userId);
+    const callerUnscoped = unscopeAgentId(callerAgentId, userId);
+    isCoordinator = callerUnscoped === 'coordinator' || callerUnscoped === coordinatorId;
+  } catch { /* coordinator lookup failure shouldn't deny */ }
+
+  // Legacy watcher with no recorded owner — be permissive.
+  if (!watcher.agentId) return { ok: true };
+
+  // Same-agent ops are always allowed (owner can manage own).
+  if (watcher.agentId === callerAgentId) return { ok: true };
+  if (unscopeAgentId(watcher.agentId, userId) === unscopeAgentId(callerAgentId, userId)) return { ok: true };
+
+  // Coordinator path. The bypass is split into two cases:
+  //   - Coordinator called by user directly → trusted, execute immediately.
+  //   - Coordinator called inside a delegation chain (specialist asked them
+  //     to do this) → stage for user approval. Prevents the "runaway
+  //     specialist asks coordinator to cancel everything" escalation that
+  //     trivially bypassed the per-agent owner check.
+  if (isCoordinator) {
+    if (isDelegatedCall(callerAgentId, userId)) {
+      return {
+        ok: false,
+        needsApproval: true,
+        watcherLabel: watcher.label || watcher.id,
+        watcherOwner: unscopeAgentId(watcher.agentId, userId) || 'unknown',
+      };
+    }
+    return { ok: true };
+  }
+
+  // Specialist asking to touch another agent's watcher → hard deny with
+  // escalation hint. The coordinator-via-ask_agent path is the documented
+  // way to do this, but it'll stage rather than auto-execute (see above).
+  return {
+    ok: false,
+    reason: `watcher belongs to a different agent (${unscopeAgentId(watcher.agentId, userId)}). Only that agent or the coordinator can modify it. Escalate to the coordinator via ask_agent if you need this changed — note that the coordinator will ask the user for explicit approval before touching a cross-agent watcher.`,
+  };
+}
+
+// ── Pending cross-agent watcher op (staged for user approval) ──────────────
+// Same pattern as expenses' CONFIRM DELETION / email's APPROVE PURGE — a
+// destructive op that requires the user to type the magic phrase before
+// it actually runs. Key by userId, TTL'd so a stale stage from one session
+// doesn't fire when an unrelated approval phrase shows up later.
+const _pendingWatcherOps = new Map(); // userId → { action, watcherId, args, requestedBy, ts }
+const PENDING_WATCHER_TTL_MS = 5 * 60 * 1000;
+
+export function getPendingWatcherOp(userId) {
+  const p = _pendingWatcherOps.get(userId);
+  if (!p) return null;
+  if (Date.now() - p.ts > PENDING_WATCHER_TTL_MS) {
+    _pendingWatcherOps.delete(userId);
+    return null;
+  }
+  return p;
+}
+export function clearPendingWatcherOp(userId) { _pendingWatcherOps.delete(userId); }
+
+export async function executePendingWatcherOp(userId) {
+  const pending = getPendingWatcherOp(userId);
+  if (!pending) return 'No pending watcher operation (it may have expired).';
+  _pendingWatcherOps.delete(userId);
+  const { unregisterWatcher, updateWatcher } = await import('../../scheduler/watchers.mjs');
+  if (pending.action === 'cancel') {
+    const ok = unregisterWatcher(userId, pending.watcherId, 'cancelled');
+    return ok ? `Watch "${pending.watcherLabel}" cancelled.` : `Watch already gone — nothing to cancel.`;
+  }
+  if (pending.action === 'update') {
+    const updated = updateWatcher(userId, pending.watcherId, pending.patch);
+    return updated ? `Watch "${updated.label}" updated.` : `Watch not found — nothing updated.`;
+  }
+  return 'Unknown staged watcher action.';
+}
+
 async function execListTasks(userId) {
   const { loadTasksForOwner, formatTaskCadence } = await import('../../scheduler.mjs');
   const tasks = loadTasksForOwner(userId);
@@ -318,11 +436,33 @@ function _fmtDeliver(onFire) {
   return 'no delivery configured';
 }
 
-async function execListWatches(userId) {
+async function execListWatches(userId, agentId, args) {
   if (!userId) return 'Error: no user context.';
   const { listWatchers } = await import('../../scheduler/watchers.mjs');
-  const { active, recent } = listWatchers(userId);
-  if (!active.length && !recent.length) return 'No watches configured.';
+  const { active: allActive, recent: allRecent } = listWatchers(userId);
+  // Coordinator sees everything by default (or explicitly via all:true).
+  // Specialists see only their own watchers unless they pass all:true, which
+  // is interpreted as a request — coordinator allows, specialist gets denied
+  // and a note about scoping.
+  let active = allActive, recent = allRecent;
+  const wantsAll = !!args?.all;
+  const { getUserCoordinatorAgentId } = await import('../../routes/_helpers.mjs');
+  const coordinatorId = getUserCoordinatorAgentId(userId);
+  const callerUnscoped = unscopeAgentId(agentId, userId);
+  const isCoordinator = callerUnscoped === 'coordinator' || callerUnscoped === coordinatorId;
+  if (!isCoordinator) {
+    if (wantsAll) {
+      return 'Permission denied: only the coordinator can list all watches across agents. Re-call without all:true to see your own.';
+    }
+    // Filter to only watchers this agent registered. Legacy watchers without
+    // agentId stay hidden from specialists — coordinator/admin can still see
+    // them via all:true.
+    active = allActive.filter(w => w.agentId && (w.agentId === agentId || unscopeAgentId(w.agentId, userId) === callerUnscoped));
+    recent = allRecent.filter(w => w.agentId && (w.agentId === agentId || unscopeAgentId(w.agentId, userId) === callerUnscoped));
+  }
+  if (!active.length && !recent.length) {
+    return isCoordinator ? 'No watches configured.' : 'No watches owned by this agent.';
+  }
   const lines = [];
   if (active.length) {
     lines.push('Active:');
@@ -373,13 +513,19 @@ function _parseCadenceInput(input) {
   return null;
 }
 
-async function execUpdateWatch(args, userId) {
+async function execUpdateWatch(args, userId, agentId) {
   if (!userId)  return 'Error: no user context.';
   if (!args?.id) return 'Error: id is required (call list_watches to find it).';
 
   const { listWatchers, updateWatcher } = await import('../../scheduler/watchers.mjs');
   const existing = (listWatchers(userId)?.active || []).find(w => w.id === args.id);
   if (!existing) return `Error: no active watch with id "${args.id}".`;
+  const auth = await canActOnWatcher(existing, agentId, userId);
+  // Hard deny (not staging) — return early. Staging branch is checked after
+  // the patch is built so the approval captures exactly what would change.
+  if (!auth.ok && !('needsApproval' in auth && auth.needsApproval)) {
+    return `Permission denied: ${auth.reason}`;
+  }
 
   /** @type {{cadenceSec?: number, label?: string, expiresAt?: number|null, onFire?: object}} */
   const patch = {};
@@ -445,15 +591,45 @@ async function execUpdateWatch(args, userId) {
     return `No changes — every requested value matches the current watcher.`;
   }
 
+  // Stage approval-required ops AFTER computing the patch so the approval
+  // captures exactly what would change. canActOnWatcher returned needsApproval
+  // for cross-agent coordinator-delegated calls; defer until the user echoes.
+  if (auth.ok === false && 'needsApproval' in auth && auth.needsApproval) {
+    _pendingWatcherOps.set(userId, {
+      action: 'update',
+      watcherId: args.id,
+      watcherLabel: auth.watcherLabel,
+      patch,
+      changes,
+      requestedBy: unscopeAgentId(agentId, userId),
+      ts: Date.now(),
+    });
+    return `⚠️ A specialist has asked me (the coordinator) to update watcher "${auth.watcherLabel}" (${changes.join('; ')}), which was created by a different agent (${auth.watcherOwner}). Because this change didn't come directly from you, I'm staging it. Type **APPROVE WATCHER OP** in the chat to proceed, or say anything else to abandon.`;
+  }
+
   const updated = updateWatcher(userId, args.id, patch);
   if (!updated) return `Error: updateWatcher failed for id "${args.id}".`;
   return `Updated "${updated.label}": ${changes.join('; ')}.`;
 }
 
-async function execCancelWatch(id, userId) {
+async function execCancelWatch(id, userId, agentId) {
   if (!userId) return 'Error: no user context.';
   if (!id) return 'Error: id is required.';
-  const { unregisterWatcher } = await import('../../scheduler/watchers.mjs');
+  const { listWatchers, unregisterWatcher } = await import('../../scheduler/watchers.mjs');
+  const watcher = (listWatchers(userId)?.active || []).find(w => w.id === id);
+  if (!watcher) return `No active watch with id "${id}".`;
+  const auth = await canActOnWatcher(watcher, agentId, userId);
+  if (auth.ok === false && 'needsApproval' in auth && auth.needsApproval) {
+    _pendingWatcherOps.set(userId, {
+      action: 'cancel',
+      watcherId: id,
+      watcherLabel: auth.watcherLabel,
+      requestedBy: unscopeAgentId(agentId, userId),
+      ts: Date.now(),
+    });
+    return `⚠️ A specialist has asked me (the coordinator) to cancel watcher "${auth.watcherLabel}", which was created by a different agent (${auth.watcherOwner}). Because this cancel didn't come directly from you, I'm staging it. Type **APPROVE WATCHER OP** in the chat to proceed, or say anything else to abandon.`;
+  }
+  if (!auth.ok) return `Permission denied: ${auth.reason}`;
   const ok = unregisterWatcher(userId, id, 'cancelled');
   return ok ? `Watch ${id} cancelled.` : `No active watch with id "${id}".`;
 }
@@ -497,8 +673,8 @@ export default async function execute(name, args, userId, agentId, ctx) {
   if (name === 'list_reminders')  return execListReminders(userId);
   if (name === 'cancel_reminder') return execCancelReminder(args.id, userId);
   if (name === 'create_watch')    return execCreateWatch(args || {}, userId, agentId, ctx);
-  if (name === 'list_watches')    return execListWatches(userId);
-  if (name === 'update_watch')    return execUpdateWatch(args, userId);
-  if (name === 'cancel_watch')    return execCancelWatch(args?.id, userId);
+  if (name === 'list_watches')    return execListWatches(userId, agentId, args || {});
+  if (name === 'update_watch')    return execUpdateWatch(args, userId, agentId);
+  if (name === 'cancel_watch')    return execCancelWatch(args?.id, userId, agentId);
   return `Unknown tool: ${name}`;
 }

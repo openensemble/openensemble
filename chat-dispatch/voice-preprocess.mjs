@@ -19,6 +19,9 @@
  *   4. CONFIRM DELETION       — staged destructive expense op
  *   5. APPROVE PURGE          — staged destructive email op
  *   6. APPROVE PROVEN         — staged trust-state promotion
+ *   7. APPROVE WATCHER OP     — staged cross-agent watcher cancel/update
+ *                                (coordinator deferred when a specialist
+ *                                asked to touch another agent's watcher)
  */
 
 import { appendToSession } from '../sessions.mjs';
@@ -41,6 +44,9 @@ import {
 import {
   getPendingProven, clearPendingProven, executePendingProven,
 } from '../skills/profiles/execute.mjs';
+import {
+  getPendingWatcherOp, clearPendingWatcherOp, executePendingWatcherOp,
+} from '../skills/tasks/execute.mjs';
 
 /**
  * Fast-path regex router for voice-device control intents. Runs BEFORE the
@@ -333,6 +339,7 @@ export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agent
  *   - "CONFIRM DELETION" → executePendingDelete (expenses)
  *   - "APPROVE PURGE"    → executePendingEmail (destructive email op)
  *   - "APPROVE PROVEN"   → executePendingProven (trust-state promotion)
+ *   - "APPROVE WATCHER OP" → executePendingWatcherOp (cross-agent watcher op)
  *
  * These run AFTER agent setup but still BEFORE the busy-slot is acquired,
  * so they emit + persist + return without finalizeTurn. The caller is
@@ -385,6 +392,23 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
     return { handled: true };
   }
   if (getPendingProven(userId)) clearPendingProven(userId);
+
+  // Intercept "APPROVE WATCHER OP" — execute staged cross-agent watcher
+  // cancel/update that the coordinator deferred when a specialist asked it
+  // to touch a watcher owned by a different agent. See canActOnWatcher in
+  // skills/tasks/execute.mjs for the staging logic.
+  if (userText.toUpperCase() === 'APPROVE WATCHER OP' && getPendingWatcherOp(userId)) {
+    /** @type {string} */
+    const text = await executePendingWatcherOp(userId);
+    appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: text, ts: Date.now() }
+    );
+    onEvent({ type: 'token', text, agent: agentId });
+    onEvent({ type: 'done', agent: agentId });
+    return { handled: true };
+  }
+  if (getPendingWatcherOp(userId)) clearPendingWatcherOp(userId);
 
   return null;
 }
