@@ -3,7 +3,22 @@ console.log(`[OE Bridge popup] script loaded version=${POPUP_VERSION}`);
 
 const $ = (id) => document.getElementById(id);
 
-function render(status, config) {
+// Populate the input fields exactly once at popup open. The 3-second
+// refresh loop only updates the STATUS pill — it must NOT touch the
+// input fields, otherwise the user can't finish typing the server URL
+// (every refresh overwrites the half-typed value with the empty stored
+// value).
+let _fieldsPopulated = false;
+
+function populateFields(config) {
+  if (_fieldsPopulated || !config) return;
+  $('serverUrl').value = config.serverUrl || '';
+  $('token').value     = config.token     || '';
+  $('name').value      = config.name      || '';
+  _fieldsPopulated = true;
+}
+
+function renderStatus(status) {
   const el = $('status');
   if (status.connected) {
     el.className = 'status ok';
@@ -16,16 +31,13 @@ function render(status, config) {
     el.className = 'status idle';
     el.textContent = 'Waiting for config…';
   }
-  if (config) {
-    $('serverUrl').value = config.serverUrl || '';
-    $('token').value     = config.token     || '';
-    $('name').value      = config.name      || '';
-  }
 }
 
 async function refresh() {
   const resp = await chrome.runtime.sendMessage({ type: 'get_status' });
-  if (resp) render(resp.status, resp.config);
+  if (!resp) return;
+  populateFields(resp.config);   // no-op after first call
+  renderStatus(resp.status);
 }
 
 function showError(text) {
@@ -64,7 +76,7 @@ $('reconnect').addEventListener('click', async () => {
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'status') render(msg.status);
+  if (msg?.type === 'status') renderStatus(msg.status);
 });
 
 refresh();
