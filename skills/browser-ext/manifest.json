@@ -255,11 +255,11 @@
       "type": "function",
       "function": {
         "name": "browser_observe",
-        "description": "Read the buffered user actions in one tab. Returns a list of {kind, element, value, x, y, ts} for click / input / change / submit events. Use this in Teach Mode AFTER the user does something on the page — you'll see exactly which element they clicked or what they typed, with the element's tag / id / class / aria-label / placeholder / selector path. Synthesise that into site notes (NOT a recipe — describe the affordance, not the coordinates). Sensitive fields (password inputs, credit-card autocomplete hints) never carry their value — only the FACT of typing.",
+        "description": "Read the buffered user actions in one tab. Returns a list of {kind, element, value, x, y, ts} for click / input / change / submit events. Use this in Teach Mode AFTER the user does something on the page — you'll see exactly which element they clicked or what they typed, with the element's tag / id / class / aria-label / placeholder / selector path. Synthesise that into site notes (NOT a recipe — describe the affordance, not the coordinates). Sensitive fields (password inputs, credit-card autocomplete hints) never carry their value — only the FACT of typing. IMPORTANT: OMIT tabId entirely to auto-pick the tab with the most recent observed activity — that's almost always what you want. DON'T pass tabId: 0 (Chrome never assigns 0). Only pass an explicit tabId if you're polling a specific known-id tab.",
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId":    { "type": "integer", "description": "Tab id from browser_list. Defaults to the active tab if omitted." },
+            "tabId":    { "type": "integer", "description": "Tab id from browser_list (must be > 0). OMIT to auto-pick the tab with the freshest activity in the buffer." },
             "since_ms": { "type": "integer", "description": "Epoch ms — only return events since this time. Omit to get the most recent ~50 events." }
           }
         }

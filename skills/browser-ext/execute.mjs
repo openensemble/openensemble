@@ -177,21 +177,33 @@ export default async function execute(name, args, userId, agentId) {
   }
 
   if (name === 'browser_observe') {
-    const tabId = args?.tabId != null ? Number(args.tabId) : null;
+    // Reject `tabId: 0` — Chrome never assigns it, so the LLM passing
+    // it as a default leads to the buffer lookup missing the real tab
+    // where the user actually clicked.
+    const rawTabId = args?.tabId != null ? Number(args.tabId) : null;
+    const tabId = (Number.isFinite(rawTabId) && rawTabId > 0) ? rawTabId : null;
     const since_ms = args?.since_ms != null ? Number(args.since_ms) : null;
     try {
       const data = await sendCommand(
         userId,
         'get_observations',
-        { ...(Number.isFinite(tabId) ? { tabId } : {}), ...(Number.isFinite(since_ms) ? { since_ms } : {}) },
+        { ...(tabId != null ? { tabId } : {}), ...(Number.isFinite(since_ms) ? { since_ms } : {}) },
         { extId: args?.extId, timeoutMs: 5000 },
       );
       const events = Array.isArray(data?.events) ? data.events : [];
+      const watched = Array.isArray(data?.watchedTabs) ? data.watchedTabs : [];
       if (!data?.watchMode) {
         return `Watch mode is OFF — no observations are being captured. Call browser_watch_mode({on:true}) first to start watching the user demonstrate.`;
       }
       if (!events.length) {
-        return `Watch mode is ON but no events captured yet on tab ${data?.tabId}. Ask the user to do something on the page and I'll see it.`;
+        if (watched.length) {
+          // We have events on OTHER tabs — Chey was looking at the wrong one.
+          const summary = watched
+            .map(w => `tab ${w.tabId} (${w.eventCount} event${w.eventCount === 1 ? '' : 's'})`)
+            .join(', ');
+          return `No events on tab ${data?.tabId ?? '?'} — but watch mode is buffering activity on: ${summary}. Call browser_observe with one of those tabIds, OR omit tabId and I'll auto-pick the tab with the freshest activity.`;
+        }
+        return `Watch mode is ON but no events captured yet — nobody has clicked / typed on any page since watch mode came on. Ask the user to demonstrate something and I'll see it. (Tab being polled: ${data?.tabId ?? 'no active tab found'}.) If you ARE seeing the orange banner on the right page, this means the page might be in an iframe or chrome:// or otherwise unscriptable.`;
       }
       const lines = [`${events.length} observation(s) on tab ${data.tabId} (most recent last):`, ''];
       for (const e of events) {
