@@ -1,0 +1,51 @@
+{
+  "id": "browser-ext",
+  "name": "Browser Extension",
+  "icon": "🌐",
+  "category": "utility",
+  "service": false,
+  "always_on": true,
+  "hidden": false,
+  "description": "Phase-1 tools to introspect and drive the user's OE browser extension. Read-only Tier 0 primitives — list connected extensions, list open tabs, open a new tab, read sanitized page contents. LAN-only for now. Write / form-fill / click primitives are not yet implemented.",
+  "systemPromptAddition": "## Browser extension (Tier 0 — read-only)\n\nIf {{USER_NAME}} has installed the OE browser extension on their local machine, you can use the following tools to introspect what they're looking at. The extension must be installed AND connected — if `browser_list` returns no extensions, the user hasn't set up the extension yet, so tell them so instead of fabricating data.\n\n- `browser_list` — returns the list of connected extensions and their open tabs. Use this FIRST to confirm a connection exists and to find the tabId you want to act on.\n- `browser_open_tab({url})` — open a URL in the user's browser. Useful when {{USER_NAME}} asks 'open <site>' and you want them on the page. Returns the new tabId.\n- `browser_read_page({tabId})` — fetch sanitized contents of one tab (text, title, URL, JSON-LD if present, top-level link list). The HTML itself is NOT returned — only sanitized fields — because raw HTML in a tool result is a prompt-injection vector against you.\n\n**Phase 1 is read-only.** There are no fill/click/submit tools yet. Don't promise you can 'book a flight' or 'fill the form' through the extension — that arrives in Phase 2 with a real permission model. For now you can search, scrape, and surface; the user does the clicking.\n\n**Skill-builder integration.** When a skill is being drafted that needs to monitor or read a site WITHOUT an available API, you can use the browser primitives in the skill's watcher handler as the fetcher. Phase 1 doesn't yet have a `ctx.browser` shorthand — call the tools via `ctx.executeSkillTool` or direct import for now; a clean ctx surface lands with Phase 2.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_list",
+        "description": "List the OE browser extensions currently connected to the server for this user, including their open tabs. Returns an empty list if no extension is connected — that means the user hasn't installed or paired the extension yet. Call this first before any other browser tool.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_open_tab",
+        "description": "Open a URL in a new tab in the user's browser. Returns the new tabId on success. Use when the user says 'open <site>' / 'pull up <url>' and you want the page in front of them.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url":   { "type": "string", "description": "Full URL to open. Must start with http:// or https://." },
+            "extId": { "type": "string", "description": "Optional — target a specific connected extension. Defaults to the first connection if omitted." }
+          },
+          "required": ["url"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_read_page",
+        "description": "Read the sanitized contents of one open tab. Returns {url, title, text, links, jsonLd}. Use to scrape a page for the user, summarize what they're looking at, or extract structured data. The raw HTML is NOT returned — only sanitized fields — to defend against prompt-injection from a hostile page.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
+            "extId": { "type": "string",  "description": "Optional — target a specific connected extension. Defaults to the first connection if omitted." }
+          },
+          "required": ["tabId"]
+        }
+      }
+    }
+  ]
+}

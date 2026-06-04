@@ -63,6 +63,7 @@ const MAX_WS_PER_USER = 20;
 let _wss = null;
 let _nodeWss = null;
 let _termWss = null;
+let _browserExtWss = null;
 
 // Same-origin check for browser-initiated WebSocket upgrades. Browsers send
 // Origin automatically; native clients (mobile apps, node agents, curl) do
@@ -97,6 +98,7 @@ export function initWs(httpServer) {
   _wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
   _nodeWss = initNodeWss();
   _termWss = initTerminalWss();
+  _browserExtWss = initBrowserExtWss();
 
   attachWsUpgrade(httpServer);
 
@@ -126,21 +128,118 @@ export function initWs(httpServer) {
  */
 export function attachWsUpgrade(httpServer) {
   httpServer.on('upgrade', (req, socket, head) => {
-    if (!isSameOriginWs(req)) {
+    const pathname = new URL(req.url, 'http://x').pathname;
+    // Browser extensions and node agents are NOT same-origin (extension
+    // origin is chrome-extension://<id>; node-agent has no Origin). Auth
+    // for both paths happens via the first-message token instead — so we
+    // skip the same-origin gate for those paths only.
+    const isExternalClientPath =
+      pathname === '/ws/nodes' ||
+      pathname === '/ws/nodes/terminal' ||
+      pathname === '/ws/browser-ext';
+    if (!isExternalClientPath && !isSameOriginWs(req)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }
-    const pathname = new URL(req.url, 'http://x').pathname;
     if (pathname === '/ws/nodes') {
       _nodeWss.handleUpgrade(req, socket, head, ws => _nodeWss.emit('connection', ws, req));
     } else if (pathname === '/ws/nodes/terminal') {
       _termWss.handleUpgrade(req, socket, head, ws => _termWss.emit('connection', ws, req));
+    } else if (pathname === '/ws/browser-ext') {
+      _browserExtWss.handleUpgrade(req, socket, head, ws => _browserExtWss.emit('connection', ws, req));
     } else {
       _wss.handleUpgrade(req, socket, head, ws => _wss.emit('connection', ws, req));
     }
   });
 }
+
+// Browser extension WS lifecycle. Auth happens via first-message token —
+// the extension stores the user's OE auth token at setup time and sends it
+// as the first frame. Subsequent frames are bus messages (register, result,
+// tabs_update, ping). See lib/browser-bus.mjs.
+function initBrowserExtWss() {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
+  wss.on('connection', async (ws, req) => {
+    ws._alive = true;
+    ws._authenticated = false;
+    ws._extId = null;
+    ws.on('pong', () => { ws._alive = true; });
+
+    // Lazy imports — browser-bus + getSessionMeta are not needed unless an
+    // extension actually connects.
+    const { registerBrowser, dropBrowser, handleResult, updateTabs } = await import('./lib/browser-bus.mjs');
+
+    ws.on('message', async (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw); } catch { return; }
+      if (!msg || typeof msg !== 'object') return;
+
+      // First message MUST be auth. Reject anything else until authed.
+      if (!ws._authenticated) {
+        if (msg.type !== 'auth' || typeof msg.token !== 'string') {
+          try { ws.send(JSON.stringify({ type: 'error', message: 'first message must be {type:"auth", token}' })); } catch {}
+          ws.close(4001, 'auth required');
+          return;
+        }
+        const meta = getSessionMeta(msg.token);
+        if (!meta?.userId) {
+          try { ws.send(JSON.stringify({ type: 'error', message: 'invalid token' })); } catch {}
+          ws.close(4002, 'invalid token');
+          return;
+        }
+        ws._authenticated = true;
+        ws._userId = meta.userId;
+        try {
+          const extId = registerBrowser(ws, {
+            userId: meta.userId,
+            name: msg.name,
+            version: msg.version,
+            tabs: msg.tabs,
+          });
+          ws.send(JSON.stringify({ type: 'auth_ok', extId, userId: meta.userId }));
+        } catch (e) {
+          try { ws.send(JSON.stringify({ type: 'error', message: String(e?.message || e) })); } catch {}
+          ws.close(4003, 'register failed');
+        }
+        return;
+      }
+
+      if (msg.type === 'result') {
+        handleResult(msg);
+        return;
+      }
+      if (msg.type === 'tabs_update') {
+        updateTabs(ws, msg.tabs);
+        return;
+      }
+      if (msg.type === 'ping') {
+        try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch {}
+        return;
+      }
+      // Unknown frame — log + drop.
+      log.warn('browser-ext', 'unknown frame type', { type: msg.type, userId: ws._userId });
+    });
+
+    ws.on('close', () => { dropBrowser(ws); });
+    ws.on('error', () => { dropBrowser(ws); });
+  });
+
+  // Heartbeat to keep mobile / suspended browsers responsive. Same cadence
+  // as the main WS heartbeat — terminate after one missed pong cycle.
+  const hb = setInterval(() => {
+    for (const c of wss.clients) {
+      if (c._alive === false) { c.terminate(); continue; }
+      c._alive = false;
+      try { c.ping(); } catch {}
+    }
+  }, WS_PING_INTERVAL);
+  wss.on('close', () => clearInterval(hb));
+
+  return wss;
+}
+
+export function getBrowserExtClientCount() { return _browserExtWss?.clients?.size ?? 0; }
 
 function onConnection(ws, req) {
   // Auth precedence:

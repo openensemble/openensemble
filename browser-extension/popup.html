@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OE Bridge</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; width: 320px; padding: 12px; font-size: 13px; color: #222; background: #f8f9fa; }
+    h1 { font-size: 14px; margin: 0 0 8px 0; }
+    .status { padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; }
+    .status.ok    { background: #d4f4dd; color: #1a6c2f; }
+    .status.bad   { background: #fbe2e2; color: #8a2424; }
+    .status.idle  { background: #e4e7ec; color: #555; }
+    label { display: block; margin: 8px 0 4px 0; font-weight: 600; }
+    input { width: 100%; padding: 6px 8px; box-sizing: border-box; border: 1px solid #c0c4cc; border-radius: 4px; font-family: monospace; font-size: 12px; }
+    .row { display: flex; gap: 6px; margin-top: 10px; }
+    button { flex: 1; padding: 8px; border: 1px solid #c0c4cc; background: #fff; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    button:hover { filter: brightness(0.95); }
+    .meta { font-size: 11px; color: #666; margin-top: 6px; font-family: monospace; word-break: break-all; }
+    details { margin-top: 10px; font-size: 11px; color: #666; }
+    details summary { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>🌐 OpenEnsemble Bridge</h1>
+
+  <div id="status" class="status idle">…</div>
+
+  <label for="serverUrl">OE server URL</label>
+  <input id="serverUrl" placeholder="http://localhost:3737" />
+
+  <label for="token">Auth token</label>
+  <input id="token" type="password" placeholder="paste your OE auth token" />
+
+  <label for="name">Browser name (optional)</label>
+  <input id="name" placeholder="my laptop chrome" />
+
+  <div class="row">
+    <button id="save" class="primary">Save &amp; connect</button>
+    <button id="reconnect">Reconnect</button>
+  </div>
+
+  <details>
+    <summary>How to get the token</summary>
+    Open OE in another tab → Settings → Browser Bridge → copy the token. Or, on the OE machine, run:
+    <pre style="margin-top:4px;">curl http://localhost:3737/api/browser/setup-token --cookie-jar /tmp/oe.cookies</pre>
+    (logged-in browser session needed)
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>
