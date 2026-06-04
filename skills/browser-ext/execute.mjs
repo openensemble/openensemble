@@ -12,7 +12,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import { listBrowsers, sendCommand } from '../../lib/browser-bus.mjs';
-import { getUserFilesDir, userSiteNotesDir, userSiteNotesPath } from '../../lib/paths.mjs';
+import { getUserFilesDir, userSiteNotesDir, userSiteNotesPath, userSharedSiteNotesPath } from '../../lib/paths.mjs';
 
 // Pull the registrable domain out of a URL — strips scheme, www., port,
 // path. Used by browser_screenshot / browser_read_page to find site
@@ -33,6 +33,38 @@ function _readNotes(userId, domain) {
     if (!existsSync(p)) return null;
     return readFileSync(p, 'utf8');
   } catch { return null; }
+}
+
+// Cross-cutting notes — patterns the user has shared across every site
+// (general web-flow knowledge, user-wide preferences). Prepended to the
+// per-domain notes so even unfamiliar domains arrive with priors.
+function _readSharedNotes(userId) {
+  try {
+    const p = userSharedSiteNotesPath(userId);
+    if (!existsSync(p)) return null;
+    return readFileSync(p, 'utf8');
+  } catch { return null; }
+}
+
+function _composeNotesBlock(userId, domain) {
+  const shared = _readSharedNotes(userId);
+  const perDomain = _readNotes(userId, domain);
+  if (!shared && !perDomain && !domain) return '';
+  const parts = [];
+  if (shared) {
+    parts.push(`## Your general patterns (apply to every site)`, shared.trim(), '');
+  }
+  if (perDomain) {
+    parts.push(`## What you know about ${domain}`,
+      'These are your own notes from prior visits / teaching sessions. Use them as priors — but trust the live page when reality differs, and update via browser_site_notes_write if you learn something new.',
+      '',
+      perDomain.trim(),
+      '');
+  } else if (domain) {
+    parts.push(`*No site notes yet for ${domain}. After you finish this task, consider writing some via browser_site_notes_write — your future self will thank you.${shared ? ' Your general patterns above still apply.' : ''}*`, '');
+  }
+  parts.push('---', '');
+  return parts.join('\n');
 }
 
 function _humanList(browsers) {
@@ -118,17 +150,11 @@ export default async function execute(name, args, userId, agentId) {
       const fpath = path.join(outDir, fname);
       writeFileSync(fpath, Buffer.from(png, 'base64'));
       const sizeKb = Math.round(png.length * 0.75 / 1024);
-      // Auto-inject site notes for the current domain. Every screenshot
-      // is also an opportunity to remind Sydney what she's learned
-      // about this site. If there are no notes yet, the result just
-      // omits that section — no scary prompts to author them.
+      // Auto-inject shared + per-domain notes. Shared notes always
+      // prepend so even unfamiliar domains arrive with priors (general
+      // web patterns, user-wide preferences). Per-domain comes next.
       const domain = _domainOf(data.tabUrl);
-      const notes = _readNotes(userId, domain);
-      const notesBlock = notes
-        ? `## What you know about ${domain}\nThese are your own notes from prior visits / teaching sessions. Use them as priors — but trust the screenshot when reality differs, and update the notes via browser_site_notes_write after you learn something new.\n\n${notes}\n\n---\n\n`
-        : domain
-          ? `*No site notes yet for ${domain}. After you finish this task, consider writing some via browser_site_notes_write — your future self (and other turns) will thank you.*\n\n`
-          : '';
+      const notesBlock = _composeNotesBlock(userId, domain);
       return {
         text: `${notesBlock}Screenshot saved (${sizeKb} KB, ${data.width}×${data.height}) at:\n  ${fpath}\n\nTab: ${data.tabTitle || '(no title)'} — ${data.tabUrl || ''}\n\nThe viewport coordinate space is 0,0 (top-left) to ${data.width},${data.height} (bottom-right). Use browser_click_xy with coordinates in that space. The screenshot itself is attached as a follow-up image — look at it to decide which (x,y) to click next.`,
         _images: [{ mediaType: 'image/png', base64: png }],
@@ -142,14 +168,18 @@ export default async function execute(name, args, userId, agentId) {
   // website works. Markdown free-form, NOT step-by-step recipes.
   if (name === 'browser_site_notes_read') {
     let domain = args?.domain ? String(args.domain).trim() : null;
-    // If no domain passed, default to the active tab. listBrowsers gives
-    // us the currently-tracked tab list — find the one marked active.
+    if (domain === '_shared' || domain === '*') {
+      const shared = _readSharedNotes(userId);
+      return shared
+        ? `# Your general / cross-site patterns\n\n${shared}`
+        : `No shared notes yet. Use browser_site_notes_write with domain="_shared" to set cross-cutting patterns (user preferences that apply to every site, general web flows).`;
+    }
     if (!domain) {
       const list = listBrowsers(userId);
       const activeTab = list?.[0]?.tabs?.find(t => t.active);
       domain = _domainOf(activeTab?.url);
     }
-    if (!domain) return 'No domain specified, and no active tab to infer from. Pass `domain: "<example.com>"`.';
+    if (!domain) return 'No domain specified, and no active tab to infer from. Pass `domain: "<example.com>"` (or `"_shared"` for the cross-cutting file).';
     const notes = _readNotes(userId, domain);
     if (!notes) return `No site notes for ${domain} yet. Use browser_site_notes_write to start building them.`;
     return `# Site notes for ${domain}\n\n${notes}`;
@@ -160,14 +190,18 @@ export default async function execute(name, args, userId, agentId) {
     const content = typeof args?.content === 'string' ? args.content : '';
     const mode = args?.mode === 'append' ? 'append' : 'replace';
     if (!content.trim()) return 'content is required (free-form markdown).';
-    if (!domain) {
-      const list = listBrowsers(userId);
-      const activeTab = list?.[0]?.tabs?.find(t => t.active);
-      domain = _domainOf(activeTab?.url);
+    if (domain !== '_shared' && domain !== '*') {
+      if (!domain) {
+        const list = listBrowsers(userId);
+        const activeTab = list?.[0]?.tabs?.find(t => t.active);
+        domain = _domainOf(activeTab?.url);
+      }
+      if (!domain) return 'No domain specified, and no active tab to infer from.';
     }
-    if (!domain) return 'No domain specified, and no active tab to infer from.';
     try {
-      const p = userSiteNotesPath(userId, domain);
+      const p = (domain === '_shared' || domain === '*')
+        ? userSharedSiteNotesPath(userId)
+        : userSiteNotesPath(userId, domain);
       mkdirSync(userSiteNotesDir(userId), { recursive: true });
       if (mode === 'append' && existsSync(p)) {
         const existing = readFileSync(p, 'utf8').replace(/\n+$/, '');
@@ -177,9 +211,10 @@ export default async function execute(name, args, userId, agentId) {
         writeFileSync(p, content.trim() + '\n');
       }
       const size = statSync(p).size;
-      return `${mode === 'append' ? 'Appended to' : 'Wrote'} site notes for ${domain} (${size} bytes total).`;
+      const label = (domain === '_shared' || domain === '*') ? 'shared / cross-site notes' : `site notes for ${domain}`;
+      return `${mode === 'append' ? 'Appended to' : 'Wrote'} ${label} (${size} bytes total).`;
     } catch (e) {
-      return `Failed to write site notes: ${e?.message || String(e)}`;
+      return `Failed to write notes: ${e?.message || String(e)}`;
     }
   }
 
@@ -188,15 +223,32 @@ export default async function execute(name, args, userId, agentId) {
     if (!existsSync(dir)) return 'No site notes yet.';
     const files = readdirSync(dir).filter(f => f.endsWith('.md'));
     if (!files.length) return 'No site notes yet.';
-    const lines = ['Sites you have notes for:'];
-    for (const f of files) {
-      const domain = f.replace(/\.md$/, '');
-      const full = path.join(dir, f);
+    const lines = [];
+    // Shared notes first if present, with a special label.
+    const sharedFile = files.find(f => f === '_shared.md');
+    const perDomainFiles = files.filter(f => f !== '_shared.md');
+    if (sharedFile) {
+      const full = path.join(dir, sharedFile);
       try {
         const stat = statSync(full);
         const txt = readFileSync(full, 'utf8').slice(0, 200).replace(/\s+/g, ' ').trim();
-        lines.push(`- **${domain}** — ${stat.size} bytes, updated ${new Date(stat.mtimeMs).toLocaleDateString()}: "${txt.slice(0, 120)}${txt.length > 120 ? '…' : ''}"`);
-      } catch { /* unreadable file — skip */ }
+        lines.push(`**Shared / cross-site** — ${stat.size} bytes, updated ${new Date(stat.mtimeMs).toLocaleDateString()}: "${txt.slice(0, 120)}${txt.length > 120 ? '…' : ''}"`);
+        lines.push('');
+      } catch { /* unreadable — skip */ }
+    }
+    if (perDomainFiles.length) {
+      lines.push('Sites you have notes for:');
+      for (const f of perDomainFiles) {
+        const domain = f.replace(/\.md$/, '');
+        const full = path.join(dir, f);
+        try {
+          const stat = statSync(full);
+          const txt = readFileSync(full, 'utf8').slice(0, 200).replace(/\s+/g, ' ').trim();
+          lines.push(`- **${domain}** — ${stat.size} bytes, updated ${new Date(stat.mtimeMs).toLocaleDateString()}: "${txt.slice(0, 120)}${txt.length > 120 ? '…' : ''}"`);
+        } catch { /* unreadable — skip */ }
+      }
+    } else if (!sharedFile) {
+      lines.push('No site notes yet.');
     }
     return lines.join('\n');
   }
@@ -269,17 +321,9 @@ export default async function execute(name, args, userId, agentId) {
       const links = Array.isArray(data?.links) ? data.links.slice(0, 30) : [];
       const jsonLd = Array.isArray(data?.jsonLd) ? data.jsonLd.slice(0, 5) : [];
       const domain = _domainOf(data?.url);
-      const notes = _readNotes(userId, domain);
+      const notesBlock = _composeNotesBlock(userId, domain);
       const out = [];
-      if (notes) {
-        out.push(`## What you know about ${domain}`,
-          'These are your own notes from prior visits / teaching sessions. Use them as priors — but trust the page when reality differs, and update via browser_site_notes_write if you learn something new.',
-          '',
-          notes,
-          '',
-          '---',
-          '');
-      }
+      if (notesBlock) out.push(notesBlock);
       out.push(
         `**${data?.title || '(no title)'}**`,
         `URL: ${data?.url}`,
