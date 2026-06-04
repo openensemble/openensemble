@@ -10,6 +10,14 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-banner.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "OpenEnsemble Bridge"

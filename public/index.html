@@ -724,6 +724,7 @@
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;profile&quot;]" id="stab-profile">Profile</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;system&quot;]"  id="stab-system" style="display:none">System</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;mcp&quot;]"      id="stab-mcp">MCP</button>
+        <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;browser&quot;]" id="stab-browser">Browser</button>
         <button class="stab-btn"        data-action="switchSettingsTab" data-args="[&quot;backup&quot;]" id="stab-backup" style="display:none">Backup</button>
       </div>
       <div class="desk-drawer-body">
@@ -1349,6 +1350,14 @@
         <div class="stab-panel" id="stab-panel-mcp">
           <div style="font-size:11px;color:var(--muted);margin-bottom:16px">Register Model Context Protocol servers and assign them to your agents. Each server runs as a subprocess on this host with the env vars you provide (encrypted at rest); the tools it exposes get merged into the agents you assign. Adult accounts only.</div>
           <div id="mcpServersBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
+        </div>
+
+        <!-- ── Browser Bridge tab ── -->
+        <div class="stab-panel" id="stab-panel-browser">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+            The OpenEnsemble Bridge browser extension lets agents see your open tabs, open URLs, control media playback, navigate (back / forward / reload / close tabs), and use your browser as a fetcher for sites without APIs. LAN-only — the extension talks only to your OE server.
+          </div>
+          <div id="browserBridgeBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
         </div>
 
         <!-- ── Backup & Restore tab (admin/owner only) ── -->

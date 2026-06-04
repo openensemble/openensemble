@@ -63,6 +63,91 @@
     {
       "type": "function",
       "function": {
+        "name": "browser_close_tab",
+        "description": "Close one tab in the user's browser. Use when the user says 'close that tab', 'close <site>', 'close my Gmail tab', etc. Tab-level operation — equivalent to Ctrl+W; no per-site permission needed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          },
+          "required": ["tabId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_focus_tab",
+        "description": "Bring one tab to the front (make it the active tab in its window AND focus that window). Use when the user says 'switch to <site>', 'go to my Gmail tab', 'show me that tab', etc.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          },
+          "required": ["tabId"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_back",
+        "description": "Navigate one step back in a tab's history. Equivalent to Alt+Left. Use when the user says 'go back', 'previous page'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id. Defaults to the active tab if omitted." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_forward",
+        "description": "Navigate one step forward in a tab's history. Equivalent to Alt+Right.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id. Defaults to the active tab if omitted." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_reload",
+        "description": "Reload one tab. Equivalent to F5 / Ctrl+R. Use when the user says 'refresh this page', 'reload that tab'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tabId": { "type": "integer", "description": "Tab id. Defaults to the active tab if omitted." },
+            "extId": { "type": "string",  "description": "Optional connected extension target." }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "browser_focus_window",
+        "description": "Bring the browser window itself to the front of the OS (Alt-Tab / Cmd-Tab equivalent). Pair with browser_open_tab when the user wants to actually look at the new tab — without this the tab opens in a window that may be behind other apps.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "extId": { "type": "string", "description": "Optional connected extension target." }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
         "name": "browser_media_control",
         "description": "Control media playback in the user's browser — skip to next track, go back, or play/pause — on whichever tab is currently playing. Works on YouTube, YouTube Music, Spotify Web, SoundCloud, and any site that registers Media Session handlers. Use this when the user says 'skip', 'next', 'previous', 'pause the music', 'play it', etc. — DON'T tell them you can't control their browser, you CAN do this exact thing. Bounded to three actions for safety (no per-site permission model needed — the action surface is too small to abuse).",
         "parameters": {

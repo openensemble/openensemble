@@ -1086,10 +1086,35 @@ function _onFireForDeliver(deliver, record) {
 }
 
 function handlerHelpers(record) {
+  // ctx.browser shorthand for watcher handlers — same primitives the
+  // skill-side ctx.browser exposes, bound to record.userId. Lets a
+  // collection-watcher handler use the user's connected browser as its
+  // fetcher (Best Buy stock pages, sites without RSS / public APIs, etc.).
+  // Lazy-imported so watchers that don't touch the browser pay nothing.
+  let _browserCache = null;
+  async function getBrowser() {
+    if (_browserCache) return _browserCache;
+    const { buildBrowserHelpers } = await import('../lib/browser-helper.mjs');
+    _browserCache = buildBrowserHelpers({ userId: record.userId, agentId: record.agentId });
+    return _browserCache;
+  }
+  const browser = {
+    list:         (...a) => getBrowser().then(b => b.list(...a)),
+    openTab:      (...a) => getBrowser().then(b => b.openTab(...a)),
+    readPage:     (...a) => getBrowser().then(b => b.readPage(...a)),
+    mediaControl: (...a) => getBrowser().then(b => b.mediaControl(...a)),
+    closeTab:     (...a) => getBrowser().then(b => b.closeTab(...a)),
+    focusTab:     (...a) => getBrowser().then(b => b.focusTab(...a)),
+    back:         (...a) => getBrowser().then(b => b.back(...a)),
+    forward:      (...a) => getBrowser().then(b => b.forward(...a)),
+    reload:       (...a) => getBrowser().then(b => b.reload(...a)),
+    focusWindow:  (...a) => getBrowser().then(b => b.focusWindow(...a)),
+  };
   return {
     userId: record.userId,
     agentId: record.agentId,
     watcherId: record.id,
+    browser,
     showImage: async (img) => _showImageFn?.(record.userId, { ...img, agent: record.agentId }),
     showVideo: async (vid) => _showVideoFn?.(record.userId, { ...vid, agent: record.agentId }),
     postStatus: (text) => {

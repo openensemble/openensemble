@@ -175,12 +175,110 @@ async function mediaControl(action) {
   return result || { tabUrl: tab.url, method: 'unknown' };
 }
 
+// Resolve an effective tabId — explicit id if passed, otherwise the active
+// tab of the current focused window. Used by the nav primitives so the LLM
+// doesn't have to enumerate to get a "use the one in front" call.
+async function resolveTabId(maybeTabId) {
+  if (Number.isFinite(Number(maybeTabId))) return Number(maybeTabId);
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!active?.id) throw new Error('no active tab to act on');
+  return active.id;
+}
+
+async function closeTab(tabId) {
+  const id = await resolveTabId(tabId);
+  const tab = await chrome.tabs.get(id).catch(() => null);
+  await chrome.tabs.remove(id);
+  return { tabId: id, url: tab?.url, title: tab?.title };
+}
+
+async function focusTab(tabId) {
+  const id = await resolveTabId(tabId);
+  const tab = await chrome.tabs.update(id, { active: true });
+  if (tab?.windowId != null) {
+    try { await chrome.windows.update(tab.windowId, { focused: true }); } catch {}
+  }
+  return { tabId: id, url: tab?.url, title: tab?.title, windowId: tab?.windowId };
+}
+
+async function tabBack(tabId) {
+  const id = await resolveTabId(tabId);
+  await chrome.tabs.goBack(id);
+  const tab = await chrome.tabs.get(id).catch(() => null);
+  return { tabId: id, url: tab?.url };
+}
+
+async function tabForward(tabId) {
+  const id = await resolveTabId(tabId);
+  await chrome.tabs.goForward(id);
+  const tab = await chrome.tabs.get(id).catch(() => null);
+  return { tabId: id, url: tab?.url };
+}
+
+async function tabReload(tabId) {
+  const id = await resolveTabId(tabId);
+  await chrome.tabs.reload(id);
+  const tab = await chrome.tabs.get(id).catch(() => null);
+  return { tabId: id, url: tab?.url };
+}
+
+async function focusWindow() {
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (active?.windowId != null) {
+    try { await chrome.windows.update(active.windowId, { focused: true, drawAttention: true }); } catch {}
+    return { windowId: active.windowId, focusedTab: active.id };
+  }
+  // Fallback: grab any window and focus it.
+  const wins = await chrome.windows.getAll();
+  const w = wins[0];
+  if (w?.id != null) {
+    try { await chrome.windows.update(w.id, { focused: true, drawAttention: true }); } catch {}
+    return { windowId: w.id };
+  }
+  return { windowId: null };
+}
+
+// Actions that touch a specific tab — send a banner-show event to that
+// tab's content script so the user sees what's happening. list_tabs and
+// focus_window are not user-facing per-tab work, so they skip the banner.
+const TAB_TOUCHING_ACTIONS = new Set([
+  'read_page', 'media_control', 'back', 'forward', 'reload', 'close_tab', 'focus_tab',
+]);
+
+async function fireActivityBanner(action, tabId) {
+  if (!tabId || !TAB_TOUCHING_ACTIONS.has(action)) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: 'oe_activity_start', action });
+  } catch { /* tab might be a chrome:// page with no content script; ignore */ }
+}
+
 async function dispatch(action, args) {
+  // Resolve effective tabId for actions that target one — we want to fire
+  // the banner BEFORE the action lands, so the user sees the indicator
+  // even if the action completes instantly (close_tab makes the tab go
+  // away; the banner still flashes on its window or shows on the next
+  // active tab).
+  let effectiveTabId = null;
+  if (action === 'read_page' && args?.tabId != null)        effectiveTabId = Number(args.tabId);
+  else if (action === 'close_tab' || action === 'focus_tab') effectiveTabId = await resolveTabId(args?.tabId).catch(() => null);
+  else if (action === 'back' || action === 'forward' || action === 'reload') effectiveTabId = await resolveTabId(args?.tabId).catch(() => null);
+  else if (action === 'media_control') {
+    const t = await findMediaTab().catch(() => null);
+    effectiveTabId = t?.id ?? null;
+  }
+  if (effectiveTabId) fireActivityBanner(action, effectiveTabId);
+
   switch (action) {
     case 'list_tabs':     return await listTabsSnapshot();
     case 'open_tab':      return await openTab(String(args?.url || ''));
     case 'read_page':     return await readPage(Number(args?.tabId));
     case 'media_control': return await mediaControl(String(args?.action || ''));
+    case 'close_tab':     return await closeTab(args?.tabId);
+    case 'focus_tab':     return await focusTab(args?.tabId);
+    case 'back':          return await tabBack(args?.tabId);
+    case 'forward':       return await tabForward(args?.tabId);
+    case 'reload':        return await tabReload(args?.tabId);
+    case 'focus_window':  return await focusWindow();
     default: throw new Error(`unknown action "${action}"`);
   }
 }

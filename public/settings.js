@@ -775,7 +775,80 @@ function switchSettingsTab(name) {
     if (typeof loadTailscaleStatus === 'function') loadTailscaleStatus();
   }
   if (name === 'mcp' && typeof loadMcpServers === 'function') loadMcpServers();
+  if (name === 'browser' && typeof loadBrowserBridge === 'function') loadBrowserBridge();
 }
+
+// ── Browser Bridge tab ───────────────────────────────────────────────────────
+let _browserBridgePollTimer = null;
+async function loadBrowserBridge() {
+  const body = document.getElementById('browserBridgeBody');
+  if (!body) return;
+  try {
+    const r = await fetch('/api/browser/status', { credentials: 'include', cache: 'no-store' });
+    if (!r.ok) {
+      body.innerHTML = `<div style="font-size:12px;color:var(--muted)">Couldn't fetch status (HTTP ${r.status}).</div>`;
+      return;
+    }
+    const j = await r.json();
+    const list = j.connected || [];
+    if (!list.length) {
+      body.innerHTML = `
+        <div style="font-size:13px;color:var(--muted);margin-bottom:12px">
+          No browser extensions connected.
+        </div>
+        <div style="font-size:12px;color:var(--text);line-height:1.6">
+          Install the <b>OpenEnsemble Bridge</b> extension to let your agents see your tabs, open URLs, control media playback, and use your browser as a fetcher for sites without APIs.
+          <ol style="margin:8px 0 0 18px;padding:0">
+            <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>).</li>
+            <li>Toggle <b>Developer mode</b> on.</li>
+            <li>Click <b>Load unpacked</b> and pick <code>~/.openensemble/browser-extension/</code>.</li>
+            <li>Click the new puzzle-piece icon. It should auto-detect this server and connect.</li>
+          </ol>
+        </div>
+      `;
+      return;
+    }
+    const fmtTime = (ts) => ts ? new Date(ts).toLocaleString() : '?';
+    const rows = list.map(b => {
+      const tabs = (b.tabs || []).slice(0, 25).map(t => {
+        const star = t.active ? '★' : ' ';
+        const safe = (s) => String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+        return `<div style="font-size:11px;color:var(--text);font-family:monospace;padding:2px 0">${star} <span style="color:var(--muted)">[${t.tabId}]</span> ${safe(t.title || '(no title)')}<br><span style="color:var(--muted);margin-left:16px">${safe(t.url)}</span></div>`;
+      }).join('');
+      const overflow = (b.tabs || []).length > 25 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">… ${(b.tabs || []).length - 25} more tab(s)</div>` : '';
+      return `
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div>
+              <div style="font-weight:600;font-size:13px">${b.name || '(unnamed)'}${b.version ? ` <span style="color:var(--muted);font-weight:400;font-size:11px">v${b.version}</span>` : ''}</div>
+              <div style="font-size:11px;color:var(--muted);font-family:monospace;margin-top:2px">extId: ${b.extId}</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px">Connected: ${fmtTime(b.registeredAt)} · ${b.tabCount} tab(s)</div>
+            </div>
+          </div>
+          ${tabs ? `<details><summary style="cursor:pointer;font-size:11px;color:var(--muted)">Open tabs (${b.tabCount})</summary><div style="margin-top:6px;max-height:240px;overflow-y:auto">${tabs}${overflow}</div></details>` : ''}
+        </div>
+      `;
+    }).join('');
+    body.innerHTML = rows;
+  } catch (e) {
+    body.innerHTML = `<div style="font-size:12px;color:var(--red,#e05c5c)">Error: ${e?.message || String(e)}</div>`;
+  }
+}
+
+// When the Browser Bridge tab is active, keep status fresh.
+document.addEventListener('visibilitychange', () => {
+  const panel = document.getElementById('stab-panel-browser');
+  if (!panel?.classList.contains('active')) return;
+  if (document.visibilityState === 'visible') loadBrowserBridge();
+});
+function browserBridgeAutoRefresh() {
+  clearInterval(_browserBridgePollTimer);
+  _browserBridgePollTimer = setInterval(() => {
+    const panel = document.getElementById('stab-panel-browser');
+    if (panel?.classList.contains('active')) loadBrowserBridge();
+  }, 5000);
+}
+browserBridgeAutoRefresh();
 
 // ── Server logs viewer (admin/owner only) ─────────────────────────────────────
 let _logSearchDebounce = null;

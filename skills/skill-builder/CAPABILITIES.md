@@ -213,24 +213,33 @@ depend on the user keeping a browser open). Order of preference per
 the MONITORED-SOURCE PATTERN stays: RSS > public API > JSON-LD >
 browser-extension scrape > full server-side scrape.
 
-**Skill-side scaffold** (Phase 1 — read-only):
+**Skill-side scaffolds** (Phase 1 — read-only):
+
+A kickoff tool (called from a chat turn) uses `ctx.browser`:
 ```
-// in the watcher handler
+// in execute.mjs tool handler
 const tabs = (await ctx.browser.list())[0]?.tabs || [];
 const targetTab = tabs.find(t => t.url.includes('bestbuy.com/site/x'));
-if (!targetTab) {
-  // no tab open — open one
-  const { tabId } = await ctx.browser.openTab('https://www.bestbuy.com/...');
+const tabId = targetTab?.tabId ?? (await ctx.browser.openTab('https://www.bestbuy.com/...')).tabId;
+await new Promise(r => setTimeout(r, 3000));
+const page = await ctx.browser.readPage(tabId);
+```
+
+A watcher handler uses `helpers.browser` (same surface, bound to the
+record's userId — `ctx` isn't available inside a handler tick):
+```
+async [KIND](state, helpers) {
+  const tabs = (await helpers.browser.list())[0]?.tabs || [];
+  const targetTab = tabs.find(t => t.url.includes(state.url));
+  const tabId = targetTab?.tabId ?? (await helpers.browser.openTab(state.url)).tabId;
   await new Promise(r => setTimeout(r, 3000));
-  page = await ctx.browser.readPage(tabId);
-} else {
-  page = await ctx.browser.readPage(targetTab.tabId);
+  const page = await helpers.browser.readPage(tabId);
+  const inStock = /add to cart/i.test(page.text);
+  if (inStock !== state.lastInStock) {
+    await helpers.fire({ message: `Best Buy: ${inStock ? 'IN STOCK' : 'sold out'}` });
+  }
+  return { newState: { ...state, lastInStock: inStock } };
 }
-const inStock = /add to cart/i.test(page.text);
-if (inStock !== state.lastInStock) {
-  await helpers.fire({ message: `Best Buy: ${inStock ? 'IN STOCK' : 'sold out'}` });
-}
-return { newState: { ...state, lastInStock: inStock } };
 ```
 
 ## 11. Scheduled action (cron-style)

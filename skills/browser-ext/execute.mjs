@@ -40,6 +40,42 @@ export default async function execute(name, args, userId, agentId) {
     }
   }
 
+  // Tab-level operations — all bounded to "things the user could press
+  // with a keyboard shortcut" (Ctrl+W, Ctrl+Tab, Alt+Left, F5, etc.).
+  // No per-site permission gate because they don't touch page content.
+  if (name === 'browser_close_tab' || name === 'browser_focus_tab' ||
+      name === 'browser_back' || name === 'browser_forward' ||
+      name === 'browser_reload') {
+    const tabId = args?.tabId != null ? Number(args.tabId) : null;
+    if ((name === 'browser_close_tab' || name === 'browser_focus_tab') && !Number.isFinite(tabId)) {
+      return 'tabId is required.';
+    }
+    const action = name.replace(/^browser_/, '');
+    try {
+      const data = await sendCommand(userId, action, tabId != null ? { tabId } : {}, { extId: args?.extId, timeoutMs: 5000 });
+      const verbs = {
+        close_tab: 'Closed tab',
+        focus_tab: 'Brought tab to the front',
+        back: 'Went back',
+        forward: 'Went forward',
+        reload: 'Reloaded the page',
+      };
+      const url = data?.url ? ` — ${data.url}` : '';
+      return `${verbs[action] || action}${url}.`;
+    } catch (e) {
+      return `Failed (${action}): ${e?.message || String(e)}`;
+    }
+  }
+
+  if (name === 'browser_focus_window') {
+    try {
+      const data = await sendCommand(userId, 'focus_window', {}, { extId: args?.extId, timeoutMs: 5000 });
+      return `Brought the browser window to the front.${data?.windowId ? ` (windowId=${data.windowId})` : ''}`;
+    } catch (e) {
+      return `Failed to focus browser window: ${e?.message || String(e)}`;
+    }
+  }
+
   if (name === 'browser_media_control') {
     const action = String(args?.action || '').trim().toLowerCase();
     if (!['next', 'previous', 'playpause'].includes(action)) {
