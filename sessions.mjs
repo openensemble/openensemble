@@ -143,13 +143,13 @@ export function writeStreamBuffer(agentId, content) {
   if (now - last < FLUSH_INTERVAL) return;
   _lastFlush.set(agentId, now);
   const p = streamBufferPath(agentId);
-  try {
-    const dir = path.dirname(p);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ content, ts: now }));
-  } catch (e) {
-    console.warn('[sessions] Failed to write stream buffer:', e.message);
-  }
+  // Fire-and-forget: the FLUSH_INTERVAL throttle is the only bound. Sync
+  // writeFileSync here blocked the Node event loop on every flush — same
+  // disk-pressure trap that bit the logger. Use fsp + .catch() so the
+  // caller never awaits and the disk write stays out of the hot path.
+  fsp.mkdir(path.dirname(p), { recursive: true })
+    .then(() => fsp.writeFile(p, JSON.stringify({ content, ts: now })))
+    .catch(e => console.warn('[sessions] Failed to write stream buffer:', e.message));
 }
 
 export function clearStreamBuffer(agentId) {
