@@ -71,13 +71,45 @@ function rotate(filepath) {
   }
 }
 
-function writeLine(filepath, line) {
+// Persistent write streams per log file. appendFileSync blocked the Node
+// event loop on every log line — under disk pressure (e.g. concurrent ML
+// training) a burst of log lines could block for seconds, killing keep-
+// alive WS connections and stalling the accept queue. Now we open one
+// append-stream per file and call stream.write(), which buffers in
+// libuv and writes asynchronously. byteCount is tracked in-memory so we
+// avoid a per-line statSync too.
+const _streams = new Map();  // filepath → { stream, byteCount }
+
+function getStream(filepath) {
+  let entry = _streams.get(filepath);
+  if (entry && !entry.stream.destroyed) return entry;
   ensureDir();
+  let initialSize = 0;
+  try { initialSize = fs.statSync(filepath).size; } catch {}
+  const stream = fs.createWriteStream(filepath, { flags: 'a' });
+  // Never let stream errors crash the process.
+  stream.on('error', () => {});
+  entry = { stream, byteCount: initialSize };
+  _streams.set(filepath, entry);
+  return entry;
+}
+
+function writeLine(filepath, line) {
   try {
-    let size = 0;
-    try { size = fs.statSync(filepath).size; } catch {}
-    if (size > 0 && size + line.length > MAX_BYTES) rotate(filepath);
-    fs.appendFileSync(filepath, line);
+    const entry = getStream(filepath);
+    if (entry.byteCount > 0 && entry.byteCount + line.length > MAX_BYTES) {
+      // Close current stream cleanly, do the rename dance, drop the cache
+      // entry so the next write opens a fresh stream against the new file.
+      try { entry.stream.end(); } catch {}
+      _streams.delete(filepath);
+      rotate(filepath);
+      const next = getStream(filepath);
+      next.stream.write(line);
+      next.byteCount = line.length;
+      return;
+    }
+    entry.stream.write(line);
+    entry.byteCount += line.length;
   } catch {
     // Never throw from logger.
   }
