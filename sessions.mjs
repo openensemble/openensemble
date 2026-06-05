@@ -53,10 +53,20 @@ function lmsIdPath(agentId) {
   return path.join(dir, `${safeId(localId)}.lms_id`);
 }
 
-export function loadSession(agentId, limit = MAX_HISTORY) {
+export async function loadSession(agentId, limit = MAX_HISTORY) {
   const p = sessionPath(agentId);
-  if (!fs.existsSync(p)) return [];
-  const lines = fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean);
+  // Async read — sync readFileSync on every chat dispatch / WS connect /
+  // tool-routing decision (8 call sites) was real event-loop pressure
+  // under disk contention. ENOENT → empty history; any other failure
+  // logs but still degrades to empty rather than throwing.
+  let text;
+  try {
+    text = await fsp.readFile(p, 'utf8');
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[sessions] loadSession read failed:', e.message);
+    return [];
+  }
+  const lines = text.trim().split('\n').filter(Boolean);
   const messages = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   return messages.slice(-limit);
 }

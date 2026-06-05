@@ -293,7 +293,7 @@ export async function buildSchedulerNote({ userId, agentId, userText }) {
   let schedulerNote = null;
   if (userText) {
     try {
-      const recentHistory = loadSession(`${userId}_${agentId}`, 6);
+      const recentHistory = await loadSession(`${userId}_${agentId}`, 6);
       const intercept = await interceptScheduling({ userId, agentId, text: userText, history: recentHistory });
       if (intercept.matched) {
         schedulerNote = `<scheduler_result>\n${intercept.outcome}\n</scheduler_result>`;

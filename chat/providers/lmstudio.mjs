@@ -135,7 +135,7 @@ export async function* streamLMStudio(agent, systemPrompt, userText, agentId, si
 // ── LM Studio — OpenAI-compat /v1/chat/completions (used when tools needed) ───
 export async function* streamLMStudioCompat(agent, systemPrompt, userText, agentId, signal, userId = 'default') {
   // Need full history for tool-using requests since compat endpoint is stateless
-  const history = loadSession(agentId).map(({ role, content }) => ({ role, content }));
+  const history = (await loadSession(agentId)).map(({ role, content }) => ({ role, content }));
   const working = [
     { role: 'system', content: systemPrompt },
     ...history,

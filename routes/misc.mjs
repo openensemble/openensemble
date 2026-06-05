@@ -156,7 +156,7 @@ export async function handle(req, res) {
   if (histMatch) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const sessionId = `${authId}_${histMatch[1]}`;
-    const messages = loadSession(sessionId, 60);
+    const messages = await loadSession(sessionId, 60);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(messages));
     return true;

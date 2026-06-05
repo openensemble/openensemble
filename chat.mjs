@@ -414,7 +414,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
   let recallQuery = userText;
   if (userText.length < 50 || NEEDS_CONTEXT_RE.test(userText)) {
-    const recentMsgs = loadSession(agent.id, 4);
+    const recentMsgs = await loadSession(agent.id, 4);
     if (recentMsgs.length) {
       const lastUser = recentMsgs.filter(m => m.role === 'user').slice(-1)[0];
       const lastAsst = recentMsgs.filter(m => m.role === 'assistant').slice(-1)[0];
@@ -561,7 +561,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // it wrote. Same idea for `via:` on router-routed turns — the coordinator
   // needs to know the prior reply came from a specialist, not its own run.
   const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
-  const history = loadSession(agent.id)
+  const history = (await loadSession(agent.id))
     .filter(m => LLM_ROLES.has(m.role))
     .map(({ role, content, name, toolsUsed, toolResults, via, viaName }) => {
       let body = content;

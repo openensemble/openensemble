@@ -222,6 +222,25 @@ function initBrowserExtWss() {
         try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch {}
         return;
       }
+      // Clear the chat session for the Browser Tutor (or coordinator
+      // fallback). Lets the side panel "Clear" button wipe BOTH the local
+      // rendered chat AND the server-side session, so the LLM starts
+      // fresh — important because the Tutor's reasoning otherwise
+      // pattern-matches off the running thread ("still no events
+      // captured") instead of actually re-querying browser_observe.
+      if (msg.type === 'chat_clear_session') {
+        try {
+          const { getRoleAssignments } = await import('./roles.mjs');
+          const tutorAgentId = getRoleAssignments(ws._userId)?.['role_browser_tutor'] || null;
+          const rawAgentId = tutorAgentId || getUserCoordinatorAgentId(ws._userId);
+          const { clearSession } = await import('./sessions.mjs');
+          clearSession(`${ws._userId}_${rawAgentId}`);
+          try { ws.send(JSON.stringify({ type: 'chat_session_cleared', agentId: rawAgentId })); } catch {}
+        } catch (e) {
+          try { ws.send(JSON.stringify({ type: 'error', message: 'session clear failed: ' + (e?.message || String(e)) })); } catch {}
+        }
+        return;
+      }
       // Chat from the extension popup / side panel — routes to the user's
       // **Browser Tutor** if they've assigned the role_browser_tutor
       // role to an agent. Otherwise falls back to the coordinator. The
@@ -313,14 +332,20 @@ function onConnection(ws, req) {
   // Send initial data once authenticated. We log only user id — never the
   // raw request URL, which may contain a legacy ?token= that would otherwise
   // land in logs / ship to log aggregators in plaintext.
-  function sendInitialData() {
+  async function sendInitialData() {
     console.log('[ws] client connected, user:', ws._userId);
     log.info('ws', 'client connected', { userId: ws._userId });
     const userAgents = getAgentsForUser(ws._userId);
     ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire), boot_id: BOOT_ID }));
-    for (const agent of userAgents) {
-      const messages = loadSession(sessionKey(ws._userId, agent.id), 60);
-      const pendingStream = getStreamBuffer(sessionKey(ws._userId, agent.id));
+    // Load every agent's session in parallel — loadSession is async since
+    // the previous commit; the prior serial sync version was 5+ blocking
+    // reads at WS connect time. Parallel async makes total wall time =
+    // the slowest single read, not the sum.
+    const sessionLoads = await Promise.all(userAgents.map(async (agent) => {
+      const key = sessionKey(ws._userId, agent.id);
+      return { agent, messages: await loadSession(key, 60), pendingStream: getStreamBuffer(key) };
+    }));
+    for (const { agent, messages, pendingStream } of sessionLoads) {
       ws.send(JSON.stringify({ type: 'session_loaded', agent: agent.id, messages, pendingStream }));
     }
     // Tell the client which agents are actively streaming and which background tasks are running
@@ -496,7 +521,7 @@ function onConnection(ws, req) {
     if (msg.type === 'load_session') {
       const agentId = msg.agent;
       if (agentId) {
-        const messages = loadSession(sessionKey(ws._userId, agentId), 60);
+        const messages = await loadSession(sessionKey(ws._userId, agentId), 60);
         const pendingStream = getStreamBuffer(sessionKey(ws._userId, agentId));
         ws.send(JSON.stringify({ type: 'session_loaded', agent: agentId, messages, pendingStream }));
       }
