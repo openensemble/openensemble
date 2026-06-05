@@ -154,13 +154,23 @@ export function updateCustomAgent(id, changes) {
   return list[idx];
 }
 
-export function deleteCustomAgent(id) {
+export async function deleteCustomAgent(id) {
   const all = loadCustomAgents();
   const existing = all.find(a => a.id === id);
   if (!existing) return;
   const userId = existing.ownerId ?? 'shared';
   const list = loadUserAgents(userId).filter(a => a.id !== id);
   saveUserAgents(userId, list);
+  // Drop the agent's session JSONL, streaming buffer, LM Studio response-id
+  // file, and the in-memory tracking entries. Without this, a deleted agent
+  // leaves litter on disk forever and Map keys in sessions.mjs never get
+  // evicted — caught while auditing the post-logger-fix hot paths.
+  try {
+    const { deleteSession } = await import('./sessions.mjs');
+    await deleteSession(`${userId}_${id}`);
+  } catch (e) {
+    console.warn('[agents] deleteSession on agent removal failed:', e.message);
+  }
 }
 
 // Update name/emoji for ANY agent (built-in or custom) — built-ins stored in config.json

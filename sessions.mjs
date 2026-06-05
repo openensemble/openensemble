@@ -122,6 +122,17 @@ export function clearSession(agentId) {
   if (fs.existsSync(idp)) fs.unlinkSync(idp);
 }
 
+// Full delete (used when the agent is being permanently removed, not just
+// when the user clears its context). Removes the session JSONL, the
+// .streaming buffer, the LM Studio response-id file, and evicts every
+// in-memory tracking entry so nothing leaks across agent IDs over time.
+export async function deleteSession(agentId) {
+  const paths = [sessionPath(agentId), streamBufferPath(agentId), lmsIdPath(agentId)];
+  await Promise.all(paths.map(p => fsp.rm(p, { force: true }).catch(() => {})));
+  _lineCounts.delete(agentId);
+  _lastFlush.delete(agentId);
+}
+
 // ── LM Studio stateful response ID ───────────────────────────────────────────
 
 export function getLmsResponseId(agentId) {

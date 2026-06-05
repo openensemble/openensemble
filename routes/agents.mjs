@@ -145,7 +145,7 @@ export async function handle(req, res) {
     const ca = loadCustomAgents().find(a => a.id === agentMatch[1]);
     if (!ca) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found or not a custom agent' })); return true; }
     if (ca.ownerId && ca.ownerId !== authId) { res.writeHead(403); res.end(JSON.stringify({ error: 'Not your agent' })); return true; }
-    deleteCustomAgent(agentMatch[1]);
+    await deleteCustomAgent(agentMatch[1]);
     // Cascade-delete the owner's agent aliases. routes/* deletions don't go
     // through tool dispatch, so the framework's manifest cascade_on_tools
     // doesn't fire — call the public helper directly.
