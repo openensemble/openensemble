@@ -505,9 +505,11 @@ function renderDevices() {
   const rows = _devicesList.map(d => {
     const lastSeen = d.last_seen ? fmtTimeAgo(d.last_seen) : 'never';
     const dot = d.online
-      ? '<span title="Connected" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3cc36f;margin-right:6px;vertical-align:middle"></span>'
-      : '<span title="Offline" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted,#888);margin-right:6px;vertical-align:middle"></span>';
-    const status = d.online ? 'connected' : `seen ${escHtml(lastSeen)}`;
+      ? '<span title="Online" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3cc36f;margin-right:6px;vertical-align:middle"></span>'
+      : '<span title="Offline" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e0a030;margin-right:6px;vertical-align:middle"></span>';
+    const status = d.online
+      ? '<span style="color:#3cc36f;font-weight:600">Online</span>'
+      : `<span style="color:#e0a030;font-weight:600">Offline</span> · last seen ${escHtml(lastSeen)}`;
     // Firmware row: current version + an Update button when an upgrade is
     // available and the device is online. _firmwareManifest is the cached
     // /firmware/voice-device/manifest.json fetched on drawer open.
@@ -1016,16 +1018,16 @@ function renderVoiceConfigPanel(roster, deviceCount) {
             <label style="font-size:11px;color:var(--muted)">Avg cutoff</label>
             <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
               <div style="display:flex;gap:6px;align-items:center">
-                <input type="number" class="cdraw-input" min="0.5" max="0.99" step="0.01"
+                <input type="number" class="cdraw-input" min="0" max="0.99" step="0.01"
                   value="${avgCutoffVal}"
                   placeholder="off"
                   data-change-action="setSlotAvgProbability"
                   data-change-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
                   style="padding:4px 6px;font-size:12px;width:80px"
-                  title="Server-side gate on the firmware's rolling-window avg probability. Filters cross-fires that spike one frame then dip (e.g. TTS playback). Leave blank to disable.">
+                  title="Server-side gate on the firmware's rolling-window avg probability. Filters cross-fires that spike one frame then dip (e.g. TTS playback). Set 0 or leave blank to disable (shows as off).">
                 <button class="cdraw-btn" data-action="pushVoiceConfig"
                   style="font-size:11px;padding:3px 8px"
-                  title="Push the saved voice config (wake word, voice, cutoffs) to your paired device(s)">Push</button>
+                  title="Save these settings and push them (wake word, voice, cutoffs) to your paired device(s)">Save &amp; Push</button>
               </div>
               <span style="font-size:10px;color:var(--muted);line-height:1.3">Server-only — drops marginal wakes whose avg dips below this.</span>
             </div>`
@@ -1340,10 +1342,12 @@ window.setSlotWakeword = function (slot, ev) {
   // Re-selecting the same option still fires `change` — skip the PUT (and
   // its OTA push) to avoid pointless flash writes when nothing changed.
   if ((existing.wakewordId ?? null) === next) return;
-  // Switching wake words drops any cutoff override — the new word has its
-  // own manifest default that the UI re-displays automatically.
-  _voiceConfig.slot_assignments[slot] = { ...existing, wakewordId: next, probability_cutoff: null };
+  // Switching wake words drops BOTH the cutoff and avg-cutoff overrides — the
+  // new word has its own manifest default (the UI re-displays cutoff from the
+  // new manifest automatically) and the server-side avg gate goes back to off.
+  _voiceConfig.slot_assignments[slot] = { ...existing, wakewordId: next, probability_cutoff: null, avg_prob_cutoff: null };
   saveVoiceConfig();
+  renderDevices();   // re-render so cutoff/avg inputs redraw with the new word's defaults
 };
 
 // Cutoff input is in-memory only — typing into it shouldn't fire an OTA on
@@ -1370,16 +1374,24 @@ window.pushVoiceConfig = async function () {
     const r = await fetch('/api/voice-config/push', { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
+    // Report against EVERY paired device, not just the ones reached — a device
+    // is "reached" only if it acked a slot; anything else (no socket / ack
+    // timeout) is offline and will sync on its next connect.
     const push = data.push || {};
-    let pushedDeviceCount = 0;
-    const offlineDevices = new Set();
-    for (const [deviceId, pr] of Object.entries(push)) {
-      if (pr.pushedSlots?.length) pushedDeviceCount++;
-      if (pr.offlineSlots?.length) offlineDevices.add(deviceId);
+    const total = Object.keys(push).length;
+    let reached = 0;
+    for (const pr of Object.values(push)) if (pr.ackedSlots?.length) reached++;
+    const offline = total - reached;
+    const dev = (n) => `${n} device${n === 1 ? '' : 's'}`;
+    if (total === 0) {
+      showDeviceToast('Saved — no paired device to push to.', { variant: 'warn' });
+    } else if (offline === 0) {
+      showDeviceToast(`Saved & pushed to ${dev(reached)}.`);
+    } else if (reached > 0) {
+      showDeviceToast(`Saved & pushed to ${dev(reached)}; ${dev(offline)} offline (will sync on connect).`, { variant: 'warn' });
+    } else {
+      showDeviceToast(`Saved — couldn't push: ${total === 1 ? 'device is offline' : `all ${total} devices offline`} (will sync on next connect).`, { variant: 'warn' });
     }
-    if (pushedDeviceCount > 0) showDeviceToast(`Pushed to ${pushedDeviceCount} device${pushedDeviceCount === 1 ? '' : 's'}.`);
-    else if (offlineDevices.size > 0) showDeviceToast('Devices offline — will sync on next connect.', { variant: 'warn' });
-    else showDeviceToast('No paired devices to push to.', { variant: 'warn' });
   } catch (e) {
     showDeviceToast(`Push failed: ${e.message}`, { variant: 'error' });
   }
@@ -1394,10 +1406,14 @@ window.setSlotAvgProbability = function (slot, ev) {
   let next = null;
   if (raw !== '') {
     const f = parseFloat(raw);
+    // 0 (or anything below 0.5 / out of range) means "no gate" → off.
     if (Number.isFinite(f) && f >= 0.5 && f <= 0.99) {
       next = Math.round(f * 100) / 100;
     }
   }
+  // When it resolves to off, blank the field so it shows the "off" placeholder
+  // instead of a stale "0" the user typed.
+  if (next === null) ev.target.value = '';
   if ((existing.avg_prob_cutoff ?? null) === next) return;
   _voiceConfig.slot_assignments[slot] = { ...existing, avg_prob_cutoff: next };
   saveVoiceConfig();
