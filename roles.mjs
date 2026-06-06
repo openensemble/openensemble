@@ -789,7 +789,7 @@ async function _wsHandler() {
 
 // Build the per-call context object passed to skill executors as the 5th arg.
 // Skills that don't accept it (4-param signature) ignore it transparently.
-async function buildCtx(userId, agentId) {
+async function buildCtx(userId, agentId, skillId = null) {
   // Providers pass the scoped `${userId}_${rawAgentId}` here, but the dashboard
   // matches inbound bubbles against the raw agent id. Strip the prefix so
   // ctx.showImage/showVideo land in the right chat thread.
@@ -900,7 +900,14 @@ async function buildCtx(userId, agentId) {
   // populated below from the agentId's owning skill registry lookup if
   // available; for now bind to the agentId as the skill key so logs are at
   // least segregated per agent.
-  ctx.log = buildSkillLogger({ userId, skillId: wsAgentId || 'unknown', agentId: wsAgentId });
+  // skillId is passed in by the dispatcher (executeRoleTool / the generator
+  // at the bottom of this file) and identifies the SKILL that owns the tool
+  // being executed — not the agent calling it. That matters for log routing:
+  // Sydney (coordinator) calling the youtube skill's tool should write
+  // entries to users/<id>/skills/youtube/runtime.log, not sydney/runtime.log.
+  // Falls back to wsAgentId only when buildCtx is reached from a non-skill
+  // path (rare; mostly chat-side direct ctx usage).
+  ctx.log = buildSkillLogger({ userId, skillId: skillId || wsAgentId || 'unknown', agentId: wsAgentId });
 
   // Encrypted credential primitive — wraps lib/credentials.mjs so user skills
   // don't have to know the install-root-relative import depth (four-up from
@@ -942,7 +949,7 @@ export async function executeRoleTool(name, args, userId = 'default', agentId = 
   for (const [key, wrap] of visibleEntries(userId)) {
     if (wrap.manifest.tools?.some(t => t.function?.name === name)) {
       const exec = await getExecutorByKey(key);
-      if (exec) return exec(name, args, userId, agentId, await buildCtx(userId, agentId));
+      if (exec) return exec(name, args, userId, agentId, await buildCtx(userId, agentId, wrap.manifest.id));
       break;
     }
   }
@@ -1128,7 +1135,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     return outText === value.text ? value : { ...value, text: outText };
   };
   try {
-    const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId));
+    const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId, owningSkillId));
 
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
       // ── Streaming path ──────────────────────────────────────────────────
