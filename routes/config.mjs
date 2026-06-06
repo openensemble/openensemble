@@ -18,6 +18,7 @@ import { getVoiceRef } from '../lib/voice-refs.mjs';
 import {
   takeTestMp3,
   takeAmbientStream, registerAmbientResponse, unregisterAmbientResponse,
+  pinAmbientMp3,
 } from './devices.mjs';
 import { ambientFilePath } from '../lib/routines.mjs';
 import { supportsVision } from '../lib/model-capabilities.mjs';
@@ -1324,6 +1325,7 @@ export async function handle(req, res) {
             res.on('close', onResClose);
             res.on('error', onResClose);
             registerAmbientResponse(trimmedText, res, existing.forceKill);
+            pinAmbientMp3(trimmedText);  // cancel the orphan-cleanup TTL — stream is live
             console.log(`[tts] ambient stream RESUMED (warm reattach) marker=${trimmedText}`);
             return true;
           }
@@ -1388,6 +1390,7 @@ export async function handle(req, res) {
           res.on('close', onResClose);
           res.on('error', onResClose);
           registerAmbientResponse(trimmedText, res, forceKill);
+          pinAmbientMp3(trimmedText);  // cancel the orphan-cleanup TTL — stream is live
           console.log(`[tts] ambient stream started (cold) marker=${trimmedText} file=${meta.file} loop=${meta.loop !== false}`);
           return true;
         }

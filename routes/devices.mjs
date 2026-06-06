@@ -61,12 +61,18 @@ export function cacheOneShotMp3(mp3Buf) {
 // Ambient (looped) playback: register a source file + loop flag against a
 // fresh marker. The /api/tts handler matches the marker and spawns ffmpeg
 // with `-stream_loop -1` so the response is ONE continuous MP3 stream with
-// zero silence at seams. Lifecycle is bounded by stopAmbientOnDevice (which
-// drops the entry + closes the in-flight HTTP response) and a 4-hour idle
-// TTL backstop.
+// zero silence at seams. Lifecycle is bounded by:
+//   - explicit stop_ambient (stopAmbientOnDevice → dropAmbientMp3)
+//   - a 4-hour orphan-cleanup TTL for markers that never got picked up
+// The TTL is CANCELLED once an HTTP stream is actually attached via
+// pinAmbientMp3() — an active stream must keep playing forever, the
+// 4h TTL only existed to clean up dead markers registered but never
+// streamed. Without the pin we ended actively-streaming sessions at
+// the 4h mark and the device's HTTP retry would 500 because the
+// marker cache was gone by then.
 const _ambientStreamCache = new Map();        // marker → { userId, file, loop }
 const _ambientByDevice    = new Map();        // deviceId → marker
-const _ambientTimers      = new Map();        // marker → setTimeout handle
+const _ambientTimers      = new Map();        // marker → setTimeout handle (cleared when pinned)
 const _ambientResponses   = new Map();        // marker → in-flight res (so stop can end it)
 const AMBIENT_TTL_MS = 4 * 60 * 60 * 1000;
 
@@ -80,6 +86,16 @@ export function registerAmbientResponse(marker, res, killFn) {
 
 export function unregisterAmbientResponse(marker) {
   _ambientResponses.delete(marker);
+}
+
+// Cancel the orphan-cleanup TTL on a marker once an HTTP stream is attached.
+// Called by routes/config.mjs as soon as it starts (or warm-reattaches to)
+// the ffmpeg pipe. The marker cache survives for the lifetime of the stream;
+// dropAmbientMp3 (explicit stop or device-removal) is the only thing that
+// can clean it up after pinning.
+export function pinAmbientMp3(marker) {
+  const t = _ambientTimers.get(marker);
+  if (t) { clearTimeout(t); _ambientTimers.delete(marker); }
 }
 
 export function cacheAmbientStream(deviceId, meta) {
@@ -488,9 +504,11 @@ export async function handle(req, res) {
   }
 
   // POST /api/devices/ambient-library/:file — upload a raw MP3 to the user's
-  // ambient library. Same 15 MB cap as the existing play-mp3 endpoint; the
-  // route reads bytes inline because the global BODY_LIMIT (512 KB) would
-  // reject any reasonable ambient sound.
+  // ambient library. 40 MB cap (~33 min of audio at 160 kbps); the route
+  // reads bytes inline because the global BODY_LIMIT (512 KB) would reject
+  // any reasonable ambient sound. Exempt from the 25 MiB API_BODY_CAP in
+  // server.mjs because that pre-route gate would otherwise reject anything
+  // > 25 MiB before this handler even runs.
   const libUploadMatch = p.match(/^\/api\/devices\/ambient-library\/([^/]+)$/);
   if (libUploadMatch && req.method === 'POST') {
     const userId = requireAuth(req, res);
@@ -501,7 +519,7 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Invalid filename' }));
       return true;
     }
-    const CAP = 15 * 1024 * 1024;
+    const CAP = 40 * 1024 * 1024;
     let buf;
     try {
       buf = await new Promise((resolve, reject) => {
