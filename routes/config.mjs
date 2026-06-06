@@ -236,6 +236,12 @@ export async function handle(req, res) {
         piperAvailable,
         kittenttsAvailable,
         fasterWhisperAvailable,
+        // Persisted install state — set true at profile-install time. The UI
+        // keys "installed vs pick-a-profile" off THIS (not the live probe), so
+        // a transient probe miss during cold-start/restart (model load takes up
+        // to ~15 s) doesn't wrongly tell the user to reinstall. The probe still
+        // drives the "running now" sub-state.
+        fasterWhisperInstalled: cfg.integrations?.faster_whisper?.installed === true,
         fasterWhisperProfile: cfg.integrations?.faster_whisper?.profile ?? null,
         ffmpegAvailable,
         elevenlabsKeySet: !!cfg.elevenlabsApiKey,
@@ -283,6 +289,9 @@ export async function handle(req, res) {
             return true;
           }
         }
+        // Set inside the modifyConfig closure when sttMode actually flips, so
+        // the systemd side-effect below only runs on a real transition.
+        let fwServiceAction = null; // 'stop' (→ remote) | 'start' (→ local)
         await modifyConfig(cfg => {
           if (body.anthropicApiKey)   cfg.anthropicApiKey   = body.anthropicApiKey;
           if (body.fireworksApiKey)   cfg.fireworksApiKey   = body.fireworksApiKey;
@@ -340,7 +349,17 @@ export async function handle(req, res) {
           if (body.sttApiKey)                      cfg.sttApiKey   = body.sttApiKey;
           if (body.sttApiUrl   !== undefined)      cfg.sttApiUrl   = body.sttApiUrl;
           if (body.sttModel    !== undefined)      cfg.sttModel    = body.sttModel;
-          if (body.sttMode === 'remote' || body.sttMode === 'local') cfg.sttMode = body.sttMode;
+          if (body.sttMode === 'remote' || body.sttMode === 'local') {
+            // Stop the local Faster-Whisper systemd unit when switching to a
+            // remote STT API (it'd otherwise keep holding GPU/VRAM for nothing);
+            // restart it when switching back to local. Only when it's actually
+            // installed — we stop, never uninstall, so the swap back is instant.
+            const prevMode = cfg.sttMode === 'local' ? 'local' : 'remote';
+            if (body.sttMode !== prevMode && cfg.integrations?.faster_whisper?.installed === true) {
+              fwServiceAction = body.sttMode === 'remote' ? 'stop' : 'start';
+            }
+            cfg.sttMode = body.sttMode;
+          }
           if (body.enabledProviders !== undefined) cfg.enabledProviders = { ...(cfg.enabledProviders ?? {}), ...body.enabledProviders };
           if (body.providerFailover !== undefined) cfg.providerFailover = body.providerFailover;
           if (body.clearMicrosoftCreds) { delete cfg.msClientId; delete cfg.msClientSecret; delete cfg.msTenant; }
@@ -350,6 +369,23 @@ export async function handle(req, res) {
             if (body.msTenant !== undefined) cfg.msTenant       = body.msTenant;
           }
         });
+        // Apply the Faster-Whisper service transition AFTER the config save.
+        // `--now` does stop+disable / start+enable in one call, so the choice
+        // also survives reboots (no point auto-starting whisper on boot while
+        // the user is on a remote API). Non-fatal: log on failure; never block
+        // the config save on a systemd hiccup.
+        if (fwServiceAction) {
+          const verb = fwServiceAction === 'stop' ? 'disable' : 'enable';
+          const child = spawn('systemctl', ['--user', verb, '--now', 'faster-whisper.service'], {
+            env: { ...process.env, HOME: os.homedir() },
+            stdio: 'ignore',
+          });
+          child.on('error', (e) => log.warn('config', 'faster-whisper service control failed', { action: fwServiceAction, error: e.message }));
+          child.on('exit', (code) => {
+            if (code === 0) { invalidateVoiceDepsCache(); log.info('config', `faster-whisper ${fwServiceAction === 'stop' ? 'stopped (switched to remote STT)' : 'started (switched to local STT)'}`); }
+            else log.warn('config', 'faster-whisper service control non-zero exit', { action: fwServiceAction, code });
+          });
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }

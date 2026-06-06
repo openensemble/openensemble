@@ -976,11 +976,22 @@ async function loadProviderConfig() {
     const fwProfileSel   = $('providerFwProfile');
     const fwInstallBtn   = $('providerFwInstallBtn');
     if (fwStatus) {
-      window._fwInstalledProfile = cfg.fasterWhisperAvailable ? cfg.fasterWhisperProfile : null;
-      if (cfg.fasterWhisperAvailable) {
+      // Install state comes from the PERSISTED flag (fasterWhisperInstalled),
+      // not the live probe — so a transient probe miss during cold-start /
+      // restart (model load takes up to ~15 s) doesn't claim "not installed"
+      // and prompt a needless reinstall. The probe (fasterWhisperAvailable)
+      // only distinguishes "running now" from "installed but not responding".
+      const fwInstalled = cfg.fasterWhisperInstalled || cfg.fasterWhisperAvailable;
+      window._fwInstalledProfile = fwInstalled ? cfg.fasterWhisperProfile : null;
+      if (fwInstalled) {
         const profile = cfg.fasterWhisperProfile || '?';
-        fwStatus.textContent = `Faster-Whisper is running on 127.0.0.1:5154 (${profile} profile). Pick a different profile below to switch.`;
-        fwStatus.style.color = 'var(--success, #4caf50)';
+        if (cfg.fasterWhisperAvailable) {
+          fwStatus.textContent = `Faster-Whisper is running on 127.0.0.1:5154 (${profile} profile). Pick a different profile below to switch.`;
+          fwStatus.style.color = 'var(--success, #4caf50)';
+        } else {
+          fwStatus.textContent = `Faster-Whisper is installed (${profile} profile) but not responding yet — it may still be loading the model. Reload in a moment.`;
+          fwStatus.style.color = 'var(--warning, #e0a030)';
+        }
         if (fwPicker) fwPicker.style.display = 'flex';
         if (fwUninstallBtn) fwUninstallBtn.style.display = '';
         // Pre-select the currently-running profile so the user sees its info
