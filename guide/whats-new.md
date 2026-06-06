@@ -6,6 +6,16 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-06-06
+
+**Voice device settings: edit freely, push when ready**
+In Settings → Devices, changing a voice device's wake word, voice, cutoff, or avg cutoff used to update your device over-the-air on *every* change. Now those edits just **save** — your device only receives them when you click the new **Push** button (now next to the **Avg cutoff** field). If you were used to changes taking effect on the device automatically, this is the difference: tweak everything you want, then Push once. It also stops the device's wake word from reloading on every keystroke, which could leave it on a stale model until a restart.
+
+**ElevenLabs speech-pace slider**
+ElevenLabs' fast default cadence — especially the low-latency Turbo model — could make spoken replies sound rushed or sped-up. There's now a **Speech pace** slider under Settings → Providers → TTS that appears when ElevenLabs is selected: slide it down (toward 0.7) to slow speech to a natural pace, or up toward 1.2 to speed it up. It defaults to 0.85, which fixes the rushed delivery out of the box. (Piper already had its own pace control; now both providers do.)
+
+---
+
 ## 2026-06-03
 
 **Skill proposer stops false-firing on shared utility tools**

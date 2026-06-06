@@ -862,7 +862,7 @@ function renderAmbientLibraryPanel() {
         <button class="cdraw-btn cdraw-btn-primary" data-action="uploadAmbient" style="font-size:11px;padding:4px 10px">+ Upload sound</button>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.45">
-        MP3s available to the <em>play ambient</em> action. Click <strong>+ Upload sound</strong> to add one (max 15&nbsp;MB).
+        MP3s available to the <em>play ambient</em> action. Click <strong>+ Upload sound</strong> to add one (max 40&nbsp;MB).
       </div>
       ${rows}
       ${dragHint}
@@ -1005,29 +1005,28 @@ function renderVoiceConfigPanel(roster, deviceCount) {
       ? `
             <label style="font-size:11px;color:var(--muted)">Cutoff</label>
             <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
-              <div style="display:flex;gap:6px;align-items:center">
-                <input type="number" class="cdraw-input" min="0.5" max="0.99" step="0.01"
-                  value="${effectiveCutoff}"
-                  data-change-action="setSlotProbability"
-                  data-change-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
-                  style="padding:4px 6px;font-size:12px;width:80px"
-                  title="Wake-word probability cutoff (0.5–0.99). Lower = fires more easily.">
-                <button class="cdraw-btn" data-action="pushSlotProbability"
-                  data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
-                  style="font-size:11px;padding:3px 8px"
-                  title="Push this cutoff to the device's SPIFFS">Push</button>
-              </div>
+              <input type="number" class="cdraw-input" min="0.5" max="0.99" step="0.01"
+                value="${effectiveCutoff}"
+                data-change-action="setSlotProbability"
+                data-change-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
+                style="padding:4px 6px;font-size:12px;width:80px"
+                title="Wake-word probability cutoff (0.5–0.99). Lower = fires more easily. Saved on change — click Push to send to the device.">
               <span style="font-size:10px;color:var(--muted);line-height:1.3">Lowering can cause more false positives.</span>
             </div>
             <label style="font-size:11px;color:var(--muted)">Avg cutoff</label>
             <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
-              <input type="number" class="cdraw-input" min="0.5" max="0.99" step="0.01"
-                value="${avgCutoffVal}"
-                placeholder="off"
-                data-change-action="setSlotAvgProbability"
-                data-change-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
-                style="padding:4px 6px;font-size:12px;width:80px"
-                title="Server-side gate on the firmware's rolling-window avg probability. Filters cross-fires that spike one frame then dip (e.g. TTS playback). Leave blank to disable.">
+              <div style="display:flex;gap:6px;align-items:center">
+                <input type="number" class="cdraw-input" min="0.5" max="0.99" step="0.01"
+                  value="${avgCutoffVal}"
+                  placeholder="off"
+                  data-change-action="setSlotAvgProbability"
+                  data-change-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}'
+                  style="padding:4px 6px;font-size:12px;width:80px"
+                  title="Server-side gate on the firmware's rolling-window avg probability. Filters cross-fires that spike one frame then dip (e.g. TTS playback). Leave blank to disable.">
+                <button class="cdraw-btn" data-action="pushVoiceConfig"
+                  style="font-size:11px;padding:3px 8px"
+                  title="Push the saved voice config (wake word, voice, cutoffs) to your paired device(s)">Push</button>
+              </div>
               <span style="font-size:10px;color:var(--muted);line-height:1.3">Server-only — drops marginal wakes whose avg dips below this.</span>
             </div>`
       : '';
@@ -1192,27 +1191,9 @@ async function saveVoiceConfig() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     _voiceConfig = data.config;
-    // Aggregate per-device push results for the toast — voice-config
-    // applies to all of this user's devices so push results need a
-    // device-count rollup, not a per-slot toast.
-    const push = data.push || {};
-    const onlineSlots = new Set();
-    const offlineDevices = new Set();
-    let pushedDeviceCount = 0;
-    for (const [deviceId, r] of Object.entries(push)) {
-      if (r.pushedSlots?.length) {
-        pushedDeviceCount++;
-        for (const s of r.pushedSlots) onlineSlots.add(s);
-      }
-      if (r.offlineSlots?.length) offlineDevices.add(deviceId);
-    }
-    if (pushedDeviceCount > 0) {
-      showDeviceToast(`Saved — pushed to ${pushedDeviceCount} device${pushedDeviceCount === 1 ? '' : 's'}.`);
-    } else if (offlineDevices.size > 0) {
-      showDeviceToast(`Saved — devices offline, will sync on next connect.`, { variant: 'warn' });
-    } else {
-      showDeviceToast('Saved.');
-    }
+    // Save only — no push here (decoupled). Stay silent on success: saves fire
+    // on every field change, and a toast per keystroke is noise. The Push
+    // button is where the user gets explicit "reached the device" feedback.
   } catch (e) {
     showDeviceToast(`Save failed: ${e.message}`, { variant: 'error' });
   }
@@ -1376,13 +1357,32 @@ window.setSlotProbability = function (slot, ev) {
     ? Math.round(raw * 100) / 100
     : null;
   _voiceConfig.slot_assignments[slot] = { ...existing, probability_cutoff: next };
+  saveVoiceConfig();   // save only — the device gets it on the next Push
 };
 
-// Push the slot's current cutoff to the device. saveVoiceConfig is the same
-// path used by every other slot change — it PUTs the whole config and the
-// server fans out the OTA push to every paired device.
-window.pushSlotProbability = function (slot) {
-  saveVoiceConfig();
+// Push the saved voice config (wake words, voices, cutoffs) to every paired
+// device. Decoupled from saving: editing fields just persists locally +
+// server-side; THIS is the only thing that OTAs the device. Saves any pending
+// edit first so the push reflects what's on screen.
+window.pushVoiceConfig = async function () {
+  await saveVoiceConfig();
+  try {
+    const r = await fetch('/api/voice-config/push', { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const push = data.push || {};
+    let pushedDeviceCount = 0;
+    const offlineDevices = new Set();
+    for (const [deviceId, pr] of Object.entries(push)) {
+      if (pr.pushedSlots?.length) pushedDeviceCount++;
+      if (pr.offlineSlots?.length) offlineDevices.add(deviceId);
+    }
+    if (pushedDeviceCount > 0) showDeviceToast(`Pushed to ${pushedDeviceCount} device${pushedDeviceCount === 1 ? '' : 's'}.`);
+    else if (offlineDevices.size > 0) showDeviceToast('Devices offline — will sync on next connect.', { variant: 'warn' });
+    else showDeviceToast('No paired devices to push to.', { variant: 'warn' });
+  } catch (e) {
+    showDeviceToast(`Push failed: ${e.message}`, { variant: 'error' });
+  }
 };
 
 // Avg-prob gate is server-only — no OTA fan-out needed, so save on every
@@ -2055,8 +2055,8 @@ window.uploadAmbient = function () {
 };
 
 async function _uploadAmbientFile(file) {
-  if (file.size > 15 * 1024 * 1024) {
-    showDeviceToast('File too large (max 15 MB).', { variant: 'error' });
+  if (file.size > 40 * 1024 * 1024) {
+    showDeviceToast('File too large (max 40 MB).', { variant: 'error' });
     return;
   }
   if (!/\.mp3$/i.test(file.name)) {

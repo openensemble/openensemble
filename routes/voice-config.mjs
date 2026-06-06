@@ -1,9 +1,14 @@
 /**
  * Per-user voice-config API.
  *
- *   GET  /api/voice-config   — return this user's config { version, slot_assignments }
- *   PUT  /api/voice-config   — replace this user's config; auto-pushes wake words
- *                              to every online voice device paired to this user
+ *   GET  /api/voice-config        — return this user's config { version, slot_assignments }
+ *   PUT  /api/voice-config        — replace this user's config (SAVE ONLY, no push)
+ *   POST /api/voice-config/push   — explicitly push the saved config (wake words,
+ *                                   cutoffs, voices) to every device paired to this user
+ *
+ * Save and push are decoupled on purpose: editing a wake word / voice / cutoff
+ * just persists; the device only gets the OTA when the user hits Push. This
+ * stops every keystroke from thrashing the firmware's fragile hot-reload.
  *
  * ONE config per OE-install user → applies to ALL of their voice devices.
  * Designed so a household with multiple voice devices configures slots
@@ -64,9 +69,19 @@ export async function handle(req, res) {
     const saved = writeVoiceConfig(userId, body?.slot_assignments || {}, {
       userExists: (id) => !!getUser(id),
     });
+    // SAVE ONLY — no auto-push. The device gets changes when the user clicks
+    // Push (POST /api/voice-config/push below).
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ config: saved }));
+    return true;
+  }
+
+  if (req.url === '/api/voice-config/push' && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
     const push = await pushToAllDevices(userId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ config: saved, push }));
+    res.end(JSON.stringify({ push }));
     return true;
   }
 
