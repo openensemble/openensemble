@@ -894,6 +894,15 @@ async function loadProviderConfig() {
     _ttsConfigured = !!cfg.ttsKeySet;
     if ($('providerTtsProvider')) $('providerTtsProvider').value = cfg.ttsProvider ?? 'openai';
     if ($('providerElevenlabsStatus')) $('providerElevenlabsStatus').textContent = cfg.elevenlabsKeySet ? 'ElevenLabs key is set.' : '';
+    // Seed the ElevenLabs pace slider from server-reported elevenlabsSpeed
+    // (default 0.85). The slider lives inside providerTtsFields_elevenlabs, so
+    // updateTtsProviderFields() shows it only when ElevenLabs is selected.
+    {
+      const elPace = $('providerElevenlabsPace'), elPaceLbl = $('providerElevenlabsPaceValue');
+      const sp = Number.isFinite(cfg.elevenlabsSpeed) ? cfg.elevenlabsSpeed : 0.85;
+      if (elPace) elPace.value = sp;
+      if (elPaceLbl) elPaceLbl.textContent = Number(sp).toFixed(2) + '×';
+    }
 
     // Piper local-service detection. piperAvailable comes from the server's
     // GET /api/provider-config probe of 127.0.0.1:5151. Update the Piper
@@ -1510,6 +1519,26 @@ window.onPiperPaceChange = async function (ev) {
     });
   } catch (e) {
     showToast?.(`Failed to save speech pace: ${e.message}`);
+  }
+};
+// ElevenLabs pace — voice_settings.speed (0.7-1.2). Mirrors the Piper pair:
+// live-update the label on input, save on release.
+window.onElevenlabsPaceInput = function (ev) {
+  const v = Number(ev.target.value);
+  const label = document.getElementById('providerElevenlabsPaceValue');
+  if (label && Number.isFinite(v)) label.textContent = v.toFixed(2) + '×';
+};
+window.onElevenlabsPaceChange = async function (ev) {
+  const v = Number(ev.target.value);
+  if (!Number.isFinite(v)) return;
+  try {
+    await fetch('/api/provider-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ elevenlabsSpeed: v }),
+    });
+  } catch (e) {
+    showToast?.(`Failed to save ElevenLabs pace: ${e.message}`);
   }
 };
 

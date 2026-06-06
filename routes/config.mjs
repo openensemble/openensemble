@@ -246,6 +246,10 @@ export async function handle(req, res) {
         ffmpegAvailable,
         elevenlabsKeySet: !!cfg.elevenlabsApiKey,
         elevenlabsModel:  cfg.elevenlabsModel ?? '',
+        // ElevenLabs speaking-pace control (voice_settings.speed). 1.0 = the
+        // model's brisk default; <1 slows it. Default 0.85 fixes the turbo
+        // model's rushed cadence. UI exposes a slider like Piper's pace.
+        elevenlabsSpeed:  Number.isFinite(cfg.elevenlabsSpeed) ? cfg.elevenlabsSpeed : 0.85,
         sttKeySet:    !!cfg.sttApiKey,
         sttApiUrl:    cfg.sttApiUrl   ?? '',
         sttModel:     cfg.sttModel    ?? '',
@@ -346,6 +350,10 @@ export async function handle(req, res) {
           }
           if (body.elevenlabsApiKey)               cfg.elevenlabsApiKey = body.elevenlabsApiKey;
           if (body.elevenlabsModel !== undefined)  cfg.elevenlabsModel  = body.elevenlabsModel;
+          if (body.elevenlabsSpeed !== undefined) {
+            const n = Number(body.elevenlabsSpeed);
+            if (Number.isFinite(n) && n >= 0.7 && n <= 1.2) cfg.elevenlabsSpeed = n;
+          }
           if (body.sttApiKey)                      cfg.sttApiKey   = body.sttApiKey;
           if (body.sttApiUrl   !== undefined)      cfg.sttApiUrl   = body.sttApiUrl;
           if (body.sttModel    !== undefined)      cfg.sttModel    = body.sttModel;
@@ -1470,6 +1478,12 @@ export async function handle(req, res) {
         // voice_id (UUID-ish string). Default model 'eleven_turbo_v2_5' is
         // their low-latency option; users can override via cfg.elevenlabsModel.
         const elModel = cfg.elevenlabsModel || 'eleven_turbo_v2_5';
+        // eleven_turbo_v2_5 ships a brisk default cadence (~25% faster than
+        // natural — the "chipmunk" reports). `speed` (0.7-1.2) on voice_settings
+        // slows it; `style: 0` keeps pacing stable. Configurable via
+        // cfg.elevenlabsSpeed; default 0.85 lands near natural for short replies.
+        const elSpeed = Number.isFinite(cfg.elevenlabsSpeed)
+          ? Math.min(1.2, Math.max(0.7, cfg.elevenlabsSpeed)) : 0.85;
         const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}`, {
           method: 'POST',
           headers: {
@@ -1480,7 +1494,7 @@ export async function handle(req, res) {
           body: JSON.stringify({
             text,
             model_id: elModel,
-            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+            voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0, speed: elSpeed },
           }),
           signal: AbortSignal.timeout(30000),
         });

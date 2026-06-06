@@ -909,6 +909,23 @@
                     style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
                 </div>
                 <div id="providerElevenlabsStatus" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+                <!-- ElevenLabs speaking-pace slider → voice_settings.speed
+                     (server-validated [0.7, 1.2]). eleven_turbo_v2_5 ships a
+                     brisk default; lower this if replies sound rushed. Shows
+                     whenever ElevenLabs is the selected provider; auto-saves on
+                     `change` so the next /api/tts call uses the new pace. -->
+                <div style="display:flex;flex-direction:column;gap:4px;margin:8px 0">
+                  <div style="display:flex;justify-content:space-between;align-items:baseline">
+                    <label for="providerElevenlabsPace" style="font-size:11px;color:var(--muted)">Speech pace</label>
+                    <span id="providerElevenlabsPaceValue" style="font-size:11px;color:var(--text);font-family:ui-monospace,monospace">0.85×</span>
+                  </div>
+                  <input id="providerElevenlabsPace" type="range" min="0.7" max="1.2" step="0.05" value="0.85"
+                    data-input-action="onElevenlabsPaceInput" data-change-action="onElevenlabsPaceChange"
+                    style="width:100%;accent-color:var(--accent)">
+                  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted)">
+                    <span>slower</span><span>default 1.0</span><span>faster</span>
+                  </div>
+                </div>
               </div>
 
               <div id="providerTtsFields_piper" style="display:none">
