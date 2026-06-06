@@ -7,12 +7,12 @@
   "trained_languages": [
     "en"
   ],
-  "version": 2,
+  "version": 3,
   "micro": {
     "feature_step_size": 10,
     "sliding_window_size": 5,
     "tensor_arena_size": 26080,
     "minimum_esphome_version": "2024.7.0",
-    "probability_cutoff": 0.95
+    "probability_cutoff": 0.99
   }
 }

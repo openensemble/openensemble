@@ -4,10 +4,12 @@
   "author": "OpenEnsemble",
   "website": "https://openensemble.dev/",
   "model": "sydney.tflite",
-  "trained_languages": ["en"],
-  "version": 3,
+  "trained_languages": [
+    "en"
+  ],
+  "version": 4,
   "micro": {
-    "probability_cutoff": 0.92,
+    "probability_cutoff": 0.99,
     "feature_step_size": 10,
     "sliding_window_size": 5,
     "tensor_arena_size": 26080,
