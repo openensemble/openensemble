@@ -185,6 +185,19 @@ optional and most skills should not include one.
 
 ## 10. Browser extension as the fetcher (no-API sites)
 
+> ⛔ **NOT AVAILABLE YET — DO NOT RECOMMEND OR BUILD AGAINST THIS.** The OE
+> Bridge browser extension is not shipped: it's gitignored, absent from fresh
+> installs, and the `ctx.browser` / `helpers.browser` surface is incomplete
+> (read-only primitives only; no scripting to click or control a page). Until
+> it ships, do NOT pitch the extension to the user, do NOT offer it as a
+> capability, and do NOT scaffold skills that depend on `ctx.browser`,
+> `helpers.browser`, or `browser_list`. If a request would need it (scrape a
+> no-API site, control a web app like YouTube Music, read the user's tabs),
+> prefer a public API / RSS / JSON-LD source instead — and if there's no such
+> source, tell the user that browser automation isn't available yet rather
+> than building against the bridge. Everything below is retained for when it
+> ships; ignore it for now.
+
 **Trigger:** the user wants to monitor or read a site that has NO public
 API, no RSS feed, no structured data export — AND/OR is known for
 aggressive anti-bot (Best Buy, Target, Ticketmaster, Kayak, airline
