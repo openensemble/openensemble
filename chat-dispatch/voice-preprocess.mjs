@@ -138,7 +138,14 @@ function classifyVoiceIntent(text, { ambientActive = false } = {}) {
   }
 
   if (/^pause\b/.test(t))                 return { type: 'pause' };
-  if (/^(resume|continue|unpause|play)\b/.test(t)) return { type: 'resume' };
+  if (/^(resume|continue|unpause)\b/.test(t)) return { type: 'resume' };
+  // Bare "play" / "play music" / "play it" = resume the current playback. But
+  // "play <something>" (e.g. "play Twice Fancy on YouTube Music") is a *new*
+  // play request — let it fall through to the LLM/skill dispatch instead of
+  // mis-firing a resume. Anchored at end so only contentless plays resume here.
+  if (/^play(\s+(music|it|this|that|the\s+(song|music|track)))?[.!?]*$/.test(t)) {
+    return { type: 'resume' };
+  }
 
   // Stop / cancel — barge-in firmware has already killed local audio; we
   // mark this `replaces` so the chat pipeline doesn't generate a reply.

@@ -51,7 +51,7 @@ import {
   tryRenameIntercept,
 } from './chat-dispatch/profile-intercepts.mjs';
 import { extractTransactions } from './skills/expenses/execute.mjs';
-import { getRoleAssignments } from './roles.mjs';
+import { getRoleAssignments, listRoles } from './roles.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
@@ -118,6 +118,27 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   'delete_routine',
   'list_ambient_files',
 ]);
+
+/**
+ * Tools that voice turns are allowed to use = the hardcoded built-ins above
+ * UNION every tool belonging to a skill the user has that declares
+ * `"voice_device": true` in its manifest. This lets the skill-builder opt a
+ * skill into voice-device control (e.g. youtube-music-controller) without
+ * editing this file — the manifest flag IS the registration. Per-user because
+ * custom skills are user-scoped; computed per turn (cheap — listRoles reads an
+ * in-memory registry).
+ */
+function voiceToolAllowlistFor(userId) {
+  const allow = new Set(VOICE_DEVICE_TOOL_ALLOWLIST);
+  for (const m of listRoles(userId)) {
+    if (m?.voice_device !== true || !Array.isArray(m.tools)) continue;
+    for (const t of m.tools) {
+      const name = t?.function?.name || t?.name;
+      if (name) allow.add(name);
+    }
+  }
+  return allow;
+}
 
 /**
  * Platform-agnostic chat entrypoint. WS (server.mjs) and Telegram
@@ -291,7 +312,8 @@ export async function handleChatMessage({
   // to low was tested but caused the model to skip useful tool calls.
   if (source === 'voice-device' && Array.isArray(agent.tools) && agent.tools.length) {
     const originalCount = agent.tools.length;
-    const slim = agent.tools.filter(t => VOICE_DEVICE_TOOL_ALLOWLIST.has(t.function?.name));
+    const voiceAllow = voiceToolAllowlistFor(userId);
+    const slim = agent.tools.filter(t => voiceAllow.has(t.function?.name));
     agent = { ...agent, tools: slim };
     console.log(`[chat] voice-device source: tools ${originalCount} → ${slim.length}`);
   }

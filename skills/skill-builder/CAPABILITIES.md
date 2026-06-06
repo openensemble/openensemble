@@ -315,6 +315,19 @@ the device, popping up in chat, or both?"
 - `ctx.device.notify(deviceId, text)` — v1 just calls speak. Future
   versions will add chime + criticality + quiet-hours awareness.
 
+**REQUIRED — make the skill voice-triggerable (`voice_device` flag):**
+
+Voice turns run a slim tool allowlist for latency, so a skill's tools
+are STRIPPED on voice turns by default — the user speaks and nothing
+happens. ANY skill the user will trigger by SPEAKING to a voice device
+MUST set `"voice_device": true` at the manifest top level; that single
+flag adds the skill's tools to the voice allowlist. This is independent
+of audio output — a skill that controls YouTube Music in the browser, or
+toggles a smart-home device, or just answers a question by voice needs
+the flag just as much as one that streams audio via `ctx.device`. Leave
+it off (default) only for skills the user will exclusively use in the
+browser/chat UI.
+
 **Audio-source guidance for the skill:**
 
 When the user names an external music/podcast/audio service ("YouTube

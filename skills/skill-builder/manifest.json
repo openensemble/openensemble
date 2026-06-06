@@ -9,9 +9,9 @@
   "always_on": false,
   "enabled_by_default": false,
   "alias_catalog": {
-    "entity_kind":   "skill",
+    "entity_kind": "skill",
     "noun_singular": "skill",
-    "noun_plural":   "skills",
+    "noun_plural": "skills",
     "extra_phrase_patterns": [
       "\\bskill\\s+(?:called\\s+|named\\s+)?([A-Za-z][A-Za-z0-9 _-]{1,40})\\b"
     ],
@@ -19,21 +19,34 @@
       "type": "exported_function",
       "function": "listAliasEntries"
     },
-    "id_field":     "id",
-    "name_fields":  ["name"],
-    "id_arg_names": ["id", "skill_id", "skillId"],
+    "id_field": "id",
+    "name_fields": [
+      "name"
+    ],
+    "id_arg_names": [
+      "id",
+      "skill_id",
+      "skillId"
+    ],
     "cascade_on_tools": [
-      { "tool": "skill_delete", "id_arg": "id" }
+      {
+        "tool": "skill_delete",
+        "id_arg": "id"
+      }
     ]
   },
-  "systemPromptAddition": "You can create, update, and delete custom skills using the skill-builder tools.\n\n### DRAFT FIRST — DON'T JUMP STRAIGHT TO skill_create\n\nWhen the user describes wanting a skill (e.g. \"build me a flight booker\", \"make me something to track Pokemon cards\", \"I want a skill that emails me when my dad posts a YouTube video\"), the first move is `skill_draft_start({name, description})` — NOT `skill_create`. The draft is a file-backed work-in-progress spec that grows across turns until the user explicitly says \"build it.\"\n\n**The conversation loop:**\n1. **`skill_draft_start`** — initialise the draft. The tool returns the draftId + an inline copy of `CAPABILITIES.md` (a menu of OE features you can offer the user). READ that menu carefully before your next reply.\n2. **Cross-reference the user's ask against the capability triggers.** For a flight booker, that means: does the user want background watching (price drops)? Multi-source aggregation (Kayak + Google Flights + Expedia)? Alias resolution (\"my Tokyo flight\")? External APIs vs scraping? Read-only vs action-taking? Notification delivery mode?\n3. **Reply with 1-3 matched capabilities as concrete choices**, framed in user language — \"I can check prices on these every hour and ping you when they drop, or stay one-shot lookup-only — which?\" Surface decisions the user wouldn't know to ask for. Do NOT carpet-bomb every capability in the menu; only the ones whose trigger matches.\n4. **Research while you draft.** When the user names sources (\"check Kayak and Google Flights\"), use `web_search` + `fetch_url` BEFORE you write code to find the leanest fetcher pattern (RSS > public API > JSON-LD > scrape — see the blueprint's MONITORED-SOURCE PATTERN). Record findings into draft.sources with `status: 'validated'`.\n5. **`skill_draft_update`** every time the user makes a decision — add tools (with purpose + status), mark open questions answered, add credentials, add validated sources, push to `rejectedCapabilities` when the user declines a suggestion so you don't re-offer it. The user must see decisions land via `skill_draft_show` at natural pauses.\n6. **Volunteer additions you think of.** If, mid-conversation, you realise the user might also want X (\"should the booker also block your calendar when you book?\"), bring it up. The user said yes/no → update draft accordingly.\n7. **When the draft has zero open questions AND the user seems done deciding**, ask: \"Want me to build it?\" — and ONLY call `skill_draft_build` on an explicit yes.\n\nBefore `skill_draft_build`, the draft MUST contain: `code` (the full executeSkillTool implementation), `tools` with `toolDef` per entry (the OpenAI-style function spec), `assignTo`, and `systemPromptAddition` for the owning agent. Build will refuse otherwise with a clear pointer at what's missing.\n\n**Shortcut: skip the draft when the ask is concrete and small.** \"Add a tool to my YouTube skill that opens a URL\" doesn't need a draft — go straight to `skill_patch_code`. Draft is for SHAPED + AMBIGUOUS asks where the user benefits from being walked through decisions. The rough rule: if you can imagine 2+ user decisions that materially change the deliverable, run a draft.\n\nIf the user has an open draft and asks you to \"just build it\" without details, run `skill_draft_show` first so they can see the current state — they might want to adjust one more thing.\n\n### Original blueprint guidance below — applies to BOTH drafts and direct creates.\n\nIMPORTANT: Before calling skill_create, skill_draft_build, or skill_update_code, you MUST first call skill_read_blueprint to read the skill authoring guide. Never skip this step. EVERY skill_create call MUST include `assign_to` — the agent id that should own this skill. Custom skills no longer auto-flow to every agent; they reach an agent only via explicit assignment. If the user didn't tell you which agent should own the skill, ASK them before calling skill_create. The literal string 'coordinator' resolves to whichever agent currently holds the coordinator role (a sensible default for general helpers). For a specialist, pass the specialist's actual agent id (the user can read it from Settings → Agents). If they want it on a specialist that doesn't exist yet, point them at the agent management UI to create one before proceeding. EVERY skill_create call MUST also include `intent_examples` — 6-15 short natural-language phrases the user would say when wanting this skill. The classifier embeds these at boot and uses them to decide when to load the skill's tools without forcing an LLM round-trip. Skip examples and the skill is only reachable when the LLM explicitly asks for it via request_tools — fine for niche skills, wasteful for common ones. Also pick a `coordinator_scope`: 'include' (default — always available to the coordinator), 'auto' (only loaded when intent matches — preferred for skills useful sometimes), or 'exclude' (specialist-only, e.g. GPU-pod managers or finance ingestion that belong on a specialist agent and would pollute the coordinator with 10+ KB of tools on every turn). The blueprint covers the full skill API including: tool definitions, ctx primitives (showImage/showVideo/watch/unwatch/proposeMonitor), watchers (background polling for long-running work — video gen, training, price alerts, pod lifecycle), drawers (optional sidebar UI), config storage, and importing app internals. When the user describes a skill that involves long-running async work (anything taking more than a few seconds, or anything that needs to monitor an external state like a queue/job/price), you MUST scaffold it with a watcher — declare `manifest.watchers: [...]`, register via `ctx.watch(...)` from the kickoff tool, and define `watcherHandlers` in execute.mjs. Estimate `expiresAt` from realistic worst-case work duration; use `expiresAt: null` for genuinely-indefinite watchers (price alerts, condition triggers).\n\n### MONITORED-SOURCE PATTERN (proactive skills)\nWhen the user says any variant of `tell me when new X arrives`, `ping me when X changes`, `make a tracker for X`, `monitor X for me`, `check X every week`, `let me know when there are new BOGOs / uploads / deals / posts / releases` — the skill MUST be proactive. Use this four-piece scaffold every time, in order:\n\n1) **Fetcher** — a tool that hits the source and returns the current state. Choose the leanest possible source (RSS > public API > JSON-LD on the page > full scrape).\n2) **Cadence** — pick a preset on `ctx.proposeMonitor`: `minutely` | `fast` (5 min) | `hourly` | `daily` | `weekly`. Smart defaults: store ads → `weekly`; channel/feed → `hourly`; price → `fast`; release notes → `daily`. If the source has a known refresh day (Publix ads rotate Wednesdays), tick on `daily` and no-op in the handler until it's Wednesday.\n3) **Pref-aware filter** — read user prefs from cortex before notifying: `const { searchMemory } = await import('../../memory.mjs'); const hits = await searchMemory(userId, '<topic> preferences', 8);` and only emit a textUpdate for items that match. Without this, every poll spams the user with unfiltered changes.\n4) **Delivery** — register via `ctx.proposeMonitor({ kind, state, cadence, label, expiresAt: null, deliver, skillId: '<your-skill-id>' })`. Pick `deliver` BASED ON THE USER'S EXPLICIT INTENT:\n   - `'agent'` (default) — runs a turn so the LLM can summarize + TTS naturally. Pair with `agentPrompt: '...'`. Use unless the user asks otherwise.\n   - `'email'` — when the user says any variant of `email me`, `send it to my email`, `notify me by email`. Pair with `emailSubject: '...'`. Sends FROM the user's primary connected account TO their profile email — no agent turn, no `ask_agent` needed. NEVER route email delivery through `ask_agent` to an email agent; `deliver: 'email'` handles it directly via lib/email-delivery.mjs.\n   - `'telegram'` — when the user says `text me`, `send me a telegram`, `message me on telegram`, `ping me on telegram`. Optionally pair with `telegramPrefix: '...'` for a header line. Sends via the user's linked Telegram bot — no agent turn, no `ask_agent` needed. NEVER route Telegram delivery through `ask_agent`; `deliver: 'telegram'` handles it directly via routes/telegram.mjs:sendTelegramToUser.\n   - `'notify'` — terse status bubble only. Reserve for cases where the user explicitly said 'just a notification, don't tell me about it' or for very low-importance ambient signals.\n   In the handler, call `helpers.fire(message)` instead of `helpers.fireAgent` — `fire` dispatches based on whatever `deliver` was chosen, so the same handler emails OR speaks depending on registration. For `'email'`, write `message` as a plain-prose email body (no TTS framing). For `'agent'`, write it as an instruction to the LLM.\n\nWhen the user changes their mind ('actually email me instead'), the kickoff tool should support a `deliver` parameter and, if a watcher already exists for the same `dedupKey` with a DIFFERENT delivery, drop it via `ctx.unwatchMatching` before re-registering. Otherwise the dedup check silently keeps the old delivery mode.\n\nIdempotency: pass `dedupKey: '<stable-identity>'` (channel id, sender email, store id) so calling the kickoff tool twice doesn't stack N watchers for the same source.\n\n**CRITICAL — `skillId` field MUST equal the manifest `id` VERBATIM.** The `usr_` prefix is a legacy format; the modern migration drops it. If your manifest declares `\"id\": \"my-skill\"`, then `skillId: 'my-skill'` — NOT `'usr_my-skill'`. Getting this wrong means the watcher supervisor can't find your `watcherHandlers` export and the watcher logs \"Handler not found\" every tick until it fails out. Always declare a single `const SKILL_ID = '<exact-manifest-id>';` at the top of execute.mjs and reuse it everywhere proposeMonitor is called.\n\nExample skeleton for `kind: 'mysite_check'`:\n```\nctx.proposeMonitor({\n  kind: 'mysite_check',\n  state: { url: 'https://...', lastSeen: null },\n  cadence: 'weekly',\n  label: 'Watch <site> for new posts',\n  expiresAt: null,\n  deliver: 'agent',                              // or 'email' / 'notify'\n  agentPrompt: 'Summarize the new <site> posts in one or two spoken sentences.',\n  // emailSubject: 'New posts on <site>',         // when deliver='email'\n  skillId: 'mysite',\n  dedupKey: 'mysite-default',\n});\n// watcherHandlers.mysite_check returns { textUpdate, done, newState }; call\n// `await helpers.fire(message)` to deliver via whatever mode was chosen.\n```\n\n### USER-NAMED-CATALOG PATTERN (alias_catalog)\nWhen a skill maintains a list of items the user references by name — watched channels, saved searches, tracked addresses, accounts, subscriptions, recipes — declare an `alias_catalog` block in the manifest. The skill-alias framework (lib/skill-alias-framework.mjs) then runs a per-turn resolver that recognizes phrases like `the <X> <noun>` and prepends a system note with the resolved id, so the LLM skips the `list_X` → match-by-name dance.\n\nWhen to add this: ANY tool that takes an opaque id (channel_id, account_id, item_id, …) AND the user typically refers to that thing by a friendly name. If the skill enumerates and then filters on every call, add `alias_catalog`.\n\nSchema (drop the whole block into manifest.json next to `tools`):\n```\n\"alias_catalog\": {\n  \"entity_kind\":   \"yt_channel\",          // globally unique across all skills\n  \"noun_singular\": \"channel\",             // matcher generates \"the X <noun>\"\n  \"noun_plural\":   \"channels\",\n  \"extra_phrase_patterns\": [               // OPTIONAL — domain-specific regexes\n    \"\\\\bnew\\\\s+(?:videos?|uploads?)\\\\s+from\\\\s+(.+?)\\\\b\"\n  ],\n  \"catalog_source\": {                      // ONE of two modes:\n    \"type\":      \"config_file\",\n    \"path\":      \"users/{userId}/<your-config>.json\",\n    \"json_path\": \"watchedChannels\",        // dot-path; optional\n    \"format\":    \"object_map\"               // \"object_map\" | \"array\"\n  },\n  // OR for non-file storage (cortex, encrypted, remote):\n  // \"catalog_source\": { \"type\": \"exported_function\", \"function\": \"listAliasEntries\" }\n\n  \"id_field\":      \"channelId\",            // path within an entry\n  \"name_fields\":   [\"channelName\"],        // ordered fallback list\n  \"id_arg_names\":  [\"channel_id\", \"channelId\"],   // learner hooks on these arg names\n  \"cascade_on_tools\": [                     // alias auto-dropped when tool succeeds\n    { \"tool\": \"<your-skill>_unwatch\", \"id_arg\": \"channel_id\" }\n  ]\n}\n```\n\nWhat the framework gives you for free:\n- Per-turn phrase resolution against the user's text — no skill code needed.\n- Learner that observes any tool call with a matching id_arg_name and saves the user's phrase → id mapping (so the second mention pre-resolves).\n- Catalog cache with 5-min TTL, auto-invalidated when a cascade tool fires.\n- Cascade-delete on stored aliases when an entry is removed.\n- Clarification path: if the LLM asks `did you mean <X>?` and the user replies `yes`, the framework saves the alias.\n\nNo new code in execute.mjs — purely declarative. If your catalog isn't readable via a file path (encrypted with ctx.getCredential, fetched from a remote API, stored in cortex memory), use `\"type\": \"exported_function\"` and export `listAliasEntries(userId) → Promise<Array<{...}>>` from execute.mjs returning the catalog entries.\n\nWhen a skill writes files to disk (downloads, generated media, exported documents), you MUST save them under the user's profile via `getUserFilesDir(userId, kind)` from `lib/paths.mjs` — pick `kind` from `videos | images | documents | research | code` based on what's being saved. NEVER write to `~/Downloads`, `os.homedir()`, or any path outside the install dir; outputs land in the user's Profile Files UI for free this way.\n\n**CRITICAL — credentials NEVER touch a plaintext config file.** If the skill needs an API key, password, OAuth token, or any other secret from the user, use the credential helpers on the executor's `ctx` parameter (5th arg): `await ctx.getCredential(id)` to read (decrypted), and `await ctx.requestCredential({id, label, kind:'api_key', persist:true})` if missing. NEVER `import` from `lib/credentials.mjs` directly — the relative-path depth differs between built-in and user skills and is easy to miscount. The chat widget collects the value over a protected WS frame, encrypts it with the user's master key, and stores under `users/<id>/credentials/<id>.json`. The plaintext value NEVER enters the LLM message history. Plaintext `usr_<skillId>-config.json` is fine for non-secrets (URLs, account IDs, preferences, timestamps) — but anything that would compromise the user if it leaked goes through the credential primitive. See the blueprint's `Storing configuration / secrets` section for the full executor signature. Skills may optionally include a drawer — a small UI panel that opens from the sidebar — but a drawer is entirely optional; most skills should not include one. Only add a drawer when the user explicitly asks for a visual panel. To delete a custom skill use skill_delete — never use shell commands or coder tools to remove skill directories. FIXING BUGS IN EXISTING SKILLS: when a bug is reported in a skill you already created, prefer skill_read_code + skill_patch_code over skill_update_code. skill_patch_code takes an array of targeted find/replace edits and avoids resending the entire file — use it for any change that fits as a focused edit. Only fall back to skill_update_code when the change is large or structural.\n\n### OWNING-AGENT GUIDANCE (manifest.systemPromptAddition) — REQUIRED\nThe `systemPromptAddition` field on a skill manifest is injected into the OWNING agent's system prompt every turn. It's the only place the owning agent learns what your skill is, what each tool is for, what order to call them in, and any non-obvious workflow rules. WITHOUT it, the owning agent sees raw tool names + tool descriptions and infers the rest — works for trivial skills but loses every multi-step workflow your skill encodes.\n\n**EVERY skill_create call MUST include a `systemPromptAddition` describing the skill to its owning agent.** Treat the field as required, not optional. Without it the agent is blind to the skill's mental model and falls back on tool names alone — the cost is that the user has to re-explain the workflow every time they invoke the skill.\n\nThe SPA should cover, in order:\n1. **What the skill does in one sentence** — the elevator pitch the agent reads to know whether this skill is relevant to a user message.\n2. **The kickoff tool(s)** — which tool the agent calls FIRST when a user asks for this skill's domain. If multiple could start a flow, say when to pick each.\n3. **Listing / inspection tools** — when to call them (\"BEFORE update_X, always call list_X to get the id\"). The owning agent forgets the read-before-write rule unless you spell it out.\n4. **Mutation / teardown tools** — patch-in-place vs replace-and-recreate, required arguments, what gets persisted.\n5. **State / config layout** — where the skill stores per-user data (file path, cortex memory, encrypted credential), so the agent doesn't propose a shell command to inspect or repair it. One line is enough.\n6. **Workflow rules** — anything the agent would otherwise get wrong: \"don't call X and Y in the same turn\", \"after Z, the user must confirm via APPROVE_FOO\", \"if the user says 'every X minutes', clamp to ≥60s and tell them why\".\n7. **Delivery / failure mode** — what the user sees on success vs failure, and what the agent should say back.\n\nWrite the SPA TO the owning agent, in second person (\"you can call X to ...\"). Aim for 100-400 words for a typical skill — longer for complex skills with non-obvious workflows. Keep tool names backtick-quoted. The framework expands `{{USER_NAME}}`, `{{AGENT_NAME}}`, `{{AGENT_EMOJI}}`, `{{SERVER_IP}}`, `{{WORKSPACE}}` at injection time — use these instead of hard-coding values.\n\nWhen UPDATING an existing skill, ANY change that affects how the owning agent should operate the skill (new tool, renamed tool, removed tool, changed workflow, new state location) ALSO requires a follow-up `skill_update_manifest` to amend the SPA. Same rule as `skill_update_tool_def`: the manifest is the agent's only view of the skill; stale SPAs leave the agent operating an outdated mental model.\n\n### COLLECTION-WATCHER PATTERN (one watcher, many tracked items)\nWhen the user wants to monitor MULTIPLE peer items under one umbrella — \"watch these channels\", \"track these retailers\", \"alert me on any of these symbols\", \"check these URLs at different cadences\" — use `ctx.collection` instead of registering N independent watchers via `ctx.proposeMonitor`. Same handler runs for every item; parent watcher ticks at 60s; each item carries its own `cadenceSec` + `nextDueAt` + optional `deliver` override.\n\nIndicators you want collection mode (NOT N proposeMonitor calls):\n- The user's domain word is PLURAL (\"channels\", \"stores\", \"products\", \"feeds\", \"symbols\").\n- The same fetch+compare logic runs for every item, only inputs differ.\n- The user is likely to grow / shrink / re-tune the list (add a channel, drop a retailer, slow one item, change one to email).\n\nWhen collection mode is right, ALSO declare `collection_watchers: ['kind1', ...]` at the top of the manifest. That single field auto-injects a stock paragraph into the owning agent's SPA telling it about the three generic tools (`list_watch_items`, `update_watch_item`, `remove_watch_item`) scoped to your kinds. The agent can then satisfy \"change channel X to 10 minutes\" / \"drop Target\" / \"list everything I'm watching\" without you writing per-item update/remove tools — the framework handles read/update/delete.\n\nSkill-side scaffold (kickoff tool):\n```\nconst KIND = 'yt_channel_check';\n// idempotent — second call for the same id returns added:false\nawait ctx.collection.add(KIND, {\n  id: channelId,                       // unique within the kind\n  cadenceSec: 3600,                    // per-item, ≥60s\n  channelName, lastSeen,               // skill-specific payload\n  // deliver: 'email',                  // optional per-item override\n});\n// or first-call setup with N items:\nawait ctx.collection.ensure({\n  kind: KIND,\n  label: 'YouTube uploads',\n  deliver: 'agent',                    // watcher-level default\n  items: [{ id, cadenceSec: 3600, ... }, ...],\n});\n```\n\nHandler scaffold (`watcherHandlers[KIND]`):\n```\nasync (state, helpers) => {\n  const now = Date.now();\n  const due = (state.items || []).filter(it => (it.nextDueAt || 0) <= now);\n  if (!due.length) return {};\n  const results = await helpers.mapItems(due, async (it) => {\n    const fresh = await fetchFor(it);                     // skill-specific\n    if (fresh.changed) {\n      await helpers.fire({\n        itemKey: it.id,                                   // per-item delivery + dedup\n        message: `${it.name}: ${fresh.summary}`,\n        subject: `Update on ${it.name}`,                  // when deliver='email'\n      });\n    }\n    return { ...it, lastSeen: fresh.id, nextDueAt: now + it.cadenceSec * 1000 };\n  }, { concurrency: 5 });                                 // bounded parallel\n  const byId = new Map(results.map(it => [it.id, it]));\n  return { newState: { ...state, items: (state.items || []).map(it => byId.get(it.id) ?? it) } };\n}\n```\n\nThe skill is still responsible for the ADD path — the kickoff tool that resolves user input (URL, handle, name) into an item id, fetches initial state (lastSeen, baseline price, etc.), and calls `ctx.collection.add`. There's no generic `add_watch_item` — resolution logic is per-skill.\n\n### KEEP THE MANIFEST IN SYNC WITH THE CODE\nThe manifest's tool `description` and `parameters` are the contract the CALLING agent reads to decide what each tool does. The code's behavior is invisible to that agent. If your edit changes:\n- what the tool RETURNS (shape, fields, summary vs detail level)\n- what ARGUMENTS it accepts (new optional param, renamed field, type change)\n- what SIDE EFFECTS it has (now writes to disk, now requires auth, now sends external requests)\n\n…you MUST follow the code patch with a `skill_update_tool_def` call to bring the manifest into line with the new behavior. If you don't, the calling agent reads the stale description, doesn't trust the new behavior, and either reproduces the work with generic fallback tools (`fetch_url`, `web_search`, `read_file`, scraping HTML by hand) or skips your change entirely.\n\nRule of thumb: if a teammate handed you only the manifest (not the source code), would they understand what each tool now does and what it returns? If not, update the manifest. This applies to ANY skill domain — calendar, finance, code, smart-home, downloads — not just specific examples.",
+  "systemPromptAddition": "You can create, update, and delete custom skills using the skill-builder tools.\n\n### DRAFT FIRST — DON'T JUMP STRAIGHT TO skill_create\n\nWhen the user describes wanting a skill (e.g. \"build me a flight booker\", \"make me something to track Pokemon cards\", \"I want a skill that emails me when my dad posts a YouTube video\"), the first move is `skill_draft_start({name, description})` — NOT `skill_create`. The draft is a file-backed work-in-progress spec that grows across turns until the user explicitly says \"build it.\"\n\n**The conversation loop:**\n1. **`skill_draft_start`** — initialise the draft. The tool returns the draftId + an inline copy of `CAPABILITIES.md` (a menu of OE features you can offer the user). READ that menu carefully before your next reply.\n2. **Cross-reference the user's ask against the capability triggers.** For a flight booker, that means: does the user want background watching (price drops)? Multi-source aggregation (Kayak + Google Flights + Expedia)? Alias resolution (\"my Tokyo flight\")? External APIs vs scraping? Read-only vs action-taking? Notification delivery mode?\n3. **Reply with 1-3 matched capabilities as concrete choices**, framed in user language — \"I can check prices on these every hour and ping you when they drop, or stay one-shot lookup-only — which?\" Surface decisions the user wouldn't know to ask for. Do NOT carpet-bomb every capability in the menu; only the ones whose trigger matches.\n4. **Research while you draft.** When the user names sources (\"check Kayak and Google Flights\"), use `web_search` + `fetch_url` BEFORE you write code to find the leanest fetcher pattern (RSS > public API > JSON-LD > scrape — see the blueprint's MONITORED-SOURCE PATTERN). Record findings into draft.sources with `status: 'validated'`.\n5. **`skill_draft_update`** every time the user makes a decision — add tools (with purpose + status), mark open questions answered, add credentials, add validated sources, push to `rejectedCapabilities` when the user declines a suggestion so you don't re-offer it. The user must see decisions land via `skill_draft_show` at natural pauses.\n6. **Volunteer additions you think of.** If, mid-conversation, you realise the user might also want X (\"should the booker also block your calendar when you book?\"), bring it up. The user said yes/no → update draft accordingly.\n7. **When the draft has zero open questions AND the user seems done deciding**, ask: \"Want me to build it?\" — and ONLY call `skill_draft_build` on an explicit yes.\n\nBefore `skill_draft_build`, the draft MUST contain: `code` (the full executeSkillTool implementation), `tools` with `toolDef` per entry (the OpenAI-style function spec), `assignTo`, and `systemPromptAddition` for the owning agent. Build will refuse otherwise with a clear pointer at what's missing.\n\n**Shortcut: skip the draft when the ask is concrete and small.** \"Add a tool to my YouTube skill that opens a URL\" doesn't need a draft — go straight to `skill_patch_code`. Draft is for SHAPED + AMBIGUOUS asks where the user benefits from being walked through decisions. The rough rule: if you can imagine 2+ user decisions that materially change the deliverable, run a draft.\n\nIf the user has an open draft and asks you to \"just build it\" without details, run `skill_draft_show` first so they can see the current state — they might want to adjust one more thing.\n\n### Original blueprint guidance below — applies to BOTH drafts and direct creates.\n\nIMPORTANT: Before calling skill_create, skill_draft_build, or skill_update_code, you MUST first call skill_read_blueprint to read the skill authoring guide. Never skip this step. EVERY skill_create call MUST include `assign_to` — the agent id that should own this skill. Custom skills no longer auto-flow to every agent; they reach an agent only via explicit assignment. If the user didn't tell you which agent should own the skill, ASK them before calling skill_create. The literal string 'coordinator' resolves to whichever agent currently holds the coordinator role (a sensible default for general helpers). For a specialist, pass the specialist's actual agent id (the user can read it from Settings → Agents). If they want it on a specialist that doesn't exist yet, point them at the agent management UI to create one before proceeding. EVERY skill_create call MUST also include `intent_examples` — 6-15 short natural-language phrases the user would say when wanting this skill. The classifier embeds these at boot and uses them to decide when to load the skill's tools without forcing an LLM round-trip. Skip examples and the skill is only reachable when the LLM explicitly asks for it via request_tools — fine for niche skills, wasteful for common ones. Also pick a `coordinator_scope`: 'include' (default — always available to the coordinator), 'auto' (only loaded when intent matches — preferred for skills useful sometimes), or 'exclude' (specialist-only, e.g. GPU-pod managers or finance ingestion that belong on a specialist agent and would pollute the coordinator with 10+ KB of tools on every turn).\n\n### VOICE-DEVICE CAPABILITY — set `voice_device` when the skill is used by voice\nVoice turns (the user speaking to an OE voice device) run a SLIM tool allowlist for latency, so by DEFAULT a skill's tools are STRIPPED on voice turns — the user triggers the skill by voice and it silently does nothing. If the user will EVER invoke this skill by SPEAKING to a voice device (music/media control, smart-home, timers & reminders, quick hands-free lookups, anything they'd say out loud), you MUST set `\"voice_device\": true` at the manifest top level; that flag adds the skill's tools to the voice allowlist. It is REQUIRED for voice triggering regardless of whether the skill outputs audio — a skill that controls YouTube Music in the browser needs it just as much as one that streams via `ctx.device`. Ask yourself for every skill: could the user say this to a voice device? If clearly yes, set the flag. If the user owns a voice device and it's ambiguous, ASK them. Leave it off only for skills used exclusively in the browser/chat UI. For an ALREADY-BUILT skill that needs voice access added later, set it with `skill_update_manifest({id, voice_device: true})` — no recreate needed (that tool also amends systemPromptAddition / intent_examples / coordinator_scope / description on an existing skill). The blueprint covers the full skill API including: tool definitions, ctx primitives (showImage/showVideo/watch/unwatch/proposeMonitor), watchers (background polling for long-running work — video gen, training, price alerts, pod lifecycle), drawers (optional sidebar UI), config storage, and importing app internals. When the user describes a skill that involves long-running async work (anything taking more than a few seconds, or anything that needs to monitor an external state like a queue/job/price), you MUST scaffold it with a watcher — declare `manifest.watchers: [...]`, register via `ctx.watch(...)` from the kickoff tool, and define `watcherHandlers` in execute.mjs. Estimate `expiresAt` from realistic worst-case work duration; use `expiresAt: null` for genuinely-indefinite watchers (price alerts, condition triggers).\n\n### MONITORED-SOURCE PATTERN (proactive skills)\nWhen the user says any variant of `tell me when new X arrives`, `ping me when X changes`, `make a tracker for X`, `monitor X for me`, `check X every week`, `let me know when there are new BOGOs / uploads / deals / posts / releases` — the skill MUST be proactive. Use this four-piece scaffold every time, in order:\n\n1) **Fetcher** — a tool that hits the source and returns the current state. Choose the leanest possible source (RSS > public API > JSON-LD on the page > full scrape).\n2) **Cadence** — pick a preset on `ctx.proposeMonitor`: `minutely` | `fast` (5 min) | `hourly` | `daily` | `weekly`. Smart defaults: store ads → `weekly`; channel/feed → `hourly`; price → `fast`; release notes → `daily`. If the source has a known refresh day (Publix ads rotate Wednesdays), tick on `daily` and no-op in the handler until it's Wednesday.\n3) **Pref-aware filter** — read user prefs from cortex before notifying: `const { searchMemory } = await import('../../memory.mjs'); const hits = await searchMemory(userId, '<topic> preferences', 8);` and only emit a textUpdate for items that match. Without this, every poll spams the user with unfiltered changes.\n4) **Delivery** — register via `ctx.proposeMonitor({ kind, state, cadence, label, expiresAt: null, deliver, skillId: '<your-skill-id>' })`. Pick `deliver` BASED ON THE USER'S EXPLICIT INTENT:\n   - `'agent'` (default) — runs a turn so the LLM can summarize + TTS naturally. Pair with `agentPrompt: '...'`. Use unless the user asks otherwise.\n   - `'email'` — when the user says any variant of `email me`, `send it to my email`, `notify me by email`. Pair with `emailSubject: '...'`. Sends FROM the user's primary connected account TO their profile email — no agent turn, no `ask_agent` needed. NEVER route email delivery through `ask_agent` to an email agent; `deliver: 'email'` handles it directly via lib/email-delivery.mjs.\n   - `'telegram'` — when the user says `text me`, `send me a telegram`, `message me on telegram`, `ping me on telegram`. Optionally pair with `telegramPrefix: '...'` for a header line. Sends via the user's linked Telegram bot — no agent turn, no `ask_agent` needed. NEVER route Telegram delivery through `ask_agent`; `deliver: 'telegram'` handles it directly via routes/telegram.mjs:sendTelegramToUser.\n   - `'notify'` — terse status bubble only. Reserve for cases where the user explicitly said 'just a notification, don't tell me about it' or for very low-importance ambient signals.\n   In the handler, call `helpers.fire(message)` instead of `helpers.fireAgent` — `fire` dispatches based on whatever `deliver` was chosen, so the same handler emails OR speaks depending on registration. For `'email'`, write `message` as a plain-prose email body (no TTS framing). For `'agent'`, write it as an instruction to the LLM.\n\nWhen the user changes their mind ('actually email me instead'), the kickoff tool should support a `deliver` parameter and, if a watcher already exists for the same `dedupKey` with a DIFFERENT delivery, drop it via `ctx.unwatchMatching` before re-registering. Otherwise the dedup check silently keeps the old delivery mode.\n\nIdempotency: pass `dedupKey: '<stable-identity>'` (channel id, sender email, store id) so calling the kickoff tool twice doesn't stack N watchers for the same source.\n\n**CRITICAL — `skillId` field MUST equal the manifest `id` VERBATIM.** The `usr_` prefix is a legacy format; the modern migration drops it. If your manifest declares `\"id\": \"my-skill\"`, then `skillId: 'my-skill'` — NOT `'usr_my-skill'`. Getting this wrong means the watcher supervisor can't find your `watcherHandlers` export and the watcher logs \"Handler not found\" every tick until it fails out. Always declare a single `const SKILL_ID = '<exact-manifest-id>';` at the top of execute.mjs and reuse it everywhere proposeMonitor is called.\n\nExample skeleton for `kind: 'mysite_check'`:\n```\nctx.proposeMonitor({\n  kind: 'mysite_check',\n  state: { url: 'https://...', lastSeen: null },\n  cadence: 'weekly',\n  label: 'Watch <site> for new posts',\n  expiresAt: null,\n  deliver: 'agent',                              // or 'email' / 'notify'\n  agentPrompt: 'Summarize the new <site> posts in one or two spoken sentences.',\n  // emailSubject: 'New posts on <site>',         // when deliver='email'\n  skillId: 'mysite',\n  dedupKey: 'mysite-default',\n});\n// watcherHandlers.mysite_check returns { textUpdate, done, newState }; call\n// `await helpers.fire(message)` to deliver via whatever mode was chosen.\n```\n\n### USER-NAMED-CATALOG PATTERN (alias_catalog)\nWhen a skill maintains a list of items the user references by name — watched channels, saved searches, tracked addresses, accounts, subscriptions, recipes — declare an `alias_catalog` block in the manifest. The skill-alias framework (lib/skill-alias-framework.mjs) then runs a per-turn resolver that recognizes phrases like `the <X> <noun>` and prepends a system note with the resolved id, so the LLM skips the `list_X` → match-by-name dance.\n\nWhen to add this: ANY tool that takes an opaque id (channel_id, account_id, item_id, …) AND the user typically refers to that thing by a friendly name. If the skill enumerates and then filters on every call, add `alias_catalog`.\n\nSchema (drop the whole block into manifest.json next to `tools`):\n```\n\"alias_catalog\": {\n  \"entity_kind\":   \"yt_channel\",          // globally unique across all skills\n  \"noun_singular\": \"channel\",             // matcher generates \"the X <noun>\"\n  \"noun_plural\":   \"channels\",\n  \"extra_phrase_patterns\": [               // OPTIONAL — domain-specific regexes\n    \"\\\\bnew\\\\s+(?:videos?|uploads?)\\\\s+from\\\\s+(.+?)\\\\b\"\n  ],\n  \"catalog_source\": {                      // ONE of two modes:\n    \"type\":      \"config_file\",\n    \"path\":      \"users/{userId}/<your-config>.json\",\n    \"json_path\": \"watchedChannels\",        // dot-path; optional\n    \"format\":    \"object_map\"               // \"object_map\" | \"array\"\n  },\n  // OR for non-file storage (cortex, encrypted, remote):\n  // \"catalog_source\": { \"type\": \"exported_function\", \"function\": \"listAliasEntries\" }\n\n  \"id_field\":      \"channelId\",            // path within an entry\n  \"name_fields\":   [\"channelName\"],        // ordered fallback list\n  \"id_arg_names\":  [\"channel_id\", \"channelId\"],   // learner hooks on these arg names\n  \"cascade_on_tools\": [                     // alias auto-dropped when tool succeeds\n    { \"tool\": \"<your-skill>_unwatch\", \"id_arg\": \"channel_id\" }\n  ]\n}\n```\n\nWhat the framework gives you for free:\n- Per-turn phrase resolution against the user's text — no skill code needed.\n- Learner that observes any tool call with a matching id_arg_name and saves the user's phrase → id mapping (so the second mention pre-resolves).\n- Catalog cache with 5-min TTL, auto-invalidated when a cascade tool fires.\n- Cascade-delete on stored aliases when an entry is removed.\n- Clarification path: if the LLM asks `did you mean <X>?` and the user replies `yes`, the framework saves the alias.\n\nNo new code in execute.mjs — purely declarative. If your catalog isn't readable via a file path (encrypted with ctx.getCredential, fetched from a remote API, stored in cortex memory), use `\"type\": \"exported_function\"` and export `listAliasEntries(userId) → Promise<Array<{...}>>` from execute.mjs returning the catalog entries.\n\nWhen a skill writes files to disk (downloads, generated media, exported documents), you MUST save them under the user's profile via `getUserFilesDir(userId, kind)` from `lib/paths.mjs` — pick `kind` from `videos | images | documents | research | code` based on what's being saved. NEVER write to `~/Downloads`, `os.homedir()`, or any path outside the install dir; outputs land in the user's Profile Files UI for free this way.\n\n**CRITICAL — credentials NEVER touch a plaintext config file.** If the skill needs an API key, password, OAuth token, or any other secret from the user, use the credential helpers on the executor's `ctx` parameter (5th arg): `await ctx.getCredential(id)` to read (decrypted), and `await ctx.requestCredential({id, label, kind:'api_key', persist:true})` if missing. NEVER `import` from `lib/credentials.mjs` directly — the relative-path depth differs between built-in and user skills and is easy to miscount. The chat widget collects the value over a protected WS frame, encrypts it with the user's master key, and stores under `users/<id>/credentials/<id>.json`. The plaintext value NEVER enters the LLM message history. Plaintext `usr_<skillId>-config.json` is fine for non-secrets (URLs, account IDs, preferences, timestamps) — but anything that would compromise the user if it leaked goes through the credential primitive. See the blueprint's `Storing configuration / secrets` section for the full executor signature. Skills may optionally include a drawer — a small UI panel that opens from the sidebar — but a drawer is entirely optional; most skills should not include one. Only add a drawer when the user explicitly asks for a visual panel. To delete a custom skill use skill_delete — never use shell commands or coder tools to remove skill directories. FIXING BUGS IN EXISTING SKILLS: when a bug is reported in a skill you already created, prefer skill_read_code + skill_patch_code over skill_update_code. skill_patch_code takes an array of targeted find/replace edits and avoids resending the entire file — use it for any change that fits as a focused edit. Only fall back to skill_update_code when the change is large or structural.\n\n### OWNING-AGENT GUIDANCE (manifest.systemPromptAddition) — REQUIRED\nThe `systemPromptAddition` field on a skill manifest is injected into the OWNING agent's system prompt every turn. It's the only place the owning agent learns what your skill is, what each tool is for, what order to call them in, and any non-obvious workflow rules. WITHOUT it, the owning agent sees raw tool names + tool descriptions and infers the rest — works for trivial skills but loses every multi-step workflow your skill encodes.\n\n**EVERY skill_create call MUST include a `systemPromptAddition` describing the skill to its owning agent.** Treat the field as required, not optional. Without it the agent is blind to the skill's mental model and falls back on tool names alone — the cost is that the user has to re-explain the workflow every time they invoke the skill.\n\nThe SPA should cover, in order:\n1. **What the skill does in one sentence** — the elevator pitch the agent reads to know whether this skill is relevant to a user message.\n2. **The kickoff tool(s)** — which tool the agent calls FIRST when a user asks for this skill's domain. If multiple could start a flow, say when to pick each.\n3. **Listing / inspection tools** — when to call them (\"BEFORE update_X, always call list_X to get the id\"). The owning agent forgets the read-before-write rule unless you spell it out.\n4. **Mutation / teardown tools** — patch-in-place vs replace-and-recreate, required arguments, what gets persisted.\n5. **State / config layout** — where the skill stores per-user data (file path, cortex memory, encrypted credential), so the agent doesn't propose a shell command to inspect or repair it. One line is enough.\n6. **Workflow rules** — anything the agent would otherwise get wrong: \"don't call X and Y in the same turn\", \"after Z, the user must confirm via APPROVE_FOO\", \"if the user says 'every X minutes', clamp to ≥60s and tell them why\".\n7. **Delivery / failure mode** — what the user sees on success vs failure, and what the agent should say back.\n\nWrite the SPA TO the owning agent, in second person (\"you can call X to ...\"). Aim for 100-400 words for a typical skill — longer for complex skills with non-obvious workflows. Keep tool names backtick-quoted. The framework expands `{{USER_NAME}}`, `{{AGENT_NAME}}`, `{{AGENT_EMOJI}}`, `{{SERVER_IP}}`, `{{WORKSPACE}}` at injection time — use these instead of hard-coding values.\n\nWhen UPDATING an existing skill, ANY change that affects how the owning agent should operate the skill (new tool, renamed tool, removed tool, changed workflow, new state location) ALSO requires a follow-up `skill_update_manifest` to amend the SPA. Same rule as `skill_update_tool_def`: the manifest is the agent's only view of the skill; stale SPAs leave the agent operating an outdated mental model.\n\n### COLLECTION-WATCHER PATTERN (one watcher, many tracked items)\nWhen the user wants to monitor MULTIPLE peer items under one umbrella — \"watch these channels\", \"track these retailers\", \"alert me on any of these symbols\", \"check these URLs at different cadences\" — use `ctx.collection` instead of registering N independent watchers via `ctx.proposeMonitor`. Same handler runs for every item; parent watcher ticks at 60s; each item carries its own `cadenceSec` + `nextDueAt` + optional `deliver` override.\n\nIndicators you want collection mode (NOT N proposeMonitor calls):\n- The user's domain word is PLURAL (\"channels\", \"stores\", \"products\", \"feeds\", \"symbols\").\n- The same fetch+compare logic runs for every item, only inputs differ.\n- The user is likely to grow / shrink / re-tune the list (add a channel, drop a retailer, slow one item, change one to email).\n\nWhen collection mode is right, ALSO declare `collection_watchers: ['kind1', ...]` at the top of the manifest. That single field auto-injects a stock paragraph into the owning agent's SPA telling it about the three generic tools (`list_watch_items`, `update_watch_item`, `remove_watch_item`) scoped to your kinds. The agent can then satisfy \"change channel X to 10 minutes\" / \"drop Target\" / \"list everything I'm watching\" without you writing per-item update/remove tools — the framework handles read/update/delete.\n\nSkill-side scaffold (kickoff tool):\n```\nconst KIND = 'yt_channel_check';\n// idempotent — second call for the same id returns added:false\nawait ctx.collection.add(KIND, {\n  id: channelId,                       // unique within the kind\n  cadenceSec: 3600,                    // per-item, ≥60s\n  channelName, lastSeen,               // skill-specific payload\n  // deliver: 'email',                  // optional per-item override\n});\n// or first-call setup with N items:\nawait ctx.collection.ensure({\n  kind: KIND,\n  label: 'YouTube uploads',\n  deliver: 'agent',                    // watcher-level default\n  items: [{ id, cadenceSec: 3600, ... }, ...],\n});\n```\n\nHandler scaffold (`watcherHandlers[KIND]`):\n```\nasync (state, helpers) => {\n  const now = Date.now();\n  const due = (state.items || []).filter(it => (it.nextDueAt || 0) <= now);\n  if (!due.length) return {};\n  const results = await helpers.mapItems(due, async (it) => {\n    const fresh = await fetchFor(it);                     // skill-specific\n    if (fresh.changed) {\n      await helpers.fire({\n        itemKey: it.id,                                   // per-item delivery + dedup\n        message: `${it.name}: ${fresh.summary}`,\n        subject: `Update on ${it.name}`,                  // when deliver='email'\n      });\n    }\n    return { ...it, lastSeen: fresh.id, nextDueAt: now + it.cadenceSec * 1000 };\n  }, { concurrency: 5 });                                 // bounded parallel\n  const byId = new Map(results.map(it => [it.id, it]));\n  return { newState: { ...state, items: (state.items || []).map(it => byId.get(it.id) ?? it) } };\n}\n```\n\nThe skill is still responsible for the ADD path — the kickoff tool that resolves user input (URL, handle, name) into an item id, fetches initial state (lastSeen, baseline price, etc.), and calls `ctx.collection.add`. There's no generic `add_watch_item` — resolution logic is per-skill.\n\n### KEEP THE MANIFEST IN SYNC WITH THE CODE\nThe manifest's tool `description` and `parameters` are the contract the CALLING agent reads to decide what each tool does. The code's behavior is invisible to that agent. If your edit changes:\n- what the tool RETURNS (shape, fields, summary vs detail level)\n- what ARGUMENTS it accepts (new optional param, renamed field, type change)\n- what SIDE EFFECTS it has (now writes to disk, now requires auth, now sends external requests)\n\n…you MUST follow the code patch with a `skill_update_tool_def` call to bring the manifest into line with the new behavior. If you don't, the calling agent reads the stale description, doesn't trust the new behavior, and either reproduces the work with generic fallback tools (`fetch_url`, `web_search`, `read_file`, scraping HTML by hand) or skips your change entirely.\n\nRule of thumb: if a teammate handed you only the manifest (not the source code), would they understand what each tool now does and what it returns? If not, update the manifest. This applies to ANY skill domain — calendar, finance, code, smart-home, downloads — not just specific examples.",
   "tools": [
     {
       "type": "function",
       "function": {
         "name": "skill_read_blueprint",
         "description": "Read the skill authoring guide before writing any skill code. Always call this first.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     },
     {
@@ -44,14 +57,28 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "id": { "type": "string", "description": "Unique id: lowercase letters, numbers, hyphens (no underscores). Stored verbatim — use this exact string when later calling skill_delete, skill_read_code, or skill_patch_code." },
-            "name": { "type": "string", "description": "Human-readable skill name" },
-            "description": { "type": "string", "description": "One-sentence description" },
-            "icon": { "type": "string", "description": "Single emoji icon" },
+            "id": {
+              "type": "string",
+              "description": "Unique id: lowercase letters, numbers, hyphens (no underscores). Stored verbatim — use this exact string when later calling skill_delete, skill_read_code, or skill_patch_code."
+            },
+            "name": {
+              "type": "string",
+              "description": "Human-readable skill name"
+            },
+            "description": {
+              "type": "string",
+              "description": "One-sentence description"
+            },
+            "icon": {
+              "type": "string",
+              "description": "Single emoji icon"
+            },
             "tools": {
               "type": "array",
               "description": "OpenAI-compatible tool schemas. Each: {type:'function', function:{name, description, parameters}}. Always prefix tool names with the skill id (e.g. ha_turn_on for skill id 'ha').\n\n**Optional per-tool field `destructive: true`** — set on any tool that mutates external state (sends email, calls a remote write API, deletes files, posts to a webhook). When set, the smoke runner skips that tool with a warning instead of invoking it. Read-only tools (weather lookups, listing things, search) should NOT be marked destructive — they get safety-tested for free.",
-              "items": { "type": "object" }
+              "items": {
+                "type": "object"
+              }
             },
             "watchers": {
               "type": "array",
@@ -59,21 +86,39 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "kind":        { "type": "string", "description": "Unique watcher kind id, must match a key in watcherHandlers. Prefix with skill id like tool names." },
-                  "description": { "type": "string", "description": "What this watcher polls / produces." }
+                  "kind": {
+                    "type": "string",
+                    "description": "Unique watcher kind id, must match a key in watcherHandlers. Prefix with skill id like tool names."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What this watcher polls / produces."
+                  }
                 },
-                "required": ["kind", "description"]
+                "required": [
+                  "kind",
+                  "description"
+                ]
               }
             },
-            "code": { "type": "string", "description": "Complete ESM source for execute.mjs. Must export: async function executeSkillTool(name, args, userId, agentId, ctx) and export default executeSkillTool. Return a string result. If the skill declares watchers, also export `watcherHandlers` — a named export object mapping each declared kind to an async handler function `(state, helpers) => ({textUpdate?, done?, newState?, nextCadenceSec?, extendExpiryBy?})`. Inside tool handlers, register watchers via `ctx.watch({kind, skillId, label, cadenceSec, expiresAt, state})` — always set expiresAt explicitly based on a realistic estimate of the work, or pass null for indefinite watchers (price alerts etc.). Never import app internals at the top level — use dynamic await import() inside handlers only." },
+            "code": {
+              "type": "string",
+              "description": "Complete ESM source for execute.mjs. Must export: async function executeSkillTool(name, args, userId, agentId, ctx) and export default executeSkillTool. Return a string result. If the skill declares watchers, also export `watcherHandlers` — a named export object mapping each declared kind to an async handler function `(state, helpers) => ({textUpdate?, done?, newState?, nextCadenceSec?, extendExpiryBy?})`. Inside tool handlers, register watchers via `ctx.watch({kind, skillId, label, cadenceSec, expiresAt, state})` — always set expiresAt explicitly based on a realistic estimate of the work, or pass null for indefinite watchers (price alerts etc.). Never import app internals at the top level — use dynamic await import() inside handlers only."
+            },
             "intent_examples": {
               "type": "array",
               "description": "STRONGLY RECOMMENDED. 6–15 short natural-language phrases the user might say when they want this skill. Used by the tool-router's embedding classifier to decide whether to load this skill's tools on a given turn — without examples, the coordinator only sees the skill's tools after the LLM explicitly calls request_tools. Write phrases the way real users phrase requests, varied across surface forms. Examples for a 'kroger-deals' skill: ['what's on sale at kroger this week', 'check kroger weekly ad', 'find snack deals at kroger', 'kroger digital coupons', 'are eggs on sale at kroger']. Don't include the skill name itself in the phrase — match how a user describes the GOAL, not the tool.",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "coordinator_scope": {
               "type": "string",
-              "enum": ["include", "exclude", "auto"],
+              "enum": [
+                "include",
+                "exclude",
+                "auto"
+              ],
               "description": "How this custom skill flows to the coordinator agent's tool surface. 'include' (default for custom skills): always available to the coordinator. 'exclude': hidden from the coordinator entirely — useful for heavyweight skills (GPU-pod managers, finance ingestion) that belong on a specialist agent and would otherwise add 10+ KB to every coordinator turn. 'auto': only loaded when the user prompt matches the skill's intent_examples (requires intent_examples to be set). Pick 'exclude' when the skill should only be reachable via ask_agent to a specialist. Pick 'auto' for skills useful sometimes but not every turn."
             },
             "assign_to": {
@@ -84,14 +129,35 @@
               "type": "object",
               "description": "OPTIONAL. Provide ONLY if the user wants a sidebar drawer UI for this skill. Omit entirely otherwise — most skills should not include a drawer.",
               "properties": {
-                "name":       { "type": "string", "description": "Drawer label shown in the header (e.g. 'Home Assistant')" },
-                "lucideIcon": { "type": "string", "description": "STRONGLY PREFERRED. A lucide icon name (e.g. 'receipt', 'home', 'bell', 'calendar') rendered in the sidebar button and drawer header so the drawer matches the rest of the UI. See https://lucide.dev/icons for names. Fall back to emoji only if no lucide icon fits." },
-                "icon":       { "type": "string", "description": "Single emoji, only used if lucideIcon is not provided. Prefer lucideIcon for visual consistency with built-in drawers." },
-                "html":       { "type": "string", "description": "HTML injected into the drawer body. Use plain HTML and the .cdraw-* classes documented in the skill blueprint (.cdraw-row, .cdraw-btn, .cdraw-badge, .cdraw-empty, .cdraw-toolbar, etc.) so the drawer matches the app's look and feel. Give any custom ids a unique prefix (e.g. usr_myskill_root) to avoid DOM collisions." },
-                "initJs":     { "type": "string", "description": "OPTIONAL JS body that runs when the drawer is opened. Runs in the page global scope; use `document.getElementById(...)` and `fetch('/api/usr_myskill/...')` freely." },
-                "serverCode": { "type": "string", "description": "OPTIONAL ESM source for plugins/usr_{id}/server.mjs. Must export: async function handleRequest(req, res, cfg). Return true if handled, false otherwise. Only needed if the drawer needs custom HTTP endpoints." }
+                "name": {
+                  "type": "string",
+                  "description": "Drawer label shown in the header (e.g. 'Home Assistant')"
+                },
+                "lucideIcon": {
+                  "type": "string",
+                  "description": "STRONGLY PREFERRED. A lucide icon name (e.g. 'receipt', 'home', 'bell', 'calendar') rendered in the sidebar button and drawer header so the drawer matches the rest of the UI. See https://lucide.dev/icons for names. Fall back to emoji only if no lucide icon fits."
+                },
+                "icon": {
+                  "type": "string",
+                  "description": "Single emoji, only used if lucideIcon is not provided. Prefer lucideIcon for visual consistency with built-in drawers."
+                },
+                "html": {
+                  "type": "string",
+                  "description": "HTML injected into the drawer body. Use plain HTML and the .cdraw-* classes documented in the skill blueprint (.cdraw-row, .cdraw-btn, .cdraw-badge, .cdraw-empty, .cdraw-toolbar, etc.) so the drawer matches the app's look and feel. Give any custom ids a unique prefix (e.g. usr_myskill_root) to avoid DOM collisions."
+                },
+                "initJs": {
+                  "type": "string",
+                  "description": "OPTIONAL JS body that runs when the drawer is opened. Runs in the page global scope; use `document.getElementById(...)` and `fetch('/api/usr_myskill/...')` freely."
+                },
+                "serverCode": {
+                  "type": "string",
+                  "description": "OPTIONAL ESM source for plugins/usr_{id}/server.mjs. Must export: async function handleRequest(req, res, cfg). Return true if handled, false otherwise. Only needed if the drawer needs custom HTTP endpoints."
+                }
               },
-              "required": ["name", "html"]
+              "required": [
+                "name",
+                "html"
+              ]
             },
             "skip_lsp": {
               "type": "boolean",
@@ -104,9 +170,20 @@
             "skip_smoke": {
               "type": "boolean",
               "description": "OPTIONAL. Default false. When false, every tool in the manifest is imported and called with generated args (and a stub ctx that returns undefined for credentials and no-ops on showImage/watch/etc.). Crashes, hangs (3s timeout), and wrong-typed returns block the create. Annotate individual tools with `destructive: true` in the manifest to skip them surgically. Set this flag to true only as a nuclear option when most tools legitimately can't be smoke-tested."
+            },
+            "voice_device": {
+              "type": "boolean",
+              "description": "Set true when the user will trigger this skill by SPEAKING to an OE voice device (music/media control, smart-home, timers, hands-free lookups). Voice turns run a slim tool allowlist for latency, so WITHOUT this flag the skill's tools are stripped on voice turns and the skill silently does nothing when invoked by voice. Independent of whether the skill outputs audio. Default false (browser/chat-only skills)."
             }
           },
-          "required": ["id", "name", "description", "tools", "code", "assign_to"]
+          "required": [
+            "id",
+            "name",
+            "description",
+            "tools",
+            "code",
+            "assign_to"
+          ]
         }
       }
     },
@@ -118,8 +195,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "id": { "type": "string", "description": "Full skill id including usr_ prefix (e.g. usr_homeassistant)" },
-            "code": { "type": "string", "description": "Complete new execute.mjs source code" },
+            "id": {
+              "type": "string",
+              "description": "Full skill id including usr_ prefix (e.g. usr_homeassistant)"
+            },
+            "code": {
+              "type": "string",
+              "description": "Complete new execute.mjs source code"
+            },
             "skip_lsp": {
               "type": "boolean",
               "description": "OPTIONAL. Default false. When false, the new code is type-checked before being written; any error blocks the update and the original file is left untouched. Set true only when you've confirmed a diagnostic is a false positive."
@@ -133,7 +216,10 @@
               "description": "OPTIONAL. Default false. When false, every tool gets smoke-tested with generated args after the new code is written; any crash, hang (3s timeout), or wrong return type reverts the update. Annotate destructive tools with `destructive:true` in the manifest to skip them individually."
             }
           },
-          "required": ["id", "code"]
+          "required": [
+            "id",
+            "code"
+          ]
         }
       }
     },
@@ -145,9 +231,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "id": { "type": "string", "description": "Full skill id including usr_ prefix" }
+            "id": {
+              "type": "string",
+              "description": "Full skill id including usr_ prefix"
+            }
           },
-          "required": ["id"]
+          "required": [
+            "id"
+          ]
         }
       }
     },
@@ -159,17 +250,29 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "id": { "type": "string", "description": "Full skill id including usr_ prefix" },
+            "id": {
+              "type": "string",
+              "description": "Full skill id including usr_ prefix"
+            },
             "edits": {
               "type": "array",
               "description": "Edits to apply in order. Each must be an object with 'find' and 'replace' string fields.",
               "items": {
                 "type": "object",
                 "properties": {
-                  "find":    { "type": "string", "description": "Exact substring to replace. Must appear exactly once in the current file — include enough surrounding context to make it unique." },
-                  "replace": { "type": "string", "description": "Replacement string. May be empty to delete the matched region." }
+                  "find": {
+                    "type": "string",
+                    "description": "Exact substring to replace. Must appear exactly once in the current file — include enough surrounding context to make it unique."
+                  },
+                  "replace": {
+                    "type": "string",
+                    "description": "Replacement string. May be empty to delete the matched region."
+                  }
                 },
-                "required": ["find", "replace"]
+                "required": [
+                  "find",
+                  "replace"
+                ]
               },
               "minItems": 1
             },
@@ -186,7 +289,10 @@
               "description": "OPTIONAL. Default false. When false, every tool is smoke-tested with generated args after the patch is written; any crash, hang, or wrong return type reverts to the previous version. Annotate destructive tools with `destructive:true` in the manifest to skip them individually."
             }
           },
-          "required": ["id", "edits"]
+          "required": [
+            "id",
+            "edits"
+          ]
         }
       }
     },
@@ -198,12 +304,74 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "id":          { "type": "string", "description": "Full skill id (the same id you'd pass to skill_patch_code / skill_read_code)." },
-            "tool_name":   { "type": "string", "description": "The exact `function.name` of the tool inside the skill's manifest you want to update." },
-            "description": { "type": "string", "description": "Optional. The new tool description (what the tool does, what it returns, when to use it). Omit to leave unchanged." },
-            "parameters":  { "type": "object", "description": "Optional. The full new JSON-schema parameters object for the tool (e.g. { type:'object', properties:{...}, required:[...] }). REPLACES the existing parameters block in its entirety — include every property you want to keep. Omit to leave parameters unchanged." }
+            "id": {
+              "type": "string",
+              "description": "Full skill id (the same id you'd pass to skill_patch_code / skill_read_code)."
+            },
+            "tool_name": {
+              "type": "string",
+              "description": "The exact `function.name` of the tool inside the skill's manifest you want to update."
+            },
+            "description": {
+              "type": "string",
+              "description": "Optional. The new tool description (what the tool does, what it returns, when to use it). Omit to leave unchanged."
+            },
+            "parameters": {
+              "type": "object",
+              "description": "Optional. The full new JSON-schema parameters object for the tool (e.g. { type:'object', properties:{...}, required:[...] }). REPLACES the existing parameters block in its entirety — include every property you want to keep. Omit to leave parameters unchanged."
+            }
           },
-          "required": ["id", "tool_name"]
+          "required": [
+            "id",
+            "tool_name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_update_manifest",
+        "description": "Update manifest-LEVEL fields on an existing user skill (not a specific tool's def — use skill_update_tool_def for that, and skill_update_code/skill_patch_code for code). Use this to set voice_device after the fact, amend the systemPromptAddition the owning agent reads, or change intent_examples/coordinator_scope/description. Changes are live on the next turn without a server restart. Provide id plus at least one field to change.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The skill id to update."
+            },
+            "voice_device": {
+              "type": "boolean",
+              "description": "Set true to make the skill's tools usable from voice devices (adds them to the voice tool allowlist); false to remove that. Set true for any skill the user triggers by speaking."
+            },
+            "systemPromptAddition": {
+              "type": "string",
+              "description": "Replace the owning-agent guidance injected into the agent's system prompt. Amend this whenever a code/tool change alters how the agent should operate the skill."
+            },
+            "intent_examples": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Replace the natural-language intent phrases the embed-router uses to auto-load the skill's tools. Rebuilds the classifier index immediately."
+            },
+            "coordinator_scope": {
+              "type": "string",
+              "enum": [
+                "include",
+                "auto",
+                "exclude"
+              ],
+              "description": "Control whether the skill flows to coordinator-class agents: include (always), auto (only on intent match), exclude (specialist-only)."
+            },
+            "description": {
+              "type": "string",
+              "description": "Replace the skill's one-line description."
+            }
+          },
+          "required": [
+            "id"
+          ]
         }
       }
     },
@@ -215,9 +383,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "id": { "type": "string", "description": "Full skill id including usr_ prefix" }
+            "id": {
+              "type": "string",
+              "description": "Full skill id including usr_ prefix"
+            }
           },
-          "required": ["id"]
+          "required": [
+            "id"
+          ]
         }
       }
     },
@@ -226,7 +399,11 @@
       "function": {
         "name": "skill_list",
         "description": "List all custom skills currently in the user's session.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     },
     {
@@ -237,11 +414,23 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "name":        { "type": "string", "description": "Human-readable skill name (e.g. 'Flight Booker'). Required." },
-            "description": { "type": "string", "description": "One short sentence describing what the skill does, derived from the user's ask. Required." },
-            "id":          { "type": "string", "description": "Optional slug (kebab-case). Auto-derived from name if omitted." }
+            "name": {
+              "type": "string",
+              "description": "Human-readable skill name (e.g. 'Flight Booker'). Required."
+            },
+            "description": {
+              "type": "string",
+              "description": "One short sentence describing what the skill does, derived from the user's ask. Required."
+            },
+            "id": {
+              "type": "string",
+              "description": "Optional slug (kebab-case). Auto-derived from name if omitted."
+            }
           },
-          "required": ["name", "description"]
+          "required": [
+            "name",
+            "description"
+          ]
         }
       }
     },
@@ -253,7 +442,10 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "draftId": { "type": "string", "description": "Specific draft to show. Omit to list all drafts in progress for this user." }
+            "draftId": {
+              "type": "string",
+              "description": "Specific draft to show. Omit to list all drafts in progress for this user."
+            }
           }
         }
       }
@@ -266,10 +458,19 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "draftId": { "type": "string", "description": "Draft id from skill_draft_start." },
-            "patch":   { "type": "object", "description": "Partial spec to merge. Common keys: tools, openQuestions, credentials, sources, dataStorage, assignTo, watcher, collection, aliasCatalog, sampleDialogs, intentExamples, coordinatorScope, systemPromptAddition, code, drawer, watchers, rejectedCapabilities. Add only the fields you want to change." }
+            "draftId": {
+              "type": "string",
+              "description": "Draft id from skill_draft_start."
+            },
+            "patch": {
+              "type": "object",
+              "description": "Partial spec to merge. Common keys: tools, openQuestions, credentials, sources, dataStorage, assignTo, watcher, collection, aliasCatalog, sampleDialogs, intentExamples, coordinatorScope, systemPromptAddition, code, drawer, watchers, rejectedCapabilities. Add only the fields you want to change."
+            }
           },
-          "required": ["draftId", "patch"]
+          "required": [
+            "draftId",
+            "patch"
+          ]
         }
       }
     },
@@ -281,9 +482,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "draftId": { "type": "string", "description": "Draft id to build." }
+            "draftId": {
+              "type": "string",
+              "description": "Draft id to build."
+            }
           },
-          "required": ["draftId"]
+          "required": [
+            "draftId"
+          ]
         }
       }
     },
@@ -295,9 +501,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "draftId": { "type": "string", "description": "Draft id to discard." }
+            "draftId": {
+              "type": "string",
+              "description": "Draft id to discard."
+            }
           },
-          "required": ["draftId"]
+          "required": [
+            "draftId"
+          ]
         }
       }
     },
@@ -306,7 +517,11 @@
       "function": {
         "name": "skill_draft_list",
         "description": "List every draft currently in progress for this user. Useful when the user says 'what skills was I working on' or when resuming a session.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     },
     {
@@ -317,13 +532,35 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "skillId": { "type": "string", "description": "Exact manifest id of the skill to inspect (no usr_ prefix)." },
-            "tail": { "type": "number", "description": "How many most-recent entries to return (default 100, max 5000)." },
-            "level": { "type": "string", "enum": ["info", "warn", "error"], "description": "Filter to only this level. Omit for all levels." },
-            "since": { "type": "string", "description": "ISO timestamp or epoch ms — return only entries newer than this." },
-            "q": { "type": "string", "description": "Case-insensitive text match against the msg + meta JSON." }
+            "skillId": {
+              "type": "string",
+              "description": "Exact manifest id of the skill to inspect (no usr_ prefix)."
+            },
+            "tail": {
+              "type": "number",
+              "description": "How many most-recent entries to return (default 100, max 5000)."
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warn",
+                "error"
+              ],
+              "description": "Filter to only this level. Omit for all levels."
+            },
+            "since": {
+              "type": "string",
+              "description": "ISO timestamp or epoch ms — return only entries newer than this."
+            },
+            "q": {
+              "type": "string",
+              "description": "Case-insensitive text match against the msg + meta JSON."
+            }
           },
-          "required": ["skillId"]
+          "required": [
+            "skillId"
+          ]
         }
       }
     }

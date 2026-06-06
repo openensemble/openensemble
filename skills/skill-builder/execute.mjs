@@ -264,7 +264,7 @@ function handleReadBlueprint() {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -340,6 +340,13 @@ async function handleCreate(args, userId) {
       .map(s => typeof s === 'string' ? s.trim() : '')
       .filter(s => s.length > 0 && s.length < 200);
     if (cleaned.length) manifest.intent_examples = cleaned;
+  }
+  // voice_device: when true, the skill's tools survive the voice-device tool
+  // allowlist (chat-dispatch.mjs voiceToolAllowlistFor) so the user can trigger
+  // the skill by speaking to a voice device. Off by default — voice turns run a
+  // slim toolset for latency.
+  if (voice_device === true) {
+    manifest.voice_device = true;
   }
   if (coordinator_scope === 'exclude' || coordinator_scope === 'auto' || coordinator_scope === 'include') {
     manifest.coordinator_scope = coordinator_scope;
@@ -762,6 +769,87 @@ async function handleUpdateToolDef(args, userId) {
   return `Skill "${manifest.name}" (${skillId}) — tool "${tool_name}" manifest updated (${changed.join(' + ')}). The new description/parameters take effect on every agent's next turn.`;
 }
 
+// Update manifest-LEVEL fields (not a specific tool) on an existing skill:
+// voice_device, systemPromptAddition, intent_examples, coordinator_scope,
+// description. Modeled on handleUpdateToolDef — atomic write + re-register so
+// the change is live without a server restart.
+async function handleUpdateManifest(args, userId) {
+  const { id, voice_device, systemPromptAddition, intent_examples, coordinator_scope, description } = args;
+  if (!id?.trim()) return 'id is required.';
+
+  const skillId = id.trim();
+  const { getRoleManifest, listAllRoles, clearExecutorCache, addRoleManifest } = await import('../../roles.mjs');
+
+  let manifest = getRoleManifest(skillId, userId);
+  if (manifest && !manifest.custom) return 'Only user-created skills can be updated.';
+  if (!manifest && isPrivileged(userId)) {
+    manifest = listAllRoles().find(m => m.id === skillId && m.custom) ?? null;
+  }
+  if (!manifest) return `Skill "${skillId}" not found. Use skill_list to see your skills.`;
+
+  const ownerId = manifest.createdBy;
+  const manifestPath = path.join(userSkillsDir(ownerId), skillId, 'manifest.json');
+  if (!existsSync(manifestPath)) return `Skill "${skillId}" has no manifest.json on disk.`;
+
+  let disk;
+  try { disk = JSON.parse(readFileSync(manifestPath, 'utf8')); }
+  catch (e) { return `Could not parse manifest.json: ${e.message}`; }
+
+  const changed = [];
+  if (voice_device === true)  { disk.voice_device = true;       changed.push('voice_device=true'); }
+  else if (voice_device === false) { delete disk.voice_device;  changed.push('voice_device=false'); }
+  if (typeof systemPromptAddition === 'string' && systemPromptAddition.trim()) {
+    disk.systemPromptAddition = systemPromptAddition;
+    changed.push('systemPromptAddition');
+  }
+  if (Array.isArray(intent_examples)) {
+    disk.intent_examples = intent_examples
+      .map(s => typeof s === 'string' ? s.trim() : '')
+      .filter(s => s.length > 0 && s.length < 200);
+    changed.push(`intent_examples(${disk.intent_examples.length})`);
+  }
+  if (coordinator_scope === 'exclude' || coordinator_scope === 'auto' || coordinator_scope === 'include') {
+    disk.coordinator_scope = coordinator_scope;
+    changed.push(`coordinator_scope=${coordinator_scope}`);
+  }
+  if (typeof description === 'string' && description.trim()) {
+    disk.description = description.trim();
+    changed.push('description');
+  }
+  if (!changed.length) {
+    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, coordinator_scope, description.';
+  }
+
+  const backupPath = manifestPath + '.bak';
+  const original = readFileSync(manifestPath, 'utf8');
+  writeFileSync(backupPath, original);
+  try {
+    writeFileSync(manifestPath, JSON.stringify(disk, null, 2) + '\n');
+    addRoleManifest(disk, ownerId);
+    clearExecutorCache(skillId, ownerId);
+  } catch (e) {
+    writeFileSync(manifestPath, original);
+    rmSync(backupPath, { force: true });
+    return `Manifest write failed — reverted to previous version: ${e.message}`;
+  }
+  rmSync(backupPath, { force: true });
+
+  if (Array.isArray(intent_examples)) {
+    try {
+      const { invalidateIntentEmbeddings, loadIntentEmbeddings } = await import('../../lib/specialist-embed-router.mjs');
+      invalidateIntentEmbeddings();
+      loadIntentEmbeddings().catch(e => console.warn('[skill-builder] reload intent embeddings failed:', e.message));
+    } catch (e) { console.warn('[skill-builder] intent embed rebuild failed:', e.message); }
+  }
+
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    appendEntry(ownerId, skillId, { kind: 'manifest_update', summary: `Manifest fields: ${changed.join(', ')}` });
+  } catch (e) { console.debug('[skill-builder] log append (manifest_update) failed:', e.message); }
+
+  return `Skill "${manifest.name}" (${skillId}) manifest updated: ${changed.join(', ')}. Live on the next turn — for voice_device, the next voice turn re-reads the allowlist.`;
+}
+
 async function handleDelete(args, userId) {
   const { id: skillId } = args;
   if (!skillId?.trim()) return 'id is required.';
@@ -1064,6 +1152,7 @@ async function handleDraftBuild(args, userId) {
     watchers: s.watchers,
     intent_examples: s.intentExamples,
     coordinator_scope: s.coordinatorScope,
+    voice_device: s.voiceDevice === true || s.voice_device === true,
     assign_to: s.assignTo,
     from_draft: draftId,
   };
@@ -1109,6 +1198,7 @@ export async function executeSkillTool(name, args, userId, agentId) {
     if (name === 'skill_read_code')         return await handleReadCode(args, userId);
     if (name === 'skill_patch_code')        return await handlePatchCode(args, userId);
     if (name === 'skill_update_tool_def')   return await handleUpdateToolDef(args, userId);
+    if (name === 'skill_update_manifest')   return await handleUpdateManifest(args, userId);
     if (name === 'skill_delete')            return await handleDelete(args, userId);
     if (name === 'skill_list')              return await handleList(userId);
     if (name === 'skill_draft_start')       return await handleDraftStart(args, userId);
