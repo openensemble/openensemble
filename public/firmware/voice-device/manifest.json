@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.42-pcm-buf-256k",
+  "version": "0.2.43-ww-autoreboot",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
@@ -8,10 +8,30 @@
   },
   "baud": 921600,
   "parts": [
-    { "name": "bootloader",      "offset": "0x0",      "file": "bootloader.bin" },
-    { "name": "partition-table", "offset": "0x8000",   "file": "partition-table.bin" },
-    { "name": "ota-data",        "offset": "0x10000",  "file": "ota_data_initial.bin" },
-    { "name": "app",             "offset": "0x20000",  "file": "oe_voice_device.bin" },
-    { "name": "wakewords",       "offset": "0x620000", "file": "wakewords.bin" }
+    {
+      "name": "bootloader",
+      "offset": "0x0",
+      "file": "bootloader.bin"
+    },
+    {
+      "name": "partition-table",
+      "offset": "0x8000",
+      "file": "partition-table.bin"
+    },
+    {
+      "name": "ota-data",
+      "offset": "0x10000",
+      "file": "ota_data_initial.bin"
+    },
+    {
+      "name": "app",
+      "offset": "0x20000",
+      "file": "oe_voice_device.bin"
+    },
+    {
+      "name": "wakewords",
+      "offset": "0x620000",
+      "file": "wakewords.bin"
+    }
   ]
 }
