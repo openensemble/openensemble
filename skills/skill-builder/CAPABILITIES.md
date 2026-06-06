@@ -281,3 +281,119 @@ When the user's ask is concrete enough that no decisions are needed
 ("add a tool to my YouTube skill that opens a URL in browser"), skip
 the draft entirely and go straight to `skill_patch_code` /
 `skill_create`. Draft is for shaped + ambiguous asks, not micro edits.
+
+---
+
+## N. Voice device output (`ctx.device.*`)
+
+**Trigger:** user wants the skill to TALK through their voice device,
+PLAY audio (music, podcasts, sound effects, alarms) on the device, or
+NOTIFY them out loud when something happens — anything where the
+device's speaker is the delivery surface, not the chat UI.
+
+**User pitch:** "I can have this play / speak / notify through
+your voice device — same one you talk to now. Want it speaking from
+the device, popping up in chat, or both?"
+
+**What ctx.device exposes (v1):**
+
+- `ctx.device.id()` — the device the user is currently talking through,
+  or `null` if this is a web/text chat. Use this as the default target
+  when the user says "play music" without naming a room.
+- `ctx.device.list()` — every registered device with id + name. Use
+  when the user names a specific room ("play it in the kitchen").
+- `ctx.device.playStream(deviceId, url, { loop })` — start an audio
+  stream. `url` must be an http/https URL the server can fetch. The
+  ambient pipeline transcodes it on the fly to MP3 CBR 160 kbps stereo
+  at 48 kHz (the only format the firmware decodes), so the input
+  can be any format ffmpeg can read (m4a, opus, mp3, ogg, etc.).
+  `loop: true` restarts seamlessly at end-of-file.
+- `ctx.device.stop(deviceId)` — stop any current stream.
+- `ctx.device.speak(deviceId, text)` — TTS the text through the
+  speaker. Interrupts any current playback (including ambient + the
+  agent's reply if mid-conversation), so use sparingly.
+- `ctx.device.notify(deviceId, text)` — v1 just calls speak. Future
+  versions will add chime + criticality + quiet-hours awareness.
+
+**Audio-source guidance for the skill:**
+
+When the user names an external music/podcast/audio service ("YouTube
+Music", "Spotify", "my podcast feed", "this Bandcamp page"), pick the
+backend at skill-build time based on what the user asked for. Use
+whatever lib gets you to a streamable URL (search/discovery on the
+service's side, URL resolution per song/episode). Don't ask the user
+"which library should I use" — they already chose the service. Choose
+a lib whose license fits + that doesn't require manual auth setup
+unless the user mentions credentials. The OE side is identical
+regardless of source: hand `ctx.device.playStream` an http(s) URL.
+
+**For local audio files** (skill downloads/generates an MP3 first), the
+file needs to be reachable as an http URL the OE server can fetch.
+Today this means either hosting via `/api/files/...` (write into the
+user's profile files dir via `getUserFilesDir(userId, 'audio')` and
+expose) or — simplest for v1 — keep the file in a temp location and
+serve it through a short-lived skill HTTP endpoint. The ambient-library
+upload route already does the storage half; future work will expose a
+"register temp audio" helper so skills don't have to roll their own.
+
+**Decisions to surface:**
+
+- "Which device should this come out of? The one you're talking through
+  right now, or a specific room?"
+- "Should it loop (background ambience) or play once (a song / message)?"
+- "If you're already in the middle of another conversation, should this
+  interrupt it or queue?" (v1 ALWAYS interrupts — note this honestly if
+  it matters to the user)
+
+**Skip when:** the skill's output is purely textual or visual (the
+user reads a chat reply or sees an image). Don't shoehorn voice when
+the user didn't ask for it.
+
+---
+
+## N. Per-skill runtime logging (`ctx.log.*`)
+
+**Trigger:** EVERY skill you create. Default to `ctx.log.*` instead of
+`console.log/warn/error`. Skills that don't use ctx.log can't be
+debugged via `skill_read_logs` — entries vanish into OE's main app.log
+mixed with everything else.
+
+**What ctx.log exposes:**
+
+```
+ctx.log.info('fetched 3 songs', { query, ms });
+ctx.log.warn('search returned empty', { query });
+ctx.log.error('yt-dlp failed', { code, stderr });
+```
+
+Every entry is mirrored to:
+- OE's app.log tagged `skill:<id>` (so cross-skill queries still see
+  it)
+- A per-skill JSONL at `users/<userId>/skills/<skillId>/runtime.log`
+  that you can read back via `skill_read_logs`
+
+**When to log:**
+- Every external request (URL fetched, API called, command spawned) —
+  log the action + key params, log the result (status, count, error)
+- Every state transition (watcher fired, item added/removed, mode
+  switched)
+- Every decision branch where the next behavior depends on a value —
+  log the value
+- DON'T log token-by-token; log per-meaningful-step
+
+**When users come back saying "skill X isn't working":**
+
+1. Call `skill_read_logs({ skillId: 'X', tail: 100, level: 'error' })`
+   first — actual error messages from the most-recent runs.
+2. If there are recent errors, you know what to patch. Don't guess.
+3. If there are NO error entries but the user reports a problem, fall
+   back to `skill_read_logs` without the level filter (info+warn) to
+   see what the skill saw on its last run, then ask the user one
+   targeted question based on what's actually missing from the log.
+4. If the per-skill log is empty entirely (skill was using
+   `console.log`), patch the skill to use `ctx.log.*` BEFORE trying to
+   diagnose — otherwise the next "it's broken" report will also have
+   nothing to read.
+
+**Skip when:** never. Always wire `ctx.log` from the first version of
+the skill so the next time something breaks you have a trail.

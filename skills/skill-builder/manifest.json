@@ -308,6 +308,24 @@
         "description": "List every draft currently in progress for this user. Useful when the user says 'what skills was I working on' or when resuming a session.",
         "parameters": { "type": "object", "properties": {}, "required": [] }
       }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_read_logs",
+        "description": "Read recent runtime log entries for a custom skill. Use this BEFORE patching code when the user says 'X isn't working' / 'X is broken' / 'fix X' — actual error messages from the skill's last run tell you what to change, and you'll otherwise be guessing. The skill must have logged via ctx.log.* for entries to appear here; legacy console.log/warn/error from skill code falls through to the main app.log and won't show up. Supports tail (default 100), level filter, since timestamp, and free-text search.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "skillId": { "type": "string", "description": "Exact manifest id of the skill to inspect (no usr_ prefix)." },
+            "tail": { "type": "number", "description": "How many most-recent entries to return (default 100, max 5000)." },
+            "level": { "type": "string", "enum": ["info", "warn", "error"], "description": "Filter to only this level. Omit for all levels." },
+            "since": { "type": "string", "description": "ISO timestamp or epoch ms — return only entries newer than this." },
+            "q": { "type": "string", "description": "Case-insensitive text match against the msg + meta JSON." }
+          },
+          "required": ["skillId"]
+        }
+      }
     }
   ]
 }

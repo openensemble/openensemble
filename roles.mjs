@@ -20,6 +20,12 @@ import path from 'path';
 import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir } from './lib/paths.mjs';
 import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helper.mjs';
 import { buildBrowserHelpers } from './lib/browser-helper.mjs';
+import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-helper.mjs';
+import { buildSkillLogger } from './lib/skill-logger.mjs';
+import { getVoiceContext } from './lib/voice-context.mjs';
+// One-time: hand the voice-context getter to device-helper so ctx.device.id()
+// can resolve the current device sync.
+_registerVoiceContextResolver(getVoiceContext);
 import { mergeDefaults, recordToolCall, recordPinUsage } from './lib/tool-defaults.mjs';
 import { recordToolFailure } from './lib/tool-failures.mjs';
 import { isSkillDisabled, getHiddenTools } from './lib/skill-overrides.mjs';
@@ -875,6 +881,26 @@ async function buildCtx(userId, agentId) {
   // full per-site permission model. ctx.browser.click / fill / select land
   // with Phase 2 (Tier 1 writes + permission UX).
   ctx.browser = buildBrowserHelpers({ userId, agentId: wsAgentId });
+
+  // ctx.device — primitive surface for skills that want to drive the user's
+  // voice device(s). Mirrors ctx.browser's shape — bounded operations
+  // (playStream/stop/speak/notify) that hide the marker-cache, ffmpeg, and
+  // WS plumbing. v1 covers the YouTube-Music streaming use case; multi-turn
+  // handoff, LED, recording, quiet hours etc are tracked in
+  // project_voice_device_skill_api_todo.md.
+  ctx.device = buildDeviceHelpers({ userId });
+
+  // ctx.log — per-skill structured logging that ALSO lands in OE's app.log
+  // tagged `skill:<id>`. Skills should prefer this over console.log because
+  // (a) entries are queryable via skill_read_logs, and (b) the agent that
+  // owns the skill can read its own runtime log to diagnose failures.
+  // Bound to the calling skill — when buildCtx is called from a skill
+  // executor we have the skillId; for non-skill ctx callers (chat hot paths)
+  // ctx.log falls back to logging under skill='unknown'. SkillId is
+  // populated below from the agentId's owning skill registry lookup if
+  // available; for now bind to the agentId as the skill key so logs are at
+  // least segregated per agent.
+  ctx.log = buildSkillLogger({ userId, skillId: wsAgentId || 'unknown', agentId: wsAgentId });
 
   // Encrypted credential primitive — wraps lib/credentials.mjs so user skills
   // don't have to know the install-root-relative import depth (four-up from

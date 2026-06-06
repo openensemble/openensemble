@@ -1298,9 +1298,20 @@ export async function handle(req, res) {
       if (/^__ambient_[a-f0-9]+__$/.test(trimmedText)) {
         const meta = takeAmbientStream(trimmedText);
         if (meta) {
-          const sourcePath = ambientFilePath(meta.userId, meta.file);
+          // Two flavours of source:
+          //   meta.file — relative filename in the user's ambient-library dir
+          //               (the existing "user uploaded an MP3" flow)
+          //   meta.url  — direct http/https URL (skills calling
+          //               ctx.device.playStream pass these; ffmpeg pulls
+          //               the bytes itself and transcodes inline)
+          let sourcePath = null;
+          if (meta.url && /^https?:\/\//i.test(meta.url)) {
+            sourcePath = meta.url;
+          } else if (meta.file) {
+            sourcePath = ambientFilePath(meta.userId, meta.file);
+          }
           if (!sourcePath) {
-            console.warn(`[tts] ambient marker=${trimmedText} resolved bad filename ${meta.file}`);
+            console.warn(`[tts] ambient marker=${trimmedText} resolved no source (file=${meta.file ?? '-'} url=${meta.url ?? '-'})`);
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'ambient source missing' }));
             return true;
@@ -1391,7 +1402,7 @@ export async function handle(req, res) {
           res.on('error', onResClose);
           registerAmbientResponse(trimmedText, res, forceKill);
           pinAmbientMp3(trimmedText);  // cancel the orphan-cleanup TTL — stream is live
-          console.log(`[tts] ambient stream started (cold) marker=${trimmedText} file=${meta.file} loop=${meta.loop !== false}`);
+          console.log(`[tts] ambient stream started (cold) marker=${trimmedText} src=${meta.url ?? meta.file ?? '?'} loop=${meta.loop !== false}`);
           return true;
         }
         console.warn(`[tts] ambient marker=${trimmedText} missed cache (TTL expired or never cached)`);

@@ -44,7 +44,7 @@
     "coder_list_files", "coder_search",
     "coder_todo_write", "coder_todo_read",
     "skill_add_rule", "skill_remove_rule", "skill_list_rules",
-    "skill_read_blueprint", "skill_create", "skill_update_code", "skill_delete", "skill_list"
+    "skill_read_blueprint", "skill_create", "skill_update_code", "skill_delete", "skill_list", "skill_read_logs"
   ],
   "alias_catalog": {
     "entity_kind":   "project",

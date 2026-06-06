@@ -1117,11 +1117,37 @@ export async function executeSkillTool(name, args, userId, agentId) {
     if (name === 'skill_draft_build')       return await handleDraftBuild(args, userId);
     if (name === 'skill_draft_discard')     return await handleDraftDiscard(args, userId);
     if (name === 'skill_draft_list')        return await handleDraftList(args, userId);
+    if (name === 'skill_read_logs')         return await handleReadLogs(args, userId);
     return null;
   } catch (e) {
     console.error(`[skill-builder] ${name}:`, e.message);
     return `Skill builder error: ${e.message}`;
   }
+}
+
+async function handleReadLogs(args, userId) {
+  const skillId = String(args?.skillId || '').trim();
+  if (!skillId) return 'skillId is required';
+  // Strip any legacy "usr_" prefix the model might still infer from older
+  // examples, so the read works whether or not the call accidentally uses
+  // the obsolete naming.
+  const cleanId = skillId.replace(/^usr_/, '');
+  const { readSkillLog } = await import('../../lib/skill-logger.mjs');
+  const opts = { userId, skillId: cleanId };
+  if (Number.isFinite(Number(args.tail)))   opts.tail = Number(args.tail);
+  if (args.level)                            opts.level = String(args.level);
+  if (args.since !== undefined)              opts.since = args.since;
+  if (args.q)                                opts.q = String(args.q);
+  const { entries, totalBytes } = await readSkillLog(opts);
+  if (!entries.length) {
+    return `No log entries for ${cleanId}${args.q ? ` matching "${args.q}"` : ''}. The skill may not be using ctx.log.* (in which case console.log/warn/error fell through to OE's main app.log instead). Suggest updating its execute.mjs to use ctx.log for next-time diagnostics.`;
+  }
+  const lines = entries.map(e => {
+    const ts = e.ts ? new Date(e.ts).toISOString().slice(11, 19) : '--:--:--';
+    const meta = e.meta ? ' ' + JSON.stringify(e.meta) : '';
+    return `${ts} [${(e.level || 'info').toUpperCase()}] ${e.msg}${meta}`;
+  });
+  return `Skill ${cleanId} runtime log (${entries.length} entries, file=${totalBytes}b):\n${lines.join('\n')}`;
 }
 
 export default executeSkillTool;
