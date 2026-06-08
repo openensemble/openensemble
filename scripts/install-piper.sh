@@ -146,22 +146,8 @@ UNIT
 step "Reloading systemd-user daemon..."
 systemctl --user daemon-reload
 
-step "Enabling + starting $SERVICE_NAME..."
-systemctl --user enable --now "$SERVICE_NAME"
-
-# ── verify ────────────────────────────────────────────────────────────────────
-step "Waiting for Piper to come up on 127.0.0.1:$PIPER_PORT..."
-for i in $(seq 1 30); do
-  if command -v curl >/dev/null; then
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$PIPER_PORT/" || true)
-    case "$code" in
-      2*|3*|4*|5*) step "OK — piper responding (HTTP $code)"; exit 0 ;;
-    esac
-  fi
-  sleep 1
-done
-
-# 30 s and still nothing — surface journalctl tail for debugging.
-echo "[piper-install] last 20 service log lines:" >&2
-journalctl --user -u "$SERVICE_NAME" --no-pager -n 20 >&2 || true
-fail "service started but didn't respond on 127.0.0.1:$PIPER_PORT after 30 s"
+# Install only — the service is NOT started here. The selected TTS provider is
+# started when the user hits Save (POST /api/provider-config), which first stops
+# any other running TTS service so exactly one local TTS runs at a time.
+step "OK — Piper installed. Unit $SERVICE_NAME is ready; it starts when you select Piper and Save."
+exit 0

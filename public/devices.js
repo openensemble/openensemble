@@ -22,9 +22,9 @@ let _incomingSlots = [];
 // slot can be assigned a library entry via the slot's "Wake word" picker;
 // changing the picker triggers an OTA push to the device.
 let _wakewordLibrary = [];
-// User's voice-reference library (F5-TTS zero-shot clones). Each entry
-// is a label + transcript + WAV file the user uploaded; F5-TTS clones
-// from these. Drawer fetches this when ttsProvider='f5-tts'.
+// User's voice-reference library (Pocket TTS zero-shot clones). Each entry
+// is a label + WAV file the user uploaded (transcript optional); Pocket TTS
+// clones from these. Drawer fetches this when ttsProvider='pocket-tts'.
 let _voiceRefs = [];
 // Alarm chime state — per-user. { hasCustom: bool, sizeBytes: number }.
 // When hasCustom is false the device(s) use the firmware's built-in
@@ -32,7 +32,7 @@ let _voiceRefs = [];
 let _chimeInfo = { hasCustom: false, sizeBytes: 0 };
 // Server-reported TTS provider. Drives which voice-control UI to render
 // per slot ('openai' → named-voice dropdown, 'piper' → numeric speaker
-// ID input, 'f5-tts' → reference dropdown, 'elevenlabs' → fetched-voice
+// ID input, 'pocket-tts' → cloned-voice dropdown, 'elevenlabs' → fetched-voice
 // dropdown). Fetched on drawer load.
 let _ttsProvider = 'openai';
 // Runtime availability snapshot from /api/tts/info — { ffmpeg, openai,
@@ -328,6 +328,8 @@ function renderTtsAvailabilityBanner() {
       ? 'The local Piper service is not running. Reinstall or restart it from Settings → Providers → Text-to-Speech.'
       : _ttsProvider === 'kittentts'
         ? 'The local KittenTTS service is not running. Install or restart it from Settings → Providers → Text-to-Speech.'
+        : _ttsProvider === 'pocket-tts'
+          ? 'The local Pocket TTS service is not running. In Settings → Providers → Text-to-Speech, select Pocket TTS and click Save to start it.'
         : _ttsProvider === 'elevenlabs'
           ? 'The ElevenLabs API key is missing. Set it in Settings → Providers → Text-to-Speech.'
           : 'The OpenAI-compatible TTS provider is not configured. Set the URL and API key in Settings → Providers → Text-to-Speech.';
@@ -428,24 +430,24 @@ function renderDevices() {
     </div>
   `;
 
-  // Voice references — uploaded WAV clips used by F5-TTS for zero-shot
-  // cloning. Only shown when ttsProvider='f5-tts'. Per-slot voice picker
+  // Voice references — uploaded WAV clips used by Pocket TTS for zero-shot
+  // cloning. Only shown when ttsProvider='pocket-tts'. Per-slot voice picker
   // (further down) selects which reference each wake phrase uses.
   const REFS_CAP = 10;
-  const refsHtml = (_ttsProvider === 'f5-tts') ? `
+  const refsHtml = (_ttsProvider === 'pocket-tts') ? `
     <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
           Voice references
           <span style="text-transform:none;letter-spacing:0;margin-left:6px;opacity:.7">${_voiceRefs.length} / ${REFS_CAP}</span>
         </div>
-        <button class="cdraw-btn cdraw-btn-primary" data-action="openVoiceRefUpload" style="font-size:11px;padding:4px 10px${_voiceRefs.length >= REFS_CAP ? ';opacity:.4;pointer-events:none' : ''}" title="${_voiceRefs.length >= REFS_CAP ? 'Library full — delete one first' : 'Upload a ~10s WAV + transcript to clone that voice'}">+ Upload voice</button>
+        <button class="cdraw-btn cdraw-btn-primary" data-action="openVoiceRefUpload" style="font-size:11px;padding:4px 10px${_voiceRefs.length >= REFS_CAP ? ';opacity:.4;pointer-events:none' : ''}" title="${_voiceRefs.length >= REFS_CAP ? 'Library full — delete one first' : 'Upload a clean ~15-20s WAV to clone that voice'}">+ Upload voice</button>
       </div>
       ${_voiceRefs.length ? _voiceRefs.map(r => {
         const dur = r.duration_s ? r.duration_s.toFixed(1) + 's' : '—';
         return `
           <div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
-            <span style="flex:1"><strong>${escHtml(r.label)}</strong> <span style="color:var(--muted)">${dur} · "${escHtml((r.transcript || '').slice(0, 60))}${r.transcript && r.transcript.length > 60 ? '…' : ''}"</span></span>
+            <span style="flex:1"><strong>${escHtml(r.label)}</strong> <span style="color:var(--muted)">${dur}${r.transcript ? ' · "' + escHtml(r.transcript.slice(0, 60)) + (r.transcript.length > 60 ? '…' : '') + '"' : ''}</span></span>
             <button class="cdraw-btn" data-action="deleteVoiceRef" data-args='${JSON.stringify([r.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 7px;color:var(--red,#e05c5c);border-color:var(--red,#e05c5c)" title="Delete">Delete</button>
           </div>
         `;
@@ -930,9 +932,9 @@ function renderVoiceConfigPanel(roster, deviceCount) {
       voiceControl = `<span style="display:flex;gap:4px;align-items:center;min-width:0">
            <select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="flex:1;min-width:0;padding:4px 6px;font-size:12px">${elOpts}</select>
          </span>`;
-    } else if (_ttsProvider === 'f5-tts') {
+    } else if (_ttsProvider === 'pocket-tts') {
       const refOpts = ['<option value="">(device default)</option>']
-        .concat([{ id: 'default-en', label: 'Default (F5-TTS bundled)' }, ..._voiceRefs]
+        .concat([{ id: 'george', label: 'Default (Pocket preset)' }, ..._voiceRefs]
           .map(r => `<option value="${escHtml(r.id)}" ${r.id === curVoice ? 'selected' : ''}>${escHtml(r.label)}</option>`))
         .join('');
       voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${refOpts}</select>`;
@@ -1557,25 +1559,25 @@ window.openWakewordUpload = function () {
   setTimeout(() => input.remove(), 60_000);
 };
 
-// Open a small modal to upload a voice reference for F5-TTS. Three inputs:
-// WAV file (10-15s of clean speech), label ("Shawn", "Test"), and a
-// transcript of exactly what's said in the clip. F5-TTS clones much better
-// when given an accurate transcript.
+// Open a small modal to upload a voice reference for Pocket TTS zero-shot
+// cloning. Two inputs: a label ("Shawn", "Test") and a WAV file (a clean
+// ~15-20s clip of a single speaker). No transcript needed — Pocket TTS is
+// fully zero-shot. By uploading you confirm you have consent to clone the voice.
 window.openVoiceRefUpload = function () {
   const label = prompt('Voice label (e.g. "Shawn", "Test"):');
   if (!label || !label.trim()) return;
-  const transcript = prompt('Transcript — type EXACTLY what is said in the WAV (e.g. "Hello, my name is Shawn and this is my voice."):');
-  if (!transcript || !transcript.trim()) return;
+  if (!confirm('Confirm you have the explicit, lawful consent of the person whose voice this clip contains. Cloning a voice without permission is prohibited.')) return;
+  const transcript = '';
 
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.wav,audio/wav';
+  input.accept = '.wav,.mp3,audio/wav,audio/mpeg';
   input.style.display = 'none';
   input.onchange = async () => {
     const file = input.files?.[0];
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.wav')) {
-      showDeviceToast('Reference must be a .wav file.', { variant: 'error' });
+    if (!/\.(wav|mp3)$/i.test(file.name)) {
+      showDeviceToast('Reference must be a .wav or .mp3 file.', { variant: 'error' });
       return;
     }
     try {

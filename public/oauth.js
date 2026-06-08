@@ -950,16 +950,48 @@ async function loadProviderConfig() {
     const kittenttsInstallBtn  = $('providerKittenttsInstallBtn');
     const kittenttsUninstallBtn = $('providerKittenttsUninstallBtn');
     if (kittenttsStatus && kittenttsInstallBtn) {
-      if (cfg.kittenttsAvailable) {
-        kittenttsStatus.textContent = 'KittenTTS is running on 127.0.0.1:5153 — no further setup needed.';
-        kittenttsStatus.style.color = 'var(--success, #4caf50)';
+      if (cfg.kittenttsInstalled) {
         kittenttsInstallBtn.style.display = 'none';
         if (kittenttsUninstallBtn) kittenttsUninstallBtn.style.display = '';
+        if (cfg.kittenttsAvailable) {
+          kittenttsStatus.textContent = 'KittenTTS is installed and running on 127.0.0.1:5153.';
+          kittenttsStatus.style.color = 'var(--success, #4caf50)';
+        } else {
+          kittenttsStatus.textContent = 'KittenTTS is installed but not running. Select KittenTTS above and click Save to start it.';
+          kittenttsStatus.style.color = 'var(--muted)';
+        }
       } else {
         kittenttsStatus.textContent = 'KittenTTS is not installed on this server. Install it locally (~50 MB, CPU only, no API key).';
         kittenttsStatus.style.color = 'var(--muted)';
         kittenttsInstallBtn.style.display = '';
         if (kittenttsUninstallBtn) kittenttsUninstallBtn.style.display = 'none';
+      }
+    }
+
+    // Pocket TTS — same shape. pocketTtsAvailable toggles install/uninstall +
+    // shows the cloned-voice upload UI only once the service is running.
+    const pocketStatus       = $('providerPocketTtsStatus');
+    const pocketInstallBtn   = $('providerPocketTtsInstallBtn');
+    const pocketUninstallBtn = $('providerPocketTtsUninstallBtn');
+    const pocketUploadBtn    = $('providerPocketTtsUploadBtn');
+    if (pocketStatus && pocketInstallBtn) {
+      if (cfg.pocketTtsInstalled) {
+        pocketInstallBtn.style.display = 'none';
+        if (pocketUninstallBtn) pocketUninstallBtn.style.display = '';
+        if (pocketUploadBtn) pocketUploadBtn.style.display = '';
+        if (cfg.pocketTtsAvailable) {
+          pocketStatus.textContent = 'Pocket TTS is installed and running on 127.0.0.1:5155 — upload a voice clip below to clone it.';
+          pocketStatus.style.color = 'var(--success, #4caf50)';
+        } else {
+          pocketStatus.textContent = 'Pocket TTS is installed but not running. Select Pocket TTS above and click Save to start it.';
+          pocketStatus.style.color = 'var(--muted)';
+        }
+      } else {
+        pocketStatus.textContent = 'Pocket TTS is not installed on this server. Install it locally (~400 MB, CPU only, no API key).';
+        pocketStatus.style.color = 'var(--muted)';
+        pocketInstallBtn.style.display = '';
+        if (pocketUninstallBtn) pocketUninstallBtn.style.display = 'none';
+        if (pocketUploadBtn) pocketUploadBtn.style.display = 'none';
       }
     }
 
@@ -1270,10 +1302,11 @@ function updateTtsProviderFields() {
   const sel = document.getElementById('providerTtsProvider');
   if (!sel) return;
   const active = sel.value || 'openai';
-  for (const p of ['openai', 'elevenlabs', 'piper', 'kittentts']) {
+  for (const p of ['openai', 'elevenlabs', 'piper', 'kittentts', 'pocket-tts']) {
     const block = document.getElementById(`providerTtsFields_${p}`);
     if (block) block.style.display = (p === active) ? '' : 'none';
   }
+  if (active === 'pocket-tts') window.renderPocketVoices?.();
 }
 window.updateTtsProviderFields = updateTtsProviderFields;
 
@@ -1290,6 +1323,7 @@ function updateTtsProviderAvailability(cfg) {
     elevenlabs: sel.querySelector('option[value="elevenlabs"]'),
     piper:      sel.querySelector('option[value="piper"]'),
     kittentts:  sel.querySelector('option[value="kittentts"]'),
+    'pocket-tts': sel.querySelector('option[value="pocket-tts"]'),
   };
   // Cache the original labels so we can re-decorate on every refresh
   // without compounding " — reason" suffixes.
@@ -1300,8 +1334,11 @@ function updateTtsProviderAvailability(cfg) {
   const reasons = {
     openai:     !ffmpeg ? 'ffmpeg not installed' : (!cfg.ttsKeySet ? 'API key not set' : ''),
     elevenlabs: !ffmpeg ? 'ffmpeg not installed' : (!cfg.elevenlabsKeySet ? 'API key not set' : ''),
-    piper:      !ffmpeg ? 'ffmpeg not installed' : (!cfg.piperAvailable ? 'install needed' : ''),
-    kittentts:  !ffmpeg ? 'ffmpeg not installed' : (!cfg.kittenttsAvailable ? 'install needed' : ''),
+    // Selectable when INSTALLED (not necessarily running) — saving the provider
+    // starts its service. piperAvailable/etc. (running) drive only the status line.
+    piper:      !ffmpeg ? 'ffmpeg not installed' : (!cfg.piperInstalled ? 'install needed' : ''),
+    kittentts:  !ffmpeg ? 'ffmpeg not installed' : (!cfg.kittenttsInstalled ? 'install needed' : ''),
+    'pocket-tts': !ffmpeg ? 'ffmpeg not installed' : (!cfg.pocketTtsInstalled ? 'install needed' : ''),
   };
   // For locally-installable providers (piper, kittentts) the user MUST be able
   // to select the option in order to reach the install button inside the
@@ -1640,12 +1677,14 @@ async function installKittentts() {
 
   if (success) {
     if (status) {
-      status.textContent = 'KittenTTS installed and running.';
-      status.style.color = 'var(--success, #4caf50)';
+      status.textContent = 'KittenTTS installed. Click Save to start it.';
+      status.style.color = 'var(--muted)';
     }
     btn.style.display = 'none';
-    showToast?.('KittenTTS installed');
-    loadProviderConfig();
+    showToast?.('KittenTTS installed — Save to start it');
+    await loadProviderConfig();
+    const ksel = document.getElementById('providerTtsProvider');
+    if (ksel) { ksel.value = 'kittentts'; updateTtsProviderFields(); }
   } else {
     btn.disabled = false;
     btn.textContent = 'Retry install';
@@ -1653,6 +1692,140 @@ async function installKittentts() {
   }
 }
 window.installKittentts = installKittentts;
+
+// ── Pocket TTS install (SSE-streamed, mirrors installKittentts) ──────────────
+async function installPocketTts() {
+  const btn = document.getElementById('providerPocketTtsInstallBtn');
+  const log = document.getElementById('providerPocketTtsLog');
+  const status = document.getElementById('providerPocketTtsStatus');
+  if (!btn || !log) return;
+  btn.disabled = true;
+  btn.textContent = 'Installing…';
+  log.style.display = '';
+  log.textContent = '';
+  if (status) status.textContent = 'Installing Pocket TTS… (first run pulls CPU torch — a few minutes)';
+
+  let resp;
+  try {
+    resp = await fetch('/api/provider-config/install-pocket-tts', { method: 'POST' });
+  } catch (e) {
+    log.textContent += `\n[error] ${e.message}\n`;
+    btn.disabled = false; btn.textContent = 'Install Pocket TTS (~400 MB)'; return;
+  }
+  if (!resp.ok || !resp.body) {
+    log.textContent += `\n[error] HTTP ${resp.status}\n`;
+    btn.disabled = false; btn.textContent = 'Install Pocket TTS (~400 MB)'; return;
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '', success = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let evName = 'message';
+      const dataLines = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event: ')) evName = line.slice(7).trim();
+        else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+      }
+      let data = {};
+      try { data = JSON.parse(dataLines.join('\n')); } catch {}
+      if (evName === 'log') { log.textContent += data.line + '\n'; log.scrollTop = log.scrollHeight; }
+      else if (evName === 'done') { success = !!data.ok; log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`; }
+    }
+  }
+  if (success) {
+    if (status) { status.textContent = 'Pocket TTS installed. Click Save to start it.'; status.style.color = 'var(--muted)'; }
+    btn.style.display = 'none';
+    showToast?.('Pocket TTS installed — Save to start it');
+    await loadProviderConfig();
+    // loadProviderConfig() resets the dropdown to the saved provider; keep the
+    // user on Pocket TTS so they can just hit Save to start it.
+    const psel = document.getElementById('providerTtsProvider');
+    if (psel) { psel.value = 'pocket-tts'; updateTtsProviderFields(); }
+  } else {
+    btn.disabled = false; btn.textContent = 'Retry install';
+    if (status) status.textContent = 'Pocket TTS install failed — see log below.';
+  }
+}
+window.installPocketTts = installPocketTts;
+
+function uninstallPocketTts() { return _uninstallLocalTts('pocket-tts', 'Pocket TTS', 'providerPocketTts'); }
+window.uninstallPocketTts = uninstallPocketTts;
+
+// ── Pocket TTS: upload + name a voice clip (zero-shot clone) ──────────────────
+async function uploadPocketVoice() {
+  const nameEl = document.getElementById('providerPocketTtsVoiceName');
+  const consentEl = document.getElementById('providerPocketTtsConsent');
+  const label = (nameEl?.value || '').trim();
+  if (!label) { showToast?.('Enter a voice name first'); return; }
+  if (!consentEl?.checked) { showToast?.('Please confirm you have consent to clone this voice'); return; }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.wav,.mp3,audio/wav,audio/mpeg';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { showToast?.('Clip too large (5 MB max — ~15-20s is plenty)'); return; }
+    const buf = await file.arrayBuffer();
+    let bin = ''; const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    const b64 = btoa(bin);
+    let resp;
+    try {
+      resp = await fetch('/api/voice-refs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wav_b64: b64, label, transcript: '' }),
+      });
+    } catch (e) { showToast?.('Upload failed: ' + e.message); return; }
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.id) {
+      showToast?.(`"${label}" added — select it as the device voice or save it as the default.`);
+      if (nameEl) nameEl.value = '';
+      if (consentEl) consentEl.checked = false;
+      renderPocketVoices();
+    } else {
+      showToast?.('Upload failed: ' + (data.error || `HTTP ${resp.status}`));
+    }
+  };
+  input.click();
+}
+window.uploadPocketVoice = uploadPocketVoice;
+
+async function renderPocketVoices() {
+  const host = document.getElementById('providerPocketTtsVoices');
+  if (!host) return;
+  let refs = [];
+  try { const r = await fetch('/api/voice-refs'); refs = (await r.json()).refs || []; } catch {}
+  if (!refs.length) { host.innerHTML = '<div style="font-size:11px;color:var(--muted)">No cloned voices yet — upload a clip below.</div>'; return; }
+  host.innerHTML = '<div style="font-size:11px;color:var(--muted);margin-bottom:4px">Cloned voices (assign per-device in Settings → Devices, or save one as the default):</div>' +
+    refs.map(r => {
+      const dur = (typeof r.duration_s === 'number') ? r.duration_s.toFixed(1) + 's' : '';
+      const label = (r.label || r.id).replace(/[<>&]/g, '');
+      return `<div style="display:flex;gap:8px;align-items:center;font-size:12px;padding:3px 0">
+      <span style="flex:1">${label}${dur ? `<span style="color:var(--muted)"> · ${dur}</span>` : ''}</span>
+      <button type="button" onclick="deletePocketVoice('${r.id}')" title="Delete this cloned voice" style="background:transparent;border:1px solid var(--border);color:var(--red,#e05c5c);border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer">Delete</button>
+    </div>`;
+    }).join('');
+}
+window.renderPocketVoices = renderPocketVoices;
+
+async function deletePocketVoice(id) {
+  if (!confirm('Delete this cloned voice? It will be removed from this server and from any voice device using it.')) return;
+  try {
+    const r = await fetch('/api/voice-refs/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); showToast?.('Delete failed: ' + (d.error || `HTTP ${r.status}`)); return; }
+    showToast?.('Voice deleted');
+    renderPocketVoices();
+  } catch (e) { showToast?.('Delete failed: ' + e.message); }
+}
+window.deletePocketVoice = deletePocketVoice;
 
 // Shared uninstall handler for the local-TTS providers. Each provider has its
 // own status/log/button DOM ids but the flow is identical: confirm, POST,

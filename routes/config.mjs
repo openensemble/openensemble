@@ -25,6 +25,7 @@ import { supportsVision } from '../lib/model-capabilities.mjs';
 import {
   probePiperAvailable,
   probeKittenttsAvailable,
+  probePocketTtsAvailable,
   probeFasterWhisperAvailable,
   probeFfmpegAvailable,
   getTtsAvailability,
@@ -292,9 +293,10 @@ export async function handle(req, res) {
       // vs "running" status without a separate round-trip. ffmpegAvailable
       // gates every TTS provider (we always resample/encode through ffmpeg)
       // so Settings → Providers can disable options when ffmpeg is missing.
-      const [piperAvailable, kittenttsAvailable, fasterWhisperAvailable, ffmpegAvailable] = await Promise.all([
+      const [piperAvailable, kittenttsAvailable, pocketTtsAvailable, fasterWhisperAvailable, ffmpegAvailable] = await Promise.all([
         probePiperAvailable(cfg),
         probeKittenttsAvailable(cfg),
+        probePocketTtsAvailable(cfg),
         probeFasterWhisperAvailable(cfg),
         probeFfmpegAvailable(),
       ]);
@@ -329,6 +331,14 @@ export async function handle(req, res) {
         piperLengthScale: Number.isFinite(cfg.piperLengthScale) ? cfg.piperLengthScale : 1.1,
         piperAvailable,
         kittenttsAvailable,
+        pocketTtsAvailable,
+        // Installed (unit file present) vs available (service responding). Local
+        // TTS installers no longer auto-start; selecting + saving starts the
+        // service. The UI keys selectability off *Installed so an installed-but-
+        // stopped provider can still be picked (Save then starts it).
+        piperInstalled:     fs.existsSync(path.join(os.homedir(), '.config/systemd/user/piper-tts.service')),
+        kittenttsInstalled: fs.existsSync(path.join(os.homedir(), '.config/systemd/user/kittentts.service')),
+        pocketTtsInstalled: fs.existsSync(path.join(os.homedir(), '.config/systemd/user/pocket-tts.service')),
         fasterWhisperAvailable,
         // Persisted install state — set true at profile-install time. The UI
         // keys "installed vs pick-a-profile" off THIS (not the live probe), so
@@ -412,6 +422,10 @@ export async function handle(req, res) {
         // Set when the STT GPU pin changes, applied (unit rewrite + restart)
         // after the config save. undefined = unchanged; null = clear pin.
         let fwGpuPinToApply;
+        // Set when the TTS provider is (re)saved. After the save we enforce
+        // "one local TTS service at a time": stop the others, start the selected
+        // one. undefined = ttsProvider not in this request → leave services alone.
+        let ttsProviderToApply;
         await modifyConfig(cfg => {
           if (body.anthropicApiKey)   cfg.anthropicApiKey   = body.anthropicApiKey;
           if (body.fireworksApiKey)   cfg.fireworksApiKey   = body.fireworksApiKey;
@@ -457,12 +471,12 @@ export async function handle(req, res) {
             if (Number.isFinite(n) && n >= 0.7 && n <= 1.6) cfg.piperLengthScale = n;
           }
           if (body.ttsProvider !== undefined) {
-            // f5-tts was removed 2026-05-15 — the UI no longer offers it and
-            // the server-side handler below silently falls back to openai if
-            // an old config still has it. The handler block for f5-tts is
-            // kept as dead code for now in case we re-add it.
-            const allowed = ['openai', 'piper', 'kittentts', 'elevenlabs'];
-            if (allowed.includes(body.ttsProvider)) cfg.ttsProvider = body.ttsProvider;
+            const allowed = ['openai', 'piper', 'kittentts', 'elevenlabs', 'pocket-tts'];
+            if (allowed.includes(body.ttsProvider)) {
+              cfg.ttsProvider = body.ttsProvider;
+              // Enforce one-local-TTS-at-a-time after the save (below).
+              ttsProviderToApply = body.ttsProvider;
+            }
           }
           if (body.elevenlabsApiKey)               cfg.elevenlabsApiKey = body.elevenlabsApiKey;
           if (body.elevenlabsModel !== undefined)  cfg.elevenlabsModel  = body.elevenlabsModel;
@@ -530,6 +544,44 @@ export async function handle(req, res) {
           pinServiceGpu('faster-whisper.service', fwGpuPinToApply)
             .then(r => { if (!r.ok) log.warn('config', 'STT GPU pin failed', r); })
             .catch(e => log.warn('config', 'STT GPU pin error', { error: e.message }));
+        }
+        // One-local-TTS-at-a-time. Installers no longer auto-start their service;
+        // selecting + saving a provider is what starts it. Here we stop+disable
+        // every local TTS unit except the selected, then start+enable the
+        // selected one (if it's a local service) and wait for it to accept
+        // requests so the post-save UI reflects "running". Remote providers
+        // (openai, elevenlabs) just stop all local TTS. STT is untouched.
+        if (ttsProviderToApply !== undefined) {
+          const TTS_UNITS = {
+            piper:        { unit: 'piper-tts.service', port: 5151 },
+            kittentts:    { unit: 'kittentts.service', port: 5153 },
+            'pocket-tts': { unit: 'pocket-tts.service', port: 5155 },
+          };
+          const sel = TTS_UNITS[ttsProviderToApply] || null;
+          const sysctl = (args) => new Promise(resolve => {
+            const c = spawn('systemctl', ['--user', ...args], { env: { ...process.env, HOME: os.homedir() }, stdio: 'ignore' });
+            c.on('error', () => resolve(-1));
+            c.on('exit', code => resolve(code ?? -1));
+          });
+          try {
+            for (const { unit } of Object.values(TTS_UNITS)) {
+              if (!sel || unit !== sel.unit) await sysctl(['disable', '--now', unit]);
+            }
+            if (sel) {
+              await sysctl(['enable', '--now', sel.unit]);
+              for (let i = 0; i < 12; i++) { // up to ~6s for model load
+                try {
+                  const r = await fetch(`http://127.0.0.1:${sel.port}/`, { signal: AbortSignal.timeout(500) });
+                  if (r.status >= 200 && r.status < 600) break;
+                } catch {}
+                await new Promise(r => setTimeout(r, 500));
+              }
+            }
+            invalidateVoiceDepsCache();
+            log.info('config', `TTS provider → ${ttsProviderToApply}${sel ? ` (started ${sel.unit}, others stopped)` : ' (remote — local TTS stopped)'}`);
+          } catch (e) {
+            log.warn('config', 'TTS service switch failed', { provider: ttsProviderToApply, error: e.message });
+          }
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
@@ -644,7 +696,7 @@ export async function handle(req, res) {
   // voice-deps cache is invalidated on success so the next
   // /api/provider-config GET reflects the change immediately.
   {
-    const uninstallMatch = req.url.match(/^\/api\/provider-config\/uninstall-(piper|kittentts|faster-whisper)$/);
+    const uninstallMatch = req.url.match(/^\/api\/provider-config\/uninstall-(piper|kittentts|faster-whisper|pocket-tts)$/);
     if (uninstallMatch && req.method === 'POST') {
       const authId = requirePrivileged(req, res);
       if (!authId) return true;
@@ -772,6 +824,54 @@ export async function handle(req, res) {
   // Same shape as install-piper: SSE-stream the install script's output.
   // KittenTTS is the no-GPU / no-API-key fallback tier; install is CPU-only,
   // ~50 MB, and finishes in under a minute on first run.
+  // POST /api/provider-config/install-pocket-tts
+  // Same SSE shape as install-kittentts. Pocket TTS (Kyutai 100M CPU TTS,
+  // zero-shot voice cloning). Weights are mirrored non-gated (CC-BY-4.0) at
+  // openensemble/pocket-tts so users never hit the upstream HF access gate.
+  if (req.url === '/api/provider-config/install-pocket-tts' && req.method === 'POST') {
+    const authId = requirePrivileged(req, res);
+    if (!authId) return true;
+
+    const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
+                                    '..', 'scripts', 'install-pocket-tts.sh');
+    if (!fs.existsSync(scriptPath)) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `install-pocket-tts.sh not found at ${scriptPath}` }));
+      return true;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    const childP = spawn('/usr/bin/env', ['bash', scriptPath], {
+      env: { ...process.env, HOME: os.homedir() },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const sendP = (event, data) => {
+      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+    sendP('start', { script: scriptPath });
+    const onLineP = (kind) => (chunk) => {
+      const lines = chunk.toString('utf8').split(/\r?\n/);
+      for (const line of lines) { if (line) sendP('log', { kind, line }); }
+    };
+    childP.stdout.on('data', onLineP('stdout'));
+    childP.stderr.on('data', onLineP('stderr'));
+    childP.on('exit', (code, signal) => {
+      if (code === 0) invalidateVoiceDepsCache();
+      sendP('done', { code, signal: signal ?? null, ok: code === 0 });
+      try { res.end(); } catch {}
+    });
+    childP.on('error', (err) => {
+      sendP('done', { code: -1, error: err.message, ok: false });
+      try { res.end(); } catch {}
+    });
+    req.on('close', () => { try { childP.kill('SIGTERM'); } catch {} });
+    return true;
+  }
+
   if (req.url === '/api/provider-config/install-kittentts' && req.method === 'POST') {
     const authId = requirePrivileged(req, res);
     if (!authId) return true;
@@ -1296,7 +1396,7 @@ export async function handle(req, res) {
   if (req.url === '/api/tts/info' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
-    const ALLOWED = ['openai', 'piper', 'kittentts', 'elevenlabs'];
+    const ALLOWED = ['openai', 'piper', 'kittentts', 'elevenlabs', 'pocket-tts'];
     const provider = ALLOWED.includes(cfg.ttsProvider) ? cfg.ttsProvider : 'openai';
     // Runtime availability snapshot — lets the devices drawer show a
     // banner when the configured provider can't actually fulfill TTS
@@ -1428,7 +1528,7 @@ export async function handle(req, res) {
     //   'elevenlabs'  — remote ElevenLabs (voice_id, including user-cloned)
     //   'piper'       — local libritts_r multi-speaker via piper-tts.service:5151
     //   'kittentts'   — local 25M-param ONNX (CPU) via kittentts.service:5153
-    const ALLOWED = ['openai', 'piper', 'kittentts', 'elevenlabs'];
+    const ALLOWED = ['openai', 'piper', 'kittentts', 'elevenlabs', 'pocket-tts'];
     const provider = ALLOWED.includes(cfg.ttsProvider) ? cfg.ttsProvider : 'openai';
     if (provider === 'openai' && (!cfg.ttsApiKey || !cfg.ttsApiUrl)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1603,9 +1703,9 @@ export async function handle(req, res) {
       //   3. cfg.ttsVoice (server-global default)
       //   4. 'alloy' for openai / '0' for piper (hardcoded fallback)
       const defaultVoice =
-        provider === 'f5-tts' ? 'default-en' :
         provider === 'piper' ? '0' :
         provider === 'kittentts' ? KITTENTTS_DEFAULT_VOICE :
+        provider === 'pocket-tts' ? 'george' : // preset catalog voice; cloned voices are ref_<hex> ids
         provider === 'elevenlabs' ? '21m00Tcm4TlvDq8ikWAM' : // Rachel — EL stock voice id
         'alloy';
       let voice = cfg.ttsVoice || defaultVoice;
@@ -1675,51 +1775,33 @@ export async function handle(req, res) {
         res.end(elMp3_16k);
         return true;
       }
-      if (provider === 'f5-tts') {
-        // Resolve `voice` (a refId string) to the WAV path + transcript.
-        // The built-in 'default-en' lives under models/tts/refs/; user
-        // uploads live under users/<owner>/voice-refs/. The owner for
-        // refId lookup is the AUTH user, not the slot's effective user —
-        // the device-paired user manages all voices for their device.
-        let refPath, refText;
-        if (voice === 'default-en') {
-          refPath = '/home/shawn/.openensemble/models/tts/refs/default-en.wav';
-          refText = 'Some call me nature, others call me mother nature.';
-        } else {
-          const ref = getVoiceRef(authId, voice);
-          if (!ref) {
-            // Fall back to default rather than 500 the device — better to
-            // hear *some* voice than nothing.
-            console.warn(`[tts] f5-tts: refId ${voice} not found, using default-en`);
-            refPath = '/home/shawn/.openensemble/models/tts/refs/default-en.wav';
-            refText = 'Some call me nature, others call me mother nature.';
-          } else {
-            refPath = ref.wavPath;
-            refText = ref.transcript;
-          }
-        }
-        const f5Url = cfg.f5ttsUrl || 'http://127.0.0.1:5152/tts';
-        // F5-TTS clones cleanly on most short prompts but >40s of generation
-        // gets slow on CPU; OE's voice replies are short so this is fine.
-        const f5Res = await fetch(f5Url, {
+      if (provider === 'pocket-tts') {
+        // Pocket TTS speaks {text, ref_path} (zero-shot clone from a user's
+        // uploaded reference) or {text, voice} (a preset catalog name). A
+        // cloned voice is a voice-ref id (ref_<hex>) owned by the AUTH user —
+        // the device-paired user manages all voices for their device. No
+        // transcript needed (unlike F5): Pocket TTS is fully zero-shot.
+        const pocketBody = { text };
+        const isRef = typeof voice === 'string' && voice.startsWith('ref_');
+        const pref = isRef ? getVoiceRef(authId, voice) : null;
+        if (pref) pocketBody.ref_path = pref.wavPath;
+        // A deleted/missing ref falls back to a preset rather than sending a
+        // dead ref id (which the service can't resolve).
+        else pocketBody.voice = isRef ? 'george' : voice;
+        const pocketUrl = cfg.pocketTtsUrl || 'http://127.0.0.1:5155/';
+        const pRes = await fetch(pocketUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, ref_path: refPath, ref_text: refText }),
+          body: JSON.stringify(pocketBody),
           signal: AbortSignal.timeout(60000),
         });
-        if (!f5Res.ok) {
-          const errBody = await f5Res.text().catch(() => '');
-          throw new Error(`F5-TTS returned ${f5Res.status}: ${errBody.slice(0, 200)}`);
-        }
-        const wavBuf = Buffer.from(await f5Res.arrayBuffer());
+        if (!pRes.ok) throw new Error(`Pocket TTS returned ${pRes.status}`);
+        const wavBuf = Buffer.from(await pRes.arrayBuffer());
         const { spawn } = await import('child_process');
         const ff = spawn('ffmpeg', [
           '-loglevel', 'error',
           '-f', 'wav', '-i', 'pipe:0',
           // Device I²S is fixed at 16 kHz (audio_io.h AUDIO_BUS_SAMPLE_RATE).
-          // Sending higher-rate MP3 → libhelix decodes at source rate →
-          // played into a 16 kHz I²S pipeline → audio is slower + pitched
-          // down. Resample server-side to match the bus.
           '-ac', '1', '-ar', '16000', '-b:a', '48k',
           '-f', 'mp3', 'pipe:1',
         ]);

@@ -880,12 +880,13 @@
               <label class="provider-toggle"><input type="checkbox" id="providerToggle_tts" checked data-change-action="toggleProvider" data-change-args="[&quot;tts&quot;, &quot;$checked&quot;]"><span class="provider-toggle-slider"></span></label>
             </div>
             <div id="providerBody_tts">
-              <div class="settings-section-desc" style="margin-bottom:8px">Pick the TTS provider. Local options (F5-TTS, Piper) run via systemd services on this box; remote options need an API key.</div>
+              <div class="settings-section-desc" style="margin-bottom:8px">Pick the TTS provider. Local options (Piper, KittenTTS, Pocket TTS) run via systemd services on this box; remote options need an API key.</div>
               <select id="providerTtsProvider" data-change-action="updateTtsProviderFields" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:8px">
                 <option value="openai">OpenAI-compatible (remote, API key)</option>
                 <option value="elevenlabs">ElevenLabs (remote, API key — voice cloning)</option>
                 <option value="piper">Piper (local, multi-voice — download voices below)</option>
                 <option value="kittentts">KittenTTS (local, CPU, ~50 MB — 8 preset voices, no GPU needed)</option>
+                <option value="pocket-tts">Pocket TTS (local, CPU — zero-shot voice cloning from a clip)</option>
               </select>
 
               <div id="providerTtsFields_openai">
@@ -980,6 +981,31 @@
                   <button id="providerKittenttsUninstallBtn" data-action="uninstallKittentts" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Uninstall</button>
                 </div>
                 <pre id="providerKittenttsLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:200px;overflow:auto;margin:0 0 8px;white-space:pre-wrap"></pre>
+              </div>
+
+              <div id="providerTtsFields_pocket-tts" style="display:none">
+                <div id="providerPocketTtsStatus" class="settings-section-desc" style="font-size:11px;color:var(--muted);margin-bottom:8px">Pocket TTS is a tiny CPU-only engine with zero-shot voice cloning — no GPU, no API key. Checking service…</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                  <button id="providerPocketTtsInstallBtn" data-action="installPocketTts" type="button" style="display:none;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Install Pocket TTS (~400 MB)</button>
+                  <button id="providerPocketTtsUninstallBtn" data-action="uninstallPocketTts" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Uninstall</button>
+                </div>
+                <pre id="providerPocketTtsLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:200px;overflow:auto;margin:0 0 8px;white-space:pre-wrap"></pre>
+
+                <!-- Cloned voices -->
+                <div id="providerPocketTtsVoices" style="margin-bottom:8px"></div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+                  <input id="providerPocketTtsVoiceName" type="text" placeholder="Voice name (e.g. My voice)" style="flex:1;min-width:140px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 10px;font-size:12px" />
+                  <button id="providerPocketTtsUploadBtn" data-action="uploadPocketVoice" type="button" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 12px;font-size:12px;cursor:pointer">Upload voice clip…</button>
+                </div>
+                <label style="display:flex;gap:7px;align-items:flex-start;font-size:11px;color:var(--muted);margin-bottom:8px;cursor:pointer">
+                  <input id="providerPocketTtsConsent" type="checkbox" style="margin-top:2px" />
+                  <span>I confirm I have the explicit, lawful consent of the person whose voice this clip contains to clone it. Cloning a voice without permission is prohibited.</span>
+                </label>
+                <div class="settings-section-desc" style="font-size:10px;color:var(--muted);line-height:1.5">
+                  Tip: use a clean ~15–20 second clip of a single speaker. Voice synthesis by
+                  <a href="https://github.com/kyutai-labs/pocket-tts" target="_blank" rel="noopener" style="color:var(--muted)">Kyutai Pocket TTS</a>,
+                  licensed CC-BY-4.0.
+                </div>
               </div>
 
               <div style="display:flex;gap:8px;align-items:center">
