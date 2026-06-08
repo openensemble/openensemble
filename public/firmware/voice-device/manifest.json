@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.48-slotclear",
+  "version": "0.2.49-cutoff-persist",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
