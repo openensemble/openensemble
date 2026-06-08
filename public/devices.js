@@ -933,8 +933,10 @@ function renderVoiceConfigPanel(roster, deviceCount) {
            <select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="flex:1;min-width:0;padding:4px 6px;font-size:12px">${elOpts}</select>
          </span>`;
     } else if (_ttsProvider === 'pocket-tts') {
-      const refOpts = ['<option value="">(device default)</option>']
-        .concat([{ id: 'george', label: 'Default (Pocket preset)' }, ..._voiceRefs]
+      // "(OE Default)" = empty value → server uses the bundled default voice-state.
+      // Then the user's cloned voices.
+      const refOpts = ['<option value="">(OE Default)</option>']
+        .concat(_voiceRefs
           .map(r => `<option value="${escHtml(r.id)}" ${r.id === curVoice ? 'selected' : ''}>${escHtml(r.label)}</option>`))
         .join('');
       voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${refOpts}</select>`;
@@ -1222,19 +1224,39 @@ async function saveVoiceConfig() {
   }
 }
 
-// Add-user picker: allocates the lowest free slot index for the chosen
-// user, writes the fresh assignment to _voiceConfig, and PUTs the whole
-// config so every device gets the new wake-word OTA. agentId stays null
-// (routes to that user's coordinator; UI doesn't expose pin-to-agent).
+// Re-pack slot assignments into contiguous indices 0..N-1, preserving their
+// current slot order. The firmware loads wake words by slot index, so a
+// device's slots ARE the user list in order: removing a middle user must
+// shift everyone after them down a slot, not leave a hole. Without this,
+// deleting "test" (slot 1) from [shawn:0, test:1, lauren:2] would strand
+// lauren at slot 2 with an empty slot 1; with it, lauren moves to slot 1 and
+// the now-unassigned slot 2 gets cleared off the device by the push pass.
+// Returns a fresh assignments object (does not mutate the input).
+function repackSlotAssignments(assignments) {
+  const ordered = Object.keys(assignments || {})
+    .map(Number)
+    .filter(n => Number.isInteger(n) && (assignments[n] ?? assignments[String(n)])?.ownerUserId)
+    .sort((a, b) => a - b);
+  const packed = {};
+  ordered.forEach((oldSlot, i) => {
+    packed[i] = assignments[oldSlot] ?? assignments[String(oldSlot)];
+  });
+  return packed;
+}
+
+// Add-user picker: appends the chosen user to the next free contiguous slot
+// (so slot index == position in the user list), writes the fresh assignment
+// to _voiceConfig, and PUTs the whole config. agentId stays null (routes to
+// that user's coordinator; UI doesn't expose pin-to-agent). Save only — the
+// new slot has no wake word yet, so there's nothing to push until the user
+// picks one and clicks Push.
 window.addSlotUser = async function (ev) {
   const userId = ev.target.value;
   if (!userId) return;
-  const cur = { ...(_voiceConfig.slot_assignments || {}) };
-  let slot = -1;
-  for (let i = 0; i < 6; i++) {
-    if (!cur[i] && !cur[String(i)]) { slot = i; break; }
-  }
-  if (slot < 0) {
+  // Repack first so a legacy gappy config collapses before we append.
+  const cur = repackSlotAssignments(_voiceConfig.slot_assignments || {});
+  const slot = Object.keys(cur).length;   // contiguous → next index == count
+  if (slot >= 6) {
     showDeviceToast('All 6 slots are in use — remove a user first.', { variant: 'warn' });
     ev.target.value = '';
     return;
@@ -1246,20 +1268,23 @@ window.addSlotUser = async function (ev) {
   populateCoordinatorLabels();
 };
 
-// Remove-user button: clears the slot from _voiceConfig and saves. Wake
-// words stay on every device's SPIFFS until that slot is reassigned and
-// re-pushed; the routing entry going away is what stops the wake from
-// firing.
+// Remove-user button: drops the slot, repacks the remaining users into
+// contiguous slots, then pushes. The push re-sends the shifted users' wake
+// words to their new (lower) slots AND sends ww_clear for the freed tail
+// slot, so the removed user's wake word is wiped from every online device's
+// SPIFFS partition immediately (offline devices sync on next connect). This
+// is a deliberate, confirmed action, so we push rather than wait for the
+// Push button — the removal should take effect now.
 window.removeSlotUser = async function (slot) {
   const a = _voiceConfig.slot_assignments?.[slot] ?? _voiceConfig.slot_assignments?.[String(slot)];
   const roster = Array.isArray(_usersRoster) ? _usersRoster : [];
   const name = roster.find(u => u.id === a?.ownerUserId)?.name || a?.ownerUserId || 'user';
-  if (!confirm(`Remove "${name}" from the voice configuration? Their wake word will stop routing on every paired device.`)) return;
+  if (!confirm(`Remove "${name}" from the voice configuration? Their wake word will be cleared from every paired device and the remaining users move up a slot.`)) return;
   const cur = { ...(_voiceConfig.slot_assignments || {}) };
   delete cur[slot];
   delete cur[String(slot)];
-  _voiceConfig.slot_assignments = cur;
-  await saveVoiceConfig();
+  _voiceConfig.slot_assignments = repackSlotAssignments(cur);
+  await pushVoiceConfig();   // save + OTA: re-push shifted slots, clear the freed tail
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -1400,8 +1425,11 @@ window.pushVoiceConfig = async function () {
     // timeout) is offline and will sync on its next connect.
     const push = data.push || {};
     const total = Object.keys(push).length;
+    // "Reached" = the device acked something this round — a wake-word push OR a
+    // slot clear. A removal that only clears slots (no remaining wake words)
+    // still reached the device even though ackedSlots is empty.
     let reached = 0;
-    for (const pr of Object.values(push)) if (pr.ackedSlots?.length) reached++;
+    for (const pr of Object.values(push)) if (pr.ackedSlots?.length || pr.clearedSlots?.length) reached++;
     const offline = total - reached;
     const dev = (n) => `${n} device${n === 1 ? '' : 's'}`;
     if (total === 0) {

@@ -100,7 +100,14 @@ def _state_for(ref_path: str | None, voice: str | None):
                 except Exception as e:
                     print(f"[pocket-tts-server] voice-state cache failed: {e}", flush=True)
     else:
-        st = model.get_state_for_audio_prompt(voice or DEFAULT_VOICE)
+        target = voice or DEFAULT_VOICE
+        try:
+            st = model.get_state_for_audio_prompt(target)
+        except Exception as e:
+            # Invalid/legacy preset name (e.g. F5's "default-en") → don't 500;
+            # fall back to the default catalog voice so a reply still plays.
+            print(f"[pocket-tts-server] voice '{target}' invalid ({e}); using {DEFAULT_VOICE}", flush=True)
+            st = model.get_state_for_audio_prompt(DEFAULT_VOICE)
     with _lock:
         _states[key] = st
     return st

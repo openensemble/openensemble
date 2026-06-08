@@ -11,6 +11,14 @@
 
 import { WebSocketServer } from 'ws';
 import { randomBytes } from 'crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+// OE Default Pocket TTS voice — bundled offline voice-state (.safetensors)
+// fetched by install-pocket-tts.sh. Used when a slot has no cloned voice and
+// no global default is set, so new users get a working voice with no HF/network.
+const OE_DEFAULT_VOICE_STATE = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
 import { getAgentScope } from './agents.mjs';
 
 // Boot identity — fresh random value every server start. Sent to clients on
@@ -27,10 +35,12 @@ import { markAlarmFired, markAlarmAcked } from './lib/alarms.mjs';
 import { initNodeWss, initTerminalWss } from './routes/nodes.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
-  getSessionUserId, getAuthToken, resolveShareGroup,
+  getSessionUserId, getAuthToken, resolveShareGroup, loadConfig,
 } from './routes/_helpers.mjs';
+import { getVoiceRef } from './lib/voice-refs.mjs';
+import { createVoiceTtsStreamer } from './lib/voice-tts-stream.mjs';
 import { getSessionMeta, setSessionDeviceId } from './routes/_helpers/auth-sessions.mjs';
-import { getSlotAssignment, findDeviceByTokenPrefix, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice } from './lib/voice-devices.mjs';
+import { getSlotAssignment, findDeviceByTokenPrefix, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice } from './lib/voice-devices.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
 import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
@@ -406,16 +416,20 @@ function onConnection(ws, req) {
       ws._authenticated = true;
       if (!enforceWsCap(ws)) return;
       sendInitialData();
-      maybePushVoiceConfig(ws);
       if (ws._deviceId) {
         // Firmware reports its running version on auth (since 0.2.3). Store
         // it on the device record so the UI can show "Update available"
-        // when manifest.version > device.fw_version.
+        // when manifest.version > device.fw_version. Persist it BEFORE the
+        // voice-config push so the push's clear-pass gate (fwSupportsClear)
+        // sees the just-reported version — otherwise the first reconnect
+        // after an OTA up to 0.2.48 would still read the stale older version
+        // and skip clears for one extra round-trip.
         const fwReported = typeof msg.firmware_version === 'string' &&
           msg.firmware_version.length > 0 && msg.firmware_version.length < 32
             ? msg.firmware_version : null;
         touchDevice(ws._userId, ws._deviceId, fwReported ? { fw_version: fwReported } : {});
       }
+      maybePushVoiceConfig(ws);
       return;
     }
 
@@ -503,6 +517,9 @@ function onConnection(ws, req) {
     }
 
     if (msg.type === 'stop') {
+      // Barge-in / mute: halt any in-flight server-side TTS push immediately so
+      // the device stops getting audio frames, then abort the LLM turn.
+      try { ws._ttsStreamer?.abort(); } catch {}
       const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
       if (stopAgent) abortChat(ws._userId, stopAgent);
       return;
@@ -623,6 +640,42 @@ function onConnection(ws, req) {
           return;
         }
       }
+      // Server-side voice TTS streaming: when the device advertises the
+      // capability (msg.tts_stream) and the provider is Pocket TTS, the server
+      // segments + synthesizes + pushes PCM audio frames itself (see
+      // lib/voice-tts-stream.mjs). The device plays them as a dumb stream — no
+      // on-device sentence accumulation / per-sentence pull / drain race. Old
+      // firmware omits msg.tts_stream and keeps the legacy `token` path.
+      let ttsStreamer = null;
+      try {
+        const _cfg = loadConfig();
+        if (msg.tts_stream === true && ws._deviceId && _cfg.ttsProvider === 'pocket-tts') {
+          let v = (slotAssignment?.ttsVoice) || _cfg.ttsVoice || '';
+          let refPath = null, presetVoice = null;
+          if (typeof v === 'string' && v.startsWith('ref_')) {
+            const ref = getVoiceRef(ws._userId, v);   // refs owned by the auth (device-paired) user
+            if (ref) refPath = ref.wavPath;
+          }
+          if (!refPath && (!v || v === 'default-en' || v === 'default')) {
+            // OE Default — bundled offline voice-state. Covers a slot with no
+            // cloned voice, an empty global default, or the legacy F5 'default-en'.
+            if (fs.existsSync(OE_DEFAULT_VOICE_STATE)) refPath = OE_DEFAULT_VOICE_STATE;
+          }
+          if (!refPath && !presetVoice) {
+            // A real preset name → use it; otherwise OE Default if present, else a catalog preset.
+            if (v && !v.startsWith('ref_')) presetVoice = v;
+            else if (fs.existsSync(OE_DEFAULT_VOICE_STATE)) refPath = OE_DEFAULT_VOICE_STATE;
+            else presetVoice = 'george';
+          }
+          ttsStreamer = createVoiceTtsStreamer({
+            send: (m) => { if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(m)); } catch {} } },
+            isOpen: () => ws.readyState === ws.OPEN,
+            cfg: _cfg, refPath, voice: presetVoice, log,
+          });
+          ws._ttsStreamer = ttsStreamer;
+        }
+      } catch (e) { log.warn('voice-tts', 'streamer setup failed', { error: e.message }); ttsStreamer = null; }
+
       await handleChatMessage({
         userId:     ws._userId,
         agentId:    msg.agent,
@@ -654,7 +707,15 @@ function onConnection(ws, req) {
           // message is actually spoken. Other tabs/clients still see the
           // raw `error` so the UI can render it appropriately.
           const isVoiceOrigin = !!ws._deviceId;
-          if (ws.readyState === ws.OPEN) {
+          if (ttsStreamer && isVoiceOrigin) {
+            // Streaming path: the server synthesizes + pushes tts_audio frames;
+            // the device never receives raw token/done. Route the text through
+            // the streamer; pass status/other events through unchanged.
+            if (e?.type === 'token' && typeof e.text === 'string') ttsStreamer.pushText(e.text);
+            else if (e?.type === 'done') ttsStreamer.finish();
+            else if (e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) { ttsStreamer.pushText(e.message); ttsStreamer.finish(); }
+            else if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(e)); } catch {} }
+          } else if (ws.readyState === ws.OPEN) {
             try {
               if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
                 ws.send(JSON.stringify({ type: 'token', text: e.message, agent: e.agent ?? 'system' }));
@@ -809,17 +870,24 @@ async function maybePushVoiceConfig(ws) {
     if (isSameVersion) {
       console.log(`[ws] voice-config push to ${ws._deviceId}: version unchanged (v${cfg.version}) but pushing anyway in case device NVS was reset`);
     }
-    const r = await pushConfigToDevice(ws._deviceId, ws._userId);
+    // Read the device's last-reported firmware version so the clear pass only
+    // runs on firmware that knows ww_clear (>= 0.2.48). The auth handler stores
+    // the freshly-reported version before calling us, so this is current.
+    const fwVersion = getDevice(ws._userId, ws._deviceId)?.fw_version ?? null;
+    const r = await pushConfigToDevice(ws._deviceId, ws._userId, { fwVersion });
+    // Device is in sync when every push acked and nothing dropped/failed —
+    // across BOTH the wake-word push pass and the clear pass for unassigned
+    // slots. No pushedSlots>0 gate: a config with only clears (e.g. every user
+    // removed) is still a valid in-sync state to mark.
     const fullySucceeded =
-      r.pushedSlots.length > 0 &&
       r.offlineSlots.length === 0 &&
       r.failedSlots.length === 0 &&
       r.ackedSlots.length === r.pushedSlots.length;
     if (fullySucceeded) {
       markVoiceConfigPushed(ws._userId, ws._deviceId, cfg.version);
-      console.log(`[ws] voice-config v${cfg.version} pushed+acked by ${ws._deviceId} (slots ${r.ackedSlots.join(',')})`);
-    } else if (r.pushedSlots.length > 0) {
-      console.warn(`[ws] voice-config v${cfg.version} partial push to ${ws._deviceId}: acked=${r.ackedSlots.join(',') || '-'} failed=${r.failedSlots.map(f=>f.slot+':'+f.err).join(',') || '-'} offline=${r.offlineSlots.join(',') || '-'}`);
+      console.log(`[ws] voice-config v${cfg.version} synced by ${ws._deviceId} (pushed ${r.ackedSlots.join(',') || '-'}, cleared ${r.clearedSlots.join(',') || '-'})`);
+    } else {
+      console.warn(`[ws] voice-config v${cfg.version} partial sync to ${ws._deviceId}: acked=${r.ackedSlots.join(',') || '-'} cleared=${r.clearedSlots.join(',') || '-'} failed=${r.failedSlots.map(f=>f.slot+':'+f.err).join(',') || '-'} offline=${r.offlineSlots.join(',') || '-'}`);
     }
   } catch (e) {
     console.warn(`[ws] voice-config push to ${ws._deviceId} failed: ${e.message}`);

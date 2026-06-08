@@ -6,6 +6,13 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-06-08
+
+**Removing a voice user now frees its slot and wipes the wake word off your devices**
+Voice devices give each user in your Global Voice Configuration a wake-word "slot," numbered by the order they're listed. Removing someone used to leave a hole: the people below them kept their original slot numbers, and the removed user's wake word stayed loaded in the device's memory — so it could still fire until you happened to reassign that slot. Now removing a user **packs everyone up a slot** (so a list of Shawn, Test, Lauren with Test removed becomes Shawn = slot 0, Lauren = slot 1) and **clears the freed slot off every paired device**, deleting its wake word from the device's storage so it stops responding immediately (online devices right away; offline ones the next time they connect). The push happens automatically when you remove a user — no separate Push click. (Requires firmware ≥ 0.2.48; older devices keep the previous behavior until they update.)
+
+---
+
 ## 2026-06-07
 
 **Reset a voice device's Wi-Fi from the app**

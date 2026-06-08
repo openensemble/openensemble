@@ -87,6 +87,19 @@ for p in paths:
 print("  prefetch ok")
 PY
 
+# ── OE Default voice (bundled offline voice-state) ────────────────────────────
+# New users get a working voice with no HF account/network: a pre-computed
+# Pocket TTS speaker state hosted (non-gated) on the mirror. Used by the server
+# when a slot has no cloned voice and no global default is set.
+step "Downloading OE Default voice-state (~11 MB)..."
+default_state="$MODEL_DIR/default-voice.safetensors"
+if [ ! -s "$default_state" ]; then
+  default_url="https://huggingface.co/${MIRROR}/resolve/main/default-voice.safetensors"
+  if command -v wget >/dev/null; then wget --quiet -O "$default_state" "$default_url" || { rm -f "$default_state"; fail "OE Default voice download failed"; }
+  else curl -fL -o "$default_state" "$default_url" || { rm -f "$default_state"; fail "OE Default voice download failed"; }
+  fi
+fi
+
 # ── systemd unit ──────────────────────────────────────────────────────────────
 mkdir -p "$SERVICE_DIR"
 unit_path="$SERVICE_DIR/$SERVICE_NAME"

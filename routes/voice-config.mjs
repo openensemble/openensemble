@@ -34,10 +34,12 @@ async function pushToAllDevices(userId) {
   const devices = listDevices(userId);
   const perDevice = {};
   await Promise.all(devices.map(async (d) => {
-    const r = await pushConfigToDevice(d.id, userId);
+    const r = await pushConfigToDevice(d.id, userId, { fwVersion: d.fw_version });
     perDevice[d.id] = r;
+    // In sync when every push acked and nothing dropped/failed across both the
+    // push pass and the clear pass (unassigned slots). No pushedSlots>0 gate —
+    // a clear-only config (all users removed) is a valid in-sync state.
     const fullySucceeded =
-      r.pushedSlots.length > 0 &&
       r.offlineSlots.length === 0 &&
       r.failedSlots.length === 0 &&
       r.ackedSlots.length === r.pushedSlots.length;

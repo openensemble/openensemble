@@ -1705,7 +1705,7 @@ export async function handle(req, res) {
       const defaultVoice =
         provider === 'piper' ? '0' :
         provider === 'kittentts' ? KITTENTTS_DEFAULT_VOICE :
-        provider === 'pocket-tts' ? 'george' : // preset catalog voice; cloned voices are ref_<hex> ids
+        provider === 'pocket-tts' ? '' : // empty → OE Default voice-state (offline); cloned voices are ref_<hex>; presets are catalog names
         provider === 'elevenlabs' ? '21m00Tcm4TlvDq8ikWAM' : // Rachel — EL stock voice id
         'alloy';
       let voice = cfg.ttsVoice || defaultVoice;
@@ -1784,10 +1784,12 @@ export async function handle(req, res) {
         const pocketBody = { text };
         const isRef = typeof voice === 'string' && voice.startsWith('ref_');
         const pref = isRef ? getVoiceRef(authId, voice) : null;
+        const oeDefaultState = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
         if (pref) pocketBody.ref_path = pref.wavPath;
-        // A deleted/missing ref falls back to a preset rather than sending a
-        // dead ref id (which the service can't resolve).
-        else pocketBody.voice = isRef ? 'george' : voice;
+        else if (voice && !isRef && voice !== 'default-en' && voice !== 'default') pocketBody.voice = voice; // explicit preset
+        // OE Default (empty/legacy/deleted-ref) → bundled offline voice-state; else a catalog preset.
+        else if (fs.existsSync(oeDefaultState)) pocketBody.ref_path = oeDefaultState;
+        else pocketBody.voice = 'george';
         const pocketUrl = cfg.pocketTtsUrl || 'http://127.0.0.1:5155/';
         const pRes = await fetch(pocketUrl, {
           method: 'POST',

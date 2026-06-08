@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.46-ttsbundle",
+  "version": "0.2.48-slotclear",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
