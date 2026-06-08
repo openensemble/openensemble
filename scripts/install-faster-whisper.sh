@@ -49,6 +49,12 @@ case "$FW_DEVICE" in
   *) echo "[fw-install] FAIL: FW_DEVICE must be cpu or cuda, got $FW_DEVICE" >&2; exit 1 ;;
 esac
 
+# Optional: pin the CUDA build to a specific GPU index (multi-GPU boxes). When
+# set we emit CUDA_DEVICE_ORDER=PCI_BUS_ID so the index matches nvidia-smi.
+# Unset = CUDA default (device 0). Ignored for the CPU profile. The OE Settings
+# UI re-applies this at runtime too; keeping it here means a reinstall honors it.
+FW_GPU_ID="${FW_GPU_ID:-}"
+
 # Both profiles use large-v3-turbo. distil-large-v3 was tested as the CPU
 # default but quality was meaningfully worse (Tree/Three confusion, "trademark
 # file lane" type errors) while runtime speed barely changed — large-v3-turbo
@@ -172,7 +178,7 @@ Environment=FW_DEVICE=$FW_DEVICE
 Environment=FW_COMPUTE_TYPE=$FW_COMPUTE_TYPE
 Environment=FW_DOWNLOAD_DIR=$MODEL_CACHE_DIR
 ${LD_PATH:+Environment=LD_LIBRARY_PATH=$LD_PATH}
-${CUDA_VISIBLE_DEVICES:+Environment=CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES}
+$( [ "$FW_DEVICE" = "cuda" ] && [ -n "$FW_GPU_ID" ] && printf 'Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID\nEnvironment=CUDA_VISIBLE_DEVICES=%s' "$FW_GPU_ID" )
 
 [Install]
 WantedBy=default.target

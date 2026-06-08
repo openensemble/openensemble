@@ -534,6 +534,7 @@ function renderDevices() {
         </div>
         <div style="text-align:center;font-size:11px;color:var(--muted)">${metaBits}</div>
         <div style="text-align:center;font-size:11px;color:var(--muted);margin-top:4px"><span>${fwLabel}</span>${updateBtn}</div>
+        ${d.online ? `<div style="text-align:center;margin-top:6px"><button class="cdraw-btn" data-action="enterApMode" data-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 9px" title="Wipe Wi-Fi/pairing and reboot into the setup AP (oe-voice-XXXX) so you can move this device to a different Wi-Fi network">⟳ Reset Wi-Fi</button></div>` : ''}
         <div data-ota-status="${escHtml(d.id)}" style="text-align:center;font-size:11px;color:var(--muted);margin-top:4px;display:none"></div>
       </div>
     `;
@@ -1165,6 +1166,24 @@ window._handleOtaProgress = function (msg) {
     case 'rebooting': row.textContent = `Rebooting into ${msg.target_version || 'new firmware'}…`; setTimeout(loadDevices, 8000); break;
     case 'error':     row.textContent = `Update failed: ${msg.err || 'unknown error'}`; break;
     default:          row.textContent = msg.phase || '';
+  }
+};
+
+// Tell an online device to wipe its Wi-Fi/pairing and reboot into the captive
+// portal AP so it can be moved to a different network. Destructive (the device
+// goes offline + must be re-provisioned and re-paired), so confirm first.
+window.enterApMode = async function (id) {
+  if (!confirm('Reset this device\'s Wi-Fi?\n\nIt will reboot into its setup AP (oe-voice-XXXX) and be REMOVED from OpenEnsemble. To use it again, join its "oe-voice-…" Wi-Fi, enter the new network, and re-pair it. Wake words on the device are kept.')) return;
+  try {
+    const r = await fetch(`/api/devices/${encodeURIComponent(id)}/enter-ap`, { method: 'POST' });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      throw new Error(r.status === 409 ? 'device is offline' : `HTTP ${r.status} ${txt}`);
+    }
+    showDeviceToast('Device is resetting into setup mode and has been removed — re-pair it after joining its "oe-voice-…" Wi-Fi.');
+    setTimeout(loadDevices, 1200); // it's already removed server-side; refresh the drawer
+  } catch (e) {
+    showDeviceToast(`Reset Wi-Fi failed: ${e.message}`, { variant: 'error' });
   }
 };
 

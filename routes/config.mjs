@@ -163,7 +163,101 @@ const PERPLEXITY_STATIC_MODELS = [
   { id: 'sonar-deep-research',   name: 'Sonar Deep Research' },
 ];
 
+// Enumerate NVIDIA GPUs via nvidia-smi for the "pin a local service to a GPU"
+// settings UI. Returns [] when nvidia-smi is absent (CPU-only box) — callers
+// treat empty as "no GPU selector". Cached briefly so repeated Settings opens
+// don't fork nvidia-smi each time.
+let _gpuCache = null; // { at, gpus }
+const GPU_CACHE_MS = 30_000;
+function listNvidiaGpus() {
+  if (_gpuCache && (Date.now() - _gpuCache.at) < GPU_CACHE_MS) {
+    return Promise.resolve(_gpuCache.gpus);
+  }
+  return new Promise((resolve) => {
+    let out = '';
+    let done = false;
+    const finish = (gpus) => { if (done) return; done = true; _gpuCache = { at: Date.now(), gpus }; resolve(gpus); };
+    let child;
+    try {
+      child = spawn('nvidia-smi',
+        ['--query-gpu=index,name,memory.total,memory.free', '--format=csv,noheader,nounits'],
+        { env: { ...process.env, HOME: os.homedir() }, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { return finish([]); }
+    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} finish([]); }, 3000);
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => { clearTimeout(killer); finish([]); });
+    child.on('exit', (code) => {
+      clearTimeout(killer);
+      if (code !== 0) return finish([]);
+      const gpus = out.trim().split('\n').filter(Boolean).map((line) => {
+        const [index, name, total, free] = line.split(',').map(s => s.trim());
+        return {
+          index: Number(index),
+          name,
+          memTotalMiB: Number(total) || null,
+          memFreeMiB: Number(free) || null,
+        };
+      }).filter(g => Number.isInteger(g.index));
+      finish(gpus);
+    });
+  });
+}
+
+// Rewrite a user systemd unit so a local service is pinned to a specific GPU
+// (CUDA_VISIBLE_DEVICES=<index> + CUDA_DEVICE_ORDER=PCI_BUS_ID so the index
+// matches nvidia-smi). gpuId === null clears the pin (back to CUDA's default).
+// daemon-reloads, and restarts the unit only if it's currently active so we
+// don't auto-start a service the user has stopped (e.g. STT switched to remote).
+// Reusable for any future GPU-backed local service. Non-fatal: resolves to
+// { ok, reason } and logs; never throws into the request path.
+async function pinServiceGpu(serviceName, gpuId) {
+  const unitPath = path.join(os.homedir(), '.config', 'systemd', 'user', serviceName);
+  if (!fs.existsSync(unitPath)) return { ok: false, reason: 'unit-missing' };
+  let unit;
+  try { unit = fs.readFileSync(unitPath, 'utf8'); } catch (e) { return { ok: false, reason: e.message }; }
+  // Drop any existing CUDA pin lines (and our marker comment) so this is idempotent.
+  const lines = unit.split('\n').filter(l =>
+    !/^Environment=CUDA_VISIBLE_DEVICES=/.test(l) &&
+    !/^Environment=CUDA_DEVICE_ORDER=/.test(l) &&
+    !/^# OE GPU pin\b/.test(l));
+  if (Number.isInteger(gpuId) && gpuId >= 0) {
+    // Insert right after the [Service] header so the env applies to ExecStart.
+    const idx = lines.findIndex(l => l.trim() === '[Service]');
+    const inject = [
+      '# OE GPU pin (managed by Settings → STT)',
+      'Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID',
+      `Environment=CUDA_VISIBLE_DEVICES=${gpuId}`,
+    ];
+    if (idx >= 0) lines.splice(idx + 1, 0, ...inject);
+    else lines.push(...inject);
+  }
+  try { fs.writeFileSync(unitPath, lines.join('\n')); } catch (e) { return { ok: false, reason: e.message }; }
+  const sysctl = (args) => new Promise((resolve) => {
+    const c = spawn('systemctl', ['--user', ...args], { env: { ...process.env, HOME: os.homedir() }, stdio: 'ignore' });
+    c.on('error', () => resolve(1));
+    c.on('exit', (code) => resolve(code ?? 1));
+  });
+  await sysctl(['daemon-reload']);
+  // Only restart if active — `is-active` exits 0 when running.
+  const active = await sysctl(['is-active', '--quiet', serviceName]);
+  if (active === 0) await sysctl(['restart', serviceName]);
+  invalidateVoiceDepsCache();
+  log.info('config', `pinned ${serviceName} to GPU`, { gpuId, restarted: active === 0 });
+  return { ok: true, restarted: active === 0 };
+}
+
 export async function handle(req, res) {
+  // GET /api/hardware/gpus — enumerate NVIDIA GPUs for the GPU-pin settings UI.
+  // Readable by any authed user (read-only hardware info, no secrets).
+  if (req.url === '/api/hardware/gpus' && req.method === 'GET') {
+    const authId = requireAuth(req, res);
+    if (!authId) return true;
+    const gpus = await listNvidiaGpus();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ gpus, available: gpus.length > 0 }));
+    return true;
+  }
+
   // Provider config: GET is readable by any authed user (so non-admin clients
   // can see which providers are enabled and populate the agent model picker);
   // POST stays admin-only since it writes API keys and toggle state.
@@ -243,6 +337,13 @@ export async function handle(req, res) {
         // drives the "running now" sub-state.
         fasterWhisperInstalled: cfg.integrations?.faster_whisper?.installed === true,
         fasterWhisperProfile: cfg.integrations?.faster_whisper?.profile ?? null,
+        // Which GPU the STT service is pinned to (CUDA_VISIBLE_DEVICES index,
+        // with CUDA_DEVICE_ORDER=PCI_BUS_ID so it matches nvidia-smi's index).
+        // null = no explicit pin (CUDA's default, usually device 0). Only
+        // meaningful on the cuda profile + a multi-GPU box. Lets users keep STT
+        // off a GPU they want free for e.g. local training.
+        fasterWhisperGpuId: Number.isInteger(cfg.integrations?.faster_whisper?.gpuId)
+          ? cfg.integrations.faster_whisper.gpuId : null,
         ffmpegAvailable,
         elevenlabsKeySet: !!cfg.elevenlabsApiKey,
         elevenlabsModel:  cfg.elevenlabsModel ?? '',
@@ -293,9 +394,24 @@ export async function handle(req, res) {
             return true;
           }
         }
+        // Validate the STT GPU pin against actually-present GPUs *before* the
+        // transaction, so a bad index 400s loudly instead of silently writing a
+        // unit that fails to start. null clears the pin.
+        if (body.fasterWhisperGpuId !== undefined && body.fasterWhisperGpuId !== null) {
+          const g = Number(body.fasterWhisperGpuId);
+          const gpus = await listNvidiaGpus();
+          if (!Number.isInteger(g) || g < 0 || !gpus.some(d => d.index === g)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `fasterWhisperGpuId must be the index of a detected GPU (have: ${gpus.map(d => d.index).join(', ') || 'none'})` }));
+            return true;
+          }
+        }
         // Set inside the modifyConfig closure when sttMode actually flips, so
         // the systemd side-effect below only runs on a real transition.
         let fwServiceAction = null; // 'stop' (→ remote) | 'start' (→ local)
+        // Set when the STT GPU pin changes, applied (unit rewrite + restart)
+        // after the config save. undefined = unchanged; null = clear pin.
+        let fwGpuPinToApply;
         await modifyConfig(cfg => {
           if (body.anthropicApiKey)   cfg.anthropicApiKey   = body.anthropicApiKey;
           if (body.fireworksApiKey)   cfg.fireworksApiKey   = body.fireworksApiKey;
@@ -368,6 +484,19 @@ export async function handle(req, res) {
             }
             cfg.sttMode = body.sttMode;
           }
+          // Pin (or clear) which GPU the local STT service runs on. Accepts a
+          // non-negative integer (GPU index) or null (clear). Only applied when
+          // faster-whisper is installed; persisted either way so a later install
+          // honors it. Validated against detected GPUs above.
+          if (body.fasterWhisperGpuId !== undefined) {
+            const g = body.fasterWhisperGpuId;
+            const val = (g === null) ? null : Number(g);
+            cfg.integrations ??= {};
+            cfg.integrations.faster_whisper ??= {};
+            if (val === null) delete cfg.integrations.faster_whisper.gpuId;
+            else cfg.integrations.faster_whisper.gpuId = val;
+            if (cfg.integrations.faster_whisper.installed === true) fwGpuPinToApply = val;
+          }
           if (body.enabledProviders !== undefined) cfg.enabledProviders = { ...(cfg.enabledProviders ?? {}), ...body.enabledProviders };
           if (body.providerFailover !== undefined) cfg.providerFailover = body.providerFailover;
           if (body.clearMicrosoftCreds) { delete cfg.msClientId; delete cfg.msClientSecret; delete cfg.msTenant; }
@@ -393,6 +522,14 @@ export async function handle(req, res) {
             if (code === 0) { invalidateVoiceDepsCache(); log.info('config', `faster-whisper ${fwServiceAction === 'stop' ? 'stopped (switched to remote STT)' : 'started (switched to local STT)'}`); }
             else log.warn('config', 'faster-whisper service control non-zero exit', { action: fwServiceAction, code });
           });
+        }
+        // Apply the GPU pin (rewrite unit + restart if running). Skipped when we
+        // also just toggled the service on/off above — that path already wrote
+        // CUDA env via the installer/enable and a double restart is pointless.
+        if (fwGpuPinToApply !== undefined && !fwServiceAction) {
+          pinServiceGpu('faster-whisper.service', fwGpuPinToApply)
+            .then(r => { if (!r.ok) log.warn('config', 'STT GPU pin failed', r); })
+            .catch(e => log.warn('config', 'STT GPU pin error', { error: e.message }));
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
@@ -549,6 +686,7 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res);
     if (!authId) return true;
 
+    const cfg = loadConfig();
     const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
                                     '..', 'scripts', 'install-faster-whisper.sh');
     if (!fs.existsSync(scriptPath)) {
@@ -583,7 +721,13 @@ export async function handle(req, res) {
     });
 
     const child = spawn('/usr/bin/env', ['bash', scriptPath], {
-      env: { ...process.env, HOME: os.homedir(), FW_DEVICE: profile },
+      env: {
+        ...process.env, HOME: os.homedir(), FW_DEVICE: profile,
+        // Honor a previously-chosen GPU pin so reinstalling/switching profiles
+        // doesn't silently move STT back onto the default GPU.
+        ...(profile === 'cuda' && Number.isInteger(cfg.integrations?.faster_whisper?.gpuId)
+          ? { FW_GPU_ID: String(cfg.integrations.faster_whisper.gpuId) } : {}),
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 

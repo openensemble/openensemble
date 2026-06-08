@@ -354,7 +354,10 @@ const httpServer = http.createServer(async (req, res) => {
       (req.method === 'POST' && req.url.startsWith('/api/shared-docs')) ||
       // Chat attachments (audio/video for transcription, large images, etc.)
       // — enforced at 500 MB by the route-level busboy parser.
-      (req.method === 'POST' && req.url === '/api/chat-upload');
+      (req.method === 'POST' && req.url === '/api/chat-upload') ||
+      // Ambient-library MP3 uploads — enforced at 40 MB by the route-level
+      // handler in routes/devices.mjs.
+      (req.method === 'POST' && req.url.startsWith('/api/devices/ambient-library/'));
     if (!exemptFromBodyCap) {
       const declared = parseInt(req.headers['content-length'] || '0', 10);
       if (declared > API_BODY_CAP) {

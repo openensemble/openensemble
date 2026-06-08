@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.43-ww-autoreboot",
+  "version": "0.2.45-ap6slots",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

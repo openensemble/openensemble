@@ -1054,6 +1054,16 @@
                   <button id="providerFwInstallBtn" data-action="installFwFromPicker" type="button" disabled style="background:var(--muted);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:not-allowed;font-weight:600;align-self:flex-start">Save & install</button>
                 </div>
 
+                <!-- GPU pin (shown only when installed on the GPU profile and the
+                     box has more than one NVIDIA GPU). Lets users keep STT off a
+                     GPU they want free for e.g. local model training. Populated +
+                     toggled by loadProviderConfig. -->
+                <div id="providerFwGpuWrap" style="display:none;flex-direction:column;gap:4px;margin-bottom:8px">
+                  <label for="providerFwGpuPin" style="font-size:11px;color:var(--text);font-weight:600">STT GPU</label>
+                  <select id="providerFwGpuPin" data-change-action="onFwGpuPinChange" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px"></select>
+                  <div id="providerFwGpuStatus" style="font-size:10px;color:var(--muted);line-height:1.4">Pin Faster-Whisper to a specific GPU. Changing this restarts the STT service (~15 s).</div>
+                </div>
+
                 <button id="providerFwUninstallBtn" data-action="uninstallFasterWhisper" type="button" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;align-self:flex-start">Uninstall</button>
 
                 <pre id="providerFwLog" style="display:none;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:ui-monospace,monospace;font-size:11px;border-radius:6px;padding:8px;max-height:240px;overflow:auto;margin:8px 0 0;white-space:pre-wrap"></pre>

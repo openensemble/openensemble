@@ -766,6 +766,41 @@ export async function handle(req, res) {
     return true;
   }
 
+  // POST /api/devices/:id/enter-ap — tell the device to wipe its Wi-Fi/pairing
+  // creds and reboot into the captive-portal AP (oe-voice-XXXX) so it can be
+  // moved to a different Wi-Fi network. The device must be ONLINE to receive
+  // this (it's reachable on its current network); afterwards it drops off and
+  // reappears as the setup AP. Wake-word models (SPIFFS) are preserved.
+  const apMatch = p.match(/^\/api\/devices\/([^/]+)\/enter-ap$/);
+  if (apMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const id = decodeURIComponent(apMatch[1]);
+    const device = getDevice(userId, id);
+    if (!device) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+      return true;
+    }
+    if (!isDeviceOnline(id)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'device_offline' }));
+      return true;
+    }
+    const sent = sendToDevice(id, { type: 'enter_ap_mode' });
+    // The device wipes its pairing on reset and comes back as a brand-new
+    // device (fresh pairing via the captive portal), so this registry entry is
+    // now stale. Remove it + revoke its session token so it drops out of the
+    // Devices drawer immediately. Send the WS command FIRST (above) so the
+    // frame is buffered before we revoke.
+    removeDevice(userId, id);
+    let sessionRevoked = false;
+    if (device.token_prefix) sessionRevoked = revokeSessionByPrefix(userId, device.token_prefix);
+    res.writeHead(sent ? 202 : 502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ nudged: !!sent, removed: true, sessionRevoked }));
+    return true;
+  }
+
   // DELETE /api/devices/:id — drop from registry + revoke its session token
   if (idMatch && req.method === 'DELETE') {
     const userId = requireAuth(req, res);

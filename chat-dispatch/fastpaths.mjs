@@ -16,8 +16,17 @@
  */
 
 import { appendToSession } from '../sessions.mjs';
-import { classifyRoutineIntent, executeRoutine, resolveRoutineDeviceId } from '../lib/routines.mjs';
-import { speakReminder } from '../lib/voice-reminder.mjs';
+import { classifyRoutineIntent, executeRoutine, resolveRoutineDeviceId, runDeferredAmbient } from '../lib/routines.mjs';
+import { speakRoutineTts } from '../lib/voice-reminder.mjs';
+
+// Rough spoken-duration estimate (ms) for the same-device token-stream TTS path,
+// which gives no completion signal. ~165 wpm, floored, biased slightly long so
+// ambient never clips the tail of the announcement.
+function estimateTtsMs(text) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean).length;
+  if (!words) return 0;
+  return Math.max(1000, Math.round((words / 2.5) * 1000) + 500);
+}
 
 // ── HA fast-path (pre-LLM) ────────────────────────────────────────────────────
 // Resolution order for "<verb> <phrase>" commands:
@@ -226,16 +235,33 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
     const targetDiffers = targetDeviceId && targetDeviceId !== deviceId;
     const result = await executeRoutine(routine, { userId, deviceId: targetDeviceId });
     const reply = result.text || '';
-    // When the routine targets a different device, push the spoken reply
-    // to THAT device via the MP3-marker path. Don't stream it over the
-    // originating device's WS (that'd speak the reply in the wrong room).
+    const ambient = Array.isArray(result.ambient) ? result.ambient : [];
+    let ttsMs = 0; // spoken duration of the reply, used to time ambient start
+
+    // When the routine targets a different device, push the spoken reply to
+    // THAT device via the MP3-marker path. speakRoutineTts reports the measured
+    // audio duration so ambient can start exactly when the announcement ends.
     if (reply && targetDiffers) {
       try {
-        await speakReminder({ userId, deviceIds: [targetDeviceId], text: reply, prefix: '', chime: false });
+        ({ durationMs: ttsMs } = await speakRoutineTts({ userId, deviceIds: [targetDeviceId], text: reply }));
       } catch (e) {
         console.warn(`[chat] routine cross-device tts push failed: ${e.message}`);
       }
     }
+
+    // play_ambient is started only AFTER the spoken reply finishes, so the
+    // announcement isn't drowned by the ambient sound. Same-device TTS streams
+    // over the WS with no completion signal, so we estimate the duration;
+    // cross-device used the measured MP3 length above. ttsMs<=0 → start now.
+    const scheduleAmbient = (spokenMs) => {
+      if (!ambient.length) return;
+      const delay = spokenMs > 0 ? spokenMs + 300 : 0;
+      setTimeout(() => {
+        runDeferredAmbient(ambient, { userId, deviceId: targetDeviceId })
+          .catch(e => console.warn(`[chat] routine ambient start failed: ${e.message}`));
+      }, delay);
+    };
+
     // If a run_prompt action is in the routine, the trigger phrase becomes a
     // setup step — speak the routine's collected text first, then signal the
     // caller to hand the prompt off to the user's coordinator agent.
@@ -248,9 +274,10 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
           { role: 'assistant', content: reply, ts: Date.now() },
         );
         // Skip the WS token push when the routine is bound to a different
-        // device — speakReminder above already spoke it in the right room.
-        if (!targetDiffers) onEvent({ type: 'token', text: reply, agent: agentId });
+        // device — speakRoutineTts above already spoke it in the right room.
+        if (!targetDiffers) { onEvent({ type: 'token', text: reply, agent: agentId }); ttsMs = estimateTtsMs(reply); }
       }
+      scheduleAmbient(ttsMs);
       console.log(`[chat] routine-fastpath: ${routine.id} → followup prompt`);
       return { handled: true, followupPrompt: result.followupPrompt, targetDeviceId };
     }
@@ -259,11 +286,12 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
       { role: 'assistant', content: reply || '(routine executed silently)', ts: Date.now() }
     );
     // Only stream the spoken reply over the originating WS when the routine
-    // fires on that same device — otherwise speakReminder above has already
+    // fires on that same device — otherwise speakRoutineTts above has already
     // pushed it to the target device.
-    if (reply && !targetDiffers) onEvent({ type: 'token', text: reply, agent: agentId });
+    if (reply && !targetDiffers) { onEvent({ type: 'token', text: reply, agent: agentId }); ttsMs = estimateTtsMs(reply); }
+    scheduleAmbient(ttsMs);
     onEvent({ type: 'done', agent: agentId });
-    console.log(`[chat] routine-fastpath: ${routine.id} actions=${routine.actions.length} errors=${result.errors.length}`);
+    console.log(`[chat] routine-fastpath: ${routine.id} actions=${routine.actions.length} errors=${result.errors.length} ambient=${ambient.length}`);
     return { handled: true };
   } catch (e) {
     console.warn('[chat] routine-fastpath threw, falling through:', e.message);

@@ -55,6 +55,11 @@ import { log } from './logger.mjs';
 // messages, base64 screenshots, and attachments we expect in normal use.
 const WS_MAX_PAYLOAD = 2 * 1024 * 1024;
 const WS_PING_INTERVAL = 15000; // 15s — aggressive enough for mobile carriers
+// Tolerate this many consecutive missed pongs before terminating. Terminating
+// after a SINGLE missed pong (the old behavior) kills voice-device sockets on a
+// transient 2.4 GHz Wi-Fi hiccup, causing constant reconnect flapping. 3 misses
+// ≈ 45 s grace — still reaps truly-dead connections, but rides out brief loss.
+const WS_MAX_MISSED_PONGS = 3;
 // Per-user concurrent WebSocket cap. A compromised account (or a buggy
 // reconnect loop) shouldn't be able to hoard server sockets — each open
 // connection costs a heartbeat timer slot and keepalive memory.
@@ -105,8 +110,15 @@ export function initWs(httpServer) {
   // Server-side heartbeat — keeps mobile connections alive across NAT/proxy
   const heartbeat = setInterval(() => {
     for (const client of _wss.clients) {
-      if (client._alive === false) { client.terminate(); continue; }
-      client._alive = false;
+      client._missedPongs = (client._missedPongs || 0) + 1;
+      if (client._missedPongs >= WS_MAX_MISSED_PONGS) {
+        // Server-initiated termination — logged distinctly from a client-side
+        // close so we can tell whether OE's heartbeat is dropping a device vs.
+        // the device dropping itself.
+        log.info('ws', 'terminating unresponsive client', { userId: client._userId, missedPongs: client._missedPongs, intervalMs: WS_PING_INTERVAL });
+        client.terminate();
+        continue;
+      }
       client.ping();
     }
   }, WS_PING_INTERVAL);
@@ -161,10 +173,10 @@ export function attachWsUpgrade(httpServer) {
 function initBrowserExtWss() {
   const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
   wss.on('connection', async (ws, req) => {
-    ws._alive = true;
+    ws._missedPongs = 0;
     ws._authenticated = false;
     ws._extId = null;
-    ws.on('pong', () => { ws._alive = true; });
+    ws.on('pong', () => { ws._missedPongs = 0; });
 
     // Lazy imports — browser-bus + getSessionMeta are not needed unless an
     // extension actually connects.
@@ -286,8 +298,8 @@ function initBrowserExtWss() {
   // as the main WS heartbeat — terminate after one missed pong cycle.
   const hb = setInterval(() => {
     for (const c of wss.clients) {
-      if (c._alive === false) { c.terminate(); continue; }
-      c._alive = false;
+      c._missedPongs = (c._missedPongs || 0) + 1;
+      if (c._missedPongs >= WS_MAX_MISSED_PONGS) { c.terminate(); continue; }
       try { c.ping(); } catch {}
     }
   }, WS_PING_INTERVAL);
@@ -326,8 +338,8 @@ function onConnection(ws, req) {
     ws._authenticated = false;
   }
 
-  ws._alive = true;
-  ws.on('pong', () => { ws._alive = true; });
+  ws._missedPongs = 0;
+  ws.on('pong', () => { ws._missedPongs = 0; });
 
   // Send initial data once authenticated. We log only user id — never the
   // raw request URL, which may contain a legacy ?token= that would otherwise

@@ -220,6 +220,8 @@ export function cleanStaleStreamBuffers() {
 cleanStaleStreamBuffers();
 
 // ── Cross-agent context ─────────────────────────────────────────────────────
-export function loadCrossAgentContext(userId, targetAgentId, limit = 3) {
+// async because it just forwards to loadSession, which is async since
+// 4a0d21e.
+export async function loadCrossAgentContext(userId, targetAgentId, limit = 3) {
   return loadSession(`${userId}_${targetAgentId}`, limit);
 }

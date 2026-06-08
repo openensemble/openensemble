@@ -469,7 +469,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (!agent.ephemeral && agent.crossAgentRead?.length && userId && userId !== 'default') {
     const parts = [];
     for (const otherId of agent.crossAgentRead) {
-      const recent = loadCrossAgentContext(userId, otherId, 3);
+      const recent = await loadCrossAgentContext(userId, otherId, 3);
       // Filter to only user/assistant messages (skip notifications, system)
       const useful = recent.filter(m => m.role === 'user' || m.role === 'assistant');
       if (useful.length) {

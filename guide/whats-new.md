@@ -6,7 +6,20 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-06-07
+
+**Reset a voice device's Wi-Fi from the app**
+Moving a voice device to a different Wi-Fi network used to mean re-flashing it over USB (the saved Wi-Fi lives in NVS, which re-flashing preserves). Now there's a **⟳ Reset Wi-Fi** button on each online device in Settings → Devices: it tells the device to wipe its Wi-Fi/pairing and reboot into its setup AP (`oe-voice-XXXX`), so you can join that and enter the new network — no computer, no button-fishing. Because the device comes back as a fresh pairing, OpenEnsemble also **removes it from your device list** when you do this (it reappears once you re-pair it on the new network). Wake-word models on the device are kept. (Requires the device to be online to receive the command, and firmware ≥ 0.2.44.)
+
+**Routines: announcement finishes before ambient sound starts**
+In a routine that both says something and plays an ambient sound, the sound used to start while (or before) the spoken announcement played, talking over it. Now the routine speaks its reply first and only starts the ambient sound **after the announcement has finished**, so you actually hear it. Applies to voice-triggered routines, the Test button, and webhook/NFC fires.
+
+---
+
 ## 2026-06-06
+
+**Pick which GPU runs local Speech-to-Text**
+On a machine with more than one NVIDIA GPU, the local Faster-Whisper STT service used to always grab the default GPU (device 0) — a problem if you wanted that card free for something else, like training a model. Settings → Providers → STT now shows a **STT GPU** picker (when you're on the GPU profile and have 2+ GPUs): choose which card Faster-Whisper runs on, and OpenEnsemble re-pins the service and restarts it (~15 s). The choice survives reboots and reinstalls. Single-GPU and CPU setups don't see the picker — nothing changes for them.
 
 **Voice device settings: edit freely, push when ready**
 In Settings → Devices, changing a voice device's wake word, voice, cutoff, or avg cutoff used to update your device over-the-air on *every* change. Now those edits just **save** — your device only receives them when you click the new **Push** button (now next to the **Avg cutoff** field). If you were used to changes taking effect on the device automatically, this is the difference: tweak everything you want, then Push once. It also stops the device's wake word from reloading on every keystroke, which could leave it on a stale model until a restart.

@@ -1009,6 +1009,8 @@ async function loadProviderConfig() {
           fwProfileSel.value = cfg.fasterWhisperProfile;
           window.onFwProfileChange?.();
         }
+        // Populate + show the GPU pin selector (cuda profile + multi-GPU only).
+        window._populateFwGpuPin?.(cfg);
       } else {
         fwStatus.textContent = 'Faster-Whisper is not installed.';
         fwStatus.style.color = 'var(--muted)';
@@ -1017,6 +1019,8 @@ async function loadProviderConfig() {
         // Reset the dropdown so the user picks fresh.
         if (fwProfileSel) fwProfileSel.value = '';
         window.onFwProfileChange?.();
+        const gpuWrap = $('providerFwGpuWrap');
+        if (gpuWrap) gpuWrap.style.display = 'none';
       }
     }
 
@@ -1868,6 +1872,53 @@ window.installFwFromPicker = function () {
   const profile = document.getElementById('providerFwProfile')?.value;
   if (profile !== 'cpu' && profile !== 'cuda') return;
   return window.installFasterWhisper(profile);
+};
+
+// Populate the "pin STT to a GPU" selector. Only meaningful on the cuda profile
+// with more than one NVIDIA GPU — otherwise the wrapper stays hidden. Called by
+// loadProviderConfig with the provider-config payload (for the current pin).
+window._populateFwGpuPin = async function (cfg) {
+  const wrap = document.getElementById('providerFwGpuWrap');
+  const sel  = document.getElementById('providerFwGpuPin');
+  if (!wrap || !sel) return;
+  // Only the GPU profile can be pinned to a device.
+  if (cfg?.fasterWhisperProfile !== 'cuda') { wrap.style.display = 'none'; return; }
+  let gpus = [];
+  try {
+    const r = await fetch('/api/hardware/gpus').then(x => x.json());
+    gpus = Array.isArray(r?.gpus) ? r.gpus : [];
+  } catch { gpus = []; }
+  // No selector for single-GPU (or no-GPU) boxes — nothing to choose.
+  if (gpus.length < 2) { wrap.style.display = 'none'; return; }
+  const current = Number.isInteger(cfg?.fasterWhisperGpuId) ? cfg.fasterWhisperGpuId : '';
+  const fmtFree = g => (g.memFreeMiB != null ? ` — ${(g.memFreeMiB / 1024).toFixed(1)} GB free` : '');
+  sel.innerHTML =
+    `<option value="">Auto (CUDA default — usually GPU 0)</option>` +
+    gpus.map(g => `<option value="${g.index}">GPU ${g.index}: ${g.name}${fmtFree(g)}</option>`).join('');
+  sel.value = current === '' ? '' : String(current);
+  wrap.style.display = 'flex';
+};
+
+// Persist the chosen GPU pin. Server rewrites the systemd unit + restarts STT.
+window.onFwGpuPinChange = async function () {
+  const sel = document.getElementById('providerFwGpuPin');
+  const status = document.getElementById('providerFwGpuStatus');
+  if (!sel) return;
+  const raw = sel.value;
+  const gpuId = raw === '' ? null : Number(raw);
+  if (status) status.textContent = 'Applying… restarting STT service.';
+  try {
+    const res = await fetch('/api/provider-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fasterWhisperGpuId: gpuId }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || `HTTP ${res.status}`);
+    showToast(gpuId === null ? 'STT GPU set to auto' : `STT pinned to GPU ${gpuId}`);
+    if (status) status.textContent = 'Pin Faster-Whisper to a specific GPU. Changing this restarts the STT service (~15 s).';
+  } catch (e) {
+    showToast(`Failed to set STT GPU: ${e.message}`);
+    if (status) status.textContent = `Failed: ${e.message}`;
+  }
 };
 
 async function saveProviderTts() {
