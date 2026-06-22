@@ -125,7 +125,7 @@ export function initWs(httpServer) {
         // Server-initiated termination — logged distinctly from a client-side
         // close so we can tell whether OE's heartbeat is dropping a device vs.
         // the device dropping itself.
-        log.info('ws', 'terminating unresponsive client', { userId: client._userId, missedPongs: client._missedPongs, intervalMs: WS_PING_INTERVAL });
+        log.info('ws', 'terminating unresponsive client', { userId: client._userId, deviceId: client._deviceId ?? null, missedPongs: client._missedPongs, intervalMs: WS_PING_INTERVAL });
         client.terminate();
         continue;
       }
@@ -355,8 +355,8 @@ function onConnection(ws, req) {
   // raw request URL, which may contain a legacy ?token= that would otherwise
   // land in logs / ship to log aggregators in plaintext.
   async function sendInitialData() {
-    console.log('[ws] client connected, user:', ws._userId);
-    log.info('ws', 'client connected', { userId: ws._userId });
+    console.log('[ws] client connected, user:', ws._userId, 'device:', ws._deviceId ?? '-');
+    log.info('ws', 'client connected', { userId: ws._userId, deviceId: ws._deviceId ?? null });
     const userAgents = getAgentsForUser(ws._userId);
     ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire), boot_id: BOOT_ID }));
     // Load every agent's session in parallel — loadSession is async since
@@ -754,11 +754,16 @@ function onConnection(ws, req) {
    }
   });
 
-  ws.on('close', () => {
-    console.log('[ws] client disconnected');
-    log.info('ws', 'client disconnected', { userId: ws._userId });
+  ws.on('close', (code, reason) => {
+    const r = reason ? reason.toString().slice(0, 80) : '';
+    // code 1006 = abnormal (no close frame: network drop / TCP RST); 1000/1001 = clean.
+    console.log(`[ws] client disconnected device=${ws._deviceId ?? '-'} user=${ws._userId} code=${code ?? '?'}${r ? ' reason=' + r : ''}`);
+    log.info('ws', 'client disconnected', { userId: ws._userId, deviceId: ws._deviceId ?? null, code: code ?? null, reason: r || null });
   });
-  ws.on('error', e => console.error('[ws] error:', e.message));
+  ws.on('error', e => {
+    console.error('[ws] error:', e.message, 'device=' + (ws._deviceId ?? '-'));
+    log.warn('ws', 'client error', { userId: ws._userId, deviceId: ws._deviceId ?? null, error: e?.message || String(e) });
+  });
 }
 
 // ── Broadcast helpers ────────────────────────────────────────────────────────

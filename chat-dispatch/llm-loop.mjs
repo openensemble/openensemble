@@ -412,12 +412,17 @@ export async function runLlmTurn({
     // safety net for when it doesn't. Only sends for voice-device sources.
     if (source === 'voice-device' && deviceId) {
       const reply = (streamBuf || '').trim();
-      const HAS_QUESTION = /[?？]/;
+      // Only arm when the reply actually ENDS by asking the user something — a
+      // "?" earlier in the reply is usually rhetorical or embedded and would
+      // open a needless listen window (a false-listen vector). The LLM is
+      // prompted to end a genuine question with "?"; allow trailing
+      // quotes/brackets/emoji-free punctuation after it.
+      const ENDS_WITH_QUESTION = /[?？]["'”’)\]]*$/.test(reply);
       // Patterns: "please say X", "say 'X'", "tell me X", "let me know",
       // "do you mean", "did you mean" — common LLM hedges that ask for
       // user input without a literal "?".
       const ASKS_FOR_REPLY = /\b(please\s+(say|tell|repeat)|say\s+["'“]|tell\s+me|let\s+me\s+know|d(o|id)\s+you\s+mean)\b/i;
-      if (HAS_QUESTION.test(reply) || ASKS_FOR_REPLY.test(reply)) {
+      if (ENDS_WITH_QUESTION || ASKS_FOR_REPLY.test(reply)) {
         sendToDevice(deviceId, { type: 'await_followup', windowMs: 5000 });
       }
     }

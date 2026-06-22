@@ -480,6 +480,16 @@ function renderDevices() {
   ` : '';
 
   if (!_devicesList.length) {
+    // Routines + ambient library are PER-USER (users/<id>/routines.json,
+    // users/<id>/ambient/*.mp3) and fire when the user says their wake word on
+    // ANY device — including a slot SHARED to them on someone else's device. A
+    // user who owns no device but has an incoming slot (e.g. a household member) still needs
+    // them, so render those panels here too instead of bailing to a bare empty
+    // state. (voiceConfigPanel is intentionally omitted — slot routing is owned
+    // by whoever owns the physical device.)
+    const sharedPanels = _incomingSlots.length
+      ? renderRoutinesPanel() + renderAmbientLibraryPanel()
+      : '';
     body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + `
       <div class="cdraw-empty" style="padding:30px 18px;text-align:center;font-size:13px;color:var(--muted);line-height:1.55">
         <div style="font-size:32px;margin-bottom:10px;opacity:.4">🎙️</div>
@@ -487,7 +497,7 @@ function renderDevices() {
           ? `You don't own any voice devices, but you can speak to other users' devices using the wake words above.`
           : `No voice devices paired yet.<br>Click <strong>+ Pair new device</strong> above to begin.`}
       </div>
-    `;
+    ` + sharedPanels;
     return;
   }
 
