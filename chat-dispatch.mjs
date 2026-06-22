@@ -41,6 +41,7 @@ import {
   tryVoiceEmptyFastpath,
   tryTranscribeAttachmentFastpath,
 } from './chat-dispatch/fastpaths.mjs';
+import { tryLocalIntentFastpath } from './chat-dispatch/local-intent-fastpath.mjs';
 import {
   runSpecialistRoute,
   buildSchedulerNote,
@@ -446,6 +447,11 @@ export async function handleChatMessage({
     tryHaFastpath,
     tryRoutineFastpath,
     tryTriviaFastpath,
+    // Skill-agnostic local cognition tier (dispatch face). Runs after the
+    // bespoke fast-paths and before the embedding specialist router, so a
+    // confident local-intent match never escalates to the cloud coordinator.
+    // Inert unless cfg.localTier.enabled (kill switch). Falls through on miss.
+    tryLocalIntentFastpath,
     c => runSpecialistRoute({ ...c, attachment: c.attachment }),
   ];
 
@@ -533,6 +539,12 @@ export async function handleChatMessage({
       if (finalAssistantText) {
         await learner.maybeStashClarification(userId, ctx.userText, finalAssistantText);
       }
+      // Phase-3 local-tier learning: reaching this block means every interceptor
+      // (incl. the local fastpath) missed. If the LLM then called a localIntent
+      // tool, the utterance was a miss the tier should learn. Gated internally by
+      // localTier.learning; fully self-guarded; never throws into this IIFE.
+      const il = await import('./lib/intent-learner.mjs');
+      await il.captureFromTurn({ userId, agentId, userText: ctx.userText, scopedSessionKey });
     } catch (e) { console.warn('[chat-dispatch] post-turn learn failed:', e.message); }
   })();
 

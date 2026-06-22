@@ -211,24 +211,24 @@ function listNvidiaGpus() {
 // don't auto-start a service the user has stopped (e.g. STT switched to remote).
 // Reusable for any future GPU-backed local service. Non-fatal: resolves to
 // { ok, reason } and logs; never throws into the request path.
-async function pinServiceGpu(serviceName, gpuId) {
+export async function pinServiceGpu(serviceName, gpuId, { envVar = 'CUDA_VISIBLE_DEVICES' } = {}) {
   const unitPath = path.join(os.homedir(), '.config', 'systemd', 'user', serviceName);
   if (!fs.existsSync(unitPath)) return { ok: false, reason: 'unit-missing' };
   let unit;
   try { unit = fs.readFileSync(unitPath, 'utf8'); } catch (e) { return { ok: false, reason: e.message }; }
-  // Drop any existing CUDA pin lines (and our marker comment) so this is idempotent.
+  const isCuda = /^CUDA/.test(envVar);   // CUDA needs the PCI_BUS_ID order; Vulkan (GGML_VK_*) does not
+  // Drop any existing pin lines for THIS env var (+ the CUDA order + our marker)
+  // so this is idempotent across CUDA-pinned (STT) and Vulkan-pinned (llama) units.
   const lines = unit.split('\n').filter(l =>
-    !/^Environment=CUDA_VISIBLE_DEVICES=/.test(l) &&
+    !new RegExp(`^Environment=${envVar}=`).test(l) &&
     !/^Environment=CUDA_DEVICE_ORDER=/.test(l) &&
     !/^# OE GPU pin\b/.test(l));
   if (Number.isInteger(gpuId) && gpuId >= 0) {
     // Insert right after the [Service] header so the env applies to ExecStart.
     const idx = lines.findIndex(l => l.trim() === '[Service]');
-    const inject = [
-      '# OE GPU pin (managed by Settings → STT)',
-      'Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID',
-      `Environment=CUDA_VISIBLE_DEVICES=${gpuId}`,
-    ];
+    const inject = ['# OE GPU pin (managed by Settings)'];
+    if (isCuda) inject.push('Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID');
+    inject.push(`Environment=${envVar}=${gpuId}`);
     if (idx >= 0) lines.splice(idx + 1, 0, ...inject);
     else lines.push(...inject);
   }
@@ -1317,9 +1317,13 @@ export async function handle(req, res) {
       catch (e) { console.debug('[cortex] Health check failed for', url + ':', e.message); return false; }
     };
     const ollamaAuthHeaders = ollamaKey ? { Authorization: `Bearer ${ollamaKey}` } : {};
-    const [ollamaOk, lmsOk] = await Promise.all([
+    // OE's managed local llama.cpp GPU server has no API key — it must be PROBED
+    // like ollama/lmstudio, not treated as a cloud key-based provider. Cortex 5157.
+    const llamacppBase = (c.llamacppReasonUrl ?? 'http://127.0.0.1:5157').replace(/\/$/, '');
+    const [ollamaOk, lmsOk, llamacppOk] = await Promise.all([
       check(`${ollamaBase}/api/tags`, ollamaAuthHeaders),
       check(`${lmsBase}/v1/models`),
+      reasonProvider === 'llamacpp' ? check(`${llamacppBase}/health`) : Promise.resolve(false),
     ]);
     // Cloud providers are "reachable" as long as their API key is configured —
     // probing them costs rate-limit headroom. getProviderSpec returns the
@@ -1333,6 +1337,7 @@ export async function handle(req, res) {
       if (prov === 'builtin')  return false; // handled specially below for embed
       if (prov === 'ollama')   return ollamaOk;
       if (prov === 'lmstudio') return lmsOk;
+      if (prov === 'llamacpp') return llamacppOk;
       if (prov === 'auto')     return ollamaOk || lmsOk;
       const spec = getProviderSpec(prov);
       if (!spec) return false;

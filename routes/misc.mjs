@@ -29,7 +29,7 @@ import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
 import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
 import { acceptProposal, dismissProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
-import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, resetSalienceKind, applySkillOverride, revokeSkillOverride } from '../lib/learnings.mjs';
+import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride } from '../lib/learnings.mjs';
 import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../lib/week1-sweep.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
@@ -373,6 +373,16 @@ export async function handle(req, res) {
   if (revokeRoutingMatch && req.method === 'DELETE') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const result = await revokeRoutingOverride(authId, revokeRoutingMatch[1]);
+    res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const revokeLearnedMatch = req.url.match(/^\/api\/learnings\/learned-intents\/([^/?]+)\/([^/?]+)$/);
+  if (revokeLearnedMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const skillId = decodeURIComponent(revokeLearnedMatch[1]);
+    const intentId = decodeURIComponent(revokeLearnedMatch[2]);
+    const result = await revokeLearnedIntent(authId, skillId, intentId);
     res.writeHead(result.ok ? 200 : 404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
     return true;

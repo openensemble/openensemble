@@ -187,6 +187,16 @@ export function getProviderSpec(provider) {
       supportsEmbed: true, supportsChat: true,
     };
   }
+  if (provider === 'llamacpp') {
+    // OE's managed local GPU server (scripts/llama-node-server.mjs), OpenAI-
+    // compatible, chat-only (embeddings stay on builtin-embed). Default :5157.
+    const base = (c.llamacppReasonUrl ?? 'http://127.0.0.1:5157').replace(/\/$/, '');
+    return {
+      baseUrl: `${base}/v1`, apiStyle: 'openai',
+      headers: { 'Content-Type': 'application/json' },
+      supportsEmbed: false, supportsChat: true,
+    };
+  }
   if (OPENAI_COMPAT_PROVIDERS[provider]) {
     const { baseUrl } = OPENAI_COMPAT_PROVIDERS[provider];
     const key = getCompatKey(provider);

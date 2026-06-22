@@ -145,6 +145,18 @@ const TASKS = {
       'You classify the urgency of a scheduler event. Output ONLY a JSON object: ' +
       '{ urgency: "urgent"|"normal"|"low", interruptable: boolean, reason (short) }.',
   },
+  extract: {
+    // Slot extraction for the skill-agnostic local cognition tier. This system
+    // string is used ONLY when an EXTERNAL stock model (no task-token training)
+    // runs the extract task — it needs the behavior spelled out. The bundled
+    // LoRA uses TRAINING_SYSTEM + the <extract> token like every other task; the
+    // per-call slot schema rides in the user message and the grammar.
+    system:
+      'You extract structured field values from a user utterance. Given a JSON ' +
+      'schema of fields and the utterance, output ONLY a JSON object that fills ' +
+      'each field from the utterance, using null when the utterance does not ' +
+      'mention it. Do not invent values.',
+  },
 };
 
 // JSON schemas used for grammar-constrained generation. SmolLM2-135M leaks
@@ -237,6 +249,27 @@ async function _getGrammar(task) {
   }
 }
 
+// Runtime-schema grammar cache for the <extract> task. Unlike the fixed
+// per-task SCHEMAS above, extract's schema is supplied by the caller (a skill's
+// slot projection) and varies per intent — so we compile + cache keyed by the
+// schema JSON itself, NOT by task name. This content-keyed cache is what lets
+// one model fill slots for ANY skill. (Mutating the shared SCHEMAS map per call
+// would race under the serial queue's interleaving.)
+const _schemaGrammarCache = new Map();
+async function _getGrammarForSchema(schema) {
+  if (!schema || !_LlamaJsonSchemaGrammar || !_llama) return null;
+  const key = JSON.stringify(schema);
+  if (_schemaGrammarCache.has(key)) return _schemaGrammarCache.get(key);
+  try {
+    const g = new _LlamaJsonSchemaGrammar(_llama, schema);
+    _schemaGrammarCache.set(key, g);
+    return g;
+  } catch (e) {
+    console.warn('[plan] could not compile extract grammar:', e.message);
+    return null;
+  }
+}
+
 // Task tokens added to the SmolLM2 vocab during fine-tuning (see
 // training/plan/train.py:37-42). Prepended to the user content so the LoRA
 // routes to the correct task head — earlier code stripped these entirely
@@ -246,6 +279,7 @@ const TASK_TOKENS = {
   decide: '<decide>',
   decompose: '<decompose>',
   classify: '<classify>',
+  extract: '<extract>',
 };
 
 // Build the ChatML prompt — same template SmolLM2-Instruct was trained on,
@@ -263,8 +297,9 @@ function _buildPromptTokens(system, user, task) {
  * Generate a scheduler-reasoning completion.
  *
  * @param {{
- *   task: 'parse'|'decide'|'decompose'|'classify',
+ *   task: 'parse'|'decide'|'decompose'|'classify'|'extract',
  *   user: string,
+ *   schema?: object|null,   // runtime JSON schema (extract task) -> grammar
  *   systemOverride?: string|null,
  *   temperature?: number,
  *   maxTokens?: number,
@@ -274,6 +309,7 @@ function _buildPromptTokens(system, user, task) {
 export async function planGenerate({
   task,
   user,
+  schema = null,
   systemOverride = null,
   temperature = 0.01,
   maxTokens = 512,
@@ -288,18 +324,27 @@ export async function planGenerate({
   const cfg = loadConfig();
   const provider = cfg?.scheduler?.planProvider ?? 'builtin';
 
-  if (provider === 'ollama' || provider === 'lmstudio') {
+  // External runtimes: ollama / lmstudio (user-pointed) and `llamacpp` (OUR
+  // managed GPU server, OpenAI-compatible — scripts/llama-node-server.mjs).
+  //
+  // The <extract> task powers the local cognition tier and needs the
+  // extract-trained model. ollama/lmstudio may point at any model, so extract
+  // never routes there (it falls to the bundled GGUF). But the `llamacpp`
+  // server is loaded by OE with the extract-capable model, so extract IS
+  // allowed through it.
+  const isExternal = provider === 'ollama' || provider === 'lmstudio' || provider === 'llamacpp';
+  const extractBlocked = task === 'extract' && provider !== 'llamacpp';
+  if (isExternal && !extractBlocked) {
     // Two paths through the same external runtime:
-    // 1. Our fine-tuned model (Ollama tag `openensemble-plan:...` or LM Studio
-    //    `openensemble/plan-...`) — was trained with the SHORT training-format
-    //    system prompt + a task-token prefix on the user message. Sending
-    //    `preset.system` (the verbose schema-hint prompt the bundled-cortex
-    //    path used to use) produces garbage because the LoRA never saw it.
-    // 2. A stock external model the user pointed us at (e.g. ministral, llama,
-    //    gemma) — needs the schema-rich `preset.system` since the stock model
-    //    has no task-token training.
+    // 1. Our fine-tuned model (the `llamacpp` server always, or an Ollama tag
+    //    `openensemble-plan:...` / LM Studio `openensemble/plan-...`) — trained
+    //    with the SHORT training-format system prompt + a task-token prefix.
+    //    Sending `preset.system` produces garbage because the LoRA never saw it.
+    // 2. A stock external model (ministral, llama, gemma) — needs the schema-rich
+    //    `preset.system` since it has no task-token training.
     const planModel = cfg?.scheduler?.planModel ?? '';
-    const isOurModel = /^openensemble-plan:/i.test(planModel) || /^openensemble\/plan-/i.test(planModel);
+    const isOurModel = provider === 'llamacpp'
+      || /^openensemble-plan:/i.test(planModel) || /^openensemble\/plan-/i.test(planModel);
     if (isOurModel && !systemOverride) {
       const taskToken = TASK_TOKENS[task];
       const userWithToken = taskToken ? `${taskToken}\n${user ?? ''}` : (user ?? '');
@@ -316,7 +361,9 @@ export async function planGenerate({
     try {
       await initBuiltinPlan();
       const tokens = _buildPromptTokens(system, user, task);
-      const grammar = await _getGrammar(task);
+      // Runtime schema (extract task) compiles a per-schema grammar; the fixed
+      // tasks use their cached per-task grammar.
+      const grammar = schema ? await _getGrammarForSchema(schema) : await _getGrammar(task);
       const sequence = _context.getSequence();
       try {
         const completion = new _LlamaCompletion({ contextSequence: sequence });
@@ -336,6 +383,38 @@ export async function planGenerate({
   const result = _queue.then(run);
   _queue = result.catch(() => null);
   return result;
+}
+
+/**
+ * Canonical <extract> prompt-input format. The training-data generator
+ * (training/plan/generate-extract-*.mjs) imports this so the `input` field it
+ * emits is byte-identical to what inference builds — train/serve parity.
+ */
+export function formatExtractInput(schema, utterance) {
+  return `Slot schema: ${JSON.stringify(schema)}\nUtterance: "${String(utterance ?? '').replace(/"/g, "'")}"`;
+}
+
+/**
+ * Fill a skill's slot schema from an utterance via the <extract> task. `schema`
+ * is a JSON Schema object (type:object, properties=slots, each nullable).
+ * Returns the parsed object (schema fields only; null for slots the utterance
+ * doesn't mention) or null on failure. The bundled model must be trained on
+ * <extract> for the VALUES to be meaningful — the grammar guarantees the SHAPE
+ * regardless, so the dispatcher can rely on getting a well-formed object.
+ */
+export async function extractSlots({ utterance, schema, temperature = 0.01, maxTokens = 256 } = {}) {
+  if (!utterance || !schema || typeof schema !== 'object') return null;
+  const user = formatExtractInput(schema, utterance);
+  // NOTE: deliberately NOT passing `schema` here, so NO grammar is applied.
+  // node-llama-cpp's JsonSchemaGrammar on a nullable-string union
+  // (anyOf:[string,null]) collapses every field to null — the model emits the
+  // correct value raw but the grammar overrides it (verified 2026-06-08). The
+  // model was fine-tuned to emit valid compact JSON for the <extract> task, so
+  // we rely on that + JSON.parse + the dispatcher's anti-hallucination check
+  // (value must appear in the source utterance) instead of a grammar.
+  const out = await planGenerate({ task: 'extract', user, temperature, maxTokens });
+  if (!out) return null;
+  try { return JSON.parse(out); } catch { return null; }
 }
 
 // External runtimes (Ollama / LM Studio). Both speak their own flavor of
@@ -385,10 +464,14 @@ async function _generateExternal({ provider, system, user, temperature, maxToken
       return out;
     }
 
-    if (provider === 'lmstudio') {
-      const base = (c.lmstudioUrl ?? 'http://127.0.0.1:1234').replace(/\/$/, '');
+    // lmstudio + llamacpp both speak the OpenAI /v1/chat/completions API; they
+    // differ only in URL (llamacpp = OE's managed local GPU server, default :5156).
+    if (provider === 'lmstudio' || provider === 'llamacpp') {
+      const base = (provider === 'llamacpp'
+        ? (sched.llamacppUrl ?? 'http://127.0.0.1:5156')
+        : (c.lmstudioUrl ?? 'http://127.0.0.1:1234')).replace(/\/$/, '');
       const headers = { 'Content-Type': 'application/json' };
-      if (c.lmstudioApiKey) headers.Authorization = `Bearer ${c.lmstudioApiKey}`;
+      if (provider === 'lmstudio' && c.lmstudioApiKey) headers.Authorization = `Bearer ${c.lmstudioApiKey}`;
       const res = await fetch(`${base}/v1/chat/completions`, {
         method: 'POST', headers, signal,
         body: JSON.stringify({
@@ -452,6 +535,7 @@ export async function reloadBuiltinPlan() {
   _initPromise = null;
   _llama = null; _model = null; _context = null;
   _grammarCache = new Map();
+  _schemaGrammarCache.clear();
   MODEL_FILE = targetFile;
   MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
   await initBuiltinPlan();

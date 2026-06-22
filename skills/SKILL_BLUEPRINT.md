@@ -133,6 +133,47 @@ The coordinator's per-turn tool list is trimmed by an embedding classifier — o
   - `"auto"` — only loaded when intent matches (preferred for most user skills — keeps the coordinator's prompt small on unrelated turns)
   - `"exclude"` — never available to the coordinator. Use for heavyweight skills that belong on a specialist agent (GPU-pod managers, finance ingestion, batch ML training). The skill stays usable on other agents via direct chat or `ask_agent`.
 
+### localIntents — handle simple requests locally (no cloud LLM)
+
+`intent_examples` decides whether your tools get *loaded* for the cloud coordinator. **`localIntents` goes one step further: it fulfils a request entirely on-device, with no cloud-LLM call at all.** When a user's message matches a local intent, OpenEnsemble runs your tool directly and streams the result back — faster, cheaper, private. This is the local cognition tier; lean on it for any **deterministic** operation (a lookup, a list/search, a delete-by-sender, a toggle).
+
+How a turn resolves a local intent:
+1. **embeddings — the primary path.** Your `utterances` are matched semantically (nomic, on-device) to pick the intent. This is what *classifies* the request, and it **self-improves**: phrasings the tier misses get learned over time. Write good utterances and most intents need nothing else.
+2. **regex `patterns` — slot extraction only.** If a pattern matches AND captures a slot, the tier short-circuits even before embeddings (free, deterministic). Use patterns ONLY to pull a **structured token** out of the utterance — an email, an id, a ZIP, a date, an order number. A pattern that captures no slot is ignored for routing (embeddings handle classification); a `.+` free-text slot is a poor fit — leave it to step 3.
+3. **extract model** — a small on-device model fills the messy, free-text slots the regex didn't (an item name, a search query). Extracted values are validated against the user's text (must appear verbatim) so it can't hallucinate.
+
+If none match confidently, the turn falls through to the normal coordinator — so a local intent is a pure optimization, never a risk.
+
+```jsonc
+"localIntents": [
+  {
+    "id": "search_item",
+    "tool": "kroger_search",                 // a tool THIS skill declares
+    // Classification rides entirely on utterances — write varied, real phrasings.
+    "utterances": ["any deals on greek yogurt", "is coffee on sale", "what's bogo on snacks", "search publix for pizza"],
+    "patterns": [],                           // query is free text → no regex; the extract model fills it
+    "slots": ["query"],                       // tool params the intent fills
+    "confirm": false
+  },
+  {
+    "id": "purge_sender",
+    "tool": "email_purge_sender",
+    "utterances": ["delete all email from someone", "purge messages from an address"],
+    // sender is a STRUCTURED token (an email) → a tight regex captures it for free.
+    "patterns": ["(?:delete|purge)\\b.*\\bfrom\\s+(?<sender>\\S+@\\S+)"],
+    "slots": ["sender"],
+    "confirm": true                            // destructive → defers to the approval flow, never auto-runs
+  }
+]
+```
+
+Rules of thumb:
+- **Lead with `utterances`.** They are the classifier — 3–8 varied, real phrasings (same spirit as `intent_examples`). The tier learns new phrasings on its own, so you don't have to enumerate every wording.
+- **Use `patterns` only to capture a structured-token slot** (email, id, ZIP, date, SKU) via a `(?<slot>...)` named group. Do NOT write patterns as classifiers (`^(?:check|show|list)\\b.*\\binbox\\b`) — embeddings do that better and self-improve. Do NOT write `.+` free-text slots — the extract model handles those. A pattern that captures no slot is ignored for routing.
+- **`tool`** must be one of this skill's own tools. **`slots`** name that tool's parameters; only the named ones are filled by the local tier, the rest use the tool's defaults.
+- Set **`confirm: true`** for anything destructive or irreversible. Those never auto-run locally — they hand off to the normal "APPROVE" confirmation.
+- You can add `localIntents` at create time (`skill_create`) or to an existing skill (`skill_update_manifest`). Adding them is free latency/cost savings — do it for any skill with simple, unambiguous operations.
+
 ---
 
 ## execute.mjs

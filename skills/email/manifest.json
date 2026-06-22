@@ -301,5 +301,52 @@
         }
       }
     }
+  ],
+  "localIntents": [
+    {
+      "id": "list_email",
+      "tool": "email_list",
+      "utterances": [
+        "check my email",
+        "any new emails",
+        "what's in my inbox",
+        "show me my latest emails",
+        "read my email",
+        "do i have any new mail"
+      ],
+      "patterns": [],
+      "slots": [],
+      "confirm": false
+    },
+    {
+      "id": "inbox_stats",
+      "tool": "email_inbox_stats",
+      "utterances": [
+        "how many unread emails do i have",
+        "what's my email count",
+        "inbox stats",
+        "how much unread mail do i have"
+      ],
+      "patterns": [],
+      "slots": [],
+      "confirm": false
+    },
+    {
+      "id": "purge_sender",
+      "tool": "email_purge_sender",
+      "utterances": [
+        "delete all email from someone",
+        "get rid of everything from a sender",
+        "purge all emails from an address"
+      ],
+      "patterns": [
+        "(?:delete|purge|trash|remove)\\b.*\\b(?:e-?mails?|messages?|mail)\\b.*\\bfrom\\s+(?<sender>\\S+@\\S+)",
+        "(?:delete|purge|trash)\\s+(?:all\\s+)?(?:from|by)\\s+(?<sender>\\S+@\\S+)"
+      ],
+      "slots": [
+        "sender"
+      ],
+      "confirm": true
+    }
   ]
 }

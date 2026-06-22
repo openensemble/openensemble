@@ -180,6 +180,12 @@ async function buildFullHealth() {
     ...compatProbes.map(p => p.promise),
   ]);
 
+  // llama.cpp GPU reason server (OE's managed local service) — probe its /health
+  // so the dashboard/Settings reflect the right state when reasonProvider=llamacpp.
+  const llamacppReasonOk = reasonProvider === 'llamacpp'
+    ? await checkProvider(`${(cfg.cortex?.llamacppReasonUrl ?? 'http://127.0.0.1:5157').replace(/\/$/, '')}/health`)
+    : null;
+
   const providers = {};
   if (anthropicConfigured) providers.anthropic = anthropicOk;
   if (ollamaConfigured)    providers.ollama    = ollamaOk;
@@ -207,6 +213,7 @@ async function buildFullHealth() {
   const reasonOk = reasonProvider === 'builtin' ? builtinReasonOk
     : reasonProvider === 'lmstudio' ? !!lmstudioOk
     : reasonProvider === 'ollama' ? !!ollamaOk
+    : reasonProvider === 'llamacpp' ? !!llamacppReasonOk
     // 'auto' resolves to builtin when ready, else tries external runtimes.
     : (builtinReasonOk || !!ollamaOk || !!lmstudioOk);
 

@@ -59,6 +59,7 @@ function _renderLearnDrawer() {
     _renderRulesSection(L.rules || []),
     _renderDefaultsSection(L.defaults || []),
     _renderRoutingOverridesSection(L.routingOverrides || []),
+    _renderLearnedIntentsSection(L.learnedIntents || []),
     _renderAliasesSection(L.aliases || []),
     _renderRoutinesSection(L.routines || []),
     _renderSkillsSection(L.skills || []),
@@ -330,6 +331,43 @@ async function learnRevokeRoutingOverride(id, pattern) {
 }
 
 // ── HA aliases ──────────────────────────────────────────────────────────────
+
+function _renderLearnedIntentsSection(items) {
+  let body = '';
+  if (!items.length) {
+    body = _renderEmptyHint('Nothing learned yet. When the cloud handles a request the on-device tier should have caught, OE offers to teach it so it runs locally next time — no cloud call.');
+  } else {
+    body = items.map(it => {
+      const args = JSON.stringify([it.skillId, it.intentId]).replace(/"/g, '&quot;');
+      const chips = (it.utterances || []).map(u =>
+        `<span style="font-size:11px;background:var(--bg1);padding:1px 6px;border-radius:10px;color:var(--text)">"${escHtml(u)}"</span>`
+      ).join(' ');
+      return `<div style="padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <code style="font-size:11px;background:var(--bg1);padding:1px 5px;border-radius:3px;color:var(--text)">${escHtml(it.skillId)}/${escHtml(it.intentId)}</code>
+          ${it.tool ? `<span style="color:var(--muted)">→ ${escHtml(it.tool)}</span>` : ''}
+          <button class="btn-small" data-action="learnRevokeLearnedIntent" data-args='${args}' style="margin-left:auto;background:transparent;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer">Revoke</button>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${chips}</div>
+      </div>`;
+    }).join('');
+  }
+  return _renderSectionHdr('Learned phrasings', items.length) + body;
+}
+
+async function learnRevokeLearnedIntent(skillId, intentId) {
+  if (!confirm(`Forget the learned phrasings for ${skillId}/${intentId}?`)) return;
+  try {
+    const r = await fetch(`/api/learnings/learned-intents/${encodeURIComponent(skillId)}/${encodeURIComponent(intentId)}`, { method: 'DELETE' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(`Failed: ${err.error || r.statusText}`);
+    }
+  } catch (e) {
+    alert(`Failed: ${e.message}`);
+  }
+  loadLearnDrawer();
+}
 
 function _renderAliasesSection(aliases) {
   let body = '';

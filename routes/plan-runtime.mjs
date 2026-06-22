@@ -26,10 +26,30 @@ import {
 import { loadConfig } from './_helpers.mjs';
 import { BUNDLED_PLAN_MODELS, DEFAULT_PLAN_TIER, planFileForTier, ensureGguf } from '../lib/model-fetch.mjs';
 import { USERS_DIR } from '../lib/paths.mjs';
+import { spawn } from 'child_process';
+import os from 'os';
+import { fileURLToPath } from 'url';
+import { pinServiceGpu } from './config.mjs';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function sendJSON(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+// Run a scripts/ install/uninstall script (the local llama.cpp GPU server),
+// capturing its output. Resolves { code, log } — never rejects.
+function runScript(script, env) {
+  return new Promise((resolve) => {
+    const out = [];
+    const c = spawn('bash', [path.join(REPO_ROOT, 'scripts', script)],
+      { env: { ...process.env, ...env, HOME: os.homedir() } });
+    c.stdout.on('data', d => out.push(d.toString()));
+    c.stderr.on('data', d => out.push(d.toString()));
+    c.on('error', e => resolve({ code: 1, log: e.message }));
+    c.on('exit', code => resolve({ code: code ?? 1, log: out.join('') }));
+  });
 }
 
 export async function handle(req, res) {
@@ -146,6 +166,50 @@ export async function handle(req, res) {
         x.scheduler.useBuiltinPlan = enabled;
       });
       sendJSON(res, 200, { ok: true, useBuiltinPlan: enabled });
+      return true;
+    }
+
+    // Install + select the local llama.cpp GPU server (node-llama-cpp, Vulkan)
+    // and pin it to a GPU. Body: { gpuId }. Mirrors the STT install flow.
+    if (url.pathname === '/api/plan-runtime/llamacpp' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req).catch(() => '{}') || '{}');
+      const gpuId = Number.isInteger(body?.gpuId) ? body.gpuId : 0;
+      const r = await runScript('install-llama-server.sh', { OE_LLAMA_KIND: 'plan', OE_LLAMA_GPU_ID: String(gpuId) });
+      if (r.code !== 0) { sendJSON(res, 500, { error: 'install failed', log: r.log }); return true; }
+      await modifyConfig(x => {
+        x.scheduler = x.scheduler ?? {};
+        x.scheduler.planProvider = 'llamacpp';
+        x.integrations = x.integrations ?? {};
+        x.integrations.plan_llama = { installed: true, gpuId, port: 5156 };
+      });
+      sendJSON(res, 200, { ok: true, provider: 'llamacpp', gpuId, log: r.log });
+      return true;
+    }
+
+    // Switch which GPU the already-installed plan server runs on (no reinstall).
+    if (url.pathname === '/api/plan-runtime/llamacpp-gpu' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req).catch(() => '{}') || '{}');
+      const gpuId = Number.isInteger(body?.gpuId) ? body.gpuId : 0;
+      const pin = await pinServiceGpu('oe-plan-llama.service', gpuId, { envVar: 'GGML_VK_VISIBLE_DEVICES' });
+      if (!pin.ok) { sendJSON(res, 400, { error: `GPU pin failed: ${pin.reason}` }); return true; }
+      await modifyConfig(x => {
+        x.integrations = x.integrations ?? {};
+        x.integrations.plan_llama = { ...(x.integrations.plan_llama ?? { installed: true, port: 5156 }), gpuId };
+      });
+      sendJSON(res, 200, { ok: true, gpuId, restarted: pin.restarted });
+      return true;
+    }
+
+    // Uninstall the plan server + flip back to builtin (CPU).
+    if (url.pathname === '/api/plan-runtime/llamacpp-uninstall' && req.method === 'POST') {
+      await runScript('uninstall-llama-server.sh', { OE_LLAMA_KIND: 'plan' });
+      await modifyConfig(x => {
+        x.scheduler = x.scheduler ?? {};
+        x.scheduler.planProvider = 'builtin';
+        x.scheduler.planModel = getBuiltinPlanModelId();
+        if (x.integrations?.plan_llama) x.integrations.plan_llama.installed = false;
+      });
+      sendJSON(res, 200, { ok: true, provider: 'builtin' });
       return true;
     }
 

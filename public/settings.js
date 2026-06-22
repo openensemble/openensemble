@@ -367,6 +367,85 @@ function reasonRuntimeRow({ runtime, label, hint, selected }) {
     ${jitTip}`;
 }
 
+// ── Local llama.cpp GPU server picker (cortex + plan) ────────────────────────
+// One radio option ("Run on GPU (llama.cpp)") + a GPU dropdown, mirroring the
+// STT GPU picker. Backed by /api/{plan,reason}-runtime/llamacpp* endpoints.
+let _gpus = null;   // null = not loaded; [] = loaded (maybe empty)
+async function ensureGpus() {
+  if (_gpus !== null) return _gpus;
+  try { const r = await fetch('/api/hardware/gpus').then(x => x.json()); _gpus = Array.isArray(r?.gpus) ? r.gpus : []; }
+  catch { _gpus = []; }
+  return _gpus;
+}
+function llamaGpuOptionsHtml() {
+  if (_gpus === null) {
+    // Lazy-load on first render, then re-render once (null→[] guards against a loop).
+    ensureGpus().then(() => { try { renderPlanModelRows(); } catch {} try { renderCortexModelRows(); } catch {} });
+    return '<option>loading GPUs…</option>';
+  }
+  if (!_gpus.length) return '<option value="0">GPU 0</option>';
+  return _gpus.map(g =>
+    `<option value="${g.index}">GPU ${g.index}: ${escHtml(g.name)}${g.memFreeMiB != null ? ` — ${(g.memFreeMiB / 1024).toFixed(1)} GB free` : ''}</option>`
+  ).join('');
+}
+function llamaRuntimeRowHtml(kind, selected) {
+  const radioName = kind === 'plan' ? 'planRuntime' : 'reasonRuntime';
+  const a = JSON.stringify([kind]).replace(/'/g, '&#39;');
+  const gpuBlock = selected ? `
+    <div style="margin:2px 0 4px 22px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:11px;color:var(--muted)">GPU</span>
+      <select data-change-action="onLlamaGpuChange" data-change-args='${a}' style="font-size:12px;padding:3px 6px">${llamaGpuOptionsHtml()}</select>
+      <button type="button" data-action="removeLlamaRuntime" data-args='${a}' style="font-size:11px;padding:3px 8px">Remove</button>
+    </div>` : '';
+  return `
+    <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer">
+      <input type="radio" name="${radioName}" value="llamacpp" ${selected ? 'checked' : ''}
+             data-change-action="selectLlamaRuntime" data-change-args='${a}'>
+      <span style="flex:1;display:flex;flex-direction:column;gap:2px">
+        <span style="font-weight:500">Run on GPU (llama.cpp)</span>
+        <span style="font-size:11px;color:var(--muted)">local GPU server — no Ollama/LM Studio needed; pick the card</span>
+      </span>
+    </label>
+    ${gpuBlock}`;
+}
+async function selectLlamaRuntime(kind, ev) {
+  const radio = ev?.target; if (radio) radio.disabled = true;
+  const base = kind === 'plan' ? '/api/plan-runtime' : '/api/reason-runtime';
+  try {
+    await ensureGpus();
+    const gpuId = (_gpus && _gpus.length) ? _gpus[0].index : 0;
+    showToast(`Installing ${kind} GPU server (GPU ${gpuId})…`, 6000);
+    const r = await fetch(`${base}/llamacpp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gpuId }) });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) alert(`Install failed: ${body.error ?? r.status}`);
+    else showToast(`${kind === 'plan' ? 'Plan' : 'Cortex'} now on GPU ${gpuId} (llama.cpp)`);
+  } catch (e) { alert(`Failed: ${e.message}`); }
+  finally { if (radio) radio.disabled = false; }
+  await loadPlanRuntimeStatus(); await loadCortexConfig();
+  renderPlanModelRows(); renderCortexModelRows();
+}
+async function onLlamaGpuChange(kind, ev) {
+  const gpuId = Number(ev?.target?.value);
+  if (!Number.isInteger(gpuId)) return;
+  const base = kind === 'plan' ? '/api/plan-runtime' : '/api/reason-runtime';
+  try {
+    const r = await fetch(`${base}/llamacpp-gpu`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gpuId }) });
+    if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.error ?? r.status); }
+    showToast(`${kind === 'plan' ? 'Plan' : 'Cortex'} moved to GPU ${gpuId} (~2s restart)`);
+  } catch (e) { showToast(`GPU switch failed: ${e.message}`); }
+}
+async function removeLlamaRuntime(kind, ev) {
+  if (!confirm('Remove the GPU server and switch this model back to CPU (built-in)?')) return;
+  const base = kind === 'plan' ? '/api/plan-runtime' : '/api/reason-runtime';
+  try {
+    const r = await fetch(`${base}/llamacpp-uninstall`, { method: 'POST' });
+    if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.error ?? r.status); }
+    showToast(`${kind === 'plan' ? 'Plan' : 'Cortex'} switched back to CPU`);
+  } catch (e) { alert(`Remove failed: ${e.message}`); }
+  await loadPlanRuntimeStatus(); await loadCortexConfig();
+  renderPlanModelRows(); renderCortexModelRows();
+}
+
 function renderCortexModelRows() {
   // 'auto' resolves to 'builtin' at the backend; treat it the same in the UI.
   const reasonProv = (cortexCfg.reasonProvider === 'auto' || !cortexCfg.reasonProvider)
@@ -387,6 +466,7 @@ function renderCortexModelRows() {
      </div>`;
   const reasonRows =
       reasonRuntimeRow({ runtime: 'builtin',  label: 'Built-in (CPU)', hint: 'in-process via llama.cpp — no external runtime', selected: reasonProv === 'builtin' })
+    + llamaRuntimeRowHtml('cortex', reasonProv === 'llamacpp')
     + externalHeader
     + reasonRuntimeRow({ runtime: 'ollama',   label: 'Via Ollama',     hint: '',                                                selected: reasonProv === 'ollama' })
     + reasonRuntimeRow({ runtime: 'lmstudio', label: 'Via LM Studio',  hint: '',                                                selected: reasonProv === 'lmstudio' });
@@ -611,6 +691,7 @@ function renderPlanModelRows() {
   const rows = `<div style="${dimWrap}">`
     + tierBlock
     + planRuntimeRow({ runtime: 'builtin',  label: 'Built-in (CPU)', hint: 'in-process via llama.cpp — no external runtime', selected: current === 'builtin' })
+    + llamaRuntimeRowHtml('plan', current === 'llamacpp')
     + externalHeader
     + planRuntimeRow({ runtime: 'ollama',   label: 'Via Ollama',     hint: '',                                                selected: current === 'ollama' })
     + planRuntimeRow({ runtime: 'lmstudio', label: 'Via LM Studio',  hint: '',                                                selected: current === 'lmstudio' })

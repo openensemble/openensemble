@@ -22,6 +22,7 @@ import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helpe
 import { buildBrowserHelpers } from './lib/browser-helper.mjs';
 import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-helper.mjs';
 import { buildSkillLogger } from './lib/skill-logger.mjs';
+import { recordToolExecution } from './lib/tool-exec-log.mjs';
 import { getVoiceContext } from './lib/voice-context.mjs';
 // One-time: hand the voice-context getter to device-helper so ctx.device.id()
 // can resolve the current device sync.
@@ -737,6 +738,27 @@ export async function getWatcherHandler(skillId, userId, kind) {
 export async function validateSkills() {
   for (const [internalKey, wrap] of _manifests) {
     const { manifest } = wrap;
+
+    // Validate optional `localIntents` (skill-agnostic local cognition tier).
+    // Warnings only — lib/local-label.mjs defensively skips anything invalid at
+    // runtime, so a bad entry never breaks chat; this just surfaces authoring
+    // bugs (unknown tool, slot that isn't a tool parameter, uncompilable regex).
+    if (Array.isArray(manifest.localIntents)) {
+      const label = wrap.userId ? `${wrap.userId}/${manifest.id}` : manifest.id;
+      for (const li of manifest.localIntents) {
+        if (!li?.id || !li?.tool) { console.warn(`[skills] ⚠️  ${label}: localIntent missing id/tool`); continue; }
+        const tool = (manifest.tools ?? []).find(t => t.function?.name === li.tool);
+        if (!tool) { console.warn(`[skills] ⚠️  ${label}: localIntent '${li.id}' binds unknown tool '${li.tool}'`); continue; }
+        const props = tool.function?.parameters?.properties ?? {};
+        for (const slot of (Array.isArray(li.slots) ? li.slots : [])) {
+          if (!(slot in props)) console.warn(`[skills] ⚠️  ${label}: localIntent '${li.id}' slot '${slot}' is not a parameter of '${li.tool}'`);
+        }
+        for (const pat of (Array.isArray(li.patterns) ? li.patterns : [])) {
+          try { new RegExp(pat, 'i'); } catch (e) { console.warn(`[skills] ⚠️  ${label}: localIntent '${li.id}' bad regex /${pat}/: ${e.message}`); }
+        }
+      }
+    }
+
     const execPath = path.join(wrap.dir, 'execute.mjs');
     if (!existsSync(execPath)) continue;
     const exec = await getExecutorByKey(internalKey);
@@ -1134,6 +1156,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     _ephemCacheSet(agentId, name, mergedArgs, outText);
     return outText === value.text ? value : { ...value, text: outText };
   };
+  // Record this execution for the Phase-3 intent learner — covers coordinator-
+  // direct AND delegated-specialist calls (both funnel through here). Cheap,
+  // synchronous, never throws into dispatch. The local fastpath uses a different
+  // executor, so local successes are intentionally NOT recorded.
+  try { recordToolExecution(userId, name); } catch { /* never block tool dispatch */ }
   try {
     const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId, owningSkillId));
 

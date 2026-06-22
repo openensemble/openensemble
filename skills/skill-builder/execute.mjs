@@ -263,8 +263,27 @@ function handleReadBlueprint() {
   catch { return `Blueprint not found at ${BLUEPRINT}`; }
 }
 
+// Clean + lightly validate a `localIntents` block (the skill-agnostic local
+// cognition tier — see SKILL_BLUEPRINT). Drops entries that don't bind a real
+// tool of this skill or are malformed; heavier checks (slot ⊆ tool params,
+// regex compiles) run at load in roles.mjs validateSkills as warnings.
+function cleanLocalIntents(localIntents, toolNames) {
+  if (!Array.isArray(localIntents)) return null;
+  const valid = new Set(toolNames);
+  const strArr = (a) => Array.isArray(a) ? a.map(s => typeof s === 'string' ? s.trim() : '').filter(Boolean) : [];
+  const out = [];
+  for (const li of localIntents) {
+    if (!li || typeof li !== 'object') continue;
+    const id = typeof li.id === 'string' ? li.id.trim() : '';
+    const tool = typeof li.tool === 'string' ? li.tool.trim() : '';
+    if (!id || !tool || !valid.has(tool)) continue;   // must bind a real tool of this skill
+    out.push({ id, tool, utterances: strArr(li.utterances), patterns: strArr(li.patterns), slots: strArr(li.slots), confirm: li.confirm === true });
+  }
+  return out.length ? out : null;
+}
+
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -340,6 +359,13 @@ async function handleCreate(args, userId) {
       .map(s => typeof s === 'string' ? s.trim() : '')
       .filter(s => s.length > 0 && s.length < 200);
     if (cleaned.length) manifest.intent_examples = cleaned;
+  }
+  // localIntents: simple operations this skill can fulfil LOCALLY (regex →
+  // embeddings → the on-device extract model) with no cloud-LLM round-trip.
+  // See SKILL_BLUEPRINT's "localIntents" section.
+  {
+    const cleaned = cleanLocalIntents(localIntents, newNames);
+    if (cleaned) manifest.localIntents = cleaned;
   }
   // voice_device: when true, the skill's tools survive the voice-device tool
   // allowlist (chat-dispatch.mjs voiceToolAllowlistFor) so the user can trigger
@@ -774,7 +800,7 @@ async function handleUpdateToolDef(args, userId) {
 // description. Modeled on handleUpdateToolDef — atomic write + re-register so
 // the change is live without a server restart.
 async function handleUpdateManifest(args, userId) {
-  const { id, voice_device, systemPromptAddition, intent_examples, coordinator_scope, description } = args;
+  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description } = args;
   if (!id?.trim()) return 'id is required.';
 
   const skillId = id.trim();
@@ -816,8 +842,15 @@ async function handleUpdateManifest(args, userId) {
     disk.description = description.trim();
     changed.push('description');
   }
+  // localIntents — local cognition tier (see SKILL_BLUEPRINT). Pass [] to clear.
+  if (Array.isArray(localIntents)) {
+    const toolNames = (disk.tools ?? []).map(t => t.function?.name).filter(Boolean);
+    disk.localIntents = cleanLocalIntents(localIntents, toolNames) ?? [];
+    if (!disk.localIntents.length) delete disk.localIntents;
+    changed.push(`localIntents(${disk.localIntents?.length ?? 0})`);
+  }
   if (!changed.length) {
-    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, coordinator_scope, description.';
+    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description.';
   }
 
   const backupPath = manifestPath + '.bak';
