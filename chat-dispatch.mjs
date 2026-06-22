@@ -56,6 +56,15 @@ import { getRoleAssignments, listRoles } from './roles.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
+
+// Pending ambient-restore timers, keyed by deviceId. A burst of wakes seconds
+// apart (e.g. a real command immediately followed by a false wake) would each
+// queue a restore and fire overlapping play_ambient messages — the device then
+// stacks concurrent ambient fetchers and the playback path tears down underneath
+// them, leaving ambient "running" but silent (pcm_rb=0, ~3× bandwidth). Trailing-
+// edge debounce: each new turn cancels the prior pending restore and re-arms one,
+// so exactly ONE restore fires ~3s after the LAST interruption settles.
+const _ambientRestoreTimers = new Map();
 import { buildVoiceSystemAddition } from './lib/voice-context.mjs';
 import {
   loadConfig, getAgentsForUser,
@@ -591,7 +600,13 @@ export async function handleChatMessage({
     // ensures we never resurrect an ambient the routine intentionally
     // replaced (different marker) or the user said "stop" to (null marker).
     if (_ambientAtStart && deviceId) {
-      setTimeout(async () => {
+      // Trailing-edge debounce (see _ambientRestoreTimers): cancel any restore
+      // already queued for this device so back-to-back wakes coalesce into a
+      // single restore instead of stacking overlapping play_ambient sends.
+      const prevTimer = _ambientRestoreTimers.get(deviceId);
+      if (prevTimer) clearTimeout(prevTimer);
+      const restoreTimer = setTimeout(async () => {
+        _ambientRestoreTimers.delete(deviceId);
         try {
           // If the user said "stop" in the last 15s — even on a different
           // (later) turn — don't resurrect ambient. Without this guard, a
@@ -620,6 +635,7 @@ export async function handleChatMessage({
           console.warn('[chat-dispatch] ambient auto-restore failed:', e.message);
         }
       }, 3000);
+      _ambientRestoreTimers.set(deviceId, restoreTimer);
     }
   }
 }

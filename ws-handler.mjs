@@ -70,6 +70,18 @@ const WS_PING_INTERVAL = 15000; // 15s — aggressive enough for mobile carriers
 // transient 2.4 GHz Wi-Fi hiccup, causing constant reconnect flapping. 3 misses
 // ≈ 45 s grace — still reaps truly-dead connections, but rides out brief loss.
 const WS_MAX_MISSED_PONGS = 3;
+// Debounce window for re-pushing an UNCHANGED voice-config to a device that
+// reconnects. A same-version push makes the device run esp_spiffs_gc + rewrite
+// ~62 KB/slot + wakeword_load_slot (which tears down + rebuilds the model, and
+// esp_restart()s the device if the reload fails — see main.c apply_ww_upload).
+// Doing that on EVERY reconnect turns a flapping Wi-Fi link into an all-night
+// reboot/reconnect storm (observed 2026-06-22: ambient streaming → WS drop →
+// reconnect → re-push → reload-fail → reboot → repeat, leaving the device deaf
+// to "hey sydney"). A real config change (version bump) is never debounced —
+// only identical re-pushes whose sole purpose is "in case NVS was reset" are.
+const VOICE_CONFIG_REPUSH_DEBOUNCE_MS = 10 * 60 * 1000; // 10 min
+// key `${userId}:${deviceId}` -> { at, version } of the last actual push.
+const _lastVoiceConfigPush = new Map();
 // Per-user concurrent WebSocket cap. A compromised account (or a buggy
 // reconnect loop) shouldn't be able to hoard server sockets — each open
 // connection costs a heartbeat timer slot and keepalive memory.
@@ -866,15 +878,28 @@ async function maybePushVoiceConfig(ws) {
   try {
     const cfg = readVoiceConfig(ws._userId);
     const lastPushed = getDeviceVoiceConfigVersion(ws._userId, ws._deviceId);
-    // Always push on every WS (re)connect — a boot can wipe NVS without the
-    // server knowing, so the version-match optimization was misleading us
-    // into skipping pushes after real device reboots. Bandwidth cost is
-    // amortized across rare-event boots; the device's per-slot ack throttle
-    // already keeps the push from overrunning the firmware's WS recv path.
+    // A version bump means real config change → always push (handled below).
+    // A version MATCH means we're only re-pushing "in case NVS was reset".
+    // That re-push is expensive on the device (SPIFFS GC + ~62 KB/slot rewrite
+    // + model rebuild, and esp_restart() on reload failure), so debounce it:
+    // doing it on every reconnect drives a flapping device into a reboot loop
+    // (see VOICE_CONFIG_REPUSH_DEBOUNCE_MS). The first reconnect still pushes
+    // (recovers a genuinely-wiped device); rapid follow-on reconnects skip.
     const isSameVersion = lastPushed === cfg.version;
+    const pushKey = `${ws._userId}:${ws._deviceId}`;
     if (isSameVersion) {
+      const prev = _lastVoiceConfigPush.get(pushKey);
+      if (prev && prev.version === cfg.version &&
+          (Date.now() - prev.at) < VOICE_CONFIG_REPUSH_DEBOUNCE_MS) {
+        const agoS = Math.round((Date.now() - prev.at) / 1000);
+        console.log(`[ws] voice-config re-push to ${ws._deviceId} debounced (v${cfg.version}, last push ${agoS}s ago) — flapping guard`);
+        return;
+      }
       console.log(`[ws] voice-config push to ${ws._deviceId}: version unchanged (v${cfg.version}) but pushing anyway in case device NVS was reset`);
     }
+    // Record the attempt now so a storm of reconnects during the (awaited)
+    // push below collapses to one in-flight push, not N stacked ones.
+    _lastVoiceConfigPush.set(pushKey, { at: Date.now(), version: cfg.version });
     // Read the device's last-reported firmware version so the clear pass only
     // runs on firmware that knows ww_clear (>= 0.2.48). The auth handler stores
     // the freshly-reported version before calling us, so this is current.

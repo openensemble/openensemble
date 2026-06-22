@@ -2014,7 +2014,12 @@ export async function handle(req, res) {
       const form = new FormData();
       form.append('file', new Blob([audioBuf], { type: audioMime }), audioName);
       form.append('model', cfg.sttModel || 'whisper-1');
-      if (lang) form.append('language', lang);
+      // Always pin a language. With none, multilingual Whisper auto-detects and,
+      // on the silence/noise that follows a FALSE wake, hallucinates whatever is
+      // statistically common in its training data — YouTube end-cards in Japanese/
+      // Korean/Russian ("ご視聴ありがとうございました" etc.). Device-sent lang wins;
+      // else the config default; else English. Override via cfg.sttLanguage.
+      form.append('language', lang || cfg.sttLanguage || 'en');
       const isLocal = cfg.sttMode === 'local';
       const sttUrl = isLocal
         ? 'http://127.0.0.1:5154/v1/audio/transcriptions'
@@ -2039,6 +2044,38 @@ export async function handle(req, res) {
       );
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ transcript, raw: data }));
+    } catch (e) { safeError(res, e); }
+    return true;
+  }
+
+  // POST /api/wake-capture?slot=&prob= — a voice device (fw >= 0.2.53) uploads
+  // the ~3s of pre-roll audio that triggered a wake fire (16 kHz-mono WAV body)
+  // so false triggers can be mined as wake-word hard negatives. The slot tags
+  // each clip to the wake word that fired (0=hey_sydney, 1=hey_taylor), which is
+  // how we tell which model is causing the false positives. Saved under
+  // wake-captures/<deviceId>/; rsync to ~/wakeword-train/negatives_raw to retrain.
+  if (req.url.startsWith('/api/wake-capture') && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const u = new URL(req.url, 'http://x');
+      const slot = (u.searchParams.get('slot') || 'x').replace(/[^0-9]/g, '').slice(0, 2) || 'x';
+      const prob = (u.searchParams.get('prob') || '0').replace(/[^0-9]/g, '').slice(0, 3) || '0';
+      const meta = getSessionMeta(getAuthToken(req));
+      const deviceId = String(meta?.deviceId || 'dev').replace(/[^\w-]/g, '').slice(0, 40);
+      const wav = await readBodyBuffer(req);
+      if (!wav || wav.length < 44) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'empty or too-small WAV' }));
+        return true;
+      }
+      const fs = await import('fs');
+      const dir = `wake-captures/${deviceId}`;
+      fs.mkdirSync(dir, { recursive: true });
+      const fname = `${dir}/slot${slot}_p${prob}_${Date.now()}.wav`;
+      fs.writeFileSync(fname, wav);
+      console.log(`[wake-capture] dev=${deviceId} slot=${slot} prob=${prob} ${wav.length}B -> ${fname}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
     } catch (e) { safeError(res, e); }
     return true;
   }

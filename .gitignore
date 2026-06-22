@@ -132,3 +132,8 @@ MIGRATION_per-user-encryption.md
 
 # Browser extension — kept out of the repo until fully developed (see commit msg)
 /browser-extension/
+
+# voice-device wake-capture audio (per-device personal recordings)
+wake-captures/
+# dated firmware/source backups (foo.bak-0.2.xx)
+*.bak-*

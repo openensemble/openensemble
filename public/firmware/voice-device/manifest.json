@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.50-followup-drain",
+  "version": "0.2.58-turn-slot-lock",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

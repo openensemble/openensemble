@@ -10,6 +10,17 @@ import {
 import { embed } from './embedding.mjs';
 import { getTable } from './lance.mjs';
 
+// Upper bound on `stability` (hours). Recall multiplies stability by 1.8 each
+// time; with no cap a hot memory grew geometrically until it overflowed JS
+// doubles to Infinity. node-lancedb then serialized that into the UPDATE
+// expression as a bare `Infinity` token, which Datafusion parsed as a COLUMN
+// reference → "No field named Infinity", failing the write on every recall
+// (and `new Date(Infinity).toISOString()` in the review path throws outright).
+// 999999 is the codebase's existing "effectively immortal" stability sentinel
+// (see lance.mjs initialStability / signals.mjs), so a heavily-recalled memory
+// just asymptotes to permanent — the intended behavior — without overflowing.
+const MAX_STABILITY = 999999;
+
 // ── Temporal query detection ─────────────────────────────────────────────────
 export const TEMPORAL_RE = /\b(yesterday|last (week|month|time|night|session)|earlier today|recently|the other day|few days ago|a while (back|ago)|before|back when|remember when|what did (we|i|you) (talk|discuss|say|mention|do)|previous(ly)?|ago|in the past|history|our (last|earlier|previous) (chat|conversation|session|discussion))\b/i;
 const TIME_ANCHOR_RE = /\b(?:(?<days>\d+)\s*days?\s*ago|yesterday|last\s+(?<unit>week|month|night|session)|earlier\s+today)\b/i;
@@ -97,7 +108,7 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
         where: `id = '${assertId(m.id)}'`,
         values: {
           recall_count: (m.recall_count || 0) + 1,
-          stability: (m.stability || 24) * 1.8,
+          stability: Math.min(MAX_STABILITY, (m.stability || 24) * 1.8),
           retention_score: 1.0,
           last_recalled_at: new Date().toISOString(),
         }
@@ -147,7 +158,7 @@ export async function updateReviewSchedule({ agentId = 'main', type = 'params', 
   let multiplier = 1.8;
   if (rating && RATING_MULTIPLIERS[rating]) multiplier = RATING_MULTIPLIERS[rating];
   else if (correct === false) multiplier = RATING_MULTIPLIERS.again;
-  const newStability = Math.max(1, (m.stability || 24) * multiplier);
+  const newStability = Math.min(MAX_STABILITY, Math.max(1, (m.stability || 24) * multiplier));
   // Next review at ~60% retention: solve e^(-t/S) = 0.6 => t = S * 0.51
   const hoursUntilReview = newStability * 0.51;
   const nextReview = new Date(Date.now() + hoursUntilReview * 3_600_000).toISOString();

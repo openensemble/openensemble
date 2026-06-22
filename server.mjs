@@ -23,6 +23,7 @@ import { makeNodeExecFn } from './lib/node-exec-wrapper.mjs';
 import { resolveTokenStorage } from './lib/token-storage.mjs';
 import { loadProfile as loadServiceProfile } from './lib/service-profile.mjs';
 import { setProposalBroadcastFn, bootLoadProposals } from './lib/proposals.mjs';
+import { startVoiceUdpLog } from './lib/voice-udplog.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
 import { getRateLimit } from './rate-limit.mjs';
@@ -428,6 +429,12 @@ const httpServer = http.createServer(async (req, res) => {
 // of the system that need to push events (scheduler, background tasks,
 // route modules via the _helpers injection points, /health metrics).
 initWs(httpServer);
+
+// Voice-device UDP diagnostic sink — devices (fw >= 0.2.52) forward their
+// [boot]/[hb]/[ambient-stats] heartbeat lines here over UDP so a Wi-Fi-only
+// device can be watched live without a serial cable, and the datagrams survive
+// WS drops. Tail /tmp/oe-voice-udplog.log.
+startVoiceUdpLog();
 
 setBroadcastFn(broadcastAgentList);
 setBackgroundBroadcastFn(broadcast);
