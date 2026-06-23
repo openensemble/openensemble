@@ -2048,37 +2048,5 @@ export async function handle(req, res) {
     return true;
   }
 
-  // POST /api/wake-capture?slot=&prob= — a voice device (fw >= 0.2.53) uploads
-  // the ~3s of pre-roll audio that triggered a wake fire (16 kHz-mono WAV body)
-  // so false triggers can be mined as wake-word hard negatives. The slot tags
-  // each clip to the wake word that fired (0=hey_sydney, 1=hey_taylor), which is
-  // how we tell which model is causing the false positives. Saved under
-  // wake-captures/<deviceId>/; rsync to ~/wakeword-train/negatives_raw to retrain.
-  if (req.url.startsWith('/api/wake-capture') && req.method === 'POST') {
-    const authId = requireAuth(req, res); if (!authId) return true;
-    try {
-      const u = new URL(req.url, 'http://x');
-      const slot = (u.searchParams.get('slot') || 'x').replace(/[^0-9]/g, '').slice(0, 2) || 'x';
-      const prob = (u.searchParams.get('prob') || '0').replace(/[^0-9]/g, '').slice(0, 3) || '0';
-      const meta = getSessionMeta(getAuthToken(req));
-      const deviceId = String(meta?.deviceId || 'dev').replace(/[^\w-]/g, '').slice(0, 40);
-      const wav = await readBodyBuffer(req);
-      if (!wav || wav.length < 44) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'empty or too-small WAV' }));
-        return true;
-      }
-      const fs = await import('fs');
-      const dir = `wake-captures/${deviceId}`;
-      fs.mkdirSync(dir, { recursive: true });
-      const fname = `${dir}/slot${slot}_p${prob}_${Date.now()}.wav`;
-      fs.writeFileSync(fname, wav);
-      console.log(`[wake-capture] dev=${deviceId} slot=${slot} prob=${prob} ${wav.length}B -> ${fname}`);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    } catch (e) { safeError(res, e); }
-    return true;
-  }
-
   return false;
 }

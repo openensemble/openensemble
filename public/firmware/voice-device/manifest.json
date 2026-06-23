@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.58-turn-slot-lock",
+  "version": "0.2.59-rm-wakecap",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
