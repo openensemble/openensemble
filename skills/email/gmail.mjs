@@ -41,11 +41,37 @@ async function gmailFetch(endpoint, opts = {}) {
   return res.json();
 }
 
-// Fetch multiple message endpoints in one HTTP round-trip using the Gmail Batch API.
+// Fetch multiple message endpoints via the Gmail Batch API.
 // endpoints: array of strings like '/messages/<id>?format=metadata&...'
-// Returns array of parsed JSON responses in the same order.
-async function gmailBatchFetch(endpoints) {
-  if (!endpoints.length) return [];
+// Returns array of parsed JSON responses in the same order (null only for items
+// that permanently failed, e.g. a deleted message → 404).
+//
+// IMPORTANT: Gmail caps the number of CONCURRENT requests per user, and a batch
+// fans out all its sub-requests simultaneously. A single 50-wide batch therefore
+// comes back HTTP 200 at the envelope level while ~half the sub-requests inside
+// carry "HTTP 429 Too Many Concurrent Requests" error bodies. The old code parsed
+// that error JSON as if it were a message (it has a `{`, so JSON.parse succeeds),
+// yielding blank `[undefined]` rows and silently dropping a third of the inbox.
+// We now send small SEQUENTIAL chunks (≤ BATCH_CHUNK in flight at once), inspect
+// each sub-request's own HTTP status, and retry throttled/transient ones with
+// exponential backoff so nothing is dropped without a trace.
+const BATCH_CHUNK   = 10;  // sub-requests per batch — stays under the per-user concurrency cap
+const BATCH_RETRIES = 4;   // retry rounds for 429 / 5xx sub-requests
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Parse one multipart/mixed sub-response → { status, obj }.
+function parseBatchPart(part) {
+  const status    = parseInt(part.match(/HTTP\/\d\.\d\s+(\d{3})/)?.[1] || '0', 10);
+  const jsonStart = part.indexOf('{');
+  if (jsonStart === -1) return { status, obj: null };
+  try { return { status, obj: JSON.parse(part.slice(jsonStart)) }; }
+  catch { return { status, obj: null }; }
+}
+
+// Send one batch of endpoints. Returns array of { status, obj } in request order,
+// or null when the WHOLE batch was throttled/transient and should be retried.
+async function sendOneBatch(endpoints) {
   const token    = await getAccessToken();
   const boundary = 'batch_gmail_boundary';
   const body     = endpoints.map((ep, i) => [
@@ -66,18 +92,39 @@ async function gmailBatchFetch(endpoints) {
     body,
   });
   if (!res.ok) {
+    if (res.status === 429 || res.status >= 500) return null; // whole-batch transient → retry
     const err = await res.text();
     console.error(`Gmail Batch API error ${res.status}: ${err}`);
     process.exit(1);
   }
-  const text         = await res.text();
-  const resBoundary  = res.headers.get('content-type').match(/boundary=([^\s;]+)/)?.[1];
-  const parts        = text.split(`--${resBoundary}`).slice(1, -1);
-  return parts.map(part => {
-    const jsonStart = part.indexOf('{');
-    if (jsonStart === -1) return null;
-    try { return JSON.parse(part.slice(jsonStart)); } catch { return null; }
-  });
+  const text        = await res.text();
+  const resBoundary = res.headers.get('content-type').match(/boundary=([^\s;"]+)/)?.[1];
+  return text.split(`--${resBoundary}`).slice(1, -1).map(parseBatchPart);
+}
+
+async function gmailBatchFetch(endpoints) {
+  if (!endpoints.length) return [];
+  const results = new Array(endpoints.length).fill(null);
+  let pending   = endpoints.map((_, i) => i); // indices still needing a result
+
+  for (let attempt = 0; attempt <= BATCH_RETRIES && pending.length; attempt++) {
+    if (attempt > 0) await sleep(300 * 2 ** (attempt - 1) + Math.floor(Math.random() * 200)); // backoff + jitter
+    const retry = [];
+    for (let c = 0; c < pending.length; c += BATCH_CHUNK) {
+      const chunkIdx = pending.slice(c, c + BATCH_CHUNK);
+      const parsed   = await sendOneBatch(chunkIdx.map(i => endpoints[i]));
+      if (parsed === null) { retry.push(...chunkIdx); continue; } // whole chunk throttled
+      chunkIdx.forEach((origIdx, k) => {
+        const { status = 0, obj = null } = parsed[k] || {};
+        if (obj && !obj.error)                            results[origIdx] = obj;   // success
+        else if (status === 429 || status >= 500 || !obj) retry.push(origIdx);      // transient → retry
+        // else: permanent 4xx (e.g. 404 deleted message) → leave null, do not retry
+      });
+    }
+    pending = retry;
+  }
+  if (pending.length) process.stderr.write(`[gmailBatchFetch] ${pending.length}/${endpoints.length} message(s) could not be fetched after ${BATCH_RETRIES} retries.\n`);
+  return results;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -141,10 +188,25 @@ function decodeBody(part) {
 async function cmdList(args) {
   const query = args[0] || 'is:unread';
   const max   = parseInt(args[1]) || 10;
-  const data  = await gmailFetch(`/messages?q=${encodeURIComponent(query)}&maxResults=${max}`);
-  if (!data.messages?.length) { console.log('No emails found.'); return; }
-  const ids = data.messages.slice(0, max).map(m => m.id);
-  // Use batch API — all metadata in one HTTP request (up to 100 per batch)
+
+  // Phase 1 — collect up to `max` message IDs. Gmail's list endpoint returns at
+  // most 500 ids per page, so paginate when more than that is requested. This is
+  // what makes "give me my latest 107 (or 600)" actually return them all.
+  const ids = [];
+  let pageToken = '';
+  while (ids.length < max) {
+    const pageSize = Math.min(max - ids.length, 500);
+    const qs = `/messages?q=${encodeURIComponent(query)}&maxResults=${pageSize}` + (pageToken ? `&pageToken=${pageToken}` : '');
+    const data = await gmailFetch(qs);
+    for (const m of data.messages || []) ids.push(m.id);
+    if (!data.nextPageToken || ids.length >= max) break;
+    pageToken = data.nextPageToken;
+  }
+  if (!ids.length) { console.log('No emails found.'); return; }
+
+  // Phase 2 — fetch metadata for every id. gmailBatchFetch splits these into
+  // sequential sub-batches of BATCH_CHUNK so we never exceed Gmail's per-user
+  // concurrency cap, no matter how many ids we're resolving.
   const endpoints = ids.map(id => `/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`);
   const details   = await gmailBatchFetch(endpoints);
   for (const [i, msg] of details.entries()) {
@@ -217,12 +279,8 @@ async function cmdLabel(args) {
   const rmLabels   = args.filter(a => a.startsWith('remove:')).map(a => a.slice(7));
   if (!messageId) { console.error('Usage: gmail.mjs label <messageId> add:<LABEL> remove:<LABEL>'); process.exit(1); }
 
-  const labelsData = await gmailFetch('/labels');
-  const labelMap   = {};
-  for (const l of labelsData.labels || []) labelMap[l.name.toUpperCase()] = l.id;
-
-  const addIds = addLabels.map(n => labelMap[n.toUpperCase()] || n);
-  const rmIds  = rmLabels.map(n => labelMap[n.toUpperCase()] || n);
+  const addIds = await resolveLabelIds(addLabels, { create: true });
+  const rmIds  = await resolveLabelIds(rmLabels);
 
   await gmailFetch(`/messages/${messageId}/modify`, {
     method: 'POST',
@@ -232,8 +290,16 @@ async function cmdLabel(args) {
 }
 
 async function cmdLabels() {
-  const data = await gmailFetch('/labels');
-  for (const l of data.labels || []) console.log(`${l.id}  ${l.name}`);
+  const data   = await gmailFetch('/labels');
+  const labels = data.labels || [];
+  // Split user-created labels (what an agent matches against when sorting) from
+  // Gmail's built-in system labels. Names are enough — the label tools resolve
+  // names → ids themselves — so we don't dump the internal Label_NNN ids.
+  const user   = labels.filter(l => l.type === 'user').map(l => l.name).sort((a, b) => a.localeCompare(b));
+  const system = labels.filter(l => l.type !== 'user').map(l => l.name);
+  console.log(`User labels (${user.length}):`);
+  for (const n of user) console.log(`  ${n}`);
+  console.log(`\nSystem labels: ${system.join(', ')}`);
 }
 
 async function cmdTrash(args) {
@@ -321,12 +387,9 @@ async function cmdLabelQuery(args) {
   if (!query) { console.error('Usage: gmail.mjs labelquery <query> add:<L> remove:<L>'); process.exit(1); }
   if (!addLabels.length && !rmLabels.length) { console.error('No labels specified.'); process.exit(1); }
 
-  // Resolve label names to IDs
-  const labelsData = await gmailFetch('/labels');
-  const labelMap   = {};
-  for (const l of labelsData.labels || []) labelMap[l.name.toUpperCase()] = l.id;
-  const addIds = addLabels.map(n => labelMap[n.toUpperCase()] || n);
-  const rmIds  = rmLabels.map(n => labelMap[n.toUpperCase()] || n);
+  // Resolve label names to IDs (creating any new add-labels that don't exist yet)
+  const addIds = await resolveLabelIds(addLabels, { create: true });
+  const rmIds  = await resolveLabelIds(rmLabels);
 
   // Phase 1: collect all matching IDs
   const ids = [];
@@ -368,11 +431,8 @@ async function cmdBatchLabel(args) {
   const ids       = args.filter(a => !a.startsWith('add:') && !a.startsWith('remove:'));
   if (!ids.length) { console.error('Usage: gmail.mjs batchlabel add:<L> remove:<L> <id1> <id2> ...'); process.exit(1); }
 
-  const labelsData = await gmailFetch('/labels');
-  const labelMap   = {};
-  for (const l of labelsData.labels || []) labelMap[l.name.toUpperCase()] = l.id;
-  const addIds = addLabels.map(n => labelMap[n.toUpperCase()] || n);
-  const rmIds  = rmLabels.map(n => labelMap[n.toUpperCase()] || n);
+  const addIds = await resolveLabelIds(addLabels, { create: true });
+  const rmIds  = await resolveLabelIds(rmLabels);
 
   const body = {};
   if (addIds.length) body.addLabelIds = addIds;
@@ -601,6 +661,37 @@ async function cmdBatchMarkRead(args) {
     : { ids, removeLabelIds: ['UNREAD'] };
   await gmailFetch('/messages/batchModify', { method: 'POST', body: JSON.stringify(body) });
   console.log(`${ids.length} email(s) marked as ${mode}.`);
+}
+
+// Resolve an array of label NAMES to Gmail label IDs in one /labels round-trip.
+// Existing user labels and system labels (INBOX, STARRED, …) resolve directly.
+// With { create:true } any name that has no existing label is created on the fly
+// (used for add-labels, so "move to a brand-new label" works); without it,
+// unknown names pass through unchanged (used for remove-labels, where creating a
+// label just to remove it would be nonsensical). Fixes the old `labelMap[n] || n`
+// fallback that handed Gmail a raw NAME as a label-id and got rejected.
+async function resolveLabelIds(names, { create = false } = {}) {
+  if (!names.length) return [];
+  const labelsData = await gmailFetch('/labels');
+  const labelMap   = {};
+  for (const l of labelsData.labels || []) labelMap[l.name.toUpperCase()] = l.id;
+  const ids = [];
+  for (const name of names) {
+    const existing = labelMap[name.toUpperCase()];
+    if (existing) { ids.push(existing); continue; }
+    if (create) {
+      const made = await gmailFetch('/labels', {
+        method: 'POST',
+        body: JSON.stringify({ name, labelListVisibility: 'labelShow', messageListVisibility: 'show' }),
+      });
+      labelMap[name.toUpperCase()] = made.id;
+      ids.push(made.id);
+      process.stderr.write(`[labels] created "${name}"\n`);
+    } else {
+      ids.push(name); // unknown remove-target → pass through (harmless no-op / system id)
+    }
+  }
+  return ids;
 }
 
 // Returns the label ID for labelName, creating the label if it doesn't exist.

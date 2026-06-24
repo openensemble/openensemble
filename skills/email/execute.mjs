@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
 import { isVoiceSource } from '../../lib/voice-context.mjs';
+import { emailLabelsEnabled, recordLabelings, recordCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
 
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BASE_DIR  = path.resolve(SKILL_DIR, '../..');
@@ -166,6 +167,86 @@ function spawnGmail(cmdArgs, userId, accountId) {
   });
 }
 
+async function gmailToken(userId, accountId) {
+  const { getAccessToken } = await import('../../lib/google-auth.mjs');
+  return getAccessToken('gmail', userId, accountId);
+}
+
+// One message's id + From + Subject (sequential callers keep concurrency at 1,
+// comfortably under Gmail's per-user cap).
+async function gmailMessageMeta(token, id) {
+  const r = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,
+    { headers: { Authorization: `Bearer ${token}` } });
+  if (!r.ok) return null;
+  const m = await r.json();
+  const h = m.payload?.headers || [];
+  return {
+    id,
+    from:    h.find(x => x.name?.toLowerCase() === 'from')?.value || '',
+    subject: h.find(x => x.name?.toLowerCase() === 'subject')?.value || '',
+  };
+}
+
+// Headers for a known set of ids (used by the fire-and-forget learning capture).
+async function fetchFromHeaders(userId, accountId, messageIds) {
+  const token = await gmailToken(userId, accountId);
+  const out = [];
+  for (const id of messageIds.slice(0, 200)) {
+    try { const m = await gmailMessageMeta(token, id); if (m) out.push(m); } catch { /* skip */ }
+  }
+  return out;
+}
+
+// Latest inbox emails (id + From + Subject) for the local pre-sort. Paginates
+// ids, then fetches metadata sequentially.
+async function fetchInboxForSort(userId, accountId, query, max) {
+  const token = await gmailToken(userId, accountId);
+  const ids = [];
+  let pageToken = '';
+  while (ids.length < max) {
+    const pageSize = Math.min(max - ids.length, 500);
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${pageSize}` + (pageToken ? `&pageToken=${pageToken}` : '');
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) break;
+    const d = await r.json();
+    for (const m of d.messages || []) ids.push(m.id);
+    if (!d.nextPageToken || ids.length >= max) break;
+    pageToken = d.nextPageToken;
+  }
+  // Fetch metadata in parallel chunks of 10 — sequential one-at-a-time was ~150ms
+  // each, so 100 emails took >15s and blew the tool's 10s budget (the call got
+  // auto-backgrounded and the result never made it back inline). 10-wide stays
+  // under Gmail's per-user concurrency cap; ~100 emails now resolve in ~2-3s.
+  const out = [];
+  const CHUNK = 10;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const metas = await Promise.all(chunk.map(id => gmailMessageMeta(token, id).catch(() => null)));
+    for (const m of metas) if (m) out.push(m);
+    if (i + CHUNK < ids.length) await new Promise(r => setTimeout(r, 60)); // tiny gap between chunks
+  }
+  return out;
+}
+
+// Learn (sender → label) from a just-applied batch label. Fire-and-forget: the
+// labels are already applied and the user's reply is already on its way; this
+// only feeds the local email-organizer store. Never blocks, never throws.
+function maybeLearnLabels(userId, accountId, messageIds, addLabels) {
+  if (!emailLabelsEnabled()) return;
+  const labels = (addLabels || []).map(l => String(l || '').trim()).filter(Boolean);
+  if (!labels.length || !messageIds?.length) return;
+  (async () => {
+    try {
+      const metas = await fetchFromHeaders(userId, accountId, messageIds);
+      const items = [];
+      for (const m of metas) for (const label of labels) items.push({ from: m.from, subject: m.subject, label });
+      const { recorded, senders } = recordLabelings(userId, items);
+      if (recorded) console.log(`[email-learn] +${recorded} sender→label pairs (${senders} senders known) for ${userId}`);
+    } catch (e) { console.log('[email-learn] capture failed:', e.message); }
+  })();
+}
+
 async function execGmail(name, args, userId, accountId) {
   switch (name) {
     case 'email_list':
@@ -192,7 +273,10 @@ async function execGmail(name, args, userId, accountId) {
       const addArgs = (args.addLabels ?? []).map(l => `add:${l}`);
       const rmArgs  = (args.removeLabels ?? []).map(l => `remove:${l}`);
       if (!addArgs.length && !rmArgs.length) return 'No labels specified to add or remove.';
-      return spawnGmail(['batchlabel', ...addArgs, ...rmArgs, ...ids], userId, accountId);
+      const result = await spawnGmail(['batchlabel', ...addArgs, ...rmArgs, ...ids], userId, accountId);
+      // Learn from what was applied — captures cloud-LLM sorts AND manual labels.
+      if (!result.startsWith('Error')) maybeLearnLabels(userId, accountId, ids, args.addLabels ?? []);
+      return result;
     }
     case 'email_label_query': {
       if (!args.query) return 'No query specified.';
@@ -219,6 +303,71 @@ async function execGmail(name, args, userId, accountId) {
     }
     case 'email_inbox_stats':
       return spawnGmail(['inboxstats'], userId, accountId);
+    case 'email_list_labels':
+      return spawnGmail(['labels'], userId, accountId);
+    case 'email_sort_local': {
+      if (!emailLabelsEnabled()) return 'Local email-label learning is off (cfg.localTier.emailLabels) — cannot pre-sort locally.';
+      const max     = Math.min(parseInt(args.maxResults) || 50, 200);
+      const query   = args.query || 'in:inbox';
+      const archive = args.archive !== false; // default: archive (remove from inbox), matching a normal sort
+      const apply   = args.apply !== false;   // default: apply; pass apply:false for a dry-run preview
+      const emails  = await fetchInboxForSort(userId, accountId, query, max);
+      if (!emails.length) return 'No emails found to sort.';
+
+      // Partition: confident (trusted/pinned local mapping) vs needs-judgment.
+      // Group confident emails by their full (label-set + keepInbox) so a sender
+      // pinned to ["Promotions","Travel"] is applied as one batch.
+      const groups = new Map(); // signature -> { labels:[], keepInbox, ids:[] }
+      const proposals = [];     // per-email view, for the dry-run preview
+      const unknown = [];
+      for (const e of emails) {
+        const sug = suggestLabels(userId, e.from, e.subject);
+        if (sug && sug.trusted) {
+          const sig = sug.labels.slice().sort().join('|') + '#' + (sug.keepInbox ? 'keep' : 'archive');
+          if (!groups.has(sig)) groups.set(sig, { labels: sug.labels, keepInbox: sug.keepInbox, ids: [] });
+          groups.get(sig).ids.push(e.id);
+          proposals.push({ e, labels: sug.labels, keepInbox: sug.keepInbox });
+        } else {
+          unknown.push(e);
+        }
+      }
+
+      // Apply the confident ones locally — NO cloud call. Deliberately NOT
+      // re-recorded: a local echo of an existing mapping is not new learning
+      // signal (same rule as the dispatch loop's "local successes aren't recorded").
+      const applied = [];
+      for (const g of groups.values()) {
+        if (apply) {
+          const addArgs = g.labels.map(l => `add:${l}`);
+          const rmArgs  = (archive && !g.keepInbox) ? ['remove:INBOX'] : [];
+          const res = await spawnGmail(['batchlabel', ...addArgs, ...rmArgs, ...g.ids], userId, accountId);
+          if (res.startsWith('Error')) continue;
+        }
+        applied.push({ labels: g.labels, keepInbox: g.keepInbox, n: g.ids.length });
+      }
+
+      const total = applied.reduce((s, a) => s + a.n, 0);
+      const head  = apply
+        ? `Local pre-sort applied ${total} email(s) with NO cloud call`
+        : `[dry run] Local pre-sort WOULD apply ${total} email(s) with no cloud call`;
+      const fmtLabels = a => `${a.labels.join(' + ')}${a.keepInbox ? ' (kept in Inbox)' : ''}`;
+      const appliedLines = applied.length
+        ? applied.map(a => `  ${fmtLabels(a)}: ${a.n}`).join('\n')
+        : '  (none — no trusted local mappings matched these senders yet)';
+      let out = `${head}:\n${appliedLines}\n\n`;
+      // In a dry run, show the per-email proposals so they can be reviewed/corrected.
+      if (!apply && proposals.length) {
+        out += `Proposed (local, confident):\n`;
+        out += proposals.map((p, i) => `${i + 1}. [${p.e.id}] ${p.e.from} — ${p.e.subject} → ${fmtLabels(p)}`).join('\n') + '\n\n';
+      }
+      if (!unknown.length) {
+        out += 'Nothing left — every email matched a learned/pinned mapping.';
+      } else {
+        out += `${unknown.length} email(s) need your judgment (no trusted local mapping yet). Decide a label for each and apply with email_batch_label — that teaches the local tier for next time:\n`;
+        out += unknown.map((e, i) => `${i + 1}. [${e.id}] ${e.from} — ${e.subject}`).join('\n');
+      }
+      return out;
+    }
     default:
       return `Tool ${name} not supported for Gmail.`;
   }
@@ -464,6 +613,47 @@ async function _executeInner(name, args, userId) {
     return accounts.map((a, i) =>
       `${i === 0 ? '★ ' : ''}${a.label} (${a.provider})`
     ).join('\n');
+  }
+
+  // Inspect what the local tier has learned — provider-agnostic, reads the
+  // per-user store, needs no account.
+  if (name === 'email_learned_labels') {
+    const s = labelLearningSummary(userId);
+    if (!s.distinctKeys) {
+      return emailLabelsEnabled()
+        ? 'No email-label learning recorded yet. Sort or label some emails and I will start learning which senders map to which labels.'
+        : 'Email-label learning is turned off (cfg.localTier.emailLabels).';
+    }
+    const lines = s.mappings.map(m => {
+      const pinStr = (m.pins || []).map(p => {
+        const cond = p.conditional ? ` when subject ~ [${p.conditional.join(', ')}]` : '';
+        const inbox = p.keepInbox ? ' + keep in Inbox' : '';
+        return `📌 ${p.labels.join(' + ')}${inbox}${cond}`;
+      });
+      const obs = m.label ? `${m.label} (${m.count}/${m.total}${m.multi ? ', multi-label' : ''}${m.trusted && !m.pins.length ? ', trusted' : ''})` : null;
+      const rhs = [...pinStr, obs].filter(Boolean).join('  |  ');
+      return `${m.key} [${m.kind}] → ${rhs}`;
+    });
+    return `Learned ${s.distinctKeys} mapping(s) from ${s.totalApplied} labeling(s) + ${s.corrections || 0} correction(s); ${s.trusted} trusted. 📌 = your explicit correction (overrides observations; can be multiple labels and/or keep-in-inbox). Keys are full sender addresses, plus root domains for corporate senders (free providers like gmail.com are keyed per-address only):\n` + lines.join('\n');
+  }
+
+  // Explicit user correction: "mail from X (about Y) should be labeled A (and B) (and stay in inbox)".
+  // Provider-agnostic — writes the learned store directly, overrides observations.
+  if (name === 'email_correct_label') {
+    if (!emailLabelsEnabled()) return 'Email-label learning is turned off (cfg.localTier.emailLabels).';
+    const labels = Array.isArray(args.labels) ? args.labels
+      : (args.labels ? [args.labels] : (args.label ? [args.label] : []));
+    const r = recordCorrection(userId, {
+      sender: args.sender,
+      labels,
+      keepInbox: args.keep_inbox === true,
+      subjectContains: Array.isArray(args.subject_contains) ? args.subject_contains
+        : (args.subject_contains ? [args.subject_contains] : []),
+    });
+    if (!r.ok) return `Could not record the correction: ${r.error}`;
+    const cond = r.conditional ? ` when the subject mentions [${r.conditional.join(', ')}]` : '';
+    const inbox = r.keepInbox ? ' (and keep it in the inbox)' : '';
+    return `Got it — mail from ${r.key} (${r.kind})${cond} → "${r.labels.join('" + "')}"${inbox} from now on. This overrides what I'd learned and applies locally without a cloud call. (It sets the rule only; it doesn't move existing mail — say the word if you want the matching emails moved too.)`;
   }
 
   const accounts = loadAccounts(userId);
