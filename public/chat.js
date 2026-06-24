@@ -591,6 +591,15 @@ function appendProposalBubble(proposal, scroll = true) {
   dismissBtn.addEventListener('click', () => respondToProposal(el, id, 'dismiss', acceptBtn, dismissBtn));
   actions.appendChild(dismissBtn);
 
+  // Permanent opt-out — dismiss only snoozes this pattern for 24h; this one
+  // records it so it's never proposed again.
+  const neverBtn = document.createElement('button');
+  neverBtn.textContent = "Don't propose again";
+  neverBtn.title = 'Never suggest this again (a normal dismiss only hides it for 24h)';
+  neverBtn.style.cssText = 'padding:6px 12px;border:none;background:transparent;color:var(--muted);border-radius:4px;cursor:pointer;font-size:12px;text-decoration:underline;opacity:0.75';
+  neverBtn.addEventListener('click', () => respondToProposal(el, id, 'never', acceptBtn, dismissBtn));
+  actions.appendChild(neverBtn);
+
   el.appendChild(actions);
   insertBefore(el);
   if (scroll) scrollToBottom();
@@ -889,14 +898,63 @@ function appendStreamingBubble() {
   const el = msgEl('assistant'); insertBefore(el);
   return el.querySelector('.msg-bubble');
 }
+// Resolve an agent id (or an already-a-name string) to its human display name,
+// so delegation pills read "Asking Coordinator" instead of "ask_agent → agent_2df…".
+function friendlyAgentName(idOrName) {
+  if (!idOrName) return 'agent';
+  const needle = String(idOrName).toLowerCase();
+  const list = (typeof agents !== 'undefined' && Array.isArray(agents)) ? agents : [];
+  const a = list.find(x => x.id === idOrName
+    || x.name?.toLowerCase() === needle
+    || x.role?.toLowerCase() === needle);
+  if (a?.name) return a.name;
+  if (needle === 'coordinator') return 'Coordinator';
+  return String(idOrName);
+}
+
+// Human-readable label for a tool pill. Most tools just show their raw name; the
+// jargon-y delegation tools get a plain-language label so the user can tell what
+// is happening without reading internal code names.
+function toolDisplayLabel(name, args) {
+  if (name === 'ask_agent' && args?.agent_id) return `Asking ${friendlyAgentName(args.agent_id)}`;
+  if (name === 'waiting_for_agent')           return `Waiting for ${friendlyAgentName(args?.agent)}`;
+  // Email tools get plain-language labels so a long sort reads as a running
+  // narration ("Auto-sorting inbox", "Labeling email → Promotions · 12") instead
+  // of a row of identical "email_batch_label" pills.
+  if (name === 'email_sort_local')     return 'Auto-sorting inbox';
+  if (name === 'email_batch_label')    return 'Labeling email';
+  if (name === 'email_list')           return 'Reading inbox';
+  if (name === 'email_list_labels')    return 'Reading labels';
+  if (name === 'email_learned_labels') return 'Checking learned labels';
+  if (name === 'email_correct_label')  return 'Saving label rule';
+  return name;
+}
+
 // Pull the most informative arg for a tool into a one-line subtitle.
 // Returns '' if nothing useful is available — the pill stays as just the name.
 function toolPillSubtitle(name, args) {
   if (!args || typeof args !== 'object') return '';
-  // Tools where the headline arg is the user-visible action.
-  if (name === 'ask_agent' && typeof args.agent_id === 'string') {
-    return `→ ${args.agent_id}`;
+  // Delegation: the label already names the target agent, so the subtitle carries
+  // the actual task being handed off — this is the "what is she doing?" the user
+  // was missing when an ask_agent call just showed "ask_agent → coordinator".
+  if (name === 'ask_agent') {
+    return typeof args.task === 'string' ? args.task : '';
   }
+  // Email tools — narrate the actual work so a multi-call sort shows progress.
+  if (name === 'email_batch_label') {
+    const add = Array.isArray(args.addLabels) ? args.addLabels.join(', ') : '';
+    const n   = Array.isArray(args.messageIds) ? args.messageIds.length : 0;
+    const arch = Array.isArray(args.removeLabels) && args.removeLabels.includes('INBOX') ? ' · archived' : '';
+    return `${add ? '→ ' + add : ''}${n ? ` · ${n} email${n === 1 ? '' : 's'}` : ''}${arch}`.trim();
+  }
+  if (name === 'email_sort_local') {
+    return `latest ${args.maxResults || 50}${args.apply === false ? ' (preview)' : ''}${args.archive === false ? ' · keep in inbox' : ''}`;
+  }
+  if (name === 'email_correct_label' && args.sender) {
+    const labels = Array.isArray(args.labels) ? args.labels.join('+') : (args.label || '');
+    return `${args.sender} → ${labels}`;
+  }
+  if (name === 'email_list' && typeof args.query === 'string' && args.query) return args.query;
   if (name === 'node_exec' && typeof args.command === 'string') return args.command;
   if (name === 'node_push_project' && typeof args.dest_path === 'string') {
     return `${args.node_id || ''} → ${args.dest_path}`.trim();
@@ -921,7 +979,9 @@ function showToolPill(name, args) {
   const pill = document.createElement('span');
   pill.className = 'tool-pill';
   pill.dataset.tool = name;
-  pill.innerHTML = `${icon('settings', 13)} ${escHtml(name)}`;
+  const displayLabel = toolDisplayLabel(name, args);
+  pill._displayLabel = displayLabel;
+  pill.innerHTML = `${icon('settings', 13)} ${escHtml(displayLabel)}`;
   const subtitle = toolPillSubtitle(name, args);
   if (subtitle) {
     pill._argSubtitle = subtitle;
@@ -955,7 +1015,7 @@ function _findLatestPendingPill(name) {
   return null;
 }
 
-function _ensureStreamBubble(name, argSubtitle) {
+function _ensureStreamBubble(name, argSubtitle, displayLabel) {
   if (toolStreamBubbleEl && toolStreamBubbleTool === name) return toolStreamBubbleEl;
   // Different tool (or none yet) — rebuild the bubble.
   if (toolStreamBubbleEl) toolStreamBubbleEl.remove();
@@ -963,7 +1023,7 @@ function _ensureStreamBubble(name, argSubtitle) {
   toolStreamBubbleEl.className = 'tool-stream-bubble';
   const head = document.createElement('div');
   head.className = 'tool-pill-head';
-  head.innerHTML = `${icon('settings', 13)} ${escHtml(name)}`;
+  head.innerHTML = `${icon('settings', 13)} ${escHtml(displayLabel || name)}`;
   if (argSubtitle) {
     const cmdEl = document.createElement('span');
     cmdEl.className = 'tool-pill-cmd';
@@ -987,7 +1047,7 @@ function appendToolPillProgress(name, text) {
   const pendingPill = _findLatestPendingPill(name);
   if (!pendingPill) return; // nothing to attach progress to (already finished)
   const argSub = pendingPill._argSubtitle || '';
-  const bubble = _ensureStreamBubble(name, argSub);
+  const bubble = _ensureStreamBubble(name, argSub, pendingPill._displayLabel);
   const stream = bubble.querySelector('.tool-pill-stream');
   stream._buf = (stream._buf + text).slice(-PROGRESS_BUF_CAP);
   stream.textContent = stream._buf;

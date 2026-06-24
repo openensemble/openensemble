@@ -144,6 +144,7 @@ function _renderPendingCard(p) {
       <button class="btn-small" data-action="learnAcceptProposal" data-args='${btnArgs}' ${disabled} style="background:var(--accent,#4f82ff);color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer">${accept}</button>
       <button class="btn-small" data-action="learnSnoozeProposal" data-args='${btnArgs}' ${disabled} style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--text)">Snooze 7d</button>
       <button class="btn-small" data-action="learnDismissProposal" data-args='${btnArgs}' ${disabled} style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted)">${dismiss}</button>
+      <button class="btn-small" data-action="learnNeverProposal" data-args='${btnArgs}' ${disabled} title="Never suggest this again (a normal dismiss only hides it for 24h)" style="background:transparent;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted);text-decoration:underline">Don't propose again</button>
     </div>
   </div>`;
 }
@@ -171,6 +172,7 @@ async function _proposalAction(id, action) {
 function learnAcceptProposal(id)  { return _proposalAction(id, 'accept'); }
 function learnDismissProposal(id) { return _proposalAction(id, 'dismiss'); }
 function learnSnoozeProposal(id)  { return _proposalAction(id, 'snooze'); }
+function learnNeverProposal(id)   { return _proposalAction(id, 'never'); }
 
 // ── Rules (per-role standing instructions) ──────────────────────────────────
 
