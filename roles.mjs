@@ -1217,7 +1217,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           if (backgrounded) {
             // Inform the coordinator's LLM the tool was backgrounded — its turn
             // ends gracefully with this message in place of the real result.
-            yield { type: 'result', text: `\`${name}\` is taking longer than 10s — moved to background. A live progress chip is in the chat; you don't need to reply about it.` };
+            yield { type: 'result', text: `\`${name}\` is taking longer than 10s and is now running in the background (task ${watcherId}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
             yield { type: '__hide_turn', reason: 'bg_chip', taskId: watcherId };
 
             // Detached worker: continue draining iter, push to chip, finalize
@@ -1326,7 +1326,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           cadenceSec: 30,
           expiresAt: null,
         });
-        yield { type: 'result', text: `\`${name}\` is taking longer than 10s — moved to background. A live progress chip is in the chat; you don't need to reply about it.` };
+        yield { type: 'result', text: `\`${name}\` is taking longer than 10s and is now running in the background (task ${wid}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
         yield { type: '__hide_turn', reason: 'bg_chip', taskId: wid };
 
         racePromise.then(async (val) => {

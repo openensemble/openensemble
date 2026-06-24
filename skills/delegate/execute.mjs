@@ -42,22 +42,11 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   let task = rawTask;
   if (!agent_id || !task) { yield { type: 'result', text: 'Missing agent_id or task.' }; return; }
 
-  // Auto-default `background` to true for task-shaped delegations when the
-  // LLM didn't pass an explicit value. Coordinators that ignore the SPA
-  // recommendation still end up backgrounding skill-creation / refactor /
-  // multi-step work. Sync remains the default ONLY for quick lookups
-  // (single-tool-call shapes). Distinguish "explicit false" (honor) from
-  // "undefined" (apply heuristic) by reading args.background directly.
-  const LONG_TASK_RE = /\b(create|build|make|generate|refactor|rewrite|fix|update|modify|change|delete|remove|install|deploy|configure|setup|set up|investigate|debug|trace|run|execute|test|download|upload|patch|migrate|optimize|implement|write|edit|read|search|analyze|review)\b/i;
-  let background;
-  if (typeof args.background === 'boolean') {
-    background = args.background;     // LLM was explicit — honor it
-  } else {
-    background = LONG_TASK_RE.test(rawTask);
-    if (background) {
-      console.log('[delegate] auto-background:true (task-shaped keyword match) for', agent_id);
-    }
-  }
+  // Sync-vs-background is decided below, AFTER the delegation direction is known
+  // (see "Decide sync vs background"). Auto-backgrounding applies only when the
+  // coordinator dispatches DOWN to a specialist — never when a specialist
+  // escalates UP — so a user waiting in a specialist's chat watches the
+  // escalation stream live instead of going dark.
 
   // Dynamic imports — by the time this executes, all modules are fully initialized
   const { streamChat } = await import('../../chat.mjs');
@@ -128,6 +117,26 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     return;
   }
   const newDepth = currentDepth + 1;
+
+  // ── Decide sync vs background ──────────────────────────────────────────
+  // Auto-backgrounding (the task-shaped keyword heuristic) applies ONLY when the
+  // COORDINATOR is dispatching DOWN to a specialist — the case where a long task
+  // should detach and report back later. When a SPECIALIST escalates UP to the
+  // coordinator, the user is sitting in that specialist's chat waiting on the
+  // answer, so we stream the coordinator's reply live (sync) instead of going
+  // dark. Explicit background:true from the model is always honored; _parallel
+  // (several delegations in one response) still backgrounds at the dispatch check
+  // below, since multiple live streams can't share one chat.
+  const LONG_TASK_RE = /\b(create|build|make|generate|refactor|rewrite|fix|update|modify|change|delete|remove|install|deploy|configure|setup|set up|investigate|debug|trace|run|execute|test|download|upload|patch|migrate|optimize|implement|write|edit|read|search|analyze|review)\b/i;
+  let background;
+  if (typeof args.background === 'boolean') {
+    background = args.background;                  // LLM was explicit — honor it
+  } else if (callerIsCoordinator) {
+    background = LONG_TASK_RE.test(rawTask);       // coordinator → specialist: long tasks detach
+    if (background) console.log('[delegate] auto-background:true (coordinator→specialist, task-shaped) for', agent_id);
+  } else {
+    background = false;                            // specialist → coordinator escalation: stream live
+  }
 
   // Every coordinator delegation is ephemeral: a fresh session per call with no
   // prior history loaded and nothing persisted back. Prevents cross-task context
@@ -216,7 +225,10 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   if (background || _parallel) {
     const { dispatchBackground } = await import('../../background-tasks.mjs');
     const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji);
-    yield { type: 'result', text: `Dispatching ${agentName} in background (task ${taskId}).` };
+    // Phrase the result as something the calling agent can relay verbatim to the
+    // user — not internal jargon — so the user knows what's happening and that a
+    // result will follow, without having to watch logs.
+    yield { type: 'result', text: `Handed this to ${agentName} to work on in the background — the result will be posted here when it's ready. (background task ${taskId})` };
     return;
   }
 
@@ -231,8 +243,33 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       name: 'waiting_for_agent',
       args: { agent: agentName, reason: 'busy with prior task' },
     };
-    await waitForAgentIdle(scopedAgentId);
+    // Bound the wait. With sync escalations a specialist's turn stays open while
+    // the coordinator runs, so the coordinator delegating BACK to that specialist
+    // hits a slot that only frees when the suspended turn ends — a wait that
+    // never resolves (waitForAgentIdle has no timeout). Cap it and bail with a
+    // clear instruction so a loop-back degrades to a message, not the hang the
+    // user was complaining about. Normal contention clears well under this.
+    const IDLE_WAIT_TIMEOUT_MS = 20000;
+    let _to;
+    const timedOut = await Promise.race([
+      waitForAgentIdle(scopedAgentId).then(() => false),
+      new Promise(res => { _to = setTimeout(() => res(true), IDLE_WAIT_TIMEOUT_MS); }),
+    ]);
+    clearTimeout(_to);
     waitedMs = Date.now() - waitStart;
+    if (timedOut) {
+      yield {
+        type: 'tool_result',
+        name: 'waiting_for_agent',
+        text: `${agentName} still busy after ${Math.round(waitedMs / 1000)}s — giving up the wait.`,
+        preview: `${agentName} still busy`,
+      };
+      yield {
+        type: 'result',
+        text: `${agentName} is busy with another task in this conversation and didn't free up — this happens when a request loops back to an agent that's already working on it. Answer the user directly with what you have instead of delegating to ${agentName}.`,
+      };
+      return;
+    }
     yield {
       type: 'tool_result',
       name: 'waiting_for_agent',
