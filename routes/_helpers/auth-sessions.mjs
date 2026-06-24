@@ -100,6 +100,23 @@ export function createSession(userId, { kind = 'browser', deviceId = null } = {}
 }
 
 /**
+ * Revive an EXISTING token as a live session. Used by voice-device auto-recovery:
+ * a paired device's session token expired and was pruned, but the device proved
+ * possession of it (verified against the device registry's stored token hash),
+ * so we re-admit that exact token instead of forcing a re-pair. The device keeps
+ * using the token already in its NVS — no firmware change, no new token to push.
+ * Caller is responsible for verifying the token's owner before calling this.
+ */
+export function adoptSession(token, { userId, deviceId = null, kind = 'voice-device' } = {}) {
+  if (!token || !userId) return false;
+  const now = Date.now();
+  const expires = now + 7 * 24 * 60 * 60 * 1000;
+  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now, deviceId });
+  persistSessions();
+  return true;
+}
+
+/**
  * Bind a deviceId onto an already-created session. Used by the device-pairing
  * route after registerDevice() generates the id — we want the deviceId in the
  * session so the WS handler can resolve it cheaply, but we also need the

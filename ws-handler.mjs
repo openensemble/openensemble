@@ -39,8 +39,8 @@ import {
 } from './routes/_helpers.mjs';
 import { getVoiceRef } from './lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from './lib/voice-tts-stream.mjs';
-import { getSessionMeta, setSessionDeviceId } from './routes/_helpers/auth-sessions.mjs';
-import { getSlotAssignment, findDeviceByTokenPrefix, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice } from './lib/voice-devices.mjs';
+import { getSessionMeta, setSessionDeviceId, adoptSession } from './routes/_helpers/auth-sessions.mjs';
+import { getSlotAssignment, findDeviceByTokenPrefix, findDeviceByTokenAnyUser, recordTokenSecret, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice } from './lib/voice-devices.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
 import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
@@ -57,6 +57,30 @@ function resolveDeviceId(token, meta) {
   if (!dev) return null;
   setSessionDeviceId(token, dev.id);
   return dev.id;
+}
+
+// Auto-recover a paired voice device whose session token expired. A voice device
+// stores its token in NVS and just keeps presenting it; the server prunes the
+// session after the inactivity window, so a device powered off for a while comes
+// back unable to authenticate. Rather than force a re-pair, verify the presented
+// token against the device registry (full sha256 hash, or a one-time legacy
+// 8-char-prefix fallback for pre-hash devices) and revive the exact token. The
+// rate limiter bounds brute-forcing the legacy 32-bit prefix path.
+const RECOVER_WINDOW_MS = 60_000;
+const RECOVER_MAX_PER_WINDOW = 30;
+let _recoverWindowStart = 0;
+let _recoverCount = 0;
+function tryRecoverDeviceSession(token) {
+  if (!token) return null;
+  const now = Date.now();
+  if (now - _recoverWindowStart > RECOVER_WINDOW_MS) { _recoverWindowStart = now; _recoverCount = 0; }
+  if (_recoverCount >= RECOVER_MAX_PER_WINDOW) return null; // throttle — fail closed
+  _recoverCount++;
+  const match = findDeviceByTokenAnyUser(token);
+  if (!match) return null;
+  adoptSession(token, { userId: match.userId, deviceId: match.device.id, kind: 'voice-device' });
+  recordTokenSecret(match.userId, match.device.id, token); // backfill hash → strong from here on
+  return match;
 }
 import { log } from './logger.mjs';
 
@@ -416,15 +440,31 @@ function onConnection(ws, req) {
         }
         return;
       }
-      const meta = getSessionMeta(msg.token);
-      const userId = meta?.userId ?? null;
+      let meta = getSessionMeta(msg.token);
+      let userId = meta?.userId ?? null;
+      let recoveredDeviceId = null;
+      if (!userId) {
+        // Expired voice-device token? Verify against the device registry and
+        // revive it instead of dropping the device (which then can't reconnect
+        // without a manual re-pair).
+        try {
+          const match = tryRecoverDeviceSession(msg.token);
+          if (match) {
+            userId = match.userId;
+            recoveredDeviceId = match.device.id;
+            meta = getSessionMeta(msg.token); // now resolves to the revived session
+            console.log(`[ws] auto-recovered voice device ${match.device.id} (user ${match.userId}, ${match.strong ? 'hash' : 'legacy-prefix'} match) — revived expired session`);
+            log.info('ws', 'voice device session auto-recovered', { userId: match.userId, deviceId: match.device.id, match: match.strong ? 'hash' : 'prefix' });
+          }
+        } catch (e) { console.warn('[ws] device auto-recover failed:', e.message); }
+      }
       if (!userId) {
         ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }));
         ws.close(4001, 'Unauthorized');
         return;
       }
       ws._userId = userId;
-      ws._deviceId = resolveDeviceId(msg.token, meta);
+      ws._deviceId = recoveredDeviceId ?? resolveDeviceId(msg.token, meta);
       ws._authenticated = true;
       if (!enforceWsCap(ws)) return;
       sendInitialData();
@@ -440,6 +480,9 @@ function onConnection(ws, req) {
           msg.firmware_version.length > 0 && msg.firmware_version.length < 32
             ? msg.firmware_version : null;
         touchDevice(ws._userId, ws._deviceId, fwReported ? { fw_version: fwReported } : {});
+        // Backfill the token's sha256 so a future expiry can be auto-recovered by
+        // strong hash match. Idempotent — only writes when the token changes.
+        recordTokenSecret(ws._userId, ws._deviceId, msg.token);
       }
       maybePushVoiceConfig(ws);
       return;
