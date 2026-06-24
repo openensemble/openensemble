@@ -28,7 +28,7 @@ async function saveThreads(threads) {
 import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
 import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
-import { acceptProposal, dismissProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
+import { acceptProposal, dismissProposal, blockProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
 import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride } from '../lib/learnings.mjs';
 import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../lib/week1-sweep.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
@@ -268,7 +268,7 @@ export async function handle(req, res) {
     }
     return true;
   }
-  const propMatch = req.url.match(/^\/api\/proposals\/([^/?]+)\/(accept|dismiss|snooze|undo)$/);
+  const propMatch = req.url.match(/^\/api\/proposals\/([^/?]+)\/(accept|dismiss|snooze|undo|never)$/);
   if (propMatch && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const id = propMatch[1];
@@ -279,6 +279,7 @@ export async function handle(req, res) {
     const result = action === 'accept'  ? await acceptProposal(id)
                  : action === 'snooze'  ? await snoozeProposal(id)
                  : action === 'undo'    ? await undoProposal(id)
+                 : action === 'never'   ? await blockProposal(id)
                                         : await dismissProposal(id);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
