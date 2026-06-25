@@ -67,33 +67,39 @@ describe('buildSystemProfile', () => {
     }
   });
 
-  it('starts trust_state at reviewed (auto-monitoring)', () => {
+  it('starts trust_state at unverified until the user onboards Host health', () => {
     const p = buildSystemProfile({ nodeId: NODE, hostname: 'mybox' });
-    expect(p.trust_state).toBe('reviewed');
+    expect(p.trust_state).toBe('unverified');
   });
 });
 
 describe('ensureNodeSystemProfile', () => {
-  it('creates the profile + registers a watcher on first run', () => {
+  it('creates the profile as Draft without registering a watcher on first run', () => {
     const r = ensureNodeSystemProfile(USER, NODE, { hostname: 'mybox', platform: 'linux' });
     expect(r.created).toBe(true);
     expect(r.signal_count).toBe(4);
+    expect(r.watcher_id).toBeNull();
     expect(loadProfile(USER, NODE, 'system')).toBeTruthy();
     const watchers = listWatchers(USER).active.filter(w => w.kind === 'profile_health' && w.state.service_id === 'system');
-    expect(watchers).toHaveLength(1);
+    expect(watchers).toHaveLength(0);
   });
 
-  it('is idempotent — second call is a no-op when profile + watcher both exist', () => {
+  it('is idempotent while the profile is waiting for approval', () => {
     ensureNodeSystemProfile(USER, NODE, { hostname: 'mybox', platform: 'linux' });
     const second = ensureNodeSystemProfile(USER, NODE, { hostname: 'mybox', platform: 'linux' });
     expect(second.created).toBe(false);
-    expect(second.reason).toMatch(/already exist/);
+    expect(second.reason).toMatch(/non-monitoring trust state/);
     const watchers = listWatchers(USER).active.filter(w => w.kind === 'profile_health' && w.state.service_id === 'system');
-    expect(watchers).toHaveLength(1); // not duplicated
+    expect(watchers).toHaveLength(0);
   });
 
   it('recovers a missing watcher when the profile exists but no watcher does', async () => {
     // Simulate the cap-was-hit scenario: profile saved, but watcher never registered.
+    ensureNodeSystemProfile(USER, NODE, { hostname: 'mybox', platform: 'linux' });
+    const { saveProfile, loadProfile } = await import('../lib/service-profile.mjs');
+    const p = loadProfile(USER, NODE, 'system');
+    p.trust_state = 'reviewed';
+    saveProfile(USER, NODE, p);
     ensureNodeSystemProfile(USER, NODE, { hostname: 'mybox', platform: 'linux' });
     // Tear down the watcher externally to simulate the bug state.
     const { unregisterProfileHealthWatchers } = await import('../scheduler/health-monitor.mjs');

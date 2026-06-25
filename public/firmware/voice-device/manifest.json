@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.59-rm-wakecap",
+  "version": "0.2.60-audio-stereo",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",

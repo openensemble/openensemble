@@ -1472,6 +1472,32 @@ export async function handle(req, res) {
     return true;
   }
 
+  // Lightweight read-only info about the configured STT path. Used by the
+  // Voice devices drawer to show whether wake-capture can actually become a
+  // transcript before the user discovers it through a silent device turn.
+  if (req.url === '/api/stt/info' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const cfg = loadConfig();
+    const mode = cfg.sttMode === 'local' ? 'local' : 'remote';
+    const localAvailable = await probeFasterWhisperAvailable(cfg);
+    const remoteConfigured = !!(cfg.sttApiUrl && cfg.sttApiKey);
+    const available = mode === 'local' ? localAvailable : remoteConfigured;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      mode,
+      available,
+      localAvailable,
+      remoteConfigured,
+      installed: cfg.integrations?.faster_whisper?.installed === true,
+      profile: cfg.integrations?.faster_whisper?.profile ?? null,
+      apiUrl: mode === 'remote' ? (cfg.sttApiUrl ?? '') : 'http://127.0.0.1:5154/v1/audio/transcriptions',
+      model: cfg.sttModel || (mode === 'local' ? 'large-v3-turbo' : 'whisper-1'),
+      language: cfg.sttLanguage || 'en',
+      keySet: !!cfg.sttApiKey,
+    }));
+    return true;
+  }
+
   // List ElevenLabs voices (pre-made + user-cloned). Proxies the EL
   // /v1/voices endpoint so the API key stays server-side; UI populates
   // its per-slot dropdown from the response. Cached in-memory for 60 s
@@ -2007,7 +2033,8 @@ export async function handle(req, res) {
   if (req.url === '/api/stt' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
-    if (!cfg.sttApiKey || !cfg.sttApiUrl) {
+    const isLocal = cfg.sttMode === 'local';
+    if (!isLocal && (!cfg.sttApiKey || !cfg.sttApiUrl)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'STT provider not configured', configured: false }));
       return true;
@@ -2072,7 +2099,6 @@ export async function handle(req, res) {
       // Korean/Russian ("ご視聴ありがとうございました" etc.). Device-sent lang wins;
       // else the config default; else English. Override via cfg.sttLanguage.
       form.append('language', lang || cfg.sttLanguage || 'en');
-      const isLocal = cfg.sttMode === 'local';
       const sttUrl = isLocal
         ? 'http://127.0.0.1:5154/v1/audio/transcriptions'
         : cfg.sttApiUrl;

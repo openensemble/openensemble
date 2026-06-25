@@ -7,11 +7,42 @@ A **node** is a remote machine paired with this OpenEnsemble install. Once paire
 ## Pairing a node
 
 1. Open the **Nodes** drawer (sidebar server icon).
-2. Click **+ Add Node**. The server generates a one-time pairing code (valid for ~10 minutes).
+2. Click **Pair New Node**. The server generates a one-time pairing code (valid for ~10 minutes).
 3. SSH into the machine you want to pair and run the install snippet shown — it downloads `oe-node-agent`, registers it as a service, and connects it to your install using the pairing code.
 4. The new node appears in the drawer with its hostname, OS, and "online" status.
 
 The pairing code dies when the server restarts, so finish step 3 in the same session you started step 2.
+
+Pairing only connects the machine. It does not automatically turn every app on that machine into a managed service. After a node appears, click **Onboard** beside **Node checks** or **Managed services** on that node card to walk through Host health and service setup.
+
+## Reading the node card
+
+The top of each card describes the remote machine itself:
+
+- **Connected / Recovered / Not Responding / Offline** - the oe-node-agent tunnel state.
+- **Access level** - what administrative actions this node allows. **Full Access** can run privileged commands; a lock means access changes must be made from SSH on the node.
+- **Agent version** - the installed oe-node-agent version. Use **Upgrade Agent** when OE shows it is outdated.
+- **Quick actions** - Terminal, Status, Update, Restart, Shut Down, Install, Upgrade Agent, and Remove all act on the remote machine named in that card.
+
+The lower part separates two different kinds of monitoring:
+
+- **Node checks / Host health** is created automatically. It covers generic host health such as disk, load, memory, and the agent service.
+- **Managed services** are service profiles that were researched and verified separately, such as Tailscale, Vaultwarden, Pi-hole, nginx, or Home Assistant.
+
+Automation labels mean:
+
+- **Draft** - monitoring and auto-fix are off.
+- **Approved** - monitoring is on; verified low-risk fixes may auto-apply.
+- **Auto-fix** - verified medium-risk fixes may auto-apply too. High-risk changes still require confirmation.
+
+New nodes start Host health in **Draft**. Click **Onboard** beside **Node checks**, then approve Host health to run the built-in read-only diagnostics and start monitoring. After that passes, OE asks whether you want to go further and enable **Auto-fix** for verified medium-risk host fixes.
+
+The same progression applies to services under **Managed services**:
+
+1. Use **Onboard** beside **Managed services** to detect running services.
+2. Ask the agent to create service profiles for the detected services. The agent researches each service, saves a Draft profile, verifies read-only operations, then shows it for review.
+3. Click **Approve** on a Draft service profile after it looks right.
+4. Enable **Auto-fix** from the onboarding flow only when you want verified medium-risk fixes for that service to run automatically.
 
 ## What agents can do with a node
 
@@ -57,17 +88,17 @@ For a server install (OE running on a Pi or NAS away from your daily-driver mach
 Each row in the Nodes drawer shows two things:
 
 - **The node itself** — green/red dot for the WS connection (the oe-node-agent → server tunnel).
-- **The service profiles on it** — one line per profile, with the trust state and signal counts.
+- **Checks and managed services** — baseline node checks are grouped separately from service profiles.
 
 A profile row like:
 
-> `vaultwarden v1.35.6 — proven — 3 signals · 2 healthy · 1 unhealthy · 6/6 ops verified`
+> `vaultwarden v1.35.6 — Approved — 3 checks · 2 ok · 1 failing · 6/6 actions tested`
 
-means: this profile is at trust state `proven`, declares 3 health signals, 2 of them are passing right now, 1 is failing, and OE has successfully run all 6 of the profile's operations at least once.
+means: monitoring is on for that service, 3 checks define what healthy means, 2 are passing right now, 1 is failing, and OE has successfully tested all 6 actions at least once.
 
-The **system** profile is auto-created on every node and tracks generic Linux health: disk free, load, memory, the oe-node-agent itself. You don't need to onboard it — it's bootstrapped on first connection.
+The **Node checks** row is auto-created on every node and tracks generic host health: disk free, load, memory, and the oe-node-agent itself. It starts as Draft on new nodes. Use **Onboard** beside the Node checks header to verify the built-in diagnostics and approve monitoring.
 
-To investigate a "1 unhealthy" badge, see the **Debugging an unhealthy signal** section in the **Service profiles** page.
+To investigate a "1 failing" badge, see the **Debugging a failing check** section in the **Service profiles** page.
 
 ### Quick health commands
 

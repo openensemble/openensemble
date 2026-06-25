@@ -157,6 +157,28 @@ describe('runDiagnosticRecipe', () => {
     const updated = loadIncident(USER, NODE, inc.id);
     expect(updated.diagnostics_collected[0].output_excerpt).toMatch(/\[error\]/);
   });
+
+  it('records string diagnostic steps as guidance instead of unsupported mechanism errors', async () => {
+    saveProfile(USER, NODE, fresh());
+    const inc = openIncident(USER, NODE, {
+      service_id: 'pihole',
+      triggering_signal: { kind: 'string_recipe', value: 'x', expected: 'y', fired_at: new Date().toISOString() },
+    });
+    const profile = loadProfile(USER, NODE, 'pihole');
+    profile.diagnostic_recipes = {
+      string_recipe: ['Run systemctl status pihole-FTL.', 'Check recent journal entries.'],
+    };
+    const result = await runDiagnosticRecipe({
+      userId: USER, nodeId: NODE, incidentId: inc.id, profile,
+      recipeKey: 'string_recipe',
+      ctx: {},
+    });
+    expect(result.ran).toBe(2);
+    expect(result.results.every(r => r.mechanism === 'note')).toBe(true);
+    const updated = loadIncident(USER, NODE, inc.id);
+    expect(updated.diagnostics_collected[0].output_excerpt).toMatch(/\[guidance\]/);
+    expect(updated.diagnostics_collected[0].output_excerpt).not.toMatch(/unsupported diagnostic mechanism/);
+  });
 });
 
 // ── unit: failure-matcher ─────────────────────────────────────────────────────

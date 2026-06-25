@@ -40,6 +40,10 @@ let _ttsProvider = 'openai';
 // provider can't actually fulfill TTS (missing ffmpeg, Piper down, key
 // cleared) so devices don't silently hang on the next wake.
 let _ttsAvailable = null;
+// Runtime availability snapshot from /api/stt/info. STT is the first server
+// hop after wake capture, so it gets its own health state instead of being
+// inferred from provider settings.
+let _sttInfo = null;
 // ElevenLabs voice catalog — populated lazily when ttsProvider='elevenlabs'.
 let _elevenlabsVoices = [];
 // KittenTTS preset-voice list (8 baked-in names) — populated from /api/tts/info
@@ -165,11 +169,12 @@ async function loadDevices() {
     // refs, OE user roster, AND the per-user voice-config (sole source
     // of truth for slot routing since 2026-05-13 — applies to all of
     // this user's voice devices).
-    const [rDevices, rIncoming, rLib, rTts, rRefs, _roster, rCfg, rFw, rChime, rRoutines, rAmbient, rHaEnts, rHaCall, rHaSvc] = await Promise.all([
+    const [rDevices, rIncoming, rLib, rTts, rStt, rRefs, _roster, rCfg, rFw, rChime, rRoutines, rAmbient, rHaEnts, rHaCall, rHaSvc] = await Promise.all([
       fetch('/api/devices'),
       fetch('/api/devices/incoming-slots'),
       fetch('/api/wakewords'),
       fetch('/api/tts/info'),
+      fetch('/api/stt/info'),
       fetch('/api/voice-refs'),
       ensureUsersRoster(),
       fetch('/api/voice-config'),
@@ -198,6 +203,12 @@ async function loadDevices() {
     } else {
       _ttsAvailable = null;
       _kittenttsVoices = [];
+    }
+    if (rStt.ok) {
+      try { _sttInfo = await rStt.json(); }
+      catch { _sttInfo = null; }
+    } else {
+      _sttInfo = null;
     }
     if (rRefs.ok) {
       const { refs } = await rRefs.json();
@@ -340,6 +351,71 @@ function renderTtsAvailabilityBanner() {
   `;
 }
 
+function renderVoiceHealthPanel() {
+  const online = _devicesList.filter(d => d.online).length;
+  const total = _devicesList.length;
+  const manifestVer = _firmwareManifest?.version || null;
+  const outdated = manifestVer
+    ? _devicesList.filter(d => d.fw_version && versionCmp(manifestVer, d.fw_version) > 0).length
+    : 0;
+  const unknownFw = _devicesList.filter(d => !d.fw_version).length;
+
+  const ttsOk = !!(_ttsAvailable && _ttsAvailable[_ttsProvider]);
+  const sttOk = !!(_sttInfo && _sttInfo.available);
+  const chip = (label, ok, detail) => `
+    <div style="display:flex;align-items:center;gap:7px;min-width:0;padding:7px 8px;border:1px solid var(--border);background:var(--bg);border-radius:6px">
+      <span style="width:8px;height:8px;border-radius:50%;background:${ok ? '#3cc36f' : 'var(--amber,#d49a44)'};flex:0 0 auto"></span>
+      <div style="min-width:0">
+        <div style="font-size:11px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</div>
+        <div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${detail}</div>
+      </div>
+    </div>
+  `;
+
+  const deviceDetail = total
+    ? `${online}/${total} online`
+    : 'no paired devices';
+  const sttDetail = _sttInfo
+    ? (_sttInfo.mode === 'local'
+      ? `local Whisper ${_sttInfo.localAvailable ? 'running' : 'not reachable'}`
+      : `remote ${_sttInfo.remoteConfigured ? 'configured' : 'missing key or URL'}`)
+    : 'status unavailable';
+  const ttsDetail = _ttsAvailable
+    ? `${_ttsProvider} ${ttsOk ? 'ready' : 'not ready'}`
+    : 'status unavailable';
+  const fwDetail = manifestVer
+    ? (outdated ? `${outdated} update available` : unknownFw ? `${unknownFw} unknown` : `server ${manifestVer}`)
+    : 'manifest unavailable';
+
+  const hints = [];
+  if (_sttInfo && !sttOk) {
+    hints.push(_sttInfo.mode === 'local'
+      ? 'STT is set to local, but Faster-Whisper is not reachable on 127.0.0.1:5154.'
+      : 'STT is set to remote, but the Whisper URL or API key is missing.');
+  }
+  if (_ttsAvailable && !ttsOk) {
+    hints.push('TTS is not ready, so a successful chat turn may still produce no spoken reply.');
+  }
+  if (total && online === 0) hints.push('No paired voice device is online right now.');
+  if (outdated) hints.push('One or more devices can take the current firmware update.');
+
+  return `
+    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Voice health</div>
+        <button class="cdraw-btn" data-action="loadDevices" style="font-size:11px;padding:3px 8px" title="Refresh voice health">Refresh</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px">
+        ${chip('Devices', total > 0 && online > 0, deviceDetail)}
+        ${chip('STT', sttOk, sttDetail)}
+        ${chip('TTS', ttsOk, ttsDetail)}
+        ${chip('Firmware', !outdated && !unknownFw, fwDetail)}
+      </div>
+      ${hints.length ? `<div style="margin-top:8px;font-size:11px;color:var(--amber,#d49a44);line-height:1.45">${hints.map(escHtml).join(' ')}</div>` : ''}
+    </div>
+  `;
+}
+
 function renderDevices() {
   const body = $('drawerDevicesBody');
   if (!body) return;
@@ -356,6 +432,7 @@ function renderDevices() {
       </div>
     </div>
     ${renderTtsAvailabilityBanner()}
+    ${renderVoiceHealthPanel()}
   `;
 
   // Wake-word library — user-uploaded .tflite + .json pairs available for

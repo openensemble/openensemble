@@ -39,6 +39,29 @@ describe('profile_save', () => {
     expect(result).toMatch(/trust_state/);
   });
 
+  it('normalizes common CLI operation draft shapes before validation', async () => {
+    const draft = fresh();
+    draft.operations[0] = {
+      id: 'service_status',
+      capability: 'monitoring',
+      description: 'Check service status.',
+      mechanism: 'cli',
+      risk: 'low',
+      readonly: true,
+      parameters: [],
+      cli: { command: 'systemctl is-active vaultwarden.service' },
+      verified: false,
+      last_tested: null,
+      last_failure: null,
+    };
+    const result = await execute('profile_save', {
+      node_id: NODE, service_id: 'vaultwarden', profile: draft,
+    }, USER, null, {});
+    expect(result).toMatch(/Saved profile "vaultwarden"/);
+    const saved = loadProfile(USER, NODE, 'vaultwarden');
+    expect(saved.operations[0].cli.write.command).toBe('systemctl is-active vaultwarden.service');
+  });
+
   it('errors when required args missing', async () => {
     expect(await execute('profile_save', { node_id: NODE }, USER, null, {})).toMatch(/needs node_id/);
   });
@@ -185,8 +208,8 @@ describe('profile_list', () => {
     await execute('profile_save', { node_id: NODE, service_id: 'pihole', profile: fresh() }, USER, null, {});
     const result = await execute('profile_list', { node_id: NODE }, USER, null, {});
     expect(result).toContain('pihole');
-    expect(result).toContain('unverified');
-    expect(result).toMatch(/0\/5 ops verified/);
+    expect(result).toContain('Draft');
+    expect(result).toMatch(/0\/5 actions tested/);
   });
 
   it('reports empty cleanly', async () => {

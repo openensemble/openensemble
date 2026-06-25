@@ -192,6 +192,19 @@ describe('runSignalCheck — cli / exec mechanisms', () => {
       expect(result.value).toBe('inactive');
     });
   });
+
+  it('exposes CLI exitCode so health signals can expect exit_code', async () => {
+    const execFn = async () => ({ stdout: '', stderr: '', exitCode: 0 });
+    await withExecFn(execFn, async () => {
+      const result = await runSignalCheck(
+        { node_id: NODE, service_id: 'nfs', endpoint: '' },
+        { check: { mechanism: 'cli', command: 'sudo exportfs -v 2>&1' }, expect: { exit_code: 0 } },
+        { userId: USER },
+      );
+      expect(result.ok).toBe(true);
+      expect(result.exitCode).toBe(0);
+    });
+  });
 });
 
 describe('unregisterProfileHealthWatchers', () => {

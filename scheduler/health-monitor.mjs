@@ -93,6 +93,9 @@ function matchesExpected(value, expect) {
     if ('lt'  in expect)       return Number(value) <  Number(expect.lt);
     if ('eq'  in expect)       return String(value) === String(expect.eq);
     if ('neq' in expect)       return String(value) !== String(expect.neq);
+    if ('exit_code' in expect && value && typeof value === 'object') {
+      return Number(value.exitCode) === Number(expect.exit_code);
+    }
   }
   return false;
 }
@@ -170,7 +173,13 @@ function interpretCliOutput(out) {
     return { ok: false, value: null, raw: stderr.slice(0, 500), unknown: true };
   }
   const value = (out.stdout || '').trim();
-  return { ok: out.exitCode === 0, value, raw: value.slice(0, 500) };
+  return {
+    ok: out.exitCode === 0,
+    value,
+    raw: value.slice(0, 500),
+    exitCode: out.exitCode,
+    stderr: stderr.slice(0, 500),
+  };
 }
 
 // Build one composite bash invocation for an ordered list of {cmd} entries.
@@ -310,6 +319,8 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
   let isHealthy;
   if (signal.expect && typeof signal.expect === 'object' && 'status' in signal.expect && result.httpStatus !== undefined) {
     isHealthy = Number(result.httpStatus) === Number(signal.expect.status);
+  } else if (signal.expect && typeof signal.expect === 'object' && 'exit_code' in signal.expect && result.exitCode !== undefined) {
+    isHealthy = Number(result.exitCode) === Number(signal.expect.exit_code);
   } else {
     isHealthy = matchesExpected(result.value, signal.expect);
   }

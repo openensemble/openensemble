@@ -3,6 +3,7 @@
 let _nodesRefreshTimer = null;
 let _nodesList = [];
 let _termWindows = {};  // nodeId → Window reference
+const NODE_WALKTHROUGH_DISMISSED_KEY = 'oe.nodes.walkthrough.dismissed.v1';
 
 const PKG_COMMANDS = {
   apt:    { update: 'sudo apt update && sudo apt upgrade -y', install: 'sudo apt install -y' },
@@ -128,8 +129,14 @@ async function loadNodes() {
         <i data-lucide="shield-off" style="width:12px;height:12px;margin-right:4px"></i> Revoke All
       </button>`
     : '';
+  const helpBtn = _nodesList.length
+    ? `<button class="cdraw-btn" data-action="showNodeWalkthrough" style="font-size:11px;padding:5px 10px" title="Explain node status, checks, services, and auto-fix labels">
+        <i data-lucide="circle-help" style="width:12px;height:12px;margin-right:4px"></i> Help
+      </button>`
+    : '';
   const pairBtnHtml = `<div class="cdraw-toolbar" style="padding:10px 12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
     <span style="font-size:12px;color:var(--muted);flex:1">${countLabel}</span>
+    ${helpBtn}
     ${revokeAllBtn}
     <button class="cdraw-btn cdraw-btn-primary" data-action="pairNewNode" style="font-size:11px;padding:5px 12px">
       <i data-lucide="plus" style="width:12px;height:12px;margin-right:4px"></i> Pair New Node
@@ -147,7 +154,7 @@ async function loadNodes() {
     return;
   }
 
-  let html = pairBtnHtml + '<div style="padding:10px">';
+  let html = pairBtnHtml + renderNodeWalkthroughCard() + '<div style="padding:10px">';
   for (const node of _nodesList) {
     html += renderNodeCard(node);
   }
@@ -158,8 +165,87 @@ async function loadNodes() {
   refreshNodesAlertBadge();
 }
 
+function renderNodeWalkthroughCard() {
+  if (localStorage.getItem(NODE_WALKTHROUGH_DISMISSED_KEY) === '1') return '';
+  return `<div class="node-walkthrough-card">
+    <div class="node-walkthrough-title">
+      <i data-lucide="map" style="width:14px;height:14px"></i>
+      Node walkthrough
+    </div>
+    <div class="node-walkthrough-grid">
+      <div><b>Top row:</b> machine, connection, package manager, agent version, and access level.</div>
+      <div><b>Node checks:</b> automatic host health. You do not need to onboard this row.</div>
+      <div><b>Managed services:</b> researched service profiles like Tailscale or Vaultwarden.</div>
+      <div><b>Approved / Auto-fix:</b> how much verified automation OE can run without asking.</div>
+    </div>
+    <div class="node-walkthrough-actions">
+      <button class="cdraw-btn" data-action="showNodeWalkthrough" style="font-size:11px;padding:5px 10px">
+        <i data-lucide="book-open" style="width:12px;height:12px;margin-right:4px"></i> Walk Through
+      </button>
+      <button class="cdraw-btn" data-action="dismissNodeWalkthrough" style="font-size:11px;padding:5px 10px">
+        <i data-lucide="x" style="width:12px;height:12px;margin-right:4px"></i> Hide
+      </button>
+    </div>
+  </div>`;
+}
+
+function dismissNodeWalkthrough() {
+  localStorage.setItem(NODE_WALKTHROUGH_DISMISSED_KEY, '1');
+  this?.closest?.('.node-pair-modal')?.remove();
+  loadNodes();
+}
+
+function showNodeWalkthrough() {
+  const modal = document.createElement('div');
+  modal.className = 'node-pair-modal';
+  modal.innerHTML = `
+    <div class="node-pair-modal-bg" data-action="_nodePairModalClose"></div>
+    <div class="node-pair-modal-box node-walkthrough-modal">
+      <div class="node-walkthrough-modal-head">
+        <i data-lucide="server" style="width:18px;height:18px"></i>
+        <div>
+          <div class="node-walkthrough-modal-title">Reading a node card</div>
+          <div class="node-walkthrough-modal-subtitle">What to check after pairing a machine</div>
+        </div>
+      </div>
+      <div class="node-walkthrough-steps">
+        <div class="node-walkthrough-step">
+          <span class="node-walkthrough-step-num">1</span>
+          <div><b>Confirm the node is reachable.</b> The connection badge says Connected, Recovered, Not Responding, or Offline. Recovered means the agent restarted and came back recently.</div>
+        </div>
+        <div class="node-walkthrough-step">
+          <span class="node-walkthrough-step-num">2</span>
+          <div><b>Check access before using actions.</b> Full Access can run administrative commands. Locked means the node must be changed from SSH, not from this drawer.</div>
+        </div>
+        <div class="node-walkthrough-step">
+          <span class="node-walkthrough-step-num">3</span>
+          <div><b>Use quick actions deliberately.</b> Terminal opens a shell. Status refreshes inventory. Update, Install, Restart, Shut Down, and Upgrade Agent act on the remote machine.</div>
+        </div>
+        <div class="node-walkthrough-step">
+          <span class="node-walkthrough-step-num">4</span>
+          <div><b>Separate host health from services.</b> Node checks / Host health is automatic. Managed services are profiles OE researched and verified for a specific service.</div>
+        </div>
+        <div class="node-walkthrough-step">
+          <span class="node-walkthrough-step-num">5</span>
+          <div><b>Read the automation level.</b> Draft keeps monitoring and auto-fix off. Approved allows verified low-risk fixes. Auto-fix allows verified medium-risk fixes too; high-risk changes still ask first.</div>
+        </div>
+      </div>
+      <div class="node-walkthrough-next">
+        To finish onboarding a useful node, ask an agent: <code>detect services on this node and onboard the ones you find</code>.
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button class="cdraw-btn" data-action="dismissNodeWalkthrough" style="font-size:12px;padding:6px 12px">Hide Inline Guide</button>
+        <button class="cdraw-btn cdraw-btn-primary" data-action="_nodePairModalCloseInner" style="font-size:12px;padding:6px 12px">Done</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('show'));
+  lucide.createIcons();
+}
+
 // Toggle the small red dot on the sidebar Nodes button. Visible iff any
-// reachable node has at least one unhealthy profile signal — same signal that
+// reachable node has at least one failing profile check — same condition that
 // triggers the toast notification — so the user notices something's wrong
 // even with the drawer closed.
 function refreshNodesAlertBadge() {
@@ -250,49 +336,83 @@ function renderProfilesSection(node) {
   const profiles = Array.isArray(node.profiles) ? node.profiles : [];
   if (!profiles.length) {
     return `<div class="node-profiles-section">
+      <div class="node-profiles-header">
+        <span>Node onboarding</span>
+        ${renderProfileSectionOnboardButton(node.nodeId)}
+      </div>
       <div class="node-profiles-empty">
         <i data-lucide="info" style="width:12px;height:12px"></i>
-        Not yet onboarded — ask any agent to "onboard the services on ${escHtml(node.hostname)}" to start managing them.
+        Not yet onboarded — start here to approve Host health and detect services.
       </div>
     </div>`;
   }
 
-  const rows = profiles.map(p => {
+  const systemProfiles = profiles.filter(p => p.service_id === 'system');
+  const serviceProfiles = profiles.filter(p => p.service_id !== 'system');
+  const systemRows = renderProfileRows(systemProfiles, { system: true, nodeId: node.nodeId });
+  const serviceRows = renderProfileRows(serviceProfiles, { system: false, nodeId: node.nodeId });
+
+  return `<div class="node-profiles-section">
+    ${systemRows ? `<div class="node-profiles-header"><span>Node checks</span>${renderProfileSectionOnboardButton(node.nodeId)}</div>${systemRows}` : ''}
+    ${serviceRows ? `<div class="node-profiles-header"><span>${systemRows ? 'Managed services' : `Managed services (${serviceProfiles.length})`}</span>${renderProfileSectionOnboardButton(node.nodeId)}</div>${serviceRows}` : ''}
+  </div>`;
+}
+
+function renderProfileSectionOnboardButton(nodeId) {
+  return `<button class="cdraw-btn node-section-onboard-btn" data-action="openNodeOnboarding" data-args='${JSON.stringify([nodeId]).replace(/'/g, "&#39;")}' title="Walk through Host health and detected services">
+    <i data-lucide="route" style="width:11px;height:11px"></i> Onboard
+  </button>`;
+}
+
+function renderProfileRows(profiles, { system, nodeId }) {
+  return profiles.map(p => {
     const dot = profileOverallDot(p.overall);
+    const trust = profileTrustInfo(p.trust_state);
     const trustBadge = profileTrustBadge(p.trust_state);
     const ver = p.detected_version ? ` <span style="color:var(--muted);font-size:11px">v${escHtml(p.detected_version)}</span>` : '';
-    let signalLine;
+    const displayName = system ? 'Host health' : p.service_id;
+    let checkLine;
     if (p.trust_state === 'unverified') {
-      signalLine = '<span style="color:var(--muted)">monitoring off (unverified)</span>';
+      checkLine = '<span style="color:var(--muted)">checks off</span>';
     } else if (p.signals_total === 0) {
-      signalLine = '<span style="color:var(--muted)">no health signals declared</span>';
+      checkLine = '<span style="color:var(--muted)">no checks configured</span>';
     } else {
       const parts = [];
-      if (p.signals_healthy)   parts.push(`<span style="color:var(--green)">${p.signals_healthy} healthy</span>`);
-      if (p.signals_unhealthy) parts.push(`<span style="color:var(--red)">${p.signals_unhealthy} unhealthy</span>`);
-      if (p.signals_unknown)   parts.push(`<span style="color:var(--muted)">${p.signals_unknown} unknown</span>`);
-      signalLine = `${p.signals_total} signal${p.signals_total === 1 ? '' : 's'} · ${parts.join(' · ')}`;
+      if (p.signals_healthy)   parts.push(`<span style="color:var(--green)">${p.signals_healthy} ok</span>`);
+      if (p.signals_unhealthy) parts.push(`<span style="color:var(--red)">${p.signals_unhealthy} failing</span>`);
+      if (p.signals_unknown)   parts.push(`<span style="color:var(--muted)">${p.signals_unknown} pending</span>`);
+      checkLine = `${p.signals_total} check${p.signals_total === 1 ? '' : 's'} · ${parts.join(' · ')}`;
     }
     const verifyLine = p.ops_total
-      ? `${p.ops_verified}/${p.ops_total} ops verified`
-      : 'no operations defined';
+      ? `${p.ops_verified}/${p.ops_total} actions tested`
+      : 'no actions defined';
     const incidentLine = p.open_incidents
       ? ` · <span style="color:var(--red)">${p.open_incidents} open incident${p.open_incidents === 1 ? '' : 's'}</span>`
       : '';
     return `<div class="node-profile-row">
       <div class="node-profile-row-header">
         ${dot}
-        <span class="node-profile-name">${escHtml(p.service_id)}</span>${ver}
+        <span class="node-profile-name">${escHtml(displayName)}</span>${ver}
         ${trustBadge}
       </div>
-      <div class="node-profile-row-meta">${signalLine} · ${verifyLine}${incidentLine}</div>
+      <div class="node-profile-row-meta">${checkLine} · ${verifyLine} · ${escHtml(trust.hint)}${incidentLine}</div>
     </div>`;
   }).join('');
+}
 
-  return `<div class="node-profiles-section">
-    <div class="node-profiles-header">Service profiles (${profiles.length})</div>
-    ${rows}
-  </div>`;
+function renderProfileAction(nodeId, profile, { system }) {
+  const label = system ? 'Host health' : profile.service_id;
+  if (profile.trust_state === 'unverified') {
+    return `<button class="cdraw-btn node-profile-action" data-action="approveNodeProfile" data-args='${JSON.stringify([nodeId, profile.service_id]).replace(/'/g, "&#39;")}' title="Verify ${escHtml(label)} diagnostics, then approve monitoring">
+      <i data-lucide="check-circle-2" style="width:11px;height:11px"></i> Approve
+    </button>`;
+  }
+  if (profile.trust_state === 'reviewed') {
+    return `<button class="cdraw-btn node-profile-action" data-action="promoteNodeProfileAutoFix" data-args='${JSON.stringify([nodeId, profile.service_id]).replace(/'/g, "&#39;")}' title="Allow verified medium-risk ${escHtml(label)} fixes">
+      <i data-lucide="wrench" style="width:11px;height:11px"></i> Auto-fix
+    </button>`;
+  }
+  return '';
 }
 
 function profileOverallDot(overall) {
@@ -302,20 +422,27 @@ function profileOverallDot(overall) {
     overall === 'monitoring' ? 'var(--yellow)' :
     /* unverified */          'var(--muted)';
   const title =
-    overall === 'healthy'   ? 'all signals healthy' :
-    overall === 'unhealthy' ? 'one or more signals unhealthy' :
-    overall === 'monitoring' ? 'monitoring (signals warming up or unknown)' :
-                              'unverified — monitoring off';
+    overall === 'healthy'   ? 'all checks ok' :
+    overall === 'unhealthy' ? 'one or more checks failing' :
+    overall === 'monitoring' ? 'monitoring (checks warming up or pending)' :
+                              'Draft — monitoring off';
   return `<span class="node-profile-dot" style="background:${color}" title="${title}"></span>`;
 }
 
+function profileTrustInfo(state) {
+  if (state === 'reviewed') {
+    return { label: 'Approved', hint: 'low-risk auto-fixes allowed', cls: 'node-trust-approved' };
+  }
+  if (state === 'proven') {
+    return { label: 'Auto-fix', hint: 'medium-risk auto-fixes allowed', cls: 'node-trust-autofix' };
+  }
+  return { label: 'Draft', hint: 'monitoring and auto-fix off', cls: 'node-trust-unverified' };
+}
+
 function profileTrustBadge(state) {
-  const label =
-    state === 'reviewed' ? 'reviewed' :
-    state === 'proven'   ? 'proven' :
-                           'unverified';
+  const info = profileTrustInfo(state);
   const cls = state === 'unverified' ? 'cdraw-badge node-trust-unverified' : 'cdraw-badge';
-  return `<span class="${cls}" style="margin-left:auto;font-size:10px">${label}</span>`;
+  return `<span class="${cls}" style="margin-left:auto;font-size:10px" title="${escHtml(info.hint)}">${escHtml(info.label)}</span>`;
 }
 
 // ── Popout Terminal ──────────────────────────────────────────────────────────
@@ -460,6 +587,198 @@ function changeNodeAccess(nodeId) {
       openNodeTerminal(nodeId, cmd);
     },
   });
+}
+
+function profileDisplayLabel(serviceId) {
+  return serviceId === 'system' ? 'Host health' : serviceId;
+}
+
+async function requestNodeProfileOnboard(nodeId, serviceId, target) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const stateLabel = target === 'proven' ? 'Auto-fix' : 'Approved';
+  const profileLabel = profileDisplayLabel(serviceId);
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/profile/${encodeURIComponent(serviceId)}/onboard`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const failed = data.verification?.results
+        ?.filter(r => r.status === 'failed')
+        ?.map(r => r.op_id)
+        ?.join(', ');
+      showNodeToast(`${node?.hostname || nodeId}: ${data.error || `could not enable ${stateLabel}`}${failed ? ` (${failed})` : ''}`, 'error');
+      await loadNodes();
+      return null;
+    }
+    showNodeToast(`${node?.hostname || nodeId}: ${profileLabel} is now ${stateLabel}`, 'success');
+    await loadNodes();
+    return data;
+  } catch (e) {
+    showNodeToast(`${node?.hostname || nodeId}: ${e.message}`, 'error');
+    return null;
+  }
+}
+
+async function approveNodeProfile(nodeId, serviceId) {
+  const data = await requestNodeProfileOnboard(nodeId, serviceId, 'reviewed');
+  if (!data) return;
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const profileLabel = profileDisplayLabel(serviceId);
+  const passed = data.verification ? `${data.verification.passed}/${data.verification.tested} diagnostics passed` : 'Diagnostics passed';
+  showNodeConfirmModal({
+    title: `Enable Auto-fix for ${profileLabel}?`,
+    message: `${profileLabel} is Approved and monitoring is starting on ${node?.hostname || nodeId}.\n\n${passed}.\n\nAuto-fix allows verified medium-risk fixes for this profile when troubleshooting determines that is the fix. High-risk changes still ask first.`,
+    confirmLabel: 'Enable Auto-fix',
+    cancelLabel: 'Keep Approved',
+    confirmClass: 'cdraw-btn-warning',
+    onConfirm: () => requestNodeProfileOnboard(nodeId, serviceId, 'proven'),
+  });
+}
+
+function promoteNodeProfileAutoFix(nodeId, serviceId) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const profileLabel = profileDisplayLabel(serviceId);
+  showNodeConfirmModal({
+    title: `Enable Auto-fix for ${profileLabel}?`,
+    message: `This promotes ${profileLabel} on ${node?.hostname || nodeId} from Approved to Auto-fix.\n\nVerified medium-risk fixes may auto-apply when troubleshooting fires. High-risk changes still require confirmation.`,
+    confirmLabel: 'Enable Auto-fix',
+    cancelLabel: 'Cancel',
+    confirmClass: 'cdraw-btn-warning',
+    onConfirm: () => requestNodeProfileOnboard(nodeId, serviceId, 'proven'),
+  });
+}
+
+async function openNodeOnboarding(nodeId) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  if (!node) return;
+  const modal = document.createElement('div');
+  modal.className = 'node-pair-modal';
+  modal.innerHTML = `
+    <div class="node-pair-modal-bg" data-action="_nodePairModalClose"></div>
+    <div class="node-pair-modal-box node-onboarding-modal">
+      <div class="node-walkthrough-modal-head">
+        <i data-lucide="route" style="width:18px;height:18px"></i>
+        <div>
+          <div class="node-walkthrough-modal-title">Onboard ${escHtml(node.hostname)}</div>
+          <div class="node-walkthrough-modal-subtitle">Approve Host health, then set up service profiles</div>
+        </div>
+      </div>
+      <div id="nodeOnboardBody_${escHtml(nodeId)}" class="node-onboarding-body">
+        ${renderNodeOnboardingBody(node)}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button class="cdraw-btn" data-action="_nodePairModalCloseInner" style="font-size:12px;padding:6px 12px">Done</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('show'));
+  lucide.createIcons();
+}
+
+function renderNodeOnboardingBody(node, detection = null) {
+  const profiles = Array.isArray(node.profiles) ? node.profiles : [];
+  const system = profiles.find(p => p.service_id === 'system');
+  const services = profiles.filter(p => p.service_id !== 'system');
+  const hostAction = system
+    ? renderProfileAction(node.nodeId, system, { system: true })
+    : `<button class="cdraw-btn node-profile-action" data-action="approveNodeProfile" data-args='${JSON.stringify([node.nodeId, 'system']).replace(/'/g, "&#39;")}'><i data-lucide="check-circle-2" style="width:11px;height:11px"></i> Approve</button>`;
+  const serviceRows = services.length
+    ? services.map(p => `<div class="node-onboarding-row"><span>${escHtml(p.service_id)}</span>${profileTrustBadge(p.trust_state)}${renderProfileAction(node.nodeId, p, { system: false })}</div>`).join('')
+    : '<div class="node-onboarding-empty">No managed service profiles yet.</div>';
+  const detectBusy = detection?.state === 'running';
+  const detectDone = detection?.state === 'done';
+  const detectError = detection?.state === 'error';
+  const detectStatus = detection ? `<div class="node-onboarding-status node-onboarding-status-${escHtml(detection.state)}">
+    <span class="node-onboarding-spinner" aria-hidden="true"></span>
+    <div>
+      <b>${escHtml(detection.title)}</b>
+      <div>${escHtml(detection.detail || '')}</div>
+    </div>
+  </div>` : '';
+  const detectionText = detection?.text || '';
+  return `
+    <div class="node-onboarding-step">
+      <div>
+        <b>1. Host health</b>
+        <div>Verify built-in node diagnostics, then approve monitoring.</div>
+      </div>
+      <div class="node-onboarding-row">${system ? profileTrustBadge(system.trust_state) : '<span class="cdraw-badge node-trust-unverified">Draft</span>'}${hostAction}</div>
+    </div>
+    <div class="node-onboarding-step">
+      <div>
+        <b>2. Detect running services</b>
+        <div>Probe the node for known services. Services without profiles need agent research before they can be approved.</div>
+      </div>
+      <button class="cdraw-btn" data-action="detectNodeServicesForOnboarding" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' style="font-size:11px;padding:5px 10px" ${detectBusy ? 'disabled' : ''}>
+        <i data-lucide="${detectBusy ? 'loader-circle' : 'search'}" style="width:12px;height:12px;margin-right:4px"></i> ${detectBusy ? 'Detecting...' : 'Detect Services'}
+      </button>
+    </div>
+    ${detectStatus}
+    ${detectionText ? `<pre class="node-onboarding-detect">${escHtml(detectionText)}</pre>
+      <button class="cdraw-btn cdraw-btn-primary" data-action="askAgentToOnboardNodeServices" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' style="font-size:11px;padding:6px 10px">
+        <i data-lucide="message-square" style="width:12px;height:12px;margin-right:4px"></i> Ask Agent to Create Service Profiles
+      </button>` : ''}
+    <div class="node-onboarding-step">
+      <div>
+        <b>3. Existing service profiles</b>
+        <div>Approve each Draft profile after verification, then optionally promote it to Auto-fix.</div>
+      </div>
+      <div class="node-onboarding-services">${serviceRows}</div>
+    </div>
+  `;
+}
+
+async function detectNodeServicesForOnboarding(nodeId) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const body = document.querySelector(`[id="nodeOnboardBody_${CSS.escape(nodeId)}"]`);
+  if (!node || !body) return;
+  body.innerHTML = renderNodeOnboardingBody(node, {
+    state: 'running',
+    title: 'Running service probe',
+    detail: 'Checking listening ports, known binaries, service units, and common config paths on the node.',
+  });
+  lucide.createIcons();
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/detect-services`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (Array.isArray(data.profiles)) node.profiles = data.profiles;
+    const count = Array.isArray(data.detected) ? data.detected.length : 0;
+    const finishedAt = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    body.innerHTML = renderNodeOnboardingBody(node, {
+      state: 'done',
+      title: 'Service detection finished',
+      detail: `${count} known service${count === 1 ? '' : 's'} detected at ${finishedAt}.`,
+      text: data.text || '',
+    });
+    lucide.createIcons();
+  } catch (e) {
+    body.innerHTML = renderNodeOnboardingBody(node, {
+      state: 'error',
+      title: 'Service detection failed',
+      detail: e.message,
+    });
+    lucide.createIcons();
+  }
+}
+
+function askAgentToOnboardNodeServices(nodeId) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const prompt = `Detect services on ${node?.hostname || nodeId}, then onboard each detected service profile. For each service: research it, save a Draft profile, verify read-only operations, show me the profile, and ask whether to mark it Approved. Do not enable Auto-fix until I explicitly confirm.`;
+  if (typeof closeDrawer === 'function') closeDrawer();
+  const input = $('input');
+  if (input && typeof send === 'function') {
+    input.value = prompt;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    send();
+  } else {
+    navigator.clipboard?.writeText(prompt).catch(() => {});
+    showNodeToast('Onboarding prompt copied', 'success');
+  }
 }
 
 function revokeAllNodes() {
@@ -642,6 +961,9 @@ async function pairNewNode() {
     const { code, expiresIn, installUrl } = await res.json();
     // Fallback in case server didn't return installUrl (older build)
     const curlUrl = installUrl || `${location.protocol}//${location.host}/nodes/install.sh`;
+    const serverUrl = curlUrl.replace(/\/nodes\/install\.sh(?:\?.*)?$/, '');
+    const installCmd = `curl -fsSL ${curlUrl} | sh -s -- --server ${serverUrl} --code ${code}`;
+    const repairCmd = `sudo oe repair ${code}`;
 
     // Show modal with the code
     const modal = document.createElement('div');
@@ -652,17 +974,31 @@ async function pairNewNode() {
         <div style="font-weight:700;font-size:15px;margin-bottom:12px">Pair New Node</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:16px;text-align:left">
           On the remote machine, run this one-line installer:<br>
-          <code style="display:block;background:var(--bg2);padding:8px 10px;border-radius:6px;margin-top:8px;font-size:11px;user-select:all;word-break:break-all;line-height:1.4">curl -sSL ${curlUrl} | bash</code>
-          <div style="margin-top:8px;font-size:11px">It will download Node.js, the agent, dependencies, and prompt for this pairing code.</div>
+          <code style="display:block;background:var(--bg2);padding:8px 10px;border-radius:6px;margin-top:8px;font-size:11px;user-select:all;word-break:break-all;line-height:1.4">${escHtml(installCmd)}</code>
+          <button class="cdraw-btn" style="margin-top:8px;font-size:11px;padding:5px 10px" data-copy-text="${escHtml(installCmd).replace(/"/g, '&quot;')}">
+            <i data-lucide="copy" style="width:12px;height:12px;margin-right:4px"></i> Copy Installer
+          </button>
+          <div style="margin-top:8px;font-size:11px">It will download Node.js, install the agent, pair it, and start the service without extra prompts.</div>
         </div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Enter this pairing code when prompted:</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Pairing code for manual setup or repair:</div>
         <div class="node-pair-code">${code}</div>
+        <code style="display:block;background:var(--bg2);padding:8px 10px;border-radius:6px;margin-top:10px;font-size:11px;user-select:all;word-break:break-all;line-height:1.4">${escHtml(repairCmd)}</code>
         <div style="font-size:11px;color:var(--muted);margin-top:12px">Expires in ${Math.floor(expiresIn / 60)} minutes</div>
         <button class="cdraw-btn" style="margin-top:16px;width:100%" data-action="_nodePairModalCloseInner">Close</button>
       </div>
     `;
     document.body.appendChild(modal);
+    const copyBtn = modal.querySelector('[data-copy-text]');
+    copyBtn?.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(copyBtn.dataset.copyText || installCmd);
+        showNodeToast('Installer copied', 'success');
+      } catch {
+        showNodeToast('Copy failed', 'error');
+      }
+    });
     requestAnimationFrame(() => modal.classList.add('show'));
+    lucide.createIcons();
   } catch (e) {
     alert('Failed to generate pairing code: ' + e.message);
   }

@@ -22,9 +22,18 @@ import {
 import { requireAuth, readBody, getUser, getSessionUserId, getAuthToken, clearUserNodeSessions } from './_helpers.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import { getNodeProfilesSummary } from '../lib/node-profile-summary.mjs';
+import { ensureNodeSystemProfile } from '../lib/node-system-profile.mjs';
+import { loadProfile, setTrustState } from '../lib/service-profile.mjs';
+import { verifyProfileReadonly } from '../lib/capability-dispatcher.mjs';
+import { makeNodeExecFn } from '../lib/node-exec-wrapper.mjs';
+import {
+  registerProfileHealthWatchers,
+  unregisterProfileHealthWatchers,
+} from '../scheduler/health-monitor.mjs';
 import { handlePairingRoutes } from './nodes/pairing.mjs';
 import { initNodeWss, getNodeWss } from './nodes/websocket.mjs';
 import { initTerminalWss, getTerminalWss, handleTerminalPage, handleTerminalTicket } from './nodes/terminal.mjs';
+import nodesSkill from '../skills/nodes/execute.mjs';
 
 export { initNodeWss, getNodeWss, initTerminalWss, getTerminalWss };
 
@@ -192,6 +201,130 @@ export async function handle(req, res) {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ pushed: true, nodeId }));
+    return true;
+  }
+
+  // POST /api/nodes/:nodeId/profile/:serviceId/onboard
+  // Approves an existing profile after verifying read-only diagnostics.
+  // target=reviewed starts monitoring + low-risk auto-fixes; target=proven is
+  // the explicit second step for medium-risk auto-fixes.
+  const profileOnboardMatch = p.match(/^\/api\/nodes\/([^/]+)\/profile\/([^/]+)\/onboard$/);
+  const legacySystemOnboardMatch = p.match(/^\/api\/nodes\/([^/]+)\/system-profile\/onboard$/);
+  if ((profileOnboardMatch || legacySystemOnboardMatch) && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeId = decodeURIComponent((profileOnboardMatch || legacySystemOnboardMatch)[1]);
+    const serviceId = profileOnboardMatch ? decodeURIComponent(profileOnboardMatch[2]) : 'system';
+    const node = getNode(nodeId, userId);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Node not found' }));
+      return true;
+    }
+
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return true;
+    }
+
+    const target = body.target === 'proven' ? 'proven' : 'reviewed';
+    const ensured = serviceId === 'system'
+      ? ensureNodeSystemProfile(userId, nodeId, { hostname: node.hostname, platform: node.platform })
+      : null;
+    let profile = loadProfile(userId, nodeId, serviceId);
+    if (!profile) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: ensured?.reason || `No profile exists for "${serviceId}" on this node yet.` }));
+      return true;
+    }
+
+    if (target === 'proven' && profile.trust_state !== 'reviewed' && profile.trust_state !== 'proven') {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Approve ${serviceId === 'system' ? 'Host health' : serviceId} before enabling Auto-fix.` }));
+      return true;
+    }
+
+    let verification = null;
+    if (target === 'reviewed') {
+      try {
+        verification = await verifyProfileReadonly({
+          userId,
+          nodeId,
+          serviceId,
+          ctx: { execFn: makeNodeExecFn(userId, nodeId) },
+        });
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Verification failed: ${e.message}` }));
+        return true;
+      }
+      if (verification.failed > 0 || verification.tested === 0) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Profile verification did not pass. Fix the failed diagnostic before approving.',
+          verification,
+          profiles: getNodeProfilesSummary(userId, nodeId, node.hostname),
+        }));
+        return true;
+      }
+    }
+
+    try {
+      profile = setTrustState(userId, nodeId, serviceId, target, userId);
+      unregisterProfileHealthWatchers(userId, nodeId, serviceId);
+      let watcher = null;
+      if ((profile.health_signals || []).length > 0) {
+        watcher = registerProfileHealthWatchers(userId, nodeId, serviceId, {
+          agentId: `${userId}_coordinator`,
+        });
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        target,
+        verification,
+        watcher,
+        profiles: getNodeProfilesSummary(userId, nodeId, node.hostname),
+      }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+
+  // POST /api/nodes/:nodeId/detect-services — probe node and return the same
+  // human-readable summary the nodes skill uses. The UI uses this as the first
+  // step of node onboarding before handing profile creation to the agent.
+  const detectServicesMatch = p.match(/^\/api\/nodes\/([^/]+)\/detect-services$/);
+  if (detectServicesMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeId = decodeURIComponent(detectServicesMatch[1]);
+    const node = getNode(nodeId, userId);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Node not found' }));
+      return true;
+    }
+    try {
+      const chunks = [];
+      for await (const ev of nodesSkill('node_detect_services', { node_id: nodeId }, userId, null, {})) {
+        if (ev?.text) chunks.push(ev.text);
+      }
+      const text = chunks.join('\n\n') || 'No service detection output.';
+      const detected = [...text.matchAll(/^- \*\*([^*]+)\*\*/gm)].map(m => m[1]);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ text, detected, profiles: getNodeProfilesSummary(userId, nodeId, node.hostname) }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return true;
   }
 
