@@ -313,7 +313,12 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
       toolsUsed.push({ name: event.name, text: event.text || '', args: _lastCallArgsByName[event.name] ?? null });
       delete _lastCallArgsByName[event.name];
     }
-    if (!(suppressText && (event.type === 'token' || event.type === 'replace'))) {
+    const isVisibleText = event.type === 'token' || event.type === 'replace';
+    // Auto-backgrounded tools use a task chip plus completion report as the
+    // visible surface. The provider may still synthesize a stale "I'll check..."
+    // answer after seeing the synthetic background result; suppress those
+    // tokens so the completed task report remains the final user-facing update.
+    if (!(isVisibleText && (suppressText || hideTurn))) {
       yield event;
     }
     if (event.type === 'error') { errored = true; break; }
