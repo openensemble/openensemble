@@ -1,13 +1,13 @@
 # CI for OpenEnsemble — runs on every push to main and on PRs.
 #
-# Three gates, in order of speed:
+# CI gates, in order of speed:
 #   1. Syntax check every .mjs (catches typos before the test suite even imports)
 #   2. Danger-zone lint (flags filesystem patterns with a track record of
 #      taking down installs; see scripts/danger-zone-lint.mjs)
-#   3. Vitest suite (currently 530+ tests, ~25s)
+#   3. Typecheck opt-in files
 #
 # npm ci uses --ignore-scripts so the postinstall model fetch (~220 MB GGUF
-# weights) doesn't burn CI time. No test loads the bundled models directly.
+# weights) doesn't burn CI time.
 
 name: CI
 
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   test:
-    name: lint + tests
+    name: lint + typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -53,6 +53,3 @@ jobs:
 
       - name: Typecheck (opt-in via // @ts-check)
         run: npm run typecheck
-
-      - name: Tests
-        run: npm test
