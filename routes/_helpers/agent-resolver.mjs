@@ -60,11 +60,13 @@ export function getUserEnabledSkills(userId) {
     const defaults = getDefaultRoles();
     const missing = defaults.filter(s => !user.skills.includes(s));
     if (missing.length) {
-      user.skills.push(...missing);
+      // Persist via modifyUser so profile secrets get RE-ENCRYPTED on write.
+      // The old path wrote the decrypted `user` object straight to disk, which
+      // re-saved telegram.botToken etc. in PLAINTEXT — defeating encryption-at-rest.
       try {
-        const profilePath = path.join(USERS_DIR, userId, 'profile.json');
-        fs.writeFileSync(profilePath, JSON.stringify(user, null, 2));
-      } catch {}
+        modifyUser(userId, u => { u.skills = [...new Set([...(u.skills || []), ...missing])]; });
+      } catch { /* best-effort backfill */ }
+      user.skills.push(...missing);   // reflect in the object returned this call
     }
     return user.skills;
   } catch (e) { console.warn('[roles] Failed to resolve user roles:', e.message); return getDefaultRoles(); }

@@ -161,6 +161,24 @@ function safePath(base, userPath) {
   if (!resolved.startsWith(base + path.sep) && resolved !== base) {
     throw new Error(`Path "${userPath}" is outside the allowed directory.`);
   }
+  // Symlink-escape guard: the lexical check above is fooled by a project-local
+  // symlink pointing outside the workspace — readFile/writeFile/unlink would
+  // follow it out of the sandbox. Walk up to the deepest EXISTING component,
+  // resolve symlinks, and require the real location to stay under the real base
+  // before any I/O. (Don't blanket-reject symlinks — that'd break node_modules.)
+  const realBase = realpathSync(base);
+  let probe = resolved;
+  while (probe !== base && !existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  if (existsSync(probe)) {
+    const real = realpathSync(probe);
+    if (real !== realBase && !real.startsWith(realBase + path.sep)) {
+      throw new Error(`Path "${userPath}" resolves outside the allowed directory (symlink).`);
+    }
+  }
   return resolved;
 }
 

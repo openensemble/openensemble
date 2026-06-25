@@ -458,15 +458,7 @@ export function pushWatcherStatus(userId, watcherId, text, extraState = null) {
     record.lastStatusText = text;
     record.lastChangeAt = Date.now();
     pushHistory(record, { text, ts: Date.now() });
-    _sendStatusFn?.(userId, {
-      type: 'status', agent: record.agentId, watcherId: record.id,
-      kind: record.kind, label: record.label, text, ts: Date.now(),
-      // Phase-14b: surface awaiting_input + pending_question so the chip
-      // UI can render an inline reply box. task_proxy-only fields; other
-      // watcher kinds leave these undefined.
-      awaiting_input: record.state?.awaiting_input || false,
-      pending_question: record.state?.pending_question || null,
-    });
+    _sendStatusFn?.(userId, watcherStatusPayload(record, text));
   }
   persistUser(userId);
   return true;
@@ -840,6 +832,23 @@ function pushHistory(record, entry) {
   }
 }
 
+function watcherStatusPayload(record, text, extra = {}) {
+  return {
+    type: 'status',
+    agent: record.agentId,
+    watcherId: record.id,
+    kind: record.kind,
+    label: record.label,
+    text,
+    ts: Date.now(),
+    state: record.state || {},
+    recentHistory: Array.isArray(record.history) ? record.history.slice(-5) : [],
+    awaiting_input: record.state?.awaiting_input || false,
+    pending_question: record.state?.pending_question || null,
+    ...extra,
+  };
+}
+
 function finalizeWatcher(record, status, finalText) {
   const data = _byUser.get(record.userId);
   if (!data) return;
@@ -863,17 +872,10 @@ function finalizeWatcher(record, status, finalText) {
   data.recent = data.recent.slice(0, 20);
   persistUser(record.userId);
   if (_sendStatusFn && finalText) {
-    _sendStatusFn(record.userId, {
-      type: 'status',
-      agent: record.agentId,
-      watcherId: record.id,
-      kind: record.kind,
-      label: record.label,
-      text: finalText,
-      ts: Date.now(),
+    _sendStatusFn(record.userId, watcherStatusPayload(record, finalText, {
       final: true,
       finalStatus: status,
-    });
+    }));
   }
   // Only fire the chained action on a successful predicate hit. Errors,
   // expiries, and user-cancellations should not auto-run an agent — that

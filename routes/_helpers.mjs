@@ -318,6 +318,21 @@ export function getUser(id) {
 }
 /** @param {string|null|undefined} id @returns {'owner'|'admin'|'user'|'child'} */
 export function getUserRole(id) { return getUser(id)?.role ?? 'user'; }
+
+/**
+ * Strip secrets before sending a user object to the browser. SINGLE chokepoint —
+ * any secret added to the profile MUST be masked HERE. getUser()/loadUsers()
+ * return profiles with secrets decrypted for runtime use (telegram bot token /
+ * webhook secret, password/pin hashes); never echo those to JS, or an XSS bug
+ * elsewhere could exfiltrate the live token. chatId + "is it configured" are safe.
+ */
+export function sanitizeUserForWire(user) {
+  if (!user || typeof user !== 'object') return user;
+  const { passwordHash, pinHash, telegram, ...rest } = user;
+  const safe = { ...rest, hasPin: !!pinHash };
+  if (telegram) safe.telegram = { configured: !!telegram.botToken, chatId: telegram.chatId ?? null };
+  return safe;
+}
 /** @param {string} userId @returns {string|null} */
 export function getUserCoordinatorAgentId(userId) {
   return getRoleAssignments(userId)['coordinator'] ?? null;

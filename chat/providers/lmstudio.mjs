@@ -9,7 +9,7 @@
 import { executeToolStreaming } from '../../roles.mjs';
 import { loadSession, getLmsResponseId, setLmsResponseId } from '../../sessions.mjs';
 import {
-  LMSTUDIO_NATIVE, LMSTUDIO_COMPAT, readAnthropicSSE,
+  getLmstudioNativeUrl, getLmstudioCompatUrl, lmstudioAuthHeaders, readAnthropicSSE,
   stripThinking, stripReasoningPreamble, getStripThinkingTags,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
@@ -38,9 +38,9 @@ export async function* streamLMStudio(agent, systemPrompt, userText, agentId, si
   if (agent.think === false) body.reasoning = 'off';
   if (prevId) body.previous_response_id = prevId;
 
-  const res = await fetch(LMSTUDIO_NATIVE, {
+  const res = await fetch(getLmstudioNativeUrl(), {
     method: 'POST', signal,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...lmstudioAuthHeaders() },
     body: JSON.stringify(body),
   });
 
@@ -149,16 +149,17 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     // Re-read tools per iteration so dynamic toolset mutations
     // (request_tools meta-tool) take effect on the next provider call.
     const lmTools = compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }));
-    // Force tool use on the first call so models like GLM don't skip tools and answer from history.
-    // Subsequent iterations (after a tool result) use 'auto' to allow a free-text final response.
-    const toolChoice = guard.count === 1 ? 'required' : 'auto';
+    // LM Studio models vary widely in tool-call support. Some emit pseudo-tool
+    // XML inside reasoning_content when forced. Let capable models call tools,
+    // but allow plain text for simple turns like "hello".
+    const toolChoice = 'auto';
     const body = { model: agent.model, messages: working, stream: true, tools: lmTools, tool_choice: toolChoice };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     if (agent.think === false) body.reasoning = 'off';
 
-    const res = await fetch(LMSTUDIO_COMPAT, {
+    const res = await fetch(getLmstudioCompatUrl(), {
       method: 'POST', signal,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...lmstudioAuthHeaders() },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -167,6 +168,7 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     }
 
     let textContent  = '';
+    let reasoningContent = '';
     const toolCalls  = new Map(); // index -> { id, name, argsJson }
     let tokenCount   = 0;
     const startedAt  = Date.now();
@@ -176,6 +178,9 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
       const choice = event.choices?.[0];
       if (!choice) continue;
       const delta = choice.delta ?? {};
+      if (delta.reasoning_content) {
+        reasoningContent += delta.reasoning_content;
+      }
       if (delta.content) {
         if (!firstTokenAt) firstTokenAt = Date.now();
         tokenCount++;
@@ -190,6 +195,15 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
         if (tc.function?.arguments) entry.argsJson += tc.function.arguments;
       }
       if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop') break;
+    }
+
+    // Some LM Studio-compatible models stream their entire response in
+    // reasoning_content and never emit content. Prefer normal content whenever
+    // it exists; fall back only for reasoning-only streams so those models do
+    // not produce blank chat bubbles.
+    if (!textContent.trim() && reasoningContent.trim()) {
+      textContent = reasoningContent;
+      yield { type: 'token', text: reasoningContent };
     }
 
     if (toolCalls.size > 0) {

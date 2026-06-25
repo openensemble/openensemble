@@ -204,6 +204,7 @@ async function fetchInboxForSort(userId, accountId, query, max) {
   const token = await gmailToken(userId, accountId);
   const ids = [];
   let pageToken = '';
+  let more = false; // true when matching messages remain beyond this batch (caller loops)
   while (ids.length < max) {
     const pageSize = Math.min(max - ids.length, 500);
     const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${pageSize}` + (pageToken ? `&pageToken=${pageToken}` : '');
@@ -211,8 +212,9 @@ async function fetchInboxForSort(userId, accountId, query, max) {
     if (!r.ok) break;
     const d = await r.json();
     for (const m of d.messages || []) ids.push(m.id);
-    if (!d.nextPageToken || ids.length >= max) break;
+    if (!d.nextPageToken) break;                   // whole query consumed — nothing left
     pageToken = d.nextPageToken;
+    if (ids.length >= max) { more = true; break; } // cap reached but more match the query
   }
   // Fetch metadata in parallel chunks of 10 — sequential one-at-a-time was ~150ms
   // each, so 100 emails took >15s and blew the tool's 10s budget (the call got
@@ -226,7 +228,7 @@ async function fetchInboxForSort(userId, accountId, query, max) {
     for (const m of metas) if (m) out.push(m);
     if (i + CHUNK < ids.length) await new Promise(r => setTimeout(r, 60)); // tiny gap between chunks
   }
-  return out;
+  return { emails: out, more };
 }
 
 // Learn (sender → label) from a just-applied batch label. Fire-and-forget: the
@@ -303,6 +305,8 @@ async function execGmail(name, args, userId, accountId) {
     }
     case 'email_inbox_stats':
       return spawnGmail(['inboxstats'], userId, accountId);
+    case 'email_count':
+      return spawnGmail(['count', args.query || 'in:inbox has:nouserlabels'], userId, accountId);
     case 'email_list_labels':
       return spawnGmail(['labels'], userId, accountId);
     case 'email_sort_local': {
@@ -311,7 +315,7 @@ async function execGmail(name, args, userId, accountId) {
       const query   = args.query || 'in:inbox';
       const archive = args.archive !== false; // default: archive (remove from inbox), matching a normal sort
       const apply   = args.apply !== false;   // default: apply; pass apply:false for a dry-run preview
-      const emails  = await fetchInboxForSort(userId, accountId, query, max);
+      const { emails, more } = await fetchInboxForSort(userId, accountId, query, max);
       if (!emails.length) return 'No emails found to sort.';
 
       // Partition: confident (trusted/pinned local mapping) vs needs-judgment.
@@ -361,10 +365,25 @@ async function execGmail(name, args, userId, accountId) {
         out += proposals.map((p, i) => `${i + 1}. [${p.e.id}] ${p.e.from} — ${p.e.subject} → ${fmtLabels(p)}`).join('\n') + '\n\n';
       }
       if (!unknown.length) {
-        out += 'Nothing left — every email matched a learned/pinned mapping.';
+        out += 'Nothing left in this batch — every email matched a learned/pinned mapping.';
       } else {
         out += `${unknown.length} email(s) need your judgment (no trusted local mapping yet). Decide a label for each and apply with email_batch_label — that teaches the local tier for next time:\n`;
         out += unknown.map((e, i) => `${i + 1}. [${e.id}] ${e.from} — ${e.subject}`).join('\n');
+      }
+      // Batch / continuation signal. email_sort_local handles ONE batch (up to
+      // `max`) per call to stay inside the inline tool budget — fetching metadata
+      // for the whole inbox at once would exceed ~10s and get auto-backgrounded.
+      // When more email matches the query beyond this batch, tell the caller to
+      // loop: after it files this batch (archiving the residual out of the inbox),
+      // the next call advances to the following ~`max`. That is how a large inbox
+      // drains across calls. Skip the loop hint on a dry run (apply:false) — nothing
+      // moved, so the same batch would just re-appear.
+      if (apply) {
+        out += more
+          ? `\n\n— MORE IN INBOX: processed a batch of ${emails.length}; more email matches "${query}" beyond it. After you label the above with email_batch_label (archiving them out of the inbox), call email_sort_local again with the same query to continue. Repeat until this line is replaced by "INBOX DRAINED".`
+          : `\n\n— INBOX DRAINED: this is the FINAL batch (${emails.length} email(s)). Label the one(s) above with email_batch_label like any other batch, then stop — no further email_sort_local calls needed for "${query}".`;
+      } else if (more) {
+        out += `\n\n(Preview shows the first ${emails.length}; more match "${query}". Apply to sort the whole inbox in batches.)`;
       }
       return out;
     }
@@ -410,6 +429,8 @@ async function execMicrosoft(name, args, userId, accountId) {
     case 'email_batch_label':
     case 'email_label_query':
       return 'Label management is only supported for Gmail accounts.';
+    case 'email_count':
+      return 'email_count (count of inbox mail with no user label) is Gmail-only — this account uses folders, not labels.';
     case 'email_purge_sender': {
       const query = (args.query && args.query.trim()) ? args.query.trim() : null;
       const sender = (args.sender && args.sender.trim()) ? args.sender.trim() : null;

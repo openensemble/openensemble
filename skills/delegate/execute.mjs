@@ -35,7 +35,118 @@ function _parseCallerSession(callerAgentId) {
   return { effectiveAgentId: callerAgentId, depth: 0 };
 }
 
+// ── Agent-owned background workers (manager/employee model) ──────────────────
+// spawn_worker / check_workers / stop_worker ride on this skill, so EVERY agent
+// gets them. A worker is a background clone of the spawning agent (same role +
+// tools), owned by that agent's STABLE id — so the owner can watch and report on
+// it from its own direct chat OR from an ephemeral delegation (the coordinator
+// asking "how's your work going"). Workers are LEAVES: they cannot hire workers.
+const MAX_WORKERS_PER_AGENT = 5;
+
+async function* _workerTool(name, args, userId, callerAgentId) {
+  const bg = await import('../../background-tasks.mjs');
+  const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+  // The owner is the STABLE agent behind whatever session is calling — strip the
+  // ephemeral/direct-chat wrapper so every incarnation resolves the same workers.
+  const { effectiveAgentId: ownerKey } = _parseCallerSession(callerAgentId);
+
+  // A worker posting its own milestone note ("Batch 3 done: 200 labeled, ~600
+  // left"). It finds its own task via the task_proxy ALS context that
+  // spawnWorker established around the run — no id threading needed.
+  if (name === 'report_progress') {
+    const note = args.note || args.text || args.message;
+    if (!note) { yield { type: 'result', text: 'Missing note — describe what just happened (e.g. "200 labeled, ~600 left").' }; return; }
+    let tc = null;
+    try { const m = await import('../../lib/task-proxy-context.mjs'); tc = m.currentTaskContext?.(); } catch { /* not in a worker */ }
+    if (tc?.taskId && bg.recordWorkerProgress(tc.taskId, note)) {
+      yield { type: 'result', text: `Progress recorded: ${String(note).slice(0, 100)}` };
+    } else {
+      yield { type: 'result', text: 'Noted, but you are not running as a background worker so there is nothing to attach this to.' };
+    }
+    return;
+  }
+
+  if (name === 'check_workers') {
+    const workers = bg.listWorkersForOwner(userId, ownerKey);
+    const recent = bg.listRecentWorkersForOwner(userId, ownerKey);
+    if (!workers.length && !recent.length) {
+      yield { type: 'result', text: 'You have no background workers — none running, and none finished recently.' };
+      return;
+    }
+    const ago = s => s < 90 ? `${s}s` : `${Math.round(s / 60)}m`;
+    const out = [];
+    if (workers.length) {
+      out.push(`Running (${workers.length}):`);
+      for (const w of workers) {
+        const head = w.stalled
+          ? `⚠ STALLED — no activity for ${ago(w.idleSec)} (was running ${w.currentTool || 'nothing'})`
+          : (w.currentTool ? `running ${w.currentTool}` : 'between steps');
+        out.push(`• ${w.name} [${w.taskId}] — ${head}; ${w.toolsUsed} tool calls, ${ago(w.elapsedSec)} elapsed. Job: ${w.summary}`);
+        const log = (w.progress || []).map(p =>
+          p.kind === 'note' ? `    • ${p.text}`
+          : p.kind === 'result' ? `    ↳ ${p.tool}: ${p.text}`
+          : `    → ${p.tool}`);
+        if (log.length) out.push(log.join('\n'));
+      }
+    }
+    if (recent.length) {
+      out.push(`Recently finished:`);
+      for (const r of recent.slice(0, 5)) {
+        const mark = r.outcome === 'done' ? '✓' : (r.outcome === 'stopped' ? '■' : '⚠');
+        const verb = r.outcome === 'done' ? 'finished' : (r.outcome === 'stopped' ? 'was stopped' : 'FAILED');
+        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls) — ${r.finalText || r.summary}`);
+      }
+    }
+    yield { type: 'result', text: out.join('\n') };
+    return;
+  }
+
+  if (name === 'stop_worker') {
+    const id = args.worker_id;
+    if (!id) { yield { type: 'result', text: 'Missing worker_id (get it from check_workers).' }; return; }
+    const r = bg.stopWorker(userId, id, ownerKey);
+    yield { type: 'result', text: r.ok ? `Stopping ${r.name} (${id}).` : `Couldn't stop ${id}: ${r.reason}.` };
+    return;
+  }
+
+  // name === 'spawn_worker' — leaf rule: a worker can't hire workers.
+  if (String(callerAgentId || '').startsWith('ephemeral_worker_')) {
+    yield { type: 'result', text: 'Workers are individual contributors and cannot hire their own workers. Do the job directly, then report back to whoever assigned it.' };
+    return;
+  }
+  const task = args.task;
+  if (!task) { yield { type: 'result', text: 'Missing task — describe the complete job for the worker.' }; return; }
+
+  const agents = getAgentsForUser(userId);
+  const ownerAgent = agents.find(a => a.id === ownerKey);
+  if (!ownerAgent) { yield { type: 'result', text: `Couldn't resolve your own agent record (${ownerKey}) to staff a worker.` }; return; }
+
+  const running = bg.listWorkersForOwner(userId, ownerKey).length;
+  if (running >= MAX_WORKERS_PER_AGENT) {
+    yield { type: 'result', text: `You already have ${running} workers running (max ${MAX_WORKERS_PER_AGENT}). Wait for one to finish or stop one with stop_worker before hiring another.` };
+    return;
+  }
+
+  const label = args.label || (task.length > 56 ? task.slice(0, 56) + '…' : task);
+  const workerId = `ephemeral_worker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
+  const workerAgent = { ...ownerAgent, id: workerId, ephemeral: true };
+  // No human is watching the worker's session — make it run to completion on its
+  // own and finish with a concise report.
+  const workerTask = `${task}\n\n[You are a background worker running detached from the chat. Work autonomously to completion — do NOT ask for confirmation or wait for approval; the user is not watching this session. Use your tools directly. When finished, reply with a short summary of what you did and anything that needs a human.]`;
+  const chipOwnerId = `${userId}_${ownerKey}`;   // owner's direct-chat session: chip + completion report land here
+
+  const tid = bg.spawnWorker({
+    workerAgent, task: workerTask, userId, chipOwnerId, ownerKey,
+    workerName: `${ownerAgent.name} worker`, emoji: ownerAgent.emoji || '🤖',
+  });
+  yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}. It's running now — I can check on it anytime with check_workers, and its report will land here when it's done.` };
+}
+
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null) {
+  if (name === 'spawn_worker' || name === 'check_workers' || name === 'stop_worker' || name === 'report_progress') {
+    yield* _workerTool(name, args, userId, callerAgentId);
+    return;
+  }
   if (name !== 'ask_agent') { yield { type: 'result', text: null }; return; }
 
   const { agent_id, task: rawTask, no_confirm = false, _parallel = false } = args;
@@ -161,6 +272,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   } catch (_) { /* best-effort; absent module = no caching, no breakage */ }
   const agentName   = agent.name  ?? agent_id;
   const agentEmoji  = agent.emoji ?? '🤖';
+  const taskSummary = (task || '').slice(0, 120);
 
   // Enrich system prompt with date context (mirrors server.mjs WS handler enrichment)
   // Without this, finance agents don't get date ranges and can't resolve "this month" etc.
@@ -232,12 +344,54 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     return;
   }
 
+  let syncWatcherId = null;
+  let syncWatcherTaskId = null;
+  let syncWatchers = null;
+  try {
+    syncWatchers = await import('../../scheduler/watchers.mjs');
+    syncWatcherTaskId = `deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    syncWatcherId = syncWatchers.registerWatcher({
+      userId,
+      agentId: callerAgentId ?? `${userId}_${callerEffectiveId || agent_id}`,
+      kind: 'task_proxy',
+      label: `${agentEmoji} ${agentName}: ${taskSummary}`,
+      state: {
+        taskId: syncWatcherTaskId,
+        status: 'running',
+        targetAgentId: scopedAgent.id,
+        targetAgentName: agentName,
+        targetAgentEmoji: agentEmoji,
+        summary: taskSummary,
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
+        phase: 'queued',
+        toolsUsed: 0,
+        currentTool: null,
+        canCancel: false,
+      },
+      cadenceSec: 30,
+      expiresAt: null,
+    });
+    syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Delegating to ${agentName}: ${taskSummary}`, {
+      phase: 'queued',
+      canCancel: false,
+    });
+  } catch (e) {
+    console.warn('[delegate] sync task_proxy watcher registration failed:', e.message);
+  }
+
   // Queue behind any in-flight run on the target agent. If busy, surface a
   // visible indicator so the user sees we're waiting instead of silently hanging.
   const scopedAgentId = `${userId}_${agent_id}`;
   let waitedMs = 0;
   if (isAgentBusy(scopedAgentId)) {
     const waitStart = Date.now();
+    if (syncWatcherId) {
+      syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Waiting for ${agentName} to finish a prior task`, {
+        phase: 'queued',
+        currentTool: 'waiting_for_agent',
+      });
+    }
     yield {
       type: 'tool_call',
       name: 'waiting_for_agent',
@@ -258,6 +412,12 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     clearTimeout(_to);
     waitedMs = Date.now() - waitStart;
     if (timedOut) {
+      if (syncWatcherId) {
+        syncWatchers.completeWatcher(userId, syncWatcherId, {
+          status: 'error',
+          finalText: `⚠ ${agentName} stayed busy after ${Math.round(waitedMs / 1000)}s`,
+        });
+      }
       yield {
         type: 'tool_result',
         name: 'waiting_for_agent',
@@ -276,6 +436,12 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       text: `${agentName} finished prior task after ${Math.round(waitedMs / 1000)}s — starting now.`,
       preview: `${agentName} ready (waited ${Math.round(waitedMs / 1000)}s)`,
     };
+    if (syncWatcherId) {
+      syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} is ready; starting now`, {
+        phase: 'running',
+        currentTool: null,
+      });
+    }
   }
 
   // Claim the busy slot so any subsequent delegate calls (or WS messages) see us.
@@ -305,11 +471,46 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // parallel delegation (email + calendar + weather) shows three distinct
   // sub-streams instead of three identical "ask_agent" bubbles.
   const streamLabel = `${agentEmoji} ${agentName}`.trim();
+  let syncToolsUsed = 0;
+  let syncCurrentTool = null;
   try {
+    if (syncWatcherId) {
+      syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} started working`, {
+        phase: 'running',
+        currentTool: null,
+      });
+    }
     for await (const event of streamChat(scopedAgent, task, null, null, userId, null, combinedNote)) {
       if (event.type === 'token') {
         fullText += event.text;
         yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: streamLabel };
+      }
+      if (event.type === 'tool_call' && event.name && syncWatcherId) {
+        syncToolsUsed++;
+        syncCurrentTool = event.name;
+        syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} is using ${event.name}`, {
+          phase: 'tool',
+          currentTool: event.name,
+          toolsUsed: syncToolsUsed,
+        });
+      }
+      if (event.type === 'tool_progress' && event.text && syncWatcherId) {
+        syncWatchers.pushWatcherStatus(userId, syncWatcherId, String(event.text).slice(-1200), {
+          phase: 'streaming',
+          currentTool: syncCurrentTool,
+          toolsUsed: syncToolsUsed,
+        });
+      }
+      if (event.type === 'tool_result' && event.name && syncWatcherId) {
+        const preview = String(event.text || '').split('\n').find(l => l.trim()) || '';
+        syncCurrentTool = null;
+        if (preview) {
+          syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${event.name}: ${preview.slice(0, 240)}`, {
+            phase: 'result',
+            currentTool: null,
+            toolsUsed: syncToolsUsed,
+          });
+        }
       }
       if (event.type === 'error') { errText = `Error from ${agent_id}: ${event.message}`; break; }
     }
@@ -317,10 +518,32 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     slot.release();
   }
 
-  if (errText) { yield { type: 'result', text: errText }; return; }
+  if (errText) {
+    if (syncWatcherId) {
+      syncWatchers.completeWatcher(userId, syncWatcherId, {
+        status: 'error',
+        finalText: `⚠ ${agentName} failed: ${errText}`,
+      });
+    }
+    yield { type: 'result', text: errText };
+    return;
+  }
   const waitNote = waitedMs > 1000
     ? `[Note: waited ${Math.round(waitedMs / 1000)}s for ${agentName} to finish a prior task before delegating.]\n\n`
     : '';
+  if (syncWatcherId) {
+    syncWatchers.pushWatcherStatus(userId, syncWatcherId, `✓ ${agentName} replied`, {
+      status: 'done',
+      phase: 'done',
+      currentTool: null,
+      canCancel: false,
+      finalReportPreview: fullText.trim().slice(0, 800),
+    });
+    syncWatchers.completeWatcher(userId, syncWatcherId, {
+      status: 'done',
+      finalText: `✓ ${agentName} replied`,
+    });
+  }
   yield { type: 'result', text: waitNote + (fullText.trim() || `No response from ${agent_id}.`) };
 }
 

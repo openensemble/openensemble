@@ -35,6 +35,64 @@
           "required": ["agent_id", "task"]
         }
       }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "spawn_worker",
+        "description": "Hire a background WORKER that YOU own to do a long-running or repetitive job — draining/sorting an entire inbox, deep research across many sources, a multi-step sweep, anything that would otherwise make you loop many tool calls in the chat. The worker is a copy of YOU (your role and tools) running detached: it does the job on its own without blocking the conversation, and surfaces a live progress chip. Returns IMMEDIATELY with a worker id. Use this INSTEAD of grinding through a long loop yourself turn-by-turn. You can check on it anytime with check_workers, stop it with stop_worker, and its final report lands in your chat when it's done. NOTE: workers are individual contributors — a worker cannot hire its own workers.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "task": {
+              "type": "string",
+              "description": "The complete, self-contained job for the worker. It runs autonomously with no chance to ask you follow-ups, so include everything it needs and state exactly what 'done' looks like (e.g. 'Sort every email matching in:inbox has:nouserlabels into my existing labels, keep them in the inbox, repeat until INBOX DRAINED')."
+            },
+            "label": {
+              "type": "string",
+              "description": "Optional short label for the progress chip (e.g. 'Sort whole inbox')."
+            }
+          },
+          "required": ["task"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "check_workers",
+        "description": "See the live status of the background workers YOU own — what each one is doing right now, how many tool calls it has made, how long it has run. This is how you answer 'how's it going' about work you handed to a worker, whether the user asks you directly or your coordinator asks you on the user's behalf. Reports only YOUR workers.",
+        "parameters": { "type": "object", "properties": {}, "required": [] }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "stop_worker",
+        "description": "Stop / cancel one of your background workers by its id (from check_workers or the spawn_worker result).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "worker_id": { "type": "string", "description": "The worker id to stop." }
+          },
+          "required": ["worker_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "report_progress",
+        "description": "ONLY meaningful when you are running as a background worker: post a short progress milestone so your manager (and the user) can see how the job is going in REAL TIME — e.g. 'Batch 3 done: 200 labeled, ~600 remaining' or 'Node update: step 3/7 (installing packages)'. Call it after each meaningful step or batch with a CONCRETE number, not vague 'still working'. This is how the user gets feedback while you run.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "note": { "type": "string", "description": "Short human-readable progress line, ideally with a number (counts, step x/y, percent)." }
+          },
+          "required": ["note"]
+        }
+      }
     }
-  ]
+  ],
+  "systemPromptAddition": "## Background workers (you're a manager)\n\nFor any job that would otherwise make you run the SAME loop many times in the chat — sorting an entire inbox, researching across many sources, sweeping a large list — do NOT grind through it turn-by-turn. Hire a background **worker** you own with `spawn_worker`: it's a copy of you that runs the job detached, shows a live progress chip, and reports back here when it's done. `spawn_worker` returns immediately, so tell the user you've started it and that you'll watch it — don't go silent.\n\n- **Watch & report:** when the user (or your coordinator) asks \"how's it going / what's the status,\" call `check_workers` and report what your workers are actually doing right now. Answer from live status, never from memory.\n- **Stop:** cancel a worker with `stop_worker` if it's no longer wanted.\n- Hand a worker a COMPLETE, self-contained task (it can't ask you follow-ups) and state exactly what 'done' looks like.\n- You can run up to a few workers at once. Workers themselves are individual contributors — they can't hire their own workers.\n- **Report real status, never guess.** `check_workers` gives you live detail: each worker's current tool, a recent progress log (with the actual numbers its tools returned), whether it's STALLED (no activity), and a terminal outcome for anything that finished or FAILED. When asked 'how's it going', call it and report what it actually says — if a worker failed or stalled, say so plainly. NEVER tell the user something is 'still running' without confirming via check_workers; a fabricated status is worse than 'let me check'.\n- **When you ARE the worker:** call `report_progress` after each batch/step with a concrete number ('200 labeled, ~600 left') so your manager can see progress instead of a black box."
 }

@@ -1182,6 +1182,8 @@ export async function handle(req, res) {
     const ollamaKey  = cfg.cortex?.ollamaApiKey ?? null;
     const ollamaHeaders = ollamaKey ? { Authorization: `Bearer ${ollamaKey}` } : {};
     const lmsBase    = cfg.cortex?.lmstudioUrl ?? LMS_DEFAULT;
+    const lmsKey     = cfg.cortex?.lmstudioApiKey ?? cfg.lmstudioApiKey ?? null;
+    const lmsHeaders = lmsKey ? { Authorization: `Bearer ${lmsKey}` } : {};
 
     // Always probe localhost for local Ollama, even when cortex.ollamaUrl points
     // at the cloud — so users running both see both sets. Skip localhost if the
@@ -1213,20 +1215,70 @@ export async function handle(req, res) {
     // Localhost probe (only when configured URL wasn't already localhost)
     if (probeLocal) ollamaFetches.push(fetchOllamaTags(LOCAL, {}, false));
 
+    const normalizeLmstudioCapabilities = (caps) => {
+      if (Array.isArray(caps)) return caps;
+      if (!caps || typeof caps !== 'object') return [];
+      const out = [];
+      if (caps.vision === true) out.push('vision');
+      if (caps.trained_for_tool_use === true || caps.tool_use === true) out.push('tool_use');
+      if (caps.reasoning) out.push('reasoning');
+      return out;
+    };
+
+    const fetchLmstudioModels = async () => {
+      const nativeUrl = `${lmsBase}/api/v1/models`;
+      const compatUrl = `${lmsBase}/v1/models`;
+      const attempts = [
+        { url: nativeUrl, headers: lmsHeaders, shape: 'native' },
+        ...(Object.keys(lmsHeaders).length ? [{ url: nativeUrl, headers: {}, shape: 'native' }] : []),
+        { url: compatUrl, headers: lmsHeaders, shape: 'compat' },
+        ...(Object.keys(lmsHeaders).length ? [{ url: compatUrl, headers: {}, shape: 'compat' }] : []),
+      ];
+      let lastErr = null;
+      for (const a of attempts) {
+        try {
+          const r = await fetch(a.url, { headers: a.headers, signal: AbortSignal.timeout(3000) });
+          if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+          const d = await r.json();
+          if (a.shape === 'native') {
+            return (d.models ?? [])
+              .filter(m => m.type === 'llm' || !m.type)
+              .map(m => {
+                const caps = normalizeLmstudioCapabilities(m.capabilities);
+                const id = m.key ?? m.id;
+                return {
+                  name:        id,
+                  provider:    'lmstudio',
+                  displayName: m.display_name ?? id,
+                  contextLen:  m.max_context_length,
+                  loaded:      (m.loaded_instances?.length ?? 0) > 0,
+                  capabilities: caps,
+                  supportsVision: supportsVision('lmstudio', id, { capabilities: caps }),
+                };
+              })
+              .filter(m => m.name);
+          }
+          return (d.data ?? [])
+            .filter(m => m.id && !String(m.id).startsWith('text-embedding-'))
+            .map(m => ({
+              name:        m.id,
+              provider:    'lmstudio',
+              displayName: m.id,
+              contextLen:  null,
+              loaded:      false,
+              capabilities: [],
+              supportsVision: supportsVision('lmstudio', m.id),
+            }));
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (lastErr) console.warn('[models] LM Studio model listing failed:', lastErr.message);
+      return [];
+    };
+
     const [lmRes, ...ollamaResults] = await Promise.allSettled([
-      fetch(`${lmsBase}/api/v1/models`, { signal: AbortSignal.timeout(3000) }).then(r => r.json())
-        .then(d => (d.models ?? [])
-          .filter(m => m.type === 'llm' || !m.type)
-          .map(m => ({
-            name:        m.key ?? m.id,
-            provider:    'lmstudio',
-            displayName: m.display_name ?? m.key,
-            contextLen:  m.max_context_length,
-            loaded:      (m.loaded_instances?.length ?? 0) > 0,
-            capabilities: Array.isArray(m.capabilities) ? m.capabilities : [],
-            supportsVision: supportsVision('lmstudio', m.key ?? m.id, { capabilities: m.capabilities }),
-          }))
-        ),
+      fetchLmstudioModels(),
       ...ollamaFetches,
     ]);
 

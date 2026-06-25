@@ -283,9 +283,19 @@ export async function installIntoLmstudio() {
 }
 
 /** Status of all three memory-lane tiers. Used by the UI to render toggles. */
+async function _probeLocalServer(port) {
+  if (!port) return false;
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) });
+    return r.ok;
+  } catch { return false; }
+}
+
 export async function getReasonRuntimeStatus() {
   const cfg = loadConfig();
   const modelPath = getBuiltinReasonModelPath();
+  const cortexInt = cfg?.integrations?.cortex_llama ?? {};
+  const cortexPort = cortexInt.port ?? 5157;
   return {
     current: cfg?.cortex?.reasonProvider ?? 'auto',
     builtin: {
@@ -306,6 +316,12 @@ export async function getReasonRuntimeStatus() {
       installed: isLmstudioInstalled(),
       modelRoot: lmstudioModelRoot(),
       modelId: `${LMSTUDIO_PUBLISHER}/${LMSTUDIO_MODEL_DIR}`,
+    },
+    llamacpp: {
+      installed: !!cortexInt.installed,
+      gpuId: Number.isInteger(cortexInt.gpuId) ? cortexInt.gpuId : null,
+      port: cortexPort,
+      running: cortexInt.installed ? await _probeLocalServer(cortexPort) : false,
     },
   };
 }

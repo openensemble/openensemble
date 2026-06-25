@@ -10,6 +10,33 @@ const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
 const VIDEO_EXTS  = new Set(['.mp4', '.webm', '.mov']);
 const AUDIO_EXTS  = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga', '.m4a', '.aac', '.opus']);
 
+/**
+ * Parse an HTTP Range header into a single satisfiable { start, end }, or null
+ * if malformed/unsatisfiable (caller should respond 416). Guards against the
+ * NaN headers / broken streams that `bytes=abc`, `bytes=999999-1`, or oversized
+ * starts would otherwise produce.
+ */
+function parseByteRange(rangeHeader, total) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(rangeHeader).trim());
+  if (!m) return null;
+  const [, s, e] = m;
+  if (s === '' && e === '') return null;
+  let start, end;
+  if (s === '') {                              // suffix range: last N bytes
+    const n = parseInt(e, 10);
+    if (!Number.isInteger(n) || n <= 0) return null;
+    start = Math.max(0, total - n);
+    end = total - 1;
+  } else {
+    start = parseInt(s, 10);
+    end = e === '' ? total - 1 : parseInt(e, 10);
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+    if (end >= total) end = total - 1;         // clamp to EOF
+  }
+  if (start < 0 || end < start || start >= total) return null;   // unsatisfiable
+  return { start, end };
+}
+
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
 function loadSharing() {
   try { return JSON.parse(fs.readFileSync(SHARING_PATH, 'utf8')); } catch { return []; }
@@ -244,9 +271,13 @@ export async function handle(req, res) {
     const total = stat.size;
     const rangeHeader = req.headers['range'];
     if (rangeHeader) {
-      const [, startStr, endStr] = rangeHeader.match(/bytes=(\d+)-(\d*)/) || [];
-      const start = parseInt(startStr, 10);
-      const end = endStr ? parseInt(endStr, 10) : total - 1;
+      const range = parseByteRange(rangeHeader, total);
+      if (!range) {
+        res.writeHead(416, { 'Content-Type': mime, 'Content-Range': `bytes */${total}` });
+        res.end();
+        return true;
+      }
+      const { start, end } = range;
       const chunkSize = end - start + 1;
       res.writeHead(206, {
         'Content-Type': mime,
@@ -292,9 +323,13 @@ export async function handle(req, res) {
     const rangeHeader = req.headers['range'];
 
     if (rangeHeader) {
-      const [, startStr, endStr] = rangeHeader.match(/bytes=(\d+)-(\d*)/) || [];
-      const start = parseInt(startStr, 10);
-      const end = endStr ? parseInt(endStr, 10) : total - 1;
+      const range = parseByteRange(rangeHeader, total);
+      if (!range) {
+        res.writeHead(416, { 'Content-Type': mime, 'Content-Range': `bytes */${total}` });
+        res.end();
+        return true;
+      }
+      const { start, end } = range;
       const chunkSize = end - start + 1;
       res.writeHead(206, {
         'Content-Type': mime,

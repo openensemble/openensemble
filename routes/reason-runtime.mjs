@@ -108,7 +108,7 @@ export async function handle(req, res) {
     sendJSON(res, 404, { error: 'Not found' });
     return true;
   } catch (e) {
-    safeError(res, 500, e.message);
+    safeError(res, e, 500);
     return true;
   }
 }

@@ -26,6 +26,28 @@ export function getOllamaKey() {
   return cfg?.cortex?.ollamaApiKey ?? cfg?.ollamaApiKey ?? null;
 }
 
+// ── LM Studio — configurable like Ollama ─────────────────────────────────────
+// The LMSTUDIO_* constants above are just localhost defaults. Real listing +
+// inference resolve the base from cortex.lmstudioUrl so LM Studio can run on
+// ANOTHER host (IP/domain), and send a Bearer key if the server requires one
+// (type a random key when it doesn't — the server ignores it).
+const LMSTUDIO_BASE_DEFAULT = 'http://127.0.0.1:1234';
+export function getLmstudioBase() {
+  const cfg = loadConfig();
+  const base = cfg?.cortex?.lmstudioUrl ?? cfg?.lmstudioUrl ?? LMSTUDIO_BASE_DEFAULT;
+  return String(base).replace(/\/+$/, '');
+}
+export function getLmstudioNativeUrl() { return getLmstudioBase() + '/api/v1/chat'; }
+export function getLmstudioCompatUrl() { return getLmstudioBase() + '/v1/chat/completions'; }
+export function getLmstudioKey() {
+  const cfg = loadConfig();
+  return cfg?.cortex?.lmstudioApiKey ?? cfg?.lmstudioApiKey ?? null;
+}
+export function lmstudioAuthHeaders() {
+  const k = getLmstudioKey();
+  return k ? { Authorization: `Bearer ${k}` } : {};
+}
+
 // ── OpenAI-compatible providers ──────────────────────────────────────────────
 // Each provider exposes the same `/chat/completions` schema. We only need to
 // know the base URL and the config key name that stores the API key.

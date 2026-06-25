@@ -392,12 +392,12 @@ function handleServerMessage(msg) {
           || stripped === activeAgent
           || (`${_currentUser?.id}_${activeAgent}`) === msg.agent;
         if (matches) {
-          appendStatusBubble({ text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question }, msg.ts || Date.now());
+          appendStatusBubble({ text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question, state: msg.state, recentHistory: msg.recentHistory }, msg.ts || Date.now());
         }
       }
       if (msg.agent) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
-        const statusEntry = { role: 'status', status: { text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus }, content: `[Status: ${msg.text}]`, ts: msg.ts || Date.now() };
+        const statusEntry = { role: 'status', status: { text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question, state: msg.state, recentHistory: msg.recentHistory }, content: `[Status: ${msg.text}]`, ts: msg.ts || Date.now() };
         const arr = sessions[msg.agent];
         const existingIdx = msg.watcherId
           ? arr.findIndex(m => m.role === 'status' && m.status?.watcherId === msg.watcherId)
@@ -541,4 +541,3 @@ function handleServerMessage(msg) {
     }
   }
 }
-

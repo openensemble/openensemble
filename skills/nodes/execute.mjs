@@ -304,16 +304,23 @@ export async function* executeSkillTool(name, args, userId, agentId) {
           label: `🖥 ${friendly}`,
           state: {
             taskId: `nx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            status: 'running',
             targetAgentName: node.hostname || node_id,
             targetAgentEmoji: '🖥',
             command, node_id,
+            summary: friendly,
+            phase: 'running',
             startedAt: Date.now(),
             lastActivityAt: Date.now(),
+            canCancel: false,
           },
           cadenceSec: 30,
           expiresAt: null,
         });
-        pushWatcherStatus(userId, watcherId, `Started: ${cmdPreview}`);
+        pushWatcherStatus(userId, watcherId, `Started: ${cmdPreview}`, {
+          phase: 'running',
+          canCancel: false,
+        });
       } catch (e) {
         console.warn('[node_exec] background watcher register failed, falling through to sync:', e.message);
       }
@@ -333,7 +340,11 @@ export async function* executeSkillTool(name, args, userId, agentId) {
               else                     chunks.stdout += data;
               // Throttled status update — last 200 chars of stdout/stderr
               const tail = ((chunks.stdout + chunks.stderr).slice(-200)).replace(/\s+/g, ' ').trim();
-              if (tail) pushWatcherStatus(userId, watcherId, `running… ${tail}`);
+              if (tail) pushWatcherStatus(userId, watcherId, `running… ${tail}`, {
+                phase: 'streaming',
+                currentTool: 'node_exec',
+                canCancel: false,
+              });
             });
           } catch (e) {
             completeWatcher(userId, watcherId, {

@@ -1195,16 +1195,25 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               label: `⏵ ${name}`,
               state: {
                 taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                status: 'running',
                 targetAgentName: name,
                 targetAgentEmoji: '⏵',
                 tool: name,
+                phase: 'backgrounded',
+                summary: `${name} is still running`,
                 startedAt,
                 lastActivityAt: Date.now(),
+                canCancel: false,
               },
               cadenceSec: 30,
               expiresAt: null,
             });
             backgrounded = true;
+            watchersMod.pushWatcherStatus(userId, watcherId, `${name} is still running in the background`, {
+              phase: 'backgrounded',
+              currentTool: name,
+              canCancel: false,
+            });
             // Push the just-yielded value into the chip too
             if (value?.type === 'tool_progress' && value.text) {
               watchersMod.pushWatcherStatus(userId, watcherId, String(value.text).slice(-200));
@@ -1232,9 +1241,21 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   if (r.done) break;
                   const v = r.value;
                   if (v?.type === 'tool_progress' && v.text) {
-                    watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-200));
+                    watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-1200), {
+                      phase: 'streaming',
+                      currentTool: captured.name,
+                      canCancel: false,
+                    });
                   } else if (v?.type === 'result' && v.text) {
                     finalText = String(v.text);
+                    const preview = finalText.split('\n').find(l => l.trim()) || '';
+                    if (preview) {
+                      watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, `${captured.name}: ${preview.slice(0, 240)}`, {
+                        phase: 'result',
+                        currentTool: null,
+                        canCancel: false,
+                      });
+                    }
                   }
                 }
                 watchersMod.completeWatcher(captured.userId, captured.watcherId, {
@@ -1317,20 +1338,35 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           label: `⏵ ${name}`,
           state: {
             taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            status: 'running',
             targetAgentName: name,
             targetAgentEmoji: '⏵',
             tool: name,
+            phase: 'backgrounded',
+            summary: `${name} is still running`,
             startedAt: _toolStart,
             lastActivityAt: Date.now(),
+            canCancel: false,
           },
           cadenceSec: 30,
           expiresAt: null,
+        });
+        watchersMod.pushWatcherStatus(userId, wid, `${name} is still running in the background`, {
+          phase: 'backgrounded',
+          currentTool: name,
+          canCancel: false,
         });
         yield { type: 'result', text: `\`${name}\` is taking longer than 10s and is now running in the background (task ${wid}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
         yield { type: '__hide_turn', reason: 'bg_chip', taskId: wid };
 
         racePromise.then(async (val) => {
-          const text = String(val ?? '');
+          // Normalize structured tool results like the inline path does — otherwise
+          // a delayed { text, _images, _notify } result becomes the string
+          // "[object Object]" and its images/notifications are lost.
+          const structured = val && typeof val === 'object' && typeof val.text === 'string';
+          const text   = structured ? val.text : String(val ?? '');
+          const images = structured && Array.isArray(val._images) ? val._images : null;
+          const notify = structured && val._notify ? val._notify : null;
           watchersMod.completeWatcher(userId, wid, {
             status: 'done',
             finalText: `✓ ${name} done${text ? `: ${text.slice(-1200)}` : ''}`,
@@ -1345,6 +1381,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 agentName: name,
                 agentEmoji: '⏵',
                 content: `[${name} finished in background]\n${text.slice(0, 4000)}`,
+                ...(images ? { images } : {}),
                 ts: Date.now(),
               });
             } catch (_) { /* best-effort */ }
@@ -1357,6 +1394,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               agentName: name,
               agentEmoji: '⏵',
               content: text || `${name} completed.`,
+              ...(images ? { images } : {}),
+              ...(notify ? { notify } : {}),
               taskId: `autobg_${wid}`,
               ts: Date.now(),
             });

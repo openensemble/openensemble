@@ -291,9 +291,21 @@ export async function installIntoLmstudio() {
   }
 }
 
+// Probe a local llama.cpp GPU server's /health so the UI can show a real
+// running dot (and we can confirm the pinned-GPU server is actually up).
+async function _probeLocalServer(port) {
+  if (!port) return false;
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) });
+    return r.ok;
+  } catch { return false; }
+}
+
 export async function getPlanRuntimeStatus() {
   const cfg = loadConfig();
   const modelPath = getBuiltinPlanModelPath();
+  const planInt = cfg?.integrations?.plan_llama ?? {};
+  const planPort = planInt.port ?? 5156;
   // Lazy-import to avoid a circular dep at module load. plan-transfer is
   // imported by builtin-plan via routes/plan-runtime; importing the other
   // direction at top-level deadlocks the ESM evaluation.
@@ -330,6 +342,14 @@ export async function getPlanRuntimeStatus() {
       installed: isLmstudioInstalled(),
       modelRoot: lmstudioModelRoot(),
       modelId: `${LMSTUDIO_PUBLISHER}/${getLmstudioModelDir()}`,
+    },
+    // The local llama.cpp GPU server: which card it's pinned to + whether it's
+    // actually responding. Drives the panel's GPU dropdown selection + run dot.
+    llamacpp: {
+      installed: !!planInt.installed,
+      gpuId: Number.isInteger(planInt.gpuId) ? planInt.gpuId : null,
+      port: planPort,
+      running: planInt.installed ? await _probeLocalServer(planPort) : false,
     },
   };
 }

@@ -199,6 +199,59 @@ function appendImageBubble(image, ts = Date.now(), scroll = true) {
 // Update-in-place: each watcher gets ONE bubble that mutates as new statuses
 // arrive. Looked up by data-watcher-id. New watchers append a fresh bubble;
 // repeat updates for the same watcherId rewrite the existing one in place.
+function taskChipTime(ts) {
+  const d = new Date(ts || Date.now());
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+function taskChipPhase(status) {
+  const phase = status.state?.phase;
+  if (status.awaiting_input) return 'awaiting reply';
+  if (status.final && status.finalStatus === 'done') return 'done';
+  if (status.final && status.finalStatus === 'error') return 'error';
+  if (status.final && status.finalStatus === 'cancelled') return 'cancelled';
+  if (phase === 'cancelling') return 'cancelling';
+  if (phase === 'cancelled') return 'cancelled';
+  if (phase === 'queued') return 'queued';
+  if (phase === 'tool') return 'using tool';
+  if (phase === 'streaming') return 'streaming';
+  if (phase === 'result') return 'reviewing result';
+  if (phase === 'backgrounded') return 'background';
+  return status.final ? 'finished' : 'running';
+}
+
+function taskChipElapsed(startedAt, nowTs = Date.now()) {
+  const start = Number(startedAt);
+  if (!Number.isFinite(start) || start <= 0) return null;
+  const sec = Math.max(0, Math.round((nowTs - start) / 1000));
+  if (sec < 60) return `${sec}s elapsed`;
+  const min = Math.floor(sec / 60);
+  const rem = sec % 60;
+  if (min < 60) return rem ? `${min}m ${rem}s elapsed` : `${min}m elapsed`;
+  const hr = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${hr}h ${m}m elapsed` : `${hr}h elapsed`;
+}
+
+async function cancelTaskChip(watcherId, btn) {
+  if (!watcherId || !btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  try {
+    const r = await fetch(`/api/watchers/${encodeURIComponent(watcherId)}`, { method: 'DELETE' });
+    if (!r.ok && r.status !== 404) {
+      const err = await r.json().catch(() => ({}));
+      btn.disabled = false;
+      btn.textContent = 'Stop';
+      alert(`Stop failed: ${err.error || r.statusText}`);
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Stop';
+    alert(`Stop failed: ${e.message}`);
+  }
+}
+
 // ── Task chip (Phase 14) — card-style bubble for in-flight background tasks
 // One chip per task_proxy watcher. Survives multiple status updates by
 // updating in place via data-watcher-id. Renders:
@@ -224,8 +277,12 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   // Pull agent + task from the label (format: "<emoji> <agent name>: <task>")
   const label = status.label || '';
   const dashIdx = label.indexOf(': ');
-  const agentPart = dashIdx > 0 ? label.slice(0, dashIdx) : label;
-  const taskPart  = dashIdx > 0 ? label.slice(dashIdx + 2) : '';
+  const state = status.state || {};
+  const fallbackAgentPart = dashIdx > 0 ? label.slice(0, dashIdx) : label;
+  const fallbackTaskPart  = dashIdx > 0 ? label.slice(dashIdx + 2) : '';
+  const agentPart = `${state.targetAgentEmoji || ''} ${state.targetAgentName || fallbackAgentPart || 'Task'}`.trim();
+  const taskPart  = state.summary || fallbackTaskPart || '';
+  const phaseText = taskChipPhase(status);
 
   // Status badge color/text based on phase
   let badge, badgeColor;
@@ -238,11 +295,17 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   } else if (final && finalStatus === 'error') {
     badge = '⚠ error';
     badgeColor = 'var(--red,#c33)';
+  } else if (final && finalStatus === 'cancelled') {
+    badge = '■ cancelled';
+    badgeColor = 'var(--orange,#c80)';
   } else if (final) {
     badge = '· finished';
     badgeColor = 'var(--muted)';
+  } else if (state.cancelling || state.status === 'cancelling') {
+    badge = '■ stopping';
+    badgeColor = 'var(--orange,#c80)';
   } else {
-    badge = '⏵ running';
+    badge = `⏵ ${phaseText}`;
     badgeColor = 'var(--accent,#6c8cff)';
   }
 
@@ -274,6 +337,28 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   badgeEl.style.cssText = `font-size:11px;color:${badgeColor};font-weight:600;white-space:nowrap`;
   header.appendChild(badgeEl);
 
+  let cancelBtn = el.querySelector('.task-chip-cancel');
+  const canCancel = !!state.canCancel && !final && !status.awaiting_input;
+  if (canCancel) {
+    if (!cancelBtn) {
+      cancelBtn = document.createElement('button');
+      cancelBtn.className = 'task-chip-cancel';
+      cancelBtn.type = 'button';
+      cancelBtn.textContent = 'Stop';
+      cancelBtn.title = 'Stop this background task';
+      cancelBtn.style.cssText = 'border:1px solid var(--border);background:var(--bg2);color:var(--muted);border-radius:4px;padding:2px 7px;font-size:11px;cursor:pointer;line-height:1.5';
+      cancelBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        cancelTaskChip(watcherId, cancelBtn);
+      });
+    }
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = 'Stop';
+    header.appendChild(cancelBtn);
+  } else if (cancelBtn) {
+    cancelBtn.remove();
+  }
+
   // Task summary (the prompt) — shown only when present
   let taskLine = el.querySelector('.task-chip-task');
   if (!taskLine) {
@@ -288,6 +373,23 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   } else {
     taskLine.style.display = 'none';
   }
+
+  let metaLine = el.querySelector('.task-chip-meta');
+  if (!metaLine) {
+    metaLine = document.createElement('div');
+    metaLine.className = 'task-chip-meta';
+    metaLine.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px;font-size:11px;color:var(--muted);line-height:1.35';
+    el.insertBefore(metaLine, taskLine.nextSibling);
+  }
+  const metaBits = [];
+  if (state.currentTool) metaBits.push(`Tool: ${state.currentTool}`);
+  if (Number.isFinite(state.toolsUsed) && state.toolsUsed > 0) metaBits.push(`${state.toolsUsed} tool${state.toolsUsed === 1 ? '' : 's'} used`);
+  const elapsed = taskChipElapsed(state.startedAt, ts);
+  if (elapsed) metaBits.push(elapsed);
+  if (state.startedAt) metaBits.push(`Started ${taskChipTime(state.startedAt)}`);
+  if (state.lastActivityAt) metaBits.push(`Updated ${taskChipTime(state.lastActivityAt)}`);
+  metaLine.textContent = metaBits.join(' · ');
+  metaLine.style.display = metaBits.length ? '' : 'none';
 
   // Latest status line (current tool, last result, awaiting question, final
   // output). Capped at ~10 lines visible with internal scrollbar so a long
@@ -309,6 +411,35 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   statusLine.textContent = status.text || '';
   if (wasAtBottom) statusLine.scrollTop = statusLine.scrollHeight;
 
+  let recent = el.querySelector('.task-chip-recent');
+  if (!recent) {
+    recent = document.createElement('div');
+    recent.className = 'task-chip-recent';
+    recent.style.cssText = 'margin-top:6px;font-size:11px;color:var(--muted);line-height:1.4;display:grid;gap:3px';
+    el.appendChild(recent);
+  }
+  const history = Array.isArray(status.recentHistory) ? status.recentHistory.slice(-4) : [];
+  const rows = history.filter(h => h?.text && h.text !== status.text);
+  if (rows.length) {
+    recent.innerHTML = '';
+    for (const h of rows) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:6px;min-width:0';
+      const t = document.createElement('span');
+      t.textContent = taskChipTime(h.ts);
+      t.style.cssText = 'flex:0 0 auto;opacity:0.6;font-variant-numeric:tabular-nums';
+      const txt = document.createElement('span');
+      txt.textContent = h.text || '';
+      txt.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      row.appendChild(t);
+      row.appendChild(txt);
+      recent.appendChild(row);
+    }
+    recent.style.display = '';
+  } else {
+    recent.style.display = 'none';
+  }
+
   // Final-state border + background tint
   if (final) {
     if (finalStatus === 'done') {
@@ -317,6 +448,9 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
     } else if (finalStatus === 'error') {
       el.style.borderLeftColor = 'var(--red, #f44336)';
       el.style.background = 'rgba(244,67,54,0.06)';
+    } else if (finalStatus === 'cancelled') {
+      el.style.borderLeftColor = 'var(--orange, #c80)';
+      el.style.background = 'rgba(204,136,0,0.06)';
     } else {
       el.style.opacity = '0.75';
     }

@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { randomBytes } from 'crypto';
 import {
-  requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole,
+  requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole, sanitizeUserForWire,
   isPrivileged, loadUsers, modifyUsers, modifyUser, hashPassword, validatePassword, verifyPassword, readBody,
   createSession, clearUserSessions, clearUserSessionsExcept, modifyExpGroups, isTimeBlocked, parseMultipart,
   safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB,
@@ -58,8 +58,7 @@ export async function handle(req, res) {
     const privileged = authId && isPrivileged(authId);
     const safe = loadUsers().map(u => {
       if (!authId) return { id: u.id, name: u.name, emoji: u.emoji, color: u.color, avatar: u.avatar ?? null };
-      const { passwordHash: _ph, pinHash: _pin, ...rest } = u;
-      const full = { ...rest, hasPin: !!u.pinHash };
+      const full = sanitizeUserForWire(u);
       return privileged ? full : { id: u.id, name: u.name, emoji: u.emoji, color: u.color, role: u.role, avatar: u.avatar ?? null };
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -132,8 +131,7 @@ export async function handle(req, res) {
     const authId = getSessionUserId(getAuthToken(req));
     const u = loadUsers().find(u => u.id === userMatch[1]);
     if (!u) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
-    const { passwordHash: _ph, pinHash: _pin, ...rest } = u;
-    const full = { ...rest, hasPin: !!u.pinHash };
+    const full = sanitizeUserForWire(u);
     const safe = (isPrivileged(authId) || authId === userMatch[1]) ? full : { id: u.id, name: u.name, emoji: u.emoji, color: u.color };
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(safe)); return true;
   }
@@ -263,8 +261,7 @@ export async function handle(req, res) {
         Object.assign(user, changes, { id: user.id });
       }).then(user => {
         if (!user) return null;
-        const { passwordHash: _ph, pinHash: _pin, ...rest } = user;
-        return { ...rest, hasPin: !!user.pinHash };
+        return sanitizeUserForWire(user);
       });
       if (!safe) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
       if (changes.locked === true) clearUserSessions(targetId);
@@ -446,7 +443,7 @@ export async function handle(req, res) {
       if (isTimeBlocked(targetUser.accessSchedule)) { res.writeHead(403); res.end(JSON.stringify({ error: 'Access is restricted at this time' })); return true; }
       const token = createSession(targetId);
       setSessionCookie(req, res, token);
-      const { passwordHash: _ph, pinHash: _pin, ...safe } = targetUser;
+      const safe = sanitizeUserForWire(targetUser);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ token, user: safe }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }

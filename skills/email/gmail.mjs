@@ -789,6 +789,27 @@ async function cmdInboxStats() {
   console.log('Inbox stats:\n' + results.join('\n'));
 }
 
+async function cmdCount(args) {
+  // EXACT count for a query by paginating message ids. Gmail's resultSizeEstimate
+  // (what cmdInboxStats uses) is wildly inaccurate for large result sets — it pins
+  // near ~201 — so to answer "how many match this" truthfully we page the ids and
+  // count them. ~500 ids/page, so a few thousand resolves in a handful of calls.
+  const query = args[0] || 'in:inbox has:nouserlabels';
+  const CAP = 50000; // safety ceiling so a pathological query can't loop forever
+  let count = 0;
+  let pageToken = '';
+  let capped = false;
+  while (true) {
+    const qs = `/messages?q=${encodeURIComponent(query)}&maxResults=500` + (pageToken ? `&pageToken=${pageToken}` : '');
+    const data = await gmailFetch(qs);
+    count += (data.messages || []).length;
+    if (!data.nextPageToken) break;
+    if (count >= CAP) { capped = true; break; }
+    pageToken = data.nextPageToken;
+  }
+  console.log(`${count}${capped ? '+' : ''} email(s) match: ${query}`);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 const [,, cmd, ...rest] = process.argv;
 switch (cmd) {
@@ -809,6 +830,7 @@ switch (cmd) {
   case 'createlabel':    await cmdCreateLabel(rest);     break;
   case 'unsubscribelink': await cmdGetUnsubscribe(rest); break;
   case 'inboxstats':     await cmdInboxStats();          break;
+  case 'count':          await cmdCount(rest);           break;
   case 'trash':          await cmdTrash(rest);           break;
   case 'batchlabel':     await cmdBatchLabel(rest);      break;
   case 'labelquery':     await cmdLabelQuery(rest);      break;

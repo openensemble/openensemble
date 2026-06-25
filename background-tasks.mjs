@@ -15,6 +15,42 @@ export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
 // in-flight task registry: taskId -> { agentId, userId, agentName, startedAt }
 const activeTasks = new Map();
 
+function taskLabel(agentEmoji, agentName, summary) {
+  const taskText = `${summary || ''}`.trim();
+  return `${agentEmoji || '🤖'} ${agentName || 'Agent'}${taskText ? `: ${taskText.slice(0, 60)}${taskText.length > 60 ? '…' : ''}` : ''}`;
+}
+
+function taskState(taskId, extra = {}) {
+  const rec = activeTasks.get(taskId);
+  if (!rec) return null;
+  return {
+    taskId,
+    status: rec.status || 'running',
+    targetAgentId: rec.agentId,
+    targetAgentName: rec.agentName,
+    targetAgentEmoji: rec.agentEmoji,
+    summary: rec.summary || '',
+    startedAt: rec.startedAt,
+    lastActivityAt: Date.now(),
+    toolsUsed: rec.toolsUsed || 0,
+    currentTool: rec.currentTool || null,
+    phase: rec.phase || 'running',
+    ownerKey: rec.ownerKey || null,
+    isWorker: !!rec.isWorker,
+    canCancel: typeof rec.abort === 'function' && rec.status !== 'cancelling',
+    cancelling: rec.status === 'cancelling',
+    ...extra,
+  };
+}
+
+function pushTaskProgress(taskId, text, extra = {}) {
+  const rec = activeTasks.get(taskId);
+  if (!rec?.watcherId || !text) return false;
+  rec.lastActivityAt = Date.now();
+  rec.phase = extra.phase || rec.phase || 'running';
+  return pushWatcherStatus(rec.userId, rec.watcherId, text, taskState(taskId, extra));
+}
+
 // Safety net: if a worker hangs forever (stuck upstream stream, etc.) the task
 // would stay in activeTasks forever. Sweep every hour, reap anything older
 // than 24h so /health + UI don't accumulate ghosts.
@@ -41,7 +77,12 @@ setInterval(() => {
 export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId, agentName, agentEmoji = '🤖') {
   const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const summary = (task || '').slice(0, 120);
-  activeTasks.set(taskId, { agentId: scopedAgent.id, userId, agentName, agentEmoji, startedAt: Date.now(), summary });
+  const ac = new AbortController();
+  activeTasks.set(taskId, {
+    agentId: scopedAgent.id, userId, agentName, agentEmoji,
+    startedAt: Date.now(), summary, phase: 'queued', status: 'running',
+    abort: () => ac.abort(),
+  });
 
   // Phase 14: register a task_proxy watcher so the task surfaces as a chat
   // chip + becomes inspectable via list_watches. The watcher's history
@@ -54,22 +95,15 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       userId,
       agentId: coordinatorAgentId,   // chip lives in the coordinator's chat
       kind: 'task_proxy',
-      label: `${agentEmoji} ${agentName}: ${summary.slice(0, 60)}${summary.length > 60 ? '…' : ''}`,
-      state: {
-        taskId,
-        targetAgentId: scopedAgent.id,
-        targetAgentName: agentName,
-        targetAgentEmoji: agentEmoji,
-        startedAt: Date.now(),
-        lastActivityAt: Date.now(),
-      },
+      label: taskLabel(agentEmoji, agentName, summary),
+      state: taskState(taskId, { phase: 'queued' }),
       cadenceSec: 30,
       expiresAt: null,   // indefinite — task runs as long as it takes
       // No skillId: system-handler (registered via _systemHandlers in watchers.mjs)
     });
     const rec = activeTasks.get(taskId);
     if (rec) rec.watcherId = watcherId;
-    pushWatcherStatus(userId, watcherId, `Started: ${summary}`);
+    pushTaskProgress(taskId, `Delegated to ${agentName}: ${summary}`, { phase: 'queued' });
   } catch (e) {
     console.warn('[background-tasks] task_proxy watcher registration failed:', e.message);
   }
@@ -93,12 +127,13 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       let fullText = '';
       let toolsUsed = 0;
       let currentTool = null;
+      pushTaskProgress(taskId, `${agentName} started working`, { phase: 'running' });
       // Phase-14b: wrap the streamChat loop in a task_proxy context so
       // ask_user_via_task (called inside the agent's tool chain) can find
       // this run's watcherId without any extra parameter threading.
       const taskCtx = { taskId, watcherId, userId, agentId: scopedAgent.id };
       await runInTaskContext(taskCtx, async () => {
-      for await (const ev of streamChat(scopedAgent, task, null, null, userId, null, scheduledNote)) {
+      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, scheduledNote)) {
         if (ev.type === 'token') fullText += ev.text;
         // Track in-flight tool calls so list_active_agents can report e.g.
         // "the coder is currently running coder_edit_file" instead of just
@@ -116,15 +151,27 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
           // History accumulates each tool call so list_watches/get_task_log
           // can replay what happened.
           if (rec?.watcherId) {
-            pushWatcherStatus(userId, rec.watcherId, `→ ${ev.name}`, { currentTool: ev.name, toolsUsed });
+            pushTaskProgress(taskId, `${agentName} is using ${ev.name}`, { currentTool: ev.name, toolsUsed, phase: 'tool' });
           }
+        }
+        if (ev.type === 'tool_progress' && ev.text) {
+          pushTaskProgress(taskId, String(ev.text).slice(-1200), {
+            currentTool,
+            toolsUsed,
+            phase: 'streaming',
+          });
         }
         if (ev.type === 'tool_result' && ev.name) {
           const rec = activeTasks.get(taskId);
+          const preview = String(ev.text || '').split('\n').find(l => l.trim()) || '';
+          currentTool = null;
           if (rec) {
             rec.currentTool = null;
-            rec.lastResultPreview = (ev.text || '').slice(0, 80);
+            rec.lastResultPreview = preview.slice(0, 160);
             rec.lastUpdateAt = Date.now();
+          }
+          if (preview) {
+            pushTaskProgress(taskId, `${ev.name}: ${preview.slice(0, 240)}`, { currentTool: null, phase: 'result' });
           }
         }
         if (ev.type === 'error') throw new Error(ev.message);
@@ -133,15 +180,24 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, fullText.trim() || `${agentName} completed the task.`);
     } catch (err) {
       console.error('[background-tasks] error in task', taskId, err.message);
-      await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, null, err.message);
+      await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, null,
+        ac.signal.aborted ? 'Task cancelled by user.' : err.message,
+        ac.signal.aborted ? 'cancelled' : 'error');
     }
   })();
 
   return taskId;
 }
 
-async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null) {
+async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null) {
   const rec = activeTasks.get(taskId);
+  const status = finalStatus || (errorMsg ? 'error' : 'done');
+  const finalReportPreview = String(errorMsg ?? result ?? '').slice(0, 800);
+  if (rec) {
+    rec.status = status;
+    rec.phase = status;
+    rec.currentTool = null;
+  }
   activeTasks.delete(taskId);
 
   // Phase 14: finalize the task_proxy watcher (chip) so it shows done/error
@@ -149,11 +205,23 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   // panel broadcast below — the chip is the user's primary visible surface.
   if (rec?.watcherId) {
     try {
-      const finalText = errorMsg
-        ? `⚠ ${agentName} failed: ${errorMsg}`
-        : `✓ ${agentName} done`;
+      const finalText = status === 'cancelled'
+        ? `■ ${agentName} cancelled`
+        : errorMsg
+          ? `⚠ ${agentName} failed: ${errorMsg}`
+          : `✓ ${agentName} done`;
+      pushWatcherStatus(userId, rec.watcherId, finalText, {
+        taskId,
+        status,
+        phase: status,
+        canCancel: false,
+        cancelling: false,
+        currentTool: null,
+        lastActivityAt: Date.now(),
+        finalReportPreview,
+      });
       completeWatcher(userId, rec.watcherId, {
-        status: errorMsg ? 'error' : 'done',
+        status,
         finalText,
       });
     } catch (e) {
@@ -208,6 +276,28 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   });
 }
 
+export function cancelTask(userId, id, reason = 'cancelled') {
+  for (const [taskId, info] of activeTasks) {
+    if (info.userId !== userId) continue;
+    if (taskId !== id && info.watcherId !== id) continue;
+    if (typeof info.abort !== 'function') return { ok: false, reason: 'not cancellable' };
+    if (info.status === 'cancelling') return { ok: true, taskId, watcherId: info.watcherId, alreadyCancelling: true };
+    info.status = 'cancelling';
+    info.phase = 'cancelling';
+    info.currentTool = null;
+    pushTaskProgress(taskId, `Cancelling ${info.agentName || 'task'}...`, {
+      status: 'cancelling',
+      phase: 'cancelling',
+      canCancel: false,
+      cancelling: true,
+      currentTool: null,
+    });
+    try { info.abort(reason); } catch { /* already stopping */ }
+    return { ok: true, taskId, watcherId: info.watcherId };
+  }
+  return { ok: false, reason: 'not found' };
+}
+
 export function getActiveTasks() {
   return [...activeTasks.entries()].map(([taskId, info]) => ({ taskId, ...info }));
 }
@@ -250,4 +340,194 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
     activeTasks.delete(taskId);
     throw err;
   }
+}
+
+// ── Agent-owned background workers (manager/employee model) ──────────────────
+// Generic capability: ANY agent can hire a background worker it OWNS, watch it,
+// and report on it. Differs from dispatchBackground (coordinator→specialist
+// delegation) in three ways:
+//   1. ownerKey is the STABLE id of the owning agent (e.g. the email
+//      specialist), derived by the delegate skill from the caller's session.
+//      The owner sees its workers from ANY session — its direct chat OR an
+//      ephemeral delegation (e.g. the coordinator asking it for status) — so
+//      "how's it going" resolves the same workers either way.
+//   2. The run is abortable, so stop_worker can cancel it.
+//   3. The chip + completion report land in the OWNER's chat (chipOwnerId),
+//      not the coordinator's. Completion bubbles up to whoever owns the worker.
+
+// Recently-finished workers (ring buffer) so check_workers can report a TERMINAL
+// outcome ("failed at 04:04") instead of silently showing nothing — the #1 cause
+// of an agent telling the user "still running" when the worker actually died.
+const recentWorkers = [];
+const RECENT_CAP = 12;
+
+function _retire(taskId, outcome, finalText) {
+  const info = activeTasks.get(taskId);
+  if (!info || !info.isWorker) return;
+  recentWorkers.unshift({
+    taskId, ownerKey: info.ownerKey, userId: info.userId,
+    name: info.agentName, summary: info.summary,
+    outcome,                                   // 'done' | 'error' | 'stopped'
+    finalText: (finalText || '').slice(0, 240),
+    toolsUsed: info.toolsUsed || 0,
+    startedAt: info.startedAt, endedAt: Date.now(),
+  });
+  if (recentWorkers.length > RECENT_CAP) recentWorkers.length = RECENT_CAP;
+}
+
+// Append an entry to a worker's rolling progress log (cap 20). Tool results carry
+// the real domain numbers (email tools return "Labeled 200…", "619 match…"), so
+// this is what lets a manager report actual progress, not just "running a tool".
+function pushWorkerProgress(taskId, entry) {
+  const rec = activeTasks.get(taskId);
+  if (!rec) return false;
+  rec.progress = rec.progress || [];
+  rec.progress.push({ ...entry, ts: Date.now() });
+  if (rec.progress.length > 20) rec.progress.shift();
+  rec.lastActivityAt = Date.now();
+  return true;
+}
+
+/** Record an explicit milestone note from inside a worker (the report_progress tool). */
+export function recordWorkerProgress(taskId, note) {
+  const rec = activeTasks.get(taskId);
+  if (!rec) return false;
+  pushWorkerProgress(taskId, { kind: 'note', text: String(note || '').slice(0, 240) });
+  if (rec.watcherId) { try { pushWatcherStatus(rec.userId, rec.watcherId, `• ${String(note || '').slice(0, 80)}`); } catch { /* chip gone */ } }
+  return true;
+}
+
+/**
+ * Hire a background worker owned by a specific agent.
+ * @param {object} a
+ * @param {object} a.workerAgent  - ephemeral agent (clone of the owner's role)
+ * @param {string} a.task         - self-contained job for the worker
+ * @param {string} a.userId
+ * @param {string} a.chipOwnerId  - scoped session id of the owner's chat (chip + report target)
+ * @param {string} a.ownerKey     - stable agent id of the owner (for check_workers lookup)
+ * @param {string} a.workerName
+ * @param {string} a.emoji
+ * @returns {string} taskId
+ */
+export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, workerName = 'Worker', emoji = '🤖' }) {
+  const taskId = `wkr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const summary = (task || '').slice(0, 120);
+  const ac = new AbortController();
+  activeTasks.set(taskId, {
+    agentId: workerAgent.id, userId, agentName: workerName, agentEmoji: emoji,
+    startedAt: Date.now(), summary, ownerKey, isWorker: true, phase: 'queued',
+    status: 'running', abort: () => ac.abort(),
+  });
+
+  let watcherId = null;
+  try {
+    watcherId = registerWatcher({
+      userId,
+      agentId: chipOwnerId,   // chip lives in the OWNER's chat
+      kind: 'task_proxy',
+      label: taskLabel(emoji, workerName, summary),
+      state: taskState(taskId, { phase: 'queued' }),
+      cadenceSec: 30,
+      expiresAt: null,
+    });
+    const rec = activeTasks.get(taskId);
+    if (rec) rec.watcherId = watcherId;
+    pushTaskProgress(taskId, `Started ${workerName}: ${summary}`, { phase: 'queued' });
+  } catch (e) {
+    console.warn('[workers] task_proxy watcher registration failed:', e.message);
+  }
+
+  (async () => {
+    const { isUserTimeBlocked } = await import('./routes/_helpers.mjs');
+    if (isUserTimeBlocked(userId)) {
+      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, null, 'Access is restricted at this time — worker not started.');
+      return;
+    }
+    try {
+      const { streamChat } = await import('./chat.mjs');
+      const { getScheduledNote } = await import('./lib/scheduled-context.mjs');
+      const scheduledNote = getScheduledNote();
+      let fullText = '';
+      const taskCtx = { taskId, watcherId, userId, agentId: workerAgent.id };
+      pushTaskProgress(taskId, `${workerName} started working`, { phase: 'running' });
+      await runInTaskContext(taskCtx, async () => {
+        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote)) {
+          if (ev.type === 'token') fullText += ev.text;
+          if (ev.type === 'tool_call' && ev.name) {
+            const rec = activeTasks.get(taskId);
+            if (rec) { rec.toolsUsed = (rec.toolsUsed || 0) + 1; rec.currentTool = ev.name; rec.lastUpdateAt = Date.now(); }
+            pushWorkerProgress(taskId, { kind: 'tool', tool: ev.name });
+            if (rec?.watcherId) pushTaskProgress(taskId, `${workerName} is using ${ev.name}`, { currentTool: ev.name, toolsUsed: rec.toolsUsed, phase: 'tool' });
+          }
+          if (ev.type === 'tool_progress' && ev.text) {
+            const rec = activeTasks.get(taskId);
+            pushTaskProgress(taskId, String(ev.text).slice(-1200), {
+              currentTool: rec?.currentTool || null,
+              toolsUsed: rec?.toolsUsed || 0,
+              phase: 'streaming',
+            });
+          }
+          if (ev.type === 'tool_result' && ev.name) {
+            const rec = activeTasks.get(taskId);
+            if (rec) { rec.currentTool = null; rec.lastResultPreview = (ev.text || '').slice(0, 80); rec.lastUpdateAt = Date.now(); }
+            // Richer preview — the first non-empty line of the result usually holds
+            // the domain number ("Labeled 200…", "619 email(s) match…"), giving the
+            // manager real progress to report instead of just the tool name.
+            const firstLine = String(ev.text || '').split('\n').find(l => l.trim()) || '';
+            pushWorkerProgress(taskId, { kind: 'result', tool: ev.name, text: firstLine.slice(0, 160) });
+            if (firstLine) pushTaskProgress(taskId, `${ev.name}: ${firstLine.slice(0, 240)}`, { currentTool: null, phase: 'result' });
+          }
+          if (ev.type === 'error') throw new Error(ev.message);
+        }
+      });
+      _retire(taskId, 'done', fullText.trim());
+      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`);
+    } catch (err) {
+      const stopped = ac.signal.aborted;
+      _retire(taskId, stopped ? 'stopped' : 'error', stopped ? 'Stopped by its manager.' : err.message);
+      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, null,
+        stopped ? 'Worker stopped by its manager.' : err.message,
+        stopped ? 'cancelled' : 'error');
+    }
+  })();
+
+  return taskId;
+}
+
+/** Live status of the workers owned by `ownerKey` (for check_workers / "how's it going"). */
+export function listWorkersForOwner(userId, ownerKey) {
+  const now = Date.now();
+  return [...activeTasks.entries()]
+    .filter(([, info]) => info.isWorker && info.userId === userId && info.ownerKey === ownerKey)
+    .map(([taskId, info]) => {
+      const lastAt = info.lastActivityAt || info.lastUpdateAt || info.startedAt;
+      return {
+        taskId,
+        name: info.agentName,
+        summary: info.summary,
+        currentTool: info.currentTool || null,
+        toolsUsed: info.toolsUsed || 0,
+        elapsedSec: Math.round((now - info.startedAt) / 1000),
+        idleSec: Math.round((now - lastAt) / 1000),
+        stalled: (now - lastAt) > 120000,         // no tool activity for >2min
+        progress: (info.progress || []).slice(-8), // recent log w/ domain numbers
+      };
+    });
+}
+
+/** Recently-finished workers for an owner — so check_workers can report terminal outcomes. */
+export function listRecentWorkersForOwner(userId, ownerKey) {
+  const now = Date.now();
+  return recentWorkers
+    .filter(r => r.userId === userId && r.ownerKey === ownerKey)
+    .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
+}
+
+/** Stop a worker by id. ownerKey (if given) must match — you can only stop your own. */
+export function stopWorker(userId, taskId, ownerKey = null) {
+  const info = activeTasks.get(taskId);
+  if (!info || !info.isWorker || info.userId !== userId) return { ok: false, reason: 'not found' };
+  if (ownerKey && info.ownerKey !== ownerKey) return { ok: false, reason: 'that worker belongs to a different agent' };
+  const r = cancelTask(userId, taskId, 'stopped_by_manager');
+  return r.ok ? { ok: true, name: info.agentName } : { ok: false, reason: r.reason || 'not cancellable' };
 }

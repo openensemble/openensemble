@@ -28,6 +28,7 @@ async function saveThreads(threads) {
 import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
 import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
+import { cancelTask } from '../background-tasks.mjs';
 import { acceptProposal, dismissProposal, blockProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
 import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride } from '../lib/learnings.mjs';
 import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../lib/week1-sweep.mjs';
@@ -184,12 +185,28 @@ export async function handle(req, res) {
       createdAt: w.createdAt, endedAt: w.endedAt || null,
       cadenceSec: w.cadenceSec, expiresAt: w.expiresAt,
       ticks: w.ticks, failures: w.failures,
+      state: w.state || {},
+      lastStatusText: w.lastStatusText || null,
       history: Array.isArray(w.history) ? w.history : [],
     }));
     return true;
   }
   if (wMatch && req.method === 'DELETE') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    const w = getWatcher(authId, wMatch[1]);
+    if (w?.kind === 'task_proxy' && w.status === 'active') {
+      const cancelled = cancelTask(authId, wMatch[1], 'cancelled');
+      if (cancelled.ok) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, cancelled: true, taskId: cancelled.taskId }));
+        return true;
+      }
+      if (cancelled.reason === 'not cancellable') {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'not cancellable' }));
+        return true;
+      }
+    }
     const ok = unregisterWatcher(authId, wMatch[1], 'cancelled');
     res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok }));

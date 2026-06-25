@@ -377,24 +377,36 @@ async function ensureGpus() {
   catch { _gpus = []; }
   return _gpus;
 }
-function llamaGpuOptionsHtml() {
+function llamaGpuOptionsHtml(currentGpuId) {
   if (_gpus === null) {
     // Lazy-load on first render, then re-render once (null→[] guards against a loop).
     ensureGpus().then(() => { try { renderPlanModelRows(); } catch {} try { renderCortexModelRows(); } catch {} });
     return '<option>loading GPUs…</option>';
   }
   if (!_gpus.length) return '<option value="0">GPU 0</option>';
+  // Pre-select the GPU the server is ACTUALLY pinned to (from status), not the
+  // first card — otherwise the dropdown lies after a refresh and a stray change
+  // could silently re-pin the model to the wrong GPU.
   return _gpus.map(g =>
-    `<option value="${g.index}">GPU ${g.index}: ${escHtml(g.name)}${g.memFreeMiB != null ? ` — ${(g.memFreeMiB / 1024).toFixed(1)} GB free` : ''}</option>`
+    `<option value="${g.index}"${Number.isInteger(currentGpuId) && Number(g.index) === currentGpuId ? ' selected' : ''}>GPU ${g.index}: ${escHtml(g.name)}${g.memFreeMiB != null ? ` — ${(g.memFreeMiB / 1024).toFixed(1)} GB free` : ''}</option>`
   ).join('');
 }
 function llamaRuntimeRowHtml(kind, selected) {
   const radioName = kind === 'plan' ? 'planRuntime' : 'reasonRuntime';
   const a = JSON.stringify([kind]).replace(/'/g, '&#39;');
+  // Live status for THIS model's llama.cpp server (running + pinned GPU).
+  const lc = (kind === 'plan' ? planRuntimeStatus : reasonRuntimeStatus)?.llamacpp ?? {};
+  // Running dot, mirroring the cortex reachability dot — green when the pinned
+  // GPU server actually answers, red when selected but not responding.
+  const runDot = selected
+    ? (lc.running
+        ? ' <span style="color:#4caf50;font-size:12px" title="Running on the GPU">●</span>'
+        : ' <span style="color:#f44336;font-size:12px" title="Not responding">●</span>')
+    : '';
   const gpuBlock = selected ? `
     <div style="margin:2px 0 4px 22px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
       <span style="font-size:11px;color:var(--muted)">GPU</span>
-      <select data-change-action="onLlamaGpuChange" data-change-args='${a}' style="font-size:12px;padding:3px 6px">${llamaGpuOptionsHtml()}</select>
+      <select data-change-action="onLlamaGpuChange" data-change-args='${a}' style="font-size:12px;padding:3px 6px">${llamaGpuOptionsHtml(lc.gpuId)}</select>
       <button type="button" data-action="removeLlamaRuntime" data-args='${a}' style="font-size:11px;padding:3px 8px">Remove</button>
     </div>` : '';
   return `
@@ -402,7 +414,7 @@ function llamaRuntimeRowHtml(kind, selected) {
       <input type="radio" name="${radioName}" value="llamacpp" ${selected ? 'checked' : ''}
              data-change-action="selectLlamaRuntime" data-change-args='${a}'>
       <span style="flex:1;display:flex;flex-direction:column;gap:2px">
-        <span style="font-weight:500">Run on GPU (llama.cpp)</span>
+        <span style="font-weight:500">Run on GPU (llama.cpp)${runDot}</span>
         <span style="font-size:11px;color:var(--muted)">local GPU server — no Ollama/LM Studio needed; pick the card</span>
       </span>
     </label>
@@ -552,7 +564,7 @@ async function installReasonRuntime(runtime) {
 // measured 2026-04-29 on Shawn's dev box; YMMV depending on CPU. Through LM
 // Studio (GPU) or Ollama, latency is roughly half.
 const PLAN_TIER_LABELS = {
-  fast:     { name: 'Fast',     base: 'SmolLM2-135M', sizeMb: 140, ramMb: 339, cpuLatencyS: 3,  accNote: '88.5% smoke',                 desc: 'lower latency, lower RAM' },
+  // `fast` (SmolLM2-135M) deprecated 2026-06-25 — too small for the local cognition/extract tier.
   accurate: { name: 'Accurate', base: 'SmolLM2-360M', sizeMb: 370, ramMb: 700, cpuLatencyS: 5,  accNote: '95.6% smoke / 87.5% holdout', desc: 'best accuracy' },
 };
 let planRuntimeStatus = null;

@@ -1273,6 +1273,11 @@ async function saveProvider(provider) {
     // status lines reflect whether a key is now set, and the welcome card
     // re-evaluates against the freshly-stored enabledProviders.
     await loadProviderConfig();
+    if (provider === 'lmstudio' || provider === 'ollama-local') {
+      await loadModels();
+      renderModelBrowser?.();
+      renderAgentModelRows?.();
+    }
   } catch { showToast('Failed to save'); }
 }
 
@@ -2228,4 +2233,3 @@ async function saveProviderStt() {
   } catch { showToast('Failed to save STT settings'); }
 }
 window.saveProviderStt = saveProviderStt;
-

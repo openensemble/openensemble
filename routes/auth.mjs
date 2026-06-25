@@ -3,7 +3,7 @@
  */
 
 import {
-  requireAuth, getAuthToken, getSessionUserId, getUser,
+  requireAuth, getAuthToken, getSessionUserId, getUser, sanitizeUserForWire,
   createSession, createMediaToken, deleteSession, verifyPassword, readBody, isTimeBlocked,
   setSessionCookie, clearSessionCookie,
 } from './_helpers.mjs';
@@ -67,8 +67,7 @@ export async function handle(req, res) {
     // use). Don't echo those to JS — an XSS bug elsewhere would exfiltrate
     // the live bot token via /api/me. UI only needs "is telegram set up";
     // chatId is fine to expose (used to render "linked to chat X").
-    const { passwordHash: _ph, telegram: _tg, ...safe } = user;
-    if (_tg) safe.telegram = { configured: !!_tg.botToken, chatId: _tg.chatId ?? null };
+    const safe = sanitizeUserForWire(user);
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(safe)); return true;
   }
 
@@ -102,7 +101,7 @@ export async function handle(req, res) {
       }
       const token = createSession(userId);
       setSessionCookie(req, res, token);
-      const { passwordHash: _ph, ...safe } = user;
+      const safe = sanitizeUserForWire(user);
       log.info('auth', 'login ok', { ip, userId, role: user.role });
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ token, user: safe }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
