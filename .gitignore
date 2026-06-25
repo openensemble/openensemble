@@ -75,6 +75,9 @@ scripts/test-task-creation.mjs
 scripts/chat-smoke.mjs
 scripts/smoke-plan-*.mjs
 
+# --- Local generated tests ---
+tests/*.test.mjs
+
 # --- Runtime artifacts ---
 server.pid
 tunnel.json
