@@ -16,34 +16,34 @@ Onboarding a service is a conversation with your agent, not a wizard. Walk throu
 2. **Research it.** *"Onboard the Pi-hole."* — the agent uses web search + `node_exec` (read-only) to look up the API, the config layout, the upgrade path, common failure modes, and cite its sources.
 3. **Save the draft.** Agent calls `profile_save` with the constructed JSON. The schema validator rejects malformed profiles with a clear error so the agent can fix and resave.
 4. **Verify.** *"Verify it works."* — `profile_verify_readonly` automatically runs every read-only operation in the profile against the live service and marks each one verified or failed. You see a summary like "4 of 5 read-only ops verified, 1 failed (auth required)."
-5. **Review.** *"Show me the profile."* — agent calls `profile_load render:true` and surfaces the rendered Markdown. You see what operations were defined, what risk class each got, what health signals will be monitored, what failure modes are catalogued, and where the LLM got the info.
-6. **Approve.** *"Looks good, approve it."* — agent calls `profile_set_trust_state state:'reviewed'`. **This automatically starts the health watchers** for the profile's defined signals; you don't have to wire monitoring separately.
+5. **Review.** *"Show me the profile."* — agent calls `profile_load render:true` and surfaces the rendered Markdown. You see what actions were defined, what risk class each got, what health checks will run, what failure modes are catalogued, and where the LLM got the info.
+6. **Approve.** *"Looks good, approve it."* — agent calls `profile_set_trust_state state:'reviewed'`. **This automatically starts monitoring** for the profile's defined checks; you don't have to wire monitoring separately.
 
 The output gets saved as plain files under `users/<you>/nodes/<nodeId>/profiles/<service>.{json,md,research.md}` so you can read them in a text editor, git-track them, share them with someone else's OE install, etc.
 
-## Trust state
+## Automation Level
 
-Every profile has a trust state that gates what can auto-fire when the troubleshooter detects a problem:
+Every profile has an automation level. Internally the JSON field is called `trust_state`, but the UI uses these labels:
 
-- **`unverified`** (default for newly-saved drafts) — the troubleshooter only ever **proposes** fixes; nothing auto-applies. Health watchers do **not** run. You can still run operations through the agent, but each one needs your per-call confirmation.
-- **`reviewed`** — you've eyeballed the profile and approved it. Health watchers run. **Low-risk** fixes on verified ops auto-apply when an incident matches a catalogued failure mode. Medium and high-risk still propose.
-- **`proven`** — elevated autonomy. Same as reviewed, plus **medium-risk** fixes (service restarts, reloads, reversible config changes) on verified ops also auto-apply. **High-risk** fixes always require confirmation, regardless of trust state. Promoting to `proven` is staged: OE asks you to type `APPROVE PROVEN` in chat to confirm — the agent can't promote on its own.
+- **Draft** (`unverified`) — monitoring is off and fixes are only proposed. You can still ask the agent to run actions, but each write needs confirmation.
+- **Approved** (`reviewed`) — monitoring is on. Low-risk fixes on tested actions can auto-apply when an incident matches a known failure mode. Medium and high-risk fixes still ask first.
+- **Auto-fix** (`proven`) — monitoring is on, and medium-risk fixes such as service restarts, reloads, and reversible config changes can auto-apply on tested actions. High-risk fixes always require confirmation. Promoting to this level is staged: OE asks you to type `APPROVE PROVEN` in chat to confirm.
 
-Going *back* to `unverified` (e.g. "I want to make changes — disable monitoring temporarily") tears down the watchers. The state always reflects what's actually happening.
+Going back to **Draft** tears down monitoring. The level always reflects what's actually happening.
 
 ### What's "low" vs "medium" vs "high" in practice?
 
-| Risk | Examples | At `reviewed`? | At `proven`? |
+| Risk | Examples | At Approved? | At Auto-fix? |
 |---|---|---|---|
 | **low** | `dns_block`, `disable_for_5min`, `reload_blocklists`, anything read-only | auto-applies on verified ops | auto-applies on verified ops |
 | **medium** | `service_restart`, `reload_config`, `apply_vhost_change`, anything with a clean inverse | proposes | auto-applies on verified ops |
 | **high** | `wipe_database`, `reset_to_defaults`, anything destructive or with no inverse | proposes | proposes |
 
-A "verified op" means OE has actually run that op (or its read-only twin) successfully at least once and `op.verified === true` — auto-apply never fires on an op that has never been exercised.
+A "tested action" means OE has actually run that action (or its read-only twin) successfully at least once and `op.verified === true` — auto-apply never fires on an action that has never been exercised.
 
 ## Operating a service
 
-Once a profile is reviewed, your agent calls operations through `dispatch_op`:
+Once a profile is Approved, your agent calls actions through `dispatch_op`:
 
 > *"Block ads on doubleclick.net"* → agent calls `dispatch_op opId='dns_block' parameters={domain:'doubleclick.net'}`.
 
@@ -104,22 +104,22 @@ node_set_parent_host nodeId='pihole' parent_host={
 
 For Home Assistant in a VM, add `vmstate: true` so a rollback brings HA back exactly mid-execution.
 
-## Health monitoring + incidents
+## Checks + Incidents
 
-When you mark a profile `reviewed`, OE automatically registers a watcher for each `health_signals` entry the profile declares. The watcher polls the check on its declared cadence and tracks state transitions.
+When you mark a profile Approved, OE automatically registers a watcher for each check the profile declares. The watcher polls the check on its declared cadence and tracks state transitions.
 
-When a signal goes from healthy to unhealthy, OE opens an **incident**. The troubleshooting loop fires:
+When a check goes from healthy to unhealthy, OE opens an **incident**. The troubleshooting loop fires:
 
 1. The matching `diagnostic_recipe` runs automatically — typically a few CLI/HTTP probes that gather context (`systemctl status`, `tail -n 100 /var/log/...`, API status check).
 2. The output gets attached to the incident and matched against the profile's catalogued `failure_modes`.
 3. If a known failure mode matches, the linked fix is either auto-applied (low-risk + reviewed profile + verified op) or proposed for your confirmation.
-4. When the health signal returns to healthy, the incident closes automatically.
+4. When the check returns to healthy, the incident closes automatically.
 
-The incident record carries the full timeline: which signal fired, what diagnostics were collected, which failure mode matched, what fix was attempted and how it went, when the signal recovered. *"What happened with Pi-hole at 2am?"* — `incident_list` shows the answer.
+The incident record carries the full timeline: which check fired, what diagnostics were collected, which failure mode matched, what fix was attempted and how it went, when the check recovered. *"What happened with Pi-hole at 2am?"* — `incident_list` shows the answer.
 
-## Health signals — what they are and how they're checked
+## Health Checks — What They Are
 
-A profile's `health_signals` array declares what "healthy" means for this service. Each signal is one cheap probe with an expected outcome. Examples from a typical profile:
+A profile's `health_signals` array declares what "healthy" means for this service. The UI calls these **checks**. Each check is one cheap probe with an expected outcome. Examples from a typical profile:
 
 ```jsonc
 {
@@ -157,7 +157,7 @@ A profile's `health_signals` array declares what "healthy" means for this servic
 
 ### Mechanisms
 
-- `cli` — runs the command on the node via the existing oe-node-agent connection. Stdout is matched against `expect`. Exit code != 0 marks the signal unhealthy regardless of the body.
+- `cli` — runs the command on the node via the existing oe-node-agent connection. Stdout is matched against `expect`. Exit code != 0 marks the check unhealthy regardless of the body.
 - `http` — fetches the URL from the OE server (not from the node!). For services not exposed externally, point the URL at the node's IP on your LAN: `http://192.0.2.10:8000/alive`.
 
 > **Watch out:** tools like `nginx -t`, `apache2ctl configtest`, `pg_isready` write to *stderr*. Append `2>&1` to your CLI command so the matcher sees their output.
@@ -174,7 +174,7 @@ The matcher recognises these keys:
 | `gt` / `gte` / `lt` / `lte` | numeric comparison | `{ "lt": 90 }` (e.g. disk-percent) |
 | `status` | **HTTP only** — compares against the response status code | `{ "status": 200 }` |
 
-If your HTTP signal needs to assert against the body (not just the status), drop the `status` key and use `contains`/`matches`/`eq` against `parse_jsonpath` output.
+If your HTTP check needs to assert against the body (not just the status), drop the `status` key and use `contains`/`matches`/`eq` against `parse_jsonpath` output.
 
 ### Cadence + severity guidance
 
@@ -183,27 +183,27 @@ If your HTTP signal needs to assert against the body (not just the status), drop
 - Disk free / memory / load → 60–300s, warn (transient spikes are normal)
 - Config-validity (`nginx -t 2>&1`) → 300s, warn
 
-`critical` signals open incidents and trigger the troubleshooting loop. `warn` signals just transition state and surface in the UI badge — no incident, no recipe.
+`critical` checks open incidents and trigger the troubleshooting loop. `warn` checks just transition state and surface in the UI badge — no incident, no recipe.
 
-## Debugging an unhealthy signal
+## Debugging a Failing Check
 
-If a profile shows "1 unhealthy" in the nodes drawer, here's the workflow:
+If a profile shows "1 failing" in the nodes drawer, here's the workflow:
 
-1. **Find which signal it is.** Open the profile's row in the nodes drawer and click through, or ask your agent: *"What signal is unhealthy on `vaultwardenTrixie`'s vaultwarden profile?"* The watcher state surfaces `last_state: 'unhealthy'` for the affected signal.
+1. **Find which check it is.** Open the profile's row in the nodes drawer and click through, or ask your agent: *"What check is failing on `vaultwardenTrixie`'s vaultwarden profile?"* The watcher state surfaces `last_state: 'unhealthy'` for the affected check.
 
-2. **Reproduce the check by hand.** Run the same command/URL the signal is using:
+2. **Reproduce the check by hand.** Run the same command/URL the check is using:
 
    ```bash
-   # CLI signal — run on the node itself
+   # CLI check — run on the node itself
    ssh node 'systemctl is-active vaultwarden.service'
 
-   # HTTP signal — run from the OE server (where the watcher lives)
+   # HTTP check — run from the OE server (where the watcher lives)
    curl -i http://192.0.2.10:8000/alive
    ```
 
-   If your manual probe disagrees with what the watcher says, the signal config is wrong (bad URL, wrong unit name, missing `2>&1`, wrong `expect` shape). If they agree, the service is actually unhealthy — proceed to step 3.
+   If your manual probe disagrees with what the watcher says, the check config is wrong (bad URL, wrong unit name, missing `2>&1`, wrong `expect` shape). If they agree, the service is actually unhealthy — proceed to step 3.
 
-3. **Check the open incident.** *"Show me the open incident for vaultwardenTrixie."* The incident record carries the diagnostic output the troubleshooter collected when the signal first fired. Often that's enough to see the cause.
+3. **Check the open incident.** *"Show me the open incident for vaultwardenTrixie."* The incident record carries the diagnostic output the troubleshooter collected when the check first fired. Often that's enough to see the cause.
 
    ```bash
    # On the OE server, raw incident files:
@@ -211,13 +211,13 @@ If a profile shows "1 unhealthy" in the nodes drawer, here's the workflow:
    cat users/<you>/nodes/<nodeId>/incidents/inc_<id>.json | jq .
    ```
 
-4. **If you've fixed it manually, force a recheck.** The watcher will recover on its next tick (within `cadence_sec`). To force it sooner, toggle the trust state — *"set vaultwarden trust_state to unverified, then back to reviewed"* — which tears down and re-registers the watchers in-process.
+4. **If you've fixed it manually, force a recheck.** The watcher will recover on its next tick (within `cadence_sec`). To force it sooner, toggle the automation level — *"set vaultwarden to Draft, then back to Approved"* — which tears down and re-registers the watchers in-process.
 
-5. **If the signal is misconfigured**, patch it instead of re-saving the whole profile:
+5. **If the check is misconfigured**, patch it instead of re-saving the whole profile:
 
-   > *"Patch the api_ok signal on vaultwarden — the expect should be `status: 200`, not `contains: 'OK'`."*
+   > *"Patch the api_ok check on vaultwarden — the expect should be `status: 200`, not `contains: 'OK'`."*
 
-   Behind the scenes: `profile_patch` with `[{op:'set', path:'health_signals[1].expect', value:{status:200}}]`. Watchers auto-refresh when health signals on a reviewed/proven profile are patched, so the new check goes live immediately.
+   Behind the scenes: `profile_patch` with `[{op:'set', path:'health_signals[1].expect', value:{status:200}}]`. Watchers auto-refresh when checks on an Approved or Auto-fix profile are patched, so the new check goes live immediately.
 
 ### Useful commands while troubleshooting
 
@@ -231,7 +231,7 @@ If a profile shows "1 unhealthy" in the nodes drawer, here's the workflow:
 | Live watcher state | `cat users/<you>/watchers.json \| jq '.active[] \| select(.label \| contains("<service>"))'` |
 | Last-known-good snapshot of an op | `ls users/<you>/nodes/<nodeId>/snapshots/<YYYY-MM-DD>/` |
 
-> Don't edit `users/<you>/watchers.json` while the server is running — the supervisor's tick will overwrite your changes. Use `profile_patch` to mutate signals, or stop OE first.
+> Don't edit `users/<you>/watchers.json` while the server is running — the supervisor's tick will overwrite your changes. Use `profile_patch` to mutate checks, or stop OE first.
 
 ## Sharing profiles
 

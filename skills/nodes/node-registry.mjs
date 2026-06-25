@@ -5,7 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { BASE_DIR } from '../../lib/paths.mjs';
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -22,6 +22,17 @@ const ptyCallbacks = new Map();    // ptyId → (msg) => void — browser WS rel
 const revokedNodes = new Map();    // `${userId}:${nodeId}` → revokedAt ts — prevents re-registration after remove
 
 const NODES_PATH = path.join(BASE_DIR, 'nodes.json');
+
+function hashToken(token) {
+  return createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function tokenHashMatches(storedHash, token) {
+  if (!storedHash || !token) return false;
+  const a = Buffer.from(String(storedHash), 'hex');
+  const b = Buffer.from(hashToken(token), 'hex');
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 function atomicWriteSync(filepath, data) {
   const tmp = `${filepath}.tmp.${process.pid}.${randomBytes(3).toString('hex')}`;
@@ -60,6 +71,8 @@ function persistNodes() {
         registeredAt: entry.registeredAt,
         disconnectedAt: entry.ws ? null : (entry.disconnectedAt ?? Date.now()),
         restartCount: entry.restartCount,
+        tokenHash: entry.tokenHash || null,
+        tokenPrefix: entry.tokenPrefix || null,
       });
     }
     for (const [key, ts] of revokedNodes) out.revoked.push({ key, ts });
@@ -101,10 +114,14 @@ export function loadPersistedNodes() {
         stats: null,
         health: 'disconnected',
         missedPings: 0,
+        lastStatsAt: null,
+        lastStatsRequestedAt: null,
         disconnectedAt: n.disconnectedAt || now,
         recoveredAt: null,
         restartCount: n.restartCount || 0,
         uptimeSince: n.registeredAt || now,
+        tokenHash: n.tokenHash || null,
+        tokenPrefix: n.tokenPrefix || null,
       });
       loadedNodes++;
     }
@@ -186,6 +203,45 @@ export function isRevoked(userId, nodeId) {
   return revokedNodes.has(revocationKey(userId, nodeId));
 }
 
+export function rememberNodeSessionToken(userId, nodeId, token) {
+  const entry = nodes.get(nodeId);
+  if (!entry || entry.userId !== userId || !token) return false;
+  const tokenHash = hashToken(token);
+  if (entry.tokenHash === tokenHash) return true;
+  entry.tokenHash = tokenHash;
+  entry.tokenPrefix = token.slice(0, 8);
+  persistNodes();
+  return true;
+}
+
+export function reviveNodeSessionFromToken(token) {
+  if (!token) return null;
+  for (const entry of nodes.values()) {
+    if (!entry.tokenHash) continue;
+    if (!tokenHashMatches(entry.tokenHash, token)) continue;
+    if (isRevoked(entry.userId, entry.nodeId)) return null;
+    return { userId: entry.userId, nodeId: entry.nodeId };
+  }
+  return null;
+}
+
+export function reviveLegacyNodeSession(token, info = {}) {
+  if (!token || !/^[a-f0-9]{64}$/i.test(String(token))) return null;
+  const nodeId = info.nodeId;
+  if (!nodeId) return null;
+  const entry = nodes.get(nodeId);
+  if (!entry || entry.tokenHash || entry.ws) return null;
+  if (isRevoked(entry.userId, entry.nodeId)) return null;
+  const incomingHost = String(info.hostname || '').toLowerCase();
+  const existingHost = String(entry.hostname || '').toLowerCase();
+  if (!incomingHost || incomingHost !== existingHost) return null;
+
+  entry.tokenHash = hashToken(token);
+  entry.tokenPrefix = token.slice(0, 8);
+  persistNodes();
+  return { userId: entry.userId, nodeId: entry.nodeId };
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────
 export function registerNode(ws, userId, info) {
   const nodeId = info.nodeId || `node_${info.hostname}_${randomBytes(3).toString('hex')}`;
@@ -233,10 +289,14 @@ export function registerNode(ws, userId, info) {
     readableFolders: oldEntry?.readableFolders || [],
     // Same for parent_host — agent never knows about this; preserve it.
     parentHost: oldEntry?.parentHost || null,
+    tokenHash: oldEntry?.tokenHash || null,
+    tokenPrefix: oldEntry?.tokenPrefix || null,
     version: info.version || 'unknown',
     registeredAt: now,
     lastHeartbeat: now,
     stats: null,
+    lastStatsAt: null,
+    lastStatsRequestedAt: null,
     // Health tracking
     health: isReconnect ? 'recovered' : 'healthy',
     missedPings: 0,
@@ -354,7 +414,7 @@ function looksLikeInteractivePrompt(text) {
   if (!text) return null;
   // Strip trailing whitespace except don't be fooled by control codes.
   // Most prompts won't have a trailing newline; a finished line would.
-  const tail = text.replace(/[ -]/g, ' ').trimEnd();
+  const tail = text.replace(/[\x00-\x1f]/g, ' ').trimEnd();
   for (const pat of INTERACTIVE_PROMPT_PATTERNS) {
     const m = tail.match(pat);
     if (m) return m[0];
@@ -422,6 +482,7 @@ function nodeToWire(entry) {
     recoveredAt: entry.recoveredAt,
     disconnectedAt: entry.disconnectedAt,
     uptimeSince: entry.uptimeSince,
+    lastStatsAt: entry.lastStatsAt,
     stats: entry.stats,
     formattedUptime: formatUptime(entry.stats?.uptime),
     formattedMem: entry.stats
@@ -691,7 +752,10 @@ export function handleNodeMessage(nodeId, msg) {
       const wasUnhealthy = entry.health !== 'healthy';
       entry.missedPings = 0;
       entry.lastHeartbeat = Date.now();
-      if (msg.stats) entry.stats = msg.stats;
+      if (msg.stats) {
+        entry.stats = msg.stats;
+        entry.lastStatsAt = Date.now();
+      }
 
       if (entry.health === 'recovered' || entry.health === 'stale') {
         entry.health = 'healthy';
@@ -730,11 +794,13 @@ export function handleNodeMessage(nodeId, msg) {
 
 // ── Heartbeat ────────────────────────────────────────────────────────────────
 let _heartbeatInterval = null;
+const STATS_POLL_INTERVAL_MS = 5 * 60 * 1000;
 
-export function startHeartbeat(intervalMs = 30000) {
+export function startHeartbeat(intervalMs = 60000) {
   if (_heartbeatInterval) clearInterval(_heartbeatInterval);
 
   _heartbeatInterval = setInterval(() => {
+    const now = Date.now();
     for (const [nodeId, entry] of nodes) {
       // Skip disconnected entries (kept in the map for UI display)
       if (!entry.ws || entry.ws.readyState !== entry.ws.OPEN) continue;
@@ -751,7 +817,9 @@ export function startHeartbeat(intervalMs = 30000) {
       }
 
       try {
-        entry.ws.send(JSON.stringify({ type: 'ping' }));
+        const wantStats = !entry.lastStatsRequestedAt || (now - entry.lastStatsRequestedAt) >= STATS_POLL_INTERVAL_MS;
+        if (wantStats) entry.lastStatsRequestedAt = now;
+        entry.ws.send(JSON.stringify({ type: 'ping', wantStats }));
       } catch {}
     }
   }, intervalMs);

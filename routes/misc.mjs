@@ -30,7 +30,7 @@ import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, sched
 import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
 import { cancelTask } from '../background-tasks.mjs';
 import { acceptProposal, dismissProposal, blockProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
-import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride } from '../lib/learnings.mjs';
+import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride, applyLearningKindPolicy, revokeLearningKindPolicy } from '../lib/learnings.mjs';
 import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../lib/week1-sweep.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
@@ -270,11 +270,12 @@ export async function handle(req, res) {
       const body = JSON.parse(await readBody(req));
       const ids = Array.isArray(body?.ids) ? body.ids : [];
       const isAccept = req.url.endsWith('/accept');
+      const reason = typeof body?.reason === 'string' ? body.reason : null;
       const results = [];
       for (const id of ids) {
         const existing = getProposal(id);
         if (!existing || existing.userId !== authId) { results.push({ id, ok: false, error: 'not found or forbidden' }); continue; }
-        const r = isAccept ? await acceptProposal(id) : await dismissProposal(id);
+        const r = isAccept ? await acceptProposal(id) : await dismissProposal(id, { reason });
         results.push({ id, ...r });
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -293,11 +294,20 @@ export async function handle(req, res) {
     const existing = getProposal(id);
     if (!existing) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not found' })); return true; }
     if (existing.userId !== authId) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'forbidden' })); return true; }
+    let body = {};
+    if (action === 'dismiss' || action === 'never') {
+      try {
+        const raw = await readBody(req);
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+        body = {};
+      }
+    }
     const result = action === 'accept'  ? await acceptProposal(id)
                  : action === 'snooze'  ? await snoozeProposal(id)
                  : action === 'undo'    ? await undoProposal(id)
-                 : action === 'never'   ? await blockProposal(id)
-                                        : await dismissProposal(id);
+                 : action === 'never'   ? await blockProposal(id, { reason: body?.reason })
+                                        : await dismissProposal(id, { reason: body?.reason });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
     return true;
@@ -410,6 +420,29 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const kind = decodeURIComponent(resetSalienceMatch[1]);
     const result = await resetSalienceKind(authId, kind);
+    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  const learningPolicyMatch = req.url.match(/^\/api\/learnings\/policy\/([^/?]+)$/);
+  if (learningPolicyMatch && req.method === 'PUT') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const kind = decodeURIComponent(learningPolicyMatch[1]);
+    try {
+      const body = JSON.parse(await readBody(req));
+      const result = await applyLearningKindPolicy(authId, kind, body);
+      res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+  if (learningPolicyMatch && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const kind = decodeURIComponent(learningPolicyMatch[1]);
+    const result = await revokeLearningKindPolicy(authId, kind);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
     return true;

@@ -4,7 +4,7 @@
   "icon": "🌐",
   "category": "utility",
   "service": false,
-  "always_on": true,
+  "always_on": false,
   "hidden": false,
   "description": "Phase-1 tools to introspect and drive the user's OE browser extension. Read-only Tier 0 primitives — list connected extensions, list open tabs, open a new tab, read sanitized page contents. LAN-only for now. Write / form-fill / click primitives are not yet implemented.",
   "intent_examples": [

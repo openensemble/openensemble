@@ -140,6 +140,14 @@ function _friendlyCommandLabel(command, hostname) {
   return `${host}: ${trimmed}`;
 }
 
+function isAgentRestartCommand(command) {
+  const c = String(command || '').toLowerCase();
+  return /\boe\s+update\b/.test(c)
+    || /\boe\s+restart\b/.test(c)
+    || /\bsystemctl\s+restart\s+oe-node-agent(?:\.service)?\b/.test(c)
+    || /\bsudo\s+oe\s+change-access\b/.test(c);
+}
+
 function shellEscape(s) {
   // single-quote escape for bash
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -248,6 +256,12 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       if (n.restartCount > 0) {
         line += `\n  Restarts: ${n.restartCount}`;
       }
+      if (n.health === 'disconnected' && n.disconnectedAt) {
+        line += `\n  Last seen: ${new Date(n.disconnectedAt).toISOString()}`;
+      }
+      if (Array.isArray(n.readableFolders) && n.readableFolders.length) {
+        line += `\n  Readable folders: ${n.readableFolders.join(', ')}`;
+      }
       return line;
     }).join('\n\n') };
     return;
@@ -347,6 +361,34 @@ export async function* executeSkillTool(name, args, userId, agentId) {
               });
             });
           } catch (e) {
+            if (/Node disconnected/i.test(e.message || '') && isAgentRestartCommand(command)) {
+              pushWatcherStatus(userId, watcherId, 'agent restarted; waiting for reconnect…', {
+                phase: 'reconnecting',
+                currentTool: 'node_exec',
+                canCancel: false,
+              });
+              const recon = await waitForNodeReconnect(node.nodeId, userId, 90_000);
+              if (recon.ok) {
+                const tail = truncate((chunks.stdout + chunks.stderr).trim()).slice(-1800);
+                completeWatcher(userId, watcherId, {
+                  status: 'done',
+                  finalText: `✓ ${cmdPreview}\nAgent reconnected after restart.${tail ? `\n\n${tail}` : ''}`,
+                });
+                try {
+                  const { appendToSession } = await import('../../sessions.mjs');
+                  const notice = `[node_exec completed on ${node.hostname || node_id} — re: "${cmdPreview}"]\nAgent reconnected after restart.${tail ? `\n\n${tail}` : ''}`;
+                  await appendToSession(attribAgentId, { role: 'assistant', content: notice, ts: Date.now() });
+                } catch (appendErr) {
+                  console.warn('[node_exec] failed to inject reconnect completion notice:', appendErr.message);
+                }
+                return;
+              }
+              completeWatcher(userId, watcherId, {
+                status: 'error',
+                finalText: `⚠ ${cmdPreview}\nAgent disconnected and did not reconnect within 90s: ${recon.reason}`,
+              });
+              return;
+            }
             completeWatcher(userId, watcherId, {
               status: 'error',
               finalText: `⚠ Command failed: ${e.message}`,
@@ -688,6 +730,37 @@ export async function* executeSkillTool(name, args, userId, agentId) {
         } else {
           out += `\n  Disk: ${result.disk.used}/${result.disk.size} (${result.disk.pct} used)`;
         }
+      }
+      const inv = result.inventory || {};
+      if (inv.agentVersion || inv.process) {
+        out += `\n  Agent: v${inv.agentVersion || node.version || 'unknown'}`;
+        if (inv.process?.user) out += ` as ${inv.process.user}`;
+        if (inv.process?.uid != null) out += ` (uid ${inv.process.uid})`;
+      }
+      if (Array.isArray(inv.network) && inv.network.length) {
+        const addrs = inv.network
+          .filter(n => n.family === 'IPv4' || n.family === 4)
+          .map(n => `${n.name}:${n.address}`)
+          .slice(0, 6);
+        if (addrs.length) out += `\n  Network: ${addrs.join(', ')}`;
+      }
+      if (Array.isArray(inv.failedUnits) && inv.failedUnits.length) {
+        out += `\n  Failed units: ${inv.failedUnits.slice(0, 5).join(' | ')}`;
+      }
+      if (Array.isArray(inv.listeningPorts) && inv.listeningPorts.length) {
+        out += `\n  Listening: ${inv.listeningPorts.slice(0, 8).join(' | ')}`;
+      }
+      if (inv.containers?.docker?.length) {
+        const containers = inv.containers.docker
+          .slice(0, 8)
+          .map(c => `${c.name || '?'} (${c.status || c.image || 'unknown'})`);
+        out += `\n  Docker: ${containers.join(', ')}`;
+      }
+      if (Array.isArray(inv.proxmoxLxc) && inv.proxmoxLxc.length) {
+        out += `\n  Proxmox LXC: ${inv.proxmoxLxc.slice(0, 8).join(' | ')}`;
+      }
+      if (Array.isArray(inv.proxmoxVm) && inv.proxmoxVm.length) {
+        out += `\n  Proxmox VM: ${inv.proxmoxVm.slice(0, 8).join(' | ')}`;
       }
       out += `\n  Health: ${node.health}`;
       if (node.restartCount > 0) out += ` (${node.restartCount} restarts)`;

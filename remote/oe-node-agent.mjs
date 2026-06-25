@@ -49,7 +49,7 @@ const __dirname = path.dirname(__filename);
 // Bump this any time the agent script changes so the server can detect outdated
 // nodes. The server reads this constant from /nodes/agent to know the latest
 // version; the agent sends it in the register message.
-const AGENT_VERSION = '1.6.2';
+const AGENT_VERSION = '1.6.3';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const CONFIG_DIR = process.platform === 'win32'
@@ -480,10 +480,84 @@ function gatherStats() {
   return result;
 }
 
+function safeExecText(command, timeout = 3000) {
+  try {
+    return execSync(command, {
+      encoding: 'utf8',
+      timeout,
+      maxBuffer: 512 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  } catch (e) {
+    const out = (e.stdout || '').toString().trim();
+    const err = (e.stderr || '').toString().trim();
+    return out || err || '';
+  }
+}
+
+function gatherInventory() {
+  const net = [];
+  for (const [name, addrs] of Object.entries(os.networkInterfaces() || {})) {
+    for (const addr of addrs || []) {
+      if (addr.internal) continue;
+      net.push({ name, family: addr.family, address: addr.address, mac: addr.mac });
+    }
+  }
+
+  const inventory = {
+    agentVersion: AGENT_VERSION,
+    process: {
+      pid: process.pid,
+      uid: typeof process.getuid === 'function' ? process.getuid() : null,
+      user: os.userInfo().username,
+      cwd: process.cwd(),
+      node: process.version,
+    },
+    network: net.slice(0, 12),
+    failedUnits: [],
+    listeningPorts: [],
+    containers: null,
+  };
+
+  if (process.platform === 'linux') {
+    const failed = safeExecText('systemctl --failed --no-legend --plain 2>/dev/null | head -20');
+    inventory.failedUnits = failed
+      ? failed.split('\n').map(line => line.trim()).filter(Boolean)
+      : [];
+
+    const ports = safeExecText("ss -ltnpH 2>/dev/null | awk '{print $4\" \"$1\" \"$NF}' | head -40");
+    inventory.listeningPorts = ports
+      ? ports.split('\n').map(line => line.trim()).filter(Boolean)
+      : [];
+
+    if (commandExists('docker')) {
+      const docker = safeExecText("docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' 2>/dev/null | head -30", 4000);
+      inventory.containers = {
+        docker: docker ? docker.split('\n').map(line => {
+          const [name, image, status] = line.split('\t');
+          return { name, image, status };
+        }) : [],
+      };
+    }
+
+    if (commandExists('pct')) {
+      const pct = safeExecText("pct list 2>/dev/null | tail -n +2 | head -40", 4000);
+      inventory.proxmoxLxc = pct ? pct.split('\n').map(line => line.trim()).filter(Boolean) : [];
+    }
+    if (commandExists('qm')) {
+      const qm = safeExecText("qm list 2>/dev/null | tail -n +2 | head -40", 4000);
+      inventory.proxmoxVm = qm ? qm.split('\n').map(line => line.trim()).filter(Boolean) : [];
+    }
+  }
+
+  return inventory;
+}
+
 function gatherFullStatus() {
   const info = detectPlatform();
   return {
     ...gatherStats(),
+    inventory: gatherInventory(),
     hostname: info.hostname,
     platform: info.platform,
     distro: info.distro,
@@ -493,6 +567,27 @@ function gatherFullStatus() {
 
 // ── Command Execution ────────────────────────────────────────────────────────
 const _activeProcs = new Map(); // cmdId → child process
+const EXEC_OUTPUT_CAP = 10 * 1024 * 1024;
+
+function appendCapped(current, chunk, max = EXEC_OUTPUT_CAP) {
+  const next = current + chunk;
+  if (next.length <= max) return next;
+  return next.slice(next.length - max);
+}
+
+function terminateProcessTree(proc) {
+  if (!proc || proc.killed) return;
+  if (process.platform === 'win32') {
+    try { execSync(`taskkill /PID ${proc.pid} /T /F`, { stdio: 'ignore' }); return; } catch {}
+  } else if (proc.pid) {
+    try { process.kill(-proc.pid, 'SIGTERM'); } catch {}
+    setTimeout(() => {
+      try { process.kill(-proc.pid, 'SIGKILL'); } catch {}
+    }, 2000).unref?.();
+    return;
+  }
+  try { proc.kill('SIGTERM'); } catch {}
+}
 
 function executeCommand(cmdId, command, timeout, ws) {
   const isWindows = process.platform === 'win32';
@@ -507,6 +602,7 @@ function executeCommand(cmdId, command, timeout, ws) {
     : spawn('bash', ['-c', command], {
         timeout: timeout * 1000,
         maxBuffer: 10 * 1024 * 1024,
+        detached: true,
       });
 
   _activeProcs.set(cmdId, proc);
@@ -517,7 +613,7 @@ function executeCommand(cmdId, command, timeout, ws) {
   // Stream partial output
   proc.stdout.on('data', (chunk) => {
     const data = chunk.toString();
-    stdout += data;
+    stdout = appendCapped(stdout, data);
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'cmd_stream', cmdId, stream: 'stdout', data }));
     }
@@ -525,7 +621,7 @@ function executeCommand(cmdId, command, timeout, ws) {
 
   proc.stderr.on('data', (chunk) => {
     const data = chunk.toString();
-    stderr += data;
+    stderr = appendCapped(stderr, data);
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'cmd_stream', cmdId, stream: 'stderr', data }));
     }
@@ -534,11 +630,11 @@ function executeCommand(cmdId, command, timeout, ws) {
   // Hard kill if process doesn't exit after timeout + grace period
   const hardKillTimer = setTimeout(() => {
     if (!finished) {
-      try { proc.kill('SIGKILL'); } catch {}
+      terminateProcessTree(proc);
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: 'cmd_result', cmdId,
-          stdout: stdout.slice(0, 10 * 1024 * 1024),
+          stdout,
           stderr: `Process killed: exceeded ${timeout}s timeout`,
           exitCode: 137,
           duration: Date.now() - startTime,
@@ -558,8 +654,8 @@ function executeCommand(cmdId, command, timeout, ws) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'cmd_result', cmdId,
-        stdout: stdout.slice(0, 10 * 1024 * 1024),
-        stderr: stderr.slice(0, 10 * 1024 * 1024),
+        stdout,
+        stderr,
         exitCode: exitCode ?? 1,
         duration: Date.now() - startTime,
       }));
@@ -801,7 +897,10 @@ function runAgent(config) {
 
         case 'ping':
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'pong', stats: gatherStats() }));
+            const payload = msg.wantStats === false
+              ? { type: 'pong' }
+              : { type: 'pong', stats: gatherStats() };
+            ws.send(JSON.stringify(payload));
           }
           break;
 
@@ -834,6 +933,11 @@ function runAgent(config) {
       registered = false;
       killAllPtys();
       log(`Disconnected (${code}${reason ? ': ' + reason : ''})`);
+      if (code === 4001) {
+        log('Authentication failed. Generate a fresh pairing code in OpenEnsemble, then run: sudo oe repair <CODE>');
+      } else if (code === 4003) {
+        log('This node was removed or revoked by the server. Run "sudo oe uninstall" to clean up, or re-pair intentionally.');
+      }
       settle();
     });
 
@@ -1866,7 +1970,7 @@ function shutdown() {
   _shuttingDown = true;
   log('Shutting down...');
   for (const [cmdId, proc] of _activeProcs) {
-    try { proc.kill(); } catch {}
+    terminateProcessTree(proc);
   }
   killAllPtys();
   process.exit(0);

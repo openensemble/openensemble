@@ -492,6 +492,7 @@ export {
 export {
   validatePassword, hashPassword, verifyPassword,
   loadPersistedSessions, createSession, getSessionUserId, deleteSession, deleteSessionByToken,
+  adoptSession,
   clearUserSessions, clearUserSessionsExcept, clearUserNodeSessions, clearUserVoiceDeviceSessions,
   getUserSessions, revokeSessionByPrefix, isPersistentDeviceKind,
   getAuthToken, getUrlToken, setSessionCookie, clearSessionCookie,

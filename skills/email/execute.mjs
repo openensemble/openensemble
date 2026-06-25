@@ -26,10 +26,14 @@ function loadAccounts(userId) {
 
 function resolveAccount(accounts, accountParam) {
   if (!accountParam) return accounts[0] ?? null;
-  const lower = accountParam.toLowerCase();
+  const lower = String(accountParam).toLowerCase();
   return accounts.find(a =>
     a.label.toLowerCase() === lower || a.id === accountParam
   ) ?? accounts[0] ?? null;
+}
+
+function requestedAccount(args = {}) {
+  return args.account ?? args.account_id ?? args.accountId ?? null;
 }
 
 // ── Gmail compose with attachments (direct API, no CLI) ───────────────────────
@@ -198,6 +202,31 @@ async function fetchFromHeaders(userId, accountId, messageIds) {
   return out;
 }
 
+async function fetchQueryHeaders(userId, accountId, query, max = 500) {
+  const token = await gmailToken(userId, accountId);
+  const ids = [];
+  let pageToken = '';
+  while (ids.length < max) {
+    const pageSize = Math.min(max - ids.length, 500);
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${pageSize}` + (pageToken ? `&pageToken=${pageToken}` : '');
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) break;
+    const d = await r.json();
+    for (const m of d.messages || []) ids.push(m.id);
+    if (!d.nextPageToken) break;
+    pageToken = d.nextPageToken;
+  }
+  const out = [];
+  const CHUNK = 10;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const metas = await Promise.all(chunk.map(id => gmailMessageMeta(token, id).catch(() => null)));
+    for (const m of metas) if (m) out.push(m);
+    if (i + CHUNK < ids.length) await new Promise(r => setTimeout(r, 60));
+  }
+  return out;
+}
+
 // Latest inbox emails (id + From + Subject) for the local pre-sort. Paginates
 // ids, then fetches metadata sequentially.
 async function fetchInboxForSort(userId, accountId, query, max) {
@@ -243,9 +272,28 @@ function maybeLearnLabels(userId, accountId, messageIds, addLabels) {
       const metas = await fetchFromHeaders(userId, accountId, messageIds);
       const items = [];
       for (const m of metas) for (const label of labels) items.push({ from: m.from, subject: m.subject, label });
-      const { recorded, senders } = recordLabelings(userId, items);
-      if (recorded) console.log(`[email-learn] +${recorded} sender→label pairs (${senders} senders known) for ${userId}`);
+      const { recorded, keys } = recordLabelings(userId, items, { accountId });
+      if (recorded) console.log(`[email-learn] +${recorded} sender→label pairs (${keys} keys known) for ${userId}/${accountId}`);
     } catch (e) { console.log('[email-learn] capture failed:', e.message); }
+  })();
+}
+
+function queryLooksSenderScoped(query) {
+  return /\bfrom\s*:\s*("[^"]+"|\([^)]+\)|[^\s)]+)/i.test(String(query || ''));
+}
+
+function maybeLearnLabelQuery(userId, accountId, query, addLabels, preFetchedMetas = null) {
+  if (!emailLabelsEnabled() || !queryLooksSenderScoped(query)) return;
+  const labels = (addLabels || []).map(l => String(l || '').trim()).filter(Boolean);
+  if (!labels.length) return;
+  (async () => {
+    try {
+      const metas = Array.isArray(preFetchedMetas) ? preFetchedMetas : await fetchQueryHeaders(userId, accountId, query, 500);
+      const items = [];
+      for (const m of metas) for (const label of labels) items.push({ from: m.from, subject: m.subject, label });
+      const { recorded, keys } = recordLabelings(userId, items, { accountId });
+      if (recorded) console.log(`[email-learn] +${recorded} sender-query label pairs (${keys} keys known) for ${userId}/${accountId}`);
+    } catch (e) { console.log('[email-learn] query capture failed:', e.message); }
   })();
 }
 
@@ -285,7 +333,12 @@ async function execGmail(name, args, userId, accountId) {
       const addArgs = (args.addLabels ?? []).map(l => `add:${l}`);
       const rmArgs  = (args.removeLabels ?? []).map(l => `remove:${l}`);
       if (!addArgs.length && !rmArgs.length) return 'No labels specified to add or remove.';
-      return spawnGmail(['labelquery', args.query, ...addArgs, ...rmArgs], userId, accountId);
+      const learnMetas = emailLabelsEnabled() && queryLooksSenderScoped(args.query)
+        ? await fetchQueryHeaders(userId, accountId, args.query, 500).catch(() => null)
+        : null;
+      const result = await spawnGmail(['labelquery', args.query, ...addArgs, ...rmArgs], userId, accountId);
+      if (!result.startsWith('Error') && learnMetas?.length) maybeLearnLabelQuery(userId, accountId, args.query, args.addLabels ?? [], learnMetas);
+      return result;
     }
     case 'email_purge_sender': {
       // Treat empty strings as absent — some LLMs emit `{query: ""}` alongside
@@ -325,7 +378,7 @@ async function execGmail(name, args, userId, accountId) {
       const proposals = [];     // per-email view, for the dry-run preview
       const unknown = [];
       for (const e of emails) {
-        const sug = suggestLabels(userId, e.from, e.subject);
+        const sug = suggestLabels(userId, e.from, e.subject, { accountId });
         if (sug && sug.trusted) {
           const sig = sug.labels.slice().sort().join('|') + '#' + (sug.keepInbox ? 'keep' : 'archive');
           if (!groups.has(sig)) groups.set(sig, { labels: sug.labels, keepInbox: sug.keepInbox, ids: [] });
@@ -340,12 +393,16 @@ async function execGmail(name, args, userId, accountId) {
       // re-recorded: a local echo of an existing mapping is not new learning
       // signal (same rule as the dispatch loop's "local successes aren't recorded").
       const applied = [];
+      const failed = [];
       for (const g of groups.values()) {
         if (apply) {
           const addArgs = g.labels.map(l => `add:${l}`);
           const rmArgs  = (archive && !g.keepInbox) ? ['remove:INBOX'] : [];
           const res = await spawnGmail(['batchlabel', ...addArgs, ...rmArgs, ...g.ids], userId, accountId);
-          if (res.startsWith('Error')) continue;
+          if (res.startsWith('Error')) {
+            failed.push({ labels: g.labels, keepInbox: g.keepInbox, n: g.ids.length, error: res.slice(0, 240) });
+            continue;
+          }
         }
         applied.push({ labels: g.labels, keepInbox: g.keepInbox, n: g.ids.length });
       }
@@ -359,6 +416,10 @@ async function execGmail(name, args, userId, accountId) {
         ? applied.map(a => `  ${fmtLabels(a)}: ${a.n}`).join('\n')
         : '  (none — no trusted local mappings matched these senders yet)';
       let out = `${head}:\n${appliedLines}\n\n`;
+      if (failed.length) {
+        out += `WARNING: ${failed.reduce((s, f) => s + f.n, 0)} locally matched email(s) were NOT updated because Gmail returned an error:\n`;
+        out += failed.map(f => `  ${fmtLabels(f)}: ${f.n} failed — ${f.error}`).join('\n') + '\n\n';
+      }
       // In a dry run, show the per-email proposals so they can be reviewed/corrected.
       if (!apply && proposals.length) {
         out += `Proposed (local, confident):\n`;
@@ -662,6 +723,8 @@ async function _executeInner(name, args, userId) {
   // Provider-agnostic — writes the learned store directly, overrides observations.
   if (name === 'email_correct_label') {
     if (!emailLabelsEnabled()) return 'Email-label learning is turned off (cfg.localTier.emailLabels).';
+    const accounts = loadAccounts(userId);
+    const account = resolveAccount(accounts, requestedAccount(args));
     const labels = Array.isArray(args.labels) ? args.labels
       : (args.labels ? [args.labels] : (args.label ? [args.label] : []));
     const r = recordCorrection(userId, {
@@ -670,6 +733,7 @@ async function _executeInner(name, args, userId) {
       keepInbox: args.keep_inbox === true,
       subjectContains: Array.isArray(args.subject_contains) ? args.subject_contains
         : (args.subject_contains ? [args.subject_contains] : []),
+      accountId: account?.id || requestedAccount(args),
     });
     if (!r.ok) return `Could not record the correction: ${r.error}`;
     const cond = r.conditional ? ` when the subject mentions [${r.conditional.join(', ')}]` : '';
@@ -680,7 +744,7 @@ async function _executeInner(name, args, userId) {
   const accounts = loadAccounts(userId);
   if (!accounts.length) return 'No email accounts connected. Ask the user to connect an account in Settings → Profile → Connected Accounts.';
 
-  const account = resolveAccount(accounts, args.account);
+  const account = resolveAccount(accounts, requestedAccount(args));
   if (!account) return 'Could not find a matching email account.';
 
   try {

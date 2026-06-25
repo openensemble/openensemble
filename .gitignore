@@ -78,6 +78,9 @@ scripts/smoke-plan-*.mjs
 # --- Local generated tests ---
 tests/*.test.mjs
 
+# --- Local handoff notes ---
+*_HANDOFF.md
+
 # --- Runtime artifacts ---
 server.pid
 tunnel.json

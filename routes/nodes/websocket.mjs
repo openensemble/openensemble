@@ -9,9 +9,10 @@ import { WebSocketServer } from 'ws';
 import {
   registerNode, unregisterNode, handleNodeMessage,
   injectDeps, startHeartbeat, stopHeartbeat, loadPersistedNodes,
+  rememberNodeSessionToken, reviveLegacyNodeSession, reviveNodeSessionFromToken,
 } from '../../skills/nodes/node-registry.mjs';
 import {
-  getSessionUserId, broadcastToUsers, getUserCoordinatorAgentId, getUser,
+  adoptSession, getSessionUserId, broadcastToUsers, getUserCoordinatorAgentId, getUser,
 } from '../_helpers.mjs';
 import { appendToSession } from '../../sessions.mjs';
 
@@ -39,9 +40,20 @@ export function initNodeWss() {
     // Auth via query string token
     const url = new URL(req.url, 'http://x');
     const token = url.searchParams.get('token');
-    const userId = token ? getSessionUserId(token) : null;
+    let userId = token ? getSessionUserId(token) : null;
+    let revivedNodeId = null;
 
-    if (!userId) {
+    if (!userId && token) {
+      const revived = reviveNodeSessionFromToken(token);
+      if (revived?.userId) {
+        adoptSession(token, { userId: revived.userId, deviceId: revived.nodeId, kind: 'node' });
+        userId = revived.userId;
+        revivedNodeId = revived.nodeId;
+        console.log(`[nodes] revived persisted node session for ${revived.nodeId} (${revived.userId})`);
+      }
+    }
+
+    const rejectUnauthorized = () => {
       const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
         || req.socket.remoteAddress || 'unknown';
       const tokenPrefix = token ? `${token.slice(0, 8)}…` : '(missing)';
@@ -50,11 +62,15 @@ export function initNodeWss() {
         `Agent needs re-pairing — session token is invalid or expired.`
       );
       ws.close(4001, 'Unauthorized');
+    };
+
+    if (!userId && !token) {
+      rejectUnauthorized();
       return;
     }
 
     // Child accounts cannot register or run node agents under any circumstances.
-    if (getUser(userId)?.role === 'child') { ws.close(4005, 'Not permitted'); return; }
+    if (userId && getUser(userId)?.role === 'child') { ws.close(4005, 'Not permitted'); return; }
 
     ws._userId = userId;
     ws._authenticated = false;
@@ -70,12 +86,26 @@ export function initNodeWss() {
 
       // First message must be register
       if (msg.type === 'register' && !ws._authenticated) {
+        if (!ws._userId) {
+          const legacy = reviveLegacyNodeSession(token, msg);
+          if (!legacy?.userId) {
+            rejectUnauthorized();
+            return;
+          }
+          adoptSession(token, { userId: legacy.userId, deviceId: legacy.nodeId, kind: 'node' });
+          ws._userId = legacy.userId;
+          revivedNodeId = legacy.nodeId;
+          console.log(`[nodes] revived legacy node session for ${legacy.nodeId} (${legacy.userId})`);
+        }
+
+        if (getUser(ws._userId)?.role === 'child') { ws.close(4005, 'Not permitted'); return; }
+
         const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
           || req.socket.remoteAddress || null;
 
         console.log(`[nodes] register from ${msg.hostname}: version=${msg.version || 'MISSING'} accessLevel=${msg.accessLevel || 'MISSING'}`);
 
-        const nodeId = registerNode(ws, userId, {
+        const nodeId = registerNode(ws, ws._userId, {
           hostname: msg.hostname,
           platform: msg.platform,
           distro: msg.distro,
@@ -92,11 +122,19 @@ export function initNodeWss() {
 
         ws._nodeId = nodeId;
         ws._authenticated = true;
+        rememberNodeSessionToken(ws._userId, nodeId, token);
+        if (revivedNodeId && revivedNodeId !== nodeId) {
+          console.warn(`[nodes] revived token for ${revivedNodeId} but agent registered as ${nodeId}`);
+        }
         ws.send(JSON.stringify({ type: 'registered', nodeId }));
         return;
       }
 
       if (!ws._authenticated) {
+        if (!ws._userId) {
+          rejectUnauthorized();
+          return;
+        }
         ws.send(JSON.stringify({ type: 'error', message: 'Must register first' }));
         return;
       }
@@ -115,17 +153,20 @@ export function initNodeWss() {
     });
   });
 
-  // Start the application-level heartbeat (30s interval)
-  startHeartbeat(30000);
+  // Application-level liveness heartbeat. Stats are requested only every few
+  // minutes inside node-registry so the server doesn't ingest full host stats
+  // on every keepalive.
+  startHeartbeat(60000);
 
-  // WS-level ping/pong for TCP keepalive (15s)
+  // WS-level ping/pong for TCP keepalive. This catches dead TCP sockets
+  // without asking the agent to gather any host stats.
   const wsHeartbeat = setInterval(() => {
     for (const client of _nodeWss.clients) {
       if (!client._alive) { client.terminate(); continue; }
       client._alive = false;
       client.ping();
     }
-  }, 15000);
+  }, 60000);
   _nodeWss.on('close', () => {
     clearInterval(wsHeartbeat);
     stopHeartbeat();

@@ -41,13 +41,28 @@ export async function verifyPassword(pw, stored) {
 // ── Session tokens ───────────────────────────────────────────────────────────
 const sessions = new Map();
 
+function sessionCreatedAt(s) {
+  return s.createdAt ?? (s.expires - 7 * 24 * 60 * 60 * 1000);
+}
+
+function sessionHardCap(s) {
+  return sessionCreatedAt(s) + NODE_SESSION_HARD_CAP_MS;
+}
+
+function shouldPruneSession(s, now = Date.now()) {
+  if (isPersistentDeviceKind(s?.kind)) {
+    return now >= sessionHardCap(s);
+  }
+  return !s || s.expires < now;
+}
+
 // Sweep expired sessions hourly so abandoned tokens don't accumulate in memory
 // or active-sessions.json. Without this, expired sessions are pruned only on
 // access — a token that expires but is never retried lingers for weeks.
 setInterval(() => {
   const now = Date.now();
   let removed = 0;
-  for (const [token, s] of sessions) if (s.expires < now) { sessions.delete(token); removed++; }
+  for (const [token, s] of sessions) if (shouldPruneSession(s, now)) { sessions.delete(token); removed++; }
   if (removed) persistSessions();
 }, 60 * 60_000).unref?.();
 
@@ -57,7 +72,7 @@ export function loadPersistedSessions() {
       const data = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf8'));
       const now = Date.now();
       for (const [token, s] of Object.entries(data))
-        if (s.expires > now) sessions.set(token, s);
+        if (!shouldPruneSession(s, now)) sessions.set(token, s);
     }
   } catch (e) { console.warn('[sessions] Failed to load persisted sessions:', e.message); }
 }
@@ -149,34 +164,62 @@ export function getSessionUserId(token) {
   if (!token) return null;
   const s = sessions.get(token);
   if (!s) return null;
-  if (s.expires < Date.now()) { sessions.delete(token); persistSessions(); return null; }
-  try {
-    const cfg = loadConfig();
-    const idleHours = cfg.sessionExpiryHours ?? 0;
-    if (idleHours > 0 && s.lastActivity) {
-      if ((Date.now() - s.lastActivity) > idleHours * 3600000) {
-        sessions.delete(token); persistSessions(); return null;
-      }
-    }
-  } catch (e) { console.warn('[sessions] Idle check error:', e.message); }
-  s.lastActivity = Date.now();
+  const now = Date.now();
   // Sliding expiry for persistent-device sessions (nodes + voice devices):
   // each successful auth pushes the hard 7-day expiry forward so long-lived
   // devices don't die after a week. Capped at NODE_SESSION_HARD_CAP_MS from
   // createdAt so a stolen device token cannot stay valid indefinitely.
   // Browser sessions keep their fixed expiry.
   if (isPersistentDeviceKind(s.kind)) {
-    const createdAt = s.createdAt ?? (s.expires - 7 * 24 * 60 * 60 * 1000);
-    const hardCap = createdAt + NODE_SESSION_HARD_CAP_MS;
-    if (Date.now() >= hardCap) {
+    const hardCap = sessionHardCap(s);
+    if (now >= hardCap) {
       sessions.delete(token); persistSessions();
       console.log(`[sessions] ${s.kind} session hit 90-day hard cap, revoking. User must re-pair.`);
       return null;
     }
-    s.expires = Math.min(Date.now() + 7 * 24 * 60 * 60 * 1000, hardCap);
+    s.lastActivity = now;
+    s.expires = Math.min(now + 7 * 24 * 60 * 60 * 1000, hardCap);
     persistSessions();
+    return s.userId;
   }
+  if (s.expires < now) { sessions.delete(token); persistSessions(); return null; }
+  try {
+    const cfg = loadConfig();
+    const idleHours = cfg.sessionExpiryHours ?? 0;
+    if (idleHours > 0 && s.lastActivity) {
+      if ((now - s.lastActivity) > idleHours * 3600000) {
+        sessions.delete(token); persistSessions(); return null;
+      }
+    }
+  } catch (e) { console.warn('[sessions] Idle check error:', e.message); }
+  s.lastActivity = now;
   return s.userId;
+}
+
+export function hasSessionToken(token) {
+  return !!(token && sessions.has(token));
+}
+
+export function persistSessionStoreForTests() {
+  persistSessions();
+}
+
+export function renewSessionForTests(token, patch) {
+  const s = sessions.get(token);
+  if (!s) return false;
+  Object.assign(s, patch);
+  persistSessions();
+  return true;
+}
+
+export function getSessionForTests(token) {
+  const s = sessions.get(token);
+  return s ? { ...s } : null;
+}
+
+export function clearSessionStoreForTests() {
+  sessions.clear();
+  persistSessions();
 }
 
 export function deleteSession(token) { sessions.delete(token); persistSessions(); }

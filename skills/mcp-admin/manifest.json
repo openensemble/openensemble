@@ -7,7 +7,7 @@
   "service": true,
   "bundled_with_role": "coordinator",
   "enabled_by_default": true,
-  "always_on": true,
+  "always_on": false,
   "intent_examples": [
     "list my MCP servers",
     "show my MCP servers",

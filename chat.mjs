@@ -24,7 +24,7 @@ import { trackFriction } from './memory/signals.mjs';
 import { loadSession, appendToSession, loadCrossAgentContext } from './sessions.mjs';
 import { getUserFilesDir } from './lib/paths.mjs';
 import { log } from './logger.mjs';
-import { trimToolsForTurn, recordTurnRouting } from './lib/tool-router.mjs';
+import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
@@ -291,7 +291,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
 // bail out on error. Returns the final assistantContent string (or '' on error/empty)
 // plus the list of tool invocations (name + result text) — used by persist() to
 // gate signal detection and pick the right UI badge for memory-mutating tools.
-async function* consumeProvider(providerGen) {
+async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   let assistantContent = '';
   let errored = false;
   // Phase-14 chip-replaces-turn: tools may yield `__hide_turn` to indicate
@@ -313,13 +313,17 @@ async function* consumeProvider(providerGen) {
       toolsUsed.push({ name: event.name, text: event.text || '', args: _lastCallArgsByName[event.name] ?? null });
       delete _lastCallArgsByName[event.name];
     }
-    yield event;
+    if (!(suppressText && (event.type === 'token' || event.type === 'replace'))) {
+      yield event;
+    }
     if (event.type === 'error') { errored = true; break; }
   }
   return errored
     ? { assistantContent: '', errored: true, toolsUsed, hideTurn: false, hideTaskId: null }
     : { assistantContent, errored: false, toolsUsed, hideTurn, hideTaskId };
 }
+
+const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
 
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null) {
@@ -675,6 +679,42 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
 
   const working = [...trimmed, currentUserTurn];
 
+  const buildProviderGen = (agentObj, prompt, messages) => {
+    const compatProviderKey = agentObj.provider === 'grok' ? 'xai' : agentObj.provider;
+    if (agentObj.provider === 'anthropic') {
+      return { providerGen: streamAnthropic(agentObj, prompt, messages, signal, userId), withSignalWordsGate: true };
+    }
+    if (agentObj.provider === 'openrouter') {
+      return { providerGen: streamOpenRouter(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
+    }
+    if (agentObj.provider === 'openai-oauth') {
+      return { providerGen: streamOpenAIResponses(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
+    }
+    if (OPENAI_COMPAT_PROVIDERS[compatProviderKey]) {
+      return { providerGen: streamOpenAICompat(compatProviderKey, agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
+    }
+    if (agentObj.provider === 'lmstudio') {
+      return { providerGen: streamLMStudio(agentObj, prompt, userText, agentObj.id, signal, userId), withSignalWordsGate: false };
+    }
+    return { providerGen: streamOllama(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
+  };
+
+  const recomposeSystemPromptForCurrentTools = () => {
+    if (agent._promptTiers && agent._composerInputs) {
+      const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
+      agent._promptTiers = { ...agent._promptTiers, context: newSpa || '' };
+      const stableTier = `${nameHeader}${agent._promptTiers.stable}${stableAppend}`;
+      const contextTier = agent._promptTiers.context || '';
+      const volatileTier = `${agent._promptTiers.volatile || ''}${_volatileFromTurn}`;
+      agent._promptTiersAssembled = { stable: stableTier, context: contextTier, volatile: volatileTier };
+      systemPrompt = [stableTier, contextTier, volatileTier].filter(Boolean).join('\n\n');
+    } else if (agent._systemPromptShell && agent._composerInputs) {
+      const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
+      agent.systemPrompt = agent._systemPromptShell.replace('%%SKILL_SPAS%%', newSpa);
+      systemPrompt = `${nameHeader}${agent.systemPrompt}${stableAppend}${_volatileFromTurn}`;
+    }
+  };
+
   // ── Grok video/image generation branch ──────────────────────────────────────
   // Only routes to the media endpoints if the model name indicates image/video
   // generation. Chat models (grok-4, grok-3, etc.) fall through to the generic
@@ -909,29 +949,54 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // ── Chat-provider dispatch ──────────────────────────────────────────────────
   // Each branch forwards events via consumeProvider, captures __content, then
   // persists + runs memory signals through persist().
-  const compatProviderKey = agent.provider === 'grok' ? 'xai' : agent.provider;
-
-  let providerGen;
-  let withSignalWordsGate = false;
-  if (agent.provider === 'anthropic') {
-    providerGen = streamAnthropic(agent, systemPrompt, working, signal, userId);
-    withSignalWordsGate = true;
-  } else if (agent.provider === 'openrouter') {
-    providerGen = streamOpenRouter(agent, systemPrompt, working, signal, userId);
-  } else if (agent.provider === 'openai-oauth') {
-    providerGen = streamOpenAIResponses(agent, systemPrompt, working, signal, userId);
-  } else if (OPENAI_COMPAT_PROVIDERS[compatProviderKey]) {
-    providerGen = streamOpenAICompat(compatProviderKey, agent, systemPrompt, working, signal, userId);
-  } else if (agent.provider === 'lmstudio') {
-    // LM Studio's native path takes `userText` (string), not full message history
-    providerGen = streamLMStudio(agent, systemPrompt, userText, agent.id, signal, userId);
-  } else {
-    // Default: Ollama
-    providerGen = streamOllama(agent, systemPrompt, working, signal, userId);
-  }
+  let { providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, working);
 
   const _llmStart = Date.now();
-  const { assistantContent, errored, toolsUsed, hideTurn, hideTaskId } = yield* consumeProvider(providerGen);
+  const shouldBufferForRecovery = Boolean(_routerStore && agent.skillCategory === 'coordinator');
+  let { assistantContent, errored, toolsUsed, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
+  let recoveredMissingTools = false;
+  if (!errored && shouldBufferForRecovery && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
+    const missingSkills = inferMissingToolSkills({ userText, assistantText: assistantContent, userId });
+    for (const skillId of [...missingSkills]) {
+      if (_routerStore.initiallyIncludedSkills.has(skillId) || _routerStore.addedSkills.has(skillId)) missingSkills.delete(skillId);
+    }
+    if (missingSkills.size) {
+      const { addedToolNames, addedSkills } = await expandToolsByReason({
+        agent,
+        fullTools: _routerStore.fullTools,
+        reason: `Recover from missing-tool reply for: ${userText}`,
+        groups: [...missingSkills],
+        userId,
+        alreadyIncludedSkills: _routerStore.initiallyIncludedSkills,
+      });
+      for (const s of addedSkills) _routerStore.addedSkills.add(s);
+      if (addedToolNames.length) {
+        recoveredMissingTools = true;
+        recomposeSystemPromptForCurrentTools();
+        log.info('chat', 'tool-miss recovery retry', {
+          userId, agentId: agent.id, skills: addedSkills, tools: addedToolNames,
+          originalReply: String(assistantContent || '').slice(0, 240),
+        });
+        const retryNote = `\n\n[System note: Your prior draft said you lacked a tool. The server has now loaded these missing tool groups for this same user request: ${addedSkills.join(', ')}. Use the tools now if needed; do not repeat the missing-tool apology unless the loaded tool actually fails.]`;
+        const recoveryTurn = Array.isArray(currentUserTurn.content)
+          ? {
+              ...currentUserTurn,
+              content: currentUserTurn.content.map((part, idx, arr) =>
+                idx === arr.length - 1 && part?.type === 'text'
+                  ? { ...part, text: `${part.text || ''}${retryNote}` }
+                  : part
+              ),
+            }
+          : { ...currentUserTurn, content: `${String(currentUserTurn.content || '')}${retryNote}` };
+        const recoveryMessages = [...trimmed, recoveryTurn];
+        ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
+        ({ assistantContent, errored, toolsUsed, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: false }));
+      }
+    }
+  }
+  if (shouldBufferForRecovery && !recoveredMissingTools && assistantContent && !hideTurn && !errored) {
+    yield { type: 'token', text: assistantContent };
+  }
   const _llmMeta = {
     userId,
     agentId: agent.id,

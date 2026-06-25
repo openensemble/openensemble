@@ -219,7 +219,7 @@
       "type": "function",
       "function": {
         "name": "node_status",
-        "description": "Get detailed system status of a remote computer (Linux/Windows/macOS) connected via oe-node-agent: OS info, uptime, CPU load, memory usage, disk usage, and health state. NOT for Home Assistant devices.",
+        "description": "Get an on-demand structured inventory/status snapshot of a remote computer (Linux/Windows/macOS) connected via oe-node-agent: OS info, uptime, CPU/load/memory/disk, agent runtime, network addresses, failed systemd units, listening ports, Docker containers, Proxmox LXC/VM summaries when available, and health state. Use this before asking broad questions like 'what is on this node?' or 'what looks wrong?'. NOT for Home Assistant devices.",
         "parameters": {
           "type": "object",
           "properties": {

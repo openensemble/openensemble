@@ -40,7 +40,7 @@
     },
     "id_field":     "id",
     "name_fields":  ["label", "username", "smtpUsername"],
-    "id_arg_names": ["account_id", "accountId"],
+    "id_arg_names": ["account", "account_id", "accountId"],
     "cascade_on_tools": []
   },
   "intent_patterns": [

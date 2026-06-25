@@ -8,7 +8,7 @@
   "bundled_with_role": "coordinator",
   "enabled_by_default": true,
   "coordinator_scope": "include",
-  "always_on": true,
+  "always_on": false,
   "intent_examples": [
     "what is the coder doing",
     "is the coder still working",

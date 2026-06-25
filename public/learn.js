@@ -129,8 +129,14 @@ async function learnBulkDismiss() {
 function _renderPendingCard(p) {
   const busy = _learnState.busy.has(p.id);
   const ageNote = p.createdAt ? `<span style="color:var(--muted);font-size:11px">${_learnAgo(p.createdAt)}</span>` : '';
-  const kindBadge = `<span style="font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted)">${escHtml(p.kind || '')}</span>`;
+  const policy = p.policy || {};
+  const risk = policy.risk || p.risk || '';
+  const confidence = policy.confidence ?? p.confidence;
+  const confidenceLabel = Number.isFinite(confidence) ? ` · ${Math.round(confidence * 100)}%` : '';
+  const kindBadge = `<span style="font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted)">${escHtml(p.kind || '')}${risk ? ` · ${escHtml(risk)}${confidenceLabel}` : ''}</span>`;
   const message = escHtml(p.message || '').replace(/\n/g, '<br>');
+  const preview = policy.preview || p.preview;
+  const previewHtml = preview ? `<div style="font-size:11px;line-height:1.35;color:var(--muted);margin:-4px 0 10px">${escHtml(_learnPreviewText(preview))}</div>` : '';
   const accept = escHtml(p.accept_label || 'Accept');
   const dismiss = escHtml(p.dismiss_label || 'Dismiss');
   const disabled = busy ? 'disabled' : '';
@@ -140,6 +146,7 @@ function _renderPendingCard(p) {
       ${kindBadge}${ageNote}
     </div>
     <div style="font-size:13px;line-height:1.45;margin-bottom:10px">${message}</div>
+    ${previewHtml}
     <div style="display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn-small" data-action="learnAcceptProposal" data-args='${btnArgs}' ${disabled} style="background:var(--accent,#4f82ff);color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer">${accept}</button>
       <button class="btn-small" data-action="learnSnoozeProposal" data-args='${btnArgs}' ${disabled} style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--text)">Snooze 7d</button>
@@ -147,6 +154,26 @@ function _renderPendingCard(p) {
       <button class="btn-small" data-action="learnNeverProposal" data-args='${btnArgs}' ${disabled} title="Never suggest this again (a normal dismiss only hides it for 24h)" style="background:transparent;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted);text-decoration:underline">Don't propose again</button>
     </div>
   </div>`;
+}
+
+function _learnPreviewText(preview) {
+  if (!preview || typeof preview !== 'object') return '';
+  if (preview.effect === 'fills_missing_tool_arg') {
+    return `Dry run: when ${preview.tool || 'this tool'} omits ${preview.arg || 'the arg'}, OE fills the proposed value; explicit user args still win.`;
+  }
+  if (preview.effect === 'force_route_on_contains_match') {
+    return `Dry run: messages containing "${preview.pattern || ''}" route directly to ${preview.forcedAgent || 'the selected agent'}.`;
+  }
+  if (preview.effect === 'add_local_utterance_match') {
+    return `Dry run: these phrases match ${preview.skillId || 'the skill'}/${preview.intentId || 'intent'} locally${preview.confirm ? ' with confirmation' : ''}.`;
+  }
+  if (preview.effect === 'bind_phrase_to_action') {
+    return `Dry run: "${preview.trigger || ''}" runs ${preview.service || 'the action'} on ${preview.entityId || 'the target'}.`;
+  }
+  if (preview.effect === 'bind_phrase_to_entity') {
+    return `Dry run: "${preview.phrase || ''}" resolves to ${preview.entityId || 'the target entity'}.`;
+  }
+  return `Dry run: ${preview.effect || 'review effect before accepting'}.`;
 }
 
 async function _proposalAction(id, action) {

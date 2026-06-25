@@ -28,6 +28,18 @@ import {
 
 // ── tool implementations ─────────────────────────────────────────────────────
 
+function trustStateLabel(state) {
+  if (state === 'reviewed') return 'Approved';
+  if (state === 'proven') return 'Auto-fix';
+  return 'Draft';
+}
+
+function trustStateHint(state) {
+  if (state === 'reviewed') return 'monitoring on, low-risk auto-fixes allowed';
+  if (state === 'proven') return 'monitoring on, medium-risk auto-fixes allowed';
+  return 'monitoring off, auto-fixes off';
+}
+
 async function execProfileSave(args, userId) {
   const { node_id, service_id, profile } = args;
   if (!node_id || !service_id || !profile) {
@@ -43,7 +55,7 @@ async function execProfileSave(args, userId) {
     const ro = saved.operations.filter(o => o.readonly).length;
     const lines = [
       `Saved profile "${service_id}" (v${saved.profile_version}) for node "${node_id}". ` +
-      `${opCount} operations defined (${ro} read-only). Trust state: ${saved.trust_state}.`,
+      `${opCount} operations defined (${ro} read-only). Status: ${trustStateLabel(saved.trust_state)} (${trustStateHint(saved.trust_state)}).`,
     ];
     if (saved.agent_requirements?.length) {
       lines.push('');
@@ -108,7 +120,7 @@ async function execProfilePatch(args, userId) {
     }
   }
 
-  return `Patched profile "${service_id}" on "${node_id}" — applied ${edits.length} edit${edits.length === 1 ? '' : 's'}. Trust state: ${updated.trust_state}.${watcherNote}`;
+  return `Patched profile "${service_id}" on "${node_id}" — applied ${edits.length} edit${edits.length === 1 ? '' : 's'}. Status: ${trustStateLabel(updated.trust_state)} (${trustStateHint(updated.trust_state)}).${watcherNote}`;
 }
 
 async function execProfileLoad(args, userId) {
@@ -130,7 +142,7 @@ async function execProfileList(args, userId) {
     const total = p.operations.length;
     const verified = p.operations.filter(o => o.verified).length;
     lines.push(
-      `- **${p.service_id}** (v${p.profile_version}) — ${p.trust_state}, ${verified}/${total} ops verified, endpoint: ${p.endpoint || 'n/a'}`
+      `- **${p.service_id}** (v${p.profile_version}) — ${trustStateLabel(p.trust_state)} (${trustStateHint(p.trust_state)}), ${verified}/${total} actions tested, endpoint: ${p.endpoint || 'n/a'}`
     );
   }
   return lines.join('\n');
