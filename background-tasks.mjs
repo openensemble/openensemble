@@ -267,6 +267,7 @@ async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgen
     onBroadcast: () => {},
     onNotify: () => {},
     _hiddenUser: true,
+    _isBackgroundContinuation: true,
   });
 }
 

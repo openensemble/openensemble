@@ -443,7 +443,7 @@ startVoiceUdpLog();
 
 setBroadcastFn(broadcastAgentList);
 setBackgroundBroadcastFn(broadcast);
-setNodesBroadcastFn(broadcast);
+setNodesBroadcastFn(sendToUser);
 setUserBroadcastFn(broadcastToUsers);
 setRuntimeWarnBroadcast(broadcast);
 setRuntimeMetricsFn(() => ({

@@ -232,6 +232,7 @@ function normalizeToolPlan(plan) {
  * @param {(fromUserId: string, agentId: string, notify: object) => void} [opts.onNotify]
  * @param {boolean} [opts._isRoutineFollowup]        internal recursion guard
  * @param {boolean} [opts._hiddenUser]               internal turn; persist user prompt hidden from UI
+ * @param {boolean} [opts._isBackgroundContinuation] internal guard for completed background-task wakeups
  * @returns {Promise<void>}
  */
 export async function handleChatMessage({
@@ -248,6 +249,7 @@ export async function handleChatMessage({
   onNotify    = () => {},
   _isRoutineFollowup = false,
   _hiddenUser = false,
+  _isBackgroundContinuation = false,
 }) {
   // Wake-slot routing — household-shared voice device.
   //
@@ -435,10 +437,11 @@ export async function handleChatMessage({
   if (tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
 
   const scopedSessionKey = `${userId}_${agentId}`;
-  const ac = openTurn(scopedSessionKey, userId, agentId);
   // Register this WS run so concurrent delegate calls queue behind it.
   // Key matches the scopedAgent.id used in streamChat (userId-scoped).
   const busySlot = markAgentBusy(scopedSessionKey);
+  await busySlot.waitTurn();
+  const ac = openTurn(scopedSessionKey, userId, agentId);
 
   const scopedAgent = { ...agent, id: `${userId}_${agentId}` };
   {
@@ -495,7 +498,7 @@ export async function handleChatMessage({
   // "ask <name>") in the incoming user message are logged against the
   // previous turn's pickedAgent so we can propose a routing override after
   // threshold. Fire-and-forget — detection never blocks dispatch.
-  if (ctx.userText) {
+  if (ctx.userText && !_isBackgroundContinuation) {
     import('./lib/router-mistakes.mjs').then(m =>
       m.detectAndLog({ userId, currentAgentId: agentId, userText: ctx.userText })
     ).catch(e => console.warn('[router-mistakes] hook failed:', e.message));
@@ -514,6 +517,7 @@ export async function handleChatMessage({
   // LLM, then the natural-language fast-paths and the specialist router get
   // their crack. Anything not handled falls through to runLlmTurn.
   const planConstrained = toolPlan?.mode === 'selected' || toolPlan?.mode === 'none';
+  const allowIntentFastpaths = !planConstrained && !_isBackgroundContinuation;
   const INTERCEPTORS = [
     // Voice-only: catch empty / 1-char STT transcripts before they reach the
     // LLM and cause the device to hang in THINKING. Must run before every
@@ -527,13 +531,13 @@ export async function handleChatMessage({
     tryApprovalIntercept,
     slashAdapter,
     financePreprocess,
-    ...(planConstrained ? [] : [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath]),
+    ...(allowIntentFastpaths ? [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath] : []),
     // Skill-agnostic local cognition tier (dispatch face). Runs after the
     // bespoke fast-paths and before the embedding specialist router, so a
     // confident local-intent match never escalates to the cloud coordinator.
     // Inert unless cfg.localTier.enabled (kill switch). Falls through on miss.
-    ...(planConstrained ? [] : [tryLocalIntentFastpath]),
-    c => runSpecialistRoute({ ...c, attachment: c.attachment }),
+    ...(allowIntentFastpaths ? [tryLocalIntentFastpath] : []),
+    ...(_isBackgroundContinuation ? [] : [c => runSpecialistRoute({ ...c, attachment: c.attachment })]),
   ];
 
   for (const handler of INTERCEPTORS) {

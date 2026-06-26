@@ -21,8 +21,8 @@ const TOOL_PLAN_CATALOG = [
   { name: 'email_batch_label', label: 'Label selected emails', desc: 'Adds or removes labels on already-known email IDs.', group: 'Email', re: /\b(?:move|label|archive|file)\b.{0,35}\b(?:emails?|messages?|them|these|selected|\d)\b/i },
   { name: 'email_purge_sender', label: 'Bulk delete matching emails', desc: 'Finds all messages from a sender/query and trashes them in one operation.', group: 'Email', re: /\b(?:purge|delete all|trash all|get rid of|clean up)\b.{0,45}\b(?:from|sender|emails?|mail)\b/i },
   { name: 'email_list_accounts', label: 'List email accounts', desc: 'Only needed when the account is unknown or the user asks about accounts.', group: 'Email', re: /\b(?:email accounts?|which account|work email|personal email)\b/i },
-  { name: 'email_compose', label: 'Send email', desc: 'Composes and sends an email when an email-capable agent has this tool.', group: 'Email', re: /\b(?:send|email|mail|forward)\b.{0,60}\b(?:to\s+my\s+email|to\s+me|me|scmurray1@gmail\.com)\b/i },
-  { name: 'ask_agent', label: 'Ask another agent', desc: 'Delegates work to another agent, usually in the background.', group: 'Agents', re: /\b(?:(?:ask|delegate|have|tell)\b.{0,45}\b(?:agent|gina|sydney|coder|someone|email|send|mail)|(?:send|email|mail|forward)\b.{0,60}\b(?:to\s+my\s+email|to\s+me|me))\b/i },
+  { name: 'email_compose', label: 'Send email', desc: 'Composes and sends an email when an email-capable agent has this tool.', group: 'Email', re: /\b(?:send|email|mail|forward)\b.{0,60}\b(?:to\s+my\s+email|to\s+me|me|myself|my\s+address)\b/i },
+  { name: 'ask_agent', label: 'Ask another agent', desc: 'Delegates work to another agent, usually in the background.', group: 'Agents', re: /\b(?:(?:ask|delegate|have|tell)\b.{0,45}\b(?:agent|assistant|specialist|someone|email|send|mail)|(?:send|email|mail|forward)\b.{0,60}\b(?:to\s+my\s+email|to\s+me|me|myself|my\s+address))\b/i },
   { name: 'request_tools', label: 'Load more tools', desc: 'Lets the model request another tool group mid-turn if the first set is missing something.', group: 'System', re: /\b(?:tool|tools|access|available)\b/i },
   { name: 'web_search', label: 'Search the web', desc: 'Looks up current information on the web.', group: 'Web', re: /\b(?:search|look up|google|latest|news|current|today)\b/i },
   { name: 'fetch_url', label: 'Fetch a web page', desc: 'Reads a specific URL the user supplied.', group: 'Web', re: /https?:\/\/\S+/i },
@@ -482,7 +482,7 @@ function orderSessionForRender(messages) {
   };
   const nodeExecReportTaskId = (m) => {
     if (!(m?.role === 'agent_report' || m?.kind === 'agent_report')) return null;
-    if (m.agentName !== 'node_exec') return null;
+    if (m.tool !== 'node_exec') return null;
     if (typeof m.taskId !== 'string' || !m.taskId.startsWith('autobg_')) return null;
     return m.taskId.slice('autobg_'.length);
   };

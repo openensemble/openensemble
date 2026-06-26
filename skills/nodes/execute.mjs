@@ -26,29 +26,30 @@ function nodeExecReportText({ status, hostname, cmdPreview, output }) {
   return `${header}\n\nCommand: ${cmdPreview}\n\n${body}`.trim();
 }
 
-async function publishNodeExecReport({ agentId, hostname, cmdPreview, status, output }) {
+async function publishNodeExecReport({ userId, agentId, hostname, cmdPreview, status, output, watcherId = null }) {
   const content = nodeExecReportText({ status, hostname, cmdPreview, output });
+  const taskId = watcherId ? `autobg_${watcherId}` : null;
+  const report = {
+    type: 'agent_report',
+    role: 'assistant',
+    kind: 'agent_report',
+    agentName: hostname,
+    agentEmoji: '🖥',
+    tool: 'node_exec',
+    ...(taskId ? { taskId } : {}),
+    content,
+    ts: Date.now(),
+  };
   try {
     const { appendToSession } = await import('../../sessions.mjs');
-    await appendToSession(agentId, {
-      role: 'assistant',
-      kind: 'agent_report',
-      agentName: hostname,
-      agentEmoji: '🖥',
-      content,
-      ts: Date.now(),
-    });
+    await appendToSession(agentId, report);
   } catch (e) {
     console.warn('[node_exec] failed to inject completion report:', e.message);
   }
   try {
-    _broadcast?.({
-      type: 'agent_report',
+    if (userId) _broadcast?.(userId, {
+      ...report,
       agent: agentId,
-      agentName: hostname,
-      agentEmoji: '🖥',
-      content,
-      ts: Date.now(),
     });
   } catch (e) {
     console.warn('[node_exec] failed to broadcast completion report:', e.message);
@@ -421,6 +422,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
                   cmdPreview,
                   status: 'done',
                   output: `Agent reconnected after restart.${tail ? `\n\n${tail}` : ''}`,
+                  watcherId,
                 });
                 return;
               }
@@ -429,11 +431,13 @@ export async function* executeSkillTool(name, args, userId, agentId) {
                 finalText: `⚠ ${cmdPreview}\nAgent disconnected and did not reconnect within 90s: ${recon.reason}`,
               });
               await publishNodeExecReport({
+                userId,
                 agentId: attribAgentId,
                 hostname: node.hostname || node_id,
                 cmdPreview,
                 status: 'error',
                 output: `Agent disconnected and did not reconnect within 90s: ${recon.reason}`,
+                watcherId,
               });
               return;
             }
@@ -442,11 +446,13 @@ export async function* executeSkillTool(name, args, userId, agentId) {
               finalText: `⚠ Command failed: ${e.message}`,
             });
             await publishNodeExecReport({
+              userId,
               agentId: attribAgentId,
               hostname: node.hostname || node_id,
               cmdPreview,
               status: 'error',
               output: e.message,
+              watcherId,
             });
             return;
           }
@@ -467,6 +473,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
             cmdPreview,
             status,
             output,
+            watcherId,
           });
         })();
 
