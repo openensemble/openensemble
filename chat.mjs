@@ -28,7 +28,7 @@ import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingT
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
-import { recordRunTrace } from './lib/run-inspector.mjs';
+import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
 
 import {
   OPENAI_COMPAT_PROVIDERS, FIREWORKS_BASE,
@@ -1058,7 +1058,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       usedNames: toolsUsed.map(t => t.name),
       used: toolsUsed.map(t => ({
         name: t.name,
-        argsPreview: t.args ? JSON.stringify(t.args).slice(0, 500) : '',
+        argsPreview: t.args ? JSON.stringify(redactArgsForTrace(t.args)).slice(0, 500) : '',
         resultPreview: String(t.text ?? '').slice(0, 500),
       })),
     },

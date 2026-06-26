@@ -1,8 +1,10 @@
 let _skillPerms = [];
 let _skillPermFilter = 'all';
+let _skillPermTarget = 'skillPermissionsBody';
 
-async function loadSkillPermissions() {
-  const body = $('skillPermissionsBody');
+async function loadSkillPermissions(targetId) {
+  _skillPermTarget = targetId || 'skillPermissionsBody';
+  const body = $(_skillPermTarget);
   if (!body) return;
   body.innerHTML = '<div class="cdraw-empty">Loading permissions…</div>';
   try {
@@ -30,7 +32,7 @@ function skillPermMatches(skill) {
 }
 
 function renderSkillPermissions() {
-  const body = $('skillPermissionsBody');
+  const body = $(_skillPermTarget);
   if (!body) return;
   const visible = _skillPerms.filter(skillPermMatches);
   const counts = {

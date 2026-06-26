@@ -800,7 +800,12 @@ async function tickOne(record) {
     // The user can read the annotation/status and decide whether to cancel.
     const sinceChange = Date.now() - record.lastChangeAt;
     const stuckThresholdMs = STUCK_RATIO * record.cadenceSec * 1000;
-    if (!record.stuckAnnounced && sinceChange > stuckThresholdMs) {
+    // Health watchers are silent when everything is healthy ("no news is good
+    // news") — they only emit a textUpdate on a transition. Treating that
+    // steady state as "stuck" fires a false "may be stuck" alert and halves the
+    // check cadence on a perfectly healthy host, so exempt them.
+    const stuckEligible = record.kind !== 'profile_health';
+    if (stuckEligible && !record.stuckAnnounced && sinceChange > stuckThresholdMs) {
       record.stuckAnnounced = true;
       record.stuckSinceAt = record.stuckSinceAt || Date.now();
       record.stuckRecoveryCount = Number(record.stuckRecoveryCount || 0) + 1;

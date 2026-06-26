@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-OpenEnsemble is a Node.js ES module application. `server.mjs` is the main entry point. Core chat orchestration lives in `chat.mjs`, with provider-specific streaming code under `chat/providers/`. Tool dispatch, roles, and skill loading are centered in `roles.mjs`, `skills/`, and `lib/`. HTTP routes live in `routes/`, browser assets in `public/`, user-facing documentation in `guide/`, and operational scripts in `scripts/`. Local runtime state such as `users/`, `logs/`, `models/`, vector databases, and `node_modules/` is intentionally ignored. The `tests/` directory is local-only and is not tracked by Git.
+OpenEnsemble is a Node.js ES module application. `server.mjs` is the main entry point. Core chat orchestration lives in `chat.mjs`, with provider-specific streaming code under `chat/providers/`. Tool dispatch, roles, and skill loading are centered in `roles.mjs`, `skills/`, and `lib/`. HTTP routes live in `routes/`, browser assets in `public/`, user-facing documentation in `guide/`, and operational scripts in `scripts/`. Local runtime state such as `users/`, `logs/`, `models/`, vector databases, and `node_modules/` is intentionally ignored. The `tests/` directory is gitignored too, so a newly created test file is not picked up by `git add` automatically; a curated subset of `*.test.mjs` files is force-added and tracked. Tracked tests run locally only — they are not part of CI.
 
 ## Build, Test, and Development Commands
 
@@ -20,7 +20,7 @@ Use ES modules and keep filenames lowercase with hyphens where helpful, for exam
 
 ## Testing Guidelines
 
-Vitest is the local test framework. Name tests `*.test.mjs` and place local test files under `tests/`. Since `tests/` is ignored, do not rely on test changes being included in PRs unless the repository policy changes. Before submitting, run `npm run lint`, `npm run typecheck`, and targeted local tests when relevant.
+Vitest is the local test framework. Name tests `*.test.mjs` and place local test files under `tests/`. Because `tests/` is gitignored, a new test file must be `git add -f`'d to be tracked and included in a PR — otherwise it stays local-only. Tests are not run in CI. Before submitting, run `npm run lint`, `npm run typecheck`, and targeted local tests when relevant.
 
 ## Commit & Pull Request Guidelines
 

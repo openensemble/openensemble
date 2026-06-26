@@ -111,6 +111,15 @@ async function loadDashboard() {
   <button class="dash-tool-btn" data-action="openDashboardTool" data-args='["runs"]'>Open Run Inspector</button>`;
   body.appendChild(inspector);
 
+  const perms = document.createElement('div');
+  perms.className = 'dash-card';
+  perms.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><span>${icon('shield-check', 28)}</span><div>
+    <div class="dash-card-title">Skill Permissions</div>
+    <div class="dash-card-meta">What each skill's tools can do, grouped by capability and risk</div>
+  </div></div>
+  <button class="dash-tool-btn" data-action="openDashboardTool" data-args='["skill-permissions"]'>Open Skill Permissions</button>`;
+  body.appendChild(perms);
+
   // Token usage card (admin/owner only)
   if (_currentUser?.role === 'owner' || _currentUser?.role === 'admin') {
     try {
@@ -200,25 +209,31 @@ async function loadDashboard() {
 
 }
 
+const DASH_TOOLS = {
+  memory: { title: 'Memory Control', icon: 'brain', panelId: 'dashboardMemoryControlBody', panelClass: 'memory-control' },
+  runs: { title: 'Run Inspector', icon: 'scan-search', panelId: 'dashboardRunInspectorBody', panelClass: 'run-inspector' },
+  'skill-permissions': { title: 'Skill Permissions', icon: 'shield-check', panelId: 'dashboardSkillPermissionsBody', panelClass: 'skill-permissions' },
+};
+
 function openDashboardTool(tool) {
   const body = $('dashBody');
   if (!body) return;
-  const title = tool === 'memory' ? 'Memory Control' : 'Run Inspector';
-  const iconName = tool === 'memory' ? 'brain' : 'scan-search';
-  const panelId = tool === 'memory' ? 'dashboardMemoryControlBody' : 'dashboardRunInspectorBody';
+  const cfg = DASH_TOOLS[tool];
+  if (!cfg) return;
   body.innerHTML = `
     <div class="dash-tool-shell">
       <div class="dash-tool-head">
         <button class="dash-tool-back" data-action="loadDashboard">${icon('arrow-left', 14)} Back</button>
-        <div class="dash-tool-title">${icon(iconName, 18)} ${escHtml(title)}</div>
+        <div class="dash-tool-title">${icon(cfg.icon, 18)} ${escHtml(cfg.title)}</div>
       </div>
-      <div class="dash-tool-panel ${tool === 'memory' ? 'memory-control' : 'run-inspector'}" id="${panelId}">
+      <div class="dash-tool-panel ${cfg.panelClass}" id="${cfg.panelId}">
         <div class="cdraw-empty">Loading…</div>
       </div>
     </div>
   `;
-  if (tool === 'memory' && typeof loadMemoryControl === 'function') loadMemoryControl(panelId);
-  if (tool === 'runs' && typeof loadRunInspector === 'function') loadRunInspector(null, panelId);
+  if (tool === 'memory' && typeof loadMemoryControl === 'function') loadMemoryControl(cfg.panelId);
+  if (tool === 'runs' && typeof loadRunInspector === 'function') loadRunInspector(null, cfg.panelId);
+  if (tool === 'skill-permissions' && typeof loadSkillPermissions === 'function') loadSkillPermissions(cfg.panelId);
   if (window.lucide) lucide.createIcons();
 }
 
