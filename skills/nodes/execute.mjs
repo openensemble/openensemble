@@ -36,6 +36,7 @@ async function publishNodeExecReport({ userId, agentId, hostname, cmdPreview, st
     agentName: hostname,
     agentEmoji: '🖥',
     tool: 'node_exec',
+    status,
     ...(taskId ? { taskId } : {}),
     content,
     ts: Date.now(),

@@ -45,15 +45,6 @@ function taskState(taskId, extra = {}) {
   };
 }
 
-export function __testTaskStateFromRecord(taskId, rec, extra = {}) {
-  activeTasks.set(taskId, rec);
-  try {
-    return taskState(taskId, extra);
-  } finally {
-    activeTasks.delete(taskId);
-  }
-}
-
 function pushTaskProgress(taskId, text, extra = {}) {
   const rec = activeTasks.get(taskId);
   if (!rec?.watcherId || !text) return false;

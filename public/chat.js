@@ -426,6 +426,7 @@ function renderSession() {
     else if (m.role === 'proposal_outcome' && m.proposalId) applyProposalOutcome(m.proposalId, m.status, m.outcome);
     else if (m.role === 'attachment_decision' && m.decisionId) appendAttachmentDecisionBubble(m, false);
     else if (m.role === 'attachment_decision_outcome' && m.decisionId) applyAttachmentDecisionOutcome(m.decisionId, m.decision);
+    else if ((m.role === 'agent_report' || m.kind === 'agent_report') && isNodeExecTaskReport(m)) appendNodeExecTaskReport(m, null, false);
     else if (m.role === 'agent_report' || m.kind === 'agent_report') _renderAgentReportEl(m);
     else if (m.role === 'assistant' && !m.hidden && _legacyAgentReportMatch(m.content)) {
       // Legacy entries persisted before the kind:'agent_report' field
@@ -481,13 +482,11 @@ function orderSessionForRender(messages) {
     ));
   };
   const nodeExecReportTaskId = (m) => {
-    if (!(m?.role === 'agent_report' || m?.kind === 'agent_report')) return null;
-    if (m.tool !== 'node_exec') return null;
-    if (typeof m.taskId !== 'string' || !m.taskId.startsWith('autobg_')) return null;
+    if (!isNodeExecTaskReport(m)) return null;
     return m.taskId.slice('autobg_'.length);
   };
   const assistantOwnsNodeExecReport = (turn, taskId) => {
-    if (turn?.role !== 'assistant' || !Array.isArray(turn.toolEvents)) return false;
+    if (turn?.role !== 'assistant' || turn.hidden || !Array.isArray(turn.toolEvents)) return false;
     const taskNeedle = taskId ? `task ${taskId}` : '';
     const resultText = Array.isArray(turn.toolResults)
       ? turn.toolResults.map(r => String(r?.text ?? '')).join('\n')
@@ -561,10 +560,11 @@ function appendNodeExecTaskReport(report, turn, scroll = true) {
   const nodeEvent = Array.isArray(turn?.toolEvents)
     ? turn.toolEvents.find(ev => ev?.name === 'node_exec')
     : null;
-  const label = nodeEvent?.args?.label || nodeEvent?.args?.command || 'node_exec';
   const output = String(report?.content ?? '');
+  const commandMatch = output.match(/^Command:\s*(.+)$/mi);
+  const label = nodeEvent?.args?.label || nodeEvent?.args?.command || commandMatch?.[1] || 'node_exec';
   const exitMatch = output.match(/Exit code:\s*(-?\d+)/i);
-  const ok = exitMatch ? Number(exitMatch[1]) === 0 : true;
+  const ok = report?.status === 'error' ? false : (exitMatch ? Number(exitMatch[1]) === 0 : true);
   return appendTaskChip({
     kind: 'task_proxy',
     watcherId: taskId || report?.taskId || `node_exec_${report?.ts || Date.now()}`,
@@ -574,9 +574,9 @@ function appendNodeExecTaskReport(report, turn, scroll = true) {
     finalStatus: ok ? 'done' : 'error',
     state: {
       status: ok ? 'done' : 'error',
-      targetAgentName: 'node_exec',
+      targetAgentName: report?.agentName || 'node_exec',
       targetAgentEmoji: '🖥',
-      summary: 'node_exec is still running',
+      summary: label,
       startedAt: nodeEvent?.startedAt || turn?.ts || report?.ts,
       lastActivityAt: report?.ts || nodeEvent?.endedAt || turn?.ts,
       currentTool: 'node_exec',
@@ -584,6 +584,13 @@ function appendNodeExecTaskReport(report, turn, scroll = true) {
     },
     recentHistory: [],
   }, report?.ts || turn?.ts || Date.now(), scroll);
+}
+
+function isNodeExecTaskReport(m) {
+  return (m?.role === 'agent_report' || m?.kind === 'agent_report')
+    && m.tool === 'node_exec'
+    && typeof m.taskId === 'string'
+    && m.taskId.startsWith('autobg_');
 }
 
 function appendUserBubble(text, ts = Date.now(), scroll = true, attachment = null) {
@@ -2024,7 +2031,7 @@ function appendNotification(msg) {
 }
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
-  const { agent, agentName, agentEmoji, content, ts, toolEvents, targetAgentId, originalTask, taskId } = msg;
+  const { agent, agentName, agentEmoji, content, ts, toolEvents, targetAgentId, originalTask, taskId, tool, status } = msg;
   // Push into the target coordinator's session cache so the report survives
   // agent-tab switches. Without this, the DOM bubble is the only copy
   // browser-side and it gets wiped on the next renderSession (e.g. when
@@ -2034,13 +2041,15 @@ function handleAgentReport(msg) {
     // Use role:'agent_report' so renderSession can route this back through
     // _renderAgentReportEl below. Keep the same shape we just received so
     // the renderer can reconstruct identical DOM.
-    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, ts: ts ?? Date.now() });
+    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, tool, status, ts: ts ?? Date.now() });
   }
   // Only paint into the visible chat panel when the report's target
   // coordinator is the agent currently being viewed. A report fired while
   // the user is on a different agent's tab should NOT appear there.
   if (!agent || agent === activeAgent) {
-    _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, ts });
+    const report = { role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, tool, status, ts };
+    if (isNodeExecTaskReport(report)) appendNodeExecTaskReport(report, null, true);
+    else _renderAgentReportEl(report);
   }
 }
 

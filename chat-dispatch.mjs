@@ -300,6 +300,17 @@ export async function handleChatMessage({
     ? { file_id: rawAttachment.file_id, name: rawAttachment.name, mimeType: rawAttachment.mimeType }
     : null;
 
+  // Hoisted above the outer try so the finally can always release the agent's
+  // busy-slot. finalizeTurnOnce() is idempotent and a no-op until busySlot is
+  // assigned (markAgentBusy below), so early returns before that are safe.
+  let busySlot = null;
+  let _turnFinalized = false;
+  const finalizeTurnOnce = () => {
+    if (_turnFinalized || !busySlot) return;
+    _turnFinalized = true;
+    finalizeTurn(`${userId}_${agentId}`, busySlot);
+  };
+
   try {
 
   // @-mention redirect (typed chat only): "@<agent> make me a skill" routes
@@ -439,8 +450,12 @@ export async function handleChatMessage({
   const scopedSessionKey = `${userId}_${agentId}`;
   // Register this WS run so concurrent delegate calls queue behind it.
   // Key matches the scopedAgent.id used in streamChat (userId-scoped).
-  const busySlot = markAgentBusy(scopedSessionKey);
-  await busySlot.waitTurn();
+  busySlot = markAgentBusy(scopedSessionKey);
+  // Background-task continuations queue behind any in-flight turn so they can't
+  // clobber each other or an active user turn. Interactive turns keep the
+  // openTurn() barge-in semantics: a new user message interrupts the prior
+  // stream rather than waiting for it.
+  if (_isBackgroundContinuation) await busySlot.waitTurn();
   const ac = openTurn(scopedSessionKey, userId, agentId);
 
   const scopedAgent = { ...agent, id: `${userId}_${agentId}` };
@@ -543,7 +558,7 @@ export async function handleChatMessage({
   for (const handler of INTERCEPTORS) {
     const r = await handler(ctx);
     if (!r?.handled) continue;
-    finalizeTurn(scopedSessionKey, busySlot);
+    finalizeTurnOnce();
     if (r.followupPrompt) {
       // Routine's run_prompt action: the trigger phrase set the scene (lights
       // dimmed, sound playing), the followup is what the user actually wants
@@ -609,7 +624,7 @@ export async function handleChatMessage({
       hiddenUser: _hiddenUser,
     });
   } finally {
-    finalizeTurn(scopedSessionKey, busySlot);
+    finalizeTurnOnce();
   }
 
   // Post-turn alias learning — fire-and-forget, never blocks return.
@@ -636,6 +651,12 @@ export async function handleChatMessage({
   })();
 
   } finally {
+    // Always release the agent's busy-slot — even if an interceptor above threw
+    // before the normal finalize ran. Idempotent; a no-op if the turn already
+    // finalized. Without this, an interceptor exception would leave the slot
+    // held forever and deadlock the next turn (continuations await the prior).
+    finalizeTurnOnce();
+
     // Post-turn attachment save/discard prompt. Chat-upload always persists
     // to users/<id>/profile-files/{images,videos,audio,documents}/ — the
     // ✕ on the preview pill clears client state but not the on-disk file.
