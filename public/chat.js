@@ -65,7 +65,7 @@ async function send() {
   $('input').value = '';
   resizeTextarea();
   clearAttachment();
-  toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
+  resetToolRun();
   if (awaitingPermission) {
     awaitingPermission = false;
     // Don't reset streaming — the agent is still running; just show typing indicator
@@ -105,7 +105,10 @@ function renderSession() {
       const { agentName, body } = _legacyAgentReportMatch(m.content);
       _renderAgentReportEl({ agentName, agentEmoji: '⏵', content: body, ts: m.ts });
     }
-    else if (m.role === 'assistant' && !m.hidden) appendAssistantBubble(m.content, m.ts, false);
+    else if (m.role === 'assistant' && !m.hidden) {
+      if (Array.isArray(m.toolEvents) && m.toolEvents.length) appendToolRun(m.toolEvents, m.ts, false, { persisted: true });
+      appendAssistantBubble(m.content, m.ts, false);
+    }
   });
   const headers = $('messages').querySelectorAll('.task-header[data-ts]');
   if (headers.length) {
@@ -1032,6 +1035,16 @@ function appendStreamingBubble() {
   const el = msgEl('assistant'); insertBefore(el);
   return el.querySelector('.msg-bubble');
 }
+function formatToolDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1000) return `${Math.round(n)}ms`;
+  const sec = n / 1000;
+  if (sec < 60) return `${sec.toFixed(sec < 10 ? 1 : 0)}s`;
+  const min = Math.floor(sec / 60);
+  const rem = Math.round(sec % 60);
+  return rem ? `${min}m ${rem}s` : `${min}m`;
+}
 // Resolve an agent id (or an already-a-name string) to its human display name,
 // so delegation pills read "Asking Coordinator" instead of "ask_agent → agent_2df…".
 function friendlyAgentName(idOrName) {
@@ -1052,6 +1065,7 @@ function friendlyAgentName(idOrName) {
 function toolDisplayLabel(name, args) {
   if (name === 'ask_agent' && args?.agent_id) return `Asking ${friendlyAgentName(args.agent_id)}`;
   if (name === 'waiting_for_agent')           return `Waiting for ${friendlyAgentName(args?.agent)}`;
+  if (name === 'request_tools')               return 'Loading tools';
   // Email tools get plain-language labels so a long sort reads as a running
   // narration ("Auto-sorting inbox", "Labeling email → Promotions · 12") instead
   // of a row of identical "email_batch_label" pills.
@@ -1062,6 +1076,21 @@ function toolDisplayLabel(name, args) {
   if (name === 'email_learned_labels') return 'Checking learned labels';
   if (name === 'email_correct_label')  return 'Saving label rule';
   return name;
+}
+
+function toolGroupLabel(name) {
+  if (!name) return 'Tools';
+  if (name.startsWith('email_')) return 'Email';
+  if (name.startsWith('node_')) return 'Node';
+  if (name.startsWith('ha_')) return 'Home';
+  if (name.startsWith('task_') || name === 'set_reminder' || name === 'schedule_task') return 'Tasks';
+  if (name === 'ask_agent' || name === 'waiting_for_agent') return 'Delegation';
+  if (name === 'web_search' || name === 'fetch_url') return 'Web';
+  return 'Tools';
+}
+
+function toolUiHidden(name) {
+  return name === 'request_tools';
 }
 
 // Pull the most informative arg for a tool into a one-line subtitle.
@@ -1099,33 +1128,172 @@ function toolPillSubtitle(name, args) {
   }
   if (name === 'node_stop_service') return `pid ${args.pid} on ${args.node_id || ''}`.trim();
   if (name === 'node_status' || name === 'node_list') return args.node_id || '';
+  if (name === 'request_tools') return args.reason || '';
   return '';
 }
 
+let liveToolRun = null;
+
+function resetToolRun(removeRun = false) {
+  if (toolStreamBubbleEl) {
+    try { toolStreamBubbleEl.remove(); } catch {}
+  }
+  if (removeRun && liveToolRun?.el) {
+    try { liveToolRun.el.remove(); } catch {}
+  }
+  toolPillsEl = null;
+  toolStreamBubbleEl = null;
+  toolStreamBubbleTool = null;
+  liveToolRun = null;
+}
+
+function scrubToolArgsForSession(value) {
+  if (Array.isArray(value)) return value.map(scrubToolArgsForSession);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (/token|secret|password|api[_-]?key|authorization|credential/i.test(k)) out[k] = '[redacted]';
+    else out[k] = scrubToolArgsForSession(v);
+  }
+  return out;
+}
+
+function currentLiveToolEvents() {
+  return liveToolRun?.events?.map(ev => ({
+    name: ev.name,
+    args: ev.args ? scrubToolArgsForSession(ev.args) : null,
+    startedAt: ev.startedAt,
+    endedAt: ev.endedAt ?? null,
+    durationMs: ev.durationMs ?? (ev.endedAt && ev.startedAt ? ev.endedAt - ev.startedAt : null),
+    status: ev.status || 'running',
+    preview: ev.preview || '',
+    text: ev.text ? String(ev.text).slice(0, 10000) : '',
+    progressPreview: ev.progressPreview || '',
+  })) ?? [];
+}
+
+function ensureToolRun() {
+  if (liveToolRun?.el && document.body.contains(liveToolRun.el)) return liveToolRun;
+  const el = document.createElement('div');
+  el.className = 'tool-run';
+  el.innerHTML = `
+    <button class="tool-run-head" type="button" aria-expanded="false">
+      <span class="pill-spinner tool-run-spinner"></span>
+      <span class="tool-run-title">Using tools</span>
+      <span class="tool-run-meta"></span>
+      <span class="tool-run-chev">${icon('chevron-down', 13)}</span>
+    </button>
+    <div class="tool-run-steps" hidden></div>`;
+  const head = el.querySelector('.tool-run-head');
+  head.addEventListener('click', () => {
+    const steps = el.querySelector('.tool-run-steps');
+    const open = steps.hasAttribute('hidden');
+    steps.toggleAttribute('hidden', !open);
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    el.classList.toggle('open', open);
+  });
+  insertBefore(el);
+  liveToolRun = { el, events: [], startedAt: Date.now() };
+  toolPillsEl = el;
+  return liveToolRun;
+}
+
+function visibleToolEvents(events) {
+  return (events || []).filter(ev => !toolUiHidden(ev.name));
+}
+
+function summarizeToolRun(events, done = false) {
+  const visible = visibleToolEvents(events);
+  const count = visible.length || events.length;
+  const groups = [...new Set(visible.map(ev => toolGroupLabel(ev.name)))].filter(Boolean);
+  const running = events.some(ev => ev.status !== 'done');
+  const elapsedStart = Math.min(...events.map(ev => Number(ev.startedAt)).filter(Number.isFinite));
+  const elapsedEnd = Math.max(...events.map(ev => Number(ev.endedAt || Date.now())).filter(Number.isFinite));
+  const duration = Number.isFinite(elapsedStart) && Number.isFinite(elapsedEnd) ? formatToolDuration(elapsedEnd - elapsedStart) : '';
+  const title = groups.length === 1 ? `${groups[0]} activity` : 'Tool activity';
+  const meta = [
+    count ? `${count} step${count === 1 ? '' : 's'}` : '',
+    done && duration ? duration : (running && duration ? `${duration} elapsed` : ''),
+  ].filter(Boolean).join(' · ');
+  return { title, meta };
+}
+
+function renderToolRunSteps(container, events) {
+  container.innerHTML = '';
+  for (const ev of events) {
+    const row = document.createElement('div');
+    row.className = `tool-run-step ${toolUiHidden(ev.name) ? 'is-internal' : ''}`;
+    const args = ev.args ?? {};
+    const label = toolDisplayLabel(ev.name, args);
+    const subtitle = toolPillSubtitle(ev.name, args);
+    const summary = ev.preview || ev.progressPreview || '';
+    const duration = formatToolDuration(ev.durationMs ?? (ev.endedAt && ev.startedAt ? ev.endedAt - ev.startedAt : null));
+    row.innerHTML = `
+      <div class="tool-run-step-main">
+        <span class="tool-run-step-icon">${ev.status === 'done' ? icon('check', 13) : '<span class="pill-spinner"></span>'}</span>
+        <span class="tool-run-step-label">${escHtml(label)}</span>
+        ${duration ? `<span class="tool-run-step-time">${escHtml(duration)}</span>` : ''}
+      </div>
+      ${subtitle ? `<div class="tool-run-step-sub">${escHtml(subtitle)}</div>` : ''}
+      ${summary ? `<div class="tool-run-step-preview">${escHtml(summary.length > 160 ? summary.slice(0, 160) + '...' : summary)}</div>` : ''}`;
+    if (ev.text) {
+      row.classList.add('clickable');
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.title = 'Open full tool output';
+      const open = () => openToolModal(label, ev.text);
+      row.addEventListener('click', open);
+      row.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+      });
+    }
+    container.appendChild(row);
+  }
+}
+
+function updateToolRunHeader(run, done = false) {
+  if (!run?.el) return;
+  const { title, meta } = summarizeToolRun(run.events, done);
+  run.el.querySelector('.tool-run-title').textContent = title;
+  run.el.querySelector('.tool-run-meta').textContent = meta;
+  run.el.classList.toggle('tool-run-done', done);
+  const spinner = run.el.querySelector('.tool-run-spinner');
+  if (spinner) spinner.outerHTML = done ? icon('check', 13) : '<span class="pill-spinner tool-run-spinner"></span>';
+  renderToolRunSteps(run.el.querySelector('.tool-run-steps'), run.events);
+}
+
+function appendToolRun(events, ts = Date.now(), scroll = true, { persisted = false } = {}) {
+  const cleanEvents = (events || []).map(ev => ({ ...ev, status: ev.status || 'done' }));
+  if (!cleanEvents.length) return null;
+  const run = document.createElement('div');
+  run.className = `tool-run tool-run-done ${persisted ? 'tool-run-persisted' : ''}`;
+  const { title, meta } = summarizeToolRun(cleanEvents, true);
+  run.innerHTML = `
+    <button class="tool-run-head" type="button" aria-expanded="false">
+      ${icon('check', 13)}
+      <span class="tool-run-title">${escHtml(title)}</span>
+      <span class="tool-run-meta">${escHtml(meta)}</span>
+      <span class="tool-run-chev">${icon('chevron-down', 13)}</span>
+    </button>
+    <div class="tool-run-steps" hidden></div>`;
+  const head = run.querySelector('.tool-run-head');
+  head.addEventListener('click', () => {
+    const steps = run.querySelector('.tool-run-steps');
+    const open = steps.hasAttribute('hidden');
+    steps.toggleAttribute('hidden', !open);
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    run.classList.toggle('open', open);
+  });
+  renderToolRunSteps(run.querySelector('.tool-run-steps'), cleanEvents);
+  insertBefore(run);
+  if (scroll) scrollToBottom();
+  return run;
+}
+
 function showToolPill(name, args) {
-  if (!toolPillsEl) {
-    toolPillsEl = document.createElement('div');
-    toolPillsEl.className = 'tool-pills';
-    toolPillsEl.addEventListener('click', onToolPillClick);
-    toolPillsEl.addEventListener('keydown', onToolPillKey);
-    insertBefore(toolPillsEl);
-  }
-  const pill = document.createElement('span');
-  pill.className = 'tool-pill';
-  pill.dataset.tool = name;
-  const displayLabel = toolDisplayLabel(name, args);
-  pill._displayLabel = displayLabel;
-  pill.innerHTML = `${icon('settings', 13)} ${escHtml(displayLabel)}`;
-  const subtitle = toolPillSubtitle(name, args);
-  if (subtitle) {
-    pill._argSubtitle = subtitle;
-    const sub = document.createElement('span');
-    sub.className = 'tool-pill-subtitle';
-    sub.textContent = subtitle.length > 100 ? subtitle.slice(0, 100) + '…' : subtitle;
-    sub.title = subtitle;
-    pill.appendChild(sub);
-  }
-  toolPillsEl.appendChild(pill);
+  const run = ensureToolRun();
+  run.events.push({ name, args: args ?? null, startedAt: Date.now(), status: 'running' });
+  updateToolRunHeader(run, false);
   scrollToBottom();
 }
 
@@ -1139,12 +1307,10 @@ let toolStreamBubbleEl = null;
 let toolStreamBubbleTool = null;
 
 function _findLatestPendingPill(name) {
-  if (!toolPillsEl) return null;
-  const pills = toolPillsEl.querySelectorAll('.tool-pill');
-  for (let i = pills.length - 1; i >= 0; i--) {
-    if (pills[i].dataset.tool === name && !pills[i].classList.contains('tool-done')) {
-      return pills[i];
-    }
+  if (!liveToolRun) return null;
+  for (let i = liveToolRun.events.length - 1; i >= 0; i--) {
+    const ev = liveToolRun.events[i];
+    if (ev.name === name && ev.status !== 'done') return ev;
   }
   return null;
 }
@@ -1178,13 +1344,16 @@ function _ensureStreamBubble(name, argSubtitle, displayLabel) {
 
 function appendToolPillProgress(name, text) {
   if (!toolPillsEl || !text) return;
-  const pendingPill = _findLatestPendingPill(name);
-  if (!pendingPill) return; // nothing to attach progress to (already finished)
-  const argSub = pendingPill._argSubtitle || '';
-  const bubble = _ensureStreamBubble(name, argSub, pendingPill._displayLabel);
+  const pending = _findLatestPendingPill(name);
+  if (!pending) return; // nothing to attach progress to (already finished)
+  pending.progressPreview = (pending.progressPreview || '') + text;
+  pending.updatedAt = Date.now();
+  const argSub = toolPillSubtitle(name, pending.args);
+  const bubble = _ensureStreamBubble(name, argSub, toolDisplayLabel(name, pending.args));
   const stream = bubble.querySelector('.tool-pill-stream');
   stream._buf = (stream._buf + text).slice(-PROGRESS_BUF_CAP);
   stream.textContent = stream._buf;
+  updateToolRunHeader(liveToolRun, false);
   stream.scrollTop = stream.scrollHeight;
   scrollToBottom();
 }
@@ -1200,28 +1369,20 @@ function updateToolPill(name, summary, fullText) {
   if (!toolPillsEl) return;
   // If this tool was streaming into the bubble, dismiss it — the small pill below takes over.
   _dismissStreamBubbleIf(name);
-  const pills = toolPillsEl.querySelectorAll('.tool-pill');
-  for (let i = pills.length - 1; i >= 0; i--) {
-    if (pills[i].dataset.tool === name && !pills[i].classList.contains('tool-done')) {
-      // innerHTML reassign drops the arg subtitle.
-      pills[i].innerHTML = `${icon('check', 13)} ${escHtml(name)}`;
-      if (summary) {
-        const sum = document.createElement('span');
-        sum.className = 'tool-pill-summary';
-        sum.textContent = summary.length > 80 ? summary.slice(0, 80) + '...' : summary;
-        pills[i].appendChild(sum);
-      }
-      pills[i].classList.add('tool-done');
-      if (fullText) {
-        pills[i]._toolFullText = fullText;
-        pills[i].classList.add('clickable');
-        pills[i].setAttribute('role', 'button');
-        pills[i].setAttribute('tabindex', '0');
-        pills[i].title = 'Click to view full output';
-      }
-      break;
-    }
+  const ev = _findLatestPendingPill(name);
+  if (ev) {
+    ev.status = 'done';
+    ev.endedAt = Date.now();
+    ev.durationMs = ev.endedAt - ev.startedAt;
+    ev.preview = summary || '';
+    ev.text = fullText || '';
+  } else if (liveToolRun) {
+    liveToolRun.events.push({
+      name, args: null, status: 'done', startedAt: Date.now(), endedAt: Date.now(),
+      durationMs: 0, preview: summary || '', text: fullText || '',
+    });
   }
+  updateToolRunHeader(liveToolRun, liveToolRun?.events?.every(e => e.status === 'done'));
 }
 
 function onToolPillClick(e) {

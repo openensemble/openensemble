@@ -67,9 +67,9 @@ function forceReconnect() {
   const wasStreaming = streaming;
   if (streamEl && streamBuf && activeAgent) {
     if (!sessions[activeAgent]) sessions[activeAgent] = [];
-    sessions[activeAgent].push({ role: 'assistant', content: streamBuf, ts: Date.now() });
+    sessions[activeAgent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
   }
-  streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
+  streamEl = null; streamBuf = ''; resetToolRun();
   // Don't reset the status dot yet — keep it busy until the server confirms
   // via active_streams whether the agent is still working.  This avoids the
   // green flash on reconnect when the agent is actually still thinking.
@@ -182,7 +182,7 @@ function handleServerMessage(msg) {
       // Commit any in-progress stream bubble
       if (streamEl && streamBuf) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
-        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now() });
+        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
       }
       streamEl = null; streamBuf = '';
       appendMessage('assistant', msg.text, { agent: msg.agent });
@@ -274,7 +274,7 @@ function handleServerMessage(msg) {
       if (streamEl) {
         try { streamEl.closest('.msg')?.remove(); } catch {}
       }
-      streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
+      streamEl = null; streamBuf = ''; resetToolRun(true);
       setTyping(false);
       break;
     case 'done':
@@ -294,19 +294,22 @@ function handleServerMessage(msg) {
         const finalBuf = widgetStreamFinish();
         if (finalBuf) {
           if (!sessions[msg.agent]) sessions[msg.agent] = [];
-          sessions[msg.agent].push({ role: 'assistant', content: finalBuf, ts: Date.now(), hidden: true });
+          sessions[msg.agent].push({ role: 'assistant', content: finalBuf, ts: Date.now(), hidden: true, toolEvents: currentLiveToolEvents() });
         }
-        streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
+        streamEl = null; streamBuf = ''; resetToolRun();
         setStreaming(false);
         break;
       }
       if (streamEl && streamBuf) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
-        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now() });
+        updateToolRunHeader(liveToolRun, true);
+        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
         addTimestamp(streamEl.closest('.msg'));
         if (msg.agent === activeAgent) updateSessionWarning();
+      } else if (liveToolRun?.events?.length) {
+        updateToolRunHeader(liveToolRun, true);
       }
-      streamEl = null; streamBuf = ''; toolPillsEl = null; toolStreamBubbleEl = null; toolStreamBubbleTool = null;
+      streamEl = null; streamBuf = ''; resetToolRun();
       setStreaming(false); setTyping(false);
       delete agentStreams[msg.agent];
       if (agents.find(a => a.skillCategory === 'expenses')?.id === msg.agent && $('drawerExpenses')?.classList.contains('open')) loadExpTxns();

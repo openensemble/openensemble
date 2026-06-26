@@ -82,7 +82,7 @@ function _modelContextWindow(model) {
   return null;
 }
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], voiceCtx = null, hideTurn = false, hideTaskId = null } = {}) {
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null } = {}) {
   // Record a compact summary of which tools fired this turn so future loads
   // of this session can show the assistant what it actually did, not just
   // what it said. Without this, short follow-ups ("send", "again", "do that
@@ -108,6 +108,19 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     ? toolsUsed.map(t => ({ name: t.name, text: String(t.text ?? '').slice(0, 10000) }))
         .filter(r => r.text.length > 0)
     : null;
+  const compactToolEvents = Array.isArray(toolEvents) && toolEvents.length
+    ? toolEvents.map(t => ({
+        name: t.name,
+        args: t.args ? redactArgsForTrace(t.args) : null,
+        status: t.status ?? 'done',
+        startedAt: t.startedAt ?? null,
+        endedAt: t.endedAt ?? null,
+        durationMs: t.durationMs ?? null,
+        preview: String(t.preview ?? '').slice(0, 500),
+        progressPreview: String(t.progressPreview ?? '').slice(-1200),
+        text: String(t.text ?? '').slice(0, 10000),
+      }))
+    : null;
   // Phase-14 chip-replaces-turn: when the turn dispatched a backgrounded
   // tool whose chip IS the visible reply, mark the assistant entry as
   // hidden so renderSession skips it on reload. The chip's own session
@@ -117,6 +130,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
         role: 'assistant', content: assistantContent, ts: Date.now(),
         toolsUsed: toolsSummary,
         ...(toolResults && toolResults.length ? { toolResults } : {}),
+        ...(compactToolEvents && compactToolEvents.length ? { toolEvents: compactToolEvents } : {}),
       }
     : { role: 'assistant', content: assistantContent, ts: Date.now() };
   if (hideTurn) assistantEntry.hidden = true;
@@ -301,17 +315,55 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   let hideTurn = false;
   let hideTaskId = null;
   const toolsUsed = [];
+  const toolEvents = [];
   // Latest tool_call args by name, attached to the matching tool_result so
   // downstream proposers (routine-proposer) can inspect what the LLM passed.
   let _lastCallArgsByName = Object.create(null);
+  let _pendingToolEventsByName = Object.create(null);
   for await (const event of providerGen) {
     if (event.type === '__content') { assistantContent = event.content; continue; }
     if (event.type === '__hide_turn') { hideTurn = true; hideTaskId = event.taskId || null; continue; }
     if (event.type === 'tool_call' && event.name) {
       _lastCallArgsByName[event.name] = event.args ?? null;
+      const rec = {
+        name: event.name,
+        args: event.args ?? null,
+        startedAt: Date.now(),
+        status: 'running',
+      };
+      if (!_pendingToolEventsByName[event.name]) _pendingToolEventsByName[event.name] = [];
+      _pendingToolEventsByName[event.name].push(rec);
+      toolEvents.push(rec);
+    }
+    if (event.type === 'tool_progress' && event.name) {
+      const pending = _pendingToolEventsByName[event.name]?.[0];
+      if (pending) {
+        const clean = String(event.text ?? '').slice(-1200);
+        pending.progressPreview = clean;
+        pending.updatedAt = Date.now();
+      }
     }
     if (event.type === 'tool_result' && event.name) {
       toolsUsed.push({ name: event.name, text: event.text || '', args: _lastCallArgsByName[event.name] ?? null });
+      const pending = _pendingToolEventsByName[event.name]?.shift();
+      if (pending) {
+        pending.status = 'done';
+        pending.endedAt = Date.now();
+        pending.durationMs = pending.endedAt - pending.startedAt;
+        pending.preview = event.preview ?? '';
+        pending.text = event.text || '';
+      } else {
+        toolEvents.push({
+          name: event.name,
+          args: _lastCallArgsByName[event.name] ?? null,
+          status: 'done',
+          startedAt: Date.now(),
+          endedAt: Date.now(),
+          durationMs: 0,
+          preview: event.preview ?? '',
+          text: event.text || '',
+        });
+      }
       delete _lastCallArgsByName[event.name];
     }
     const isVisibleText = event.type === 'token' || event.type === 'replace';
@@ -325,8 +377,8 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
     if (event.type === 'error') { errored = true; break; }
   }
   return errored
-    ? { assistantContent: '', errored: true, toolsUsed, hideTurn: false, hideTaskId: null }
-    : { assistantContent, errored: false, toolsUsed, hideTurn, hideTaskId };
+    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, hideTurn: false, hideTaskId: null }
+    : { assistantContent, errored: false, toolsUsed, toolEvents, hideTurn, hideTaskId };
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
@@ -959,7 +1011,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
 
   const _llmStart = Date.now();
   const shouldBufferForRecovery = Boolean(_routerStore && agent.skillCategory === 'coordinator');
-  let { assistantContent, errored, toolsUsed, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
+  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
   let recoveredMissingTools = false;
   if (!errored && shouldBufferForRecovery && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
     const missingSkills = inferMissingToolSkills({ userText, assistantText: assistantContent, userId });
@@ -996,7 +1048,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           : { ...currentUserTurn, content: `${String(currentUserTurn.content || '')}${retryNote}` };
         const recoveryMessages = [...trimmed, recoveryTurn];
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-        ({ assistantContent, errored, toolsUsed, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: false }));
+        ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: false }));
       }
     }
   }
@@ -1061,6 +1113,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         argsPreview: t.args ? JSON.stringify(redactArgsForTrace(t.args)).slice(0, 500) : '',
         resultPreview: String(t.text ?? '').slice(0, 500),
       })),
+      events: toolEvents.map(t => ({
+        name: t.name,
+        status: t.status,
+        durationMs: t.durationMs ?? null,
+        preview: String(t.preview ?? t.progressPreview ?? '').slice(0, 500),
+      })),
     },
     meta: {
       silent,
@@ -1090,7 +1148,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     }).catch(() => {});
   }
   if (assistantContent) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, voiceCtx, hideTurn, hideTaskId });
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId });
     // Phase-14 chip-replaces-turn: emit __content only when we're NOT
     // hiding the turn. The browser would otherwise render the coordinator's
     // assistant bubble alongside the chip — redundant.
