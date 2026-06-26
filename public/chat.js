@@ -743,16 +743,16 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   metaLine.style.display = metaBits.length ? '' : 'none';
 
   // Latest status line (current tool, last result, awaiting question, final
-  // output). Capped at ~10 lines visible with internal scrollbar so a long
-  // node_exec output (apt upgrade dumping 500 lines) doesn't blow up the
-  // chip height. white-space:pre-wrap preserves newlines; monospace for
-  // shell-output legibility; overscroll-contain isolates the scroll so the
-  // outer chat doesn't scroll when you wheel inside the chip.
+  // output). Fixed-height with internal scrollbar so streaming node_exec
+  // output doesn't repeatedly resize the chat while apt/dpkg prints.
+  // white-space:pre-wrap preserves newlines; monospace for shell-output
+  // legibility; overscroll-contain isolates the scroll so the outer chat
+  // doesn't scroll when you wheel inside the chip.
   let statusLine = el.querySelector('.task-chip-status');
   if (!statusLine) {
     statusLine = document.createElement('div');
     statusLine.className = 'task-chip-status';
-    statusLine.style.cssText = 'font-size:12px;color:var(--text);padding:6px 8px;background:var(--bg1);border-radius:4px;line-height:1.4;font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:14em;overflow-y:auto;overscroll-behavior:contain';
+    statusLine.style.cssText = 'font-size:12px;color:var(--text);padding:6px 8px;background:var(--bg1);border-radius:4px;line-height:1.4;font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;height:14em;overflow-y:auto;overscroll-behavior:contain';
     el.appendChild(statusLine);
   }
   // Track scroll-anchoring: if user has scrolled away from the bottom, don't
@@ -766,7 +766,7 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   if (!recent) {
     recent = document.createElement('div');
     recent.className = 'task-chip-recent';
-    recent.style.cssText = 'margin-top:6px;font-size:11px;color:var(--muted);line-height:1.4;display:grid;gap:3px';
+    recent.style.cssText = 'margin-top:6px;font-size:11px;color:var(--muted);line-height:1.4;display:grid;gap:3px;max-height:4.2em;overflow:hidden';
     el.appendChild(recent);
   }
   const history = Array.isArray(status.recentHistory) ? status.recentHistory.slice(-4) : [];

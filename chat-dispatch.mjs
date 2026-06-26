@@ -432,26 +432,6 @@ export async function handleChatMessage({
     ).catch(e => console.warn('[router-mistakes] hook failed:', e.message));
   }
 
-  // Phase-11d verbosity calibration: track user reply length per agent.
-  // When the rolling average drops below threshold (user keeps replying very
-  // tersely), propose a "keep responses brief" rule on the coordinator-style
-  // role. Fire-and-forget.
-  if (ctx.userText) {
-    import('./lib/verbosity-tracker.mjs').then(async m => {
-      const signal = await m.recordUserMessageLength(userId, agentId, ctx.userText.length);
-      if (signal?.proposed) {
-        const { proposeRulePromotion } = await import('./lib/proposals.mjs');
-        await proposeRulePromotion({
-          userId, agentId,
-          roleId: 'coordinator',   // verbosity preference targets the coordinator role
-          roleName: 'Coordinator',
-          ruleText: `Keep responses brief. The user has been replying with short messages (avg ${signal.avgLen} chars over ${signal.samples} turns) — match their terseness.`,
-          sourceCorrectionIds: [],
-        });
-      }
-    }).catch(e => console.warn('[verbosity] hook failed:', e.message));
-  }
-
   // Interceptor chain. Each handler returns:
   //   - { handled: true, ... }  → emit/persist already done; dispatcher
   //     calls finalizeTurn() and returns to the caller. Routine may also
