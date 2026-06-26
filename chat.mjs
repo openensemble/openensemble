@@ -460,6 +460,7 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
+const SELECTED_PLAN_CONTROL_TOOLS = new Set(['ask_agent', 'request_tools']);
 
 function sanitizeToolPlanForStream(plan) {
   if (!plan || typeof plan !== 'object') return null;
@@ -493,7 +494,10 @@ function applyUserToolPlan(agent, plan) {
     return { mode: 'none', before, after: 0, selected: [], fullTools };
   }
   const selected = new Set(clean.selectedTools);
-  agent.tools = agent.tools.filter(t => selected.has(t.function?.name));
+  agent.tools = agent.tools.filter(t => {
+    const name = t.function?.name;
+    return selected.has(name) || SELECTED_PLAN_CONTROL_TOOLS.has(name);
+  });
   return { mode: 'selected', before, after: agent.tools.length, selected: clean.selectedTools, fullTools };
 }
 
@@ -520,7 +524,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan);
   if (userToolPlanResult) {
     recomposeAgentPromptForTools(agent);
-    if (agent.skillCategory === 'coordinator' && userToolPlanResult.selected.includes('request_tools')) {
+    if (agent.skillCategory === 'coordinator' && agent.tools.some(t => t.function?.name === 'request_tools')) {
       _routerStore = {
         agent,
         fullTools: userToolPlanResult.fullTools,
@@ -674,7 +678,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // render it and the session doesn't persist it into history.
   const noteBlock = systemNote ? `\n\n${systemNote}` : '';
   const userToolPlanBlock = userToolPlanResult
-    ? `\n\n## User-selected tool plan\nThe user selected tool mode "${userToolPlanResult.mode}" before sending this message.${userToolPlanResult.mode === 'selected' ? ` Only these selected tool schemas are available this turn: ${userToolPlanResult.selected.join(', ')}. Do not claim unrelated tools are unavailable; answer or ask a concise follow-up if the selected set is insufficient.` : ' No tools are available this turn; answer without tool calls or ask a concise follow-up if live action is required.'}`
+    ? `\n\n## User-selected tool plan\nThe user selected tool mode "${userToolPlanResult.mode}" before sending this message.${userToolPlanResult.mode === 'selected' ? ` These selected action tools are available this turn: ${userToolPlanResult.selected.join(', ')}. Control-plane tools such as ask_agent/request_tools may also be available so you can delegate or recover from an incomplete selected set. Do not claim unrelated tools are unavailable; delegate, request tools, answer, or ask a concise follow-up if the selected set is insufficient.` : ' No tools are available this turn; answer without tool calls or ask a concise follow-up if live action is required.'}`
     : '';
   const desktopFoldersBlock = buildDesktopFoldersBlock(userId, voiceCtx?.source);
   const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
