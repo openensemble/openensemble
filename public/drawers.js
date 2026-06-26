@@ -20,6 +20,9 @@ function toggleDrawer(drawerId, btnId) {
   if (drawerId === 'drawerSettings') openSettingsDrawer(false);
   if (drawerId === 'drawerTasks') openTasksDrawer(false);
   if (drawerId === 'drawerLearn' && typeof loadLearnDrawer === 'function') loadLearnDrawer();
+  if (drawerId === 'drawerRunInspector' && typeof loadRunInspector === 'function') loadRunInspector();
+  if (drawerId === 'drawerMemoryControl' && typeof loadMemoryControl === 'function') loadMemoryControl();
+  if (drawerId === 'drawerSkillPermissions' && typeof loadSkillPermissions === 'function') loadSkillPermissions();
   if (drawerId === 'drawerNotes') openNotesDrawer();
   if (drawerId === 'drawerMessages') openMessagesDrawer();
   if (drawerId === 'drawerExpenses') openExpensesDrawer();

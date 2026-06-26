@@ -15,6 +15,61 @@
 .btn-dash-go { background: none; border: 1px solid var(--border); color: var(--accent); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .btn-dash-go:hover { border-color: var(--accent); }
 .btn-dash-close { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.dash-tool-btn {
+  margin-top: auto;
+  align-self: flex-start;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dash-tool-btn:hover { border-color: var(--accent); color: var(--accent); }
+.dash-tool-shell {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.dash-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+.dash-tool-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dash-tool-back:hover { border-color: var(--accent); }
+.dash-tool-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+}
+.dash-tool-panel {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg2);
+}
 
 /* ── News cards ── */
 .news-card {

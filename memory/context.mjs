@@ -86,7 +86,17 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
   const userContext = userContextParts.join('\n');
 
   return { systemInstructions, episodeHistory, userContext,
-    _meta: { paramsLoaded: params.length, episodesLoaded: episodes.length, immortalCount: immortalParams.length } };
+    _meta: {
+      paramsLoaded: params.length,
+      episodesLoaded: episodes.length,
+      userFactsLoaded: userFacts.length,
+      immortalCount: immortalParams.length,
+      injectedMemoryIds: [
+        ...params.map(m => ({ id: m.id, table: `${agentId}_params`, type: 'params', text: m.text?.slice(0, 160) ?? '' })),
+        ...episodes.map(m => ({ id: m.id, table: `${agentId}_episodes`, type: 'episodes', text: m.text?.slice(0, 160) ?? '' })),
+        ...userFacts.map(m => ({ id: m.id, table: 'user_facts', type: 'user_facts', text: m.text?.slice(0, 160) ?? '' })),
+      ],
+    } };
 }
 
 export function formatContext(ctx) {

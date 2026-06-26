@@ -69,6 +69,8 @@ import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
 import { handle as handleHomeAssistant }  from './routes/home-assistant.mjs';
 import { handle as handleMcp }            from './routes/mcp.mjs';
+import { handle as handleRunInspector }   from './routes/run-inspector.mjs';
+import { handle as handleSkillPermissions } from './routes/skill-permissions.mjs';
 import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
 import { speakReminder, pickReminderDevices } from './lib/voice-reminder.mjs';
 import { registerAlarm, getCachedAlarmTts, sendAlarmArm } from './lib/alarms.mjs';
@@ -213,6 +215,8 @@ const routeHandlers = [
   handleGuide,
   handleHomeAssistant,
   handleMcp,
+  handleRunInspector,
+  handleSkillPermissions,
 ];
 
 // CSP. Inline event handlers are no longer used — the public/event-delegation.js

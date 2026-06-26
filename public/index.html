@@ -129,6 +129,18 @@
       <span class="strip-tooltip">Learn</span>
       <span class="strip-badge" id="learnBadge" style="display:none"></span>
     </button>
+    <button class="strip-btn" id="sbtnRunInspector" data-action="toggleDrawer" data-args="[&quot;drawerRunInspector&quot;, &quot;sbtnRunInspector&quot;]" title="Run Inspector" style="display:none">
+      <i data-lucide="scan-search"></i>
+      <span class="strip-tooltip">Run Inspector</span>
+    </button>
+    <button class="strip-btn" id="sbtnMemoryControl" data-action="toggleDrawer" data-args="[&quot;drawerMemoryControl&quot;, &quot;sbtnMemoryControl&quot;]" title="Memory" style="display:none">
+      <i data-lucide="brain"></i>
+      <span class="strip-tooltip">Memory</span>
+    </button>
+    <button class="strip-btn" id="sbtnSkillPermissions" data-action="toggleDrawer" data-args="[&quot;drawerSkillPermissions&quot;, &quot;sbtnSkillPermissions&quot;]" title="Permissions" style="display:none">
+      <i data-lucide="shield-check"></i>
+      <span class="strip-tooltip">Permissions</span>
+    </button>
     <button class="strip-btn" id="sbtnNotes" data-action="toggleDrawer" data-args="[&quot;drawerNotes&quot;, &quot;sbtnNotes&quot;]" title="Docs">
       <i data-lucide="folder"></i>
       <span class="strip-tooltip">Docs</span>
@@ -378,6 +390,46 @@
       </div>
       <div class="desk-drawer-body" id="learnBody">
         <div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Drawer: Run Inspector -->
+    <div class="desk-drawer desk-drawer--wide" id="drawerRunInspector">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="scan-search"></i></span>
+        <span class="drawer-label">Run Inspector</span>
+        <button class="drawer-refresh" data-action="loadRunInspector">↻</button>
+        <button class="drawer-refresh" data-action="clearRunInspector">Clear</button>
+        <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
+      </div>
+      <div class="desk-drawer-body run-inspector" id="runInspectorBody">
+        <div class="cdraw-empty">No runs recorded yet.</div>
+      </div>
+    </div>
+
+    <!-- Drawer: Memory Control -->
+    <div class="desk-drawer desk-drawer--wide" id="drawerMemoryControl">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="brain"></i></span>
+        <span class="drawer-label">Memory</span>
+        <button class="drawer-refresh" data-action="loadMemoryControl">↻</button>
+        <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
+      </div>
+      <div class="desk-drawer-body memory-control" id="memoryControlBody">
+        <div class="cdraw-empty">Loading memories…</div>
+      </div>
+    </div>
+
+    <!-- Drawer: Skill Permissions -->
+    <div class="desk-drawer desk-drawer--wide" id="drawerSkillPermissions">
+      <div class="desk-drawer-hdr">
+        <span class="drawer-icon"><i data-lucide="shield-check"></i></span>
+        <span class="drawer-label">Skill Permissions</span>
+        <button class="drawer-refresh" data-action="loadSkillPermissions">↻</button>
+        <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
+      </div>
+      <div class="desk-drawer-body skill-permissions" id="skillPermissionsBody">
+        <div class="cdraw-empty">Loading permissions…</div>
       </div>
     </div>
 
@@ -1588,6 +1640,15 @@
     <button class="drawer-item" id="drawerTasksMobile" data-action="_closeDrawerThen" data-args='["openTasksDrawer"]'>
       <span class="di-icon"><i data-lucide="clock"></i></span> <span id="drawerTasksLabel">Tasks</span>
     </button>
+    <button class="drawer-item" data-action="_closeAndToggleDrawer" data-args='["drawerRunInspector","sbtnRunInspector"]' style="display:none">
+      <span class="di-icon"><i data-lucide="scan-search"></i></span> Run Inspector
+    </button>
+    <button class="drawer-item" data-action="_closeAndToggleDrawer" data-args='["drawerMemoryControl","sbtnMemoryControl"]' style="display:none">
+      <span class="di-icon"><i data-lucide="brain"></i></span> Memory
+    </button>
+    <button class="drawer-item" data-action="_closeAndToggleDrawer" data-args='["drawerSkillPermissions","sbtnSkillPermissions"]' style="display:none">
+      <span class="di-icon"><i data-lucide="shield-check"></i></span> Permissions
+    </button>
     <button class="drawer-item" data-action="_closeAndToggleDrawer" data-args='["drawerNotes","sbtnNotes"]'>
       <span class="di-icon"><i data-lucide="folder"></i></span> Docs
     </button>
@@ -1766,6 +1827,9 @@
 <script src="/backup.js"></script>
 <script src="/tasks.js"></script>
 <script src="/learn.js"></script>
+<script src="/run-inspector.js"></script>
+<script src="/memory-control.js"></script>
+<script src="/skill-permissions.js"></script>
 <script src="/dashboard.js"></script>
 <script src="/markets.js"></script>
 <script src="/inbox.js"></script>

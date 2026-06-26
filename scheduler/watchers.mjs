@@ -46,6 +46,7 @@ const MAX_FAILURES = 3;
 const RECENT_KEEP_MS = 60 * 60 * 1000;          // Keep completed/errored watchers visible 1h
 const MAX_HISTORY_ENTRIES = 100;                // Per-watcher progress scrollback cap
 const STUCK_RATIO = 5;                          // No change for 5×cadence → annotate as "stuck"
+const STUCK_BACKOFF_MAX_SEC = 3600;             // Back off noisy stuck polls up to hourly
 
 let _running = false;
 let _timer = null;
@@ -772,6 +773,7 @@ async function tickOne(record) {
           record.lastStatusText = result.textUpdate;
           record.lastChangeAt = Date.now();
           record.stuckAnnounced = false;
+          record.stuckSinceAt = null;
           pushHistory(record, { text: result.textUpdate, ts: Date.now() });
           if (_sendStatusFn) {
             _sendStatusFn(record.userId, {
@@ -792,16 +794,21 @@ async function tickOne(record) {
       }
     }
 
-    // Stuck detection — fire one synthetic status when N×cadence elapses
-    // with no visible change. Don't reap; long-running things like price
-    // alerts genuinely sit unchanged for hours. The user can read the
-    // annotation and decide whether to cancel.
+    // Stuck detection — fire a synthetic status when N×cadence elapses with
+    // no visible change, then back off noisy polling up to a cap. Don't reap;
+    // long-running things like price alerts genuinely sit unchanged for hours.
+    // The user can read the annotation/status and decide whether to cancel.
     const sinceChange = Date.now() - record.lastChangeAt;
     const stuckThresholdMs = STUCK_RATIO * record.cadenceSec * 1000;
     if (!record.stuckAnnounced && sinceChange > stuckThresholdMs) {
       record.stuckAnnounced = true;
+      record.stuckSinceAt = record.stuckSinceAt || Date.now();
+      record.stuckRecoveryCount = Number(record.stuckRecoveryCount || 0) + 1;
+      const oldCadence = record.cadenceSec;
+      record.cadenceSec = Math.min(STUCK_BACKOFF_MAX_SEC, Math.max(record.cadenceSec, record.cadenceSec * 2));
       const minutes = Math.round(sinceChange / 60_000);
-      const stuckText = `${record.lastStatusText || record.label} — no change for ${minutes} min, may be stuck`;
+      const backoffText = record.cadenceSec !== oldCadence ? `; backing off checks to every ${record.cadenceSec}s` : '';
+      const stuckText = `${record.lastStatusText || record.label} — no change for ${minutes} min, may be stuck${backoffText}`;
       pushHistory(record, { text: stuckText, ts: Date.now(), stuck: true });
       if (_sendStatusFn) {
         _sendStatusFn(record.userId, {

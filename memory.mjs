@@ -33,4 +33,4 @@ export { buildAgentContext, formatContext } from './memory/context.mjs';
 export {
   detectAndStoreCorrection, detectAndStorePreference, trackFriction, processSignals, pinFact,
 } from './memory/signals.mjs';
-export { getMemoryStats, migrateSharedCortexToUser } from './memory/migration.mjs';
+export { getMemoryStats, migrateSharedCortexToUser, listMemoryRows } from './memory/migration.mjs';

@@ -98,8 +98,18 @@ async function loadDashboard() {
   mc.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><span>${icon('brain', 28)}</span><div>
     <div class="dash-card-title">Memory</div>
     <div class="dash-card-meta">${data.memoryCount ?? 0} stored memories across all agents</div>
-  </div></div>`;
+  </div></div>
+  <button class="dash-tool-btn" data-action="openDashboardTool" data-args='["memory"]'>Open Memory Control</button>`;
   body.appendChild(mc);
+
+  const inspector = document.createElement('div');
+  inspector.className = 'dash-card';
+  inspector.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><span>${icon('scan-search', 28)}</span><div>
+    <div class="dash-card-title">Run Inspector</div>
+    <div class="dash-card-meta">Recent agent runs, tools, payload sizes, and injected memory</div>
+  </div></div>
+  <button class="dash-tool-btn" data-action="openDashboardTool" data-args='["runs"]'>Open Run Inspector</button>`;
+  body.appendChild(inspector);
 
   // Token usage card (admin/owner only)
   if (_currentUser?.role === 'owner' || _currentUser?.role === 'admin') {
@@ -190,6 +200,28 @@ async function loadDashboard() {
 
 }
 
+function openDashboardTool(tool) {
+  const body = $('dashBody');
+  if (!body) return;
+  const title = tool === 'memory' ? 'Memory Control' : 'Run Inspector';
+  const iconName = tool === 'memory' ? 'brain' : 'scan-search';
+  const panelId = tool === 'memory' ? 'dashboardMemoryControlBody' : 'dashboardRunInspectorBody';
+  body.innerHTML = `
+    <div class="dash-tool-shell">
+      <div class="dash-tool-head">
+        <button class="dash-tool-back" data-action="loadDashboard">${icon('arrow-left', 14)} Back</button>
+        <div class="dash-tool-title">${icon(iconName, 18)} ${escHtml(title)}</div>
+      </div>
+      <div class="dash-tool-panel ${tool === 'memory' ? 'memory-control' : 'run-inspector'}" id="${panelId}">
+        <div class="cdraw-empty">Loading…</div>
+      </div>
+    </div>
+  `;
+  if (tool === 'memory' && typeof loadMemoryControl === 'function') loadMemoryControl(panelId);
+  if (tool === 'runs' && typeof loadRunInspector === 'function') loadRunInspector(null, panelId);
+  if (window.lucide) lucide.createIcons();
+}
+
 function handleTaskComplete(msg) {
   fetch(`/api/history/${msg.agent}`).then(r => r.json()).then(messages => {
     sessions[msg.agent] = messages;
@@ -203,4 +235,3 @@ function handleTaskComplete(msg) {
     if (agents.find(a => a.skillCategory === 'expenses')?.id === msg.agent && $('drawerExpenses')?.classList.contains('open')) loadExpTxns();
   });
 }
-

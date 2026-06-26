@@ -28,6 +28,7 @@ import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingT
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
+import { recordRunTrace } from './lib/run-inspector.mjs';
 
 import {
   OPENAI_COMPAT_PROVIDERS, FIREWORKS_BASE,
@@ -497,20 +498,20 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
 
   // Monitorable-intent classifier — embedding-based judge that fires when
   // the user's message looks like "any new X from Y?", "what's on sale at Z?",
-  // "is the item back in stock?", etc. On a hit, append a one-line system
-  // note telling the LLM to ask the user (after answering) if they'd like
-  // automatic monitoring set up. Stateless — re-runs every turn; if the user
-  // ignores the offer once, the next topic-relevant turn will offer again.
+  // "is the item back in stock?", etc. On a hit, a small per-user ledger
+  // decides whether to ask once, suppress during cooldown, or escalate a
+  // repeated topic into a proposal bubble.
   // Skipped for ephemeral agents (no value in one-shot research) and slash
   // commands. ~5-10ms when the cortex embedder is warm.
   let monitorableBlock = '';
   if (!agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/')) {
     try {
-      const { classifyMonitorable, buildMonitorableSystemNote } = await import('./lib/monitorable-classifier.mjs');
+      const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('./lib/monitorable-classifier.mjs');
       const hit = await classifyMonitorable(userText);
       if (hit.monitorable) {
-        monitorableBlock = buildMonitorableSystemNote(hit);
-        log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched });
+        const offer = await recordMonitorableHit({ userId, agentId: agent.id, userText, hit });
+        if (offer.action === 'ask') monitorableBlock = buildMonitorableSystemNote(hit);
+        log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched, action: offer.action, count: offer.count });
       }
     } catch (e) {
       console.debug('[monitorable-classifier] failed:', e.message);
@@ -1020,11 +1021,64 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     userTextChars: _sizes.userTextChars,
     toolNamesUsed: toolsUsed.map(t => t.name),
   };
+  const _traceBase = {
+    agentId: agent.id,
+    agentName: agent.name ?? null,
+    skillCategory: agent.skillCategory ?? null,
+    provider: agent.provider,
+    model: agent.model,
+    source: voiceCtx?.source ?? 'web',
+    durationMs: _llmMeta.durationMs,
+    input: userText,
+    output: assistantContent,
+    attachment: attachment ? {
+      name: attachment.name ?? null,
+      mimeType: attachment.mimeType ?? null,
+      file_id: attachment.file_id ?? null,
+      hasInlineData: Boolean(attachment.base64),
+    } : null,
+    routing: _routerStore ? {
+      initialSkills: [..._routerStore.initiallyIncludedSkills],
+      addedSkills: [..._routerStore.addedSkills],
+      recoveredMissingTools,
+      fullToolCount: _routerStore.fullTools?.length ?? null,
+    } : null,
+    sizes: {
+      systemPromptChars: _sizes.spChars,
+      toolsBytes: _sizes.toolsBytes,
+      toolCount: _sizes.toolCount,
+      historyMessages: _sizes.historyMsgs,
+      historyBytes: _sizes.historyBytes,
+      droppedFromHistory: _sizes.droppedFromHistory,
+      userTextChars: _sizes.userTextChars,
+      contextWindow: ctxWindow,
+      tokenBudget: TOKEN_BUDGET,
+    },
+    tools: {
+      usedNames: toolsUsed.map(t => t.name),
+      used: toolsUsed.map(t => ({
+        name: t.name,
+        argsPreview: t.args ? JSON.stringify(t.args).slice(0, 500) : '',
+        resultPreview: String(t.text ?? '').slice(0, 500),
+      })),
+    },
+    meta: {
+      silent,
+      ephemeral: Boolean(agent.ephemeral),
+      hideTurn: Boolean(hideTurn),
+      hideTaskId: hideTaskId ?? null,
+      skippedSignals: Boolean(skipSignals),
+      skippedEpisodes: Boolean(skipEpisodes),
+      memory: ctx?._meta ?? null,
+    },
+  };
   if (errored) {
     log.error('chat', 'llm turn errored', _llmMeta);
+    recordRunTrace(userId, { ..._traceBase, status: 'error', error: assistantContent || 'Provider turn errored' });
     return;
   }
   log.info('chat', 'llm turn complete', _llmMeta);
+  recordRunTrace(userId, { ..._traceBase, status: 'complete' });
   if (_routerStore) {
     // Telemetry: fire-and-forget, feeds the future learning loop that uses
     // prior {prompt → skill} pairs as extra intent examples. Never blocks.

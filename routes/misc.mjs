@@ -27,7 +27,7 @@ async function saveThreads(threads) {
 }
 import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
-import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
+import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent, registerWatcher } from '../scheduler/watchers.mjs';
 import { cancelTask } from '../background-tasks.mjs';
 import { acceptProposal, dismissProposal, blockProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
 import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride, applyLearningKindPolicy, revokeLearningKindPolicy } from '../lib/learnings.mjs';
@@ -171,6 +171,66 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(listWatchers(authId)));
+    return true;
+  }
+
+  // Human-confirmed exec watcher creation. Agent tool calls deliberately
+  // cannot create persisted shell watches; this route is the explicit user
+  // approval path. Body:
+  // { label, command, comparator, target, parse?, cadenceSec?, expiresAt?,
+  //   agent?, confirm:"CREATE EXEC WATCH" }
+  if (req.url === '/api/watchers/exec' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      if (body.confirm !== 'CREATE EXEC WATCH') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'confirmation phrase required: CREATE EXEC WATCH' }));
+        return true;
+      }
+      if (!body.label || !body.command || !body.comparator) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'label, command, and comparator are required' }));
+        return true;
+      }
+      const valid = new Set(['gte', 'lte', 'gt', 'lt', 'eq', 'neq', 'matches', 'contains', 'changed']);
+      if (!valid.has(body.comparator)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid comparator' }));
+        return true;
+      }
+      const expiresAt = body.expiresAt === null || body.expiresAt === undefined
+        ? null
+        : new Date(body.expiresAt).getTime();
+      if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + 60_000)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'expiresAt must be null/omitted or at least one minute in the future' }));
+        return true;
+      }
+      const rawAgent = body.agent ? safeId(String(body.agent)) : 'coordinator';
+      const watcherId = registerWatcher({
+        userId: authId,
+        agentId: `${authId}_${rawAgent}`,
+        kind: 'exec',
+        label: String(body.label).slice(0, 200),
+        cadenceSec: Math.max(5, Number(body.cadenceSec) || 60),
+        expiresAt,
+        skillId: null,
+        state: {
+          command: String(body.command),
+          parse: body.parse || 'string',
+          comparator: body.comparator,
+          target: body.target,
+          _userConfirmed: true,
+        },
+        onFire: body.onFire && typeof body.onFire === 'object' ? body.onFire : { type: 'notify' },
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, watcherId }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return true;
   }
 

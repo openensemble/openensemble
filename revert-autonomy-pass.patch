@@ -1,0 +1,807 @@
+diff --git b/chat.mjs a/chat.mjs
+index e357977..7866d69 100644
+--- b/chat.mjs
++++ a/chat.mjs
+@@ -28,7 +28,6 @@ import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingT
+ import { toolRouterContext } from './lib/tool-router-context.mjs';
+ import { voiceContext } from './lib/voice-context.mjs';
+ import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
+-import { recordRunTrace } from './lib/run-inspector.mjs';
+ 
+ import {
+   OPENAI_COMPAT_PROVIDERS, FIREWORKS_BASE,
+@@ -498,20 +497,20 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
+ 
+   // Monitorable-intent classifier — embedding-based judge that fires when
+   // the user's message looks like "any new X from Y?", "what's on sale at Z?",
+-  // "is the item back in stock?", etc. On a hit, a small per-user ledger
+-  // decides whether to ask once, suppress during cooldown, or escalate a
+-  // repeated topic into a proposal bubble.
++  // "is the item back in stock?", etc. On a hit, append a one-line system
++  // note telling the LLM to ask the user (after answering) if they'd like
++  // automatic monitoring set up. Stateless — re-runs every turn; if the user
++  // ignores the offer once, the next topic-relevant turn will offer again.
+   // Skipped for ephemeral agents (no value in one-shot research) and slash
+   // commands. ~5-10ms when the cortex embedder is warm.
+   let monitorableBlock = '';
+   if (!agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/')) {
+     try {
+-      const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('./lib/monitorable-classifier.mjs');
++      const { classifyMonitorable, buildMonitorableSystemNote } = await import('./lib/monitorable-classifier.mjs');
+       const hit = await classifyMonitorable(userText);
+       if (hit.monitorable) {
+-        const offer = await recordMonitorableHit({ userId, agentId: agent.id, userText, hit });
+-        if (offer.action === 'ask') monitorableBlock = buildMonitorableSystemNote(hit);
+-        log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched, action: offer.action, count: offer.count });
++        monitorableBlock = buildMonitorableSystemNote(hit);
++        log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched });
+       }
+     } catch (e) {
+       console.debug('[monitorable-classifier] failed:', e.message);
+@@ -1021,64 +1020,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
+     userTextChars: _sizes.userTextChars,
+     toolNamesUsed: toolsUsed.map(t => t.name),
+   };
+-  const _traceBase = {
+-    agentId: agent.id,
+-    agentName: agent.name ?? null,
+-    skillCategory: agent.skillCategory ?? null,
+-    provider: agent.provider,
+-    model: agent.model,
+-    source: voiceCtx?.source ?? 'web',
+-    durationMs: _llmMeta.durationMs,
+-    input: userText,
+-    output: assistantContent,
+-    attachment: attachment ? {
+-      name: attachment.name ?? null,
+-      mimeType: attachment.mimeType ?? null,
+-      file_id: attachment.file_id ?? null,
+-      hasInlineData: Boolean(attachment.base64),
+-    } : null,
+-    routing: _routerStore ? {
+-      initialSkills: [..._routerStore.initiallyIncludedSkills],
+-      addedSkills: [..._routerStore.addedSkills],
+-      recoveredMissingTools,
+-      fullToolCount: _routerStore.fullTools?.length ?? null,
+-    } : null,
+-    sizes: {
+-      systemPromptChars: _sizes.spChars,
+-      toolsBytes: _sizes.toolsBytes,
+-      toolCount: _sizes.toolCount,
+-      historyMessages: _sizes.historyMsgs,
+-      historyBytes: _sizes.historyBytes,
+-      droppedFromHistory: _sizes.droppedFromHistory,
+-      userTextChars: _sizes.userTextChars,
+-      contextWindow: ctxWindow,
+-      tokenBudget: TOKEN_BUDGET,
+-    },
+-    tools: {
+-      usedNames: toolsUsed.map(t => t.name),
+-      used: toolsUsed.map(t => ({
+-        name: t.name,
+-        argsPreview: t.args ? JSON.stringify(t.args).slice(0, 500) : '',
+-        resultPreview: String(t.text ?? '').slice(0, 500),
+-      })),
+-    },
+-    meta: {
+-      silent,
+-      ephemeral: Boolean(agent.ephemeral),
+-      hideTurn: Boolean(hideTurn),
+-      hideTaskId: hideTaskId ?? null,
+-      skippedSignals: Boolean(skipSignals),
+-      skippedEpisodes: Boolean(skipEpisodes),
+-      memory: ctx?._meta ?? null,
+-    },
+-  };
+   if (errored) {
+     log.error('chat', 'llm turn errored', _llmMeta);
+-    recordRunTrace(userId, { ..._traceBase, status: 'error', error: assistantContent || 'Provider turn errored' });
+     return;
+   }
+   log.info('chat', 'llm turn complete', _llmMeta);
+-  recordRunTrace(userId, { ..._traceBase, status: 'complete' });
+   if (_routerStore) {
+     // Telemetry: fire-and-forget, feeds the future learning loop that uses
+     // prior {prompt → skill} pairs as extra intent examples. Never blocks.
+diff --git b/lib/monitorable-classifier.mjs a/lib/monitorable-classifier.mjs
+index b9fd76d..38c4592 100644
+--- b/lib/monitorable-classifier.mjs
++++ a/lib/monitorable-classifier.mjs
+@@ -15,16 +15,12 @@
+  * and varied — the goal is to recognize the *shape* of a monitorable
+  * query, not enumerate every possible source.
+  *
+- * The classifier itself is stateless. Callers can use recordMonitorableHit
+- * to apply a per-user cooldown/evidence ledger so OE does not nag on every
+- * matching turn and repeated monitorable questions can graduate into a
+- * proposal bubble.
++ * Stateless by design — every turn re-classifies. If the user ignores
++ * the offer once, the next time the same topic comes up we'll offer again.
++ * No proposal queue, no flush logic.
+  */
+ 
+-import fs from 'fs';
+-import path from 'path';
+ import { log } from '../logger.mjs';
+-import { USERS_DIR } from './paths.mjs';
+ 
+ // Canonical phrasings of "monitor this external state for me" intent.
+ // Mix sources (channel, store, person, feed, price, stock, account) and
+@@ -81,8 +77,6 @@ const ANTI_SEEDS = [
+ 
+ const SCORE_THRESHOLD = 0.46;          // tuned for built-in nomic-embed
+ const ANTI_MARGIN     = 0.03;          // monitorable hit must beat the best anti by this much
+-const OFFER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+-const PROPOSAL_AFTER_HITS = 2;
+ 
+ let _seedVecs = null;       // [{text, vec}]
+ let _antiVecs = null;
+@@ -133,34 +127,6 @@ function bestMatch(vec, pool) {
+   return best;
+ }
+ 
+-function offersPath(userId) {
+-  return path.join(USERS_DIR, userId, 'monitorable-offers.json');
+-}
+-
+-function topicKey(userText, matched) {
+-  const base = String(matched || userText || '').toLowerCase()
+-    .replace(/https?:\/\/\S+/g, '<url>')
+-    .replace(/[^a-z0-9<>\s]/g, ' ')
+-    .replace(/\s+/g, ' ')
+-    .trim();
+-  return base.slice(0, 120);
+-}
+-
+-function readOffers(userId) {
+-  try {
+-    const data = JSON.parse(fs.readFileSync(offersPath(userId), 'utf8'));
+-    return data && typeof data === 'object' ? data : { topics: {} };
+-  } catch {
+-    return { topics: {} };
+-  }
+-}
+-
+-function writeOffers(userId, data) {
+-  const p = offersPath(userId);
+-  fs.mkdirSync(path.dirname(p), { recursive: true });
+-  fs.writeFileSync(p, JSON.stringify(data, null, 2));
+-}
+-
+ /**
+  * @param {string} userText
+  * @returns {Promise<{monitorable: boolean, score: number, matched: string|null, antiScore?: number, antiMatched?: string|null}>}
+@@ -205,58 +171,3 @@ export function buildMonitorableSystemNote(hit) {
+   const example = hit?.matched ? ` (e.g. similar to: "${hit.matched}")` : '';
+   return `\n\n## Monitorable intent detected\nThe user's question looks like they're asking about an external source that changes over time${example}. AFTER you answer their actual question, add ONE short follow-up sentence offering to set up automatic monitoring — phrase it naturally for the medium (voice = spoken, chat = brief). Examples: "Want me to keep an eye on that and ping you when there's something new?" or "I can check this every week and let you know when it changes — should I?". If the user accepts on the next turn, use \`proposeMonitor\` if a relevant skill already exposes a watch tool, or call \`skill_create\` to build a new monitored skill that follows the four-piece pattern (fetcher, cadence, pref-aware filter, deliver='agent'). DO NOT auto-create the monitor without the user's explicit yes.`;
+ }
+-
+-/**
+- * Persist a monitorable hit and decide whether this turn should ask, suppress,
+- * or emit a proposal. The proposal still requires explicit user acceptance.
+- *
+- * @param {{userId:string, agentId:string, userText:string, hit:any}} opts
+- * @returns {Promise<{action:'ask'|'proposal'|'suppress', count:number, proposalId?:string|null, topicKey:string}>}
+- */
+-export async function recordMonitorableHit({ userId, agentId, userText, hit }) {
+-  if (!userId || !agentId || !userText || !hit?.monitorable) {
+-    return { action: 'suppress', count: 0, topicKey: '' };
+-  }
+-  const key = topicKey(userText, hit.matched);
+-  if (!key) return { action: 'suppress', count: 0, topicKey: '' };
+-
+-  const data = readOffers(userId);
+-  if (!data.topics || typeof data.topics !== 'object') data.topics = {};
+-  const now = Date.now();
+-  const rec = data.topics[key] || { count: 0, firstSeenAt: now, lastSeenAt: 0, lastAskedAt: 0, proposalId: null };
+-  rec.count = Number(rec.count || 0) + 1;
+-  rec.lastSeenAt = now;
+-  rec.lastText = String(userText).slice(0, 500);
+-  rec.matched = hit.matched || rec.matched || null;
+-  data.topics[key] = rec;
+-
+-  if (rec.proposalId) {
+-    writeOffers(userId, data);
+-    return { action: 'suppress', count: rec.count, proposalId: rec.proposalId, topicKey: key };
+-  }
+-
+-  if (rec.count >= PROPOSAL_AFTER_HITS) {
+-    try {
+-      const { proposeMonitorableWatch } = await import('./proposals.mjs');
+-      const proposal = await proposeMonitorableWatch({
+-        userId,
+-        agentId,
+-        message: userText,
+-        matched: hit.matched,
+-        evidenceCount: rec.count,
+-      });
+-      if (proposal?.id) {
+-        rec.proposalId = proposal.id;
+-        writeOffers(userId, data);
+-        return { action: 'proposal', count: rec.count, proposalId: proposal.id, topicKey: key };
+-      }
+-    } catch (e) {
+-      log.warn('monitorable-classifier', 'proposal escalation failed', { err: e.message });
+-    }
+-  }
+-
+-  const shouldAsk = !rec.lastAskedAt || now - rec.lastAskedAt > OFFER_COOLDOWN_MS;
+-  if (shouldAsk) rec.lastAskedAt = now;
+-  writeOffers(userId, data);
+-  return { action: shouldAsk ? 'ask' : 'suppress', count: rec.count, topicKey: key };
+-}
+diff --git b/lib/proposals.mjs a/lib/proposals.mjs
+index 3d828b4..3f2cc8e 100644
+--- b/lib/proposals.mjs
++++ a/lib/proposals.mjs
+@@ -329,30 +329,6 @@ export async function maybePropose({ userId, agentId, message }) {
+   });
+ }
+ 
+-/**
+- * Monitorable-intent escalation path. Unlike maybePropose(), this is not
+- * driven by exact repeated commands; it is called after the classifier ledger
+- * has seen the user ask about the same changing external state more than once.
+- */
+-export async function proposeMonitorableWatch({ userId, agentId, message, matched = null, evidenceCount = 2 }) {
+-  if (!userId || !agentId || !message) return null;
+-  if (isDismissedRecently(userId, message)) return null;
+-  if (isDestructive(message)) return null;
+-  return createProposal({
+-    id: 'prop_' + randomUUID().slice(0, 12),
+-    userId,
+-    agentId,
+-    kind: 'watch',
+-    message: `You keep asking about a changing source. Set up a monitor for: ${message}`,
+-    matched,
+-    evidenceCount,
+-    accept_label: 'Set up the watch',
+-    dismiss_label: 'No, just answer',
+-    createdAt: Date.now(),
+-    status: 'pending',
+-  });
+-}
+-
+ /**
+  * Cortex correction tracker calls this when the user has corrected the same
+  * thing twice (vector-similarity match across stored CORRECTION rows in the
+diff --git b/routes/misc.mjs a/routes/misc.mjs
+index 3546de5..be01d69 100644
+--- b/routes/misc.mjs
++++ a/routes/misc.mjs
+@@ -27,7 +27,7 @@ async function saveThreads(threads) {
+ }
+ import { loadSession } from '../sessions.mjs';
+ import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
+-import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent, registerWatcher } from '../scheduler/watchers.mjs';
++import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent } from '../scheduler/watchers.mjs';
+ import { cancelTask } from '../background-tasks.mjs';
+ import { acceptProposal, dismissProposal, blockProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
+ import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride, applyLearningKindPolicy, revokeLearningKindPolicy } from '../lib/learnings.mjs';
+@@ -174,66 +174,6 @@ export async function handle(req, res) {
+     return true;
+   }
+ 
+-  // Human-confirmed exec watcher creation. Agent tool calls deliberately
+-  // cannot create persisted shell watches; this route is the explicit user
+-  // approval path. Body:
+-  // { label, command, comparator, target, parse?, cadenceSec?, expiresAt?,
+-  //   agent?, confirm:"CREATE EXEC WATCH" }
+-  if (req.url === '/api/watchers/exec' && req.method === 'POST') {
+-    const authId = requireAuth(req, res); if (!authId) return true;
+-    try {
+-      const body = JSON.parse(await readBody(req));
+-      if (body.confirm !== 'CREATE EXEC WATCH') {
+-        res.writeHead(400, { 'Content-Type': 'application/json' });
+-        res.end(JSON.stringify({ error: 'confirmation phrase required: CREATE EXEC WATCH' }));
+-        return true;
+-      }
+-      if (!body.label || !body.command || !body.comparator) {
+-        res.writeHead(400, { 'Content-Type': 'application/json' });
+-        res.end(JSON.stringify({ error: 'label, command, and comparator are required' }));
+-        return true;
+-      }
+-      const valid = new Set(['gte', 'lte', 'gt', 'lt', 'eq', 'neq', 'matches', 'contains', 'changed']);
+-      if (!valid.has(body.comparator)) {
+-        res.writeHead(400, { 'Content-Type': 'application/json' });
+-        res.end(JSON.stringify({ error: 'invalid comparator' }));
+-        return true;
+-      }
+-      const expiresAt = body.expiresAt === null || body.expiresAt === undefined
+-        ? null
+-        : new Date(body.expiresAt).getTime();
+-      if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + 60_000)) {
+-        res.writeHead(400, { 'Content-Type': 'application/json' });
+-        res.end(JSON.stringify({ error: 'expiresAt must be null/omitted or at least one minute in the future' }));
+-        return true;
+-      }
+-      const rawAgent = body.agent ? safeId(String(body.agent)) : 'coordinator';
+-      const watcherId = registerWatcher({
+-        userId: authId,
+-        agentId: `${authId}_${rawAgent}`,
+-        kind: 'exec',
+-        label: String(body.label).slice(0, 200),
+-        cadenceSec: Math.max(5, Number(body.cadenceSec) || 60),
+-        expiresAt,
+-        skillId: null,
+-        state: {
+-          command: String(body.command),
+-          parse: body.parse || 'string',
+-          comparator: body.comparator,
+-          target: body.target,
+-          _userConfirmed: true,
+-        },
+-        onFire: body.onFire && typeof body.onFire === 'object' ? body.onFire : { type: 'notify' },
+-      });
+-      res.writeHead(200, { 'Content-Type': 'application/json' });
+-      res.end(JSON.stringify({ ok: true, watcherId }));
+-    } catch (e) {
+-      res.writeHead(400, { 'Content-Type': 'application/json' });
+-      res.end(JSON.stringify({ error: e.message }));
+-    }
+-    return true;
+-  }
+-
+   const wMatch = req.url.match(/^\/api\/watchers\/([^?/]+)/);
+   if (wMatch && req.method === 'GET') {
+     const authId = requireAuth(req, res); if (!authId) return true;
+diff --git b/scheduler/watchers.mjs a/scheduler/watchers.mjs
+index cd1d197..8b30cd7 100644
+--- b/scheduler/watchers.mjs
++++ a/scheduler/watchers.mjs
+@@ -46,7 +46,6 @@ const MAX_FAILURES = 3;
+ const RECENT_KEEP_MS = 60 * 60 * 1000;          // Keep completed/errored watchers visible 1h
+ const MAX_HISTORY_ENTRIES = 100;                // Per-watcher progress scrollback cap
+ const STUCK_RATIO = 5;                          // No change for 5×cadence → annotate as "stuck"
+-const STUCK_BACKOFF_MAX_SEC = 3600;             // Back off noisy stuck polls up to hourly
+ 
+ let _running = false;
+ let _timer = null;
+@@ -773,7 +772,6 @@ async function tickOne(record) {
+           record.lastStatusText = result.textUpdate;
+           record.lastChangeAt = Date.now();
+           record.stuckAnnounced = false;
+-          record.stuckSinceAt = null;
+           pushHistory(record, { text: result.textUpdate, ts: Date.now() });
+           if (_sendStatusFn) {
+             _sendStatusFn(record.userId, {
+@@ -794,21 +792,16 @@ async function tickOne(record) {
+       }
+     }
+ 
+-    // Stuck detection — fire a synthetic status when N×cadence elapses with
+-    // no visible change, then back off noisy polling up to a cap. Don't reap;
+-    // long-running things like price alerts genuinely sit unchanged for hours.
+-    // The user can read the annotation/status and decide whether to cancel.
++    // Stuck detection — fire one synthetic status when N×cadence elapses
++    // with no visible change. Don't reap; long-running things like price
++    // alerts genuinely sit unchanged for hours. The user can read the
++    // annotation and decide whether to cancel.
+     const sinceChange = Date.now() - record.lastChangeAt;
+     const stuckThresholdMs = STUCK_RATIO * record.cadenceSec * 1000;
+     if (!record.stuckAnnounced && sinceChange > stuckThresholdMs) {
+       record.stuckAnnounced = true;
+-      record.stuckSinceAt = record.stuckSinceAt || Date.now();
+-      record.stuckRecoveryCount = Number(record.stuckRecoveryCount || 0) + 1;
+-      const oldCadence = record.cadenceSec;
+-      record.cadenceSec = Math.min(STUCK_BACKOFF_MAX_SEC, Math.max(record.cadenceSec, record.cadenceSec * 2));
+       const minutes = Math.round(sinceChange / 60_000);
+-      const backoffText = record.cadenceSec !== oldCadence ? `; backing off checks to every ${record.cadenceSec}s` : '';
+-      const stuckText = `${record.lastStatusText || record.label} — no change for ${minutes} min, may be stuck${backoffText}`;
++      const stuckText = `${record.lastStatusText || record.label} — no change for ${minutes} min, may be stuck`;
+       pushHistory(record, { text: stuckText, ts: Date.now(), stuck: true });
+       if (_sendStatusFn) {
+         _sendStatusFn(record.userId, {
+diff --git b/skills/tasks/execute.mjs a/skills/tasks/execute.mjs
+index a713977..60aa4a4 100644
+--- b/skills/tasks/execute.mjs
++++ a/skills/tasks/execute.mjs
+@@ -372,26 +372,12 @@ async function execCreateWatch(args, userId, agentId, ctx) {
+   let onFire = null;
+   if (on_fire) {
+     if (typeof on_fire !== 'object') return 'Error: on_fire must be an object.';
+-    if (!['notify', 'agent', 'email', 'telegram'].includes(on_fire.type)) {
+-      return `Error: on_fire.type must be 'notify', 'agent', 'email', or 'telegram' (got "${on_fire.type}").`;
+-    }
+-    if (on_fire.type === 'agent') {
+-      onFire = { type: 'agent', prompt: on_fire.prompt ? String(on_fire.prompt) : null };
+-    } else if (on_fire.type === 'email') {
+-      onFire = {
+-        type: 'email',
+-        ...(on_fire.subject ? { subject: String(on_fire.subject) } : {}),
+-        ...(on_fire.to ? { to: String(on_fire.to) } : {}),
+-        ...(on_fire.account ? { account: String(on_fire.account) } : {}),
+-      };
+-    } else if (on_fire.type === 'telegram') {
+-      onFire = {
+-        type: 'telegram',
+-        ...(on_fire.prefix ? { prefix: String(on_fire.prefix) } : {}),
+-      };
+-    } else {
+-      onFire = { type: 'notify' };
++    if (on_fire.type !== 'notify' && on_fire.type !== 'agent') {
++      return `Error: on_fire.type must be 'notify' or 'agent' (got "${on_fire.type}").`;
+     }
++    onFire = on_fire.type === 'agent'
++      ? { type: 'agent', prompt: on_fire.prompt ? String(on_fire.prompt) : null }
++      : { type: 'notify' };
+   }
+ 
+   const cadence = Math.max(5, Number(cadence_sec) || 60);
+@@ -418,11 +404,7 @@ async function execCreateWatch(args, userId, agentId, ctx) {
+   } else {
+     predStr = `when ${comparator} ${target}`;
+   }
+-  const fireStr =
+-    onFire?.type === 'agent' ? ' (will run an agent action on fire)' :
+-    onFire?.type === 'email' ? ' (will email when it fires)' :
+-    onFire?.type === 'telegram' ? ' (will send Telegram when it fires)' :
+-    '';
++  const fireStr = onFire?.type === 'agent' ? ' (will run an agent action on fire)' : '';
+   return `Watch "${label}" created — ${describeWatch({ kind: source, state })} ${predStr}, every ${cadence}s${expStr}${fireStr}. id=${watcherId}`;
+ }
+ 
+@@ -499,11 +481,10 @@ async function execListWatches(userId, agentId, args) {
+       const lastRan = lastRanAt ? `, last ran ${_fmtAgo(lastRanAt)}` : ', not yet run';
+       const nextTick = w.nextTickAt ? `, next check ${_fmtRelTime(w.nextTickAt)}` : '';
+       const deliver = `, ${_fmtDeliver(w.onFire)}`;
+-      const stuck = (w.stuckAnnounced || w.stuckSinceAt) ? ', marked stuck/backed off' : '';
+       const ticks = ` (${w.ticks ?? 0} checks so far${w.failures ? `, ${w.failures} failure${w.failures === 1 ? '' : 's'}` : ''})`;
+       const last = w.lastStatusText ? `\n    last: ${w.lastStatusText}` : '';
+       const expiry = (w.expiresAt === null) ? '' : `, expires ${_fmtRelTime(w.expiresAt)}`;
+-      lines.push(`- "${w.label}" [${w.kind}${w.skillId ? ` · ${w.skillId}` : ''}] — ${cadence}${lastRan}${nextTick}${deliver}${expiry}${stuck}${ticks} (id: ${w.id})${last}`);
++      lines.push(`- "${w.label}" [${w.kind}${w.skillId ? ` · ${w.skillId}` : ''}] — ${cadence}${lastRan}${nextTick}${deliver}${expiry}${ticks} (id: ${w.id})${last}`);
+     }
+   }
+   if (recent.length) {
+@@ -740,11 +721,6 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
+   if (!userId) return 'Error: no user context.';
+   if (!label || typeof label !== 'string') return 'Error: label is required.';
+   if (!prompt || typeof prompt !== 'string') return 'Error: prompt is required.';
+-  const { canRunScheduledTaskSilently } = await import('../../lib/autonomy-policy.mjs');
+-  const silentPolicy = canRunScheduledTaskSilently({ prompt, silent });
+-  if (!silentPolicy.ok) {
+-    return `Error: ${silentPolicy.reason}. Schedule it with silent=false so the run is visible to the user.`;
+-  }
+   const rawAgent = unscopeAgentId(agentId, userId);
+   if (!rawAgent) return 'Error: no agent context — cannot schedule.';
+ 
+@@ -771,43 +747,6 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
+   return `Task "${task.label}" scheduled for ${when.toLocaleString()} via agent ${rawAgent}${silentTag}. id=${task.id}`;
+ }
+ 
+-async function execAutonomyStatus(userId, agentId) {
+-  if (!userId) return 'Error: no user context.';
+-  const { listWatchers } = await import('../../scheduler/watchers.mjs');
+-  const { listUserProposals } = await import('../../lib/proposals.mjs');
+-  const { summarizeAutonomyPolicy } = await import('../../lib/autonomy-policy.mjs');
+-  const watchers = listWatchers(userId);
+-  const active = watchers.active || [];
+-  const recent = watchers.recent || [];
+-  const proposals = listUserProposals(userId, 'pending');
+-  const policy = summarizeAutonomyPolicy();
+-
+-  const deliverCounts = active.reduce((acc, w) => {
+-    const k = w.onFire?.type || 'none';
+-    acc[k] = (acc[k] || 0) + 1;
+-    return acc;
+-  }, {});
+-  const stuck = active.filter(w => w.stuckAnnounced || w.stuckSinceAt);
+-  const owned = agentId
+-    ? active.filter(w => w.agentId === agentId || unscopeAgentId(w.agentId, userId) === unscopeAgentId(agentId, userId)).length
+-    : 0;
+-
+-  const lines = [
+-    `Autonomy status: ${active.length} active watcher(s), ${recent.length} recent watcher(s), ${proposals.length} pending proposal(s).`,
+-    `This agent owns ${owned} active watcher(s).`,
+-    `Delivery: ${Object.entries(deliverCounts).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'}.`,
+-    `Stuck/backed-off: ${stuck.length}.`,
+-    `Policy: silent tasks — ${policy.silentTasks}; exec watchers — ${policy.execWatchers}; monitor offers — ${policy.monitorOffers}; watcher recovery — ${policy.watcherRecovery}.`,
+-  ];
+-  if (stuck.length) {
+-    lines.push('Needs attention:');
+-    for (const w of stuck.slice(0, 5)) {
+-      lines.push(`- "${w.label}" (${w.kind}) last changed ${_fmtAgo(w.lastChangeAt || w.createdAt)}; cadence ${w.cadenceSec}s; id=${w.id}`);
+-    }
+-  }
+-  return lines.join('\n');
+-}
+-
+ export default async function execute(name, args, userId, agentId, ctx) {
+   if (name === 'set_reminder')    return execSetReminder(args || {}, userId);
+   if (name === 'set_alarm')       return execSetReminder({ ...(args || {}), _alarm: true }, userId);
+@@ -823,6 +762,5 @@ export default async function execute(name, args, userId, agentId, ctx) {
+   if (name === 'list_watch_items')  return execListWatchItems(args || {}, userId);
+   if (name === 'update_watch_item') return execUpdateWatchItem(args || {}, userId);
+   if (name === 'remove_watch_item') return execRemoveWatchItem(args || {}, userId);
+-  if (name === 'autonomy_status')    return execAutonomyStatus(userId, agentId);
+   return `Unknown tool: ${name}`;
+ }
+diff --git b/skills/tasks/manifest.json a/skills/tasks/manifest.json
+index 5ff1ec5..ea2c6cd 100644
+--- b/skills/tasks/manifest.json
++++ a/skills/tasks/manifest.json
+@@ -44,7 +44,7 @@
+     "update the polling frequency",
+     "slow down the etb checks"
+   ],
+-  "systemPromptAddition": "## Honesty rule (READ FIRST)\n\n**NEVER narrate success for an action you didn't take.** If you say \"Done — I scheduled that\" or \"Watching for X\" or \"Reminder set\" or anything similar, you MUST have called the corresponding tool in this same turn. If you didn't call the tool — because of an error, missing fields, or any reason — say so plainly: \"I couldn't schedule that — <specific reason>\" or \"I tried to set up the watch but the tool returned: <error>\". Hallucinated success is the worst failure mode here because the user trusts you and the action never happens.\n\nSpecific bans:\n- Don't say \"Scheduling briefly failed. Try rephrasing…\" unless schedule_task or set_reminder was actually called and returned that error verbatim. If you can't parse the time, ask for clarification — don't punt with a fake-sounding error.\n- Don't say \"Watching for X\" unless create_watch was called and returned a Watch \"…\" created line.\n- Don't say \"I'll remind you\" unless set_reminder or schedule_task ran successfully.\n\n## Scheduling fallback tools\n\nThe server normally intercepts scheduling requests *before* you see them and prepends a `[scheduler] ...` outcome line to the user message. **If you see `[scheduler]` in the user's message starting with `created` / `cancelled` / `rescheduled`, the task was already handled — confirm naturally and DO NOT call `set_reminder` or `schedule_task`.**\n\n**If `[scheduler]` says `Did not schedule` or contains an error**, the interceptor failed to parse — call `schedule_task` or `set_reminder` yourself with the parsed args. Don't echo the error back to the user; act on it.\n\nFor the cases the interceptor missed entirely (no `[scheduler]` line), call `set_reminder` or `schedule_task` whenever:\n- The user clearly wants something scheduled, AND\n- The phrasing has a parseable time (HH:MM, am/pm, \"in N minutes\", \"tomorrow\", \"every weekday\").\n\nWhen calling, parse the time yourself from the user's phrasing using the `<current_time>` block injected at the top of the chat. Resolve relative phrases like \"in five minutes\", \"tomorrow at 8\", \"every weekday at 7am\" into either a full ISO-8601 datetime (one-shots) or HH:MM 24-hour (daily). Echo the actual time back to the user when you confirm — never just say \"reminder set\" without naming when it'll fire.\n\n**Choose between the three:**\n- `set_reminder` — for gentle one-shot notifications: \"remind me to drink water at 3pm\", \"remind me about the meeting\". Fires ONCE: banner + chime + spoken label, then done.\n- `set_alarm` — for alarm-clock style: \"set an alarm for 7am\", \"wake me at 6:30\", \"alarm at 11:22\". RINGS REPEATEDLY (chime + announcement every ~4 s) on the user's voice device until they say their wake word followed by \"stop\" or the 10-minute cap hits. Use whenever the user says \"alarm\", \"wake me\", or otherwise wants an insistent ring rather than a single notification.\n- `schedule_task` — for \"every morning email me a news briefing\" / \"at 5pm summarize my inbox\". The task fires a fresh agent run with a prompt you write — you'll be the agent answering, with no human present, so write the prompt as a self-contained instruction.\n\n## Watch tasks (condition-triggered, not time-triggered)\n\nUse `create_watch` when the user wants to **monitor a condition** that should fire when something becomes true — not at a specific time. Examples:\n- \"tell me when SOL hits $100\"\n- \"ping me when GitHub PR #312 turns green\"\n- \"let me know when /var/log/build.log says BUILD OK\"\n- \"watch this URL and notify me if the price drops below 50\"\n- \"alert me when the deploy script finishes\"\n\nA watch ticks on a polling cadence and fires once when the predicate is satisfied. Pick the right `source`:\n- `http_jsonpath` — fetch a URL, walk a JSON path, compare. Best for prices, REST APIs, GitHub/CI checks.\n- `file_stat` — watch a file's existence/size/mtime. Best for \"when this file appears\" or \"when this log changes\".\n- `event_subscription` — listen for an in-process event fired by OE or an integration webhook.\n\nDo NOT create `exec` watches from agent context; the tool blocks them because persisted shell commands need a human-approved route. For service/node health, prefer service profiles and their profile_health monitors.\n\nFor each source, fill `params` with the source-specific fields (see the `create_watch` tool description). `comparator` + `target` apply uniformly. Use `comparator: \"changed\"` when the user wants any change at all (\"tell me if my GitHub stars number changes\"). Default to no expiry for open-ended monitors; set `expires_at` when the user implies a deadline.\n\nPick `on_fire` from the user's requested delivery: `{type:'agent', prompt}` when they want action or a natural summary, `{type:'email', subject?, to?, account?}` when they say email me, `{type:'telegram', prefix?}` when they say text/ping/message me on Telegram, or `{type:'notify'}` for a quiet status bubble. For email/Telegram, write the watch label and subject/prefix in user-facing language; the watcher sends directly without an extra agent handoff.\n\nWhen confirming a watch, name the predicate in plain English (\"watching SOL price, will fire when it crosses $100\"), the cadence (\"checking every 60 seconds\"), and the delivery mode. Don't echo raw URLs or shell commands unless asked.",
++  "systemPromptAddition": "## Honesty rule (READ FIRST)\n\n**NEVER narrate success for an action you didn't take.** If you say \"Done — I scheduled that\" or \"Watching for X\" or \"Reminder set\" or anything similar, you MUST have called the corresponding tool in this same turn. If you didn't call the tool — because of an error, missing fields, or any reason — say so plainly: \"I couldn't schedule that — <specific reason>\" or \"I tried to set up the watch but the tool returned: <error>\". Hallucinated success is the worst failure mode here because the user trusts you and the action never happens.\n\nSpecific bans:\n- Don't say \"Scheduling briefly failed. Try rephrasing…\" unless schedule_task or set_reminder was actually called and returned that error verbatim. If you can't parse the time, ask for clarification — don't punt with a fake-sounding error.\n- Don't say \"Watching for X\" unless create_watch was called and returned a Watch \"…\" created line.\n- Don't say \"I'll remind you\" unless set_reminder or schedule_task ran successfully.\n\n## Scheduling fallback tools\n\nThe server normally intercepts scheduling requests *before* you see them and prepends a `[scheduler] ...` outcome line to the user message. **If you see `[scheduler]` in the user's message starting with `created` / `cancelled` / `rescheduled`, the task was already handled — confirm naturally and DO NOT call `set_reminder` or `schedule_task`.**\n\n**If `[scheduler]` says `Did not schedule` or contains an error**, the interceptor failed to parse — call `schedule_task` or `set_reminder` yourself with the parsed args. Don't echo the error back to the user; act on it.\n\nFor the cases the interceptor missed entirely (no `[scheduler]` line), call `set_reminder` or `schedule_task` whenever:\n- The user clearly wants something scheduled, AND\n- The phrasing has a parseable time (HH:MM, am/pm, \"in N minutes\", \"tomorrow\", \"every weekday\").\n\nWhen calling, parse the time yourself from the user's phrasing using the `<current_time>` block injected at the top of the chat. Resolve relative phrases like \"in five minutes\", \"tomorrow at 8\", \"every weekday at 7am\" into either a full ISO-8601 datetime (one-shots) or HH:MM 24-hour (daily). Echo the actual time back to the user when you confirm — never just say \"reminder set\" without naming when it'll fire.\n\n**Choose between the three:**\n- `set_reminder` — for gentle one-shot notifications: \"remind me to drink water at 3pm\", \"remind me about the meeting\". Fires ONCE: banner + chime + spoken label, then done.\n- `set_alarm` — for alarm-clock style: \"set an alarm for 7am\", \"wake me at 6:30\", \"alarm at 11:22\". RINGS REPEATEDLY (chime + announcement every ~4 s) on the user's voice device until they say their wake word followed by \"stop\" or the 10-minute cap hits. Use whenever the user says \"alarm\", \"wake me\", or otherwise wants an insistent ring rather than a single notification.\n- `schedule_task` — for \"every morning email me a news briefing\" / \"at 5pm summarize my inbox\". The task fires a fresh agent run with a prompt you write — you'll be the agent answering, with no human present, so write the prompt as a self-contained instruction.\n\n## Watch tasks (condition-triggered, not time-triggered)\n\nUse `create_watch` when the user wants to **monitor a condition** that should fire when something becomes true — not at a specific time. Examples:\n- \"tell me when SOL hits $100\"\n- \"ping me when GitHub PR #312 turns green\"\n- \"let me know when /var/log/build.log says BUILD OK\"\n- \"watch this URL and notify me if the price drops below 50\"\n- \"alert me when the deploy script finishes\"\n\nA watch ticks on a polling cadence and fires once when the predicate is satisfied. Pick the right `source`:\n- `http_jsonpath` — fetch a URL, walk a JSON path, compare. Best for prices, REST APIs, GitHub/CI checks.\n- `exec` — run a shell command, parse stdout, compare. Best for local-system signals (`df`, `gh pr view`, `systemctl is-active`).\n- `file_stat` — watch a file's existence/size/mtime. Best for \"when this file appears\" or \"when this log changes\".\n\nFor each source, fill `params` with the source-specific fields (see the `create_watch` tool description). `comparator` + `target` apply uniformly. Use `comparator: \"changed\"` when the user wants any change at all (\"tell me if my GitHub stars number changes\"). Default to no expiry for open-ended monitors; set `expires_at` when the user implies a deadline.\n\nWhen confirming a watch, name the predicate in plain English (\"watching SOL price, will fire when it crosses $100\") and the cadence (\"checking every 60 seconds\"). Don't echo raw URLs or shell commands unless asked.",
+   "tools": [
+     {
+       "type": "function",
+@@ -95,7 +95,7 @@
+             "datetime": { "type": "string", "description": "ISO 8601 timestamp for one-shot tasks. Required when repeat is 'once' or omitted." },
+             "time":     { "type": "string", "description": "HH:MM 24-hour for daily tasks. Required when repeat is 'daily'." },
+             "repeat":   { "type": "string", "enum": ["once", "daily"], "description": "Defaults to 'once'." },
+-            "silent":   { "type": "boolean", "description": "If true, the task fires without writing anything to chat — no header, no prompt, no agent reply. Confirmation appears as a 'Last run' line in the tasks drawer with a short summary of what the agent did. Only use for low-risk information-gathering/background work. Silent tasks that send/post/buy/delete/terminate/etc. are rejected; schedule those visible with silent=false. Defaults to false." }
++            "silent":   { "type": "boolean", "description": "If true, the task fires without writing anything to chat — no header, no prompt, no agent reply. Confirmation appears as a 'Last run' line in the tasks drawer with a short summary of what the agent did. Use when the user asks for the task to run silently / quietly / in the background, or when the task delivers via side effects (telegram, email) and chat clutter is unwanted. Defaults to false." }
+           },
+           "required": ["label", "prompt"]
+         }
+@@ -149,12 +149,12 @@
+       "type": "function",
+       "function": {
+         "name": "create_watch",
+-        "description": "Create a condition-triggered monitor. Fires once when the predicate is satisfied (or every change, if comparator is 'changed'). Use for 'tell me when X' / 'ping me if Y'. NOT for 'at 5pm do Z' (use schedule_task) or 'every Monday do Z' (use schedule_task with repeat=daily).\n\n**Source-specific required keys live INSIDE `params`, not at the top level.** Top-level `comparator`/`target` apply uniformly across all sources.\n\n- `source: 'http_jsonpath'` — params: { url, json_path?, headers? }. Example for 'tell me when SOL hits $100': `{label:'SOL alert', source:'http_jsonpath', params:{url:'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', json_path:'$.solana.usd'}, comparator:'gte', target:100}`.\n- `source: 'file_stat'` — params: { path, attribute? }. attribute: 'exists'|'size'|'mtime'|'content_changed' (default 'exists'). For 'exists', omit comparator/target — fires when the file appears. Example: `{label:'Build done', source:'file_stat', params:{path:'/tmp/build-done'}}`.\n- `source: 'event_subscription'` — params: { event, predicate? }. Subscribes to a named in-process event fired by POST /api/watchers/event. predicate optional: { json_path, comparator, target } over the payload. Example: `{label:'PR merged', source:'event_subscription', params:{event:'github_pr_merged', predicate:{json_path:'$.repo', comparator:'eq', target:'openensemble'}}}`.\n\nAgent-created `exec` watches are blocked by the executor for safety because persisted shell commands need human approval. Use service profiles for node/service health monitoring.\n\n`comparator` + `target` values: 'gte', 'lte', 'gt', 'lt', 'eq', 'neq', 'matches' (regex), 'contains' (substring), 'changed' (any change from last value).",
++        "description": "Create a condition-triggered monitor. Fires once when the predicate is satisfied (or every change, if comparator is 'changed'). Use for 'tell me when X' / 'ping me if Y'. NOT for 'at 5pm do Z' (use schedule_task) or 'every Monday do Z' (use schedule_task with repeat=daily).\n\n**Source-specific required keys live INSIDE `params`, not at the top level.** Top-level `comparator`/`target` apply uniformly across all sources.\n\n- `source: 'http_jsonpath'` — params: { url, json_path?, headers? }. Example for 'tell me when SOL hits $100': `{label:'SOL alert', source:'http_jsonpath', params:{url:'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', json_path:'$.solana.usd'}, comparator:'gte', target:100}`.\n- `source: 'exec'` — params: { command, parse? }. parse: 'string'|'numeric'|'first_number'|'lines' (default 'string'). Command runs as the OE server user with a 30s timeout. Example: `{label:'Disk full', source:'exec', params:{command:'df / | tail -1 | awk \\'{print $5}\\' | tr -d %', parse:'numeric'}, comparator:'gte', target:90}`.\n- `source: 'file_stat'` — params: { path, attribute? }. attribute: 'exists'|'size'|'mtime'|'content_changed' (default 'exists'). For 'exists', omit comparator/target — fires when the file appears. Example: `{label:'Build done', source:'file_stat', params:{path:'/tmp/build-done'}}`.\n- `source: 'event_subscription'` — params: { event, predicate? }. Subscribes to a named in-process event fired by POST /api/watchers/event. predicate optional: { json_path, comparator, target } over the payload. Example: `{label:'PR merged', source:'event_subscription', params:{event:'github_pr_merged', predicate:{json_path:'$.repo', comparator:'eq', target:'openensemble'}}}`.\n\n`comparator` + `target` values: 'gte', 'lte', 'gt', 'lt', 'eq', 'neq', 'matches' (regex), 'contains' (substring), 'changed' (any change from last value).",
+         "parameters": {
+           "type": "object",
+           "properties": {
+             "label":      { "type": "string", "description": "Short human label, e.g. 'SOL price alert' or 'Build log watch'." },
+-            "source":     { "type": "string", "enum": ["http_jsonpath", "file_stat", "event_subscription"], "description": "Where to read the value from each tick (or, for event_subscription, what event to listen for). Agent-created exec watches are blocked for safety; use service profiles for node/service shell checks." },
++            "source":     { "type": "string", "enum": ["http_jsonpath", "exec", "file_stat", "event_subscription"], "description": "Where to read the value from each tick (or, for event_subscription, what event to listen for)." },
+             "params":     { "type": "object", "description": "Source-specific config — see source-by-source notes above. Required fields differ per source." },
+             "comparator": { "type": "string", "enum": ["gte", "lte", "gt", "lt", "eq", "neq", "matches", "contains", "changed"], "description": "How to compare the read value against target. Use 'changed' for 'tell me if X changes' (no target needed). For file_stat 'exists', leave omitted." },
+             "target":     { "description": "Value to compare against. Number for gte/lte/gt/lt, string for eq/neq/matches/contains. Omit for 'changed' or for file_stat 'exists'." },
+@@ -162,14 +162,10 @@
+             "expires_at": { "type": "string", "description": "Optional ISO 8601 datetime — watcher auto-reaps if condition hasn't fired by then. Omit for open-ended monitors like 'tell me when SOL hits $100'." },
+             "on_fire": {
+               "type": "object",
+-              "description": "What happens when the watch fires. Default {type:'notify'} = chat status bubble only. Use {type:'agent', prompt} when the user wants you to ACT on the trigger, not just be told about it. Use {type:'email', subject?, to?, account?} when the user says email me. Use {type:'telegram', prefix?} when the user says text/ping/message me on Telegram. Email and Telegram delivery happen directly without an extra agent run.",
++              "description": "What happens when the watch fires. Default {type:'notify'} = chat status bubble only. Use {type:'agent', prompt} when the user wants you to ACT on the trigger, not just be told about it (e.g. 'when the deploy finishes, post the URL to slack', 'when SOL hits $100 buy 5'). The agent runs with no human present at fire time, so write a self-contained prompt.",
+               "properties": {
+-                "type":    { "type": "string", "enum": ["notify", "agent", "email", "telegram"], "description": "'notify' is just the status bubble. 'agent' kicks off an agent run on this same agent. 'email' sends via the user's connected email account. 'telegram' sends via the linked Telegram bot." },
+-                "prompt":  { "type": "string", "description": "When type='agent': what you (the agent) should do. Self-contained — assume no follow-up from the user. The trigger result is automatically appended for context." },
+-                "subject": { "type": "string", "description": "When type='email': optional email subject. Defaults to Monitor: <watch label>." },
+-                "to":      { "type": "string", "description": "When type='email': optional recipient override. Defaults to the user's profile email." },
+-                "account": { "type": "string", "description": "When type='email': optional connected account label/id to send from." },
+-                "prefix":  { "type": "string", "description": "When type='telegram': optional header line prepended to the Telegram message." }
++                "type":   { "type": "string", "enum": ["notify", "agent"], "description": "'notify' is just the status bubble. 'agent' kicks off an agent run on this same agent." },
++                "prompt": { "type": "string", "description": "When type='agent': what you (the agent) should do. Self-contained — assume no follow-up from the user. The trigger result is automatically appended for context." }
+               },
+               "required": ["type"]
+             }
+@@ -194,14 +190,6 @@
+         }
+       }
+     },
+-    {
+-      "type": "function",
+-      "function": {
+-        "name": "autonomy_status",
+-        "description": "Summarize OE autonomy state for the current user: active/recent watchers, pending automation proposals, delivery mix, stuck/backed-off monitors, and the current safety policy. Use when the user asks what OE is doing automatically, where autonomy stands, or whether monitors/tasks/proposals need attention.",
+-        "parameters": { "type": "object", "properties": {} }
+-      }
+-    },
+     {
+       "type": "function",
+       "function": {
+diff --git a/lib/autonomy-policy.mjs b/lib/autonomy-policy.mjs
+deleted file mode 100644
+index 99216ff..0000000
+--- a/lib/autonomy-policy.mjs
++++ /dev/null
+@@ -1,45 +0,0 @@
+-// @ts-check
+-/**
+- * Shared autonomy policy helpers.
+- *
+- * This is intentionally small and deterministic. It centralizes the safety
+- * decisions that were previously scattered across watcher/task/proposal code:
+- * which automated actions may run silently, and how to summarize autonomy
+- * state for review surfaces.
+- */
+-
+-const DESTRUCTIVE_RE = /\b(delete|remove|purge|erase|destroy|terminate|shutdown|shut down|kill|drop|truncate|wipe|reset|rollback)\b/i;
+-const EXTERNAL_SIDE_EFFECT_RE = /\b(send|email|message|post|publish|buy|purchase|order|pay|charge|transfer|deploy|merge|commit|push)\b/i;
+-
+-export const AUTONOMY_RISK = Object.freeze({
+-  LOW: 'low',
+-  SIDE_EFFECT: 'side_effect',
+-  DESTRUCTIVE: 'destructive',
+-});
+-
+-export function classifyAutomationText(text) {
+-  const s = String(text || '');
+-  if (DESTRUCTIVE_RE.test(s)) return AUTONOMY_RISK.DESTRUCTIVE;
+-  if (EXTERNAL_SIDE_EFFECT_RE.test(s)) return AUTONOMY_RISK.SIDE_EFFECT;
+-  return AUTONOMY_RISK.LOW;
+-}
+-
+-export function canRunScheduledTaskSilently({ prompt, silent }) {
+-  if (!silent) return { ok: true, risk: classifyAutomationText(prompt) };
+-  const risk = classifyAutomationText(prompt);
+-  if (risk === AUTONOMY_RISK.LOW) return { ok: true, risk };
+-  return {
+-    ok: false,
+-    risk,
+-    reason: `silent scheduled tasks cannot perform ${risk === AUTONOMY_RISK.DESTRUCTIVE ? 'destructive actions' : 'external side effects'}`,
+-  };
+-}
+-
+-export function summarizeAutonomyPolicy() {
+-  return {
+-    silentTasks: 'allowed only for low-risk prompts; side-effect/destructive prompts must be visible',
+-    execWatchers: 'blocked from agent-created watches unless registered through a human-confirmed route',
+-    monitorOffers: 'cool down per topic and escalate repeated monitorable questions into review proposals',
+-    watcherRecovery: 'stuck polling watchers back off cadence and surface status instead of spinning silently',
+-  };
+-}
+diff --git a/tests/autonomy-policy.test.mjs b/tests/autonomy-policy.test.mjs
+deleted file mode 100644
+index bcac385..0000000
+--- a/tests/autonomy-policy.test.mjs
++++ /dev/null
+@@ -1,21 +0,0 @@
+-import { describe, expect, it } from 'vitest';
+-import { classifyAutomationText, canRunScheduledTaskSilently } from '../lib/autonomy-policy.mjs';
+-
+-describe('autonomy policy', () => {
+-  it('classifies destructive and side-effect automation text', () => {
+-    expect(classifyAutomationText('delete old files')).toBe('destructive');
+-    expect(classifyAutomationText('send an email summary')).toBe('side_effect');
+-    expect(classifyAutomationText('summarize the latest RSS posts')).toBe('low');
+-  });
+-
+-  it('allows only low-risk silent scheduled tasks', () => {
+-    expect(canRunScheduledTaskSilently({ prompt: 'summarize the news', silent: true }))
+-      .toMatchObject({ ok: true, risk: 'low' });
+-    expect(canRunScheduledTaskSilently({ prompt: 'post the report to Slack', silent: true }))
+-      .toMatchObject({ ok: false, risk: 'side_effect' });
+-    expect(canRunScheduledTaskSilently({ prompt: 'delete old backups', silent: true }))
+-      .toMatchObject({ ok: false, risk: 'destructive' });
+-    expect(canRunScheduledTaskSilently({ prompt: 'delete old backups', silent: false }))
+-      .toMatchObject({ ok: true, risk: 'destructive' });
+-  });
+-});
+diff --git a/tests/monitorable-offers.test.mjs b/tests/monitorable-offers.test.mjs
+deleted file mode 100644
+index 7a90279..0000000
+--- a/tests/monitorable-offers.test.mjs
++++ /dev/null
+@@ -1,45 +0,0 @@
+-import { describe, expect, it, beforeEach, afterAll } from 'vitest';
+-import fs from 'fs';
+-import path from 'path';
+-import { USERS_DIR } from '../lib/paths.mjs';
+-
+-const USER = 'user_monitorable_offer_test';
+-const AGENT = 'coordinator';
+-
+-function cleanupUser() {
+-  const dir = path.join(USERS_DIR, USER);
+-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+-}
+-
+-beforeEach(() => cleanupUser());
+-afterAll(() => cleanupUser());
+-
+-describe('monitorable offer ledger', () => {
+-  it('asks once, then escalates repeated monitorable topics to a watch proposal', async () => {
+-    const { recordMonitorableHit } = await import('../lib/monitorable-classifier.mjs');
+-    const { getProposal } = await import('../lib/proposals.mjs');
+-    const hit = { monitorable: true, score: 0.8, matched: 'is the item back in stock' };
+-
+-    const first = await recordMonitorableHit({
+-      userId: USER,
+-      agentId: AGENT,
+-      userText: 'Is the item back in stock?',
+-      hit,
+-    });
+-    expect(first).toMatchObject({ action: 'ask', count: 1 });
+-
+-    const second = await recordMonitorableHit({
+-      userId: USER,
+-      agentId: AGENT,
+-      userText: 'Is the item back in stock?',
+-      hit,
+-    });
+-    expect(second.action).toBe('proposal');
+-    expect(second.proposalId).toBeTruthy();
+-    expect(getProposal(second.proposalId)).toMatchObject({
+-      kind: 'watch',
+-      evidenceCount: 2,
+-      status: 'pending',
+-    });
+-  });
+-});
+diff --git a/tests/tasks-create-watch.test.mjs b/tests/tasks-create-watch.test.mjs
+deleted file mode 100644
+index 28dbf6e..0000000
+--- a/tests/tasks-create-watch.test.mjs
++++ /dev/null
+@@ -1,83 +0,0 @@
+-import { describe, expect, it } from 'vitest';
+-import execute from '../skills/tasks/execute.mjs';
+-
+-const USER = 'user_tasks_watch_test';
+-const AGENT = `${USER}_coordinator`;
+-
+-function makeCtx(calls) {
+-  return {
+-    watch: async (opts) => {
+-      calls.push(opts);
+-      return 'watch_test_id';
+-    },
+-  };
+-}
+-
+-describe('tasks create_watch delivery', () => {
+-  it('passes email delivery through to watcher onFire', async () => {
+-    const calls = [];
+-    const result = await execute('create_watch', {
+-      label: 'Price alert',
+-      source: 'http_jsonpath',
+-      params: { url: 'https://example.com/price.json', json_path: '$.price' },
+-      comparator: 'lte',
+-      target: 100,
+-      on_fire: { type: 'email', subject: 'Price hit', to: 'me@example.com', account: 'Personal' },
+-    }, USER, AGENT, makeCtx(calls));
+-
+-    expect(result).toContain('will email when it fires');
+-    expect(calls).toHaveLength(1);
+-    expect(calls[0].onFire).toEqual({
+-      type: 'email',
+-      subject: 'Price hit',
+-      to: 'me@example.com',
+-      account: 'Personal',
+-    });
+-  });
+-
+-  it('passes Telegram delivery through to watcher onFire', async () => {
+-    const calls = [];
+-    const result = await execute('create_watch', {
+-      label: 'Deploy done',
+-      source: 'file_stat',
+-      params: { path: '/tmp/deploy-done', attribute: 'exists' },
+-      on_fire: { type: 'telegram', prefix: 'Deploy monitor' },
+-    }, USER, AGENT, makeCtx(calls));
+-
+-    expect(result).toContain('will send Telegram when it fires');
+-    expect(calls).toHaveLength(1);
+-    expect(calls[0].onFire).toEqual({ type: 'telegram', prefix: 'Deploy monitor' });
+-  });
+-
+-  it('continues to reject agent-created exec watches', async () => {
+-    const calls = [];
+-    const result = await execute('create_watch', {
+-      label: 'Shell watch',
+-      source: 'exec',
+-      params: { command: 'echo ok' },
+-      comparator: 'eq',
+-      target: 'ok',
+-    }, USER, AGENT, makeCtx(calls));
+-
+-    expect(result).toContain('exec watchers cannot be created from agent context');
+-    expect(calls).toHaveLength(0);
+-  });
+-
+-  it('rejects risky silent scheduled tasks', async () => {
+-    const result = await execute('schedule_task', {
+-      label: 'Silent email',
+-      prompt: 'Send an email to the team with the latest numbers.',
+-      datetime: new Date(Date.now() + 60_000).toISOString(),
+-      silent: true,
+-    }, USER, AGENT, makeCtx([]));
+-
+-    expect(result).toContain('silent scheduled tasks cannot perform external side effects');
+-  });
+-
+-  it('reports autonomy status', async () => {
+-    const result = await execute('autonomy_status', {}, USER, AGENT, makeCtx([]));
+-
+-    expect(result).toContain('Autonomy status:');
+-    expect(result).toContain('Policy:');
+-  });
+-});

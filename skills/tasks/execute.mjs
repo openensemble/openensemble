@@ -372,12 +372,26 @@ async function execCreateWatch(args, userId, agentId, ctx) {
   let onFire = null;
   if (on_fire) {
     if (typeof on_fire !== 'object') return 'Error: on_fire must be an object.';
-    if (on_fire.type !== 'notify' && on_fire.type !== 'agent') {
-      return `Error: on_fire.type must be 'notify' or 'agent' (got "${on_fire.type}").`;
+    if (!['notify', 'agent', 'email', 'telegram'].includes(on_fire.type)) {
+      return `Error: on_fire.type must be 'notify', 'agent', 'email', or 'telegram' (got "${on_fire.type}").`;
     }
-    onFire = on_fire.type === 'agent'
-      ? { type: 'agent', prompt: on_fire.prompt ? String(on_fire.prompt) : null }
-      : { type: 'notify' };
+    if (on_fire.type === 'agent') {
+      onFire = { type: 'agent', prompt: on_fire.prompt ? String(on_fire.prompt) : null };
+    } else if (on_fire.type === 'email') {
+      onFire = {
+        type: 'email',
+        ...(on_fire.subject ? { subject: String(on_fire.subject) } : {}),
+        ...(on_fire.to ? { to: String(on_fire.to) } : {}),
+        ...(on_fire.account ? { account: String(on_fire.account) } : {}),
+      };
+    } else if (on_fire.type === 'telegram') {
+      onFire = {
+        type: 'telegram',
+        ...(on_fire.prefix ? { prefix: String(on_fire.prefix) } : {}),
+      };
+    } else {
+      onFire = { type: 'notify' };
+    }
   }
 
   const cadence = Math.max(5, Number(cadence_sec) || 60);
@@ -404,7 +418,11 @@ async function execCreateWatch(args, userId, agentId, ctx) {
   } else {
     predStr = `when ${comparator} ${target}`;
   }
-  const fireStr = onFire?.type === 'agent' ? ' (will run an agent action on fire)' : '';
+  const fireStr =
+    onFire?.type === 'agent' ? ' (will run an agent action on fire)' :
+    onFire?.type === 'email' ? ' (will email when it fires)' :
+    onFire?.type === 'telegram' ? ' (will send Telegram when it fires)' :
+    '';
   return `Watch "${label}" created — ${describeWatch({ kind: source, state })} ${predStr}, every ${cadence}s${expStr}${fireStr}. id=${watcherId}`;
 }
 
@@ -481,10 +499,11 @@ async function execListWatches(userId, agentId, args) {
       const lastRan = lastRanAt ? `, last ran ${_fmtAgo(lastRanAt)}` : ', not yet run';
       const nextTick = w.nextTickAt ? `, next check ${_fmtRelTime(w.nextTickAt)}` : '';
       const deliver = `, ${_fmtDeliver(w.onFire)}`;
+      const stuck = (w.stuckAnnounced || w.stuckSinceAt) ? ', marked stuck/backed off' : '';
       const ticks = ` (${w.ticks ?? 0} checks so far${w.failures ? `, ${w.failures} failure${w.failures === 1 ? '' : 's'}` : ''})`;
       const last = w.lastStatusText ? `\n    last: ${w.lastStatusText}` : '';
       const expiry = (w.expiresAt === null) ? '' : `, expires ${_fmtRelTime(w.expiresAt)}`;
-      lines.push(`- "${w.label}" [${w.kind}${w.skillId ? ` · ${w.skillId}` : ''}] — ${cadence}${lastRan}${nextTick}${deliver}${expiry}${ticks} (id: ${w.id})${last}`);
+      lines.push(`- "${w.label}" [${w.kind}${w.skillId ? ` · ${w.skillId}` : ''}] — ${cadence}${lastRan}${nextTick}${deliver}${expiry}${stuck}${ticks} (id: ${w.id})${last}`);
     }
   }
   if (recent.length) {
@@ -721,6 +740,11 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
   if (!userId) return 'Error: no user context.';
   if (!label || typeof label !== 'string') return 'Error: label is required.';
   if (!prompt || typeof prompt !== 'string') return 'Error: prompt is required.';
+  const { canRunScheduledTaskSilently } = await import('../../lib/autonomy-policy.mjs');
+  const silentPolicy = canRunScheduledTaskSilently({ prompt, silent });
+  if (!silentPolicy.ok) {
+    return `Error: ${silentPolicy.reason}. Schedule it with silent=false so the run is visible to the user.`;
+  }
   const rawAgent = unscopeAgentId(agentId, userId);
   if (!rawAgent) return 'Error: no agent context — cannot schedule.';
 
@@ -747,6 +771,43 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
   return `Task "${task.label}" scheduled for ${when.toLocaleString()} via agent ${rawAgent}${silentTag}. id=${task.id}`;
 }
 
+async function execAutonomyStatus(userId, agentId) {
+  if (!userId) return 'Error: no user context.';
+  const { listWatchers } = await import('../../scheduler/watchers.mjs');
+  const { listUserProposals } = await import('../../lib/proposals.mjs');
+  const { summarizeAutonomyPolicy } = await import('../../lib/autonomy-policy.mjs');
+  const watchers = listWatchers(userId);
+  const active = watchers.active || [];
+  const recent = watchers.recent || [];
+  const proposals = listUserProposals(userId, 'pending');
+  const policy = summarizeAutonomyPolicy();
+
+  const deliverCounts = active.reduce((acc, w) => {
+    const k = w.onFire?.type || 'none';
+    acc[k] = (acc[k] || 0) + 1;
+    return acc;
+  }, {});
+  const stuck = active.filter(w => w.stuckAnnounced || w.stuckSinceAt);
+  const owned = agentId
+    ? active.filter(w => w.agentId === agentId || unscopeAgentId(w.agentId, userId) === unscopeAgentId(agentId, userId)).length
+    : 0;
+
+  const lines = [
+    `Autonomy status: ${active.length} active watcher(s), ${recent.length} recent watcher(s), ${proposals.length} pending proposal(s).`,
+    `This agent owns ${owned} active watcher(s).`,
+    `Delivery: ${Object.entries(deliverCounts).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'}.`,
+    `Stuck/backed-off: ${stuck.length}.`,
+    `Policy: silent tasks — ${policy.silentTasks}; exec watchers — ${policy.execWatchers}; monitor offers — ${policy.monitorOffers}; watcher recovery — ${policy.watcherRecovery}.`,
+  ];
+  if (stuck.length) {
+    lines.push('Needs attention:');
+    for (const w of stuck.slice(0, 5)) {
+      lines.push(`- "${w.label}" (${w.kind}) last changed ${_fmtAgo(w.lastChangeAt || w.createdAt)}; cadence ${w.cadenceSec}s; id=${w.id}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 export default async function execute(name, args, userId, agentId, ctx) {
   if (name === 'set_reminder')    return execSetReminder(args || {}, userId);
   if (name === 'set_alarm')       return execSetReminder({ ...(args || {}), _alarm: true }, userId);
@@ -762,5 +823,6 @@ export default async function execute(name, args, userId, agentId, ctx) {
   if (name === 'list_watch_items')  return execListWatchItems(args || {}, userId);
   if (name === 'update_watch_item') return execUpdateWatchItem(args || {}, userId);
   if (name === 'remove_watch_item') return execRemoveWatchItem(args || {}, userId);
+  if (name === 'autonomy_status')    return execAutonomyStatus(userId, agentId);
   return `Unknown tool: ${name}`;
 }
