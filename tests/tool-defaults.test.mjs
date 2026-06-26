@@ -105,6 +105,25 @@ describe('tool default-arg safety gates', () => {
     expect(listDefaults(USER)).toEqual([{ tool: 'web_search', arg: 'count', value: 5 }]);
   });
 
+  it('does not merge, display, or accept stale remember_fact.scope pins', async () => {
+    const { mergeDefaults, listDefaults, pinDefault } = await import('../lib/tool-defaults.mjs');
+    const userDir = path.join(USERS_DIR, USER);
+    fs.mkdirSync(userDir, { recursive: true });
+    // A scope pinned before the guard existed must never be injected — it could
+    // silently route a private fact to a shared/global audience. The tool-arg
+    // guard is keyed on tool+arg, so merge/list/pin must see the real tool name.
+    fs.writeFileSync(path.join(userDir, 'tool-defaults.json'), JSON.stringify({
+      remember_fact: { scope: 'shared' },
+      web_search: { count: 5 },
+    }));
+
+    expect(mergeDefaults(USER, 'remember_fact', { text: 'a private note' }))
+      .toEqual({ text: 'a private note' });
+    expect(listDefaults(USER)).toEqual([{ tool: 'web_search', arg: 'count', value: 5 }]);
+    await expect(pinDefault(USER, 'remember_fact', 'scope', 'global'))
+      .resolves.toMatchObject({ ok: false, error: 'not pinnable' });
+  });
+
   it('uses shared learning safety for non-email defaults', async () => {
     const { recordToolCall } = await import('../lib/tool-defaults.mjs');
     const { isDefaultArgNoise, isLearnableAliasPhrase } = await import('../lib/learning-safety.mjs');

@@ -302,7 +302,7 @@ function renderNodeCard(node) {
     recoveryLine = `<div style="font-size:11px;color:var(--yellow);margin-top:2px">Restart #${node.restartCount} &middot; recovered ${timeAgo(node.recoveredAt)}</div>`;
   }
 
-  return `<div class="node-card" id="nodeCard_${node.nodeId}">
+  return `<div class="node-card" id="nodeCard_${escHtml(node.nodeId)}">
     <div class="node-card-header">
       <span class="node-platform-icon">${platformIcon(node.platform)}</span>
       <span class="node-hostname">${escHtml(node.hostname)}</span>
