@@ -254,16 +254,19 @@ async function cmdReply(args) {
   if (!to) { console.error(`Could not determine recipient — message ${messageId} has no From or Reply-To header.`); process.exit(1); }
 
   const replySubject = subject.startsWith('Re:') ? subject : `Re: ${subject}`;
-  const rawEmail = [
+  // Build headers separately and filter only the optional (null) header lines.
+  // The blank separator and body must NOT pass through filter(Boolean): an
+  // empty-string separator is falsy, so filtering it drops the mandatory
+  // header/body break and the recipient gets a body-less email.
+  const headers = [
     `To: ${to}`,
     `Subject: ${replySubject}`,
     msgId ? `In-Reply-To: ${msgId}` : null,
     msgId ? `References: ${refs ? refs + ' ' : ''}${msgId}` : (refs ? `References: ${refs}` : null),
     `MIME-Version: 1.0`,
     `Content-Type: text/plain; charset=utf-8`,
-    ``,
-    body,
-  ].filter(Boolean).join('\r\n');
+  ].filter(Boolean);
+  const rawEmail = [...headers, '', body].join('\r\n');
 
   const encoded = Buffer.from(rawEmail).toString('base64url');
   const sent = await gmailFetch('/messages/send', {
