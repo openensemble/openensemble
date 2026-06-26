@@ -170,7 +170,7 @@ function renderNodeHealthGroup(nodeId, groupWatchers) {
   } else if (detail.error) {
     body = `<div class="task-edit-panel"><div class="task-edit-meta" style="color:var(--red)">Could not load node health: ${escHtml(detail.error)}</div></div>`;
   } else {
-    body = `<div class="task-edit-panel">${OENodeHealthView.renderNodeHealthWatchers(detail.watchers || [])}</div>`;
+    body = `<div class="task-edit-panel">${OENodeHealthView.renderNodeOpsView(detail)}</div>`;
   }
   return header + body;
 }

@@ -154,7 +154,7 @@ async function loadNodes() {
     return;
   }
 
-  let html = pairBtnHtml + renderNodeWalkthroughCard() + '<div style="padding:10px">';
+  let html = pairBtnHtml + renderNodeWalkthroughCard() + renderNodesActionQueue(_nodesList) + '<div style="padding:10px">';
   for (const node of _nodesList) {
     html += renderNodeCard(node);
   }
@@ -186,6 +186,27 @@ function renderNodeWalkthroughCard() {
         <i data-lucide="x" style="width:12px;height:12px;margin-right:4px"></i> Hide
       </button>
     </div>
+  </div>`;
+}
+
+function renderNodesActionQueue(nodes) {
+  const items = [];
+  for (const node of nodes || []) {
+    for (const item of node.actionItems || []) {
+      items.push({ ...item, nodeLabel: node.hostname || node.nodeId });
+    }
+  }
+  if (!items.length) return '';
+  const ordered = items.sort((a, b) => {
+    const rank = { critical: 0, warn: 1, info: 2 };
+    return (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3);
+  }).slice(0, 8);
+  return `<div class="node-actions-queue">
+    <div class="node-actions-queue-head">
+      <span><i data-lucide="triangle-alert" style="width:14px;height:14px"></i> Action required</span>
+      <small>${items.length} item${items.length === 1 ? '' : 's'}</small>
+    </div>
+    ${OENodeHealthView.renderActionItems(ordered)}
   </div>`;
 }
 
@@ -288,6 +309,7 @@ function renderNodeCard(node) {
       ${healthDot(node.health)}
       <span class="cdraw-badge">${escHtml(pm)}</span>
       ${versionBadge(node.version, node.latestVersion, node.outdated)}
+      ${renderReliabilityBadge(node.reliability)}
     </div>
     <div class="node-card-status">
       ${healthBadge(node.health)}
@@ -298,6 +320,7 @@ function renderNodeCard(node) {
     </div>
     ${statsLine ? `<div class="node-card-stats">${statsLine}</div>` : ''}
     ${recoveryLine}
+    ${renderNodeQualitySummary(node)}
     <div class="node-actions">
       <button class="cdraw-btn" data-action="openNodeTerminal" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Terminal">
         <i data-lucide="terminal" style="width:13px;height:13px"></i> Terminal
@@ -329,6 +352,26 @@ function renderNodeCard(node) {
     </div>
     ${renderProfilesSection(node)}
   </div>`;
+}
+
+function renderReliabilityBadge(reliability) {
+  if (!reliability) return '';
+  const cls = reliability.score < 60 ? 'red' : reliability.score < 80 ? 'yellow' : 'green';
+  return `<span class="cdraw-badge ${cls}" title="Node reliability score">${escHtml(reliability.label)} ${escHtml(reliability.score)}</span>`;
+}
+
+function renderNodeQualitySummary(node) {
+  const actions = Array.isArray(node.actionItems) ? node.actionItems : [];
+  const gates = Array.isArray(node.qualityGates) ? node.qualityGates : [];
+  const critical = actions.filter(a => a.severity === 'critical').length;
+  const warn = actions.filter(a => a.severity === 'warn').length;
+  const failingGates = gates.filter(g => g.status === 'fail').length;
+  if (!actions.length && !failingGates) return '';
+  const parts = [];
+  if (critical) parts.push(`<span style="color:var(--red)">${critical} critical</span>`);
+  if (warn) parts.push(`<span style="color:var(--yellow)">${warn} warning${warn === 1 ? '' : 's'}</span>`);
+  if (failingGates) parts.push(`<span style="color:var(--red)">${failingGates} failed gate${failingGates === 1 ? '' : 's'}</span>`);
+  return `<div class="node-quality-summary">${parts.join(' · ')}</div>`;
 }
 
 // Compact per-profile rollup shown inside each node card. When no profiles
@@ -573,9 +616,59 @@ async function openNodeHealth(nodeId) {
     const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/health`, { credentials: 'same-origin' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    body.innerHTML = OENodeHealthView.renderNodeHealthWatchers(data.watchers || []);
+    body.innerHTML = OENodeHealthView.renderNodeOpsView(data);
+    lucide.createIcons();
   } catch (e) {
     body.innerHTML = `<div class="cdraw-error">Could not load node health: ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function applyNodeIncidentFix(nodeId, incidentId) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  if (!nodeId || !incidentId) return;
+  showNodeConfirmModal({
+    title: `Apply proposed fix?`,
+    message: `This will run the operation OE proposed for incident ${incidentId} on ${node?.hostname || nodeId}.\n\nThe operation will be recorded in the activity log and the incident timeline.`,
+    confirmLabel: 'Apply Fix',
+    cancelLabel: 'Cancel',
+    confirmClass: 'cdraw-btn-warning',
+    onConfirm: async () => {
+      try {
+        const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/incidents/${encodeURIComponent(incidentId)}/apply-fix`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        showNodeToast(data.result?.success ? 'Fix applied' : 'Fix ran but did not succeed', data.result?.success ? 'success' : 'error');
+        await loadNodes();
+        openNodeHealth(nodeId);
+      } catch (e) {
+        showNodeToast(`Fix failed: ${e.message}`, 'error');
+      }
+    },
+  });
+}
+
+function investigateNodeHealth(nodeId, serviceId, signalKind, incidentId) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const prompt = [
+    `Investigate node health for ${node?.hostname || nodeId}.`,
+    serviceId ? `Service: ${serviceId}.` : '',
+    signalKind ? `Signal: ${signalKind}.` : '',
+    incidentId ? `Incident: ${incidentId}.` : '',
+    'Use the node health details, incident timeline, diagnostics, activity log, and available profile operations. Explain what is broken, what OE already tried, whether a verified fix is available, and ask for approval before any risky change.',
+  ].filter(Boolean).join(' ');
+  if (typeof closeDrawer === 'function') closeDrawer();
+  const input = $('input');
+  if (input && typeof send === 'function') {
+    input.value = prompt;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    send();
+  } else {
+    navigator.clipboard?.writeText(prompt).catch(() => {});
+    showNodeToast('Investigation prompt copied', 'success');
   }
 }
 

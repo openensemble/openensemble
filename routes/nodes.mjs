@@ -22,12 +22,13 @@ import {
 import { requireAuth, readBody, getUser, getSessionUserId, getAuthToken, clearUserNodeSessions } from './_helpers.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import { getNodeProfilesSummary } from '../lib/node-profile-summary.mjs';
+import { buildNodeOpsView, getIncidentProposedFix } from '../lib/node-ops-view.mjs';
 import { ensureNodeSystemProfile } from '../lib/node-system-profile.mjs';
 import { loadProfile, setTrustState } from '../lib/service-profile.mjs';
-import { listWatchers } from '../scheduler/watchers.mjs';
-import { profileHealthWatcherDetail } from '../lib/watcher-health-details.mjs';
 import { verifyProfileReadonly } from '../lib/capability-dispatcher.mjs';
 import { makeNodeExecFn } from '../lib/node-exec-wrapper.mjs';
+import { applyProposedFix } from '../lib/fix-proposer.mjs';
+import { resolveTokenStorage } from '../lib/token-storage.mjs';
 import {
   registerProfileHealthWatchers,
   unregisterProfileHealthWatchers,
@@ -137,12 +138,22 @@ export async function handle(req, res) {
     const nodeList = getNodes(userId);
     const latestVersion = getLatestAgentVersion();
     // Annotate each node with whether it's outdated
-    const annotated = nodeList.map(n => ({
-      ...n,
-      latestVersion,
-      outdated: n.version && n.version !== 'unknown' && n.version !== latestVersion,
-      profiles: getNodeProfilesSummary(userId, n.nodeId, n.hostname),
-    }));
+    const annotated = nodeList.map(n => {
+      const node = {
+        ...n,
+        latestVersion,
+        outdated: n.version && n.version !== 'unknown' && n.version !== latestVersion,
+        profiles: getNodeProfilesSummary(userId, n.nodeId, n.hostname),
+      };
+      const ops = buildNodeOpsView(userId, node);
+      return {
+        ...node,
+        reliability: ops.reliability,
+        actionItems: ops.actionItems,
+        qualityGates: ops.qualityGates,
+        eventLog: ops.eventLog,
+      };
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(annotated));
     return true;
@@ -169,18 +180,101 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Node not found' }));
       return true;
     }
-    const active = listWatchers(userId).active || [];
-    const healthWatchers = active
-      .filter(w => w.kind === 'profile_health' && (w.state?.node_id === nodeId || w.state?.node_id === node.hostname))
-      .map(w => profileHealthWatcherDetail(userId, w));
+    const latestVersion = getLatestAgentVersion();
+    const annotatedNode = {
+      ...node,
+      latestVersion,
+      outdated: node.version && node.version !== 'unknown' && node.version !== latestVersion,
+    };
+    const ops = buildNodeOpsView(userId, annotatedNode);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       nodeId,
       hostname: node.hostname,
       health: node.health,
-      profiles: getNodeProfilesSummary(userId, nodeId, node.hostname),
-      watchers: healthWatchers,
+      profiles: ops.profiles,
+      watchers: ops.watchers,
+      reliability: ops.reliability,
+      actionItems: ops.actionItems,
+      qualityGates: ops.qualityGates,
+      incidents: ops.incidents,
+      eventLog: ops.eventLog,
     }));
+    return true;
+  }
+
+  // GET /api/nodes/:nodeId/ops — complete node operations view.
+  const opsMatch = p.match(/^\/api\/nodes\/([^/]+)\/ops$/);
+  if (opsMatch && req.method === 'GET') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeId = decodeURIComponent(opsMatch[1]);
+    const node = getNode(nodeId, userId);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Node not found' }));
+      return true;
+    }
+    const latestVersion = getLatestAgentVersion();
+    const annotatedNode = {
+      ...node,
+      latestVersion,
+      outdated: node.version && node.version !== 'unknown' && node.version !== latestVersion,
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(buildNodeOpsView(userId, annotatedNode)));
+    return true;
+  }
+
+  // POST /api/nodes/:nodeId/incidents/:incidentId/apply-fix — approve a
+  // fix_proposed incident and run the proposed operation through the normal
+  // capability dispatcher.
+  const applyFixMatch = p.match(/^\/api\/nodes\/([^/]+)\/incidents\/([^/]+)\/apply-fix$/);
+  if (applyFixMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeId = decodeURIComponent(applyFixMatch[1]);
+    const incidentId = decodeURIComponent(applyFixMatch[2]);
+    const node = getNode(nodeId, userId);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Node not found' }));
+      return true;
+    }
+    const found = getIncidentProposedFix(userId, nodeId, incidentId);
+    if (!found) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No proposed fix found for this incident.' }));
+      return true;
+    }
+    const storageRef = found.profile?.control_surface?.api?.token_storage;
+    const auth = storageRef ? resolveTokenStorage(userId, storageRef) : null;
+    try {
+      const result = await applyProposedFix({
+        userId,
+        nodeId,
+        incidentId,
+        profile: found.profile,
+        fix: { op_id: found.fix.op_id },
+        ctx: {
+          fetchFn: globalThis.fetch,
+          execFn: makeNodeExecFn(userId, nodeId),
+          auth_override: auth || '',
+        },
+        confirmedBy: userId,
+      });
+      const latestVersion = getLatestAgentVersion();
+      const annotatedNode = {
+        ...node,
+        latestVersion,
+        outdated: node.version && node.version !== 'unknown' && node.version !== latestVersion,
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, result, ops: buildNodeOpsView(userId, annotatedNode) }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return true;
   }
 

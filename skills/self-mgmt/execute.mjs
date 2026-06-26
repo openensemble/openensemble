@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync, readdirSync } from 'fs';
 import path from 'path';
 import {
   USERS_DIR, SKILLS_DIR, CFG_PATH,
@@ -67,6 +67,115 @@ async function resolveSkill(skillId, userId) {
   return getRoleManifest(skillId, userId) || null;
 }
 
+function normId(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function acronym(s) {
+  return String(s || '')
+    .replace(/^role[_-]+/i, '')
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map(part => part[0]?.toLowerCase() || '')
+    .join('');
+}
+
+async function visibleSkills(userId) {
+  const { listRoles } = await import('../../roles.mjs');
+  const fromRegistry = listRoles(userId);
+  const byId = new Map(fromRegistry.map(m => [m.id, m]));
+  try {
+    for (const entry of readdirSync(SKILLS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const m = loadSkillManifest(entry.name);
+      if (m && !byId.has(m.id || entry.name)) byId.set(m.id || entry.name, m);
+    }
+  } catch {}
+  return [...byId.values()];
+}
+
+async function ownedSkillIds(userId, agentId) {
+  if (!agentId) return new Set();
+  const { getRoleAssignments } = await import('../../roles.mjs');
+  const bareAgentId = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  const assignments = getRoleAssignments(userId);
+  const out = new Set();
+  for (const [skillId, owner] of Object.entries(assignments)) {
+    if (owner === bareAgentId) out.add(skillId);
+  }
+  return out;
+}
+
+async function agentNameMatches(input, userId, agentId) {
+  const q = normId(input);
+  if (!q) return false;
+  const bareAgentId = userId && agentId?.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  if (q === normId(bareAgentId) || q === normId(agentId)) return true;
+  try {
+    const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+    const agent = getAgentsForUser(userId).find(a => a.id === bareAgentId || a.id === agentId);
+    return !!agent && (q === normId(agent.name) || q === normId(agent.id));
+  } catch {
+    return false;
+  }
+}
+
+async function resolveSkillRef(rawSkillId, userId, agentId) {
+  const input = String(rawSkillId || '').trim();
+  if (!input) {
+    const owned = await ownedSkillIds(userId, agentId);
+    const skills = await visibleSkills(userId);
+    const ownedSkills = skills.filter(s => owned.has(s.id));
+    if (ownedSkills.length === 1) return { skillId: ownedSkills[0].id, manifest: ownedSkills[0] };
+    return { error: ownedSkills.length > 1 ? `Which skill? You own: ${ownedSkills.map(s => `${s.name || s.id} (${s.id})`).join(', ')}.` : 'skillId is required.' };
+  }
+
+  const exact = await resolveSkill(input, userId);
+  if (exact) return { skillId: exact.id || input, manifest: exact };
+
+  const skills = await visibleSkills(userId);
+  const owned = await ownedSkillIds(userId, agentId);
+  const q = normId(input);
+  const candidates = skills.map(s => {
+    const id = s.id || '';
+    const names = [
+      id,
+      id.replace(/^role[_-]+/, ''),
+      s.name || '',
+      s.description || '',
+      acronym(id),
+      acronym(s.name || ''),
+    ].map(normId).filter(Boolean);
+    const exactish = names.some(n => n === q);
+    const contains = q.length >= 3 && names.some(n => n.includes(q) || q.includes(n));
+    return { skillId: id, manifest: s, owned: owned.has(id), exactish, contains };
+  }).filter(c => c.exactish || c.contains);
+
+  const ownedCandidates = candidates.filter(c => c.owned);
+  const pool = ownedCandidates.length ? ownedCandidates : candidates;
+  if (pool.length === 1) return { skillId: pool[0].skillId, manifest: pool[0].manifest };
+
+  if (pool.length > 1) {
+    const exactOwned = pool.filter(c => c.owned && c.exactish);
+    if (exactOwned.length === 1) return { skillId: exactOwned[0].skillId, manifest: exactOwned[0].manifest };
+    return { error: `More than one skill matches "${input}": ${pool.map(c => `${c.manifest.name || c.skillId} (${c.skillId})`).join(', ')}.` };
+  }
+
+  if (await agentNameMatches(input, userId, agentId)) {
+    const ownedSkills = skills.filter(s => owned.has(s.id));
+    if (ownedSkills.length === 1) return { skillId: ownedSkills[0].id, manifest: ownedSkills[0] };
+  }
+
+  const ownedNames = skills
+    .filter(s => owned.has(s.id))
+    .map(s => `${s.name || s.id} (${s.id})`);
+  return {
+    error: ownedNames.length
+      ? `No skill found matching "${input}". Skills you own: ${ownedNames.join(', ')}.`
+      : `No skill found matching "${input}".`,
+  };
+}
+
 // Strict ownership: every agent is the sole authority over the skills it
 // holds. Only the current owner of a skill (via getRoleAssignments for
 // built-in roles, manifest.assign_to for custom skills) may write its
@@ -103,11 +212,11 @@ export default async function execute(name, args, userId, agentId) {
   // other agent (including the coordinator) must delegate via ask_agent.
   if (name === 'skill_add_rule' || name === 'role_add_rule') {
     const { skillId: argSkillId, roleId, rule } = args;
-    const skillId = argSkillId || roleId; // back-compat: accept the old roleId param
-    if (!skillId || !rule) return 'skillId and rule are required.';
+    if (!rule) return 'rule is required.';
     if (!userId) return 'userId is required for per-user rules.';
-    const manifest = await resolveSkill(skillId, userId);
-    if (!manifest) return `No skill found with id "${skillId}".`;
+    const resolved = await resolveSkillRef(argSkillId || roleId, userId, agentId);
+    if (resolved.error) return resolved.error;
+    const { skillId, manifest } = resolved;
     const own = await checkSkillOwnership(skillId, userId, agentId, manifest);
     if (!own.ok) return ownershipDenial(manifest, own.owner);
     const rules = loadRules(userId, skillId);
@@ -128,11 +237,11 @@ export default async function execute(name, args, userId, agentId) {
 
   if (name === 'skill_remove_rule' || name === 'role_remove_rule') {
     const { skillId: argSkillId, roleId, index } = args;
-    const skillId = argSkillId || roleId;
-    if (!skillId || index == null) return 'skillId and index are required.';
+    if (index == null) return 'index is required.';
     if (!userId) return 'userId is required.';
-    const manifest = await resolveSkill(skillId, userId);
-    if (!manifest) return `No skill found with id "${skillId}".`;
+    const resolved = await resolveSkillRef(argSkillId || roleId, userId, agentId);
+    if (resolved.error) return resolved.error;
+    const { skillId, manifest } = resolved;
     const own = await checkSkillOwnership(skillId, userId, agentId, manifest);
     if (!own.ok) return ownershipDenial(manifest, own.owner);
     const rules = loadRules(userId, skillId);
@@ -164,11 +273,10 @@ export default async function execute(name, args, userId, agentId) {
 
   if (name === 'skill_list_rules' || name === 'role_list_rules') {
     const { skillId: argSkillId, roleId } = args;
-    const skillId = argSkillId || roleId;
-    if (!skillId) return 'skillId is required.';
     if (!userId) return 'userId is required.';
-    const manifest = await resolveSkill(skillId, userId);
-    if (!manifest) return `No skill found with id "${skillId}".`;
+    const resolved = await resolveSkillRef(argSkillId || roleId, userId, agentId);
+    if (resolved.error) return resolved.error;
+    const { skillId, manifest } = resolved;
     // List doesn't require ownership — any agent can READ what rules
     // are in place, because that's the same info skill-prompt-composer
     // surfaces in their own system prompt anyway. Only mutation is gated.

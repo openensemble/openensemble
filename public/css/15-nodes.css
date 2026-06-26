@@ -62,11 +62,49 @@
   font-family: var(--mono, 'SF Mono', 'Fira Code', monospace);
 }
 
+.node-quality-summary {
+  margin-top: 6px;
+  font-size: 11px;
+}
+
 .node-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 8px;
+}
+
+.node-actions-queue {
+  margin: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg3);
+}
+
+.node-actions-queue-head,
+.node-reliability {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.node-actions-queue-head {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.node-actions-queue-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.node-actions-queue-head small {
+  color: var(--muted);
+  font-weight: 500;
 }
 
 .node-actions .cdraw-btn {
@@ -691,6 +729,151 @@
   color: var(--muted);
   font-size: 12px;
   padding: 10px 0;
+}
+.node-ops-view {
+  display: grid;
+  gap: 12px;
+}
+.node-reliability {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+}
+.node-reliability div {
+  display: grid;
+  gap: 2px;
+}
+.node-reliability span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.node-reliability strong {
+  font-size: 26px;
+  line-height: 1;
+}
+.node-health-section-title {
+  margin: 2px 0 -4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.node-action-list {
+  display: grid;
+  gap: 8px;
+}
+.node-action-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+}
+.node-action-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+.node-health-critical {
+  border-color: rgba(224, 92, 92, 0.45);
+}
+.node-health-warn {
+  border-color: rgba(224, 178, 92, 0.45);
+}
+.node-quality-grid {
+  display: grid;
+  gap: 6px;
+}
+.node-quality-gate {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.node-quality-gate span {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+}
+.node-quality-gate b {
+  color: var(--text);
+}
+.node-quality-pass span {
+  color: var(--green);
+}
+.node-quality-warn span {
+  color: var(--yellow);
+}
+.node-quality-fail span {
+  color: var(--red);
+}
+.node-health-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.node-timeline {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+.node-timeline-item {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+.node-timeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 5px;
+  background: var(--accent);
+}
+.node-timeline-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.node-timeline-head span,
+.node-event-row span {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.node-event-log {
+  display: grid;
+  gap: 6px;
+}
+.node-event-row {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 6px 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg2);
+  font-size: 11px;
+}
+.node-event-row div {
+  grid-column: 2;
+  color: var(--muted);
 }
 
 /* ── Sidebar nodes-button alert dot ──────────────────────────────────────── */

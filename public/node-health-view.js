@@ -3,6 +3,9 @@
   function h(s) {
     return typeof escHtml === 'function' ? escHtml(String(s ?? '')) : String(s ?? '');
   }
+  function args(v) {
+    return JSON.stringify(v).replace(/'/g, "&#39;");
+  }
 
   function formatExpect(sig) {
     const expect = sig.expect;
@@ -56,6 +59,7 @@
         <div class="node-health-line">Observed: <code>${h(observedValue(sig))}</code>; expected: <code>${h(formatExpect(sig))}</code></div>
         <div class="node-health-line">Last checked: ${h(formatCheckedAt(sig.last_checked_at))}</div>
         ${incident ? `<div class="node-health-line">Incident: <code>${h(incident.id)}</code> (${h(incident.status)}) opened ${h(new Date(incident.ts_opened).toLocaleString())}</div>` : ''}
+        ${bad ? `<div class="node-health-actions"><button class="cdraw-btn" data-action="investigateNodeHealth" data-args='${args([sig.node_id || '', sig.service_id || '', sig.kind, sig.current_incident_id || incident?.id || null])}'><i data-lucide="search" style="width:11px;height:11px"></i> Investigate</button></div>` : ''}
         ${sig.check?.command ? `<details class="node-health-command"><summary>Check command</summary><pre>${h(sig.check.command)}</pre></details>` : ''}
         ${diagHtml}
         ${eventHtml}
@@ -79,7 +83,7 @@
           </div>
           <span class="cdraw-badge ${failing ? 'red' : 'green'}">${failing ? 'Failing' : 'OK'}</span>
         </div>
-        ${signals.map(renderSignal).join('') || '<div class="node-health-muted">No health signals recorded for this watcher.</div>'}
+        ${signals.map(s => renderSignal({ ...s, node_id: w.node_id, service_id: service })).join('') || '<div class="node-health-muted">No health signals recorded for this watcher.</div>'}
       </div>`;
   }
 
@@ -89,5 +93,110 @@
     return `<div class="node-health-list">${arr.map(renderWatcher).join('')}</div>`;
   }
 
-  window.OENodeHealthView = { renderNodeHealthWatchers };
+  function severityClass(sev) {
+    if (sev === 'critical') return 'node-health-critical';
+    if (sev === 'warn') return 'node-health-warn';
+    return 'node-health-info';
+  }
+
+  function renderActionItems(items) {
+    const arr = Array.isArray(items) ? items : [];
+    if (!arr.length) return '<div class="node-health-empty">No action required.</div>';
+    return `<div class="node-action-list">${arr.map(item => `
+      <div class="node-action-item ${severityClass(item.severity)}">
+        <div>
+          <div class="node-action-title">${h(item.title)}</div>
+          <div class="node-health-muted">${h(item.detail)}</div>
+        </div>
+        ${renderActionButton(item)}
+      </div>`).join('')}</div>`;
+  }
+
+  function renderActionButton(item) {
+    const d = item.data || {};
+    if (item.kind === 'fix_proposed' && d.incidentId) {
+      return `<button class="cdraw-btn cdraw-btn-warning" data-action="applyNodeIncidentFix" data-args='${args([d.nodeId, d.incidentId])}'><i data-lucide="wrench" style="width:11px;height:11px"></i> Apply</button>`;
+    }
+    if (item.kind === 'outdated') {
+      return `<button class="cdraw-btn" data-action="pushAgentUpdate" data-args='${args([d.nodeId])}'><i data-lucide="refresh-cw" style="width:11px;height:11px"></i> Upgrade</button>`;
+    }
+    if (item.kind === 'profile_draft') {
+      return `<button class="cdraw-btn" data-action="approveNodeProfile" data-args='${args([d.nodeId, d.serviceId])}'><i data-lucide="check-circle-2" style="width:11px;height:11px"></i> Approve</button>`;
+    }
+    if (item.kind === 'signal_unhealthy') {
+      return `<button class="cdraw-btn" data-action="openNodeHealth" data-args='${args([d.nodeId])}'><i data-lucide="heart-pulse" style="width:11px;height:11px"></i> Health</button>`;
+    }
+    return `<button class="cdraw-btn" data-action="investigateNodeHealth" data-args='${args([d.nodeId || '', d.serviceId || '', '', d.incidentId || null])}'><i data-lucide="search" style="width:11px;height:11px"></i> Investigate</button>`;
+  }
+
+  function renderQualityGates(gates) {
+    const arr = Array.isArray(gates) ? gates : [];
+    if (!arr.length) return '';
+    return `<div class="node-quality-grid">${arr.map(g => `
+      <div class="node-quality-gate node-quality-${h(g.status)}">
+        <span>${g.status === 'pass' ? '✓' : g.status === 'fail' ? '!' : '•'}</span>
+        <div><b>${h(g.label)}</b><div>${h(g.detail)}</div></div>
+      </div>`).join('')}</div>`;
+  }
+
+  function renderTimelineItem(row) {
+    return `<div class="node-timeline-item node-timeline-${h(row.kind)}">
+      <div class="node-timeline-dot"></div>
+      <div>
+        <div class="node-timeline-head"><b>${h(row.title)}</b><span>${h(row.ts ? new Date(row.ts).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '')}</span></div>
+        ${row.detail ? `<div class="node-health-muted">${h(row.detail)}</div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  function renderIncidents(incidents) {
+    const arr = Array.isArray(incidents) ? incidents : [];
+    if (!arr.length) return '<div class="node-health-empty">No incidents recorded for this node.</div>';
+    return arr.map(inc => `
+      <div class="node-health-service">
+        <div class="node-health-service-head">
+          <div>
+            <div class="node-health-service-title">${h(inc.service_id || 'Service')} · ${h(inc.triggering_signal?.kind || inc.id)}</div>
+            <div class="node-health-muted">${h(inc.summary?.summary || inc.status)}</div>
+          </div>
+          <span class="cdraw-badge ${inc.status === 'resolved' ? 'green' : inc.status === 'fix_proposed' ? 'yellow' : 'red'}">${h(inc.status)}</span>
+        </div>
+        ${inc.summary?.proposed_fix ? `<div class="node-health-actions"><button class="cdraw-btn cdraw-btn-warning" data-action="applyNodeIncidentFix" data-args='${args([inc.node_id || '', inc.id])}'><i data-lucide="wrench" style="width:11px;height:11px"></i> Apply proposed fix</button></div>` : ''}
+        <div class="node-timeline">${(inc.timeline || []).map(renderTimelineItem).join('')}</div>
+      </div>`).join('');
+  }
+
+  function renderEventLog(events) {
+    const arr = Array.isArray(events) ? events : [];
+    if (!arr.length) return '<div class="node-health-empty">No node events recorded yet.</div>';
+    return `<div class="node-event-log">${arr.map(e => `
+      <div class="node-event-row">
+        <span>${h(e.ts ? new Date(e.ts).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '')}</span>
+        <b>${h(e.title)}</b>
+        <div>${h(e.detail || '')}</div>
+      </div>`).join('')}</div>`;
+  }
+
+  function renderNodeOpsView(data) {
+    const rel = data?.reliability || { score: 0, label: 'Unknown' };
+    return `
+      <div class="node-ops-view">
+        <div class="node-reliability">
+          <div><b>${h(rel.label)}</b><span>${h(data?.hostname || data?.nodeId || 'node')}</span></div>
+          <strong>${h(rel.score)}</strong>
+        </div>
+        <div class="node-health-section-title">Action required</div>
+        ${renderActionItems(data?.actionItems)}
+        <div class="node-health-section-title">Quality gates</div>
+        ${renderQualityGates(data?.qualityGates)}
+        <div class="node-health-section-title">Health signals</div>
+        ${renderNodeHealthWatchers(data?.watchers || [])}
+        <div class="node-health-section-title">Incident timeline</div>
+        ${renderIncidents((data?.incidents || []).map(i => ({ ...i, node_id: data.nodeId })))}
+        <div class="node-health-section-title">Node event log</div>
+        ${renderEventLog(data?.eventLog)}
+      </div>`;
+  }
+
+  window.OENodeHealthView = { renderNodeHealthWatchers, renderNodeOpsView, renderActionItems, renderQualityGates };
 })();
