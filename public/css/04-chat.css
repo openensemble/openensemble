@@ -211,7 +211,7 @@
 .task-header::before,.task-header::after { content:''; flex:1; height:1px; background:var(--border); }
 .task-header-label { white-space: nowrap; padding: 0 6px; color: var(--yellow); font-size: 11px; letter-spacing: 0.02em; }
 .tool-run {
-  width: 100%; max-width: 820px; min-width: 0; margin: 6px 0 4px;
+  width: 100%; max-width: min(980px, 100%); min-width: 0; margin: 6px 0 4px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg2);
   overflow: hidden; box-sizing: border-box;
 }
@@ -244,10 +244,11 @@
   color: var(--muted); font-size: 11px;
 }
 .tool-run-step-sub { font-family: monospace; }
-.tool-run-actions { display: grid; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); background: var(--bg2); }
-.tool-run-actions-summary { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; }
+.tool-run-actions { display: grid; gap: 7px; padding: 7px 8px; border-top: 1px solid var(--border); background: var(--bg2); }
+.tool-run-actions-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px; min-width: 0; color: var(--muted); font-size: 11px; }
 .tool-run-actions-summary span { white-space: nowrap; }
-.tool-run-actions-summary code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-size: 11px; }
+.tool-run-actions-tools { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.tool-run-action-chip { max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 4px; padding: 2px 5px; background: var(--bg1); color: var(--fg); font-size: 11px; line-height: 1.25; }
 .tool-run-actions-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
 .tool-run-actions button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 4px; padding: 4px 7px; font-size: 11px; cursor: pointer; }
 .tool-run-actions button:hover, .tool-run-actions button:focus-visible { color: var(--fg); background: var(--bg3); outline: none; }

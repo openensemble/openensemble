@@ -1546,19 +1546,20 @@ function attachToolRunRecipeActions(run, events, { recipeAgentId = null, recipeP
   const toolNames = [...new Set(visibleToolEvents(events).map(ev => ev.name).filter(Boolean))];
   if (!toolNames.length) return;
   const targetAgentId = recipeAgentId || events.find(ev => ev.targetAgentId)?.targetAgentId || activeAgent;
-  const toolSummary = toolNames
+  const toolChips = toolNames
     .map(name => {
       const ev = events.find(e => e.name === name) || {};
       const label = toolDisplayLabel(name, ev.args || {});
-      return label && label !== name ? `${label} (${name})` : name;
+      const display = label && label !== name ? `${label} (${name})` : name;
+      return `<span class="tool-run-action-chip" title="${escHtml(display)}">${escHtml(display)}</span>`;
     })
-    .join(', ');
+    .join('');
   const actions = document.createElement('div');
   actions.className = 'tool-run-actions';
   actions.innerHTML = `
     <div class="tool-run-actions-summary">
       <span>Tools used</span>
-      <code>${escHtml(toolSummary)}</code>
+      <div class="tool-run-actions-tools">${toolChips}</div>
     </div>
     <div class="tool-run-actions-buttons">
       <button type="button" data-tool-run-save>${icon('save', 12)} Remember these tools</button>
