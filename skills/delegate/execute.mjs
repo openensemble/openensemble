@@ -461,6 +461,8 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     ? `[DELEGATION OVERRIDE — NO CONFIRM] The coordinator has authorized this delegation as a direct send. The user's original message in the coordinator chat IS the confirmation. Do NOT show a draft, do NOT ask "are you sure?", do NOT wait for "send it" — call the action tool directly with reasonable defaults for anything unspecified, then report what you did. This overrides any "show draft and wait for approval" rule from your role's prompt for this single delegation only.`
     : null;
   const combinedNote = [scheduledNote, noConfirmNote].filter(Boolean).join('\n\n') || null;
+  const { matchToolPlan } = await import('../../lib/tool-plan-memory.mjs');
+  const rememberedToolPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: task });
   // Surface the specialist's prose into the coordinator's chat as a
   // live-streaming tool bubble (rendered by public/chat.js _ensureStreamBubble
   // via the tool_progress event). Without this, the user only sees the small
@@ -480,15 +482,23 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         currentTool: null,
       });
     }
-    for await (const event of streamChat(scopedAgent, task, null, null, userId, null, combinedNote)) {
+    for await (const event of streamChat(scopedAgent, task, null, null, userId, null, combinedNote, false, null, { toolPlan: rememberedToolPlan })) {
       if (event.type === 'token') {
         fullText += event.text;
         yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: streamLabel };
       }
-      if (event.type === 'tool_call' && event.name && syncWatcherId) {
+      if (event.type === 'tool_call' && event.name) {
         syncToolsUsed++;
         syncCurrentTool = event.name;
-        syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} is using ${event.name}`, {
+        yield {
+          type: 'tool_call',
+          name: event.name,
+          args: event.args || null,
+          delegated: true,
+          agentName,
+          targetAgentId: scopedAgent.id,
+        };
+        if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} is using ${event.name}`, {
           phase: 'tool',
           currentTool: event.name,
           toolsUsed: syncToolsUsed,
@@ -501,10 +511,19 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
           toolsUsed: syncToolsUsed,
         });
       }
-      if (event.type === 'tool_result' && event.name && syncWatcherId) {
+      if (event.type === 'tool_result' && event.name) {
         const preview = String(event.text || '').split('\n').find(l => l.trim()) || '';
         syncCurrentTool = null;
-        if (preview) {
+        yield {
+          type: 'tool_result',
+          name: event.name,
+          text: event.text || '',
+          preview,
+          delegated: true,
+          agentName,
+          targetAgentId: scopedAgent.id,
+        };
+        if (preview && syncWatcherId) {
           syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${event.name}: ${preview.slice(0, 240)}`, {
             phase: 'result',
             currentTool: null,

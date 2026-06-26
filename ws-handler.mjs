@@ -571,6 +571,23 @@ function onConnection(ws, req) {
       return;
     }
 
+    if (msg.type === 'tool_plan_remember') {
+      try {
+        const { rememberToolPlan } = await import('./lib/tool-plan-memory.mjs');
+        const r = rememberToolPlan(ws._userId, {
+          agentId: msg.agentId || msg.agent,
+          phrase: msg.phrase,
+          selectedTools: msg.selectedTools,
+          mode: msg.mode,
+          source: msg.source || 'chat-ui',
+        });
+        ws.send(JSON.stringify({ type: 'tool_plan_remembered', ok: !!r.ok, error: r.error || null, recipeId: r.recipe?.id || null }));
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'tool_plan_remembered', ok: false, error: e.message || String(e) }));
+      }
+      return;
+    }
+
     if (msg.type === 'stop') {
       // Barge-in / mute: halt any in-flight server-side TTS push immediately so
       // the device stops getting audio frames, then abort the LLM turn.

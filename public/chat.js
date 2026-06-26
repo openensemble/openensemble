@@ -92,16 +92,17 @@ function matchToolRecipe(text, agentId = activeAgent) {
   return best;
 }
 
-function rememberToolRecipe(text, selectedTools, mode = 'selected') {
+function rememberToolRecipe(text, selectedTools, mode = 'selected', agentId = activeAgent) {
   const cleanTools = [...new Set((selectedTools || []).filter(Boolean))];
   if (!text?.trim()) return;
   if (mode === 'selected' && !cleanTools.length) return;
   const norm = normalizeToolPhrase(text);
   const recipes = loadToolRecipes();
-  const existing = recipes.find(r => r.agentId === activeAgent && (r.examples || []).some(ex => tokenScore(ex, norm) >= 0.8));
+  const targetAgentId = agentId || activeAgent;
+  const existing = recipes.find(r => r.agentId === targetAgentId && (r.examples || []).some(ex => tokenScore(ex, norm) >= 0.8));
   const entry = existing || {
     id: `tool_recipe_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    agentId: activeAgent,
+    agentId: targetAgentId,
     examples: [],
     createdAt: Date.now(),
   };
@@ -111,6 +112,18 @@ function rememberToolRecipe(text, selectedTools, mode = 'selected') {
   entry.updatedAt = Date.now();
   if (!existing) recipes.unshift(entry);
   saveToolRecipes(recipes.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
+  try {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'tool_plan_remember',
+        agentId: targetAgentId,
+        phrase: text.trim(),
+        selectedTools: cleanTools,
+        mode,
+        source: 'chat-ui',
+      }));
+    }
+  } catch {}
 }
 
 function toolCatalogEntry(name) {
@@ -1528,23 +1541,24 @@ function recentUserTextForToolRecipe() {
   return $('input')?.value?.trim() || '';
 }
 
-function attachToolRunRecipeActions(run, events) {
+function attachToolRunRecipeActions(run, events, { recipeAgentId = null, recipePhrase = null } = {}) {
   if (!run || run.querySelector('.tool-run-actions')) return;
   const toolNames = [...new Set(visibleToolEvents(events).map(ev => ev.name).filter(Boolean))];
   if (!toolNames.length) return;
+  const targetAgentId = recipeAgentId || events.find(ev => ev.targetAgentId)?.targetAgentId || activeAgent;
   const actions = document.createElement('div');
   actions.className = 'tool-run-actions';
   actions.innerHTML = `
     <button type="button" data-tool-run-save>${icon('save', 12)} Remember these tools</button>
     <button type="button" data-tool-run-edit>${icon('sliders-horizontal', 12)} Edit before next send</button>`;
   actions.querySelector('[data-tool-run-save]')?.addEventListener('click', () => {
-    const phrase = recentUserTextForToolRecipe();
-    rememberToolRecipe(phrase, toolNames, 'selected');
+    const phrase = recipePhrase || recentUserTextForToolRecipe();
+    rememberToolRecipe(phrase, toolNames, 'selected', targetAgentId);
     actions.querySelector('[data-tool-run-save]').textContent = 'Remembered';
   });
   actions.querySelector('[data-tool-run-edit]')?.addEventListener('click', () => {
     const input = $('input');
-    if (input && !input.value.trim()) input.value = recentUserTextForToolRecipe();
+    if (input && !input.value.trim()) input.value = recipePhrase || recentUserTextForToolRecipe();
     toolPlanState.mode = 'selected';
     toolPlanState.selected = new Set(toolNames);
     toolPlanState.expanded = true;
@@ -1579,7 +1593,7 @@ function updateToolRunHeader(run, done = false) {
   if (done) attachToolRunRecipeActions(run.el, run.events);
 }
 
-function appendToolRun(events, ts = Date.now(), scroll = true, { persisted = false, toolResults = null } = {}) {
+function appendToolRun(events, ts = Date.now(), scroll = true, { persisted = false, toolResults = null, recipeAgentId = null, recipePhrase = null } = {}) {
   const cleanEvents = hydrateToolEvents(events, toolResults).map(ev => ({ ...ev, status: ev.status || 'done' }));
   if (!cleanEvents.length) return null;
   const run = document.createElement('div');
@@ -1602,7 +1616,7 @@ function appendToolRun(events, ts = Date.now(), scroll = true, { persisted = fal
     run.classList.toggle('open', open);
   });
   renderToolRunSteps(run.querySelector('.tool-run-steps'), cleanEvents);
-  attachToolRunRecipeActions(run, cleanEvents);
+  attachToolRunRecipeActions(run, cleanEvents, { recipeAgentId, recipePhrase });
   insertBefore(run);
   if (scroll) scrollToBottom();
   return run;
@@ -1811,7 +1825,7 @@ function appendNotification(msg) {
 }
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
-  const { agent, agentName, agentEmoji, content, ts } = msg;
+  const { agent, agentName, agentEmoji, content, ts, toolEvents, targetAgentId, originalTask } = msg;
   // Push into the target coordinator's session cache so the report survives
   // agent-tab switches. Without this, the DOM bubble is the only copy
   // browser-side and it gets wiped on the next renderSession (e.g. when
@@ -1821,13 +1835,13 @@ function handleAgentReport(msg) {
     // Use role:'agent_report' so renderSession can route this back through
     // _renderAgentReportEl below. Keep the same shape we just received so
     // the renderer can reconstruct identical DOM.
-    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, ts: ts ?? Date.now() });
+    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, ts: ts ?? Date.now() });
   }
   // Only paint into the visible chat panel when the report's target
   // coordinator is the agent currently being viewed. A report fired while
   // the user is on a different agent's tab should NOT appear there.
   if (!agent || agent === activeAgent) {
-    _renderAgentReportEl({ agentName, agentEmoji, content, ts });
+    _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, ts });
   }
 }
 
@@ -1843,7 +1857,7 @@ function _legacyAgentReportMatch(content) {
   return { agentName: m[1].trim(), body: m[2] };
 }
 
-function _renderAgentReportEl({ agentName, agentEmoji, content, ts }) {
+function _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents = null, targetAgentId = null, originalTask = '', ts }) {
   const timeStr = new Date(ts ?? Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const el = document.createElement('div');
   el.className = 'msg agent-report';
@@ -1855,6 +1869,13 @@ function _renderAgentReportEl({ agentName, agentEmoji, content, ts }) {
     <div class="agent-report-body msg-bubble">${renderMarkdown(content ?? '')}</div>
   `;
   insertBefore(el);
+  if (Array.isArray(toolEvents) && toolEvents.length) {
+    appendToolRun(toolEvents, ts ?? Date.now(), false, {
+      persisted: true,
+      recipeAgentId: targetAgentId,
+      recipePhrase: originalTask || content || '',
+    });
+  }
   scrollToBottom();
 }
 

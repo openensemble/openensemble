@@ -8,6 +8,7 @@
 
 import { registerWatcher, pushWatcherStatus, completeWatcher } from './scheduler/watchers.mjs';
 import { runInTaskContext } from './lib/task-proxy-context.mjs';
+import { matchToolPlan } from './lib/tool-plan-memory.mjs';
 
 let _broadcast = null;
 export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
@@ -49,6 +50,34 @@ function pushTaskProgress(taskId, text, extra = {}) {
   rec.lastActivityAt = Date.now();
   rec.phase = extra.phase || rec.phase || 'running';
   return pushWatcherStatus(rec.userId, rec.watcherId, text, taskState(taskId, extra));
+}
+
+function trackToolEvent(events, ev) {
+  if (!Array.isArray(events) || !ev?.name) return;
+  if (ev.type === 'tool_call') {
+    events.push({
+      name: ev.name,
+      args: ev.args || null,
+      startedAt: Date.now(),
+      status: 'running',
+      agentId: ev.agentId || null,
+    });
+    return;
+  }
+  const rec = [...events].reverse().find(e => e.name === ev.name && e.status !== 'done');
+  if (ev.type === 'tool_progress' && rec) {
+    rec.progressPreview = String(ev.text || '').slice(-1000);
+    return;
+  }
+  if (ev.type === 'tool_result') {
+    const target = rec || { name: ev.name, args: null, startedAt: Date.now(), status: 'running' };
+    if (!rec) events.push(target);
+    target.endedAt = Date.now();
+    target.durationMs = target.endedAt - target.startedAt;
+    target.status = 'done';
+    target.preview = ev.preview || String(ev.text || '').split('\n').find(l => l.trim()) || '';
+    target.text = String(ev.text || '').slice(0, 10000);
+  }
 }
 
 // Safety net: if a worker hangs forever (stuck upstream stream, etc.) the task
@@ -127,14 +156,17 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       let fullText = '';
       let toolsUsed = 0;
       let currentTool = null;
+      const toolEvents = [];
+      const rememberedPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: task });
       pushTaskProgress(taskId, `${agentName} started working`, { phase: 'running' });
       // Phase-14b: wrap the streamChat loop in a task_proxy context so
       // ask_user_via_task (called inside the agent's tool chain) can find
       // this run's watcherId without any extra parameter threading.
       const taskCtx = { taskId, watcherId, userId, agentId: scopedAgent.id };
       await runInTaskContext(taskCtx, async () => {
-      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, scheduledNote)) {
+      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan })) {
         if (ev.type === 'token') fullText += ev.text;
+        trackToolEvent(toolEvents, ev);
         // Track in-flight tool calls so list_active_agents can report e.g.
         // "the coder is currently running coder_edit_file" instead of just
         // an opaque spinner.
@@ -177,7 +209,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         if (ev.type === 'error') throw new Error(ev.message);
       }
       });   // end runInTaskContext
-      await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, fullText.trim() || `${agentName} completed the task.`);
+      await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, fullText.trim() || `${agentName} completed the task.`, null, null, toolEvents, scopedAgent.id, task);
     } catch (err) {
       console.error('[background-tasks] error in task', taskId, err.message);
       await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, null,
@@ -189,7 +221,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   return taskId;
 }
 
-async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null) {
+async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '') {
   const rec = activeTasks.get(taskId);
   const status = finalStatus || (errorMsg ? 'error' : 'done');
   const finalReportPreview = String(errorMsg ?? result ?? '').slice(0, 800);
@@ -254,6 +286,9 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       kind: 'agent_report',
       agentName, agentEmoji,
       content: notice,
+      toolEvents,
+      targetAgentId: targetAgentId || rec?.agentId || null,
+      originalTask: originalTask || rec?.summary || '',
       ts: Date.now(),
     });
   } catch (e) {
@@ -271,6 +306,9 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     agentName,
     agentEmoji,
     content,
+    toolEvents,
+    targetAgentId: targetAgentId || rec?.agentId || null,
+    originalTask: originalTask || rec?.summary || '',
     taskId,
     ts: Date.now(),
   });
@@ -448,11 +486,14 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
       const { getScheduledNote } = await import('./lib/scheduled-context.mjs');
       const scheduledNote = getScheduledNote();
       let fullText = '';
+      const toolEvents = [];
+      const rememberedPlan = matchToolPlan(userId, { agentId: workerAgent.id, phrase: task });
       const taskCtx = { taskId, watcherId, userId, agentId: workerAgent.id };
       pushTaskProgress(taskId, `${workerName} started working`, { phase: 'running' });
       await runInTaskContext(taskCtx, async () => {
-        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote)) {
+        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan })) {
           if (ev.type === 'token') fullText += ev.text;
+          trackToolEvent(toolEvents, ev);
           if (ev.type === 'tool_call' && ev.name) {
             const rec = activeTasks.get(taskId);
             if (rec) { rec.toolsUsed = (rec.toolsUsed || 0) + 1; rec.currentTool = ev.name; rec.lastUpdateAt = Date.now(); }
@@ -481,7 +522,7 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
         }
       });
       _retire(taskId, 'done', fullText.trim());
-      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`);
+      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`, null, null, toolEvents, workerAgent.id, task);
     } catch (err) {
       const stopped = ac.signal.aborted;
       _retire(taskId, stopped ? 'stopped' : 'error', stopped ? 'Stopped by its manager.' : err.message);

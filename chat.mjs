@@ -132,6 +132,9 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
           durationMs: t.durationMs ?? null,
           preview: String(t.preview ?? '').slice(0, 500),
           progressPreview: String(t.progressPreview ?? '').slice(-1200),
+          delegated: t.delegated === true,
+          agentName: t.agentName || null,
+          targetAgentId: t.targetAgentId || null,
           ...(resultIndex != null ? { resultIndex } : {}),
         };
       })
@@ -345,6 +348,9 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
         args: event.args ?? null,
         startedAt: Date.now(),
         status: 'running',
+        delegated: event.delegated === true,
+        agentName: event.agentName || null,
+        targetAgentId: event.targetAgentId || null,
       };
       if (!_pendingToolEventsByName[event.name]) _pendingToolEventsByName[event.name] = [];
       _pendingToolEventsByName[event.name].push(rec);
@@ -367,6 +373,9 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
         pending.durationMs = pending.endedAt - pending.startedAt;
         pending.preview = event.preview ?? '';
         pending.text = event.text || '';
+        pending.delegated = pending.delegated || event.delegated === true;
+        pending.agentName = pending.agentName || event.agentName || null;
+        pending.targetAgentId = pending.targetAgentId || event.targetAgentId || null;
       } else {
         toolEvents.push({
           name: event.name,
@@ -377,6 +386,9 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
           durationMs: 0,
           preview: event.preview ?? '',
           text: event.text || '',
+          delegated: event.delegated === true,
+          agentName: event.agentName || null,
+          targetAgentId: event.targetAgentId || null,
         });
       }
       delete _lastCallArgsByName[event.name];
