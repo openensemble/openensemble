@@ -386,6 +386,9 @@ function renderSession() {
     }
     else if (m.role === 'assistant' && !m.hidden) {
       if (Array.isArray(m.toolEvents) && m.toolEvents.length) appendToolRun(m.toolEvents, m.ts, false, { persisted: true, toolResults: m.toolResults });
+      if (Array.isArray(m._nodeExecTaskReports)) {
+        for (const report of m._nodeExecTaskReports) appendNodeExecTaskReport(report, m, false);
+      }
       appendAssistantBubble(m.content, m.ts, false);
     }
   });
@@ -424,6 +427,21 @@ function orderSessionForRender(messages) {
       && Math.abs((Number(ev.endedAt) || Number(turn.ts) || 0) - reportTs) < 10000
     ));
   };
+  const nodeExecReportTaskId = (m) => {
+    if (!(m?.role === 'agent_report' || m?.kind === 'agent_report')) return null;
+    if (m.agentName !== 'node_exec') return null;
+    if (typeof m.taskId !== 'string' || !m.taskId.startsWith('autobg_')) return null;
+    return m.taskId.slice('autobg_'.length);
+  };
+  const assistantOwnsNodeExecReport = (turn, taskId) => {
+    if (turn?.role !== 'assistant' || !Array.isArray(turn.toolEvents)) return false;
+    const taskNeedle = taskId ? `task ${taskId}` : '';
+    const resultText = Array.isArray(turn.toolResults)
+      ? turn.toolResults.map(r => String(r?.text ?? '')).join('\n')
+      : '';
+    return turn.toolEvents.some(ev => ev?.name === 'node_exec')
+      && (!taskNeedle || resultText.includes(taskNeedle));
+  };
   const hiddenTaskId = (m) => {
     if (m?.role !== 'assistant' || !m.hidden || !m.hideTaskId) return null;
     return `autobg_${m.hideTaskId}`;
@@ -437,6 +455,19 @@ function orderSessionForRender(messages) {
 
     const taskId = reportTaskId(m);
     if (taskId) {
+      const nodeTaskId = nodeExecReportTaskId(m);
+      if (nodeTaskId) {
+        let attached = false;
+        for (let i = out.length - 1; i >= 0; i--) {
+          if (!assistantOwnsNodeExecReport(out[i], nodeTaskId)) continue;
+          const copy = { ...out[i] };
+          copy._nodeExecTaskReports = [...(copy._nodeExecTaskReports || []), m];
+          out[i] = copy;
+          attached = true;
+          break;
+        }
+        if (attached) continue;
+      }
       if (seenHiddenTasks.has(taskId)) {
         out.push(m);
         continue;
@@ -468,6 +499,38 @@ function orderSessionForRender(messages) {
   for (const reports of pendingReports.values()) out.push(...reports);
   out.push(...pendingLegacyReports);
   return out;
+}
+
+function appendNodeExecTaskReport(report, turn, scroll = true) {
+  const taskId = typeof report?.taskId === 'string' && report.taskId.startsWith('autobg_')
+    ? report.taskId.slice('autobg_'.length)
+    : '';
+  const nodeEvent = Array.isArray(turn?.toolEvents)
+    ? turn.toolEvents.find(ev => ev?.name === 'node_exec')
+    : null;
+  const label = nodeEvent?.args?.label || nodeEvent?.args?.command || 'node_exec';
+  const output = String(report?.content ?? '');
+  const exitMatch = output.match(/Exit code:\s*(-?\d+)/i);
+  const ok = exitMatch ? Number(exitMatch[1]) === 0 : true;
+  return appendTaskChip({
+    kind: 'task_proxy',
+    watcherId: taskId || report?.taskId || `node_exec_${report?.ts || Date.now()}`,
+    label: `🖥 node_exec`,
+    text: output,
+    final: true,
+    finalStatus: ok ? 'done' : 'error',
+    state: {
+      status: ok ? 'done' : 'error',
+      targetAgentName: 'node_exec',
+      targetAgentEmoji: '🖥',
+      summary: 'node_exec is still running',
+      startedAt: nodeEvent?.startedAt || turn?.ts || report?.ts,
+      lastActivityAt: report?.ts || nodeEvent?.endedAt || turn?.ts,
+      currentTool: 'node_exec',
+      canCancel: false,
+    },
+    recentHistory: [],
+  }, report?.ts || turn?.ts || Date.now(), scroll);
 }
 
 function appendUserBubble(text, ts = Date.now(), scroll = true, attachment = null) {
