@@ -612,6 +612,87 @@
   padding: 4px 0;
 }
 
+/* ── Shared node health detail view ─────────────────────────────────────── */
+.node-health-modal {
+  max-width: 760px;
+  width: min(92vw, 760px);
+  max-height: 86dvh;
+  overflow: auto;
+  text-align: left;
+}
+.node-health-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.node-health-service {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  padding: 10px;
+}
+.node-health-service-head,
+.node-health-signal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.node-health-service-title {
+  font-weight: 650;
+  font-size: 13px;
+}
+.node-health-signal {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.node-health-signal-bad {
+  background: rgba(224, 92, 92, 0.10);
+}
+.node-health-signal-ok {
+  background: rgba(67, 184, 156, 0.08);
+}
+.node-health-signal-head span {
+  font-size: 11px;
+  color: var(--muted);
+}
+.node-health-signal-bad .node-health-signal-head span {
+  color: var(--red);
+}
+.node-health-line,
+.node-health-muted {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.node-health-line code {
+  color: var(--text);
+}
+.node-health-command {
+  margin-top: 4px;
+}
+.node-health-command summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+}
+.node-health-command pre,
+.node-health-diag {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+}
+.node-health-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 0;
+}
+
 /* ── Sidebar nodes-button alert dot ──────────────────────────────────────── */
 .strip-btn-alert {
   position: absolute;

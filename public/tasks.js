@@ -3,8 +3,9 @@ let tasks = [];
 let watchers = { active: [], recent: [] };
 let expandedTaskId = null;
 let expandedWatcherId = null;
-let nodeMonitorsExpanded = false;
+let expandedNodeHealthId = null;
 const watcherDetails = new Map();
+const nodeHealthDetails = new Map();
 
 const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function _parseCronDow(spec) {
@@ -79,61 +80,11 @@ function _watcherEtaText(w) {
   return `expires in ${h}h${m%60 ? ' ' + (m%60) + 'm' : ''}`;
 }
 
-function formatExpect(expect) {
-  if (!expect || typeof expect !== 'object') return 'no expectation recorded';
-  const [op, val] = Object.entries(expect)[0] || [];
-  if (!op) return JSON.stringify(expect);
-  const words = { lt: '<', lte: '<=', gt: '>', gte: '>=', eq: '=', neq: '!=', contains: 'contains', matches: 'matches' };
-  return `${words[op] || op} ${val}`;
-}
-
-function formatCheckedAt(ms) {
-  if (!ms) return 'never checked';
-  const d = new Date(ms);
-  return Number.isNaN(d.getTime()) ? 'unknown time' : d.toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
-}
-
-function signalObservedValue(sig) {
-  const incVal = sig.incident?.triggering_signal?.value;
-  if (incVal !== undefined && incVal !== null && incVal !== '') return incVal;
-  if (sig.last_output !== undefined && sig.last_output !== null && sig.last_output !== '') return sig.last_output;
-  if (sig.last_error) return `error: ${sig.last_error}`;
-  return 'not recorded';
-}
-
 function renderWatcherHealthDetails(w, detail) {
   if (w.kind !== 'profile_health') return '';
   if (!detail) return '<div class="task-edit-meta" style="margin-top:8px">Loading health details…</div>';
   if (detail.error) return `<div class="task-edit-meta" style="margin-top:8px;color:var(--red)">Could not load health details: ${escHtml(detail.error)}</div>`;
-  const signals = Array.isArray(detail.profileHealth) ? detail.profileHealth : [];
-  if (!signals.length) return '<div class="task-edit-meta" style="margin-top:8px">No health signal details recorded.</div>';
-
-  const rows = signals.map(sig => {
-    const bad = sig.last_state === 'unhealthy';
-    const incident = sig.incident;
-    const diagnostics = incident?.diagnostics_collected || [];
-    const diagHtml = diagnostics.length
-      ? diagnostics.map(d => `<div style="margin-top:4px;white-space:pre-wrap;word-break:break-word">${escHtml(d.output_excerpt || d.interpretation || d.op_id || '(diagnostic recorded)')}</div>`).join('')
-      : (bad ? '<div style="margin-top:4px;color:var(--muted)">No diagnostic recipe/output was recorded for this signal.</div>' : '');
-    const eventHtml = incident?.events?.length
-      ? `<div style="margin-top:4px;color:var(--muted)">Last event: ${escHtml(incident.events[incident.events.length - 1]?.type || 'event')} · ${escHtml(incident.events[incident.events.length - 1]?.ts || '')}</div>`
-      : '';
-    return `
-      <div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:8px;background:${bad ? 'rgba(244,67,54,0.08)' : 'rgba(76,175,80,0.06)'}">
-        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
-          <strong>${bad ? '⚠' : '✓'} ${escHtml(sig.kind)}</strong>
-          <span style="font-size:11px;color:${bad ? 'var(--red)' : 'var(--muted)'}">${escHtml(sig.last_state || 'unknown')}</span>
-        </div>
-        <div class="task-edit-meta" style="margin-top:4px">Observed: <code>${escHtml(String(signalObservedValue(sig)))}</code>; expected: <code>${escHtml(formatExpect(sig.expect))}</code></div>
-        <div class="task-edit-meta">Last checked: ${escHtml(formatCheckedAt(sig.last_checked_at))}</div>
-        ${incident ? `<div class="task-edit-meta">Incident: <code>${escHtml(incident.id)}</code> (${escHtml(incident.status)}) opened ${escHtml(new Date(incident.ts_opened).toLocaleString())}</div>` : ''}
-        ${sig.check?.command ? `<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--muted)">Check command</summary><pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;margin:4px 0 0">${escHtml(sig.check.command)}</pre></details>` : ''}
-        ${diagHtml}
-        ${eventHtml}
-      </div>`;
-  }).join('');
-
-  return `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600">Health signals</div>${rows}</div>`;
+  return OENodeHealthView.renderNodeHealthWatchers([detail]);
 }
 
 function renderWatcherRow(w) {
@@ -195,8 +146,51 @@ async function loadWatcherDetail(id) {
   renderTasks();
 }
 
-function toggleNodeMonitors() {
-  nodeMonitorsExpanded = !nodeMonitorsExpanded;
+function nodeIdForWatcher(w) {
+  return w.state?.node_id || (w.label || '').match(/@([^ ]+)/)?.[1] || 'unknown';
+}
+
+function renderNodeHealthGroup(nodeId, groupWatchers) {
+  const isOpen = expandedNodeHealthId === nodeId;
+  const failing = groupWatchers.reduce((n, w) => n + (Array.isArray(w.state?.signals) ? w.state.signals.filter(s => s.last_state === 'unhealthy').length : 0), 0);
+  const totalSignals = groupWatchers.reduce((n, w) => n + (Array.isArray(w.state?.signals) ? w.state.signals.length : 0), 0);
+  const meta = totalSignals ? `${totalSignals - failing}/${totalSignals} signals ok${failing ? ` · ${failing} failing` : ''}` : `${groupWatchers.length} monitor(s)`;
+  const header = `
+    <div class="task-item${isOpen ? ' task-item-open' : ''}">
+      <div class="task-item-info" data-action="toggleNodeHealthGroup" data-args='${JSON.stringify([nodeId]).replace(/'/g, "&#39;")}' title="Click to view node health signals" style="cursor:pointer">
+        <div class="task-item-label">${isOpen ? '▾' : '▸'} 🖥️ ${escHtml(nodeId)}</div>
+        <div class="task-item-meta" style="font-style:italic">${escHtml(meta)}</div>
+      </div>
+    </div>`;
+  if (!isOpen) return header;
+  const detail = nodeHealthDetails.get(nodeId);
+  let body;
+  if (!detail) {
+    body = '<div class="task-edit-panel"><div class="task-edit-meta">Loading node health…</div></div>';
+  } else if (detail.error) {
+    body = `<div class="task-edit-panel"><div class="task-edit-meta" style="color:var(--red)">Could not load node health: ${escHtml(detail.error)}</div></div>`;
+  } else {
+    body = `<div class="task-edit-panel">${OENodeHealthView.renderNodeHealthWatchers(detail.watchers || [])}</div>`;
+  }
+  return header + body;
+}
+
+function toggleNodeHealthGroup(nodeId) {
+  expandedNodeHealthId = expandedNodeHealthId === nodeId ? null : nodeId;
+  renderTasks();
+  if (expandedNodeHealthId === nodeId && !nodeHealthDetails.has(nodeId)) {
+    loadNodeHealthDetail(nodeId);
+  }
+}
+
+async function loadNodeHealthDetail(nodeId) {
+  try {
+    const r = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/health`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    nodeHealthDetails.set(nodeId, await r.json());
+  } catch (e) {
+    nodeHealthDetails.set(nodeId, { error: e.message });
+  }
   renderTasks();
 }
 
@@ -318,22 +312,16 @@ function renderTasks() {
 
   let watchersHtml = '';
   if (nodeWatchers.length) {
-    const expandToggle = nodeMonitorsExpanded ? '▾' : '▸';
-    const headerLabel = `🖥️ Node health · ${nodeWatchers.length} node${nodeWatchers.length === 1 ? '' : 's'}`;
-    const headerMeta = nodeWatchers
-      .map(w => w.lastStatusText)
-      .filter(Boolean)
-      .slice(0, 1)[0] || 'monitoring';
-    watchersHtml += `
-      <div class="task-item${nodeMonitorsExpanded ? ' task-item-open' : ''}">
-        <div class="task-item-info" data-action="toggleNodeMonitors" title="Click to expand node monitors" style="cursor:pointer">
-          <div class="task-item-label">${expandToggle} ${headerLabel}</div>
-          <div class="task-item-meta" style="font-style:italic">${escHtml(headerMeta)}</div>
-        </div>
-      </div>`;
-    if (nodeMonitorsExpanded) {
-      watchersHtml += `<div style="padding-left:18px;border-left:2px solid var(--border, #e5e5e5);margin-left:6px">${nodeWatchers.map(renderWatcherRow).join('')}</div>`;
+    const nodeGroups = new Map();
+    for (const w of nodeWatchers) {
+      const nodeId = nodeIdForWatcher(w);
+      if (!nodeGroups.has(nodeId)) nodeGroups.set(nodeId, []);
+      nodeGroups.get(nodeId).push(w);
     }
+    watchersHtml += [...nodeGroups.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([nodeId, group]) => renderNodeHealthGroup(nodeId, group))
+      .join('');
   }
   watchersHtml += otherWatchers.map(renderWatcherRow).join('');
   if (!watchersHtml) {

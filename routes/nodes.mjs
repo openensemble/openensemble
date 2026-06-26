@@ -24,6 +24,8 @@ import { getLanAddress } from '../discovery.mjs';
 import { getNodeProfilesSummary } from '../lib/node-profile-summary.mjs';
 import { ensureNodeSystemProfile } from '../lib/node-system-profile.mjs';
 import { loadProfile, setTrustState } from '../lib/service-profile.mjs';
+import { listWatchers } from '../scheduler/watchers.mjs';
+import { profileHealthWatcherDetail } from '../lib/watcher-health-details.mjs';
 import { verifyProfileReadonly } from '../lib/capability-dispatcher.mjs';
 import { makeNodeExecFn } from '../lib/node-exec-wrapper.mjs';
 import {
@@ -150,6 +152,35 @@ export async function handle(req, res) {
   if (p === '/api/nodes/latest-version' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ version: getLatestAgentVersion() }));
+    return true;
+  }
+
+  // GET /api/nodes/:nodeId/health — node-scoped profile health details.
+  // This is the same source used by the Tasks drawer node-health grouping and
+  // the Nodes drawer Health popout.
+  const healthMatch = p.match(/^\/api\/nodes\/([^/]+)\/health$/);
+  if (healthMatch && req.method === 'GET') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeId = decodeURIComponent(healthMatch[1]);
+    const node = getNode(nodeId, userId);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Node not found' }));
+      return true;
+    }
+    const active = listWatchers(userId).active || [];
+    const healthWatchers = active
+      .filter(w => w.kind === 'profile_health' && (w.state?.node_id === nodeId || w.state?.node_id === node.hostname))
+      .map(w => profileHealthWatcherDetail(userId, w));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      nodeId,
+      hostname: node.hostname,
+      health: node.health,
+      profiles: getNodeProfilesSummary(userId, nodeId, node.hostname),
+      watchers: healthWatchers,
+    }));
     return true;
   }
 

@@ -317,6 +317,9 @@ function renderNodeCard(node) {
       <button class="cdraw-btn" data-action="nodeRefreshStatus" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Refresh status">
         <i data-lucide="activity" style="width:13px;height:13px"></i> Status
       </button>
+      <button class="cdraw-btn" data-action="openNodeHealth" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="View health signals and open incidents">
+        <i data-lucide="heart-pulse" style="width:13px;height:13px"></i> Health
+      </button>
       <button class="cdraw-btn" data-action="pushAgentUpdate" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Push latest agent code and restart">
         <i data-lucide="refresh-cw" style="width:13px;height:13px"></i> Upgrade Agent
       </button>
@@ -537,6 +540,44 @@ function nodeQuickAction(nodeId, action) {
 // `this.closest('.node-pair-modal').remove()`.
 function _nodePairModalClose(_event) { this.parentElement?.remove(); }
 function _nodePairModalCloseInner(_event) { this.closest('.node-pair-modal')?.remove(); }
+
+async function openNodeHealth(nodeId) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const label = node?.hostname || nodeId;
+  const modal = document.createElement('div');
+  modal.className = 'node-pair-modal';
+  modal.innerHTML = `
+    <div class="node-pair-modal-bg" data-action="_nodePairModalClose"></div>
+    <div class="node-pair-modal-box node-health-modal">
+      <div class="node-walkthrough-modal-head">
+        <i data-lucide="heart-pulse" style="width:18px;height:18px"></i>
+        <div>
+          <div class="node-walkthrough-modal-title">Health: ${escHtml(label)}</div>
+          <div class="node-walkthrough-modal-subtitle">Signals, failing checks, and incident details</div>
+        </div>
+      </div>
+      <div class="node-health-modal-body">
+        <div class="node-health-empty">Loading health signals…</div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button class="cdraw-btn cdraw-btn-primary" data-action="_nodePairModalCloseInner" style="font-size:12px;padding:6px 12px">Done</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('show'));
+  lucide.createIcons();
+
+  const body = modal.querySelector('.node-health-modal-body');
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/health`, { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    body.innerHTML = OENodeHealthView.renderNodeHealthWatchers(data.watchers || []);
+  } catch (e) {
+    body.innerHTML = `<div class="cdraw-error">Could not load node health: ${escHtml(e.message)}</div>`;
+  }
+}
 
 function showNodeConfirmModal({ title, message, confirmLabel, cancelLabel, confirmClass, onConfirm }) {
   const modal = document.createElement('div');

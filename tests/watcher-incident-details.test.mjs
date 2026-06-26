@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { openIncident } from '../lib/incident.mjs';
-import { profileHealthSignalDetails } from '../routes/misc.mjs';
+import { profileHealthSignalDetails, profileHealthWatcherDetail } from '../lib/watcher-health-details.mjs';
 
 const USER = 'user_watcher_incident_detail_test';
 const NODE = 'node_alert_test';
@@ -61,6 +61,44 @@ describe('profileHealthSignalDetails', () => {
           expected: { lt: 90 },
         },
       },
+    });
+  });
+
+  it('wraps signal details in a node health watcher payload', () => {
+    const detail = profileHealthWatcherDetail(USER, {
+      id: 'watch_1',
+      kind: 'profile_health',
+      label: 'Host health @node_alert_test',
+      status: 'active',
+      cadenceSec: 60,
+      lastStatusText: '1/1 signals healthy',
+      ticks: 3,
+      failures: 0,
+      state: {
+        node_id: NODE,
+        service_id: 'system',
+        signals: [{
+          kind: 'cpu_load',
+          last_state: 'healthy',
+          last_checked_at: 1234,
+          expect: { lt: 8 },
+          last_output: '0.42',
+        }],
+      },
+    });
+
+    expect(detail).toMatchObject({
+      id: 'watch_1',
+      kind: 'profile_health',
+      service_id: 'system',
+      node_id: NODE,
+      cadenceSec: 60,
+      profileHealth: [{
+        kind: 'cpu_load',
+        last_state: 'healthy',
+        expect: { lt: 8 },
+        last_output: '0.42',
+      }],
     });
   });
 });
