@@ -108,18 +108,33 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     ? toolsUsed.map(t => ({ name: t.name, text: String(t.text ?? '').slice(0, 10000) }))
         .filter(r => r.text.length > 0)
     : null;
+  const resultCursorByName = new Map();
+  const nextToolResultIndex = (name) => {
+    if (!toolResults?.length) return null;
+    const start = resultCursorByName.get(name) ?? 0;
+    for (let i = start; i < toolResults.length; i++) {
+      if (toolResults[i]?.name === name) {
+        resultCursorByName.set(name, i + 1);
+        return i;
+      }
+    }
+    return null;
+  };
   const compactToolEvents = Array.isArray(toolEvents) && toolEvents.length
-    ? toolEvents.map(t => ({
-        name: t.name,
-        args: t.args ? redactArgsForTrace(t.args) : null,
-        status: t.status ?? 'done',
-        startedAt: t.startedAt ?? null,
-        endedAt: t.endedAt ?? null,
-        durationMs: t.durationMs ?? null,
-        preview: String(t.preview ?? '').slice(0, 500),
-        progressPreview: String(t.progressPreview ?? '').slice(-1200),
-        text: String(t.text ?? '').slice(0, 10000),
-      }))
+    ? toolEvents.map(t => {
+        const resultIndex = t.text ? nextToolResultIndex(t.name) : null;
+        return {
+          name: t.name,
+          args: t.args ? redactArgsForTrace(t.args) : null,
+          status: t.status ?? 'done',
+          startedAt: t.startedAt ?? null,
+          endedAt: t.endedAt ?? null,
+          durationMs: t.durationMs ?? null,
+          preview: String(t.preview ?? '').slice(0, 500),
+          progressPreview: String(t.progressPreview ?? '').slice(-1200),
+          ...(resultIndex != null ? { resultIndex } : {}),
+        };
+      })
     : null;
   // Phase-14 chip-replaces-turn: when the turn dispatched a backgrounded
   // tool whose chip IS the visible reply, mark the assistant entry as

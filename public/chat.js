@@ -106,7 +106,7 @@ function renderSession() {
       _renderAgentReportEl({ agentName, agentEmoji: '⏵', content: body, ts: m.ts });
     }
     else if (m.role === 'assistant' && !m.hidden) {
-      if (Array.isArray(m.toolEvents) && m.toolEvents.length) appendToolRun(m.toolEvents, m.ts, false, { persisted: true });
+      if (Array.isArray(m.toolEvents) && m.toolEvents.length) appendToolRun(m.toolEvents, m.ts, false, { persisted: true, toolResults: m.toolResults });
       appendAssistantBubble(m.content, m.ts, false);
     }
   });
@@ -1251,6 +1251,16 @@ function renderToolRunSteps(container, events) {
   }
 }
 
+function hydrateToolEvents(events, toolResults = null) {
+  return (events || []).map(ev => {
+    if (ev.text || !Array.isArray(toolResults)) return { ...ev };
+    const idx = Number(ev.resultIndex);
+    const result = Number.isInteger(idx) && idx >= 0 ? toolResults[idx] : null;
+    if (!result?.text) return { ...ev };
+    return { ...ev, text: result.text };
+  });
+}
+
 function updateToolRunHeader(run, done = false) {
   if (!run?.el) return;
   const { title, meta } = summarizeToolRun(run.events, done);
@@ -1262,8 +1272,8 @@ function updateToolRunHeader(run, done = false) {
   renderToolRunSteps(run.el.querySelector('.tool-run-steps'), run.events);
 }
 
-function appendToolRun(events, ts = Date.now(), scroll = true, { persisted = false } = {}) {
-  const cleanEvents = (events || []).map(ev => ({ ...ev, status: ev.status || 'done' }));
+function appendToolRun(events, ts = Date.now(), scroll = true, { persisted = false, toolResults = null } = {}) {
+  const cleanEvents = hydrateToolEvents(events, toolResults).map(ev => ({ ...ev, status: ev.status || 'done' }));
   if (!cleanEvents.length) return null;
   const run = document.createElement('div');
   run.className = `tool-run tool-run-done ${persisted ? 'tool-run-persisted' : ''}`;
