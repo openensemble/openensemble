@@ -4,6 +4,7 @@ let watchers = { active: [], recent: [] };
 let expandedTaskId = null;
 let expandedWatcherId = null;
 let nodeMonitorsExpanded = false;
+const watcherDetails = new Map();
 
 const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function _parseCronDow(spec) {
@@ -78,6 +79,63 @@ function _watcherEtaText(w) {
   return `expires in ${h}h${m%60 ? ' ' + (m%60) + 'm' : ''}`;
 }
 
+function formatExpect(expect) {
+  if (!expect || typeof expect !== 'object') return 'no expectation recorded';
+  const [op, val] = Object.entries(expect)[0] || [];
+  if (!op) return JSON.stringify(expect);
+  const words = { lt: '<', lte: '<=', gt: '>', gte: '>=', eq: '=', neq: '!=', contains: 'contains', matches: 'matches' };
+  return `${words[op] || op} ${val}`;
+}
+
+function formatCheckedAt(ms) {
+  if (!ms) return 'never checked';
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? 'unknown time' : d.toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+
+function signalObservedValue(sig) {
+  const incVal = sig.incident?.triggering_signal?.value;
+  if (incVal !== undefined && incVal !== null && incVal !== '') return incVal;
+  if (sig.last_output !== undefined && sig.last_output !== null && sig.last_output !== '') return sig.last_output;
+  if (sig.last_error) return `error: ${sig.last_error}`;
+  return 'not recorded';
+}
+
+function renderWatcherHealthDetails(w, detail) {
+  if (w.kind !== 'profile_health') return '';
+  if (!detail) return '<div class="task-edit-meta" style="margin-top:8px">Loading health details…</div>';
+  if (detail.error) return `<div class="task-edit-meta" style="margin-top:8px;color:var(--red)">Could not load health details: ${escHtml(detail.error)}</div>`;
+  const signals = Array.isArray(detail.profileHealth) ? detail.profileHealth : [];
+  if (!signals.length) return '<div class="task-edit-meta" style="margin-top:8px">No health signal details recorded.</div>';
+
+  const rows = signals.map(sig => {
+    const bad = sig.last_state === 'unhealthy';
+    const incident = sig.incident;
+    const diagnostics = incident?.diagnostics_collected || [];
+    const diagHtml = diagnostics.length
+      ? diagnostics.map(d => `<div style="margin-top:4px;white-space:pre-wrap;word-break:break-word">${escHtml(d.output_excerpt || d.interpretation || d.op_id || '(diagnostic recorded)')}</div>`).join('')
+      : (bad ? '<div style="margin-top:4px;color:var(--muted)">No diagnostic recipe/output was recorded for this signal.</div>' : '');
+    const eventHtml = incident?.events?.length
+      ? `<div style="margin-top:4px;color:var(--muted)">Last event: ${escHtml(incident.events[incident.events.length - 1]?.type || 'event')} · ${escHtml(incident.events[incident.events.length - 1]?.ts || '')}</div>`
+      : '';
+    return `
+      <div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:8px;background:${bad ? 'rgba(244,67,54,0.08)' : 'rgba(76,175,80,0.06)'}">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+          <strong>${bad ? '⚠' : '✓'} ${escHtml(sig.kind)}</strong>
+          <span style="font-size:11px;color:${bad ? 'var(--red)' : 'var(--muted)'}">${escHtml(sig.last_state || 'unknown')}</span>
+        </div>
+        <div class="task-edit-meta" style="margin-top:4px">Observed: <code>${escHtml(String(signalObservedValue(sig)))}</code>; expected: <code>${escHtml(formatExpect(sig.expect))}</code></div>
+        <div class="task-edit-meta">Last checked: ${escHtml(formatCheckedAt(sig.last_checked_at))}</div>
+        ${incident ? `<div class="task-edit-meta">Incident: <code>${escHtml(incident.id)}</code> (${escHtml(incident.status)}) opened ${escHtml(new Date(incident.ts_opened).toLocaleString())}</div>` : ''}
+        ${sig.check?.command ? `<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--muted)">Check command</summary><pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;margin:4px 0 0">${escHtml(sig.check.command)}</pre></details>` : ''}
+        ${diagHtml}
+        ${eventHtml}
+      </div>`;
+  }).join('');
+
+  return `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600">Health signals</div>${rows}</div>`;
+}
+
 function renderWatcherRow(w) {
   const isOpen = expandedWatcherId === w.id;
   const expandToggle = isOpen ? '▾' : '▸';
@@ -104,11 +162,14 @@ function renderWatcherRow(w) {
   const indefBtn = isIndefinite
     ? ''
     : `<button data-action="setWatcherIndefinite" data-args='${JSON.stringify([w.id]).replace(/'/g, "&#39;")}' style="margin-right:6px">make indefinite</button>`;
+  const detail = watcherDetails.get(w.id);
+  const healthDetails = renderWatcherHealthDetails(w, detail);
   const editor = `
     <div class="task-edit-panel">
       <div class="task-edit-meta">Started: ${new Date(w.createdAt).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })}</div>
       <div class="task-edit-meta">Cadence: every ${w.cadenceSec}s</div>
       ${w.expiresAt ? `<div class="task-edit-meta">Expires: ${new Date(w.expiresAt).toLocaleString()}</div>` : '<div class="task-edit-meta">Expires: indefinite</div>'}
+      ${healthDetails}
       <div style="margin-top:8px;font-size:12px;color:var(--muted)">Extend by:</div>
       <div style="margin-top:4px">${presets}${indefBtn}</div>
     </div>`;
@@ -117,6 +178,20 @@ function renderWatcherRow(w) {
 
 function toggleWatcherExpanded(id) {
   expandedWatcherId = expandedWatcherId === id ? null : id;
+  renderTasks();
+  if (expandedWatcherId === id && !watcherDetails.has(id)) {
+    loadWatcherDetail(id);
+  }
+}
+
+async function loadWatcherDetail(id) {
+  try {
+    const r = await fetch(`/api/watchers/${encodeURIComponent(id)}`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    watcherDetails.set(id, await r.json());
+  } catch (e) {
+    watcherDetails.set(id, { error: e.message });
+  }
   renderTasks();
 }
 

@@ -29,12 +29,53 @@ import { loadSession } from '../sessions.mjs';
 import { loadTasksForOwner, findTaskById, addTask, removeTask, updateTask, scheduleNewTask } from '../scheduler.mjs';
 import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent, registerWatcher } from '../scheduler/watchers.mjs';
 import { cancelTask } from '../background-tasks.mjs';
+import { loadIncident } from '../lib/incident.mjs';
 import { acceptProposal, dismissProposal, blockProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
 import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride, applyLearningKindPolicy, revokeLearningKindPolicy } from '../lib/learnings.mjs';
 import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../lib/week1-sweep.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
 import { getGmailAuthHeader } from './gmail.mjs';
+
+export function profileHealthSignalDetails(userId, watcher) {
+  if (watcher?.kind !== 'profile_health') return null;
+  const nodeId = watcher.state?.node_id;
+  const signals = Array.isArray(watcher.state?.signals) ? watcher.state.signals : [];
+  return signals.map(sig => {
+    let incident = null;
+    if (nodeId && sig.current_incident_id) {
+      try {
+        const inc = loadIncident(userId, nodeId, sig.current_incident_id);
+        if (inc) {
+          incident = {
+            id: inc.id,
+            status: inc.status,
+            service_id: inc.service_id || null,
+            ts_opened: inc.ts_opened,
+            ts_closed: inc.ts_closed || null,
+            triggering_signal: inc.triggering_signal || null,
+            diagnostics_collected: Array.isArray(inc.diagnostics_collected) ? inc.diagnostics_collected.slice(-5) : [],
+            fix_attempts: Array.isArray(inc.fix_attempts) ? inc.fix_attempts.slice(-5) : [],
+            events: Array.isArray(inc.events) ? inc.events.slice(-5) : [],
+            resolution_summary: inc.resolution_summary || null,
+          };
+        }
+      } catch { /* incident detail is advisory */ }
+    }
+    return {
+      kind: sig.kind,
+      severity: sig.severity || null,
+      last_state: sig.last_state || 'unknown',
+      last_checked_at: sig.last_checked_at || null,
+      current_incident_id: sig.current_incident_id || null,
+      check: sig.check || null,
+      expect: sig.expect || null,
+      last_output: sig.last_output ?? null,
+      last_error: sig.last_error ?? null,
+      incident,
+    };
+  });
+}
 
 async function getEmailUnreadCount(userId) {
   // Load user's email accounts
@@ -248,6 +289,7 @@ export async function handle(req, res) {
       state: w.state || {},
       lastStatusText: w.lastStatusText || null,
       history: Array.isArray(w.history) ? w.history : [],
+      profileHealth: profileHealthSignalDetails(authId, w),
     }));
     return true;
   }
