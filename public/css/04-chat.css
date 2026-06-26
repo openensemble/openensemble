@@ -371,6 +371,10 @@
 .tool-plan-row-label { color: var(--fg); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .tool-plan-row-desc { color: var(--muted); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
 .tool-plan-row code { color: var(--muted); font-size: 10px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-plan-add { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(120px, 0.8fr) auto; gap: 6px; align-items: center; padding: 7px; background: var(--bg2); }
+.tool-plan-add select, .tool-plan-add input { min-width: 0; width: 100%; border: 1px solid var(--border); border-radius: 4px; background: var(--bg1); color: var(--fg); padding: 6px 7px; font-size: 11px; }
+.tool-plan-add button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg3); color: var(--fg); padding: 6px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.tool-plan-add button:hover, .tool-plan-add button:focus-visible { outline: none; border-color: var(--accent); }
 .tool-plan-remember { display: flex; align-items: center; gap: 7px; padding: 8px; background: var(--bg2); color: var(--muted); font-size: 11px; cursor: pointer; }
 .tool-plan-empty { padding: 9px; background: var(--bg2); color: var(--muted); font-size: 12px; }
 @media (max-width: 640px) {
@@ -379,6 +383,8 @@
   .tool-plan-modes button { flex: 1; }
   .tool-plan-row { grid-template-columns: auto minmax(0, 1fr); }
   .tool-plan-row code { grid-column: 2; max-width: none; }
+  .tool-plan-add { grid-template-columns: 1fr; }
+  .tool-plan-add button { width: 100%; }
 }
 .msg-attachment { margin-bottom: 6px; }
 .msg-attachment img { max-width: 280px; max-height: 200px; border-radius: 8px; display: block; }

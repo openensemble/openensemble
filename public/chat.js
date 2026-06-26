@@ -136,6 +136,25 @@ function toolCatalogEntry(name) {
   };
 }
 
+function renderToolPlanAddOptions(excludedNames = new Set()) {
+  const groups = new Map();
+  for (const item of TOOL_PLAN_CATALOG) {
+    if (excludedNames.has(item.name)) continue;
+    const group = item.group || 'Other';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(item);
+  }
+  const html = ['<option value="">Add tool...</option>'];
+  for (const [group, items] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    html.push(`<optgroup label="${escHtml(group)}">`);
+    for (const item of items.sort((a, b) => (a.label || a.name).localeCompare(b.label || b.name))) {
+      html.push(`<option value="${escHtml(item.name)}">${escHtml(item.label || item.name)} (${escHtml(item.name)})</option>`);
+    }
+    html.push('</optgroup>');
+  }
+  return html.join('');
+}
+
 function detectToolSuggestions(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed || trimmed.startsWith('/') || trimmed.startsWith('@')) return { suggestions: [], recipe: null };
@@ -198,6 +217,7 @@ function renderToolPlanPicker() {
   for (const name of toolPlanState.selected) {
     if (!allVisible.some(t => t.name === name)) allVisible.push(toolCatalogEntry(name));
   }
+  const visibleNames = new Set(allVisible.map(t => t.name));
   el.style.display = 'block';
   el.innerHTML = `
     <div class="tool-plan-head">
@@ -226,6 +246,13 @@ function renderToolPlanPicker() {
           <code>${escHtml(t.name)}</code>
         </label>`;
       }).join('') : `<div class="tool-plan-empty">No obvious tools matched. Choose “OE decides” or type a clearer action.</div>`}
+      <div class="tool-plan-add">
+        <select id="toolPlanAddSelect" aria-label="Add a known tool">
+          ${renderToolPlanAddOptions(visibleNames)}
+        </select>
+        <input id="toolPlanAddName" type="text" inputmode="text" autocomplete="off" placeholder="Exact tool name">
+        <button type="button" data-tool-plan-add title="Add tool">${icon('plus', 13)}<span>Add</span></button>
+      </div>
       <label class="tool-plan-remember">
         <input type="checkbox" id="toolPlanRemember" ${toolPlanState.remember ? 'checked' : ''}>
         <span>Remember this tool choice for similar wording</span>
@@ -254,6 +281,31 @@ function renderToolPlanPicker() {
       toolPlanState.dirty = true;
       renderToolPlanPicker();
     });
+  });
+  const addTool = () => {
+    const select = el.querySelector('#toolPlanAddSelect');
+    const input = el.querySelector('#toolPlanAddName');
+    const raw = (input?.value || select?.value || '').trim();
+    if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(raw)) {
+      input?.focus();
+      return;
+    }
+    toolPlanState.selected.add(raw);
+    toolPlanState.mode = 'selected';
+    toolPlanState.expanded = true;
+    toolPlanState.dirty = true;
+    renderToolPlanPicker();
+  };
+  el.querySelector('[data-tool-plan-add]')?.addEventListener('click', addTool);
+  el.querySelector('#toolPlanAddSelect')?.addEventListener('change', (e) => {
+    const input = el.querySelector('#toolPlanAddName');
+    if (input) input.value = e.target.value || '';
+  });
+  el.querySelector('#toolPlanAddName')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addTool();
+    }
   });
   el.querySelector('#toolPlanRemember')?.addEventListener('change', (e) => {
     toolPlanState.remember = e.target.checked;
