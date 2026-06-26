@@ -231,6 +231,7 @@ function normalizeToolPlan(plan) {
  * @param {() => void} [opts.onBroadcast]
  * @param {(fromUserId: string, agentId: string, notify: object) => void} [opts.onNotify]
  * @param {boolean} [opts._isRoutineFollowup]        internal recursion guard
+ * @param {boolean} [opts._hiddenUser]               internal turn; persist user prompt hidden from UI
  * @returns {Promise<void>}
  */
 export async function handleChatMessage({
@@ -246,6 +247,7 @@ export async function handleChatMessage({
   onBroadcast = () => {},
   onNotify    = () => {},
   _isRoutineFollowup = false,
+  _hiddenUser = false,
 }) {
   // Wake-slot routing — household-shared voice device.
   //
@@ -600,6 +602,7 @@ export async function handleChatMessage({
       toolPlan: ctx.toolPlan,
       schedulerNote: resolvedNote, source, deviceId,
       ac, onEvent: wrappedOnEvent, onNotify,
+      hiddenUser: _hiddenUser,
     });
   } finally {
     finalizeTurn(scopedSessionKey, busySlot);

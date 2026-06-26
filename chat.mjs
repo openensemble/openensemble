@@ -133,7 +133,7 @@ function _modelContextWindow(model) {
   return null;
 }
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null } = {}) {
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false } = {}) {
   // Record a compact summary of which tools fired this turn so future loads
   // of this session can show the assistant what it actually did, not just
   // what it said. Without this, short follow-ups ("send", "again", "do that
@@ -205,7 +205,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
   if (hideTurn) assistantEntry.hidden = true;
   if (hideTaskId) assistantEntry.hideTaskId = hideTaskId;
   appendToSession(agent.id,
-    { role: 'user', content: sessionText, ts: Date.now() },
+    { role: 'user', content: sessionText, ts: Date.now(), ...(hiddenUser ? { hidden: true } : {}) },
     assistantEntry);
 
   // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
@@ -1326,7 +1326,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     }).catch(() => {});
   }
   if (assistantContent) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId });
+  if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true });
     // Phase-14 chip-replaces-turn: emit __content only when we're NOT
     // hiding the turn. The browser would otherwise render the coordinator's
     // assistant bubble alongside the chip — redundant.

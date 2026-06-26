@@ -38,10 +38,20 @@ function taskState(taskId, extra = {}) {
     phase: rec.phase || 'running',
     ownerKey: rec.ownerKey || null,
     isWorker: !!rec.isWorker,
+    continuation: rec.autoContinue ? { enabled: true, parentAgentId: rec.coordinatorAgentId || null } : null,
     canCancel: typeof rec.abort === 'function' && rec.status !== 'cancelling',
     cancelling: rec.status === 'cancelling',
     ...extra,
   };
+}
+
+export function __testTaskStateFromRecord(taskId, rec, extra = {}) {
+  activeTasks.set(taskId, rec);
+  try {
+    return taskState(taskId, extra);
+  } finally {
+    activeTasks.delete(taskId);
+  }
 }
 
 function pushTaskProgress(taskId, text, extra = {}) {
@@ -102,15 +112,19 @@ setInterval(() => {
  * @param {string} coordinatorAgentId - scoped id of the coordinator
  * @param {string} agentName - display name for notifications
  * @param {string} agentEmoji - emoji icon (e.g. "📧")
+ * @param {{autoContinue?: boolean}} [opts]
  */
-export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId, agentName, agentEmoji = '🤖') {
+export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId, agentName, agentEmoji = '🤖', opts = {}) {
   const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const summary = (task || '').slice(0, 120);
   const ac = new AbortController();
   activeTasks.set(taskId, {
     agentId: scopedAgent.id, userId, agentName, agentEmoji,
     startedAt: Date.now(), summary, phase: 'queued', status: 'running',
+    originalTask: task,
+    coordinatorAgentId,
     abort: () => ac.abort(),
+    autoContinue: opts?.autoContinue === true,
   });
 
   // Phase 14: register a task_proxy watcher so the task surfaces as a chat
@@ -221,6 +235,41 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   return taskId;
 }
 
+function _coordinatorAgentIdFromSessionKey(sessionKey, userId) {
+  const raw = String(sessionKey || '');
+  const prefix = `${userId}_`;
+  return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+}
+
+async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgentId, agentName, result, errorMsg, originalTask }) {
+  if (errorMsg || !result) return;
+  const agentId = _coordinatorAgentIdFromSessionKey(coordinatorAgentId, userId);
+  if (!agentId) return;
+  const prompt = [
+    'A background delegation you started has completed. Continue the original user workflow for THIS completed task only. The task id and original_task below are authoritative; do not infer from the latest visible chat message.',
+    '',
+    `<background_task id="${taskId}" agent="${agentName}" target_agent_id="${targetAgentId || ''}">`,
+    `<original_task>${originalTask || ''}</original_task>`,
+    `<result>${result}</result>`,
+    '</background_task>',
+    '',
+    'If the original user request required a next step using this result, do it now. For example, if the task returned a briefing so it could be emailed, delegate to the email agent with this exact briefing. If there is no remaining action, give the user a concise completion update. Do not act on any other background task.',
+  ].join('\n');
+  const { handleChatMessage } = await import('./chat-dispatch.mjs');
+  const { sendToUser } = await import('./ws-handler.mjs');
+  await handleChatMessage({
+    userId,
+    agentId,
+    text: prompt,
+    attachment: null,
+    source: 'web',
+    onEvent: (e) => sendToUser(userId, e),
+    onBroadcast: () => {},
+    onNotify: () => {},
+    _hiddenUser: true,
+  });
+}
+
 async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '') {
   const rec = activeTasks.get(taskId);
   const status = finalStatus || (errorMsg ? 'error' : 'done');
@@ -312,6 +361,19 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     taskId,
     ts: Date.now(),
   });
+
+  if (rec?.autoContinue) {
+    _runContinuation({
+      taskId,
+      userId,
+      coordinatorAgentId,
+      targetAgentId: targetAgentId || rec?.agentId || null,
+      agentName,
+      result,
+      errorMsg,
+      originalTask: rec?.originalTask || originalTask || rec?.summary || '',
+    }).catch(e => console.error('[background-tasks] continuation failed:', e?.stack ?? e?.message ?? e));
+  }
 }
 
 export function cancelTask(userId, id, reason = 'cancelled') {

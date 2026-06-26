@@ -235,7 +235,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // should detach and report back later. When a SPECIALIST escalates UP to the
   // coordinator, the user is sitting in that specialist's chat waiting on the
   // answer, so we stream the coordinator's reply live (sync) instead of going
-  // dark. Explicit background:true from the model is always honored; _parallel
+  // dark. Explicit background:true from the model is honored; _parallel
   // (several delegations in one response) still backgrounds at the dispatch check
   // below, since multiple live streams can't share one chat.
   const LONG_TASK_RE = /\b(create|build|make|generate|refactor|rewrite|fix|update|modify|change|delete|remove|install|deploy|configure|setup|set up|investigate|debug|trace|run|execute|test|download|upload|patch|migrate|optimize|implement|write|edit|read|search|analyze|review)\b/i;
@@ -336,7 +336,8 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // by chat.mjs when multiple ask_agent calls are detected in a single response.
   if (background || _parallel) {
     const { dispatchBackground } = await import('../../background-tasks.mjs');
-    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji);
+    const autoContinue = callerIsCoordinator;
+    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, { autoContinue });
     // Phrase the result as something the calling agent can relay verbatim to the
     // user — not internal jargon — so the user knows what's happening and that a
     // result will follow, without having to watch logs.

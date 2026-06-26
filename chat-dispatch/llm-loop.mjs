@@ -319,14 +319,14 @@ const RETRIABLE_RE = /\b(5\d{2}|timeout|timed out|rate limit|ECONNREFUSED|ECONNR
 export async function runLlmTurn({
   userId, agentId, scopedAgent, scopedSessionKey,
   userText, attachment, toolPlan, schedulerNote, source, deviceId,
-  ac, onEvent, onNotify,
+  ac, onEvent, onNotify, hiddenUser = false,
 }) {
   let streamBuf = '';
 
   async function runStream(agentObj) {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       onEvent({ ...e, agent: agentId });
-    }, userId ?? 'default', attachment, schedulerNote, false, { source, deviceId }, { toolPlan })) {
+    }, userId ?? 'default', attachment, schedulerNote, false, { source, deviceId }, { toolPlan, hiddenUser })) {
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
       // Check if this error is retriable — return it instead of emitting
