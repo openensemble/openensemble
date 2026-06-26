@@ -486,7 +486,16 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     for await (const event of streamChat(scopedAgent, task, null, null, userId, null, combinedNote, false, null, { toolPlan: rememberedToolPlan })) {
       if (event.type === 'token') {
         fullText += event.text;
-        yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: streamLabel };
+        yield {
+          type: 'tool_progress',
+          name: 'ask_agent',
+          text: event.text,
+          sourceLabel: streamLabel,
+          delegated: true,
+          agentName,
+          agentEmoji,
+          targetAgentId: scopedAgent.id,
+        };
       }
       if (event.type === 'tool_call' && event.name) {
         syncToolsUsed++;
@@ -497,6 +506,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
           args: event.args || null,
           delegated: true,
           agentName,
+          agentEmoji,
           targetAgentId: scopedAgent.id,
         };
         if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} is using ${event.name}`, {
@@ -522,6 +532,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
           preview,
           delegated: true,
           agentName,
+          agentEmoji,
           targetAgentId: scopedAgent.id,
         };
         if (preview && syncWatcherId) {

@@ -1215,6 +1215,26 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       let backgrounded = false;
       let watcherId = null;
       let watchersMod = null;
+      let delegatedMeta = null;
+
+      const rememberDelegationMeta = (value) => {
+        if (!value || typeof value !== 'object') return;
+        if (!value.delegated && !value.agentName && !value.targetAgentId && !value.sourceLabel) return;
+        const sourceLabel = typeof value.sourceLabel === 'string' ? value.sourceLabel.trim() : '';
+        let agentName = typeof value.agentName === 'string' ? value.agentName.trim() : '';
+        let agentEmoji = typeof value.agentEmoji === 'string' ? value.agentEmoji.trim() : '';
+        if (!agentName && sourceLabel) agentName = sourceLabel;
+        if (sourceLabel && agentName && sourceLabel !== agentName && sourceLabel.endsWith(agentName)) {
+          const maybeEmoji = sourceLabel.slice(0, -agentName.length).trim();
+          if (maybeEmoji && !agentEmoji) agentEmoji = maybeEmoji;
+        }
+        delegatedMeta = {
+          ...(delegatedMeta || {}),
+          ...(agentName ? { agentName } : {}),
+          ...(agentEmoji ? { agentEmoji } : {}),
+          ...(value.targetAgentId ? { targetAgentId: value.targetAgentId } : {}),
+        };
+      };
 
       while (true) {
         let next;
@@ -1226,25 +1246,30 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         }
         if (next.done) break;
         const value = next.value;
+        rememberDelegationMeta(value);
 
         // First time crossing 10s: register chip, yield deferred result,
         // hand the iterator to a detached worker, and return.
         if (!backgrounded && Date.now() - startedAt >= AUTO_BG_MS) {
+          const displayName = delegatedMeta?.agentName || name;
+          const displayEmoji = delegatedMeta?.agentEmoji || (delegatedMeta ? '' : '⏵');
+          const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
           try {
             watchersMod = await import('./scheduler/watchers.mjs');
             watcherId = watchersMod.registerWatcher({
               userId,
               agentId: await _resolveAttributionAgent(userId, agentId),
               kind: 'task_proxy',
-              label: `⏵ ${name}`,
+              label,
               state: {
                 taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
                 status: 'running',
-                targetAgentName: name,
-                targetAgentEmoji: '⏵',
+                targetAgentName: displayName,
+                targetAgentEmoji: displayEmoji || '⏵',
+                ...(delegatedMeta?.targetAgentId ? { targetAgentId: delegatedMeta.targetAgentId } : {}),
                 tool: name,
                 phase: 'backgrounded',
-                summary: `${name} is still running`,
+                summary: `${displayName} is still running`,
                 startedAt,
                 lastActivityAt: Date.now(),
                 canCancel: false,
@@ -1253,7 +1278,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               expiresAt: null,
             });
             backgrounded = true;
-            watchersMod.pushWatcherStatus(userId, watcherId, `${name} is still running in the background`, {
+            watchersMod.pushWatcherStatus(userId, watcherId, `${displayName} is still running in the background`, {
               phase: 'backgrounded',
               currentTool: name,
               canCancel: false,
@@ -1270,7 +1295,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           if (backgrounded) {
             // Inform the coordinator's LLM the tool was backgrounded — its turn
             // ends gracefully with this message in place of the real result.
-            yield { type: 'result', text: `\`${name}\` is running in the background (task ${watcherId}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
+            yield { type: 'result', text: `${displayName} is running in the background (task ${watcherId}). The result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
             yield { type: '__hide_turn', reason: 'bg_chip', taskId: watcherId };
 
             // Detached worker: continue draining iter, push to chip, finalize
@@ -1283,6 +1308,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               agentId: await _resolveAttributionAgent(userId, agentId),
               owningSkillId,
               startedAt,
+              displayName,
+              displayEmoji,
+              targetAgentId: delegatedMeta?.targetAgentId || null,
             };
             (async () => {
               let finalText = '';
@@ -1291,6 +1319,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   const r = await iter.next();
                   if (r.done) break;
                   const v = r.value;
+                  rememberDelegationMeta(v);
                   if (v?.type === 'tool_progress' && v.text) {
                     watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-1200), {
                       phase: 'streaming',
@@ -1301,7 +1330,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     finalText = String(v.text);
                     const preview = finalText.split('\n').find(l => l.trim()) || '';
                     if (preview) {
-                      watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, `${captured.name}: ${preview.slice(0, 240)}`, {
+                      watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, `${captured.displayName}: ${preview.slice(0, 240)}`, {
                         phase: 'result',
                         currentTool: null,
                         canCancel: false,
@@ -1311,7 +1340,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 }
                 watchersMod.completeWatcher(captured.userId, captured.watcherId, {
                   status: 'done',
-                  finalText: `✓ ${captured.name} done${finalText ? `: ${finalText.slice(-1200)}` : ''}`,
+                  finalText: `✓ ${captured.displayName} done${finalText ? `: ${finalText.slice(-1200)}` : ''}`,
                 });
                 // Append the result into the agent session so the next LLM
                 // turn has context. Best-effort; chip is the primary surface.
@@ -1328,9 +1357,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     await appendToSession(key, {
                       role: 'assistant',
                       kind: 'agent_report',
-                      agentName: captured.name,
-                      agentEmoji: captured.agentEmoji ?? '⏵',
-                      content: (finalText || `${captured.name} completed.`).slice(0, 4000),
+                      agentName: captured.displayName,
+                      agentEmoji: captured.displayEmoji || '⏵',
+                      ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
+                      content: (finalText || `${captured.displayName} completed.`).slice(0, 4000),
                       taskId: `autobg_${captured.watcherId}`,
                       ts: Date.now(),
                     });
@@ -1346,9 +1376,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   sendToUser(captured.userId, {
                     type: 'agent_report',
                     agent: captured.agentId ?? null,
-                    agentName: captured.name,
-                    agentEmoji: captured.agentEmoji ?? '⏵',
-                    content: finalText || `${captured.name} completed.`,
+                    agentName: captured.displayName,
+                    agentEmoji: captured.displayEmoji || '⏵',
+                    ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
+                    content: finalText || `${captured.displayName} completed.`,
                     taskId: `autobg_${captured.watcherId}`,
                     ts: Date.now(),
                   });
