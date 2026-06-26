@@ -244,7 +244,11 @@
   color: var(--muted); font-size: 11px;
 }
 .tool-run-step-sub { font-family: monospace; }
-.tool-run-actions { display: flex; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); background: var(--bg2); }
+.tool-run-actions { display: grid; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); background: var(--bg2); }
+.tool-run-actions-summary { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; }
+.tool-run-actions-summary span { white-space: nowrap; }
+.tool-run-actions-summary code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-size: 11px; }
+.tool-run-actions-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
 .tool-run-actions button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 4px; padding: 4px 7px; font-size: 11px; cursor: pointer; }
 .tool-run-actions button:hover, .tool-run-actions button:focus-visible { color: var(--fg); background: var(--bg3); outline: none; }
 .tool-pills { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px; }

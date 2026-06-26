@@ -1546,11 +1546,24 @@ function attachToolRunRecipeActions(run, events, { recipeAgentId = null, recipeP
   const toolNames = [...new Set(visibleToolEvents(events).map(ev => ev.name).filter(Boolean))];
   if (!toolNames.length) return;
   const targetAgentId = recipeAgentId || events.find(ev => ev.targetAgentId)?.targetAgentId || activeAgent;
+  const toolSummary = toolNames
+    .map(name => {
+      const ev = events.find(e => e.name === name) || {};
+      const label = toolDisplayLabel(name, ev.args || {});
+      return label && label !== name ? `${label} (${name})` : name;
+    })
+    .join(', ');
   const actions = document.createElement('div');
   actions.className = 'tool-run-actions';
   actions.innerHTML = `
-    <button type="button" data-tool-run-save>${icon('save', 12)} Remember these tools</button>
-    <button type="button" data-tool-run-edit>${icon('sliders-horizontal', 12)} Edit before next send</button>`;
+    <div class="tool-run-actions-summary">
+      <span>Tools used</span>
+      <code>${escHtml(toolSummary)}</code>
+    </div>
+    <div class="tool-run-actions-buttons">
+      <button type="button" data-tool-run-save>${icon('save', 12)} Remember these tools</button>
+      <button type="button" data-tool-run-edit>${icon('sliders-horizontal', 12)} Edit before next send</button>
+    </div>`;
   actions.querySelector('[data-tool-run-save]')?.addEventListener('click', () => {
     const phrase = recipePhrase || recentUserTextForToolRecipe();
     rememberToolRecipe(phrase, toolNames, 'selected', targetAgentId);
