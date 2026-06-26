@@ -173,6 +173,18 @@ export function getAgentsForUser(userId) {
           .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
           .filter(Boolean)
       );
+      // Enabled utility skills are intentionally available to all agents
+      // unless explicitly assigned elsewhere. Preserve them through a
+      // primary-role defaultToolIds filter; otherwise roles like coder drop
+      // cross-cutting tools such as desktop_* after resolveAgentTools added
+      // them.
+      const utilityToolNames = new Set(
+        userSkills
+          .map(id => getRoleManifest(id, userId))
+          .filter(m => m?.category === 'utility')
+          .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
+          .filter(Boolean)
+      );
       // Held service-role tools also bypass the allowlist. `claim_role` is
       // an explicit delegation — the user told this agent to do that job.
       // If the coordinator's hand-curated defaultToolIds doesn't list e.g.
@@ -219,6 +231,7 @@ export function getAgentsForUser(userId) {
       tools = tools.filter(t => {
         const name = t.function?.name;
         return allowed.has(name)
+          || utilityToolNames.has(name)
           || assignedSkillToolNames.has(name)
           || heldRoleTools.has(name)
           || bundledRoleTools.has(name)

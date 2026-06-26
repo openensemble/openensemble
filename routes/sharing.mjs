@@ -40,6 +40,7 @@ function validateOwnership(userId, fileType, fileId) {
       break;
     case 'image':
     case 'video':
+    case 'audio':
     case 'invoice':
       // These don't have index files; check if the file exists in the directory
       return true;

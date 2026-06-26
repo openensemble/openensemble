@@ -384,6 +384,10 @@ function renderDocList(docs, filter) {
     } else if (doc._source === 'code') {
       actions = `<button data-action="downloadCodeProject" data-args='${argsName}' title="Download zip" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
         <button data-action="deleteCodeProjectFromDocs" data-args='${argsName}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
+    } else if (doc._source === 'audio') {
+      actions = `<button data-action="downloadAudioFile" data-args='${argsName}' title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
+        ${shareBtn}
+        <button data-action="deleteAudioFile" data-args='${argsName}' title="Delete" style="background:var(--bg2);border:1px solid var(--border);color:var(--red,#e55);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🗑</button>`;
     } else {
       actions = `<button data-action="downloadDoc" data-args='${argsIdName}' title="Download" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">⬇</button>
         <button data-action="openDocAskModal" data-args='${argsAsk}' title="Ask Agent" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:3px 7px;font-size:11px;cursor:pointer">🤖</button>
@@ -585,6 +589,8 @@ function openDocViewer(id, filename, mimeType, source) {
     $('docViewDownloadBtn').onclick = () => downloadAiFile('videos', filename);
   } else if (source === 'code') {
     $('docViewDownloadBtn').onclick = () => downloadCodeProject(filename);
+  } else if (source === 'audio') {
+    $('docViewDownloadBtn').onclick = () => downloadAudioFile(filename);
   } else {
     $('docViewDownloadBtn').onclick = () => downloadDoc(id, filename);
   }
@@ -592,6 +598,7 @@ function openDocViewer(id, filename, mimeType, source) {
   const content  = $('docViewContent');
   const isImage  = mimeType.startsWith('image/');
   const isVideo  = mimeType.startsWith('video/');
+  const isAudio  = mimeType.startsWith('audio/');
   const isPdf    = mimeType.includes('pdf') || /\.pdf$/i.test(filename);
   const isText   = /^text\//.test(mimeType) || /\.(txt|md|csv)$/i.test(filename);
 
@@ -602,6 +609,12 @@ function openDocViewer(id, filename, mimeType, source) {
     content.innerHTML = `<img src="${viewUrl}" style="max-width:100%;max-height:72vh;object-fit:contain;border-radius:6px;display:block;margin:auto">`;
   } else if (isVideo) {
     content.innerHTML = `<video src="${viewUrl}" controls autoplay style="max-width:100%;max-height:72vh;border-radius:6px;display:block;margin:auto"></video>`;
+  } else if (isAudio) {
+    content.innerHTML = `<div style="text-align:center;padding:24px 0">
+      <div style="font-size:52px;margin-bottom:12px">🎙️</div>
+      <div style="font-size:15px;font-weight:600;margin-bottom:18px">${escHtml(filename)}</div>
+      <audio src="${viewUrl}" controls autoplay style="width:100%;max-width:520px"></audio>
+    </div>`;
   } else if (isPdf) {
     content.style.padding = '0';
     content.innerHTML = `<iframe src="${viewUrl}" style="width:100%;height:75vh;border:none;display:block"></iframe>`;
@@ -759,6 +772,7 @@ async function saveDocShare() {
       // AI-sourced items use the /api/sharing endpoint
       const fileType = doc._source === 'ai-image' ? 'image'
                      : doc._source === 'ai-video' ? 'video'
+                     : doc._source === 'audio' ? 'audio'
                      : doc._source === 'research' ? 'research'
                      : 'document';
       const r = await fetch('/api/sharing', {
@@ -815,6 +829,28 @@ async function deleteAiVideo(filename) {
   if (!confirm(`Delete "${filename}"?`)) return;
   try {
     const r = await fetch(`/api/desktop/videos/${encodeURIComponent(filename)}`, { method: 'DELETE' }).then(r => r.json());
+    if (r.error) throw new Error(r.error);
+    showToast('Deleted', 1500);
+    loadDocList();
+  } catch (e) { showToast('Delete failed: ' + e.message); }
+}
+
+async function downloadAudioFile(filename) {
+  try {
+    const resp = await fetch(`/api/desktop/audio/${encodeURIComponent(filename)}`);
+    if (!resp.ok) throw new Error('Server error ' + resp.status);
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (e) { showToast('Download failed: ' + e.message); }
+}
+
+async function deleteAudioFile(filename) {
+  if (!confirm(`Delete "${filename}"?`)) return;
+  try {
+    const r = await fetch(`/api/desktop/audio/${encodeURIComponent(filename)}`, { method: 'DELETE' }).then(r => r.json());
     if (r.error) throw new Error(r.error);
     showToast('Deleted', 1500);
     loadDocList();

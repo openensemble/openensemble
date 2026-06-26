@@ -72,6 +72,49 @@ import {
   isUserTimeBlocked,
 } from './routes/_helpers.mjs';
 
+const SERVER_CODER_TOOL_NAMES = new Set([
+  'coder_list_projects',
+  'coder_create_project',
+  'coder_switch_project',
+  'coder_delete_project',
+  'coder_read_file',
+  'coder_write_file',
+  'coder_edit_file',
+  'coder_multi_edit',
+  'coder_delete_file',
+  'coder_run_command',
+  'coder_start_server',
+  'coder_stop_server',
+  'coder_server_status',
+  'coder_list_files',
+  'coder_search',
+]);
+
+function isDesktopToolName(name) {
+  return typeof name === 'string' && name.startsWith('desktop_');
+}
+
+function explicitlyWantsServerCoderStorage(text) {
+  return /\b(?:server-side|oe-hosted|openensemble-hosted|inside\s+oe|in\s+oe|oe\s+project|coder\s+project|code\s+projects|\.openensemble|server\s+workspace|server\s+project)\b/i.test(String(text || ''));
+}
+
+function explicitlyWantsLocalDesktopStorage(text) {
+  return /\b(?:local(?:ly)?|my\s+(?:computer|desktop|laptop|pc|machine)|desktop\s+(?:app|folder|sandbox|coder)|local\s+(?:folder|sandbox|file|project)|openensemble\/coder|openensemble\s+coder)\b/i.test(String(text || ''));
+}
+
+function appendSystemStable(agent, note) {
+  if (!note) return agent;
+  if (agent._promptTiers) {
+    const stable = [agent._promptTiers.stable, note].filter(Boolean).join('\n\n');
+    const next = {
+      ...agent,
+      _promptTiers: { ...agent._promptTiers, stable },
+    };
+    next.systemPrompt = [next._promptTiers.stable, next._promptTiers.context, next._promptTiers.volatile].filter(Boolean).join('\n\n');
+    return next;
+  }
+  return { ...agent, systemPrompt: [agent.systemPrompt, note].filter(Boolean).join('\n\n') };
+}
 
 /**
  * Handle an incoming chat message from any transport.
@@ -349,6 +392,30 @@ export async function handleChatMessage({
     const slim = agent.tools.filter(t => voiceAllow.has(t.function?.name));
     agent = { ...agent, tools: slim };
     console.log(`[chat] voice-device source: tools ${originalCount} → ${slim.length}`);
+  }
+
+  if (
+    agent.skillCategory === 'coder' &&
+    Array.isArray(agent.tools) &&
+    agent.tools.some(t => t.function?.name === 'desktop_write_file')
+  ) {
+    if (source === 'desktop-app' && !explicitlyWantsServerCoderStorage(rawText)) {
+      const originalCount = agent.tools.length;
+      const desktopFirst = agent.tools.filter(t => {
+        const name = t.function?.name;
+        return !SERVER_CODER_TOOL_NAMES.has(name);
+      });
+      agent = appendSystemStable(
+        { ...agent, tools: desktopFirst },
+        '## Desktop Coder Mode\nThis turn came from the OpenEnsemble Desktop app. Server-side coder_* project tools are intentionally hidden for this turn. Use desktop_write_file or desktop_save_file in the `coder` sandbox for code files. Keep delegation available only for genuinely separate work; do not delegate simple file creation just because coder_* tools are unavailable.'
+      );
+      console.log(`[chat] desktop-app coder source: tools ${originalCount} → ${desktopFirst.length}; server coder storage hidden for local-output turn`);
+    } else if (source !== 'desktop-app' && !explicitlyWantsLocalDesktopStorage(rawText)) {
+      const originalCount = agent.tools.length;
+      const serverFirst = agent.tools.filter(t => !isDesktopToolName(t.function?.name));
+      agent = { ...agent, tools: serverFirst };
+      console.log(`[chat] web coder source: tools ${originalCount} → ${serverFirst.length}; desktop storage hidden for server-output turn`);
+    }
   }
 
   // Model restriction check

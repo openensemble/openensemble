@@ -115,6 +115,7 @@ let _wss = null;
 let _nodeWss = null;
 let _termWss = null;
 let _browserExtWss = null;
+let _desktopWss = null;
 
 // Same-origin check for browser-initiated WebSocket upgrades. Browsers send
 // Origin automatically; native clients (mobile apps, node agents, curl) do
@@ -150,6 +151,7 @@ export function initWs(httpServer) {
   _nodeWss = initNodeWss();
   _termWss = initTerminalWss();
   _browserExtWss = initBrowserExtWss();
+  _desktopWss = initDesktopWss();
 
   attachWsUpgrade(httpServer);
 
@@ -187,14 +189,15 @@ export function initWs(httpServer) {
 export function attachWsUpgrade(httpServer) {
   httpServer.on('upgrade', (req, socket, head) => {
     const pathname = new URL(req.url, 'http://x').pathname;
-    // Browser extensions and node agents are NOT same-origin (extension
-    // origin is chrome-extension://<id>; node-agent has no Origin). Auth
-    // for both paths happens via the first-message token instead — so we
-    // skip the same-origin gate for those paths only.
+    // Browser extensions, desktop apps, and node agents are NOT same-origin
+    // (extension origin is chrome-extension://<id>; native clients usually
+    // have no Origin). Auth for these paths happens via the first-message
+    // token instead, so they skip the same-origin gate.
     const isExternalClientPath =
       pathname === '/ws/nodes' ||
       pathname === '/ws/nodes/terminal' ||
-      pathname === '/ws/browser-ext';
+      pathname === '/ws/browser-ext' ||
+      pathname === '/ws/desktop';
     if (!isExternalClientPath && !isSameOriginWs(req)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
@@ -206,10 +209,93 @@ export function attachWsUpgrade(httpServer) {
       _termWss.handleUpgrade(req, socket, head, ws => _termWss.emit('connection', ws, req));
     } else if (pathname === '/ws/browser-ext') {
       _browserExtWss.handleUpgrade(req, socket, head, ws => _browserExtWss.emit('connection', ws, req));
+    } else if (pathname === '/ws/desktop') {
+      _desktopWss.handleUpgrade(req, socket, head, ws => _desktopWss.emit('connection', ws, req));
     } else {
       _wss.handleUpgrade(req, socket, head, ws => _wss.emit('connection', ws, req));
     }
   });
+}
+
+// Desktop app WS lifecycle. Desktop clients connect outbound from the user's
+// computer and execute local sandbox tools on behalf of OE agents.
+function initDesktopWss() {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
+  wss.on('connection', async (ws, req) => {
+    ws._missedPongs = 0;
+    ws._authenticated = false;
+    ws._desktopClientId = null;
+    ws.on('pong', () => { ws._missedPongs = 0; });
+
+    const { registerDesktop, dropDesktop, handleDesktopResult, updateDesktopStatus } = await import('./lib/desktop-bus.mjs');
+
+    ws.on('message', async (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw); } catch { return; }
+      if (!msg || typeof msg !== 'object') return;
+
+      if (!ws._authenticated) {
+        if (msg.type !== 'auth' || typeof msg.token !== 'string') {
+          try { ws.send(JSON.stringify({ type: 'error', message: 'first message must be {type:"auth", token}' })); } catch {}
+          ws.close(4001, 'auth required');
+          return;
+        }
+        const meta = getSessionMeta(msg.token);
+        if (!meta?.userId) {
+          try { ws.send(JSON.stringify({ type: 'error', message: 'invalid token' })); } catch {}
+          ws.close(4002, 'invalid token');
+          return;
+        }
+        ws._authenticated = true;
+        ws._userId = meta.userId;
+        try {
+          const clientId = registerDesktop(ws, {
+            userId: meta.userId,
+            clientId: msg.clientId,
+            name: msg.name,
+            version: msg.version,
+            platform: msg.platform,
+            sandboxes: msg.sandboxes,
+            capabilities: msg.capabilities,
+          });
+          ws.send(JSON.stringify({ type: 'auth_ok', clientId, userId: meta.userId }));
+        } catch (e) {
+          try { ws.send(JSON.stringify({ type: 'error', message: String(e?.message || e) })); } catch {}
+          ws.close(4003, 'register failed');
+        }
+        return;
+      }
+
+      if (msg.type === 'result') {
+        handleDesktopResult(msg);
+        return;
+      }
+      if (msg.type === 'status') {
+        updateDesktopStatus(ws, msg);
+        return;
+      }
+      if (msg.type === 'ping') {
+        updateDesktopStatus(ws, msg);
+        try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch {}
+        return;
+      }
+      log.warn('desktop', 'unknown frame type', { type: msg.type, userId: ws._userId, clientId: ws._desktopClientId });
+    });
+
+    ws.on('close', () => { dropDesktop(ws); });
+    ws.on('error', () => { dropDesktop(ws); });
+  });
+
+  const hb = setInterval(() => {
+    for (const c of wss.clients) {
+      c._missedPongs = (c._missedPongs || 0) + 1;
+      if (c._missedPongs >= WS_MAX_MISSED_PONGS) { c.terminate(); continue; }
+      try { c.ping(); } catch {}
+    }
+  }, WS_PING_INTERVAL);
+  wss.on('close', () => clearInterval(hb));
+
+  return wss;
 }
 
 // Browser extension WS lifecycle. Auth happens via first-message token —
@@ -357,6 +443,9 @@ function initBrowserExtWss() {
 export function getBrowserExtClientCount() { return _browserExtWss?.clients?.size ?? 0; }
 
 function onConnection(ws, req) {
+  const desktopHeader = String(req.headers['x-openensemble-desktop-app'] || '').trim() === '1';
+  const desktopUa = /\bOpenEnsembleDesktop\b/i.test(String(req.headers['user-agent'] || ''));
+  ws._clientSource = desktopHeader || desktopUa ? 'desktop-app' : null;
   // Auth precedence:
   //   1. Cookie via getAuthToken (browser path — cookie rides on the upgrade
   //      request automatically same-origin). Preferred.
@@ -391,8 +480,8 @@ function onConnection(ws, req) {
   // raw request URL, which may contain a legacy ?token= that would otherwise
   // land in logs / ship to log aggregators in plaintext.
   async function sendInitialData() {
-    console.log('[ws] client connected, user:', ws._userId, 'device:', ws._deviceId ?? '-');
-    log.info('ws', 'client connected', { userId: ws._userId, deviceId: ws._deviceId ?? null });
+    console.log('[ws] client connected, user:', ws._userId, 'device:', ws._deviceId ?? '-', 'source:', ws._clientSource ?? '-');
+    log.info('ws', 'client connected', { userId: ws._userId, deviceId: ws._deviceId ?? null, source: ws._clientSource ?? null });
     const userAgents = getAgentsForUser(ws._userId);
     ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire), boot_id: BOOT_ID }));
     // Load every agent's session in parallel — loadSession is async since
@@ -756,7 +845,7 @@ function onConnection(ws, req) {
         toolPlan:   msg.toolPlan,
         // Source hint — voice-device chats get a slim tool subset for low
         // latency. See chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST.
-        source:     typeof msg.source === 'string' ? msg.source : null,
+        source:     typeof msg.source === 'string' ? msg.source : (ws._clientSource ?? null),
         // Voice-device routing context: deviceId comes from the auth session;
         // wakeSlot is set on the chat message by the firmware when a wake
         // word fires. chat-dispatch resolves slot_assignments and dispatches

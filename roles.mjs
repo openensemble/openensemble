@@ -24,6 +24,7 @@ import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-
 import { buildSkillLogger } from './lib/skill-logger.mjs';
 import { recordToolExecution } from './lib/tool-exec-log.mjs';
 import { getVoiceContext } from './lib/voice-context.mjs';
+import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
 // One-time: hand the voice-context getter to device-helper so ctx.device.id()
 // can resolve the current device sync.
 _registerVoiceContextResolver(getVoiceContext);
@@ -809,6 +810,36 @@ async function _wsHandler() {
   return _wsMod || null;
 }
 
+function _desktopToolText(data) {
+  const item = Array.isArray(data?.content) ? data.content.find(p => p?.type === 'text') : null;
+  return item?.text ? String(item.text) : '';
+}
+
+function _desktopSavedPath(data) {
+  const text = _desktopToolText(data);
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed?.path === 'string' ? parsed.path : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveDesktopArtifact(userId, { sandbox, filename, base64, url, timeoutMs = 60_000 } = {}) {
+  if (getVoiceContext()?.source !== 'desktop-app' || !userId || !sandbox || !filename) return null;
+  if (!listDesktops(userId).length) return null;
+  try {
+    const data = base64
+      ? await sendDesktopCommand(userId, 'desktop_save_file', { sandbox, path: filename, content: base64, encoding: 'base64' }, { timeoutMs })
+      : await sendDesktopCommand(userId, 'desktop_download_url', { sandbox, path: filename, url }, { timeoutMs });
+    return _desktopSavedPath(data);
+  } catch (e) {
+    console.warn(`[desktop-artifact] failed to save ${sandbox}/${filename}:`, e.message);
+    return null;
+  }
+}
+
 // Build the per-call context object passed to skill executors as the 5th arg.
 // Skills that don't accept it (4-param signature) ignore it transparently.
 async function buildCtx(userId, agentId, skillId = null) {
@@ -821,12 +852,25 @@ async function buildCtx(userId, agentId, skillId = null) {
   const ctx = { userId, agentId };
   ctx.showImage = /** @param {{base64?: string, mimeType?: string, filename?: string, savedPath?: string, prompt?: string}} [opts] */ async ({ base64, mimeType = 'image/png', filename, savedPath, prompt } = {}) => {
     if (!wsAgentId || !base64 || !filename) return 0;
+    const desktopSavedPath = await saveDesktopArtifact(userId, {
+      sandbox: 'images',
+      filename,
+      base64,
+    });
+    if (desktopSavedPath) savedPath = desktopSavedPath;
     const mod = await _wsHandler();
     if (!mod?.sendToUser) return 0;
     return mod.sendToUser(userId, { type: 'image', agent: wsAgentId, base64, mimeType, filename, savedPath, prompt });
   };
   ctx.showVideo = /** @param {{url?: string, filename?: string, savedPath?: string}} [opts] */ async ({ url, filename, savedPath } = {}) => {
     if (!wsAgentId || !url || !filename) return 0;
+    const desktopSavedPath = await saveDesktopArtifact(userId, {
+      sandbox: 'videos',
+      filename,
+      url,
+      timeoutMs: 300_000,
+    });
+    if (desktopSavedPath) savedPath = desktopSavedPath;
     const mod = await _wsHandler();
     if (!mod?.sendToUser) return 0;
     return mod.sendToUser(userId, { type: 'video', agent: wsAgentId, url, filename, savedPath });

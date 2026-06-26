@@ -1,0 +1,156 @@
+{
+  "id": "desktop",
+  "name": "Desktop Bridge",
+  "description": "Connects OpenEnsemble agents to the user's local desktop app for sandboxed local files, downloads, generated assets, and optional sandbox command execution.",
+  "icon": "🖥️",
+  "category": "utility",
+  "service": true,
+  "always_on": false,
+  "enabled_by_default": true,
+  "intent_patterns": [
+    "\\bdesktop\\s+(?:app|bridge|client)\\b",
+    "\\blocal\\s+(?:computer|desktop|machine|folder|sandbox|file)\\b",
+    "\\bsave\\s+(?:it|this|that|the\\s+file|image|video|download)\\s+(?:locally|to\\s+my\\s+computer|to\\s+my\\s+desktop)\\b",
+    "\\bdownload\\s+.+\\s+(?:locally|to\\s+my\\s+computer|to\\s+my\\s+desktop)\\b"
+  ],
+  "intent_examples": [
+    "list my desktop sandboxes",
+    "save this generated image to my computer",
+    "write that file into my local documents sandbox",
+    "download this video into my desktop downloads folder",
+    "show connected desktop clients"
+  ],
+  "systemPromptAddition": "## Desktop Bridge\n\nThe desktop_* tools access sandbox folders configured in the OpenEnsemble Desktop app. Use desktop_list_clients if you need to confirm a desktop client is connected, and desktop_list_sandboxes if you need the available sandbox names. Do not use desktop_run_command unless {{USER_NAME}} explicitly asks to run a local sandbox command; command execution may be disabled in the desktop app.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_list_clients",
+        "description": "List connected OpenEnsemble Desktop app clients for this user.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_list_sandboxes",
+        "description": "List local sandbox folders configured in the connected desktop app.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "clientId": { "type": "string", "description": "Optional desktop client id." }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_list_files",
+        "description": "List files inside a named local sandbox.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "clientId": { "type": "string", "description": "Optional desktop client id." },
+            "sandbox": { "type": "string", "description": "Sandbox name, such as documents, downloads, images, videos, research, or coder." },
+            "path": { "type": "string", "description": "Path inside the sandbox. Defaults to ." },
+            "limit": { "type": "integer", "description": "Maximum entries. Default 500." }
+          },
+          "required": ["sandbox"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_read_file",
+        "description": "Read a UTF-8 text file from a named local sandbox.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "clientId": { "type": "string", "description": "Optional desktop client id." },
+            "sandbox": { "type": "string" },
+            "path": { "type": "string" },
+            "maxBytes": { "type": "integer", "description": "Maximum bytes to read. Default 1 MB." }
+          },
+          "required": ["sandbox", "path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_write_file",
+        "description": "Write a UTF-8 text file inside a named local sandbox.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "clientId": { "type": "string", "description": "Optional desktop client id." },
+            "sandbox": { "type": "string" },
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+          },
+          "required": ["sandbox", "path", "content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_save_file",
+        "description": "Save generated text or base64 file content inside a named local sandbox and return its local path.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "clientId": { "type": "string", "description": "Optional desktop client id." },
+            "sandbox": { "type": "string" },
+            "path": { "type": "string" },
+            "content": { "type": "string" },
+            "encoding": { "type": "string", "enum": ["utf8", "base64"] }
+          },
+          "required": ["sandbox", "path", "content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_download_url",
+        "description": "Download a URL into a local sandbox folder.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "clientId": { "type": "string", "description": "Optional desktop client id." },
+            "sandbox": { "type": "string" },
+            "url": { "type": "string" },
+            "path": { "type": "string" }
+          },
+          "required": ["sandbox", "url", "path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "desktop_run_command",
+        "description": "Run a shell command inside a local sandbox. The desktop app must have command execution enabled.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "clientId": { "type": "string", "description": "Optional desktop client id." },
+            "sandbox": { "type": "string" },
+            "command": { "type": "string" },
+            "cwd": { "type": "string" },
+            "timeoutSec": { "type": "integer" }
+          },
+          "required": ["sandbox", "command"]
+        }
+      }
+    }
+  ]
+}

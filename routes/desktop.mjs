@@ -298,9 +298,13 @@ export async function handle(req, res) {
     const userId = requireAuth(req, res); if (!userId) return true;
     const safeName = path.basename(decodeURIComponent(audMatch[1]));
     const filePath = path.join(getUserDir(userId), 'audio', safeName);
-    if (!fs.existsSync(filePath)) { res.writeHead(404); res.end('Not found'); return true; }
+    if (!fs.existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
+      return true;
+    }
     try { fs.unlinkSync(filePath); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true })); }
-    catch (e) { res.writeHead(500); res.end(String(e.message || e)); }
+    catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: String(e.message || e) })); }
     return true;
   }
 

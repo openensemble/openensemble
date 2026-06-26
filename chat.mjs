@@ -17,7 +17,7 @@
  * persists the session + runs memory signals.
  */
 
-import { readFileSync, existsSync, writeFileSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import path from 'path';
 import { buildAgentContext, formatContext, addToSessionBuffer, processSignals } from './memory.mjs';
 import { trackFriction } from './memory/signals.mjs';
@@ -29,6 +29,7 @@ import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
+import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
 
 import {
   OPENAI_COMPAT_PROVIDERS, FIREWORKS_BASE,
@@ -49,6 +50,56 @@ export { OPENAI_COMPAT_PROVIDERS };
 // Anthropic-only gate that skips signal detection on orchestrator agents
 // unless the message actually contains preference/correction wording.
 const SIGNAL_WORDS_RE = /prefer|like|love|hate|want|don'?t like|remember|decided|will use|choose|chose|my name|i am|i'm|my \w+ is|call me|always|never|make sure|correction/i;
+
+function _desktopToolText(data) {
+  const item = Array.isArray(data?.content) ? data.content.find(p => p?.type === 'text') : null;
+  return item?.text ? String(item.text) : '';
+}
+
+function _desktopSavedPath(data) {
+  const text = _desktopToolText(data);
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed?.path === 'string' ? parsed.path : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveDesktopArtifact(userId, { source, sandbox, filename, base64, url, timeoutMs = 60_000 } = {}) {
+  if (source !== 'desktop-app' || !userId || !sandbox || !filename) return null;
+  const connected = listDesktops(userId);
+  if (!connected.length) return null;
+  try {
+    const data = base64
+      ? await sendDesktopCommand(userId, 'desktop_save_file', { sandbox, path: filename, content: base64, encoding: 'base64' }, { timeoutMs })
+      : await sendDesktopCommand(userId, 'desktop_download_url', { sandbox, path: filename, url }, { timeoutMs });
+    return _desktopSavedPath(data);
+  } catch (e) {
+    console.warn(`[desktop-artifact] failed to save ${sandbox}/${filename}:`, e.message);
+    return null;
+  }
+}
+
+function buildDesktopFoldersBlock(userId, source) {
+  if (source !== 'desktop-app' || !userId) return '';
+  const clients = listDesktops(userId);
+  const active = clients[0];
+  if (!active) {
+    return '\n\n## Desktop Local Folders\nThis turn came from the OpenEnsemble Desktop app, but no desktop bridge is currently connected. Do not claim generated/downloaded files were saved locally unless a desktop_* tool call succeeds.';
+  }
+  const sandboxes = Array.isArray(active.sandboxes) ? active.sandboxes : [];
+  const lines = sandboxes
+    .filter(s => s?.name && s?.path)
+    .map(s => `- ${s.name}: ${s.path}`);
+  return [
+    '\n\n## Desktop Local Folders',
+    'This turn came from the OpenEnsemble Desktop app. User-visible artifacts should go to the connected desktop sandboxes instead of the server .openensemble user folder.',
+    lines.length ? `Available local sandboxes:\n${lines.join('\n')}` : 'No sandbox folder list was reported by the desktop client.',
+    'Use desktop_* tools for files, downloads, generated assets, and code output when those tools are available. Prefer images for generated images, videos for generated videos, downloads for downloaded files, documents for documents, research for research outputs, and coder for source code.',
+  ].join('\n');
+}
 
 /**
  * Map a known model name to its context-window size in tokens. Returns null
@@ -625,6 +676,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const userToolPlanBlock = userToolPlanResult
     ? `\n\n## User-selected tool plan\nThe user selected tool mode "${userToolPlanResult.mode}" before sending this message.${userToolPlanResult.mode === 'selected' ? ` Only these selected tool schemas are available this turn: ${userToolPlanResult.selected.join(', ')}. Do not claim unrelated tools are unavailable; answer or ask a concise follow-up if the selected set is insufficient.` : ' No tools are available this turn; answer without tool calls or ask a concise follow-up if live action is required.'}`
     : '';
+  const desktopFoldersBlock = buildDesktopFoldersBlock(userId, voiceCtx?.source);
   const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
 
   // Monitorable-intent classifier — embedding-based judge that fires when
@@ -670,7 +722,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // so the byte sequence under non-Anthropic providers is unchanged.
   // (memBlock previously inserted between userEmail and crossAgent with a
   // leading "\n\n"; preserve that boundary in the volatile string.)
-  const _volatileFromTurn = `${memBlock ? '\n\n' + memBlock : ''}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${monitorableBlock}`;
+  const _volatileFromTurn = `${memBlock ? '\n\n' + memBlock : ''}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${desktopFoldersBlock}${monitorableBlock}`;
   let systemPrompt;
   if (_tiers) {
     // The agent.systemPrompt that chat-dispatch built already includes
@@ -686,8 +738,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     systemPrompt = [stableTier, contextTier, volatileTier].filter(Boolean).join('\n\n');
   } else {
     systemPrompt = memBlock
-      ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${monitorableBlock}`
-      : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${monitorableBlock}`;
+      ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${desktopFoldersBlock}${monitorableBlock}`
+      : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${desktopFoldersBlock}${monitorableBlock}`;
   }
 
   // 2. Build message history (strip ts field — Ollama doesn't want it).
@@ -914,13 +966,28 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       const filename = `${slug || 'video'}_${Date.now()}.mp4`;
 
       let savedPath = null;
+      let serverSavedPath = null;
       try {
         const videoSaveDir = getUserFilesDir(userId, 'videos');
         const vidRes = await fetch(videoUrl, { signal });
-        writeFileSync(path.join(videoSaveDir, filename), Buffer.from(await vidRes.arrayBuffer()));
-        savedPath = path.join(videoSaveDir, filename);
+        serverSavedPath = path.join(videoSaveDir, filename);
+        writeFileSync(serverSavedPath, Buffer.from(await vidRes.arrayBuffer()));
+        savedPath = serverSavedPath;
       } catch (e) {
         console.warn('[grok-video] Failed to save video:', e.message);
+      }
+      const desktopSavedPath = await saveDesktopArtifact(userId, {
+        source: voiceCtx?.source,
+        sandbox: 'videos',
+        filename,
+        url: videoUrl,
+        timeoutMs: 300_000,
+      });
+      if (desktopSavedPath) {
+        if (serverSavedPath) {
+          try { unlinkSync(serverSavedPath); } catch {}
+        }
+        savedPath = desktopSavedPath;
       }
 
       if (!silent) appendToSession(agent.id,
@@ -953,12 +1020,26 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     const filename = `${slug || 'image'}_${Date.now()}.jpg`;
 
     let savedPath = null;
+    let serverSavedPath = null;
     try {
       const grokImgDir = getUserFilesDir(userId, 'images');
-      writeFileSync(path.join(grokImgDir, filename), Buffer.from(base64, 'base64'));
-      savedPath = path.join(grokImgDir, filename);
+      serverSavedPath = path.join(grokImgDir, filename);
+      writeFileSync(serverSavedPath, Buffer.from(base64, 'base64'));
+      savedPath = serverSavedPath;
     } catch (e) {
       console.warn('[grok] Failed to save image:', e.message);
+    }
+    const desktopSavedPath = await saveDesktopArtifact(userId, {
+      source: voiceCtx?.source,
+      sandbox: 'images',
+      filename,
+      base64,
+    });
+    if (desktopSavedPath) {
+      if (serverSavedPath) {
+        try { unlinkSync(serverSavedPath); } catch {}
+      }
+      savedPath = desktopSavedPath;
     }
 
     if (!silent) appendToSession(agent.id,
@@ -1066,12 +1147,26 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     const filename = `${slug || 'image'}_${Date.now()}.png`;
 
     let savedPath = null;
+    let serverSavedPath = null;
     try {
       const fwImgDir = getUserFilesDir(userId, 'images');
-      writeFileSync(path.join(fwImgDir, filename), Buffer.from(base64, 'base64'));
-      savedPath = path.join(fwImgDir, filename);
+      serverSavedPath = path.join(fwImgDir, filename);
+      writeFileSync(serverSavedPath, Buffer.from(base64, 'base64'));
+      savedPath = serverSavedPath;
     } catch (e) {
       console.warn('[fireworks] Failed to save image:', e.message);
+    }
+    const desktopSavedPath = await saveDesktopArtifact(userId, {
+      source: voiceCtx?.source,
+      sandbox: 'images',
+      filename,
+      base64,
+    });
+    if (desktopSavedPath) {
+      if (serverSavedPath) {
+        try { unlinkSync(serverSavedPath); } catch {}
+      }
+      savedPath = desktopSavedPath;
     }
 
     if (!silent) appendToSession(agent.id,
