@@ -117,6 +117,10 @@ export async function _runSignalCheckForTest(state, signal, helpers) {
   return runSignalCheck(state, signal, helpers);
 }
 
+export async function _evalSignalForTest(state, signal, helpers, now = Date.now(), precomputedResult) {
+  return evalSignal(state, signal, helpers, now, precomputedResult);
+}
+
 async function runSignalCheck(state, signal, helpers) {
   // Resolver needs node_id + service_id (at the watcher state level) to look
   // up the profile + auth token. signal-level fields are passed alongside for
@@ -180,6 +184,30 @@ function interpretCliOutput(out) {
     exitCode: out.exitCode,
     stderr: stderr.slice(0, 500),
   };
+}
+
+function observationPatch(result) {
+  const patch = {
+    last_output: null,
+    last_error: null,
+    last_exit_code: null,
+    last_http_status: null,
+  };
+  if (!result || typeof result !== 'object') return patch;
+
+  if (result.value !== undefined && result.value !== null && result.value !== '') {
+    patch.last_output = String(result.value).slice(0, 500);
+  } else if (result.raw !== undefined && result.raw !== null && result.raw !== '' && !result.unknown) {
+    patch.last_output = String(result.raw).slice(0, 500);
+  }
+
+  const err = result.stderr || (result.unknown ? result.raw : null);
+  if (err !== undefined && err !== null && err !== '') {
+    patch.last_error = String(err).slice(0, 500);
+  }
+  if (Number.isFinite(Number(result.exitCode))) patch.last_exit_code = Number(result.exitCode);
+  if (Number.isFinite(Number(result.httpStatus))) patch.last_http_status = Number(result.httpStatus);
+  return patch;
 }
 
 // Build one composite bash invocation for an ordered list of {cmd} entries.
@@ -285,7 +313,7 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
       result = await runSignalCheck(state, signal, helpers);
     } catch (e) {
       return {
-        newSignal: { ...signal, last_state: 'unknown', last_checked_at: now },
+        newSignal: { ...signal, last_state: 'unknown', last_checked_at: now, last_error: e.message, last_output: null },
         transitionText: null,
         _checkErr: e.message,
       };
@@ -307,7 +335,7 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
   if (result.unknown) {
     // CLI unsupported until node_exec is wired; don't transition. Stay silent.
     return {
-      newSignal: { ...signal, last_state: 'unknown', last_checked_at: now },
+      newSignal: { ...signal, ...observationPatch(result), last_state: 'unknown', last_checked_at: now },
       transitionText: null,
     };
   }
@@ -317,7 +345,9 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
   // is on `result.httpStatus`. Without this special-case, matchesExpected has
   // no branch for `status` and falls through to undefined → always unhealthy.
   let isHealthy;
-  if (signal.expect && typeof signal.expect === 'object' && 'status' in signal.expect && result.httpStatus !== undefined) {
+  if (signal.expect == null && typeof result.ok === 'boolean') {
+    isHealthy = result.ok;
+  } else if (signal.expect && typeof signal.expect === 'object' && 'status' in signal.expect && result.httpStatus !== undefined) {
     isHealthy = Number(result.httpStatus) === Number(signal.expect.status);
   } else if (signal.expect && typeof signal.expect === 'object' && 'exit_code' in signal.expect && result.exitCode !== undefined) {
     isHealthy = Number(result.exitCode) === Number(signal.expect.exit_code);
@@ -326,6 +356,7 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
   }
   const prev = signal.last_state;
   const next = isHealthy ? 'healthy' : 'unhealthy';
+  const observed = observationPatch(result);
 
   if (prev === next) {
     // If we still claim an active incident but the underlying record was
@@ -341,7 +372,7 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
       } catch { currentIncidentId = null; }
     }
     return {
-      newSignal: { ...signal, last_state: next, last_checked_at: now, current_incident_id: currentIncidentId },
+      newSignal: { ...signal, ...observed, last_state: next, last_checked_at: now, current_incident_id: currentIncidentId },
       transitionText: null,
     };
   }
@@ -363,7 +394,7 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
       // Skip the troubleshooting loop but still record the transition so the
       // signal moves out of unknown — better than letting the whole handler crash.
       return {
-        newSignal: { ...signal, last_state: 'unhealthy', last_checked_at: now, current_incident_id: null },
+        newSignal: { ...signal, ...observed, last_state: 'unhealthy', last_checked_at: now, current_incident_id: null },
         transitionText: `${signal.kind}: unhealthy (troubleshooting unavailable: ${e.message})`,
       };
     }
@@ -377,6 +408,7 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
     return {
       newSignal: {
         ...signal,
+        ...observed,
         last_state: 'unhealthy',
         last_checked_at: now,
         current_incident_id: summary.incident_id,
@@ -401,6 +433,7 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
   return {
     newSignal: {
       ...signal,
+      ...observed,
       last_state: 'healthy',
       last_checked_at: now,
       current_incident_id: null,
@@ -608,6 +641,10 @@ function normalizeSignal(s) {
     last_state: 'unknown',
     last_checked_at: null,
     current_incident_id: null,
+    last_output: null,
+    last_error: null,
+    last_exit_code: null,
+    last_http_status: null,
   };
 }
 

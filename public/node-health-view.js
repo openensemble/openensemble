@@ -4,11 +4,19 @@
     return typeof escHtml === 'function' ? escHtml(String(s ?? '')) : String(s ?? '');
   }
 
-  function formatExpect(expect) {
-    if (!expect || typeof expect !== 'object') return 'no expectation recorded';
+  function formatExpect(sig) {
+    const expect = sig.expect;
+    if (expect == null) {
+      const mech = sig.check?.mechanism;
+      if (mech === 'cli' || mech === 'exec') return 'command succeeds';
+      if (mech === 'http') return 'HTTP succeeds';
+      return 'check succeeds';
+    }
+    if (typeof expect === 'string') return expect;
+    if (typeof expect !== 'object') return String(expect);
     const [op, val] = Object.entries(expect)[0] || [];
     if (!op) return JSON.stringify(expect);
-    const words = { lt: '<', lte: '<=', gt: '>', gte: '>=', eq: '=', neq: '!=', contains: 'contains', matches: 'matches' };
+    const words = { lt: '<', lte: '<=', gt: '>', gte: '>=', eq: '=', neq: '!=', contains: 'contains', matches: 'matches', exit_code: 'exit code =', status: 'HTTP status =' };
     return `${words[op] || op} ${val}`;
   }
 
@@ -23,6 +31,8 @@
     if (incVal !== undefined && incVal !== null && incVal !== '') return incVal;
     if (sig.last_output !== undefined && sig.last_output !== null && sig.last_output !== '') return sig.last_output;
     if (sig.last_error) return `error: ${sig.last_error}`;
+    if (sig.last_exit_code !== undefined && sig.last_exit_code !== null) return `exit ${sig.last_exit_code}`;
+    if (sig.last_http_status !== undefined && sig.last_http_status !== null) return `HTTP ${sig.last_http_status}`;
     return 'not recorded';
   }
 
@@ -43,7 +53,7 @@
           <strong>${bad ? '⚠' : '✓'} ${h(sig.kind)}</strong>
           <span>${h(sig.last_state || 'unknown')}</span>
         </div>
-        <div class="node-health-line">Observed: <code>${h(observedValue(sig))}</code>; expected: <code>${h(formatExpect(sig.expect))}</code></div>
+        <div class="node-health-line">Observed: <code>${h(observedValue(sig))}</code>; expected: <code>${h(formatExpect(sig))}</code></div>
         <div class="node-health-line">Last checked: ${h(formatCheckedAt(sig.last_checked_at))}</div>
         ${incident ? `<div class="node-health-line">Incident: <code>${h(incident.id)}</code> (${h(incident.status)}) opened ${h(new Date(incident.ts_opened).toLocaleString())}</div>` : ''}
         ${sig.check?.command ? `<details class="node-health-command"><summary>Check command</summary><pre>${h(sig.check.command)}</pre></details>` : ''}
