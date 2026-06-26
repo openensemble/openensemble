@@ -121,7 +121,7 @@ function classifySpecialistIntent(text, userId, currentAgentId) {
  * @returns {Promise<{ handled: true } | null>}
  */
 export async function runSpecialistRoute({
-  userText, userId, agentId, source, deviceId, attachment, ac, onEvent, onNotify,
+  userText, userId, agentId, source, deviceId, attachment, toolPlan, ac, onEvent, onNotify,
 }) {
   if (!userText) return null;
   // Compound multi-step requests and explicit delegation language (e.g.
@@ -243,7 +243,7 @@ export async function runSpecialistRoute({
     try {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
         onEvent({ ...e, agent: agentId });
-      }, userId, attachment, null, false, { source, deviceId })) {
+      }, userId, attachment, null, false, { source, deviceId }, { toolPlan })) {
         if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
         if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
         if (event.type === 'token')    routerBuf += event.text;
@@ -318,7 +318,7 @@ const RETRIABLE_RE = /\b(5\d{2}|timeout|timed out|rate limit|ECONNREFUSED|ECONNR
  */
 export async function runLlmTurn({
   userId, agentId, scopedAgent, scopedSessionKey,
-  userText, attachment, schedulerNote, source, deviceId,
+  userText, attachment, toolPlan, schedulerNote, source, deviceId,
   ac, onEvent, onNotify,
 }) {
   let streamBuf = '';
@@ -326,7 +326,7 @@ export async function runLlmTurn({
   async function runStream(agentObj) {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       onEvent({ ...e, agent: agentId });
-    }, userId ?? 'default', attachment, schedulerNote, false, { source, deviceId })) {
+    }, userId ?? 'default', attachment, schedulerNote, false, { source, deviceId }, { toolPlan })) {
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
       // Check if this error is retriable — return it instead of emitting

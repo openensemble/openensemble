@@ -150,6 +150,25 @@ function voiceToolAllowlistFor(userId) {
   return allow;
 }
 
+function normalizeToolPlan(plan) {
+  if (!plan || typeof plan !== 'object') return null;
+  const mode = plan.mode === 'none' ? 'none' : plan.mode === 'selected' ? 'selected' : 'auto';
+  if (mode === 'auto') return null;
+  const selectedTools = Array.isArray(plan.selectedTools)
+    ? [...new Set(plan.selectedTools
+        .filter(t => typeof t === 'string')
+        .map(t => t.trim())
+        .filter(t => /^[A-Za-z0-9_.:-]{1,120}$/.test(t)))]
+    : [];
+  if (mode === 'selected' && !selectedTools.length) return null;
+  return {
+    mode,
+    selectedTools,
+    source: typeof plan.source === 'string' ? plan.source.slice(0, 40) : null,
+    phrase: typeof plan.phrase === 'string' ? plan.phrase.slice(0, 240) : null,
+  };
+}
+
 /**
  * Platform-agnostic chat entrypoint. WS (server.mjs) and Telegram
  * (routes/telegram.mjs) both call this with a small adapter for their
@@ -161,6 +180,7 @@ function voiceToolAllowlistFor(userId) {
  * @param {string} opts.agentId
  * @param {string} opts.text
  * @param {object|null} [opts.attachment]
+ * @param {{mode?: string, selectedTools?: string[], source?: string, phrase?: string}|null} [opts.toolPlan]
  * @param {'voice-device'|'web'|'telegram'|null} [opts.source]
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
  * @param {number|null} [opts.wakeSlot]              voice-device slot index (0–5)
@@ -175,6 +195,7 @@ export async function handleChatMessage({
   agentId: rawAgentId,
   text: rawText,
   attachment: rawAttachment,
+  toolPlan: rawToolPlan = null,
   source = null,
   deviceId = null,
   wakeSlot = null,
@@ -210,6 +231,8 @@ export async function handleChatMessage({
   }
   userId = effectiveUserId;
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
+
+  const toolPlan = normalizeToolPlan(rawToolPlan);
 
   // Snapshot ambient state for voice-device turns. The firmware kills any
   // playing ambient when a wake fires (s_ambient_stop in main.c — barge-in
@@ -394,6 +417,7 @@ export async function handleChatMessage({
     userId, agentId, agent, source, deviceId, ac,
     userText: rawText?.trim() ?? '',
     attachment: rawAttachment ?? null,
+    toolPlan,
     _isRoutineFollowup,
     onEvent, onBroadcast, onNotify,
   };
@@ -440,6 +464,7 @@ export async function handleChatMessage({
   // "CONFIRM DELETION" matches verbatim), finance augments userText for the
   // LLM, then the natural-language fast-paths and the specialist router get
   // their crack. Anything not handled falls through to runLlmTurn.
+  const planConstrained = toolPlan?.mode === 'selected' || toolPlan?.mode === 'none';
   const INTERCEPTORS = [
     // Voice-only: catch empty / 1-char STT transcripts before they reach the
     // LLM and cause the device to hang in THINKING. Must run before every
@@ -453,14 +478,12 @@ export async function handleChatMessage({
     tryApprovalIntercept,
     slashAdapter,
     financePreprocess,
-    tryHaFastpath,
-    tryRoutineFastpath,
-    tryTriviaFastpath,
+    ...(planConstrained ? [] : [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath]),
     // Skill-agnostic local cognition tier (dispatch face). Runs after the
     // bespoke fast-paths and before the embedding specialist router, so a
     // confident local-intent match never escalates to the cloud coordinator.
     // Inert unless cfg.localTier.enabled (kill switch). Falls through on miss.
-    tryLocalIntentFastpath,
+    ...(planConstrained ? [] : [tryLocalIntentFastpath]),
     c => runSpecialistRoute({ ...c, attachment: c.attachment }),
   ];
 
@@ -527,6 +550,7 @@ export async function handleChatMessage({
     await runLlmTurn({
       userId, agentId, scopedAgent, scopedSessionKey,
       userText: ctx.userText, attachment: ctx.attachment,
+      toolPlan: ctx.toolPlan,
       schedulerNote: resolvedNote, source, deviceId,
       ac, onEvent: wrappedOnEvent, onNotify,
     });

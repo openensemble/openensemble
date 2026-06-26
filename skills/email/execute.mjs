@@ -10,7 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
 import { isVoiceSource } from '../../lib/voice-context.mjs';
-import { emailLabelsEnabled, recordLabelings, recordCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
+import { emailLabelsEnabled, recordLabelings, recordCorrection, removeCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
 
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BASE_DIR  = path.resolve(SKILL_DIR, '../..');
@@ -739,6 +739,23 @@ async function _executeInner(name, args, userId) {
     const cond = r.conditional ? ` when the subject mentions [${r.conditional.join(', ')}]` : '';
     const inbox = r.keepInbox ? ' (and keep it in the inbox)' : '';
     return `Got it — mail from ${r.key} (${r.kind})${cond} → "${r.labels.join('" + "')}"${inbox} from now on. This overrides what I'd learned and applies locally without a cloud call. (It sets the rule only; it doesn't move existing mail — say the word if you want the matching emails moved too.)`;
+  }
+
+  if (name === 'email_remove_label_correction') {
+    if (!emailLabelsEnabled()) return 'Email-label learning is turned off (cfg.localTier.emailLabels).';
+    const accounts = loadAccounts(userId);
+    const account = resolveAccount(accounts, requestedAccount(args));
+    const r = removeCorrection(userId, {
+      sender: args.sender,
+      subjectContains: Array.isArray(args.subject_contains) ? args.subject_contains
+        : (args.subject_contains ? [args.subject_contains] : []),
+      all: args.all === true,
+      accountId: account?.id || requestedAccount(args),
+    });
+    if (!r.ok) return `Could not remove the correction: ${r.error}`;
+    const cond = r.conditional ? ` matching subject keywords [${r.conditional.join(', ')}]` : '';
+    if (!r.removed) return `No explicit learned-label correction found for ${r.key}${cond}. Observed learning, if any, is unchanged.`;
+    return `Removed ${r.removed} explicit learned-label correction(s) for ${r.key}${cond}. ${r.remaining ? `${r.remaining} correction(s) remain for that sender.` : 'No explicit corrections remain for that sender.'} Observed learning counts are unchanged.`;
   }
 
   const accounts = loadAccounts(userId);

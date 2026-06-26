@@ -398,8 +398,44 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
 
+function sanitizeToolPlanForStream(plan) {
+  if (!plan || typeof plan !== 'object') return null;
+  if (plan.mode === 'none') return { mode: 'none', selectedTools: [], source: plan.source || null };
+  if (plan.mode !== 'selected') return null;
+  const selectedTools = Array.isArray(plan.selectedTools)
+    ? [...new Set(plan.selectedTools.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim()))]
+    : [];
+  if (!selectedTools.length) return null;
+  return { mode: 'selected', selectedTools, source: plan.source || null };
+}
+
+function recomposeAgentPromptForTools(agent) {
+  if (agent._promptTiers && agent._composerInputs) {
+    const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
+    agent._promptTiers = { ...agent._promptTiers, context: newSpa || '' };
+    agent.systemPrompt = [agent._promptTiers.stable, agent._promptTiers.context, agent._promptTiers.volatile].filter(Boolean).join('\n\n');
+  } else if (agent._systemPromptShell && agent._composerInputs) {
+    const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
+    agent.systemPrompt = agent._systemPromptShell.replace('%%SKILL_SPAS%%', newSpa);
+  }
+}
+
+function applyUserToolPlan(agent, plan) {
+  const clean = sanitizeToolPlanForStream(plan);
+  if (!clean || !Array.isArray(agent.tools)) return null;
+  const before = agent.tools.length;
+  const fullTools = agent.tools.slice();
+  if (clean.mode === 'none') {
+    agent.tools = [];
+    return { mode: 'none', before, after: 0, selected: [], fullTools };
+  }
+  const selected = new Set(clean.selectedTools);
+  agent.tools = agent.tools.filter(t => selected.has(t.function?.name));
+  return { mode: 'selected', before, after: agent.tools.length, selected: clean.selectedTools, fullTools };
+}
+
 // ── Main chat generator ───────────────────────────────────────────────────────
-export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null) {
+export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
   // Per-turn tool routing: trim the coordinator's outbound tool list to the
   // always-on subset + on-demand skills whose intent_examples match this
   // user message. Other agents (specialists) are already tightly scoped and
@@ -418,7 +454,27 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
   /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, addedSkills: Set<string>} | null} */
   let _routerStore = null;
-  if (agent.skillCategory === 'coordinator' && Array.isArray(agent.tools) && agent.tools.length > 0) {
+  const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan);
+  if (userToolPlanResult) {
+    recomposeAgentPromptForTools(agent);
+    if (agent.skillCategory === 'coordinator' && userToolPlanResult.selected.includes('request_tools')) {
+      _routerStore = {
+        agent,
+        fullTools: userToolPlanResult.fullTools,
+        initiallyIncludedSkills: new Set(),
+        addedSkills: new Set(),
+      };
+      toolRouterContext.enterWith(_routerStore);
+    }
+    log.info('chat', 'user tool plan applied', {
+      userId, agentId: agent.id,
+      mode: userToolPlanResult.mode,
+      before: userToolPlanResult.before,
+      after: userToolPlanResult.after,
+      selected: userToolPlanResult.selected,
+    });
+  }
+  if (!userToolPlanResult && agent.skillCategory === 'coordinator' && Array.isArray(agent.tools) && agent.tools.length > 0) {
     try {
       const trim = await trimToolsForTurn({ agent, userText, userId });
       agent.tools = trim.trimmedTools;
@@ -434,14 +490,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // the recomposed SPAs go in the context tier so the stable tier stays
       // byte-identical across turns and Anthropic's cache marker on stable
       // continues to hit. Legacy path: splice into the shell as before.
-      if (agent._promptTiers && agent._composerInputs) {
-        const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
-        agent._promptTiers = { ...agent._promptTiers, context: newSpa || '' };
-        agent.systemPrompt = [agent._promptTiers.stable, agent._promptTiers.context, agent._promptTiers.volatile].filter(Boolean).join('\n\n');
-      } else if (agent._systemPromptShell && agent._composerInputs) {
-        const newSpa = composeSkillSpaBlock({ tools: agent.tools, ...agent._composerInputs });
-        agent.systemPrompt = agent._systemPromptShell.replace('%%SKILL_SPAS%%', newSpa);
-      }
+      recomposeAgentPromptForTools(agent);
       log.info('chat', 'tool-router trim', { userId, agentId: agent.id, kept: trim.trimmedTools.length, full: trim.fullTools.length, notes: trim.routerNotes, spChars: agent.systemPrompt.length });
     } catch (e) {
       console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message);
@@ -561,6 +610,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // outcome). Goes into the system prompt — not userText — so the UI doesn't
   // render it and the session doesn't persist it into history.
   const noteBlock = systemNote ? `\n\n${systemNote}` : '';
+  const userToolPlanBlock = userToolPlanResult
+    ? `\n\n## User-selected tool plan\nThe user selected tool mode "${userToolPlanResult.mode}" before sending this message.${userToolPlanResult.mode === 'selected' ? ` Only these selected tool schemas are available this turn: ${userToolPlanResult.selected.join(', ')}. Do not claim unrelated tools are unavailable; answer or ask a concise follow-up if the selected set is insufficient.` : ' No tools are available this turn; answer without tool calls or ask a concise follow-up if live action is required.'}`
+    : '';
   const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
 
   // Monitorable-intent classifier — embedding-based judge that fires when
@@ -606,7 +658,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // so the byte sequence under non-Anthropic providers is unchanged.
   // (memBlock previously inserted between userEmail and crossAgent with a
   // leading "\n\n"; preserve that boundary in the volatile string.)
-  const _volatileFromTurn = `${memBlock ? '\n\n' + memBlock : ''}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`;
+  const _volatileFromTurn = `${memBlock ? '\n\n' + memBlock : ''}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${monitorableBlock}`;
   let systemPrompt;
   if (_tiers) {
     // The agent.systemPrompt that chat-dispatch built already includes
@@ -622,8 +674,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     systemPrompt = [stableTier, contextTier, volatileTier].filter(Boolean).join('\n\n');
   } else {
     systemPrompt = memBlock
-      ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`
-      : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${monitorableBlock}`;
+      ? `${basePrompt}${userIdBlock}${userEmailBlock}\n\n${memBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${monitorableBlock}`
+      : `${basePrompt}${userIdBlock}${userEmailBlock}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${monitorableBlock}`;
   }
 
   // 2. Build message history (strip ts field — Ollama doesn't want it).

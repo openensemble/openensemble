@@ -736,6 +736,7 @@ function onConnection(ws, req) {
         agentId:    msg.agent,
         text:       msg.text,
         attachment: msg.attachment,
+        toolPlan:   msg.toolPlan,
         // Source hint — voice-device chats get a slim tool subset for low
         // latency. See chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST.
         source:     typeof msg.source === 'string' ? msg.source : null,

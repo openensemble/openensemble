@@ -65,6 +65,7 @@ async function init() {
       else hideSlashMenu();
       if ($('input').value.startsWith('@')) { updateAtMenu(); }
       else hideAtMenu();
+      renderToolPlanPicker();
       // If we're in recall mode and the user just typed (current value diverges
       // from what we set), exit recall so the next ArrowUp restarts at newest.
       // Programmatic .value sets do NOT fire 'input', so this only catches
@@ -128,6 +129,7 @@ async function init() {
         e.preventDefault();
         $('input').value = _lastRecallText;
         resizeTextarea();
+        renderToolPlanPicker();
         $('input').setSelectionRange(_lastRecallText.length, _lastRecallText.length);
         return;
       }
@@ -142,6 +144,7 @@ async function init() {
           e.preventDefault();
           $('input').value = '';
           resizeTextarea();
+          renderToolPlanPicker();
           return;
         }
         _recallIdx = nextIdx;
@@ -149,6 +152,7 @@ async function init() {
         e.preventDefault();
         $('input').value = _lastRecallText;
         resizeTextarea();
+        renderToolPlanPicker();
         $('input').setSelectionRange(_lastRecallText.length, _lastRecallText.length);
         return;
       }
