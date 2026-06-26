@@ -176,14 +176,19 @@ export async function updateReviewSchedule({ agentId = 'main', type = 'params', 
 }
 
 // ── forget — soft delete ─────────────────────────────────────────────────────
-export async function forget({ agentId = 'main', type = 'episodes', exactId, userId = 'default' }) {
+export async function forget({ agentId = 'main', type = 'episodes', exactId, userId = 'default', includeImmortal = false }) {
   if (!exactId) return { refused: true };
-  const tableName = `${agentId}_${type}`;
+  const tableName = type === 'user_facts' ? 'user_facts' : `${agentId}_${type}`;
   const table = await getTable(tableName, userId);
   assertId(exactId);
   const rows = await table.query().where(`id = '${exactId}'`).toArray().catch(() => []);
-  if (rows[0]?.immortal) return { refused: true, reason: 'Immortal — cannot forget.' };
+  if (rows[0]?.immortal && !includeImmortal) return { refused: true, reason: 'Immortal — cannot forget.' };
   await queuedWrite(tableName, () => table.update({ where: `id = '${exactId}'`, values: { forgotten: true } }));
+  await table.checkoutLatest?.();
+  const verify = await table.query().where(`id = '${exactId}'`).limit(1).toArray().catch(() => []);
+  if (verify[0] && verify[0].forgotten !== true) {
+    throw new Error('Memory update did not persist.');
+  }
   return { forgotten: true, id: exactId };
 }
 

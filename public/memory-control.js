@@ -3,6 +3,7 @@ let _memoryStats = 0;
 let _memoryFilter = 'all';
 let _memorySearch = '';
 let _memoryControlTarget = 'memoryControlBody';
+let _memorySelectedKey = '';
 
 function memDate(ts) {
   if (!ts) return 'unknown';
@@ -14,7 +15,7 @@ function memScore(v) {
   return Number.isFinite(v) ? Math.round(v * 100) + '%' : '—';
 }
 
-async function loadMemoryControl(targetId = 'memoryControlBody') {
+async function loadMemoryControl(targetId = _memoryControlTarget) {
   _memoryControlTarget = targetId;
   const body = $(_memoryControlTarget);
   if (!body) return;
@@ -33,6 +34,12 @@ async function loadMemoryControl(targetId = 'memoryControlBody') {
   } catch (e) {
     body.innerHTML = `<div class="cdraw-empty" style="color:var(--red)">Failed to load memories: ${escHtml(e.message)}</div>`;
   }
+}
+
+function showMemoryActionError(e) {
+  const msg = e?.message || 'Memory action failed';
+  console.error('[memory-control]', e);
+  alert(msg);
 }
 
 function setMemoryFilter(filter) {
@@ -88,16 +95,35 @@ function renderMemoryControl() {
       ${filtered.length ? filtered.map(renderMemoryCard).join('') : '<div class="cdraw-empty">No memories match this filter.</div>'}
     </div>
   `;
+  bindMemoryCardSelection(body);
   if (window.lucide) lucide.createIcons();
+}
+
+function bindMemoryCardSelection(body) {
+  body.querySelectorAll('.mem-card').forEach(card => {
+    const key = card.dataset.memKey || '';
+    card.open = !!key && key === _memorySelectedKey;
+    card.addEventListener('toggle', () => {
+      if (!card.open) {
+        if (_memorySelectedKey === key) _memorySelectedKey = '';
+        return;
+      }
+      _memorySelectedKey = key;
+      body.querySelectorAll('.mem-card').forEach(other => {
+        if (other !== card) other.open = false;
+      });
+    });
+  });
 }
 
 function renderMemoryCard(m) {
   const args = JSON.stringify([m.id, m.table]).replace(/'/g, '&#39;');
+  const key = `${m.table || ''}:${m.id || ''}`;
   const pinAction = m.immortal ? 'unpinMemoryItem' : 'pinMemoryItem';
   const pinLabel = m.immortal ? 'Unpin' : 'Pin';
   const scope = m.table === 'user_facts' ? 'shared' : (m.agent_id || m.table_agent_id || 'agent');
   return `
-    <details class="mem-card">
+    <details class="mem-card" data-mem-key="${escHtml(key)}">
       <summary>
         <div class="mem-card-main">
           <div class="mem-card-top">
@@ -136,47 +162,65 @@ function renderMemoryCard(m) {
 }
 
 async function editMemoryItem(id, table) {
-  const item = _memoryItems.find(m => m.id === id && m.table === table);
-  if (!item) return;
-  const next = prompt('Edit memory text', item.text || '');
-  if (next == null) return;
-  const text = next.trim();
-  if (!text || text === item.text) return;
-  await fetch(`/api/memory/${encodeURIComponent(id)}/table`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ table, text }),
-  }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
-  loadMemoryControl();
+  try {
+    const item = _memoryItems.find(m => m.id === id && m.table === table);
+    if (!item) return;
+    const next = prompt('Edit memory text', item.text || '');
+    if (next == null) return;
+    const text = next.trim();
+    if (!text || text === item.text) return;
+    await fetch(`/api/memory/${encodeURIComponent(id)}/table`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table, text }),
+    }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
+    loadMemoryControl();
+  } catch (e) {
+    showMemoryActionError(e);
+  }
 }
 
 async function pinMemoryItem(id, table) {
-  await fetch(`/api/memory/${encodeURIComponent(id)}/pin`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ table }),
-  }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
-  loadMemoryControl();
+  try {
+    await fetch(`/api/memory/${encodeURIComponent(id)}/pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table }),
+    }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
+    loadMemoryControl();
+  } catch (e) {
+    showMemoryActionError(e);
+  }
 }
 
 async function unpinMemoryItem(id, table) {
-  await fetch(`/api/memory/${encodeURIComponent(id)}/unpin`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ table }),
-  }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
-  loadMemoryControl();
+  try {
+    await fetch(`/api/memory/${encodeURIComponent(id)}/unpin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table }),
+    }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
+    loadMemoryControl();
+  } catch (e) {
+    showMemoryActionError(e);
+  }
 }
 
 async function forgetMemoryItem(id, table) {
-  const item = _memoryItems.find(m => m.id === id && m.table === table);
-  if (item?.immortal) {
-    alert('Unpin this memory before forgetting it.');
-    return;
+  try {
+    const item = _memoryItems.find(m => m.id === id && m.table === table);
+    if (item?.immortal) {
+      if (!confirm('This memory is pinned. Forget it anyway?')) return;
+    } else {
+      if (!confirm('Forget this memory?')) return;
+    }
+    const params = new URLSearchParams({ table });
+    if (item?.immortal) params.set('force', '1');
+    await fetch(`/api/memory/${encodeURIComponent(id)}/table?${params.toString()}`, {
+      method: 'DELETE',
+    }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
+    loadMemoryControl();
+  } catch (e) {
+    showMemoryActionError(e);
   }
-  if (!confirm('Forget this memory?')) return;
-  await fetch(`/api/memory/${encodeURIComponent(id)}/table?table=${encodeURIComponent(table)}`, {
-    method: 'DELETE',
-  }).then(async r => { if (!r.ok) throw new Error((await r.json()).error || r.statusText); });
-  loadMemoryControl();
 }

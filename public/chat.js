@@ -579,7 +579,7 @@ function appendNodeExecTaskReport(report, turn, scroll = true) {
       summary: label,
       startedAt: nodeEvent?.startedAt || turn?.ts || report?.ts,
       lastActivityAt: report?.ts || nodeEvent?.endedAt || turn?.ts,
-      currentTool: 'node_exec',
+      currentTool: null,
       canCancel: false,
     },
     recentHistory: [],
@@ -588,7 +588,7 @@ function appendNodeExecTaskReport(report, turn, scroll = true) {
 
 function isNodeExecTaskReport(m) {
   return (m?.role === 'agent_report' || m?.kind === 'agent_report')
-    && m.tool === 'node_exec'
+    && (m.tool === 'node_exec' || m.agentName === 'node_exec')
     && typeof m.taskId === 'string'
     && m.taskId.startsWith('autobg_');
 }

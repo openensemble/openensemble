@@ -54,6 +54,47 @@ async function _resolveAttributionAgent(userId, agentId) {
   } catch { return userId; }
 }
 
+function _agentIdFromSessionKey(sessionKey, userId) {
+  const raw = String(sessionKey || '');
+  const prefix = `${userId}_`;
+  return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+}
+
+async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, resultText, errorMsg = null }) {
+  if (!userId || !agentId) return;
+  if (_isEphem(agentId)) return;
+  const targetAgentId = _agentIdFromSessionKey(agentId, userId);
+  if (!targetAgentId) return;
+  const prompt = [
+    'A background tool call you started has completed. Continue the original user workflow for THIS completed tool only.',
+    '',
+    `<background_tool name="${toolName}">`,
+    `<args>${JSON.stringify(args ?? {})}</args>`,
+    errorMsg ? `<error>${errorMsg}</error>` : `<result>${resultText || ''}</result>`,
+    '</background_tool>',
+    '',
+    'Give the user a concise completion update. If the result shows available package/system updates, summarize what matters and ask whether to apply them. Do not apply updates or make another change unless the user explicitly confirms.',
+  ].join('\n');
+  try {
+    const { handleChatMessage } = await import('./chat-dispatch.mjs');
+    const { sendToUser } = await import('./ws-handler.mjs');
+    await handleChatMessage({
+      userId,
+      agentId: targetAgentId,
+      text: prompt,
+      attachment: null,
+      source: getVoiceContext()?.source || 'web',
+      onEvent: (e) => sendToUser(userId, e),
+      onBroadcast: () => {},
+      onNotify: () => {},
+      _hiddenUser: true,
+      _isBackgroundContinuation: true,
+    });
+  } catch (e) {
+    log.warn('tool', 'auto-bg continuation failed', { tool: toolName, userId, agentId: targetAgentId, err: e?.message || String(e) });
+  }
+}
+
 // Wrapper shape: { manifest, userId, dir }
 //   userId: null for global, userId string for per-user
 //   dir:    absolute path to the skill directory on disk
@@ -1311,6 +1352,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               displayName,
               displayEmoji,
               targetAgentId: delegatedMeta?.targetAgentId || null,
+              args: mergedArgs,
             };
             (async () => {
               let finalText = '';
@@ -1362,6 +1404,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                       ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
                       content: (finalText || `${captured.displayName} completed.`).slice(0, 4000),
                       taskId: `autobg_${captured.watcherId}`,
+                      tool: captured.name,
+                      status: 'done',
                       ts: Date.now(),
                     });
                   } catch (_) { /* best-effort */ }
@@ -1381,15 +1425,36 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
                     content: finalText || `${captured.displayName} completed.`,
                     taskId: `autobg_${captured.watcherId}`,
+                    tool: captured.name,
+                    status: 'done',
                     ts: Date.now(),
                   });
                 } catch (_) { /* best-effort */ }
+                if (!captured.targetAgentId) {
+                  await _runAutoBgToolContinuation({
+                    userId: captured.userId,
+                    agentId: captured.agentId,
+                    toolName: captured.name,
+                    args: captured.args,
+                    resultText: finalText || `${captured.displayName} completed.`,
+                  });
+                }
                 log.info('tool', 'auto-bg tool complete', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, durationMs: Date.now() - captured.startedAt });
               } catch (err) {
                 watchersMod.completeWatcher(captured.userId, captured.watcherId, {
                   status: 'error',
                   finalText: `⚠ ${captured.name} failed: ${err.message}`,
                 });
+                if (!captured.targetAgentId) {
+                  await _runAutoBgToolContinuation({
+                    userId: captured.userId,
+                    agentId: captured.agentId,
+                    toolName: captured.name,
+                    args: captured.args,
+                    resultText: '',
+                    errorMsg: err.message,
+                  });
+                }
                 log.warn('tool', 'auto-bg tool threw', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, err: err.message });
               }
             })();
@@ -1467,6 +1532,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 agentEmoji: '⏵',
                 content: (text || `${name} completed.`).slice(0, 4000),
                 taskId: `autobg_${wid}`,
+                tool: name,
+                status: 'done',
                 ...(images ? { images } : {}),
                 ts: Date.now(),
               });
@@ -1483,14 +1550,31 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               ...(images ? { images } : {}),
               ...(notify ? { notify } : {}),
               taskId: `autobg_${wid}`,
+              tool: name,
+              status: 'done',
               ts: Date.now(),
             });
           } catch (_) { /* best-effort */ }
+          await _runAutoBgToolContinuation({
+            userId,
+            agentId: attribAgentId,
+            toolName: name,
+            args: mergedArgs,
+            resultText: text || `${name} completed.`,
+          });
           log.info('tool', 'auto-bg tool complete', { skill: owningSkillId, tool: name, userId, durationMs: Date.now() - _toolStart });
-        }).catch((err) => {
+        }).catch(async (err) => {
           watchersMod.completeWatcher(userId, wid, {
             status: 'error',
             finalText: `⚠ ${name} failed: ${err.message}`,
+          });
+          await _runAutoBgToolContinuation({
+            userId,
+            agentId: attribAgentId,
+            toolName: name,
+            args: mergedArgs,
+            resultText: '',
+            errorMsg: err.message,
           });
           log.warn('tool', 'auto-bg tool threw', { skill: owningSkillId, tool: name, userId, err: err.message });
         });

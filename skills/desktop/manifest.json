@@ -1,7 +1,7 @@
 {
   "id": "desktop",
   "name": "Desktop Bridge",
-  "description": "Connects OpenEnsemble agents to the user's local desktop app for sandboxed local files, downloads, generated assets, and optional sandbox command execution.",
+  "description": "Connects OpenEnsemble agents to the user's local desktop app for sandboxed local files, downloads, generated assets, and optional local shell command execution.",
   "icon": "🖥️",
   "category": "utility",
   "service": true,
@@ -20,7 +20,7 @@
     "download this video into my desktop downloads folder",
     "show connected desktop clients"
   ],
-  "systemPromptAddition": "## Desktop Bridge\n\nThe desktop_* tools access sandbox folders configured in the OpenEnsemble Desktop app. Use desktop_list_clients if you need to confirm a desktop client is connected, and desktop_list_sandboxes if you need the available sandbox names. Do not use desktop_run_command unless {{USER_NAME}} explicitly asks to run a local sandbox command; command execution may be disabled in the desktop app.",
+  "systemPromptAddition": "## Desktop Bridge\n\nThe desktop_* file tools access sandbox folders configured in the OpenEnsemble Desktop app. Use desktop_list_clients if you need to confirm a desktop client is connected, and desktop_list_sandboxes if you need the available sandbox names. Do not use desktop_run_command unless {{USER_NAME}} explicitly asks to run a local shell command. desktop_run_command runs as the desktop user's normal OS account with cwd set inside a sandbox; it is not a filesystem jail, network sandbox, container, or privilege boundary. Command execution may be disabled in the desktop app.",
   "tools": [
     {
       "type": "function",
@@ -121,14 +121,15 @@
       "type": "function",
       "function": {
         "name": "desktop_download_url",
-        "description": "Download a URL into a local sandbox folder.",
+        "description": "Download an http/https URL into a local sandbox folder, with a desktop-enforced size cap.",
         "parameters": {
           "type": "object",
           "properties": {
             "clientId": { "type": "string", "description": "Optional desktop client id." },
             "sandbox": { "type": "string" },
             "url": { "type": "string" },
-            "path": { "type": "string" }
+            "path": { "type": "string" },
+            "maxBytes": { "type": "integer", "description": "Maximum bytes to download. Desktop default is 100 MB; desktop hard cap is 1 GB." }
           },
           "required": ["sandbox", "url", "path"]
         }
@@ -138,7 +139,7 @@
       "type": "function",
       "function": {
         "name": "desktop_run_command",
-        "description": "Run a shell command inside a local sandbox. The desktop app must have command execution enabled.",
+        "description": "Run a shell command as the desktop user with cwd set inside a local sandbox. This is not a filesystem or network jail. The desktop app must have command execution enabled.",
         "parameters": {
           "type": "object",
           "properties": {

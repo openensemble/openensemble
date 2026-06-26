@@ -181,6 +181,11 @@ export async function handle(req, res) {
           retention_score: immortal ? 1.0 : (rows[0].retention_score || 1.0),
         },
       }));
+      await table.checkoutLatest?.();
+      const verify = await table.query().where(`id = '${memId}'`).limit(1).toArray().catch(() => []);
+      if (verify[0] && verify[0].immortal !== immortal) {
+        throw new Error('Memory update did not persist.');
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, id: memId, immortal }));
     } catch (e) { safeError(res, e, 400); }
@@ -244,7 +249,19 @@ export async function handle(req, res) {
     const memId = decodeURIComponent(tableDeleteMatch[1]);
     try {
       const tableName = safeTableName(tableDeleteUrl.searchParams.get('table'));
+      const force = tableDeleteUrl.searchParams.get('force') === '1';
       assertId(memId);
+      if (tableName === 'user_facts') {
+        const result = await forget({ agentId: 'shared', type: 'user_facts', exactId: memId, userId: authId, includeImmortal: force });
+        if (result?.refused) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: result.reason || 'Memory could not be forgotten.', requiresForce: true }));
+          return true;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return true;
+      }
       const table = await getTable(tableName, authId);
       const rows = await table.query().where(`id = '${memId}'`).limit(1).toArray().catch(() => []);
       if (!rows.length) {
@@ -253,11 +270,14 @@ export async function handle(req, res) {
         return true;
       }
       if (rows[0].immortal) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Pinned memories must be unpinned before forgetting.' }));
-        return true;
+        if (!force) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Pinned memories require confirmation before forgetting.', requiresForce: true }));
+          return true;
+        }
       }
       await queuedWrite(tableName, () => table.update({ where: `id = '${memId}'`, values: { forgotten: true } }));
+      await table.checkoutLatest?.();
       const verify = await table.query().where(`id = '${memId}'`).limit(1).toArray().catch(() => []);
       if (verify[0] && verify[0].forgotten !== true) {
         throw new Error('Memory update did not persist.');
