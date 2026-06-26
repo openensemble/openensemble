@@ -210,6 +210,64 @@ function observationPatch(result) {
   return patch;
 }
 
+function troubleshootingNotification(state, signal, result, summary) {
+  const base = {
+    service_id: state.service_id,
+    node_id: state.node_id,
+    signal_kind: signal.kind,
+    severity: signal.severity,
+    value: result.value,
+    expected: signal.expect,
+    incident_id: summary.incident_id || null,
+    diagnostics_ran: summary.diagnostics_ran || 0,
+    matched_mode: summary.matched_mode || null,
+    fix_action: summary.fix_action || null,
+    fix_outcome: summary.fix_outcome ?? null,
+    fix_op_record_id: summary.fix_op_record_id || null,
+  };
+  const subject = `${state.service_id} on ${state.node_id}`;
+  if (!summary.profile_loaded) {
+    return {
+      content: `🔴 ${subject} is failing, but OE cannot diagnose it yet: ${summary.summary}`,
+      data: base,
+    };
+  }
+  if (summary.fix_action === 'auto_applied' && summary.fix_outcome === true) {
+    return {
+      content: `🛠️ ${subject} broke; OE diagnosed it and auto-applied a verified fix. Incident ${summary.incident_id}.`,
+      data: base,
+    };
+  }
+  if (summary.fix_action === 'auto_applied' && summary.fix_outcome === false) {
+    return {
+      content: `🔴 ${subject} is still failing. OE tried an auto-fix, but it did not succeed. Incident ${summary.incident_id}.`,
+      data: base,
+    };
+  }
+  if (summary.fix_action === 'proposed') {
+    return {
+      content: `🔴 ${subject} is failing. OE diagnosed it and has a proposed fix awaiting approval. Incident ${summary.incident_id}.`,
+      data: base,
+    };
+  }
+  if (summary.matched_mode) {
+    return {
+      content: `🔴 ${subject} is failing. OE matched "${summary.matched_mode}" but could not auto-fix it. Incident ${summary.incident_id}.`,
+      data: base,
+    };
+  }
+  if (summary.diagnostics_ran > 0) {
+    return {
+      content: `🔴 ${subject} is failing. OE ran ${summary.diagnostics_ran} diagnostic step(s), but needs help deciding the fix. Incident ${summary.incident_id}.`,
+      data: base,
+    };
+  }
+  return {
+    content: `🔴 ${subject} is failing and needs attention. Incident ${summary.incident_id}.`,
+    data: base,
+  };
+}
+
 // Build one composite bash invocation for an ordered list of {cmd} entries.
 // Each subcommand is wrapped in `timeout 15s` so one slow check doesn't stall
 // the whole batch, and bracketed by nonce-delimited markers so the server can
@@ -405,13 +463,18 @@ async function evalSignal(state, signal, helpers, now, precomputedResult) {
       signal: { kind: signal.kind, value: result.value, expected: signal.expect, fired_at: new Date(now).toISOString() },
       ctx: loopCtx,
     });
+    const actionNotice = troubleshootingNotification(state, signal, result, summary);
+    helpers.notify?.(
+      actionNotice.content,
+      { from: 'Health Monitor', event: 'profile_health_action', data: actionNotice.data },
+    );
     return {
       newSignal: {
         ...signal,
         ...observed,
         last_state: 'unhealthy',
         last_checked_at: now,
-        current_incident_id: summary.incident_id,
+        current_incident_id: summary.incident_id || null,
       },
       transitionText: summary.summary || `${signal.kind}: unhealthy — opened ${summary.incident_id}`,
     };

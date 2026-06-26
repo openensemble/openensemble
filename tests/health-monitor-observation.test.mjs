@@ -66,4 +66,36 @@ describe('health monitor observed signal state', () => {
       });
     });
   });
+
+  it('notifies after troubleshooting decides what action is needed', async () => {
+    const execFn = async () => ({ stdout: 'inactive', stderr: '', exitCode: 3 });
+    const notifications = [];
+    await withExecFn(execFn, async () => {
+      const { newSignal } = await evalSignal(
+        { node_id: NODE, service_id: 'missing_service', endpoint: '' },
+        {
+          kind: 'service_up',
+          check: { mechanism: 'cli', command: 'systemctl is-active missing_service' },
+          expect: 'active',
+          last_state: 'healthy',
+          last_checked_at: null,
+          current_incident_id: null,
+        },
+        { userId: USER, notify: (content, opts) => notifications.push({ content, opts }) },
+        12347,
+      );
+      expect(newSignal.last_state).toBe('unhealthy');
+      expect(notifications.map(n => n.opts.event)).toEqual([
+        'profile_health_unhealthy',
+        'profile_health_action',
+      ]);
+      expect(notifications[1].content).toMatch(/cannot diagnose/i);
+      expect(notifications[1].opts.data).toMatchObject({
+        node_id: NODE,
+        service_id: 'missing_service',
+        signal_kind: 'service_up',
+        incident_id: null,
+      });
+    });
+  });
 });

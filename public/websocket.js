@@ -472,7 +472,7 @@ function handleServerMessage(msg) {
       appendNotification(msg);
       // Profile health notifications also bump the nodes drawer's alert dot
       // so the badge appears immediately, not on the next 15s refresh.
-      if (msg.event === 'profile_health_unhealthy' || msg.event === 'profile_health_recovered') {
+      if (msg.event === 'profile_health_unhealthy' || msg.event === 'profile_health_action' || msg.event === 'profile_health_recovered') {
         if (typeof loadNodes === 'function') loadNodes();
       }
       break;
