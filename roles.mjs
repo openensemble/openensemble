@@ -1232,7 +1232,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             // Detached worker: continue draining iter, push to chip, finalize
             // when done. The tool's network/promise stays alive — we just
             // route its output to a different sink.
-            const captured = { name, watcherId, userId, agentId, owningSkillId, startedAt };
+            const captured = {
+              name,
+              watcherId,
+              userId,
+              agentId: await _resolveAttributionAgent(userId, agentId),
+              owningSkillId,
+              startedAt,
+            };
             (async () => {
               let finalText = '';
               try {
@@ -1279,7 +1286,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                       kind: 'agent_report',
                       agentName: captured.name,
                       agentEmoji: captured.agentEmoji ?? '⏵',
-                      content: `[${captured.name} finished in background]\n${(finalText || '').slice(0, 4000)}`,
+                      content: (finalText || `${captured.name} completed.`).slice(0, 4000),
+                      taskId: `autobg_${captured.watcherId}`,
                       ts: Date.now(),
                     });
                   } catch (_) { /* best-effort */ }
@@ -1367,20 +1375,23 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           const text   = structured ? val.text : String(val ?? '');
           const images = structured && Array.isArray(val._images) ? val._images : null;
           const notify = structured && val._notify ? val._notify : null;
+          const key = agentId
+            ? (agentId.startsWith(`${userId}_`) ? agentId : `${userId}_${agentId}`)
+            : null;
           watchersMod.completeWatcher(userId, wid, {
             status: 'done',
             finalText: `✓ ${name} done${text ? `: ${text.slice(-1200)}` : ''}`,
           });
-          if (agentId) {
+          if (key) {
             try {
               const { appendToSession } = await import('./sessions.mjs');
-              const key = agentId.startsWith(`${userId}_`) ? agentId : `${userId}_${agentId}`;
               await appendToSession(key, {
                 role: 'assistant',
                 kind: 'agent_report',
                 agentName: name,
                 agentEmoji: '⏵',
-                content: `[${name} finished in background]\n${text.slice(0, 4000)}`,
+                content: (text || `${name} completed.`).slice(0, 4000),
+                taskId: `autobg_${wid}`,
                 ...(images ? { images } : {}),
                 ts: Date.now(),
               });
@@ -1390,7 +1401,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             const { sendToUser } = await import('./ws-handler.mjs');
             sendToUser(userId, {
               type: 'agent_report',
-              agent: agentId ?? null,
+              agent: key,
               agentName: name,
               agentEmoji: '⏵',
               content: text || `${name} completed.`,

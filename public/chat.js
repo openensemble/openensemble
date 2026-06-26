@@ -362,7 +362,7 @@ async function send() {
 function renderSession() {
   const msgs = $('messages');
   [...msgs.children].forEach(el => { if (!el.id) el.remove(); });
-  (sessions[activeAgent] ?? []).forEach(m => {
+  orderSessionForRender(sessions[activeAgent] ?? []).forEach(m => {
     if (m.scheduled)                 appendTaskHeader(m.content, m.ts, false);
     else if (m.role === 'notification') appendNotification({ agent: activeAgent, content: m.content, from: m.from, ts: m.ts });
     else if (m.role === 'user' && !m.hidden)        appendUserBubble(m.content, m.ts, false, m.attachment ?? null);
@@ -399,6 +399,75 @@ function renderSession() {
   } else {
     scrollToBottom();
   }
+}
+
+function orderSessionForRender(messages) {
+  const out = [];
+  const pendingReports = new Map();
+  let pendingLegacyReports = [];
+  const seenHiddenTasks = new Set();
+  const reportTaskId = (m) => {
+    if (!(m?.role === 'agent_report' || m?.kind === 'agent_report')) return null;
+    return typeof m.taskId === 'string' && m.taskId.startsWith('autobg_') ? m.taskId : null;
+  };
+  const isLegacyAutoBgReport = (m) => (
+    (m?.role === 'agent_report' || m?.kind === 'agent_report')
+    && !m.taskId
+    && typeof m.content === 'string'
+    && /^\[[^\]]+ finished in background\]\n/.test(m.content)
+  );
+  const legacyReportMatchesTurn = (report, turn) => {
+    if (turn?.role !== 'assistant' || !Array.isArray(turn.toolEvents)) return false;
+    const reportTs = Number(report.ts) || 0;
+    return turn.toolEvents.some(ev => (
+      ev?.name === report.agentName
+      && Math.abs((Number(ev.endedAt) || Number(turn.ts) || 0) - reportTs) < 10000
+    ));
+  };
+  const hiddenTaskId = (m) => {
+    if (m?.role !== 'assistant' || !m.hidden || !m.hideTaskId) return null;
+    return `autobg_${m.hideTaskId}`;
+  };
+
+  for (const m of messages) {
+    if (isLegacyAutoBgReport(m)) {
+      pendingLegacyReports.push(m);
+      continue;
+    }
+
+    const taskId = reportTaskId(m);
+    if (taskId) {
+      if (seenHiddenTasks.has(taskId)) {
+        out.push(m);
+        continue;
+      }
+      if (!pendingReports.has(taskId)) pendingReports.set(taskId, []);
+      pendingReports.get(taskId).push(m);
+      continue;
+    }
+
+    out.push(m);
+    const hiddenId = hiddenTaskId(m);
+    if (hiddenId) seenHiddenTasks.add(hiddenId);
+    if (hiddenId && pendingReports.has(hiddenId)) {
+      out.push(...pendingReports.get(hiddenId));
+      pendingReports.delete(hiddenId);
+    }
+
+    if (pendingLegacyReports.length) {
+      const matched = [];
+      pendingLegacyReports = pendingLegacyReports.filter(report => {
+        if (!legacyReportMatchesTurn(report, m)) return true;
+        matched.push(report);
+        return false;
+      });
+      out.push(...matched);
+    }
+  }
+
+  for (const reports of pendingReports.values()) out.push(...reports);
+  out.push(...pendingLegacyReports);
+  return out;
 }
 
 function appendUserBubble(text, ts = Date.now(), scroll = true, attachment = null) {
@@ -1839,7 +1908,7 @@ function appendNotification(msg) {
 }
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
-  const { agent, agentName, agentEmoji, content, ts, toolEvents, targetAgentId, originalTask } = msg;
+  const { agent, agentName, agentEmoji, content, ts, toolEvents, targetAgentId, originalTask, taskId } = msg;
   // Push into the target coordinator's session cache so the report survives
   // agent-tab switches. Without this, the DOM bubble is the only copy
   // browser-side and it gets wiped on the next renderSession (e.g. when
@@ -1849,13 +1918,13 @@ function handleAgentReport(msg) {
     // Use role:'agent_report' so renderSession can route this back through
     // _renderAgentReportEl below. Keep the same shape we just received so
     // the renderer can reconstruct identical DOM.
-    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, ts: ts ?? Date.now() });
+    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, ts: ts ?? Date.now() });
   }
   // Only paint into the visible chat panel when the report's target
   // coordinator is the agent currently being viewed. A report fired while
   // the user is on a different agent's tab should NOT appear there.
   if (!agent || agent === activeAgent) {
-    _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, ts });
+    _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, ts });
   }
 }
 
@@ -1873,6 +1942,9 @@ function _legacyAgentReportMatch(content) {
 
 function _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents = null, targetAgentId = null, originalTask = '', ts }) {
   const timeStr = new Date(ts ?? Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const bodyContent = typeof content === 'string'
+    ? content.replace(/^\[[^\]]+ finished in background\]\n/, '')
+    : content;
   const el = document.createElement('div');
   el.className = 'msg agent-report';
   el.innerHTML = `
@@ -1880,7 +1952,7 @@ function _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents = nul
       <span class="agent-report-who">${escHtml(agentEmoji ?? '')} <strong>${escHtml(agentName)}</strong></span>
       <span class="agent-report-time">${timeStr}</span>
     </div>
-    <div class="agent-report-body msg-bubble">${renderMarkdown(content ?? '')}</div>
+    <div class="agent-report-body msg-bubble">${renderMarkdown(bodyContent ?? '')}</div>
   `;
   insertBefore(el);
   if (Array.isArray(toolEvents) && toolEvents.length) {
