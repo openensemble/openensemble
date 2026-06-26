@@ -78,6 +78,7 @@ import { formatDurationAdj } from './lib/voice-timer.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn } from './background-tasks.mjs';
+import { setNodesBroadcastFn } from './skills/nodes/execute.mjs';
 import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
 import { startUpdateChecker } from './lib/update.mjs';
 import { runBootCheck, aliveResponse, cancelCommitDeadline } from './lib/oe-admin-boot-check.mjs';
@@ -442,6 +443,7 @@ startVoiceUdpLog();
 
 setBroadcastFn(broadcastAgentList);
 setBackgroundBroadcastFn(broadcast);
+setNodesBroadcastFn(broadcast);
 setUserBroadcastFn(broadcastToUsers);
 setRuntimeWarnBroadcast(broadcast);
 setRuntimeMetricsFn(() => ({

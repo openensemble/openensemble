@@ -25,7 +25,7 @@
 .empty-state-card .btn-create-agent { font-size: 15px; padding: 12px 24px; }
 
 /* ── Messages ── */
-.msg { max-width: 820px; width: 100%; }
+.msg { max-width: 820px; width: 100%; flex: 0 0 auto; }
 .msg.user { align-self: flex-end; }
 .msg.assistant { align-self: flex-start; }
 .msg-bubble { padding: 10px 14px; border-radius: var(--radius); line-height: 1.55; font-size: 14px;
@@ -207,11 +207,12 @@
 .msg.user .msg-time { text-align: right; }
 
 /* ── Tool pill ── */
-.task-header { display: flex; align-items: center; gap: 8px; margin: 16px 0 4px; color: var(--muted); font-size: 11px; width: 100%; max-width: 820px; }
+.task-header { display: flex; align-items: center; gap: 8px; margin: 16px 0 4px; color: var(--muted); font-size: 11px; width: 100%; max-width: 820px; flex: 0 0 auto; }
 .task-header::before,.task-header::after { content:''; flex:1; height:1px; background:var(--border); }
 .task-header-label { white-space: nowrap; padding: 0 6px; color: var(--yellow); font-size: 11px; letter-spacing: 0.02em; }
 .tool-run {
-  width: 100%; max-width: min(980px, 100%); min-width: 0; margin: 6px 0 4px;
+  width: 100%; max-width: min(820px, 100%); min-width: 0; margin: 6px 0 4px;
+  flex: 0 0 auto; align-self: flex-start;
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg2);
   overflow: hidden; box-sizing: border-box;
 }
@@ -270,6 +271,7 @@
 .tool-stream-bubble {
   display: flex; flex-direction: column; gap: 4px;
   width: 100%; max-width: 820px; min-width: 0;
+  flex: 0 0 auto;
   padding: 6px 10px; margin: 4px 0 6px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
   box-sizing: border-box;

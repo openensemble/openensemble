@@ -15,6 +15,46 @@ import path from 'path';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
+let _broadcast = null;
+export function setNodesBroadcastFn(fn) { _broadcast = fn; }
+
+function nodeExecReportText({ status, hostname, cmdPreview, output }) {
+  const header = status === 'done'
+    ? `Finished on ${hostname}.`
+    : `Command failed on ${hostname}.`;
+  const body = output?.trim() || 'No output.';
+  return `${header}\n\nCommand: ${cmdPreview}\n\n${body}`.trim();
+}
+
+async function publishNodeExecReport({ agentId, hostname, cmdPreview, status, output }) {
+  const content = nodeExecReportText({ status, hostname, cmdPreview, output });
+  try {
+    const { appendToSession } = await import('../../sessions.mjs');
+    await appendToSession(agentId, {
+      role: 'assistant',
+      kind: 'agent_report',
+      agentName: hostname,
+      agentEmoji: '🖥',
+      content,
+      ts: Date.now(),
+    });
+  } catch (e) {
+    console.warn('[node_exec] failed to inject completion report:', e.message);
+  }
+  try {
+    _broadcast?.({
+      type: 'agent_report',
+      agent: agentId,
+      agentName: hostname,
+      agentEmoji: '🖥',
+      content,
+      ts: Date.now(),
+    });
+  } catch (e) {
+    console.warn('[node_exec] failed to broadcast completion report:', e.message);
+  }
+}
+
 // Rate-limit agent-initiated pairing-code requests per user.
 // Keyed by userId → array of timestamps (ms) within the current window.
 const PAIR_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
@@ -374,24 +414,39 @@ export async function* executeSkillTool(name, args, userId, agentId) {
                   status: 'done',
                   finalText: `✓ ${cmdPreview}\nAgent reconnected after restart.${tail ? `\n\n${tail}` : ''}`,
                 });
-                try {
-                  const { appendToSession } = await import('../../sessions.mjs');
-                  const notice = `[node_exec completed on ${node.hostname || node_id} — re: "${cmdPreview}"]\nAgent reconnected after restart.${tail ? `\n\n${tail}` : ''}`;
-                  await appendToSession(attribAgentId, { role: 'assistant', content: notice, ts: Date.now() });
-                } catch (appendErr) {
-                  console.warn('[node_exec] failed to inject reconnect completion notice:', appendErr.message);
-                }
+                await publishNodeExecReport({
+                  userId,
+                  agentId: attribAgentId,
+                  hostname: node.hostname || node_id,
+                  cmdPreview,
+                  status: 'done',
+                  output: `Agent reconnected after restart.${tail ? `\n\n${tail}` : ''}`,
+                });
                 return;
               }
               completeWatcher(userId, watcherId, {
                 status: 'error',
                 finalText: `⚠ ${cmdPreview}\nAgent disconnected and did not reconnect within 90s: ${recon.reason}`,
               });
+              await publishNodeExecReport({
+                agentId: attribAgentId,
+                hostname: node.hostname || node_id,
+                cmdPreview,
+                status: 'error',
+                output: `Agent disconnected and did not reconnect within 90s: ${recon.reason}`,
+              });
               return;
             }
             completeWatcher(userId, watcherId, {
               status: 'error',
               finalText: `⚠ Command failed: ${e.message}`,
+            });
+            await publishNodeExecReport({
+              agentId: attribAgentId,
+              hostname: node.hostname || node_id,
+              cmdPreview,
+              status: 'error',
+              output: e.message,
             });
             return;
           }
@@ -405,15 +460,14 @@ export async function* executeSkillTool(name, args, userId, agentId) {
             status,
             finalText: `${prefix} ${cmdPreview}\n${output.slice(-2000)}`,
           });
-          // Inject into the coordinator's session so a future turn has the
-          // result for context (matches dispatchBackground's pattern).
-          try {
-            const { appendToSession } = await import('../../sessions.mjs');
-            const notice = `[node_exec completed on ${node.hostname || node_id} — re: "${cmdPreview}"]\n${output}`;
-            await appendToSession(attribAgentId, { role: 'assistant', content: notice, ts: Date.now() });
-          } catch (e) {
-            console.warn('[node_exec] failed to inject completion notice:', e.message);
-          }
+          await publishNodeExecReport({
+            userId,
+            agentId: attribAgentId,
+            hostname: node.hostname || node_id,
+            cmdPreview,
+            status,
+            output,
+          });
         })();
 
         // Terse result so the LLM doesn't echo the whole "started in background"
