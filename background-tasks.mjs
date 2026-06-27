@@ -105,7 +105,7 @@ setInterval(() => {
  * @param {string} coordinatorAgentId - scoped id of the coordinator
  * @param {string} agentName - display name for notifications
  * @param {string} agentEmoji - emoji icon (e.g. "📧")
- * @param {{autoContinue?: boolean}} [opts]
+ * @param {{autoContinue?: boolean, extraSystemNote?: string | null}} [opts]
  */
 export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId, agentName, agentEmoji = '🤖', opts = {}) {
   const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -174,6 +174,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       // ALS propagates through this detached IIFE because dispatchBackground
       // was called from within scheduledContext.run(...). null in non-scheduled chats.
       const scheduledNote = getScheduledNote();
+      const combinedNote = [scheduledNote, opts?.extraSystemNote].filter(Boolean).join('\n\n') || null;
       let fullText = '';
       let toolsUsed = 0;
       let currentTool = null;
@@ -185,7 +186,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       // this run's watcherId without any extra parameter threading.
       const taskCtx = { taskId, watcherId, userId, agentId: scopedAgent.id };
       await runInTaskContext(taskCtx, async () => {
-      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan, isolatedTaskRun: true })) {
+      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, combinedNote, false, null, { toolPlan: rememberedPlan, isolatedTaskRun: true })) {
         if (ev.type === 'token') fullText += ev.text;
         trackToolEvent(toolEvents, ev);
         // Track in-flight tool calls so list_active_agents can report e.g.

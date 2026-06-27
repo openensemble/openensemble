@@ -463,6 +463,7 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
     'Background work from your scheduled task has completed. Act on the results below for THIS scheduled task only.',
     '',
     `<scheduled_task id="${task.id}" agent="${task.agent || ''}">`,
+    `<original_request>${task.prompt || ''}</original_request>`,
     `<results>\n${aggregate}\n</results>`,
     '</scheduled_task>',
     '',

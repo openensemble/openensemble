@@ -331,13 +331,21 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     } catch { /* if doc lookup fails, proceed with original task */ }
   }
 
+  // Per-call no-confirm: the coordinator can pass no_confirm:true when the
+  // user explicitly authorized the action in the triggering message
+  // ("just send it", "no need to confirm"). This must apply to both sync and
+  // background delegations; scheduled/direct-send tasks commonly detach.
+  const noConfirmNote = no_confirm
+    ? `[DELEGATION OVERRIDE — NO CONFIRM] The coordinator has authorized this delegation as a direct send. The user's original message in the coordinator chat IS the confirmation. Do NOT show a draft, do NOT ask "are you sure?", do NOT wait for "send it" — call the action tool directly with reasonable defaults for anything unspecified, then report what you did. This overrides any "show draft and wait for approval" rule from your role's prompt for this single delegation only.`
+    : null;
+
   // Background mode: fire and forget, return immediately.
   // Triggered either by explicit background:true from the model, or by _parallel:true injected
   // by chat.mjs when multiple ask_agent calls are detected in a single response.
   if (background || _parallel) {
     const { dispatchBackground } = await import('../../background-tasks.mjs');
     const autoContinue = callerIsCoordinator;
-    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, { autoContinue });
+    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, { autoContinue, extraSystemNote: noConfirmNote });
     // Phrase the result as something the calling agent can relay verbatim to the
     // user — not internal jargon — so the user knows what's happening and that a
     // result will follow, without having to watch logs.
@@ -454,13 +462,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // fall back to their default "show draft and wait" behavior, which
   // never resolves on a scheduled run since no human is there to answer.
   const scheduledNote = getScheduledNote();
-  // Per-call no-confirm: the coordinator can pass no_confirm:true when the
-  // user explicitly authorized the action in the triggering message
-  // ("just send it", "no need to confirm"). Composes with scheduledNote
-  // when both apply.
-  const noConfirmNote = no_confirm
-    ? `[DELEGATION OVERRIDE — NO CONFIRM] The coordinator has authorized this delegation as a direct send. The user's original message in the coordinator chat IS the confirmation. Do NOT show a draft, do NOT ask "are you sure?", do NOT wait for "send it" — call the action tool directly with reasonable defaults for anything unspecified, then report what you did. This overrides any "show draft and wait for approval" rule from your role's prompt for this single delegation only.`
-    : null;
+  // Composes with scheduledNote when both apply.
   const combinedNote = [scheduledNote, noConfirmNote].filter(Boolean).join('\n\n') || null;
   const { matchToolPlan } = await import('../../lib/tool-plan-memory.mjs');
   const rememberedToolPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: task });

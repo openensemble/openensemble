@@ -461,7 +461,7 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
-const SELECTED_PLAN_CONTROL_TOOLS = new Set(['ask_agent', 'request_tools']);
+const SELECTED_PLAN_CONTROL_TOOLS = new Set(['request_tools']);
 
 function sanitizeToolPlanForStream(plan) {
   if (!plan || typeof plan !== 'object') return null;
@@ -495,9 +495,11 @@ function applyUserToolPlan(agent, plan) {
     return { mode: 'none', before, after: 0, selected: [], fullTools };
   }
   const selected = new Set(clean.selectedTools);
+  const controlTools = new Set(SELECTED_PLAN_CONTROL_TOOLS);
+  if (agent.skillCategory === 'coordinator' || selected.size === 0) controlTools.add('ask_agent');
   agent.tools = agent.tools.filter(t => {
     const name = t.function?.name;
-    return selected.has(name) || SELECTED_PLAN_CONTROL_TOOLS.has(name);
+    return selected.has(name) || controlTools.has(name);
   });
   return { mode: 'selected', before, after: agent.tools.length, selected: clean.selectedTools, fullTools };
 }
@@ -1207,7 +1209,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   let { providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, working);
 
   const _llmStart = Date.now();
-  const shouldBufferForRecovery = Boolean(_routerStore && agent.skillCategory === 'coordinator');
+  const shouldBufferForRecovery = Boolean(_routerStore);
   let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
   let recoveredMissingTools = false;
   if (!errored && shouldBufferForRecovery && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
@@ -1225,14 +1227,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         alreadyIncludedSkills: _routerStore.initiallyIncludedSkills,
       });
       for (const s of addedSkills) _routerStore.addedSkills.add(s);
-      if (addedToolNames.length) {
+      const availableActionToolNames = (agent.tools ?? [])
+        .map(t => t.function?.name)
+        .filter(n => n && !SELECTED_PLAN_CONTROL_TOOLS.has(n) && n !== 'ask_agent');
+      if (addedToolNames.length || availableActionToolNames.length) {
         recoveredMissingTools = true;
-        recomposeSystemPromptForCurrentTools();
+        if (addedToolNames.length) recomposeSystemPromptForCurrentTools();
+        const retryToolNames = addedToolNames.length ? addedToolNames : availableActionToolNames.slice(0, 12);
         log.info('chat', 'tool-miss recovery retry', {
-          userId, agentId: agent.id, skills: addedSkills, tools: addedToolNames,
+          userId, agentId: agent.id, skills: addedSkills.length ? addedSkills : [...missingSkills], tools: retryToolNames,
           originalReply: String(assistantContent || '').slice(0, 240),
         });
-        const retryNote = `\n\n[System note: Your prior draft said you lacked a tool. The server has now loaded these missing tool groups for this same user request: ${addedSkills.join(', ')}. Use the tools now if needed; do not repeat the missing-tool apology unless the loaded tool actually fails.]`;
+        const retryNote = `\n\n[System note: Your prior draft said you lacked a tool. The server has verified these tools are available for this same user request: ${retryToolNames.join(', ')}. Use the appropriate tool now if needed; do not repeat the missing-tool apology unless the tool call actually fails.]`;
         const recoveryTurn = Array.isArray(currentUserTurn.content)
           ? {
               ...currentUserTurn,
