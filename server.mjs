@@ -870,6 +870,12 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // Runs async; chat works without it (just falls through to regex/coordinator).
   loadIntentEmbeddings().catch(e => log.warn?.('embed-router', 'load failed', { err: e.message }));
 
+  // Tool-level router — warm per-tool name+description embeddings so the first
+  // turn doesn't pay the embed cost. Best-effort; lazily filled otherwise.
+  import('./lib/tool-router.mjs')
+    .then(m => m.warmToolEmbeddings())
+    .catch(e => log.warn?.('tool-router', 'warm failed', { err: e.message }));
+
   // Watcher supervisor: per-user polling for long-running async work
   // (video gen, training, price alerts, etc.). Distinct from scheduler
   // (one-shot/cron) — see scheduler/watchers.mjs for the design.

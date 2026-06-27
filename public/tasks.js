@@ -25,7 +25,18 @@ function _parseCronDow(spec) {
 }
 // Mirror of scheduler.mjs:formatTaskCadence — kept in sync so the UI doesn't
 // flatten "Mon/Wed/Fri" reminders to "daily".
+function _formatIntervalText(ms) {
+  const totalMin = Math.max(1, Math.round(Number(ms) / 60000));
+  if (totalMin < 60) return `every ${totalMin} min`;
+  if (totalMin % 60 === 0) {
+    const h = totalMin / 60;
+    if (h % 24 === 0) { const d = h / 24; return `every ${d} day${d > 1 ? 's' : ''}`; }
+    return `every ${h} hour${h > 1 ? 's' : ''}`;
+  }
+  return `every ${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+}
 function formatTaskCadenceText(t) {
+  if (t.repeat === 'interval') return _formatIntervalText(t.intervalMs);
   const time = t.time || '?';
   const dow = t.dow;
   if (dow && dow !== '*') {
@@ -263,6 +274,8 @@ function renderTaskRow(t) {
   const agentOptions = agents.map(a => `<option value="${escHtml(a.id)}"${a.id===t.agent?' selected':''}>${escHtml(a.emoji||'')} ${escHtml(a.name)}</option>`).join('');
   const timeField = t.repeat === 'once'
     ? `<label>When<input type="datetime-local" id="te-dt-${escHtml(t.id)}" value="${_toLocalInputValue(t.datetime)}"></label>`
+    : t.repeat === 'interval'
+    ? `<label>Run every (minutes)<input type="number" min="1" step="1" id="te-iv-${escHtml(t.id)}" value="${escHtml(String(Math.max(1, Math.round((t.intervalMs||3600000)/60000))))}"></label>`
     : `<label>${escHtml(formatTaskCadenceLabel(t))}<input type="time" id="te-tm-${escHtml(t.id)}" value="${escHtml(t.time||'09:00')}"></label>`;
   const agentBlock = isReminder ? '' : `
       <label>Runner
@@ -284,6 +297,7 @@ function renderTaskRow(t) {
       ${lastOutput}
       <div class="task-edit-actions">
         <button class="btn-task-save" data-action="saveTaskEdits" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>Save</button>
+        ${isReminder ? '' : `<button class="btn-task-run" data-action="runTaskNow" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' title="Run this task once right now to test it">▶ Run now</button>`}
         <button class="btn-task-cancel" data-action="toggleTaskExpanded" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>Cancel</button>
       </div>
     </div>`;
@@ -367,6 +381,14 @@ async function saveTaskEdits(id) {
       const iso = d.toISOString();
       if (iso !== t.datetime) patch.datetime = iso;
     }
+  } else if (t.repeat === 'interval') {
+    const iv = document.getElementById(`te-iv-${id}`);
+    if (iv && iv.value) {
+      const mins = Math.round(Number(iv.value));
+      if (!Number.isFinite(mins) || mins < 1) { alert('Interval must be at least 1 minute.'); return; }
+      const ms = mins * 60000;
+      if (ms !== t.intervalMs) patch.intervalMs = ms;
+    }
   } else {
     const tm = document.getElementById(`te-tm-${id}`);
     if (tm && /^\d{1,2}:\d{2}$/.test(tm.value) && tm.value !== t.time) patch.time = tm.value;
@@ -438,6 +460,25 @@ async function deleteTask(id) {
   if (!confirm('Delete this task?')) return;
   await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
   await loadTaskList();
+}
+
+// Run a task once, right now, to test it. The server fires it out of band
+// (doesn't disturb the schedule, delete a one-shot, or count failures). The
+// run streams into the agent's chat session like a scheduled fire.
+async function runTaskNow(id) {
+  const btn = document.querySelector(`.btn-task-run[data-args*='"${id}"']`);
+  const restore = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = '▶ Running…'; }
+  try {
+    const r = await fetch(`/api/tasks/${id}/run`, { method: 'POST' });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
+    if (btn) btn.textContent = '✓ Started — check chat';
+    // Give the run a moment, then refresh so the "Last run" line updates.
+    setTimeout(() => loadTaskList(), 2500);
+  } catch (e) {
+    alert(`Run failed: ${e.message}`);
+    if (btn) { btn.disabled = false; btn.textContent = restore; }
+  }
 }
 
 function openTasksDrawer(openIt = true) {

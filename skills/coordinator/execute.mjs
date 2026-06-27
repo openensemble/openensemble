@@ -38,8 +38,9 @@ export default async function* execute(name, args, userId, agentId) {
     const { expandToolsByReason } = await import('../../lib/tool-router.mjs');
     const ctx = getToolRouterContext();
     if (!ctx) {
-      // Not in a coordinator turn — this tool is a no-op outside that context.
-      yield { type: 'result', text: 'request_tools is only available during a coordinator turn.' };
+      // No per-turn routing context — nothing was trimmed, so there's nothing
+      // to recover. The full toolset is already available this turn.
+      yield { type: 'result', text: 'request_tools has nothing to add — the full toolset is already available this turn.' };
       return;
     }
     const reason = typeof args?.reason === 'string' ? args.reason : null;

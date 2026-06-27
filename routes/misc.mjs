@@ -7,7 +7,7 @@ import path from 'path';
 import {
   requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole, isPrivileged,
   loadUsers, loadNotes, saveNotes, withLock, NOTES_PATH, readBody, safeId, BASE_DIR, getUserDir,
-  broadcastToUsers, getUserSessions, revokeSessionByPrefix,
+  broadcastToUsers, getUserSessions, revokeSessionByPrefix, getAgentsForUser,
 } from './_helpers.mjs';
 
 const MESSAGES_PATH = path.join(BASE_DIR, 'messages.json');
@@ -652,7 +652,7 @@ export async function handle(req, res) {
       // Any field that affects firing needs the timer re-registered. For a
       // once-task that already ran, revising the datetime should also reopen
       // it — flip enabled and wipe lastRun unless the caller specified them.
-      const touchesSchedule = 'datetime' in patch || 'time' in patch || 'cron' in patch;
+      const touchesSchedule = 'datetime' in patch || 'time' in patch || 'cron' in patch || 'intervalMs' in patch;
       if (touchesSchedule && t.repeat === 'once' && t.lastRun && !('enabled' in patch)) {
         await updateTask(taskMatch[1], { enabled: true, lastRun: null });
       }
@@ -661,6 +661,54 @@ export async function handle(req, res) {
         if (updated) scheduleNewTask(updated);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
+    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    return true;
+  }
+
+  // ── POST /api/tasks/:id/run — run a task NOW (manual test fire) ────────────
+  // Manual flag: does NOT delete a one-shot or touch the consecutive-failure
+  // counter, so testing a task can't disable or consume it. Streams to chat.
+  const taskRunMatch = req.url?.match(/^\/api\/tasks\/([^/?]+)\/run$/);
+  if (taskRunMatch && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const t = findTaskById(decodeURIComponent(taskRunMatch[1]), authId);
+    if (!t) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    try {
+      const { runTaskNow } = await import('../scheduler.mjs');
+      // Fire-and-forget: the run streams into the agent's session over WS like a
+      // scheduled fire. Respond immediately so the UI button doesn't hang on a
+      // long agent turn.
+      runTaskNow(t.id, authId).catch(e => console.warn('[tasks] manual run failed:', e?.message || e));
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, started: true, taskId: t.id }));
+    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    return true;
+  }
+
+  // ── POST /api/tool-routing/preview — what the router would send ───────────
+  // Inspect the per-turn tool trim for an agent + a sample message WITHOUT
+  // running a turn. Used to verify/tune the tool-level router during testing.
+  if (req.url === '/api/tool-routing/preview' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      const text = String(body?.text ?? '').slice(0, 2000);
+      const agentId = String(body?.agentId ?? '');
+      const agent = getAgentsForUser(authId).find(a => a.id === agentId);
+      if (!agent) { res.writeHead(404); res.end(JSON.stringify({ error: `Unknown agent "${agentId}"` })); return true; }
+      const { trimToolsForTurn } = await import('../lib/tool-router.mjs');
+      const trim = await trimToolsForTurn({ agent: { ...agent }, userText: text, userId: authId });
+      const keptNames = (trim.trimmedTools ?? []).map(t => t.function?.name).filter(Boolean);
+      const fullNames = (trim.fullTools ?? []).map(t => t.function?.name).filter(Boolean);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        agentId, category: agent.skillCategory ?? null,
+        fullCount: fullNames.length, keptCount: keptNames.length,
+        kept: keptNames,
+        dropped: fullNames.filter(n => !keptNames.includes(n)),
+        decisions: trim.toolDecisions ?? null,
+        notes: trim.routerNotes ?? [],
+      }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
     return true;
   }

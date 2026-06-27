@@ -736,7 +736,7 @@ async function execRemoveWatchItem(args, userId) {
   return `No item with id "${itemId}" in any ${kind} collection.`;
 }
 
-async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once', silent = false }, userId, agentId) {
+async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once', interval_minutes, silent = false }, userId, agentId) {
   if (!userId) return 'Error: no user context.';
   if (!label || typeof label !== 'string') return 'Error: label is required.';
   if (!prompt || typeof prompt !== 'string') return 'Error: prompt is required.';
@@ -748,9 +748,22 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
   const rawAgent = unscopeAgentId(agentId, userId);
   if (!rawAgent) return 'Error: no agent context — cannot schedule.';
 
-  const { addTask, scheduleNewTask } = await import('../../scheduler.mjs');
+  const { addTask, scheduleNewTask, formatTaskCadence } = await import('../../scheduler.mjs');
   const base = { label: label.trim(), prompt: prompt.trim(), ownerId: userId, agent: rawAgent, ...(silent && { silent: true }) };
   const silentTag = silent ? ' (silent — no chat output)' : '';
+
+  // Fixed-cadence interval task (every N minutes/hours). Also accept a bare
+  // interval_minutes without repeat='interval' — that's an unambiguous signal.
+  if (repeat === 'interval' || (repeat === 'once' && interval_minutes != null)) {
+    const mins = Number(interval_minutes);
+    if (!Number.isFinite(mins) || mins < 1) {
+      return 'Error: interval task needs interval_minutes >= 1 (e.g. 60 for hourly, 5 for every 5 minutes, 1440 for daily).';
+    }
+    const intervalMs = Math.round(mins * 60_000);
+    const task = await addTask({ ...base, repeat: 'interval', intervalMs });
+    scheduleNewTask(task);
+    return `Task "${task.label}" scheduled ${formatTaskCadence(task)} via agent ${rawAgent}${silentTag}. id=${task.id}`;
+  }
 
   if (repeat === 'daily') {
     if (!time || !/^\d{1,2}:\d{2}$/.test(time)) return 'Error: daily task needs a time in HH:MM 24-hour format.';

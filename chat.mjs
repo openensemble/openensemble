@@ -541,10 +541,21 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       selected: userToolPlanResult.selected,
     });
   }
-  if (!userToolPlanResult && agent.skillCategory === 'coordinator' && Array.isArray(agent.tools) && agent.tools.length > 0) {
+  // Per-turn tool routing runs for EVERY agent now — coordinators get the
+  // skill-level gate + the tool-level pass; specialists get the tool-level pass
+  // on their (already skill-scoped) set so e.g. an email agent asked to
+  // "summarize" doesn't ship its labeling tools. trimToolsForTurn is a no-op
+  // when the tool-level flag is off and the agent isn't a coordinator, so this
+  // is safe to call unconditionally.
+  if (!userToolPlanResult && Array.isArray(agent.tools) && agent.tools.length > 0) {
     try {
       const trim = await trimToolsForTurn({ agent, userText, userId });
+      const changed = trim.trimmedTools.length !== trim.fullTools.length;
       agent.tools = trim.trimmedTools;
+      // Stash the pre-trim set so request_tools can recover dropped tools — for
+      // every agent, not just coordinators (specialists are trimmed too, so
+      // they need the same recovery net). Only meaningful when the agent
+      // actually carries request_tools, but harmless otherwise.
       _routerStore = {
         agent, fullTools: trim.fullTools,
         initiallyIncludedSkills: trim.initiallyIncludedSkills,
@@ -552,13 +563,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       };
       toolRouterContext.enterWith(_routerStore);
       // Recompose the SPA portion of the system prompt against the trimmed
-      // tool set. Without this, SPAs for skills whose tools just got dropped
-      // (e.g. the ~10 KB profiles SPA) keep shipping. Three-tier path:
-      // the recomposed SPAs go in the context tier so the stable tier stays
-      // byte-identical across turns and Anthropic's cache marker on stable
-      // continues to hit. Legacy path: splice into the shell as before.
-      recomposeAgentPromptForTools(agent);
-      log.info('chat', 'tool-router trim', { userId, agentId: agent.id, kept: trim.trimmedTools.length, full: trim.fullTools.length, notes: trim.routerNotes, spChars: agent.systemPrompt.length });
+      // tool set only when the set actually changed — avoids needless work on
+      // specialist turns the router left untouched. Three-tier path keeps the
+      // stable tier byte-identical so Anthropic's cache marker keeps hitting.
+      if (changed) recomposeAgentPromptForTools(agent);
+      log.info('chat', 'tool-router trim', { userId, agentId: agent.id, category: agent.skillCategory, kept: trim.trimmedTools.length, full: trim.fullTools.length, notes: trim.routerNotes, spChars: agent.systemPrompt.length });
     } catch (e) {
       console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message);
     }

@@ -145,6 +145,39 @@ function parseTime(str) {
   return { hour: h, minute: m };
 }
 
+// Floor for interval tasks. Each fire wakes an agent/LLM, so a 1-minute minimum
+// keeps a runaway "every few seconds" request from hammering the provider.
+export const MIN_INTERVAL_MS = 60_000;
+
+// Parse "every N minutes/hours/days", "hourly", "every hour", "every half hour"
+// from free text → interval in ms (clamped to MIN_INTERVAL_MS), or null.
+// Deliberately does NOT match bare "every day" / "daily" / "every morning" —
+// those are clock-anchored daily tasks handled by the HH:MM path, not intervals.
+export function parseIntervalPhrase(text) {
+  const t = String(text || '').toLowerCase();
+  let ms = null, m;
+  if ((m = t.match(/\bevery\s+(\d+)\s*(?:minutes?|mins?)\b/)))      ms = Number(m[1]) * 60_000;
+  else if (/\bevery\s+(?:a\s+)?minute\b/.test(t))                    ms = 60_000;
+  else if ((m = t.match(/\bevery\s+(\d+)\s*(?:hours?|hrs?)\b/)))      ms = Number(m[1]) * 3_600_000;
+  else if (/\bevery\s+half\s+(?:an?\s+)?hour\b/.test(t))             ms = 30 * 60_000;
+  else if (/\b(?:hourly|every\s+(?:an?\s+)?hour)\b/.test(t))         ms = 3_600_000;
+  else if ((m = t.match(/\bevery\s+(\d+)\s*days?\b/)))               ms = Number(m[1]) * 86_400_000;
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
+  return Math.max(ms, MIN_INTERVAL_MS);
+}
+
+// Human-readable interval, e.g. "5 min", "1 hour", "2 hours", "1h 30m", "2 days".
+function formatInterval(ms) {
+  const totalMin = Math.max(1, Math.round(Number(ms) / 60_000));
+  if (totalMin < 60) return `${totalMin} min`;
+  if (totalMin % 60 === 0) {
+    const h = totalMin / 60;
+    if (h % 24 === 0) { const d = h / 24; return `${d} day${d > 1 ? 's' : ''}`; }
+    return `${h} hour${h > 1 ? 's' : ''}`;
+  }
+  return `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+}
+
 // Render a task's recurrence cadence for human display. Knows about the dow
 // field so multi-weekday schedules render as "Mon/Wed/Fri" instead of being
 // misreported as "daily" — same misread that surfaced the Take My Vitamins
@@ -155,6 +188,9 @@ export function formatTaskCadence(task) {
   if (!task) return '';
   if (task.repeat === 'once') {
     return task.datetime ? new Date(task.datetime).toLocaleString() : '?';
+  }
+  if (task.repeat === 'interval') {
+    return `every ${formatInterval(task.intervalMs)}`;
   }
   const time = task.time || '?';
   const dow = task.dow;
@@ -238,13 +274,17 @@ export function registerBuiltin(name, fn) {
 }
 
 // Run a task: builtin handler OR agent chat stream
-async function runTask(task, broadcast) {
-  console.log(`[scheduler] Running task "${task.label}"`);
+async function runTask(task, broadcast, opts = {}) {
+  // manual: a user pressed "Run now". Bypass day-of-week + access-curfew gating
+  // (they asked for it explicitly), never delete a one-shot, and don't touch the
+  // consecutive-failure streak — a test fire must not consume or disable a task.
+  const manual = opts.manual === true;
+  console.log(`[scheduler] Running task "${task.label}"${manual ? ' (manual)' : ''}`);
   const startedAt = Date.now();
-  log.info('scheduler', 'task start', { taskId: task.id, label: task.label, ownerId: task.ownerId, type: task.type });
+  log.info('scheduler', 'task start', { taskId: task.id, label: task.label, ownerId: task.ownerId, type: task.type, manual });
 
   try {
-    if (task.repeat !== 'once') {
+    if (!manual && task.repeat !== 'once') {
       const day = new Date().getDay();
       const allowed = parseCronDow(task.dow);
       if (allowed && !allowed.has(day)) {
@@ -271,7 +311,7 @@ async function runTask(task, broadcast) {
     // Honor accessSchedule: a task scheduled during allowed hours that fires during
     // blocked hours is skipped. Daily tasks will try again at the next occurrence;
     // one-time tasks are logged and not rescheduled.
-    if (task.ownerId && isUserTimeBlocked(task.ownerId)) {
+    if (!manual && task.ownerId && isUserTimeBlocked(task.ownerId)) {
       console.log(`[scheduler] Task "${task.label}" skipped — owner ${task.ownerId} is in scheduled blocked hours.`);
       log.info('scheduler', 'task skipped (time-blocked)', { taskId: task.id, label: task.label, ownerId: task.ownerId });
       // One-shot tasks vanish after firing (or being skipped); daily tasks
@@ -291,7 +331,7 @@ async function runTask(task, broadcast) {
       const output = await handler(task);
       console.log(`[scheduler] Task "${task.label}" complete: ${output}`);
       log.info('scheduler', 'builtin task complete', { taskId: task.id, label: task.label, handler: task.handler, durationMs: Date.now() - startedAt });
-      if (task.repeat === 'once') await removeTask(task.id);
+      if (task.repeat === 'once' && !manual) await removeTask(task.id);
       else await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: output });
       if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent ?? 'system' });
       return;
@@ -389,7 +429,14 @@ async function runTask(task, broadcast) {
     // One-shot tasks vanish after firing; recurring ones stamp lastRun even
     // on failure (with lastError) so the tasks drawer shows when it ran and
     // why it failed instead of looking like it never ran today.
-    if (task.repeat === 'once') {
+    if (manual) {
+      // Test fire: never delete or disable. Record the outcome for the drawer
+      // but leave the schedule + failure streak exactly as they were.
+      const patch = { lastRun: new Date().toISOString() };
+      if (succeeded) { patch.lastError = null; patch.lastOutput = (assistantContent || '').trim().slice(0, 280); }
+      else { patch.lastError = lastError || 'unknown'; }
+      await updateTask(task.id, patch);
+    } else if (task.repeat === 'once') {
       await removeTask(task.id);
     } else {
       const patch = { lastRun: new Date().toISOString() };
@@ -458,6 +505,17 @@ function scheduleTask(task, broadcast) {
     if (!task.datetime) return;
     delay = msUntilDatetime(task.datetime);
     label = new Date(task.datetime).toLocaleString();
+  } else if (task.repeat === 'interval') {
+    // Fixed-cadence tasks: fire one interval from now, then re-arm after each
+    // run (handled by the reschedule below, same as daily). A missing/invalid
+    // intervalMs means a malformed task — skip rather than spin every minute.
+    const raw = Number(task.intervalMs);
+    if (!Number.isFinite(raw) || raw <= 0) {
+      console.warn(`[scheduler] Task "${task.label}" has invalid intervalMs=${task.intervalMs}; not scheduled.`);
+      return;
+    }
+    delay = Math.max(raw, MIN_INTERVAL_MS);
+    label = `every ${formatInterval(delay)}`;
   } else {
     const { hour, minute } = parseTime(task.time);
     delay = msUntilNext(hour, minute, task.timezone ?? null);
@@ -513,4 +571,14 @@ export function stopScheduler() {
 // Schedule a newly-added task immediately (called after addTask)
 export function scheduleNewTask(task) {
   scheduleTask(task, _broadcast);
+}
+
+// Run a task NOW, out of band, without disturbing its schedule. Used by the
+// "Run now" button to test a task immediately. Bypasses day/curfew gating,
+// never deletes a one-shot, and never touches the failure streak (see runTask's
+// `manual` flag). Returns the runTask promise so callers can await completion.
+export async function runTaskNow(id, ownerId) {
+  const task = findTaskById(id, ownerId);
+  if (!task) throw new Error(`Task ${id} not found`);
+  return runTask(task, _broadcast, { manual: true });
 }
