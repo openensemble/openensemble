@@ -128,13 +128,115 @@
     {
       "type": "function",
       "function": {
+        "name": "list_roles",
+        "description": "List all roles AND custom skills, with the agent each is currently assigned to. Roles are broad responsibilities (Email, Coder, etc.); custom skills (YouTube Downloader, etc.) are user-installed capabilities that belong to exactly one agent. Call this whenever the user asks who owns/handles a specific capability — do NOT infer ownership from a role's name (e.g. don't assume 'YouTube Downloader' belongs to the Coder because both touch software; check the custom-skills section).",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_role",
+        "description": "Create a new role that can be assigned to an agent. IMPORTANT: Before creating a role, ALWAYS call list_roles first to check if a role with that name already exists. If it does, use assign_role_to_agent instead — do NOT create a duplicate. WORKFLOW for new roles — you MUST follow these steps in order: (1) Call list_roles to verify the role doesn't already exist. (2) Draft a system prompt for the role based on the user's description. (3) Present the draft to the user and ask if they want any changes. (4) Only after the user explicitly approves the system prompt, call this tool with confirmed=true. Never call with confirmed=false or omit it — the backend will reject it and remind you to show the draft first. Requires admin privileges.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Role name, e.g. 'Image Generator'"
+            },
+            "icon": {
+              "type": "string",
+              "description": "Single emoji icon for the role"
+            },
+            "description": {
+              "type": "string",
+              "description": "Short one-line description of what this role handles (e.g. 'Control smart-home devices via Home Assistant', 'Manage household grocery list'). The coordinator reads this to decide when to route requests to this role's agent — write it so a reader can tell at a glance what kinds of requests belong here."
+            },
+            "responsibilities": {
+              "type": "string",
+              "description": "The full system prompt injected when this role is active — must be the exact text the user approved"
+            },
+            "confirmed": {
+              "type": "boolean",
+              "description": "Set true ONLY after you have shown the user the draft system prompt and they have explicitly approved it"
+            }
+          },
+          "required": [
+            "name",
+            "description",
+            "responsibilities",
+            "confirmed"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "delete_role",
+        "description": "Permanently delete a custom role and remove it from any agent it was assigned to. Only custom roles can be deleted — built-in roles (coder, email, expenses, gcal) cannot. Requires admin privileges.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Name of the role to delete, e.g. 'Image Generator'"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "assign_role_to_agent",
+        "description": "Assign a role to a specific agent, delegating that responsibility to them. Use when the user says things like 'let my helper handle image generation' or 'assign the coder role to my coding agent'. Requires admin privileges.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "role_name": {
+              "type": "string",
+              "description": "Name of the role to assign, e.g. 'Coder' or 'Image Generator'"
+            },
+            "agent_name": {
+              "type": "string",
+              "description": "Display name of the agent to assign the role to"
+            }
+          },
+          "required": [
+            "role_name",
+            "agent_name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
         "name": "request_tools",
         "description": "Expand your tool surface mid-turn. Your initial tool list this turn was trimmed to only the tools the router predicted you'd need — this is normal and saves tokens. If you find you need a tool that isn't currently available (e.g. you wanted to call a Home Assistant or email or calendar tool but it isn't here), call this with a short description of what you're trying to do; the router will add the matching skill's tools to your toolset on the very next iteration. Prefer this over `ask_agent` only when a specialist for the task already exists — otherwise delegating is better. The cost is one extra LLM round-trip, so don't call speculatively — call only when you tried and the tool you wanted is missing.",
         "parameters": {
           "type": "object",
           "properties": {
-            "reason": { "type": "string", "description": "Short natural-language description of what you're trying to do (e.g. 'I need to check Home Assistant device states', 'I need to read this user's calendar'). The router embeds this and matches it against on-demand skill examples." },
-            "groups": { "type": "array", "items": { "type": "string" }, "description": "Optional explicit list of skill IDs to load if you know them. Valid values: 'email', 'gcal', 'expenses', 'coder', 'nodes', 'deep_research', 'skill-builder', 'role_tutor', 'image_generator', 'role_video_generator', 'role_home_assistant', 'oe-admin', 'profiles', 'tasks', 'routines'. Either reason or groups (or both) are required." }
+            "reason": {
+              "type": "string",
+              "description": "Short natural-language description of what you're trying to do (e.g. 'I need to check Home Assistant device states', 'I need to read this user's calendar'). The router embeds this and matches it against on-demand skill examples."
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional explicit list of skill IDs to load if you know them. Valid values: 'email', 'gcal', 'expenses', 'coder', 'nodes', 'deep_research', 'skill-builder', 'role_tutor', 'image_generator', 'role_video_generator', 'role_home_assistant', 'oe-admin', 'profiles', 'tasks', 'routines'. Either reason or groups (or both) are required."
+            }
           }
         }
       }
@@ -144,7 +246,11 @@
       "function": {
         "name": "oe_describe_platform",
         "description": "Return platform-knowledge details about OpenEnsemble (avatars, accounts, agents/roles, configuration). Call this ONLY when the user asks about how the platform itself works — what file types avatars accept, how child accounts work, how roles attach to agents, etc. Returns a static knowledge document; no parameters required.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     }
   ]

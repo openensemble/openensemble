@@ -2,6 +2,10 @@
 // `oe_describe_platform`. Pulled out of the coordinator SPA so it doesn't
 // ship on every turn — most turns don't need this content. Keep it factual
 // and stable; refresh when the platform's capabilities change shape.
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs';
+import path from 'path';
+import { CFG_PATH, userSkillsDir } from '../../lib/paths.mjs';
+
 const PLATFORM_KNOWLEDGE = `# OpenEnsemble platform
 
 OpenEnsemble is a self-hosted multi-user AI assistant platform.
@@ -96,6 +100,168 @@ export default async function* execute(name, args, userId, agentId) {
     broadcastAgentList();
     const roleNote = roleId ? ` and assigned to the "${roleId}" role` : '';
     yield { type: 'result', text: `Agent "${agent.name}" (${agent.emoji}) created successfully${roleNote}.` };
+    return;
+  }
+
+  if (name === 'list_roles') {
+    const { listRoles, getRoleAssignments } = await import('../../roles.mjs');
+    const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+    const assignments = getRoleAssignments(userId);
+    const allAgents = getAgentsForUser(userId);
+    const all = listRoles(userId);
+    const roles = all.filter(s => s.service);
+    const customSkills = all.filter(s =>
+      !s.service && s.category !== 'delegate' && !s.hidden && s.userScope === userId
+    );
+    const fmtOwner = (skillId) => {
+      const ownerId = assignments[skillId];
+      if (!ownerId) return 'unassigned';
+      const agent = allAgents.find(a => a.id === ownerId);
+      return agent ? `${agent.emoji ?? ''} ${agent.name}`.trim() : ownerId;
+    };
+    const lines = [];
+    if (roles.length) {
+      lines.push('## Roles');
+      for (const r of roles) {
+        lines.push(`• ${r.icon ?? ''} ${r.name} — ${fmtOwner(r.id)}${r.description ? ` (${r.description})` : ''}`);
+      }
+    }
+    if (customSkills.length) {
+      if (lines.length) lines.push('');
+      lines.push('## Custom skills (one owner each)');
+      for (const s of customSkills) {
+        lines.push(`• ${s.icon ?? ''} ${s.name} (id: ${s.id}) — ${fmtOwner(s.id)}${s.description ? ` (${s.description})` : ''}`);
+      }
+    }
+    yield { type: 'result', text: lines.length ? lines.join('\n') : 'No roles or custom skills defined yet.' };
+    return;
+  }
+
+  if (name === 'create_role') {
+    const { getUser } = await import('../../routes/_helpers.mjs');
+    const user = getUser(userId);
+    if (!user || (user.role !== 'admin' && user.role !== 'owner')) {
+      yield { type: 'result', text: 'Creating roles requires admin privileges.' };
+      return;
+    }
+    const { name: roleName, icon, description, responsibilities, confirmed } = args;
+    if (!roleName?.trim() || !responsibilities?.trim()) {
+      yield { type: 'result', text: 'name and responsibilities are required.' };
+      return;
+    }
+    if (!description?.trim()) {
+      yield { type: 'result', text: 'description is required — the coordinator uses it to decide when to delegate to this role. Write one short sentence describing what kinds of requests this role handles.' };
+      return;
+    }
+    if (!confirmed) {
+      yield { type: 'result', text: 'You must present the draft system prompt to the user and get their explicit approval before creating the role. Show them the responsibilities text and ask if they want any changes, then call create_role again with confirmed=true.' };
+      return;
+    }
+    const id = 'role_' + roleName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const { getRoleManifest, addRoleManifest } = await import('../../roles.mjs');
+    if (getRoleManifest(id, userId) || getRoleManifest(id)) {
+      yield { type: 'result', text: `A role named "${roleName}" already exists. Use assign_role_to_agent to assign it to an agent instead of creating a new one.` };
+      return;
+    }
+    const manifest = {
+      id, name: roleName.trim(), icon: icon?.trim() || '🎯',
+      description: description.trim(), category: 'custom', service: true, custom: true,
+      systemPromptAddition: responsibilities.trim(),
+      tools: [], enabled_by_default: false,
+    };
+    const skillDir = path.join(userSkillsDir(userId), id);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(path.join(skillDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    addRoleManifest(manifest, userId);
+    yield { type: 'result', text: `Role "${roleName.trim()}" created. You can assign it to an agent by saying "assign ${roleName.trim()} to [agent name]".` };
+    return;
+  }
+
+  if (name === 'delete_role') {
+    const { getUser } = await import('../../routes/_helpers.mjs');
+    const user = getUser(userId);
+    if (!user || (user.role !== 'admin' && user.role !== 'owner')) {
+      yield { type: 'result', text: 'Deleting roles requires admin privileges.' };
+      return;
+    }
+    const { listRoles, removeRoleManifest } = await import('../../roles.mjs');
+    const roleName = args.name?.trim().toLowerCase();
+    const role = listRoles(userId).find(s => s.service && s.name.toLowerCase() === roleName);
+    if (!role) {
+      yield { type: 'result', text: `No role named "${args.name}" found.` };
+      return;
+    }
+    if (!role.custom) {
+      yield { type: 'result', text: `"${role.name}" is a built-in role and cannot be deleted.` };
+      return;
+    }
+    const userRoot = userSkillsDir(userId);
+    const skillDir = path.join(userRoot, role.id);
+    const rel = path.relative(userRoot, skillDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      yield { type: 'result', text: `Refusing to delete role "${role.name}" — resolved path escapes the user skills directory.` };
+      return;
+    }
+    rmSync(skillDir, { recursive: true, force: true });
+    removeRoleManifest(role.id, userId);
+    try {
+      const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+      if (cfg.skillAssignments) {
+        delete cfg.skillAssignments[role.id];
+        writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2));
+      }
+    } catch {}
+    yield { type: 'result', text: `Role "${role.name}" has been deleted.` };
+    return;
+  }
+
+  if (name === 'assign_role_to_agent') {
+    const { getUser } = await import('../../routes/_helpers.mjs');
+    const user = getUser(userId);
+    if (!user) {
+      yield { type: 'result', text: 'User not found.' };
+      return;
+    }
+    const isPrivileged = user.role === 'admin' || user.role === 'owner';
+    const { listRoles, getRoleAssignments, setRoleAssignment } = await import('../../roles.mjs');
+    const { getAgentsForUser, loadCustomAgents } = await import('../../routes/_helpers.mjs');
+    const roleName  = args.role_name?.trim().toLowerCase();
+    const agentName = args.agent_name?.trim().toLowerCase();
+    const role = listRoles(userId).find(s => s.service && s.name.toLowerCase() === roleName);
+    if (!role) {
+      yield { type: 'result', text: `No role named "${args.role_name}" found. Use list_roles to see available roles.` };
+      return;
+    }
+    if (!isPrivileged) {
+      const userSkills = user.skills ?? [];
+      if (!userSkills.includes(role.id)) {
+        yield { type: 'result', text: `You don't have permission to assign the "${role.name}" role.` };
+        return;
+      }
+    }
+    const allAgents = getAgentsForUser(userId);
+    const agent = allAgents.find(a => a.name.toLowerCase() === agentName);
+    if (!agent) {
+      yield { type: 'result', text: `No agent named "${args.agent_name}" found.` };
+      return;
+    }
+    if (!isPrivileged) {
+      const ownedAgent = loadCustomAgents().find(a => a.id === agent.id && a.ownerId === userId);
+      if (!ownedAgent) {
+        yield { type: 'result', text: 'You can only assign roles to agents you own.' };
+        return;
+      }
+    }
+    const prev = getRoleAssignments(userId)[role.id];
+    setRoleAssignment(role.id, agent.id, userId);
+    if (user.skills && !user.skills.includes(role.id)) {
+      user.skills.push(role.id);
+      const { saveUser } = await import('../../routes/_helpers.mjs');
+      saveUser(user);
+    }
+    const prevAgent = prev ? allAgents.find(a => a.id === prev) : null;
+    const from = prevAgent ? ` (previously ${prevAgent.name})` : '';
+    yield { type: 'result', text: `${role.icon ?? ''} ${role.name} is now assigned to ${agent.emoji ?? ''} ${agent.name}${from}.` };
     return;
   }
 

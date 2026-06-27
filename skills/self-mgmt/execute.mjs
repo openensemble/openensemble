@@ -1,8 +1,8 @@
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import path from 'path';
 import {
-  USERS_DIR, SKILLS_DIR, CFG_PATH,
-  userSkillsDir, userRoleRulesDir, userRoleRulesPath,
+  USERS_DIR, SKILLS_DIR,
+  userRoleRulesDir, userRoleRulesPath,
 } from '../../lib/paths.mjs';
 
 function getUserById(userId) {
@@ -283,140 +283,6 @@ export default async function execute(name, args, userId, agentId) {
     const rules = loadRules(userId, skillId);
     if (rules.length === 0) return `No custom rules set for ${manifest.name}.`;
     return `Rules for ${manifest.name}:\n${rules.map((r, i) => `[${i}] ${r}`).join('\n')}`;
-  }
-
-  if (name === 'list_roles') {
-    const { listRoles, getRoleAssignments } = await import('../../roles.mjs');
-    const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
-    const assignments = getRoleAssignments(userId);
-    const allAgents = getAgentsForUser(userId);
-    const all = listRoles(userId);
-    const roles = all.filter(s => s.service);
-    // Custom skills (per-user, non-service) are now SCOPED to one agent via
-    // the same skillAssignments map. They're invisible to the LLM unless
-    // surfaced here, which is how "who owns the youtube downloader skill?"
-    // gets a correct answer instead of being inferred from role descriptions.
-    const customSkills = all.filter(s =>
-      !s.service && s.category !== 'delegate' && !s.hidden && s.userScope === userId
-    );
-    const fmtOwner = (skillId) => {
-      const agentId = assignments[skillId];
-      if (!agentId) return 'unassigned';
-      const agent = allAgents.find(a => a.id === agentId);
-      return agent ? `${agent.emoji ?? ''} ${agent.name}`.trim() : agentId;
-    };
-    const lines = [];
-    if (roles.length) {
-      lines.push('## Roles');
-      for (const r of roles) {
-        lines.push(`• ${r.icon ?? ''} ${r.name} — ${fmtOwner(r.id)}${r.description ? ` (${r.description})` : ''}`);
-      }
-    }
-    if (customSkills.length) {
-      if (lines.length) lines.push('');
-      lines.push('## Custom skills (one owner each)');
-      for (const s of customSkills) {
-        lines.push(`• ${s.icon ?? ''} ${s.name} (id: ${s.id}) — ${fmtOwner(s.id)}${s.description ? ` (${s.description})` : ''}`);
-      }
-    }
-    return lines.length ? lines.join('\n') : 'No roles or custom skills defined yet.';
-  }
-
-  if (name === 'create_role') {
-    const user = getUserById(userId);
-    if (!user || (user.role !== 'admin' && user.role !== 'owner')) return 'Creating roles requires admin privileges.';
-    const { name: roleName, icon, description, responsibilities, confirmed } = args;
-    if (!roleName?.trim() || !responsibilities?.trim()) return 'name and responsibilities are required.';
-    if (!description?.trim()) return 'description is required — the coordinator uses it to decide when to delegate to this role. Write one short sentence describing what kinds of requests this role handles.';
-    if (!confirmed) return 'You must present the draft system prompt to the user and get their explicit approval before creating the role. Show them the responsibilities text and ask if they want any changes, then call create_role again with confirmed=true.';
-    const id = 'role_' + roleName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-    const { getRoleManifest, addRoleManifest } = await import('../../roles.mjs');
-    // Look up under this user's scope first; if a global role of the same id
-    // exists we still refuse, so creating users can't shadow built-ins.
-    if (getRoleManifest(id, userId) || getRoleManifest(id)) {
-      return `A role named "${roleName}" already exists. Use assign_role_to_agent to assign it to an agent instead of creating a new one.`;
-    }
-    const manifest = {
-      id, name: roleName.trim(), icon: icon?.trim() || '🎯',
-      description: description?.trim() || '',
-      category: 'custom', service: true, custom: true,
-      systemPromptAddition: responsibilities.trim(),
-      tools: [], enabled_by_default: false,
-    };
-    // Custom roles are user-owned: they live under users/<uid>/skills/<id>/ so
-    // they survive `oe update` (the install tree gets git-pull-clobbered) and
-    // don't pollute other users. Mirrors skill-builder's pattern.
-    const skillDir = path.join(userSkillsDir(userId), id);
-    mkdirSync(skillDir, { recursive: true });
-    writeFileSync(path.join(skillDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    addRoleManifest(manifest, userId);
-    return `Role "${roleName.trim()}" created. You can assign it to an agent by saying "assign ${roleName.trim()} to [agent name]".`;
-  }
-
-  if (name === 'delete_role') {
-    const user = getUserById(userId);
-    if (!user || (user.role !== 'admin' && user.role !== 'owner')) return 'Deleting roles requires admin privileges.';
-    const { listRoles, removeRoleManifest } = await import('../../roles.mjs');
-    const roleName = args.name?.trim().toLowerCase();
-    // Restrict the lookup to roles visible to this user (own + globals).
-    // The custom check below ensures we never touch built-ins, and the path
-    // resolution always points into THIS user's skills dir, so a name match
-    // against another user's role won't reach across users.
-    const role = listRoles(userId).find(s => s.service && s.name.toLowerCase() === roleName);
-    if (!role) return `No role named "${args.name}" found.`;
-    if (!role.custom) return `"${role.name}" is a built-in role and cannot be deleted.`;
-    // Always resolve the on-disk dir within the requesting user's scope.
-    // Belt-and-suspenders: refuse if the resolved path somehow escapes the
-    // user's skills dir (shouldn't be possible given the id sanitizer, but a
-    // misbuilt manifest with a `..` id would otherwise let us rm outside).
-    const userRoot = userSkillsDir(userId);
-    const skillDir = path.join(userRoot, role.id);
-    const rel = path.relative(userRoot, skillDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      return `Refusing to delete role "${role.name}" — resolved path escapes the user skills directory.`;
-    }
-    rmSync(skillDir, { recursive: true, force: true });
-    removeRoleManifest(role.id, userId);
-    try {
-      const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
-      if (cfg.skillAssignments) { delete cfg.skillAssignments[role.id]; writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2)); }
-    } catch {}
-    return `Role "${role.name}" has been deleted.`;
-  }
-
-  if (name === 'assign_role_to_agent') {
-    const user = getUserById(userId);
-    if (!user) return 'User not found.';
-    const isPrivileged = user.role === 'admin' || user.role === 'owner';
-    const { listRoles, getRoleAssignments, setRoleAssignment } = await import('../../roles.mjs');
-    const { getAgentsForUser, loadCustomAgents } = await import('../../routes/_helpers.mjs');
-    const roleName  = args.role_name?.trim().toLowerCase();
-    const agentName = args.agent_name?.trim().toLowerCase();
-    const role = listRoles().find(s => s.service && s.name.toLowerCase() === roleName);
-    if (!role) return `No role named "${args.role_name}" found. Use list_roles to see available roles.`;
-    // Non-admin users may only assign roles they have been granted
-    if (!isPrivileged) {
-      const userSkills = user.skills ?? [];
-      if (!userSkills.includes(role.id)) return `You don't have permission to assign the "${role.name}" role.`;
-    }
-    const allAgents = getAgentsForUser(userId);
-    const agent = allAgents.find(a => a.name.toLowerCase() === agentName);
-    if (!agent) return `No agent named "${args.agent_name}" found.`;
-    // Non-admin users may only assign roles to their own custom agents
-    if (!isPrivileged) {
-      const ownedAgent = loadCustomAgents().find(a => a.id === agent.id && a.ownerId === userId);
-      if (!ownedAgent) return `You can only assign roles to agents you own.`;
-    }
-    const prev = getRoleAssignments(userId)[role.id];
-    setRoleAssignment(role.id, agent.id, userId);
-    // Auto-enable the skill for the requesting user
-    if (user.skills && !user.skills.includes(role.id)) {
-      user.skills.push(role.id);
-      saveUserById(user);
-    }
-    const prevAgent = prev ? allAgents.find(a => a.id === prev) : null;
-    const from = prevAgent ? ` (previously ${prevAgent.name})` : '';
-    return `${role.icon ?? ''} ${role.name} is now assigned to ${agent.emoji ?? ''} ${agent.name}${from}.`;
   }
 
   if (name === 'remember_fact') {
