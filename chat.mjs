@@ -26,6 +26,7 @@ import { getUserFilesDir } from './lib/paths.mjs';
 import { log } from './logger.mjs';
 import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
+import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
@@ -503,6 +504,7 @@ function applyUserToolPlan(agent, plan) {
 
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
+  const isolatedTaskRun = turnOpts?.isolatedTaskRun === true;
   // Per-turn tool routing: trim the coordinator's outbound tool list to the
   // always-on subset + on-demand skills whose intent_examples match this
   // user message. Other agents (specialists) are already tightly scoped and
@@ -519,7 +521,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (voiceCtx) {
     voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
   }
-  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, addedSkills: Set<string>} | null} */
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, addedSkills: Set<string>, initialToolNames?: Set<string>} | null} */
   let _routerStore = null;
   const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan);
   if (userToolPlanResult) {
@@ -530,6 +532,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         fullTools: userToolPlanResult.fullTools,
         initiallyIncludedSkills: new Set(),
         addedSkills: new Set(),
+        initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
       };
       toolRouterContext.enterWith(_routerStore);
     }
@@ -560,6 +563,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         agent, fullTools: trim.fullTools,
         initiallyIncludedSkills: trim.initiallyIncludedSkills,
         addedSkills: new Set(),
+        initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
       };
       toolRouterContext.enterWith(_routerStore);
       // Recompose the SPA portion of the system prompt against the trimmed
@@ -615,7 +619,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Expand deictic/pronominal queries ("tell me more about that") with recent context
   const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
   let recallQuery = userText;
-  if (userText.length < 50 || NEEDS_CONTEXT_RE.test(userText)) {
+  if (!isolatedTaskRun && (userText.length < 50 || NEEDS_CONTEXT_RE.test(userText))) {
     const recentMsgs = await loadSession(agent.id, 4);
     if (recentMsgs.length) {
       const lastUser = recentMsgs.filter(m => m.role === 'user').slice(-1)[0];
@@ -628,7 +632,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // — they're pure stateless one-shots and shouldn't read the user's memory.
   const ctx = agent.ephemeral
     ? null
-    : await buildAgentContext(agent.id, recallQuery, userId).catch(() => null);
+    : await buildAgentContext(agent.id, recallQuery, userId, { includeEpisodes: !isolatedTaskRun }).catch(() => null);
   const memBlock = ctx ? formatContext(ctx) : '';
 
   // Per-turn user-skill trigger nudge. Embedding-ranked when cortex is up
@@ -668,7 +672,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Skip for ephemeral agents: "ephemeral" means a hermetic run with no carried-over
   // context, and crossAgentRead would silently leak another agent's history.
   let crossAgentBlock = '';
-  if (!agent.ephemeral && agent.crossAgentRead?.length && userId && userId !== 'default') {
+  if (!isolatedTaskRun && !agent.ephemeral && agent.crossAgentRead?.length && userId && userId !== 'default') {
     const parts = [];
     for (const otherId of agent.crossAgentRead) {
       const recent = await loadCrossAgentContext(userId, otherId, 3);
@@ -767,7 +771,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // it wrote. Same idea for `via:` on router-routed turns — the coordinator
   // needs to know the prior reply came from a specialist, not its own run.
   const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
-  const history = (await loadSession(agent.id))
+  const history = isolatedTaskRun ? [] : (await loadSession(agent.id))
     .filter(m => LLM_ROLES.has(m.role))
     .map(({ role, content, name, toolsUsed, toolResults, via, viaName }) => {
       let body = content;
@@ -1333,6 +1337,32 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       addedSkills: _routerStore.addedSkills,
       usedToolNames: toolsUsed.map(t => t.name),
     }).catch(() => {});
+    const selectedPlanSource = turnOpts?.toolPlan?.source || null;
+    if (selectedPlanSource !== 'server-remembered') {
+      try {
+        const learned = learnToolPlanFromTurn(userId, {
+          agentId: agent.id,
+          phrase: userText,
+          usedToolNames: toolsUsed.map(t => t.name),
+          initiallyAvailableToolNames: [...(_routerStore.initialToolNames || [])],
+          fullToolNames: (_routerStore.fullTools || []).map(t => t.function?.name).filter(Boolean),
+          recoveredMissingTools,
+          addedSkills: [...(_routerStore.addedSkills || [])],
+          source: silent ? 'auto-scheduled-turn' : 'auto-turn',
+        });
+        if (learned?.learned) {
+          log.info('tool-plan', 'learned plan from turn', {
+            userId,
+            agentId: agent.id,
+            recipeId: learned.recipe?.id,
+            tools: learned.recipe?.selectedTools,
+            recovered: learned.recovered,
+          });
+        }
+      } catch (e) {
+        log.warn('tool-plan', 'turn learning failed', { err: e.message });
+      }
+    }
   }
   if (assistantContent) {
   if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true });

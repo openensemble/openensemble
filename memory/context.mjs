@@ -9,7 +9,7 @@ import { embed } from './embedding.mjs';
 import { recall, TEMPORAL_RE, parseTimeAnchor } from './recall.mjs';
 import { shouldSkipRecall, filterByConfidence } from './predictive-context.mjs';
 
-export async function buildAgentContext(agentId, currentQuery, userId = 'default') {
+export async function buildAgentContext(agentId, currentQuery, userId = 'default', opts = {}) {
   // Predictive pre-filter — confirmations, slash commands, voice-control
   // utterances and ultra-short reactions don't benefit from cortex recall.
   // Skip the embed + 3 LanceDB queries entirely. Returns the same empty
@@ -38,9 +38,12 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
     myRoles = getAgentRoles(agentId, userId);
   } catch (e) { /* roles module unavailable in tests — default to unscoped only */ }
 
+  const includeEpisodes = opts?.includeEpisodes !== false;
   const [paramsRaw, episodes, userFactsRaw] = await Promise.all([
     recall({ agentId, type: 'params', query: currentQuery, queryVec, topK: paramsTopK, includeShared: false, userId }),
-    recall({ agentId, type: 'episodes', query: currentQuery, queryVec, topK: episodeTopK, includeShared: false, recencyBoost: isTemporal, timeAnchor, userId }),
+    includeEpisodes
+      ? recall({ agentId, type: 'episodes', query: currentQuery, queryVec, topK: episodeTopK, includeShared: false, recencyBoost: isTemporal, timeAnchor, userId })
+      : Promise.resolve([]),
     recall({ agentId: 'shared', type: 'user_facts', query: currentQuery, queryVec, topK: 4, includeShared: false, userId, myRoles })
       .catch(() => []),
   ]);

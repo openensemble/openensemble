@@ -396,6 +396,9 @@ async function runTask(task, broadcast, opts = {}) {
       maxAttempts: MAX_ATTEMPTS,
       context: 'scheduler',
       silent: !!task.silent,
+      originTaskId: task.id,
+      originTaskOwnerId: userId,
+      originTaskAgent: task.agent,
     });
 
     if (!succeeded) console.error(`[scheduler] Task "${task.label}" failed after ${MAX_ATTEMPTS} attempts`);

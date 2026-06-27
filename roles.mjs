@@ -25,6 +25,8 @@ import { buildSkillLogger } from './lib/skill-logger.mjs';
 import { recordToolExecution } from './lib/tool-exec-log.mjs';
 import { getVoiceContext } from './lib/voice-context.mjs';
 import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
+import { getScheduledContext } from './lib/scheduled-context.mjs';
+import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-child-barrier.mjs';
 // One-time: hand the voice-context getter to device-helper so ctx.device.id()
 // can resolve the current device sync.
 _registerVoiceContextResolver(getVoiceContext);
@@ -105,6 +107,107 @@ async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, res
   } catch (e) {
     log.warn('tool', 'auto-bg continuation failed', { tool: toolName, userId, agentId: targetAgentId, err: e?.message || String(e) });
   }
+}
+
+async function _completeOriginScheduledTask({ scheduledCtx, userId, resultText, errorMsg = null }) {
+  if (!scheduledCtx?.originTaskId) return;
+  try {
+    const { updateTask } = await import('./scheduler.mjs');
+    const patch = { lastRun: new Date().toISOString() };
+    if (errorMsg) {
+      patch.lastError = errorMsg;
+    } else {
+      patch.lastError = null;
+      patch.lastOutput = String(resultText || 'Background work completed.').trim().slice(0, 2000);
+    }
+    await updateTask(scheduledCtx.originTaskId, patch);
+    try {
+      const { sendToUser } = await import('./ws-handler.mjs');
+      sendToUser(userId, {
+        type: 'task_complete',
+        taskId: scheduledCtx.originTaskId,
+        agent: scheduledCtx.originTaskAgent || null,
+      });
+    } catch { /* best-effort UI refresh */ }
+  } catch (e) {
+    log.warn('tool', 'origin scheduled task update failed', { taskId: scheduledCtx.originTaskId, userId, err: e?.message || String(e) });
+  }
+}
+
+async function _runScheduledAutoBgContinuation({ scheduledCtx, userId, toolName, args, resultText, errorMsg = null }) {
+  if (!scheduledCtx?.originTaskId || !scheduledCtx?.originTaskAgent) return;
+  const prompt = [
+    'A background operation from a scheduled task has completed. Continue the original scheduled workflow for THIS completed operation only.',
+    '',
+    `<scheduled_task id="${scheduledCtx.originTaskId}" agent="${scheduledCtx.originTaskAgent || ''}">`,
+    scheduledCtx.scheduledNote ? `<scheduled_note>${scheduledCtx.scheduledNote}</scheduled_note>` : '',
+    `<background_tool name="${toolName}">`,
+    `<args>${JSON.stringify(args ?? {})}</args>`,
+    errorMsg ? `<error>${errorMsg}</error>` : `<result>${resultText || ''}</result>`,
+    '</background_tool>',
+    '</scheduled_task>',
+    '',
+    'If the scheduled task requires a next step using this result, do it now. If the original task is already fully complete, give a concise completion update. Do not act on unrelated tasks.',
+  ].filter(Boolean).join('\n');
+  try {
+    const { handleChatMessage } = await import('./chat-dispatch.mjs');
+    const { sendToUser } = await import('./ws-handler.mjs');
+    const { scheduledContext } = await import('./lib/scheduled-context.mjs');
+    await scheduledContext.run(scheduledCtx, () => handleChatMessage({
+      userId,
+      agentId: scheduledCtx.originTaskAgent,
+      text: prompt,
+      attachment: null,
+      source: getVoiceContext()?.source || 'web',
+      onEvent: (e) => sendToUser(userId, e),
+      onBroadcast: () => {},
+      onNotify: () => {},
+      _hiddenUser: true,
+      _isBackgroundContinuation: true,
+      _isolatedTaskRun: true,
+    }));
+  } catch (e) {
+    log.warn('tool', 'scheduled auto-bg continuation failed', { taskId: scheduledCtx.originTaskId, userId, err: e?.message || String(e) });
+  }
+}
+
+function _autoBgChildId(watcherId) {
+  return watcherId ? `autobg_${watcherId}` : null;
+}
+
+function _registerScheduledAutoBgChild({ scheduledCtx, userId, watcherId, label, kind = 'tool' }) {
+  if (!scheduledCtx?.originTaskId || !watcherId) return null;
+  return registerScheduledChild({
+    userId,
+    scheduledCtx,
+    childId: _autoBgChildId(watcherId),
+    label,
+    kind,
+  });
+}
+
+function _completeScheduledAutoBgChild({ scheduledCtx, userId, watcherId, resultText, errorMsg = null }) {
+  if (!scheduledCtx?.originTaskId || !watcherId) return { tracked: false, shouldContinue: true, resultText };
+  const barrier = completeScheduledChild({
+    userId,
+    scheduledCtx,
+    childId: _autoBgChildId(watcherId),
+    resultText,
+    errorMsg,
+  });
+  if (barrier?.tracked && !barrier.shouldContinue) {
+    log.info('scheduled-barrier', 'child complete; waiting for siblings', {
+      taskId: scheduledCtx.originTaskId,
+      childId: _autoBgChildId(watcherId),
+      pending: barrier.pendingCount,
+      done: barrier.doneCount,
+      errors: barrier.errorCount,
+    });
+  }
+  return {
+    ...barrier,
+    resultText: barrier?.aggregateResult || resultText,
+  };
 }
 
 // Wrapper shape: { manifest, userId, dir }
@@ -1365,7 +1468,15 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               displayEmoji,
               targetAgentId: delegatedMeta?.targetAgentId || null,
               args: mergedArgs,
+              scheduledCtx: getScheduledContext(),
             };
+            _registerScheduledAutoBgChild({
+              scheduledCtx: captured.scheduledCtx,
+              userId: captured.userId,
+              watcherId: captured.watcherId,
+              label: `${captured.displayName || captured.name}: ${captured.name}`,
+              kind: captured.owningSkillId === 'delegate' ? 'delegate-tool' : 'tool',
+            });
             (async () => {
               let finalText = '';
               try {
@@ -1442,6 +1553,26 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     ts: Date.now(),
                   });
                 } catch (_) { /* best-effort */ }
+                const scheduledDone = _completeScheduledAutoBgChild({
+                  scheduledCtx: captured.scheduledCtx,
+                  userId: captured.userId,
+                  watcherId: captured.watcherId,
+                  resultText: finalText || `${captured.displayName} completed.`,
+                });
+                if (scheduledDone.shouldContinue) {
+                  await _completeOriginScheduledTask({
+                    scheduledCtx: captured.scheduledCtx,
+                    userId: captured.userId,
+                    resultText: scheduledDone.resultText || finalText || `${captured.displayName} completed.`,
+                  });
+                  await _runScheduledAutoBgContinuation({
+                    scheduledCtx: captured.scheduledCtx,
+                    userId: captured.userId,
+                    toolName: captured.name,
+                    args: captured.args,
+                    resultText: scheduledDone.resultText || finalText || `${captured.displayName} completed.`,
+                  });
+                }
                 if (!captured.targetAgentId) {
                   await _runAutoBgToolContinuation({
                     userId: captured.userId,
@@ -1457,6 +1588,29 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   status: 'error',
                   finalText: `⚠ ${captured.name} failed: ${err.message}`,
                 });
+                const scheduledDone = _completeScheduledAutoBgChild({
+                  scheduledCtx: captured.scheduledCtx,
+                  userId: captured.userId,
+                  watcherId: captured.watcherId,
+                  resultText: '',
+                  errorMsg: err.message,
+                });
+                if (scheduledDone.shouldContinue) {
+                  await _completeOriginScheduledTask({
+                    scheduledCtx: captured.scheduledCtx,
+                    userId: captured.userId,
+                    resultText: scheduledDone.resultText || '',
+                    errorMsg: err.message,
+                  });
+                  await _runScheduledAutoBgContinuation({
+                    scheduledCtx: captured.scheduledCtx,
+                    userId: captured.userId,
+                    toolName: captured.name,
+                    args: captured.args,
+                    resultText: scheduledDone.resultText || '',
+                    errorMsg: err.message,
+                  });
+                }
                 if (!captured.targetAgentId) {
                   await _runAutoBgToolContinuation({
                     userId: captured.userId,
@@ -1491,6 +1645,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       if (winner === TIMER_TOKEN) {
         const watchersMod = await import('./scheduler/watchers.mjs');
         const attribAgentId = await _resolveAttributionAgent(userId, agentId);
+        const scheduledCtx = getScheduledContext();
         const wid = watchersMod.registerWatcher({
           userId,
           agentId: attribAgentId,
@@ -1515,6 +1670,13 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           phase: 'backgrounded',
           currentTool: name,
           canCancel: false,
+        });
+        _registerScheduledAutoBgChild({
+          scheduledCtx,
+          userId,
+          watcherId: wid,
+          label: name,
+          kind: 'tool',
         });
         yield { type: 'result', text: `\`${name}\` is running in the background (task ${wid}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
         yield { type: '__hide_turn', reason: 'bg_chip', taskId: wid };
@@ -1574,12 +1736,55 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             args: mergedArgs,
             resultText: text || `${name} completed.`,
           });
+          const scheduledDone = _completeScheduledAutoBgChild({
+            scheduledCtx,
+            userId,
+            watcherId: wid,
+            resultText: text || `${name} completed.`,
+          });
+          if (scheduledDone.shouldContinue) {
+            await _completeOriginScheduledTask({
+              scheduledCtx,
+              userId,
+              resultText: scheduledDone.resultText || text || `${name} completed.`,
+            });
+            await _runScheduledAutoBgContinuation({
+              scheduledCtx,
+              userId,
+              toolName: name,
+              args: mergedArgs,
+              resultText: scheduledDone.resultText || text || `${name} completed.`,
+            });
+          }
           log.info('tool', 'auto-bg tool complete', { skill: owningSkillId, tool: name, userId, durationMs: Date.now() - _toolStart });
         }).catch(async (err) => {
           watchersMod.completeWatcher(userId, wid, {
             status: 'error',
             finalText: `⚠ ${name} failed: ${err.message}`,
           });
+          const scheduledDone = _completeScheduledAutoBgChild({
+            scheduledCtx,
+            userId,
+            watcherId: wid,
+            resultText: '',
+            errorMsg: err.message,
+          });
+          if (scheduledDone.shouldContinue) {
+            await _completeOriginScheduledTask({
+              scheduledCtx,
+              userId,
+              resultText: scheduledDone.resultText || '',
+              errorMsg: err.message,
+            });
+            await _runScheduledAutoBgContinuation({
+              scheduledCtx,
+              userId,
+              toolName: name,
+              args: mergedArgs,
+              resultText: scheduledDone.resultText || '',
+              errorMsg: err.message,
+            });
+          }
           await _runAutoBgToolContinuation({
             userId,
             agentId: attribAgentId,

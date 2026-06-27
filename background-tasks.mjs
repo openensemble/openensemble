@@ -8,7 +8,9 @@
 
 import { registerWatcher, pushWatcherStatus, completeWatcher } from './scheduler/watchers.mjs';
 import { runInTaskContext } from './lib/task-proxy-context.mjs';
-import { matchToolPlan } from './lib/tool-plan-memory.mjs';
+import { getScheduledContext } from './lib/scheduled-context.mjs';
+import { learnToolPlanFromToolEvents, matchToolPlan } from './lib/tool-plan-memory.mjs';
+import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-child-barrier.mjs';
 
 let _broadcast = null;
 export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
@@ -109,6 +111,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const summary = (task || '').slice(0, 120);
   const ac = new AbortController();
+  const scheduledCtx = getScheduledContext();
   activeTasks.set(taskId, {
     agentId: scopedAgent.id, userId, agentName, agentEmoji,
     startedAt: Date.now(), summary, phase: 'queued', status: 'running',
@@ -116,7 +119,20 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     coordinatorAgentId,
     abort: () => ac.abort(),
     autoContinue: opts?.autoContinue === true,
+    originScheduledTaskId: opts?.originScheduledTaskId || scheduledCtx?.originTaskId || null,
+    originScheduledTaskOwnerId: opts?.originScheduledTaskOwnerId || scheduledCtx?.originTaskOwnerId || userId || null,
+    originScheduledTaskAgent: opts?.originScheduledTaskAgent || scheduledCtx?.originTaskAgent || null,
+    originScheduledNote: scheduledCtx?.scheduledNote || null,
   });
+  if (scheduledCtx?.originTaskId) {
+    registerScheduledChild({
+      userId,
+      scheduledCtx,
+      childId: taskId,
+      label: `${agentName || 'Agent'}: ${summary}`,
+      kind: 'delegate',
+    });
+  }
 
   // Phase 14: register a task_proxy watcher so the task surfaces as a chat
   // chip + becomes inspectable via list_watches. The watcher's history
@@ -169,7 +185,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       // this run's watcherId without any extra parameter threading.
       const taskCtx = { taskId, watcherId, userId, agentId: scopedAgent.id };
       await runInTaskContext(taskCtx, async () => {
-      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan })) {
+      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan, isolatedTaskRun: true })) {
         if (ev.type === 'token') fullText += ev.text;
         trackToolEvent(toolEvents, ev);
         // Track in-flight tool calls so list_active_agents can report e.g.
@@ -232,7 +248,7 @@ function _coordinatorAgentIdFromSessionKey(sessionKey, userId) {
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
 
-async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgentId, agentName, result, errorMsg, originalTask }) {
+async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgentId, agentName, result, errorMsg, originalTask, scheduledCtx = null }) {
   if (errorMsg || !result) return;
   const agentId = _coordinatorAgentIdFromSessionKey(coordinatorAgentId, userId);
   if (!agentId) return;
@@ -248,7 +264,7 @@ async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgen
   ].join('\n');
   const { handleChatMessage } = await import('./chat-dispatch.mjs');
   const { sendToUser } = await import('./ws-handler.mjs');
-  await handleChatMessage({
+  const run = () => handleChatMessage({
     userId,
     agentId,
     text: prompt,
@@ -259,7 +275,14 @@ async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgen
     onNotify: () => {},
     _hiddenUser: true,
     _isBackgroundContinuation: true,
+    _isolatedTaskRun: !!scheduledCtx?.originTaskId,
   });
+  if (scheduledCtx?.originTaskId) {
+    const { scheduledContext } = await import('./lib/scheduled-context.mjs');
+    await scheduledContext.run(scheduledCtx, run);
+  } else {
+    await run();
+  }
 }
 
 async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '') {
@@ -303,6 +326,68 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   }
 
   const content = errorMsg ?? result;
+
+  let scheduledBarrier = null;
+  if (rec?.originScheduledTaskId) {
+    scheduledBarrier = completeScheduledChild({
+      userId,
+      scheduledCtx: {
+        originTaskId: rec.originScheduledTaskId,
+        originTaskOwnerId: rec.originScheduledTaskOwnerId,
+        originTaskAgent: rec.originScheduledTaskAgent,
+      },
+      childId: taskId,
+      resultText: result || `${agentName} completed the task.`,
+      errorMsg,
+    });
+  }
+
+  if (rec?.originScheduledTaskId && (!scheduledBarrier?.tracked || scheduledBarrier.shouldContinue)) {
+    try {
+      const { updateTask } = await import('./scheduler.mjs');
+      const patch = {
+        lastRun: new Date().toISOString(),
+      };
+      if (errorMsg) {
+        patch.lastError = errorMsg;
+      } else {
+        patch.lastError = null;
+        patch.lastOutput = String(scheduledBarrier?.aggregateResult || result || `${agentName} completed the task.`).trim().slice(0, 2000);
+      }
+      await updateTask(rec.originScheduledTaskId, patch);
+      _broadcast?.({
+        type: 'task_complete',
+        taskId: rec.originScheduledTaskId,
+        agent: rec.originScheduledTaskAgent || null,
+      });
+    } catch (e) {
+      console.warn('[background-tasks] scheduled-task completion update failed:', e.message);
+    }
+  } else if (scheduledBarrier?.tracked && !scheduledBarrier.shouldContinue) {
+    console.log('[scheduled-barrier] child complete; waiting for siblings', {
+      taskId: rec.originScheduledTaskId,
+      childId: taskId,
+      pending: scheduledBarrier.pendingCount,
+      done: scheduledBarrier.doneCount,
+      errors: scheduledBarrier.errorCount,
+    });
+  }
+
+  if (!errorMsg && Array.isArray(toolEvents) && toolEvents.length) {
+    try {
+      const learned = learnToolPlanFromToolEvents(userId, {
+        agentId: targetAgentId || rec?.agentId,
+        phrase: originalTask || rec?.originalTask || rec?.summary || '',
+        toolEvents,
+        source: rec?.isWorker ? 'auto-worker-complete' : 'auto-background-complete',
+      }).filter(r => r?.learned);
+      if (learned.length) {
+        console.log('[tool-plan] learned from background completion:', learned.map(r => `${r.recipe?.id}:${(r.recipe?.selectedTools || []).join(',')}`).join(' | '));
+      }
+    } catch (e) {
+      console.warn('[tool-plan] background learning failed:', e.message);
+    }
+  }
 
   // 1. Inject into coordinator's session so it has context on next user message.
   //    Include the original task summary so the user (and the LLM on its next
@@ -355,15 +440,22 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   });
 
   if (rec?.autoContinue) {
+    if (scheduledBarrier?.tracked && !scheduledBarrier.shouldContinue) return;
     _runContinuation({
       taskId,
       userId,
       coordinatorAgentId,
       targetAgentId: targetAgentId || rec?.agentId || null,
       agentName,
-      result,
+      result: scheduledBarrier?.aggregateResult || result,
       errorMsg,
       originalTask: rec?.originalTask || originalTask || rec?.summary || '',
+      scheduledCtx: rec?.originScheduledTaskId ? {
+        scheduledNote: rec.originScheduledNote || null,
+        originTaskId: rec.originScheduledTaskId,
+        originTaskOwnerId: rec.originScheduledTaskOwnerId,
+        originTaskAgent: rec.originScheduledTaskAgent,
+      } : null,
     }).catch(e => console.error('[background-tasks] continuation failed:', e?.stack ?? e?.message ?? e));
   }
 }
@@ -545,7 +637,7 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
       const taskCtx = { taskId, watcherId, userId, agentId: workerAgent.id };
       pushTaskProgress(taskId, `${workerName} started working`, { phase: 'running' });
       await runInTaskContext(taskCtx, async () => {
-        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan })) {
+        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan, isolatedTaskRun: true })) {
           if (ev.type === 'token') fullText += ev.text;
           trackToolEvent(toolEvents, ev);
           if (ev.type === 'tool_call' && ev.name) {

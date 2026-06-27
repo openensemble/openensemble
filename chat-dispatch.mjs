@@ -233,6 +233,7 @@ function normalizeToolPlan(plan) {
  * @param {boolean} [opts._isRoutineFollowup]        internal recursion guard
  * @param {boolean} [opts._hiddenUser]               internal turn; persist user prompt hidden from UI
  * @param {boolean} [opts._isBackgroundContinuation] internal guard for completed background-task wakeups
+ * @param {boolean} [opts._isolatedTaskRun]          internal scheduled/background task turn with no chat history
  * @returns {Promise<void>}
  */
 export async function handleChatMessage({
@@ -250,6 +251,7 @@ export async function handleChatMessage({
   _isRoutineFollowup = false,
   _hiddenUser = false,
   _isBackgroundContinuation = false,
+  _isolatedTaskRun = false,
 }) {
   // Wake-slot routing — household-shared voice device.
   //
@@ -622,6 +624,7 @@ export async function handleChatMessage({
       schedulerNote: resolvedNote, source, deviceId,
       ac, onEvent: wrappedOnEvent, onNotify,
       hiddenUser: _hiddenUser,
+      isolatedTaskRun: _isolatedTaskRun,
     });
   } finally {
     finalizeTurnOnce();
