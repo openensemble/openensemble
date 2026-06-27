@@ -14,7 +14,7 @@ import {
   BASE_DIR,
 } from './_helpers.mjs';
 import { createCustomAgent, deleteCustomAgent, updateCustomAgent } from '../agents.mjs';
-import { onRoleEnabled, getRoleAssignments, setRoleAssignment, getRoleManifest, addRoleManifest, removeRoleManifest } from '../roles.mjs';
+import { onRoleEnabled, getRoleAssignments, setRoleAssignment, getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools, resolveAgentTools } from '../roles.mjs';
 
 function setRoleAssignmentForUser(roleId, agentId, userId) {
   return setRoleAssignment(roleId, agentId || null, userId);
@@ -40,6 +40,91 @@ export async function handle(req, res) {
     const callerUserId = getSessionUserId(getAuthToken(req));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(getAgentsForUser(callerUserId).map(agentToWire)));
+    return true;
+  }
+
+  // Agent → full tool listing (read-only dashboard view). For each agent
+  // returns EVERY tool in its resolved toolset, grouped by the skill that owns
+  // it, plus a source label (primary / assigned / shared / always-on /
+  // delegate). The tool list comes straight from roles.mjs `resolveAgentTools`
+  // so it's exactly what the agent carries before the per-turn router trims it.
+  if (req.url === '/api/agent-skills' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const assignments   = getRoleAssignments(authId);
+      const coordinatorId = assignments['coordinator'] ?? null;
+      const userSkills    = getUserEnabledSkills(authId);
+      const agents        = getAgentsForUser(authId);
+      const manifests     = listRoles(authId);
+      const manById       = new Map(manifests.map(m => [m.id, m]));
+
+      // tool name → owning skill id (mirrors agent-resolver's buildToolOwnerIndex).
+      const toolOwner = Object.create(null);
+      for (const m of manifests) {
+        for (const t of (m.tools ?? [])) {
+          const name = t.function?.name ?? t.name;
+          if (name && !toolOwner[name]) toolOwner[name] = m.id;
+        }
+      }
+
+      const SRC_RANK = { primary: 0, assigned: 1, bundled: 2, 'always-on': 3, shared: 4, delegate: 5, core: 6, other: 7 };
+
+      const out = agents.map(a => {
+        const isCoord = a.id === coordinatorId;
+        const assignedHere = (id) => {
+          const owner = assignments[id];
+          return !!owner && (owner === a.id || (owner === 'coordinator' && isCoord));
+        };
+        const classify = (skillId) => {
+          if (skillId && skillId === a.skillCategory) return 'primary';
+          const m = skillId ? manById.get(skillId) : null;
+          if (!m) return 'core';
+          if (assignedHere(skillId)) return 'assigned';
+          if (m.category === 'delegate') return 'delegate';
+          if (m.category === 'utility' && !assignments[skillId]) return 'shared';
+          if (m.always_on) return 'always-on';
+          if (m.bundled_with_role) return 'bundled';
+          return 'other';
+        };
+
+        const resolved = resolveAgentTools(a.skillCategory, userSkills, a.id, authId);
+        // Group resolved tools by owning skill.
+        const groupMap = new Map(); // skillId(or '__core') → {skillId, skillName, source, tools:[]}
+        for (const t of resolved) {
+          const name = t.function?.name ?? t.name;
+          if (!name) continue;
+          const desc = t.function?.description ?? t.description ?? '';
+          const skillId = toolOwner[name] ?? null;
+          const key = skillId ?? '__core';
+          if (!groupMap.has(key)) {
+            const m = skillId ? manById.get(skillId) : null;
+            groupMap.set(key, {
+              skillId,
+              skillName: m?.name ?? (skillId ?? 'Always-on / core'),
+              source: skillId ? classify(skillId) : 'core',
+              tools: [],
+            });
+          }
+          groupMap.get(key).tools.push({ name, description: desc });
+        }
+        const groups = [...groupMap.values()].sort((x, y) =>
+          (SRC_RANK[x.source] ?? 9) - (SRC_RANK[y.source] ?? 9) || x.skillName.localeCompare(y.skillName));
+        for (const g of groups) g.tools.sort((p, q) => p.name.localeCompare(q.name));
+
+        // Dangling primary role (assigned skill whose manifest was deleted).
+        const danglingPrimary = (a.skillCategory && a.skillCategory !== 'general' && !manById.has(a.skillCategory))
+          ? a.skillCategory : null;
+
+        return {
+          id: a.id, name: a.name, emoji: a.emoji ?? '', model: a.model ?? '',
+          role: a.skillCategory ?? null, isCoordinator: isCoord,
+          totalTools: resolved.length, danglingPrimary, groups,
+        };
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ agents: out }));
+    } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
     return true;
   }
 

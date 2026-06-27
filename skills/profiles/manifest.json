@@ -3,7 +3,9 @@
   "name": "Service Profiles",
   "description": "Onboard, document, and operate services running on remote nodes (Pi-hole, Home Assistant, nginx, etc.)",
   "icon": "📚",
-  "category": "utility",
+  "category": "service",
+  "bundled_with_role": "nodes",
+  "hidden": true,
   "enabled_by_default": true,
   "intent_examples": [
     "onboard pihole as a service profile",

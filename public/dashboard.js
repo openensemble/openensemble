@@ -120,6 +120,15 @@ async function loadDashboard() {
   <button class="dash-tool-btn" data-action="openDashboardTool" data-args='["skill-permissions"]'>Open Skill Permissions</button>`;
   body.appendChild(perms);
 
+  const agskills = document.createElement('div');
+  agskills.className = 'dash-card';
+  agskills.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><span>${icon('users', 28)}</span><div>
+    <div class="dash-card-title">Agents & Skills</div>
+    <div class="dash-card-meta">Which skills and tools each agent has assigned</div>
+  </div></div>
+  <button class="dash-tool-btn" data-action="openDashboardTool" data-args='["agent-skills"]'>Open Agents &amp; Skills</button>`;
+  body.appendChild(agskills);
+
   // Token usage card (admin/owner only)
   if (_currentUser?.role === 'owner' || _currentUser?.role === 'admin') {
     try {
@@ -213,6 +222,7 @@ const DASH_TOOLS = {
   memory: { title: 'Memory Control', icon: 'brain', panelId: 'dashboardMemoryControlBody', panelClass: 'memory-control' },
   runs: { title: 'Run Inspector', icon: 'scan-search', panelId: 'dashboardRunInspectorBody', panelClass: 'run-inspector' },
   'skill-permissions': { title: 'Skill Permissions', icon: 'shield-check', panelId: 'dashboardSkillPermissionsBody', panelClass: 'skill-permissions' },
+  'agent-skills': { title: 'Agents & Skills', icon: 'users', panelId: 'dashboardAgentSkillsBody', panelClass: 'agent-skills' },
 };
 
 function openDashboardTool(tool) {
@@ -234,6 +244,7 @@ function openDashboardTool(tool) {
   if (tool === 'memory' && typeof loadMemoryControl === 'function') loadMemoryControl(cfg.panelId);
   if (tool === 'runs' && typeof loadRunInspector === 'function') loadRunInspector(null, cfg.panelId);
   if (tool === 'skill-permissions' && typeof loadSkillPermissions === 'function') loadSkillPermissions(cfg.panelId);
+  if (tool === 'agent-skills' && typeof loadAgentSkills === 'function') loadAgentSkills(cfg.panelId);
   if (window.lucide) lucide.createIcons();
 }
 

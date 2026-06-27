@@ -3,7 +3,9 @@
   "name": "Voice Routines",
   "description": "Bind a phrase to a multi-step action — say a trigger, run lights/scenes/ambient sounds in order.",
   "icon": "🎬",
-  "category": "utility",
+  "category": "service",
+  "bundled_with_role": "coordinator",
+  "hidden": true,
   "enabled_by_default": true,
   "intent_examples": [
     "when I say goodnight turn off the lights",

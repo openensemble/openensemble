@@ -1,7 +1,7 @@
 {
   "id": "user-admin",
   "name": "User Administration",
-  "always_on": true,
+  "bundled_with_role": "coordinator",
   "hidden": true,
   "tools": [
     {
