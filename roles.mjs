@@ -62,16 +62,18 @@ function _agentIdFromSessionKey(sessionKey, userId) {
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
 
-// Tools whose background completion warrants waking the coordinator with a
+// Tools whose background completion warrants waking the owning agent with a
 // concise report-back turn. Most auto-backgrounded tools just drop their
 // result into the task chip + agent_report bubble — the user already sees it,
-// so a second LLM turn would be redundant and costly. Only the tools listed
-// here justify the extra turn (e.g. node_exec surfacing package/system updates
-// that need a human go/no-go). Add a tool here only when its raw result needs
-// the coordinator to interpret it and prompt the user for a decision. Any
-// domain-specific behavior (how to summarize, what to ask) belongs in the
-// owning skill's systemPromptAddition, NOT in the continuation prompt below.
-const BG_REPORT_TOOLS = new Set(['node_exec']);
+// so a second LLM turn would be redundant and costly. The tools here are the
+// long-running shell/command ones whose raw output the agent must interpret to
+// continue its workflow (run tests → read failures → fix; apt upgrade → human
+// go/no-go) — without this the agent in a DIRECT chat silently stalls mid-task
+// when the command crosses the auto-bg threshold. Add a tool here only when its
+// result genuinely needs the agent to react. Domain-specific behavior (how to
+// summarize, what to ask) belongs in the owning skill's systemPromptAddition,
+// NOT the continuation prompt below.
+const BG_REPORT_TOOLS = new Set(['node_exec', 'coder_run_command', 'desktop_run_command']);
 
 async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, resultText, errorMsg = null }) {
   if (!userId || !agentId) return;
@@ -97,7 +99,7 @@ async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, res
       agentId: targetAgentId,
       text: prompt,
       attachment: null,
-      source: getVoiceContext()?.source || 'web',
+      source: /** @type {'voice-device'|'web'|'telegram'|'desktop-app'} */ (getVoiceContext()?.source || 'web'),
       onEvent: (e) => sendToUser(userId, e),
       onBroadcast: () => {},
       onNotify: () => {},
@@ -106,68 +108,6 @@ async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, res
     });
   } catch (e) {
     log.warn('tool', 'auto-bg continuation failed', { tool: toolName, userId, agentId: targetAgentId, err: e?.message || String(e) });
-  }
-}
-
-async function _completeOriginScheduledTask({ scheduledCtx, userId, resultText, errorMsg = null }) {
-  if (!scheduledCtx?.originTaskId) return;
-  try {
-    const { updateTask } = await import('./scheduler.mjs');
-    const patch = { lastRun: new Date().toISOString() };
-    if (errorMsg) {
-      patch.lastError = errorMsg;
-    } else {
-      patch.lastError = null;
-      patch.lastOutput = String(resultText || 'Background work completed.').trim().slice(0, 2000);
-    }
-    await updateTask(scheduledCtx.originTaskId, patch);
-    try {
-      const { sendToUser } = await import('./ws-handler.mjs');
-      sendToUser(userId, {
-        type: 'task_complete',
-        taskId: scheduledCtx.originTaskId,
-        agent: scheduledCtx.originTaskAgent || null,
-      });
-    } catch { /* best-effort UI refresh */ }
-  } catch (e) {
-    log.warn('tool', 'origin scheduled task update failed', { taskId: scheduledCtx.originTaskId, userId, err: e?.message || String(e) });
-  }
-}
-
-async function _runScheduledAutoBgContinuation({ scheduledCtx, userId, toolName, args, resultText, errorMsg = null }) {
-  if (!scheduledCtx?.originTaskId || !scheduledCtx?.originTaskAgent) return;
-  const prompt = [
-    'A background operation from a scheduled task has completed. Continue the original scheduled workflow for THIS completed operation only.',
-    '',
-    `<scheduled_task id="${scheduledCtx.originTaskId}" agent="${scheduledCtx.originTaskAgent || ''}">`,
-    scheduledCtx.scheduledNote ? `<scheduled_note>${scheduledCtx.scheduledNote}</scheduled_note>` : '',
-    `<background_tool name="${toolName}">`,
-    `<args>${JSON.stringify(args ?? {})}</args>`,
-    errorMsg ? `<error>${errorMsg}</error>` : `<result>${resultText || ''}</result>`,
-    '</background_tool>',
-    '</scheduled_task>',
-    '',
-    'If the scheduled task requires a next step using this result, do it now. If the original task is already fully complete, give a concise completion update. Do not act on unrelated tasks.',
-  ].filter(Boolean).join('\n');
-  try {
-    const { handleChatMessage } = await import('./chat-dispatch.mjs');
-    const { sendToUser } = await import('./ws-handler.mjs');
-    const { scheduledContext } = await import('./lib/scheduled-context.mjs');
-    await scheduledContext.run(scheduledCtx, () => handleChatMessage({
-      userId,
-      agentId: scheduledCtx.originTaskAgent,
-      text: prompt,
-      attachment: null,
-      source: getVoiceContext()?.source || 'web',
-      onEvent: (e) => sendToUser(userId, e),
-      onBroadcast: () => {},
-      onNotify: () => {},
-      _hiddenUser: true,
-      _isBackgroundContinuation: true,
-      _isolatedTaskRun: true,
-    }));
-  } catch (e) {
-    log.warn('tool', 'scheduled auto-bg continuation failed', { taskId: scheduledCtx.originTaskId, userId, err: e?.message || String(e) });
   }
 }
 
@@ -186,28 +126,18 @@ function _registerScheduledAutoBgChild({ scheduledCtx, userId, watcherId, label,
   });
 }
 
+// Mark an auto-backgrounded tool's barrier child done. The scheduled-task
+// reaction + finalize are driven by the barrier (see scheduler.runTask), so
+// this just records completion; it's a no-op outside a scheduled run.
 function _completeScheduledAutoBgChild({ scheduledCtx, userId, watcherId, resultText, errorMsg = null }) {
-  if (!scheduledCtx?.originTaskId || !watcherId) return { tracked: false, shouldContinue: true, resultText };
-  const barrier = completeScheduledChild({
+  if (!scheduledCtx?.originTaskId || !watcherId) return;
+  completeScheduledChild({
     userId,
     scheduledCtx,
     childId: _autoBgChildId(watcherId),
     resultText,
     errorMsg,
   });
-  if (barrier?.tracked && !barrier.shouldContinue) {
-    log.info('scheduled-barrier', 'child complete; waiting for siblings', {
-      taskId: scheduledCtx.originTaskId,
-      childId: _autoBgChildId(watcherId),
-      pending: barrier.pendingCount,
-      done: barrier.doneCount,
-      errors: barrier.errorCount,
-    });
-  }
-  return {
-    ...barrier,
-    resultText: barrier?.aggregateResult || resultText,
-  };
 }
 
 // Wrapper shape: { manifest, userId, dir }
@@ -982,6 +912,10 @@ function _desktopSavedPath(data) {
   }
 }
 
+/**
+ * @param {string} userId
+ * @param {{sandbox?: string, filename?: string, base64?: string, url?: string, timeoutMs?: number}} [opts]
+ */
 async function saveDesktopArtifact(userId, { sandbox, filename, base64, url, timeoutMs = 60_000 } = {}) {
   if (getVoiceContext()?.source !== 'desktop-app' || !userId || !sandbox || !filename) return null;
   if (!listDesktops(userId).length) return null;
@@ -1371,6 +1305,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       let backgrounded = false;
       let watcherId = null;
       let watchersMod = null;
+      /** @type {{agentName?: string, agentEmoji?: string, targetAgentId?: string} | null} */
       let delegatedMeta = null;
 
       const rememberDelegationMeta = (value) => {
@@ -1553,27 +1488,15 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     ts: Date.now(),
                   });
                 } catch (_) { /* best-effort */ }
-                const scheduledDone = _completeScheduledAutoBgChild({
+                _completeScheduledAutoBgChild({
                   scheduledCtx: captured.scheduledCtx,
                   userId: captured.userId,
                   watcherId: captured.watcherId,
                   resultText: finalText || `${captured.displayName} completed.`,
                 });
-                if (scheduledDone.shouldContinue) {
-                  await _completeOriginScheduledTask({
-                    scheduledCtx: captured.scheduledCtx,
-                    userId: captured.userId,
-                    resultText: scheduledDone.resultText || finalText || `${captured.displayName} completed.`,
-                  });
-                  await _runScheduledAutoBgContinuation({
-                    scheduledCtx: captured.scheduledCtx,
-                    userId: captured.userId,
-                    toolName: captured.name,
-                    args: captured.args,
-                    resultText: scheduledDone.resultText || finalText || `${captured.displayName} completed.`,
-                  });
-                }
-                if (!captured.targetAgentId) {
+                // Scheduled runs react+finalize via the barrier; only a direct
+                // (non-scheduled, non-delegated) chat gets the inline report-back.
+                if (!captured.scheduledCtx?.originTaskId && !captured.targetAgentId) {
                   await _runAutoBgToolContinuation({
                     userId: captured.userId,
                     agentId: captured.agentId,
@@ -1588,30 +1511,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   status: 'error',
                   finalText: `⚠ ${captured.name} failed: ${err.message}`,
                 });
-                const scheduledDone = _completeScheduledAutoBgChild({
+                _completeScheduledAutoBgChild({
                   scheduledCtx: captured.scheduledCtx,
                   userId: captured.userId,
                   watcherId: captured.watcherId,
                   resultText: '',
                   errorMsg: err.message,
                 });
-                if (scheduledDone.shouldContinue) {
-                  await _completeOriginScheduledTask({
-                    scheduledCtx: captured.scheduledCtx,
-                    userId: captured.userId,
-                    resultText: scheduledDone.resultText || '',
-                    errorMsg: err.message,
-                  });
-                  await _runScheduledAutoBgContinuation({
-                    scheduledCtx: captured.scheduledCtx,
-                    userId: captured.userId,
-                    toolName: captured.name,
-                    args: captured.args,
-                    resultText: scheduledDone.resultText || '',
-                    errorMsg: err.message,
-                  });
-                }
-                if (!captured.targetAgentId) {
+                if (!captured.scheduledCtx?.originTaskId && !captured.targetAgentId) {
                   await _runAutoBgToolContinuation({
                     userId: captured.userId,
                     agentId: captured.agentId,
@@ -1729,31 +1636,21 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               ts: Date.now(),
             });
           } catch (_) { /* best-effort */ }
-          await _runAutoBgToolContinuation({
-            userId,
-            agentId: attribAgentId,
-            toolName: name,
-            args: mergedArgs,
-            resultText: text || `${name} completed.`,
-          });
-          const scheduledDone = _completeScheduledAutoBgChild({
+          _completeScheduledAutoBgChild({
             scheduledCtx,
             userId,
             watcherId: wid,
             resultText: text || `${name} completed.`,
           });
-          if (scheduledDone.shouldContinue) {
-            await _completeOriginScheduledTask({
-              scheduledCtx,
+          // Scheduled runs react+finalize via the barrier; direct chats get the
+          // inline report-back continuation.
+          if (!scheduledCtx?.originTaskId) {
+            await _runAutoBgToolContinuation({
               userId,
-              resultText: scheduledDone.resultText || text || `${name} completed.`,
-            });
-            await _runScheduledAutoBgContinuation({
-              scheduledCtx,
-              userId,
+              agentId: attribAgentId,
               toolName: name,
               args: mergedArgs,
-              resultText: scheduledDone.resultText || text || `${name} completed.`,
+              resultText: text || `${name} completed.`,
             });
           }
           log.info('tool', 'auto-bg tool complete', { skill: owningSkillId, tool: name, userId, durationMs: Date.now() - _toolStart });
@@ -1762,37 +1659,23 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             status: 'error',
             finalText: `⚠ ${name} failed: ${err.message}`,
           });
-          const scheduledDone = _completeScheduledAutoBgChild({
+          _completeScheduledAutoBgChild({
             scheduledCtx,
             userId,
             watcherId: wid,
             resultText: '',
             errorMsg: err.message,
           });
-          if (scheduledDone.shouldContinue) {
-            await _completeOriginScheduledTask({
-              scheduledCtx,
+          if (!scheduledCtx?.originTaskId) {
+            await _runAutoBgToolContinuation({
               userId,
-              resultText: scheduledDone.resultText || '',
-              errorMsg: err.message,
-            });
-            await _runScheduledAutoBgContinuation({
-              scheduledCtx,
-              userId,
+              agentId: attribAgentId,
               toolName: name,
               args: mergedArgs,
-              resultText: scheduledDone.resultText || '',
+              resultText: '',
               errorMsg: err.message,
             });
           }
-          await _runAutoBgToolContinuation({
-            userId,
-            agentId: attribAgentId,
-            toolName: name,
-            args: mergedArgs,
-            resultText: '',
-            errorMsg: err.message,
-          });
           log.warn('tool', 'auto-bg tool threw', { skill: owningSkillId, tool: name, userId, err: err.message });
         });
         return;

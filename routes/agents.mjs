@@ -14,7 +14,7 @@ import {
   BASE_DIR,
 } from './_helpers.mjs';
 import { createCustomAgent, deleteCustomAgent, updateCustomAgent } from '../agents.mjs';
-import { onRoleEnabled, getRoleAssignments, setRoleAssignment, getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools, resolveAgentTools } from '../roles.mjs';
+import { onRoleEnabled, getRoleAssignments, setRoleAssignment, getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools } from '../roles.mjs';
 
 function setRoleAssignmentForUser(roleId, agentId, userId) {
   return setRoleAssignment(roleId, agentId || null, userId);
@@ -46,14 +46,16 @@ export async function handle(req, res) {
   // Agent → full tool listing (read-only dashboard view). For each agent
   // returns EVERY tool in its resolved toolset, grouped by the skill that owns
   // it, plus a source label (primary / assigned / shared / always-on /
-  // delegate). The tool list comes straight from roles.mjs `resolveAgentTools`
-  // so it's exactly what the agent carries before the per-turn router trims it.
+  // delegate). The list is the agent's already-resolved `.tools` — i.e. AFTER
+  // the primary role's defaultToolIds allowlist — so it matches what the agent
+  // actually carries before the per-turn router trims it (raw resolveAgentTools
+  // would over-report for roles like coordinator/coder/email that curate
+  // defaultToolIds).
   if (req.url === '/api/agent-skills' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
     try {
       const assignments   = getRoleAssignments(authId);
       const coordinatorId = assignments['coordinator'] ?? null;
-      const userSkills    = getUserEnabledSkills(authId);
       const agents        = getAgentsForUser(authId);
       const manifests     = listRoles(authId);
       const manById       = new Map(manifests.map(m => [m.id, m]));
@@ -87,7 +89,7 @@ export async function handle(req, res) {
           return 'other';
         };
 
-        const resolved = resolveAgentTools(a.skillCategory, userSkills, a.id, authId);
+        const resolved = Array.isArray(a.tools) ? a.tools : [];
         // Group resolved tools by owning skill.
         const groupMap = new Map(); // skillId(or '__core') → {skillId, skillName, source, tools:[]}
         for (const t of resolved) {

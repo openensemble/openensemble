@@ -327,9 +327,13 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
 
   const content = errorMsg ?? result;
 
-  let scheduledBarrier = null;
+  // For a scheduled run, just record this delegation's completion in the
+  // barrier. The barrier (scheduler.runTask) reacts to the aggregated results
+  // and stamps/removes the scheduled task exactly once when everything drains —
+  // this path must NOT stamp it itself (that was the double-finalize / one-shot-
+  // removed-out-from-under-pending-work bug).
   if (rec?.originScheduledTaskId) {
-    scheduledBarrier = completeScheduledChild({
+    completeScheduledChild({
       userId,
       scheduledCtx: {
         originTaskId: rec.originScheduledTaskId,
@@ -339,37 +343,6 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       childId: taskId,
       resultText: result || `${agentName} completed the task.`,
       errorMsg,
-    });
-  }
-
-  if (rec?.originScheduledTaskId && (!scheduledBarrier?.tracked || scheduledBarrier.shouldContinue)) {
-    try {
-      const { updateTask } = await import('./scheduler.mjs');
-      const patch = {
-        lastRun: new Date().toISOString(),
-      };
-      if (errorMsg) {
-        patch.lastError = errorMsg;
-      } else {
-        patch.lastError = null;
-        patch.lastOutput = String(scheduledBarrier?.aggregateResult || result || `${agentName} completed the task.`).trim().slice(0, 2000);
-      }
-      await updateTask(rec.originScheduledTaskId, patch);
-      _broadcast?.({
-        type: 'task_complete',
-        taskId: rec.originScheduledTaskId,
-        agent: rec.originScheduledTaskAgent || null,
-      });
-    } catch (e) {
-      console.warn('[background-tasks] scheduled-task completion update failed:', e.message);
-    }
-  } else if (scheduledBarrier?.tracked && !scheduledBarrier.shouldContinue) {
-    console.log('[scheduled-barrier] child complete; waiting for siblings', {
-      taskId: rec.originScheduledTaskId,
-      childId: taskId,
-      pending: scheduledBarrier.pendingCount,
-      done: scheduledBarrier.doneCount,
-      errors: scheduledBarrier.errorCount,
     });
   }
 
@@ -439,23 +412,19 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     ts: Date.now(),
   });
 
-  if (rec?.autoContinue) {
-    if (scheduledBarrier?.tracked && !scheduledBarrier.shouldContinue) return;
+  // Direct (non-scheduled) delegations get the coordinator's inline react step.
+  // Scheduled runs react+finalize via the barrier (scheduler.runScheduledReaction),
+  // so they skip this — otherwise the task would get a duplicate reaction turn.
+  if (rec?.autoContinue && !rec?.originScheduledTaskId) {
     _runContinuation({
       taskId,
       userId,
       coordinatorAgentId,
       targetAgentId: targetAgentId || rec?.agentId || null,
       agentName,
-      result: scheduledBarrier?.aggregateResult || result,
+      result,
       errorMsg,
       originalTask: rec?.originalTask || originalTask || rec?.summary || '',
-      scheduledCtx: rec?.originScheduledTaskId ? {
-        scheduledNote: rec.originScheduledNote || null,
-        originTaskId: rec.originScheduledTaskId,
-        originTaskOwnerId: rec.originScheduledTaskOwnerId,
-        originTaskAgent: rec.originScheduledTaskAgent,
-      } : null,
     }).catch(e => console.error('[background-tasks] continuation failed:', e?.stack ?? e?.message ?? e));
   }
 }

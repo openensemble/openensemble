@@ -521,7 +521,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (voiceCtx) {
     voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
   }
-  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, addedSkills: Set<string>, initialToolNames?: Set<string>} | null} */
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, addedSkills: Set<string>, initialToolNames?: Set<string>} | null} */
   let _routerStore = null;
   const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan);
   if (userToolPlanResult) {
@@ -531,6 +531,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         agent,
         fullTools: userToolPlanResult.fullTools,
         initiallyIncludedSkills: new Set(),
+        keptSkills: new Set(),
         addedSkills: new Set(),
         initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
       };
@@ -561,7 +562,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // actually carries request_tools, but harmless otherwise.
       _routerStore = {
         agent, fullTools: trim.fullTools,
+        // Empty by design when the tool-level pass applies, so request_tools can
+        // recover a dropped tool from an otherwise-kept skill (recovery gate).
         initiallyIncludedSkills: trim.initiallyIncludedSkills,
+        // The skills actually kept this turn — for telemetry/learning, which
+        // must NOT see the deliberately-empty recovery set above.
+        keptSkills: trim.skillsKept || trim.initiallyIncludedSkills,
         addedSkills: new Set(),
         initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
       };
@@ -1281,7 +1287,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       hasInlineData: Boolean(attachment.base64),
     } : null,
     routing: _routerStore ? {
-      initialSkills: [..._routerStore.initiallyIncludedSkills],
+      initialSkills: [...(_routerStore.keptSkills ?? _routerStore.initiallyIncludedSkills)],
       addedSkills: [..._routerStore.addedSkills],
       recoveredMissingTools,
       fullToolCount: _routerStore.fullTools?.length ?? null,
@@ -1333,7 +1339,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // prior {prompt → skill} pairs as extra intent examples. Never blocks.
     recordTurnRouting({
       userId, userText,
-      initiallyIncludedSkills: _routerStore.initiallyIncludedSkills,
+      initiallyIncludedSkills: _routerStore.keptSkills ?? _routerStore.initiallyIncludedSkills,
       addedSkills: _routerStore.addedSkills,
       usedToolNames: toolsUsed.map(t => t.name),
     }).catch(() => {});

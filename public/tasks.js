@@ -26,7 +26,9 @@ function _parseCronDow(spec) {
 // Mirror of scheduler.mjs:formatTaskCadence — kept in sync so the UI doesn't
 // flatten "Mon/Wed/Fri" reminders to "daily".
 function _formatIntervalText(ms) {
-  const totalMin = Math.max(1, Math.round(Number(ms) / 60000));
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return 'every ?';
+  const totalMin = Math.max(1, Math.round(n / 60000));
   if (totalMin < 60) return `every ${totalMin} min`;
   if (totalMin % 60 === 0) {
     const h = totalMin / 60;

@@ -753,8 +753,11 @@ async function execScheduleTask({ label, prompt, datetime, time, repeat = 'once'
   const silentTag = silent ? ' (silent — no chat output)' : '';
 
   // Fixed-cadence interval task (every N minutes/hours). Also accept a bare
-  // interval_minutes without repeat='interval' — that's an unambiguous signal.
-  if (repeat === 'interval' || (repeat === 'once' && interval_minutes != null)) {
+  // interval_minutes as the interval signal — but ONLY when there's no explicit
+  // clock anchor (datetime/time) and the caller didn't ask for daily. Otherwise
+  // a stray interval_minutes on a `{datetime, interval_minutes}` call would
+  // silently discard the datetime and create the wrong (recurring) task.
+  if (repeat === 'interval' || (interval_minutes != null && !datetime && !time && repeat !== 'daily')) {
     const mins = Number(interval_minutes);
     if (!Number.isFinite(mins) || mins < 1) {
       return 'Error: interval task needs interval_minutes >= 1 (e.g. 60 for hourly, 5 for every 5 minutes, 1440 for daily).';

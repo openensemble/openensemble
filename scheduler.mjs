@@ -168,7 +168,9 @@ export function parseIntervalPhrase(text) {
 
 // Human-readable interval, e.g. "5 min", "1 hour", "2 hours", "1h 30m", "2 days".
 function formatInterval(ms) {
-  const totalMin = Math.max(1, Math.round(Number(ms) / 60_000));
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '?';
+  const totalMin = Math.max(1, Math.round(n / 60_000));
   if (totalMin < 60) return `${totalMin} min`;
   if (totalMin % 60 === 0) {
     const h = totalMin / 60;
@@ -390,7 +392,24 @@ async function runTask(task, broadcast, opts = {}) {
     // Original gap that left an orphan header for "Check Proxmox Zpool"
     // 2026-05-06 was the un-caught throw; the helper try/catches it.
     const { runAgentWithRetry } = await import('./lib/run-agent-with-retry.mjs');
+    const { registerScheduledMain, completeScheduledMain } = await import('./lib/scheduled-child-barrier.mjs');
     const MAX_ATTEMPTS = 3;
+
+    // The main turn may delegate / auto-background work that outlives it. Track
+    // the main run as a barrier child BEFORE it starts so the group can't drain
+    // (and finalize) early; finalization is handed to the barrier below and
+    // happens exactly once — now if nothing backgrounded, or later when the
+    // last background child drains. Returning promptly here keeps recurring /
+    // interval re-arm from blocking on slow background work.
+    const scheduledCtx = {
+      originTaskId: task.id,
+      originTaskOwnerId: userId,
+      originTaskAgent: task.agent,
+      scheduledNote,
+      manual,
+    };
+    registerScheduledMain({ userId, scheduledCtx, label: task.label || 'scheduled run' });
+
     const { succeeded, lastError, assistantContent } = await runAgentWithRetry({
       scopedAgent, userText: task.prompt, systemNote: scheduledNote, userId, streamChat,
       maxAttempts: MAX_ATTEMPTS,
@@ -401,96 +420,143 @@ async function runTask(task, broadcast, opts = {}) {
       originTaskAgent: task.agent,
     });
 
-    if (!succeeded) console.error(`[scheduler] Task "${task.label}" failed after ${MAX_ATTEMPTS} attempts`);
-    else console.log(`[scheduler] Task "${task.label}" complete`);
+    if (!succeeded) console.error(`[scheduler] Task "${task.label}" main turn failed after ${MAX_ATTEMPTS} attempts`);
+    else console.log(`[scheduler] Task "${task.label}" main turn complete`);
     const durationMs = Date.now() - startedAt;
-    if (succeeded) log.info('scheduler', 'task complete', { taskId: task.id, label: task.label, durationMs });
+    if (succeeded) log.info('scheduler', 'task main complete', { taskId: task.id, label: task.label, durationMs });
     else           log.error('scheduler', 'task failed', { taskId: task.id, label: task.label, durationMs, attempts: MAX_ATTEMPTS, err: lastError });
 
-    // On failure, append a visible error message to the session so the chat
-    // shows what happened instead of an orphan header. Without this the user
-    // sees the scheduled-task pill and nothing under it (the bug that
-    // surfaced this whole fix). Use role:'assistant' so the chat treats it
-    // as part of the run's reply, not as scheduler scaffolding.
-    // Silent tasks skip this — failure surfaces as lastError in the tasks
-    // drawer; injecting a chat message would break the silent contract.
-    if (!succeeded && !task.silent) {
-      try {
-        appendToSession(sessionKey, {
-          role: 'assistant',
-          content: `⚠️ Scheduled task failed after ${MAX_ATTEMPTS} attempts. Last error: ${lastError || 'unknown'}.\n\nThe task is still scheduled and will retry on its next run.`,
-          scheduled: true,
-          taskId: task.id,
-          taskFailed: true,
-          ts: Date.now(),
-        });
-      } catch (e) {
-        console.warn('[scheduler] Failed to append failure message to session:', e.message);
-      }
-    }
-
-    // One-shot tasks vanish after firing; recurring ones stamp lastRun even
-    // on failure (with lastError) so the tasks drawer shows when it ran and
-    // why it failed instead of looking like it never ran today.
-    if (manual) {
-      // Test fire: never delete or disable. Record the outcome for the drawer
-      // but leave the schedule + failure streak exactly as they were.
-      const patch = { lastRun: new Date().toISOString() };
-      if (succeeded) { patch.lastError = null; patch.lastOutput = (assistantContent || '').trim().slice(0, 280); }
-      else { patch.lastError = lastError || 'unknown'; }
-      await updateTask(task.id, patch);
-    } else if (task.repeat === 'once') {
-      await removeTask(task.id);
-    } else {
-      const patch = { lastRun: new Date().toISOString() };
-      // Cross-fire failure tracking. Per-fire retry (MAX_ATTEMPTS) handles
-      // transient blips; this counter handles the broken-forever case — a
-      // cron task whose handler can never succeed shouldn't keep burning
-      // tokens every cycle. Resets to 0 on any successful fire.
-      const prevStreak = Number(task.consecutiveFailures) || 0;
-      if (!succeeded) {
-        patch.lastError = lastError || 'unknown';
-        patch.consecutiveFailures = prevStreak + 1;
-        if (patch.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          patch.enabled = false;
-          patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${lastError || 'unknown'}`;
-          // Surface the disable to the user. Without this the task just
-          // silently stops appearing in the schedule — same failure mode the
-          // per-fire ⚠️ message was added to fix, but at the schedule level.
-          if (!task.silent) {
-            try {
-              appendToSession(sessionKey, {
-                role: 'assistant',
-                content: `⛔ Scheduled task "${task.label}" auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires. Last error: ${lastError || 'unknown'}.\n\nRe-enable it from the tasks drawer once the underlying issue is fixed.`,
-                scheduled: true,
-                taskId: task.id,
-                taskAutoDisabled: true,
-                ts: Date.now(),
-              });
-            } catch (e) {
-              console.warn('[scheduler] Failed to append auto-disable message:', e.message);
-            }
-          }
-          log.warn('scheduler', 'task auto-disabled', { taskId: task.id, label: task.label, streak: patch.consecutiveFailures, lastError });
-        }
-      } else {
-        patch.lastError = null; // clear stale error on next success
-        if (prevStreak) patch.consecutiveFailures = 0;
-        // Capture the agent's final reply as lastOutput so the tasks drawer
-        // can show what happened — the only feedback channel for silent runs.
-        patch.lastOutput = (assistantContent || '').trim().slice(0, 280);
-      }
-      await updateTask(task.id, patch);
-    }
-
-    // Notify any connected WebSocket clients to reload this agent's session
-    // — applies to failures too so the user's chat refreshes and shows the
-    // ⚠️ message instead of the orphaned header.
-    if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent });
+    // Hand finalization to the barrier. `onContinue` reacts to background
+    // results (no-op when nothing backgrounded); `onFinalize` stamps the task
+    // exactly once when the group truly drains. A scheduled task "succeeded"
+    // only if the main turn succeeded AND no background child errored.
+    completeScheduledMain({
+      userId,
+      scheduledCtx,
+      resultText: assistantContent || '',
+      errorMsg: succeeded ? null : (lastError || 'unknown'),
+      meta: { manual },
+      onContinue: (aggregate) => runScheduledReaction({ task, scheduledCtx, userId, aggregate }),
+      onFinalize: (aggregate, info = {}) => finalizeScheduledTask(task, {
+        succeeded: succeeded && (info.errorCount || 0) === 0,
+        output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
+        lastError: lastError || (info.errorCount ? 'background work failed' : null),
+        manual, sessionKey, broadcast,
+      }),
+    });
   } catch (e) {
     console.error(`[scheduler] Task "${task.label}" threw outside runAttempt:`, e.message);
     log.error('scheduler', 'task threw', { taskId: task.id, label: task.label, err: e.message });
   }
+}
+
+// Reaction step: a scheduled run's background work finished. Wake the task's
+// agent (no human present) to act on the aggregated results — e.g. "briefing
+// generated → now email it". Runs inside scheduledContext so any work IT spawns
+// re-registers under the same barrier group. Invoked by the barrier on drain.
+async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
+  if (!task?.agent || !aggregate?.trim()) return;
+  const { handleChatMessage } = await import('./chat-dispatch.mjs');
+  const { sendToUser } = await import('./ws-handler.mjs');
+  const { scheduledContext } = await import('./lib/scheduled-context.mjs');
+  const prompt = [
+    'Background work from your scheduled task has completed. Act on the results below for THIS scheduled task only.',
+    '',
+    `<scheduled_task id="${task.id}" agent="${task.agent || ''}">`,
+    `<results>\n${aggregate}\n</results>`,
+    '</scheduled_task>',
+    '',
+    'No human is present. If the task needs a next step using these results, do it directly (do not ask or wait for confirmation). If it is already complete, give a concise completion summary. Do not act on any unrelated task.',
+  ].join('\n');
+  await scheduledContext.run(scheduledCtx, () => handleChatMessage({
+    userId,
+    agentId: task.agent,
+    text: prompt,
+    attachment: null,
+    source: 'web',
+    onEvent: (e) => sendToUser(userId, e),
+    onBroadcast: () => {},
+    onNotify: () => {},
+    _hiddenUser: true,
+    _isBackgroundContinuation: true,
+    _isolatedTaskRun: true,
+  }));
+}
+
+// Stamp/remove a scheduled task at TRUE completion (main turn + all background
+// children + any reaction rounds). The single finalize path — replaces the
+// former inline finalize in runTask so a delegating task can't be double-stamped
+// or have a one-shot removed out from under its own pending background work.
+async function finalizeScheduledTask(task, { succeeded, output, lastError, manual, sessionKey, broadcast }) {
+  // On failure, append a visible error message to the session so the chat shows
+  // what happened instead of an orphan header. Manual test fires skip this (the
+  // "will retry on its next run" copy is wrong for an out-of-band run; the
+  // drawer's lastError covers it). Silent tasks skip it by contract.
+  if (!succeeded && !task.silent && !manual) {
+    try {
+      appendToSession(sessionKey, {
+        role: 'assistant',
+        content: `⚠️ Scheduled task failed. Last error: ${lastError || 'unknown'}.\n\nThe task is still scheduled and will retry on its next run.`,
+        scheduled: true,
+        taskId: task.id,
+        taskFailed: true,
+        ts: Date.now(),
+      });
+    } catch (e) {
+      console.warn('[scheduler] Failed to append failure message to session:', e.message);
+    }
+  }
+
+  if (manual) {
+    // Test fire: never delete or disable. Record the outcome for the drawer
+    // but leave the schedule + failure streak exactly as they were.
+    const patch = { lastRun: new Date().toISOString() };
+    if (succeeded) { patch.lastError = null; patch.lastOutput = (output || '').trim().slice(0, 280); }
+    else { patch.lastError = lastError || 'unknown'; }
+    await updateTask(task.id, patch);
+  } else if (task.repeat === 'once') {
+    // One-shot tasks vanish after firing.
+    await removeTask(task.id);
+  } else {
+    const patch = { lastRun: new Date().toISOString() };
+    // Cross-fire failure tracking. Per-fire retry (MAX_ATTEMPTS) handles
+    // transient blips; this counter handles the broken-forever case — a cron
+    // task whose handler can never succeed shouldn't keep burning tokens every
+    // cycle. Resets to 0 on any successful fire.
+    const prevStreak = Number(task.consecutiveFailures) || 0;
+    if (!succeeded) {
+      patch.lastError = lastError || 'unknown';
+      patch.consecutiveFailures = prevStreak + 1;
+      if (patch.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        patch.enabled = false;
+        patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${lastError || 'unknown'}`;
+        if (!task.silent) {
+          try {
+            appendToSession(sessionKey, {
+              role: 'assistant',
+              content: `⛔ Scheduled task "${task.label}" auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires. Last error: ${lastError || 'unknown'}.\n\nRe-enable it from the tasks drawer once the underlying issue is fixed.`,
+              scheduled: true,
+              taskId: task.id,
+              taskAutoDisabled: true,
+              ts: Date.now(),
+            });
+          } catch (e) {
+            console.warn('[scheduler] Failed to append auto-disable message:', e.message);
+          }
+        }
+        log.warn('scheduler', 'task auto-disabled', { taskId: task.id, label: task.label, streak: patch.consecutiveFailures, lastError });
+      }
+    } else {
+      patch.lastError = null; // clear stale error on next success
+      if (prevStreak) patch.consecutiveFailures = 0;
+      // Capture the final reply as lastOutput so the tasks drawer can show what
+      // happened — the only feedback channel for silent runs.
+      patch.lastOutput = (output || '').trim().slice(0, 280);
+    }
+    await updateTask(task.id, patch);
+  }
+
+  if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent });
 }
 
 // Track pending timers so we can cancel them on shutdown

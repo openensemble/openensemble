@@ -224,7 +224,7 @@ function normalizeToolPlan(plan) {
  * @param {string} opts.text
  * @param {object|null} [opts.attachment]
  * @param {{mode?: string, selectedTools?: string[], source?: string, phrase?: string}|null} [opts.toolPlan]
- * @param {'voice-device'|'web'|'telegram'|null} [opts.source]
+ * @param {'voice-device'|'web'|'telegram'|'desktop-app'|null} [opts.source]
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
  * @param {number|null} [opts.wakeSlot]              voice-device slot index (0–5)
  * @param {(ev: {type: string, [k: string]: any}) => void} opts.onEvent

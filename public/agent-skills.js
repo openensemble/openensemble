@@ -36,7 +36,11 @@ const _AG_SRC_STYLE = {
 
 function _agSrcBadge(source) {
   const s = _AG_SRC_STYLE[source] || _AG_SRC_STYLE.other;
-  return `<span style="font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:${s.color};border:1px solid ${s.color}55;border-radius:4px;padding:0 5px;white-space:nowrap">${s.label}</span>`;
+  // color-mix keeps a translucent border valid whether s.color is a hex or a
+  // var() — appending "55" alpha to "var(--accent)" yields invalid CSS and the
+  // border silently drops.
+  const border = `color-mix(in srgb, ${s.color} 33%, transparent)`;
+  return `<span style="font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:${s.color};border:1px solid ${border};border-radius:4px;padding:0 5px;white-space:nowrap">${s.label}</span>`;
 }
 
 function _agGroupHtml(g) {
@@ -65,7 +69,7 @@ function _agAgentCard(a) {
   const groupsHtml = (a.groups || []).map(_agGroupHtml).join('') || '<div style="font-size:11px;color:var(--muted);padding:6px 0">No tools.</div>';
   return `<details class="ag-card" ${_agSkillsExpanded ? 'open' : ''} style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:8px">
     <summary style="display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none">
-      <span style="font-size:22px">${a.emoji || '🤖'}</span>
+      <span style="font-size:22px">${escHtml(a.emoji || '🤖')}</span>
       <div style="flex:1;min-width:0">
         <div style="font-weight:600;font-size:14px">${escHtml(a.name)}${coordBadge}</div>
         <div style="font-size:11px;color:var(--muted)">${a.role ? escHtml(a.role) + ' · ' : ''}${escHtml(a.model || '')}</div>
