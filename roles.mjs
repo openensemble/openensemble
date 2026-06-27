@@ -60,9 +60,21 @@ function _agentIdFromSessionKey(sessionKey, userId) {
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
 
+// Tools whose background completion warrants waking the coordinator with a
+// concise report-back turn. Most auto-backgrounded tools just drop their
+// result into the task chip + agent_report bubble — the user already sees it,
+// so a second LLM turn would be redundant and costly. Only the tools listed
+// here justify the extra turn (e.g. node_exec surfacing package/system updates
+// that need a human go/no-go). Add a tool here only when its raw result needs
+// the coordinator to interpret it and prompt the user for a decision. Any
+// domain-specific behavior (how to summarize, what to ask) belongs in the
+// owning skill's systemPromptAddition, NOT in the continuation prompt below.
+const BG_REPORT_TOOLS = new Set(['node_exec']);
+
 async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, resultText, errorMsg = null }) {
   if (!userId || !agentId) return;
   if (_isEphem(agentId)) return;
+  if (!BG_REPORT_TOOLS.has(toolName)) return;
   const targetAgentId = _agentIdFromSessionKey(agentId, userId);
   if (!targetAgentId) return;
   const prompt = [
@@ -73,7 +85,7 @@ async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, res
     errorMsg ? `<error>${errorMsg}</error>` : `<result>${resultText || ''}</result>`,
     '</background_tool>',
     '',
-    'Give the user a concise completion update. If the result shows available package/system updates, summarize what matters and ask whether to apply them. Do not apply updates or make another change unless the user explicitly confirms.',
+    'Give the user a concise completion update based on this result, following any guidance in your system instructions for this kind of task. Do not take further actions or make changes unless the user explicitly confirms.',
   ].join('\n');
   try {
     const { handleChatMessage } = await import('./chat-dispatch.mjs');
