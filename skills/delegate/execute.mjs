@@ -149,8 +149,15 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   }
   if (name !== 'ask_agent') { yield { type: 'result', text: null }; return; }
 
-  const { agent_id, task: rawTask, no_confirm = false, _parallel = false } = args;
+  const { agent_id, task: rawTask, directive: rawDirective = '', no_confirm = false, _parallel = false } = args;
   let task = rawTask;
+  // Optional routing key: the coordinator's one-line "what the specialist must
+  // DO" (e.g. "send an email to X"). Used ONLY to pick the specialist's tools
+  // and match/learn its recipe — the full content/recipients/body stay in
+  // `task`, which is what the specialist actually works from. Keeps a big pasted
+  // payload (briefing, doc) from drowning the send/compose intent. Empty → the
+  // router falls back to instructionText(task).
+  const directive = typeof rawDirective === 'string' ? rawDirective.trim() : '';
   if (!agent_id || !task) { yield { type: 'result', text: 'Missing agent_id or task.' }; return; }
 
   // Sync-vs-background is decided below, AFTER the delegation direction is known
@@ -345,7 +352,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   if (background || _parallel) {
     const { dispatchBackground } = await import('../../background-tasks.mjs');
     const autoContinue = callerIsCoordinator;
-    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, { autoContinue, extraSystemNote: noConfirmNote });
+    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, { autoContinue, extraSystemNote: noConfirmNote, routeText: directive || null });
     // Phrase the result as something the calling agent can relay verbatim to the
     // user — not internal jargon — so the user knows what's happening and that a
     // result will follow, without having to watch logs.
@@ -465,7 +472,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // Composes with scheduledNote when both apply.
   const combinedNote = [scheduledNote, noConfirmNote].filter(Boolean).join('\n\n') || null;
   const { matchToolPlan } = await import('../../lib/tool-plan-memory.mjs');
-  const rememberedToolPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: task });
+  const rememberedToolPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: directive || task });
   // Surface the specialist's prose into the coordinator's chat as a
   // live-streaming tool bubble (rendered by public/chat.js _ensureStreamBubble
   // via the tool_progress event). Without this, the user only sees the small
@@ -485,7 +492,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         currentTool: null,
       });
     }
-    for await (const event of streamChat(scopedAgent, task, null, null, userId, null, combinedNote, false, null, { toolPlan: rememberedToolPlan })) {
+    for await (const event of streamChat(scopedAgent, task, null, null, userId, null, combinedNote, false, null, { toolPlan: rememberedToolPlan, routeText: directive || undefined })) {
       if (event.type === 'token') {
         fullText += event.text;
         yield {

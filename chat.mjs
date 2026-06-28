@@ -463,6 +463,13 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
 const SELECTED_PLAN_CONTROL_TOOLS = new Set(['request_tools']);
 
+// Tools that create standing scheduled work (schedule_task / set_reminder /
+// set_alarm all call addTask). Stripped on autonomous runs so a scheduled task,
+// its barrier reaction, or any background/continuation/worker turn can't spawn
+// NEW tasks — "a task must never create a task." Interactive turns (a human is
+// present) keep them, so "remind me at 5pm" still works.
+const AUTONOMOUS_TASK_CREATION_TOOLS = new Set(['schedule_task', 'set_reminder', 'set_alarm']);
+
 function sanitizeToolPlanForStream(plan) {
   if (!plan || typeof plan !== 'object') return null;
   if (plan.mode === 'none') return { mode: 'none', selectedTools: [], source: plan.source || null };
@@ -507,6 +514,14 @@ function applyUserToolPlan(agent, plan) {
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
   const isolatedTaskRun = turnOpts?.isolatedTaskRun === true;
+  // Routing/recipe key: when a delegation supplies an explicit `directive` (the
+  // short "what the specialist must DO"), route + recover + learn on that rather
+  // than the full task body riding along with it (a pasted briefing, doc, list).
+  // Falls back to the user message; the scorer + recipe layer apply
+  // instructionText() to whichever it gets.
+  const routeText = (typeof turnOpts?.routeText === 'string' && turnOpts.routeText.trim())
+    ? turnOpts.routeText.trim()
+    : userText;
   // Per-turn tool routing: trim the coordinator's outbound tool list to the
   // always-on subset + on-demand skills whose intent_examples match this
   // user message. Other agents (specialists) are already tightly scoped and
@@ -525,10 +540,27 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
   /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, addedSkills: Set<string>, initialToolNames?: Set<string>} | null} */
   let _routerStore = null;
+  // A task must never create a task. On any autonomous run strip the task /
+  // reminder / alarm creators BEFORE tool routing, so they're absent from the
+  // recoverable set too (request_tools can't pull them back, and the reaction
+  // prompt's "scheduled task" framing can't lead the model to a duplicate).
+  if (isolatedTaskRun && Array.isArray(agent.tools)) {
+    const before = agent.tools.length;
+    agent.tools = agent.tools.filter(t => !AUTONOMOUS_TASK_CREATION_TOOLS.has(t.function?.name));
+    if (agent.tools.length !== before) {
+      log.info('chat', 'stripped task-creation tools on autonomous run', { agentId: agent.id, removed: before - agent.tools.length });
+    }
+  }
   const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan);
   if (userToolPlanResult) {
     recomposeAgentPromptForTools(agent);
-    if (agent.skillCategory === 'coordinator' && agent.tools.some(t => t.function?.name === 'request_tools')) {
+    // Populate the router store for ANY agent that still carries request_tools
+    // under a plan — not just coordinators. Without this, a plan-constrained
+    // specialist (e.g. an email agent pinned by a remembered sort/label recipe)
+    // has no fullTools to recover from: request_tools dead-ends with "nothing to
+    // add" and the missing-tool backstop never arms. fullTools holds the
+    // pre-plan toolset, so recovery can pull a dropped compose/send tool back.
+    if (agent.tools.some(t => t.function?.name === 'request_tools')) {
       _routerStore = {
         agent,
         fullTools: userToolPlanResult.fullTools,
@@ -555,7 +587,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // is safe to call unconditionally.
   if (!userToolPlanResult && Array.isArray(agent.tools) && agent.tools.length > 0) {
     try {
-      const trim = await trimToolsForTurn({ agent, userText, userId });
+      const trim = await trimToolsForTurn({ agent, userText: routeText, userId, isolatedTaskRun });
       const changed = trim.trimmedTools.length !== trim.fullTools.length;
       agent.tools = trim.trimmedTools;
       // Stash the pre-trim set so request_tools can recover dropped tools — for
@@ -1213,7 +1245,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
   let recoveredMissingTools = false;
   if (!errored && shouldBufferForRecovery && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
-    const missingSkills = inferMissingToolSkills({ userText, assistantText: assistantContent, userId });
+    const missingSkills = inferMissingToolSkills({ userText: routeText, assistantText: assistantContent, userId });
     for (const skillId of [...missingSkills]) {
       if (_routerStore.initiallyIncludedSkills.has(skillId) || _routerStore.addedSkills.has(skillId)) missingSkills.delete(skillId);
     }
@@ -1221,7 +1253,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       const { addedToolNames, addedSkills } = await expandToolsByReason({
         agent,
         fullTools: _routerStore.fullTools,
-        reason: `Recover from missing-tool reply for: ${userText}`,
+        reason: `Recover from missing-tool reply for: ${routeText}`,
         groups: [...missingSkills],
         userId,
         alreadyIncludedSkills: _routerStore.initiallyIncludedSkills,
@@ -1354,7 +1386,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       try {
         const learned = learnToolPlanFromTurn(userId, {
           agentId: agent.id,
-          phrase: userText,
+          phrase: routeText,
           usedToolNames: toolsUsed.map(t => t.name),
           initiallyAvailableToolNames: [...(_routerStore.initialToolNames || [])],
           fullToolNames: (_routerStore.fullTools || []).map(t => t.function?.name).filter(Boolean),

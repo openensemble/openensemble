@@ -584,7 +584,14 @@ export async function handleChatMessage({
   // runLlmTurn owns the streamChat + provider failover + voice-device
   // follow-up listening window. It never throws; finalizeTurn cleans up the
   // busy-slot / abort-controller / active-stream registry afterwards.
-  const schedulerNote = await buildSchedulerNote({ userId, agentId, userText: ctx.userText });
+  // Autonomous turns (scheduled run, barrier reaction, background continuation)
+  // must NOT run the scheduler-intent interceptor — it calls addTask directly,
+  // so a scheduled briefing whose reaction prompt echoes "daily ... briefing"
+  // would spawn a duplicate of itself. A task must never create a task.
+  const schedulerNote = await buildSchedulerNote({
+    userId, agentId, userText: ctx.userText,
+    skipIntercept: _isBackgroundContinuation || _isolatedTaskRun,
+  });
 
   // Pre-LLM alias learning: if the previous turn ended with a "did you mean X?"
   // and this turn is a short affirmation ("yes"), consume the pending

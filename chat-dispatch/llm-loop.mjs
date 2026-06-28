@@ -289,9 +289,14 @@ export async function runSpecialistRoute({
  * system-wide without needing the tasks skill assigned. Misses fall through
  * with only the time note set.
  */
-export async function buildSchedulerNote({ userId, agentId, userText }) {
+export async function buildSchedulerNote({ userId, agentId, userText, skipIntercept = false }) {
   let schedulerNote = null;
-  if (userText) {
+  // skipIntercept: never run the scheduler-intent interceptor on an autonomous
+  // turn (scheduled run / barrier reaction / background continuation). It calls
+  // addTask directly, so a task whose prompt contains scheduling language
+  // ("daily ... briefing") would re-create itself. A task must never create a
+  // task. The time note below is still emitted.
+  if (userText && !skipIntercept) {
     try {
       const recentHistory = await loadSession(`${userId}_${agentId}`, 6);
       const intercept = await interceptScheduling({ userId, agentId, text: userText, history: recentHistory });

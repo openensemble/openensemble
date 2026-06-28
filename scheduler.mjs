@@ -8,9 +8,10 @@ import path from 'path';
 import { getAgent } from './agents.mjs';
 import { streamChat } from './chat.mjs';
 import { appendToSession } from './sessions.mjs';
-import { withLock, getAgentsForUser, getUser, isUserTimeBlocked } from './routes/_helpers.mjs';
+import { withLock, getAgentsForUser, getUser, isUserTimeBlocked, loadConfig } from './routes/_helpers.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { log } from './logger.mjs';
+import { getScheduledContext } from './lib/scheduled-context.mjs';
 
 const TASKS_DIR      = path.join(BASE_DIR, 'tasks'); // legacy fallback
 const TASKS_LOCK_KEY = path.join(BASE_DIR, 'tasks.lock');
@@ -117,6 +118,17 @@ const modifyTasks = fn => withLock(TASKS_LOCK_KEY, () => {
 });
 
 export async function addTask(task) {
+  // INVARIANT: a task must never create a task. If we're executing inside a
+  // scheduled run (main turn, barrier reaction, continuation, or ANY delegate /
+  // sub-agent it spawned — the ALS context propagates to all of them), refuse.
+  // This is the single chokepoint that enforces the rule regardless of which
+  // path attempts it: the LLM `schedule_task` tool, the scheduler-intent
+  // interceptor, or anything else. Interactive turns (no scheduled context) are
+  // unaffected, so "remind me at 5pm" still works.
+  if (getScheduledContext()) {
+    log.warn('scheduler', 'blocked task creation from within a scheduled run', { label: task?.label, agent: task?.agent });
+    throw new Error('A running scheduled task cannot create another task.');
+  }
   const id = `task_${Date.now()}`;
   const entry = { id, enabled: true, ...task };
   // modifyTasks goes through withLock and is async — must await or callers
@@ -408,7 +420,13 @@ async function runTask(task, broadcast, opts = {}) {
       scheduledNote,
       manual,
     };
-    registerScheduledMain({ userId, scheduledCtx, label: task.label || 'scheduled run' });
+    // DIAGNOSTIC TOGGLE: config.scheduler.childBarrier === false bypasses the
+    // barrier entirely (no child tracking, no reaction turn) and finalizes
+    // directly after the main turn — the pre-barrier behavior. Read fresh so it
+    // flips between Run-now fires without a restart.
+    const useChildBarrier = loadConfig()?.scheduler?.childBarrier !== false;
+    if (useChildBarrier) registerScheduledMain({ userId, scheduledCtx, label: task.label || 'scheduled run' });
+    else log.warn('scheduler', 'CHILD BARRIER DISABLED (diagnostic)', { taskId: task.id });
 
     const { succeeded, lastError, assistantContent } = await runAgentWithRetry({
       scopedAgent, userText: task.prompt, systemNote: scheduledNote, userId, streamChat,
@@ -430,20 +448,26 @@ async function runTask(task, broadcast, opts = {}) {
     // results (no-op when nothing backgrounded); `onFinalize` stamps the task
     // exactly once when the group truly drains. A scheduled task "succeeded"
     // only if the main turn succeeded AND no background child errored.
-    completeScheduledMain({
-      userId,
-      scheduledCtx,
-      resultText: assistantContent || '',
-      errorMsg: succeeded ? null : (lastError || 'unknown'),
-      meta: { manual },
-      onContinue: (aggregate) => runScheduledReaction({ task, scheduledCtx, userId, aggregate }),
-      onFinalize: (aggregate, info = {}) => finalizeScheduledTask(task, {
-        succeeded: succeeded && (info.errorCount || 0) === 0,
-        output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
-        lastError: lastError || (info.errorCount ? 'background work failed' : null),
-        manual, sessionKey, broadcast,
-      }),
-    });
+    if (useChildBarrier) {
+      completeScheduledMain({
+        userId,
+        scheduledCtx,
+        resultText: assistantContent || '',
+        errorMsg: succeeded ? null : (lastError || 'unknown'),
+        meta: { manual },
+        onContinue: (aggregate) => runScheduledReaction({ task, scheduledCtx, userId, aggregate }),
+        onFinalize: (aggregate, info = {}) => finalizeScheduledTask(task, {
+          succeeded: succeeded && (info.errorCount || 0) === 0,
+          output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
+          lastError: lastError || (info.errorCount ? 'background work failed' : null),
+          manual, sessionKey, broadcast,
+        }),
+      });
+    } else {
+      // Barrier bypassed: no reaction turn, finalize directly after the main
+      // turn (pre-barrier behavior). Background work, if any, runs detached.
+      await finalizeScheduledTask(task, { succeeded, output: assistantContent, lastError, manual, sessionKey, broadcast });
+    }
   } catch (e) {
     console.error(`[scheduler] Task "${task.label}" threw outside runAttempt:`, e.message);
     log.error('scheduler', 'task threw', { taskId: task.id, label: task.label, err: e.message });
@@ -468,6 +492,7 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
     '</scheduled_task>',
     '',
     'No human is present. If the task needs a next step using these results, do it directly (do not ask or wait for confirmation). If it is already complete, give a concise completion summary. Do not act on any unrelated task.',
+    'Do NOT create, schedule, re-schedule, or modify any task, reminder, or alarm — this is the existing task running; it must never spawn another one.',
   ].join('\n');
   await scheduledContext.run(scheduledCtx, () => handleChatMessage({
     userId,

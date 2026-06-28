@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
+import { resolveBodyDoc, deleteBodyDoc } from '../../lib/email-body-doc.mjs';
 import { isVoiceSource } from '../../lib/voice-context.mjs';
 import { emailLabelsEnabled, recordLabelings, recordCorrection, removeCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
 
@@ -764,17 +765,45 @@ async function _executeInner(name, args, userId) {
   const account = resolveAccount(accounts, requestedAccount(args));
   if (!account) return 'Could not find a matching email account.';
 
+  // body_doc_id: forward a large pre-written body by reference instead of having
+  // the model regenerate it token-by-token. Resolve the doc into body/html_body
+  // once, here, so every provider path (gmail/microsoft/imap) sees a normal
+  // body. The handoff doc is a transient buffer — delete it after a confirmed
+  // send (below). body_doc_id supersedes any literal `body` the caller passed.
+  let bodyDocCleanup = null;
+  if (name === 'email_compose') {
+    const ref = args.body_doc_id || args.html_body_doc_id;
+    if (ref) {
+      const r = resolveBodyDoc(ref, userId);
+      if (r.error) return r.error;
+      args = { ...args, body: r.body, html_body: r.htmlBody ?? args.html_body ?? null };
+      delete args.body_doc_id;
+      delete args.html_body_doc_id;
+      bodyDocCleanup = r.cleanup;
+    }
+    if (!args.body && !args.html_body) {
+      return 'email_compose needs a body: pass `body` (plain text), `html_body`, or `body_doc_id` (a research/documents doc whose text becomes the inline body).';
+    }
+  }
+
   try {
+    let result;
     switch (account.provider) {
       case 'gmail':
-        return await execGmail(name, args, userId, account.id);
+        result = await execGmail(name, args, userId, account.id); break;
       case 'microsoft':
-        return await execMicrosoft(name, args, userId, account.id);
+        result = await execMicrosoft(name, args, userId, account.id); break;
       case 'imap':
-        return await execImap(name, args, account, userId);
+        result = await execImap(name, args, account, userId); break;
       default:
         return `Unknown provider: ${account.provider}`;
     }
+    // Transient handoff doc: delete only after a confirmed send (every provider
+    // returns "...sent..." on success). Keep it on failure so the user can retry.
+    if (bodyDocCleanup && typeof result === 'string' && /\bsent\b/i.test(result) && !/^error/i.test(result)) {
+      if (deleteBodyDoc(bodyDocCleanup, userId)) result += ' (Handoff doc deleted.)';
+    }
+    return result;
   } catch (e) {
     return `Error (${account.label}): ${e.message}`;
   }

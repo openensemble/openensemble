@@ -1,0 +1,30 @@
+{
+  "id": "email-send",
+  "name": "Email Delivery",
+  "description": "Send-only email: any agent can deliver a result to the user (or a recipient) directly, with no hand-off to the email specialist.",
+  "icon": "📤",
+  "category": "utility",
+  "always_on": true,
+  "enabled_by_default": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "email_user",
+        "description": "Email the user (or a specified recipient) DIRECTLY — sends from the user's primary connected account, with NO hand-off to an email agent. Use it to DELIVER a result you produced or were asked to send: a briefing, a research summary, an alert, a reminder. Send-only: for reading, triage, labels, search, or bulk inbox operations, that is the email specialist's job (delegate or use the full email tools).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "subject": { "type": "string", "description": "Plain ASCII subject line (no emoji or non-ASCII characters)." },
+            "body": { "type": "string", "description": "Plain-text email body. Omit when using body_doc_id." },
+            "body_doc_id": { "type": "string", "description": "Deliver a large, ALREADY-WRITTEN body by reference instead of pasting it into `body`: a 'research:doc_xxx' or 'documents:doc_xxx' handle. The doc's text becomes the inline email body (markdown auto-rendered to HTML), and the transient handoff doc is deleted after a successful send. Use this for briefings/reports you (or another agent) saved — never re-type long content into `body`." },
+            "to": { "type": "string", "description": "Recipient address. Omit (or pass 'me') to email the user themselves — it resolves to their address automatically. Pass an explicit address only for a different recipient." },
+            "account": { "type": "string", "description": "Optional connected-account label to send FROM (defaults to the user's primary account)." }
+          },
+          "required": ["subject"]
+        }
+      }
+    }
+  ],
+  "systemPromptAddition": "## Emailing directly (email_user)\n\nYou can email {{USER_NAME}} (or any recipient) yourself with `email_user` — you do NOT need to delegate to an email agent. Use it to DELIVER something the user asked for or that your job produces: a briefing, a research summary, a status alert, a reminder. It sends from {{USER_NAME}}'s primary connected account.\n\n- **To email {{USER_NAME}} themselves**, omit `to` (or pass \"me\") — it resolves to their address automatically. Pass an explicit `to` only for a different recipient.\n- **Long body you already wrote** (a briefing, a report, a synthesized doc): do NOT paste it into `body`. If it's saved as a doc, pass `body_doc_id` ('research:doc_xxx' / 'documents:doc_xxx') — the doc text becomes the inline body (markdown auto-renders) and the handoff doc is deleted after sending. Only use plain `body` for short text you're writing right now.\n- **Confirm discipline (non-negotiable):** only send when the user — or the task you're running — explicitly asked you to email. If sending is YOUR idea, show what you'd send and get a 'yes' first. On a scheduled / no-human run, the original task IS the authorization: send directly, don't wait.\n- **Send-only.** Reading the inbox, triage, labels, search, sorting, bulk deletes — that's the email specialist's job, not this tool. Delegate those.\n- **No address on file?** If you're in a live chat, ask {{USER_NAME}} which address to use. Never guess. On an automated run with no address available, report that you couldn't deliver."
+}
