@@ -29,13 +29,15 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
   const episodeTopK = isTemporal ? 12 : 6;
   const paramsTopK  = isTemporal ? 5 : 10;
 
-  // Compute this agent's service roles once; used to filter user_facts so that
-  // role-scoped facts (e.g. infra facts tagged "nodes") only land in the
-  // context of agents that actually hold that role.
+  // Compute the skills this agent is assigned once; used to filter user_facts
+  // so a scoped fact (e.g. infra facts tagged "nodes", or youtube facts tagged
+  // "youtube-downloader") only lands in the context of agents assigned that
+  // skill. Uses assigned skills — service roles AND custom specialist skills —
+  // so custom-skill facts route to their specialist, not just service roles.
   let myRoles = [];
   try {
-    const { getAgentRoles } = await import('../roles.mjs');
-    myRoles = getAgentRoles(agentId, userId);
+    const { getAgentAssignedSkills } = await import('../roles.mjs');
+    myRoles = getAgentAssignedSkills(agentId, userId);
   } catch (e) { /* roles module unavailable in tests — default to unscoped only */ }
 
   const includeEpisodes = opts?.includeEpisodes !== false;

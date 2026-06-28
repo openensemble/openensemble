@@ -26,6 +26,7 @@ import { getUserFilesDir } from './lib/paths.mjs';
 import { log } from './logger.mjs';
 import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
+import { beginMemoryScope } from './lib/memory-scope-context.mjs';
 import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
@@ -514,6 +515,11 @@ function applyUserToolPlan(agent, plan) {
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
   const isolatedTaskRun = turnOpts?.isolatedTaskRun === true;
+  // Per-turn memory-scope tracker: records which service-role skills' tools run
+  // this turn so a fact remembered mid-turn scopes to the skill that produced
+  // it (see lib/memory-scope-context.mjs). enterWith here propagates through the
+  // provider tool-loop to executeToolStreaming, same as toolRouterContext.
+  beginMemoryScope();
   // Routing/recipe key: when a delegation supplies an explicit `directive` (the
   // short "what the specialist must DO"), route + recover + learn on that rather
   // than the full task body riding along with it (a pasted briefing, doc, list).

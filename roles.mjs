@@ -22,6 +22,7 @@ import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helpe
 import { buildBrowserHelpers } from './lib/browser-helper.mjs';
 import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-helper.mjs';
 import { buildSkillLogger } from './lib/skill-logger.mjs';
+import { recordDomainSkill } from './lib/memory-scope-context.mjs';
 import { recordToolExecution } from './lib/tool-exec-log.mjs';
 import { getVoiceContext } from './lib/voice-context.mjs';
 import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
@@ -586,6 +587,34 @@ export function getAgentRoles(agentId, userId) {
     if (manifest?.service) out.push(roleId);
   }
   return out;
+}
+
+/**
+ * Every skill assigned to a given agent — service roles AND custom specialist
+ * skills (youtube-downloader, pokemon-etb, …). This is the memory-scope
+ * universe: an agent sees facts scoped to any skill it's assigned, so a fact
+ * scoped to a custom skill reaches its specialist (and only it). Broader than
+ * getAgentRoles (service-only) — kept separate so role-display logic that wants
+ * just service roles is unaffected.
+ */
+export function getAgentAssignedSkills(agentId, userId) {
+  if (!agentId) return [];
+  const bare = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  const assignments = getRoleAssignments(userId);
+  return Object.entries(assignments).filter(([, a]) => a === bare).map(([id]) => id);
+}
+
+/**
+ * Is this skill a worthwhile memory scope? True for service roles, and for any
+ * skill assigned to a specific agent (custom specialist skills). Global/utility
+ * skills (web, self-mgmt, delegate, tasks) aren't assigned to anyone, so facts
+ * from them stay shared — which is correct, since recall can only route a fact
+ * to an agent that's assigned its scope.
+ */
+export function isScopableSkill(skillId, userId) {
+  if (!skillId) return false;
+  if (getRoleManifest(skillId, userId)?.service) return true;
+  return Object.prototype.hasOwnProperty.call(getRoleAssignments(userId), skillId);
 }
 
 // Role → drawer-plugin pairs that should auto-enable on assignment.
@@ -1203,6 +1232,19 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   }
 
   if (!skillExec) { yield { type: 'result', text: `Unknown tool: ${name}` }; return; }
+
+  // Memory scoping: note when a *scopable* skill's tool runs, so a fact
+  // remembered later this turn scopes to that skill (see pinFact). Scopable =
+  // service roles + custom specialist skills assigned to an agent; utility
+  // skills (self-mgmt, web, delegate, tasks…) aren't assigned, so they never
+  // become a fact's scope. Keyed to the tool's owning skill, NOT the calling
+  // agent, so a node fact the coordinator learns via node_* tools scopes to
+  // 'nodes' (→ Chuck), and a youtube fact scopes to youtube-downloader (→ its
+  // specialist) — both regardless of who ran the tool.
+  if (owningSkillId) {
+    try { if (isScopableSkill(owningSkillId, userId)) recordDomainSkill(owningSkillId); }
+    catch { /* lookup best-effort */ }
+  }
 
   // Child-account allowedSkills enforcement — blocks tool calls that the model
   // hallucinated or that arrived via a delegation/prompt-injection path where

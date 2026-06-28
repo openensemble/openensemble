@@ -16,6 +16,7 @@ import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
+import { nativeWebSearch } from '../../lib/model-capabilities.mjs';
 
 export function toResponsesInput(messages) {
   // Translate OpenAI-compat messages → Responses API input items.
@@ -122,13 +123,32 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0, totalCachedTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  // Set if the Codex backend rejects the hosted web_search tool, so we resend
+  // with the Brave function tool restored. Guards against the experimental
+  // backend dropping hosted-tool support (the way it rejects web_search_preview
+  // today) — without it, every web-search turn would die instead of degrading.
+  let nativeSearchDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (e.g. the
     // request_tools meta-tool expanding the coordinator's surface mid-turn)
     // take effect on the very next provider call. Cost: one O(tools) map
     // per iteration — negligible vs the API roundtrip.
-    const responsesTools = agent.tools?.length ? toResponsesTools(agent.tools) : undefined;
+    let responsesTools = agent.tools?.length ? toResponsesTools(agent.tools) : undefined;
+    // Native web search: if the model can search+synthesize in one call AND the
+    // agent already holds our Brave `web_search` tool, drop the Brave function
+    // and inject the provider's hosted tool instead — one round-trip instead of
+    // search → result → synthesize. This file IS the openai-oauth path, so we
+    // ask the capability registry for that provider specifically. `fetch_url`
+    // stays a function tool: it keeps our SSRF-guarded explicit-URL fetch.
+    const nativeSearch = nativeWebSearch('openai-oauth', agent.model);
+    const useNativeSearch = !nativeSearchDisabled
+      && nativeSearch?.kind === 'responses'
+      && agent.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
+    if (useNativeSearch) {
+      responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search');
+      responsesTools.push(nativeSearch.tool);
+    }
     const body = {
       model:        agent.model,
       instructions: systemPrompt,
@@ -141,7 +161,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       store:        false,
       stream:       true,
     };
-    if (responsesTools) { body.tools = responsesTools; body.parallel_tool_calls = true; }
+    if (responsesTools?.length) { body.tools = responsesTools; body.parallel_tool_calls = true; }
 
     const headers = {
       'Content-Type':  'application/json',
@@ -219,6 +239,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           }
           return;
         }
+      } else if (res.status === 400 && useNativeSearch && /web_search|unsupported tool/i.test(errText)) {
+        // The hosted web_search tool was rejected (e.g. the experimental Codex
+        // backend dropped support). Resend this same turn with the Brave
+        // web_search function restored — search still works, just via our local
+        // path. Bounded: nativeSearchDisabled stays set, so a second failure
+        // falls through to the generic error below (no retry loop).
+        console.warn(`[openai-oauth] hosted web_search rejected (${res.status}); falling back to Brave web_search`);
+        nativeSearchDisabled = true;
+        continue;
       } else {
         console.error(`[openai-oauth] error ${res.status}: ${errText.slice(0, 500)}`);
         yield { type: 'error', message: `OpenAI Codex error ${res.status}: ${errText}` };
@@ -241,7 +270,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       const t = ev.type;
       if (t && !seenEventTypes.has(t)) {
         seenEventTypes.add(t);
-        if (!/^response\.(output_text\.delta|output_item\.(added|done)|function_call_arguments\.delta|created|in_progress|completed|content_part\.(added|done)|output_text\.done)$/.test(t)) {
+        if (!/^response\.(output_text\.delta|output_item\.(added|done)|function_call_arguments\.delta|created|in_progress|completed|content_part\.(added|done)|output_text\.done|web_search_call\.(in_progress|searching|completed))$/.test(t)) {
           console.log(`[openai-oauth] unknown SSE event type: ${t}`, JSON.stringify(ev).slice(0, 300));
         }
       }
@@ -281,6 +310,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
             toolCalls.set(callId, { id: callId, name: item.name ?? '', argsJson: typeof item.arguments === 'string' ? item.arguments : '' });
           }
         }
+        continue;
+      }
+      if (t === 'response.web_search_call.in_progress') {
+        // Provider-hosted web search runs server-side (no local execution) and
+        // folds its results straight into the output_text deltas. Surface a
+        // transient progress indicator so chat shows activity; fires once per
+        // search. Not a token, so voice devices won't speak it.
+        yield { type: 'tool_progress', name: 'web_search', text: 'Searching the web…' };
         continue;
       }
       if (t === 'response.completed') {

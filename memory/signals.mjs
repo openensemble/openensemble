@@ -346,12 +346,27 @@ export async function pinFact({ agentId, text, userId, scope = null }) {
   } else if (typeof scope === 'string' && scope.length) {
     roleScope = scope;
   } else {
-    // Auto-detect: scope to the agent's sole service role, if any
+    // Auto-scope by the skill that produced this fact's evidence THIS turn —
+    // tools are role-scoped, so the memory inherits the same scope, decoupled
+    // from which agent wrote it. A node fact learned via node_* tools scopes to
+    // 'nodes' even when the multi-role coordinator (which the old "sole role"
+    // gate could never satisfy) is the one that called remember_fact. Scope is
+    // the role, so the fact follows the role across reassignment.
     try {
-      const { getAgentRoles } = await import('../roles.mjs');
-      const roles = getAgentRoles(agentId, userId);
-      if (roles.length === 1) roleScope = roles[0];
-    } catch (e) { console.debug('[cortex] role auto-scope skipped:', e.message); }
+      const { getTurnDomainSkills } = await import('../lib/memory-scope-context.mjs');
+      const turnSkills = getTurnDomainSkills();
+      // Most-recent domain skill is the best guess for what the fact is about.
+      if (turnSkills.length) roleScope = turnSkills[turnSkills.length - 1];
+    } catch (e) { console.debug('[cortex] turn-skill auto-scope skipped:', e.message); }
+    // Fallback: no domain tool ran this turn (e.g. user stated a fact in plain
+    // chat) — scope to the writing agent's sole assigned skill, else shared.
+    if (!roleScope) {
+      try {
+        const { getAgentAssignedSkills } = await import('../roles.mjs');
+        const roles = getAgentAssignedSkills(agentId, userId);
+        if (roles.length === 1) roleScope = roles[0];
+      } catch (e) { console.debug('[cortex] role auto-scope skipped:', e.message); }
+    }
   }
 
   try {
