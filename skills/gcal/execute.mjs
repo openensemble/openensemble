@@ -28,6 +28,22 @@ function buildCmdArgs(name, args) {
       if (args.calendarId) body._calendarId = args.calendarId;
       return ['create', JSON.stringify(body)];
     }
+    case 'gcal_create_batch': {
+      const events = Array.isArray(args.events) ? args.events : [];
+      // Build each Google event body up front; drop malformed ones (the CLI
+      // reports the dropped count via `requested`). One CLI invocation creates
+      // them all, with server-side throttle/retry/dedupe. Always route to the
+      // CLI (even with 0 valid bodies) so the tool returns a clear "no valid
+      // events" message rather than masquerading as an unknown tool.
+      const bodies = events.map(buildEventBodySafe).filter(Boolean);
+      const out = {
+        calendarId: args.calendarId || 'primary',
+        skipExisting: args.skipExisting !== false,   // default true
+        requested: events.length,
+        events: bodies,
+      };
+      return ['createbatch', JSON.stringify(out)];
+    }
     case 'gcal_update': {
       if (!args.eventId) return null;
       const patch = buildEventPatch(args);
@@ -68,6 +84,14 @@ function buildEventBody(args) {
     body.attendees = args.attendees.map(email => ({ email }));
   }
   return body;
+}
+
+// Guarded body builder for the batch path: a malformed event (missing
+// summary/start/end) returns null instead of throwing, so one bad item can't
+// sink the whole batch. Used by gcal_create_batch.
+function buildEventBodySafe(ev) {
+  if (!ev || !ev.summary || !ev.start || !ev.end) return null;
+  try { return buildEventBody(ev); } catch { return null; }
 }
 
 function buildEventPatch(args) {

@@ -69,29 +69,57 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   if (name === 'check_workers') {
     const workers = bg.listWorkersForOwner(userId, ownerKey);
     const recent = bg.listRecentWorkersForOwner(userId, ownerKey);
-    if (!workers.length && !recent.length) {
-      yield { type: 'result', text: 'You have no background workers — none running, and none finished recently.' };
+    // Background DELEGATIONS (coordinator→specialist tasks) are user-level work
+    // tracked separately from owned workers. Surface them here too, so "is Gina
+    // still working?" resolves directly — no matter which agent the user asks —
+    // instead of an agent re-delegating to find out (the old black hole, where
+    // every agent in the chain checked its own empty worker list). Exclude the
+    // caller's own delegation session so a running specialist doesn't list itself.
+    const delegations       = bg.listActiveDelegationsForUser(userId, callerAgentId);
+    const recentDelegations = bg.listRecentDelegationsForUser(userId, callerAgentId);
+    if (!workers.length && !recent.length && !delegations.length && !recentDelegations.length) {
+      yield { type: 'result', text: 'No background work is running for you right now — no workers and no delegated tasks, and nothing finished in the last little while.' };
       return;
     }
     const ago = s => s < 90 ? `${s}s` : `${Math.round(s / 60)}m`;
+    const fmtLog = items => (items || []).map(p =>
+      p.kind === 'note' ? `    • ${p.text}`
+      : p.kind === 'result' ? `    ↳ ${p.tool}: ${p.text}`
+      : `    → ${p.tool}`).join('\n');
     const out = [];
     if (workers.length) {
-      out.push(`Running (${workers.length}):`);
+      out.push(`Your workers running (${workers.length}):`);
       for (const w of workers) {
         const head = w.stalled
           ? `⚠ STALLED — no activity for ${ago(w.idleSec)} (was running ${w.currentTool || 'nothing'})`
           : (w.currentTool ? `running ${w.currentTool}` : 'between steps');
         out.push(`• ${w.name} [${w.taskId}] — ${head}; ${w.toolsUsed} tool calls, ${ago(w.elapsedSec)} elapsed. Job: ${w.summary}`);
-        const log = (w.progress || []).map(p =>
-          p.kind === 'note' ? `    • ${p.text}`
-          : p.kind === 'result' ? `    ↳ ${p.tool}: ${p.text}`
-          : `    → ${p.tool}`);
-        if (log.length) out.push(log.join('\n'));
+        const log = fmtLog(w.progress);
+        if (log) out.push(log);
+      }
+    }
+    if (delegations.length) {
+      out.push(`Delegated tasks running (${delegations.length}):`);
+      for (const d of delegations) {
+        const head = d.stalled
+          ? `⚠ STALLED — no activity for ${ago(d.idleSec)}`
+          : (d.currentTool ? `running ${d.currentTool}` : 'between steps');
+        out.push(`• ${d.name} [${d.taskId}] — ${head}; ${d.toolsUsed} tool calls, ${ago(d.elapsedSec)} elapsed. Job: ${d.summary}`);
+        const log = fmtLog(d.progress);
+        if (log) out.push(log);
       }
     }
     if (recent.length) {
-      out.push(`Recently finished:`);
+      out.push(`Your workers recently finished:`);
       for (const r of recent.slice(0, 5)) {
+        const mark = r.outcome === 'done' ? '✓' : (r.outcome === 'stopped' ? '■' : '⚠');
+        const verb = r.outcome === 'done' ? 'finished' : (r.outcome === 'stopped' ? 'was stopped' : 'FAILED');
+        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls) — ${r.finalText || r.summary}`);
+      }
+    }
+    if (recentDelegations.length) {
+      out.push(`Delegated tasks recently finished:`);
+      for (const r of recentDelegations.slice(0, 5)) {
         const mark = r.outcome === 'done' ? '✓' : (r.outcome === 'stopped' ? '■' : '⚠');
         const verb = r.outcome === 'done' ? 'finished' : (r.outcome === 'stopped' ? 'was stopped' : 'FAILED');
         out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls) — ${r.finalText || r.summary}`);

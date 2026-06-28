@@ -117,6 +117,11 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     startedAt: Date.now(), summary, phase: 'queued', status: 'running',
     originalTask: task,
     coordinatorAgentId,
+    // Mark this as a coordinator→specialist DELEGATION (distinct from a worker
+    // and from a research ephemeral). This is what lets check_workers surface it
+    // as user-level background work — so "is Gina still working?" resolves no
+    // matter which agent the user happens to ask. See listActiveDelegationsForUser.
+    isDelegation: true,
     abort: () => ac.abort(),
     autoContinue: opts?.autoContinue === true,
     originScheduledTaskId: opts?.originScheduledTaskId || scheduledCtx?.originTaskId || null,
@@ -202,6 +207,9 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
             rec.currentTool = ev.name;
             rec.lastUpdateAt = Date.now();
           }
+          // Rolling progress log so check_workers can replay what this delegation
+          // has actually done (same surface workers use).
+          pushWorkerProgress(taskId, { kind: 'tool', tool: ev.name });
           // Push to the watcher chip — the chip is the user-visible surface.
           // History accumulates each tool call so list_watches/get_task_log
           // can replay what happened.
@@ -225,6 +233,9 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
             rec.lastResultPreview = preview.slice(0, 160);
             rec.lastUpdateAt = Date.now();
           }
+          // First non-empty result line usually carries the domain number
+          // ("Event created…", "56 events added") — keep it for status reports.
+          pushWorkerProgress(taskId, { kind: 'result', tool: ev.name, text: preview.slice(0, 160) });
           if (preview) {
             pushTaskProgress(taskId, `${ev.name}: ${preview.slice(0, 240)}`, { currentTool: null, phase: 'result' });
           }
@@ -295,6 +306,20 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     rec.status = status;
     rec.phase = status;
     rec.currentTool = null;
+  }
+  // Retire a finished delegation into the recent ring so check_workers can still
+  // show its terminal outcome briefly. (Workers are retired separately via
+  // _retire from spawnWorker; this is the delegation analogue.)
+  if (rec?.isDelegation) {
+    recentDelegations.unshift({
+      taskId, userId: rec.userId, agentId: rec.agentId,
+      name: rec.agentName, summary: rec.summary,
+      outcome: status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error'),
+      finalText: finalReportPreview.slice(0, 240),
+      toolsUsed: rec.toolsUsed || 0,
+      startedAt: rec.startedAt, endedAt: Date.now(),
+    });
+    if (recentDelegations.length > RECENT_CAP) recentDelegations.length = RECENT_CAP;
   }
   activeTasks.delete(taskId);
 
@@ -516,6 +541,12 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
 const recentWorkers = [];
 const RECENT_CAP = 12;
 
+// Same idea for coordinator→specialist DELEGATIONS (dispatchBackground). Lets
+// check_workers report a terminal outcome ("Gina finished — 56 events added")
+// for a moment after the task ends, instead of the task simply vanishing the
+// instant it completes and leaving the next "is it done?" with nothing to show.
+const recentDelegations = [];
+
 function _retire(taskId, outcome, finalText) {
   const info = activeTasks.get(taskId);
   if (!info || !info.isWorker) return;
@@ -678,6 +709,48 @@ export function listRecentWorkersForOwner(userId, ownerKey) {
   const now = Date.now();
   return recentWorkers
     .filter(r => r.userId === userId && r.ownerKey === ownerKey)
+    .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
+}
+
+/**
+ * Live status of coordinator→specialist DELEGATIONS in flight for a user.
+ *
+ * Unlike workers, delegations are NOT scoped to an ownerKey: a delegation is
+ * user-level background work (the coordinator handed a job to a specialist on
+ * the user's behalf), so ANY agent the user asks — the specialist they're
+ * chatting with, the coordinator, anyone — should be able to surface it. This
+ * is the fix for the "is Gina still working?" black hole: the job was always
+ * live in activeTasks, but check_workers only ever looked at isWorker records.
+ *
+ * `excludeAgentId` drops the caller's own delegation session so a running
+ * specialist doesn't list itself back as a separate task.
+ */
+export function listActiveDelegationsForUser(userId, excludeAgentId = null) {
+  const now = Date.now();
+  return [...activeTasks.entries()]
+    .filter(([, info]) => info.isDelegation && info.userId === userId && info.agentId !== excludeAgentId)
+    .map(([taskId, info]) => {
+      const lastAt = info.lastActivityAt || info.lastUpdateAt || info.startedAt;
+      return {
+        taskId,
+        name: info.agentName,
+        summary: info.summary,
+        currentTool: info.currentTool || null,
+        toolsUsed: info.toolsUsed || 0,
+        elapsedSec: Math.round((now - info.startedAt) / 1000),
+        idleSec: Math.round((now - lastAt) / 1000),
+        stalled: (now - lastAt) > 120000,         // no tool activity for >2min
+        status: info.status || 'running',
+        progress: (info.progress || []).slice(-8),
+      };
+    });
+}
+
+/** Recently-finished delegations for a user — terminal outcomes for check_workers. */
+export function listRecentDelegationsForUser(userId, excludeAgentId = null) {
+  const now = Date.now();
+  return recentDelegations
+    .filter(r => r.userId === userId && r.agentId !== excludeAgentId)
     .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
 }
 
