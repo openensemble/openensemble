@@ -14,6 +14,7 @@ import {
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
+import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 
 export async function* streamOpenAICompat(providerKey, agent, systemPrompt, messages, signal, userId = 'default') {
   const cfg = OPENAI_COMPAT_PROVIDERS[providerKey];
@@ -33,14 +34,30 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  // Set if the provider rejects an injected native web_search tool, so we resend
+  // the same turn with the Brave function restored. (Only the grok/xai path
+  // injects a tool; the perplexity model-implicit path has nothing to fall back
+  // from, so this stays false there.)
+  let nativeSearchDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
     // meta-tool expanding the coordinator's surface mid-turn) take effect on
     // the next provider call.
-    const compatTools = agent.tools?.length
-      ? compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }))
+    // Native web search: grok/xai injects a server `web_search` tool; perplexity
+    // Sonar searches by construction so we just drop our Brave web_search (the
+    // model does it implicitly). Either way: one round-trip, not search→synth.
+    // Gated to agents that already hold Brave web_search — never a new grant.
+    const { useNative, functionTools, nativeTool } =
+      resolveNativeWebSearch(providerKey, agent.model, agent.tools || [], { disabled: nativeSearchDisabled });
+    const compatFnTools = functionTools?.length
+      ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
       : undefined;
+    let compatTools = compatFnTools;
+    if (useNative && nativeTool) compatTools = [...(compatFnTools || []), nativeTool];
+    if (useNative) {
+      console.log(`[${providerKey}] native web search: ${nativeTool ? `server tool injected (${nativeTool.type})` : 'model-implicit (web_search dropped)'}`);
+    }
     const body = {
       model:    agent.model,
       messages: working,
@@ -59,7 +76,15 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     });
 
     if (!res.ok) {
-      yield { type: 'error', message: `${cfg.displayName} error ${res.status}: ${await res.text()}` };
+      const errText = await res.text();
+      // Injected native web_search tool rejected → resend with Brave restored.
+      // Bounded: the flag stays set, so a second failure hits the generic error.
+      if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(errText)) {
+        console.warn(`[${providerKey}] native web_search rejected (400); falling back to Brave web_search`);
+        nativeSearchDisabled = true;
+        continue;
+      }
+      yield { type: 'error', message: `${cfg.displayName} error ${res.status}: ${errText}` };
       return;
     }
 

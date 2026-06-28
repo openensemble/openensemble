@@ -10,6 +10,7 @@ import {
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
+import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 
 export async function* streamOpenRouter(agent, systemPrompt, messages, signal, userId = 'default') {
   const apiKey = getOpenRouterKey();
@@ -26,13 +27,26 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  // Set if OpenRouter rejects the native web_search server tool, so we resend
+  // the same turn with the Brave function restored.
+  let nativeSearchDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations
     // (request_tools meta-tool) take effect on the next provider call.
-    const orTools = agent.tools?.length
-      ? compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }))
+    // Native web search: when the agent already holds Brave web_search, drop it
+    // and append OpenRouter's server tool so the search runs server-side in one
+    // round-trip instead of search→result→synthesize.
+    const { useNative, functionTools, nativeTool } =
+      resolveNativeWebSearch('openrouter', agent.model, agent.tools || [], { disabled: nativeSearchDisabled });
+    const orFnTools = functionTools?.length
+      ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
       : undefined;
+    let orTools = orFnTools;
+    if (useNative && nativeTool) {
+      orTools = [...(orFnTools || []), nativeTool];
+      console.log(`[openrouter] native web search: server tool injected (${nativeTool.type})`);
+    }
     const body = {
       model:    agent.model,
       messages: working,
@@ -53,7 +67,15 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     });
 
     if (!res.ok) {
-      yield { type: 'error', message: `OpenRouter error ${res.status}: ${await res.text()}` };
+      const errText = await res.text();
+      // Native web_search tool rejected → resend with Brave restored. Bounded:
+      // the flag stays set, so a second failure hits the generic error below.
+      if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(errText)) {
+        console.warn(`[openrouter] native web_search rejected (400); falling back to Brave web_search`);
+        nativeSearchDisabled = true;
+        continue;
+      }
+      yield { type: 'error', message: `OpenRouter error ${res.status}: ${errText}` };
       return;
     }
 

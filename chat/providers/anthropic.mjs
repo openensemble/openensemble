@@ -12,6 +12,7 @@ import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
+import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 
 // Convert Ollama/OpenAI tool format → Anthropic format (with description compression)
 export function toAnthropicTools(tools) {
@@ -58,6 +59,9 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  // Set if Anthropic rejects the hosted web_search server tool, so we resend the
+  // same turn with the Brave function restored (search still works, via Brave).
+  let nativeSearchDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
@@ -65,7 +69,19 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // the next provider call. The system message keeps its ephemeral
     // cache_control breakpoint, so the bulk of the input still cache-hits;
     // only the tools portion takes a partial miss when expanded.
-    const anthropicTools = agent.tools?.length ? toAnthropicTools(agent.tools) : undefined;
+    // Native web search: when the model can search+synthesize server-side AND
+    // the agent already holds our Brave web_search, drop the Brave function and
+    // append Anthropic's hosted server tool (one round-trip instead of
+    // search→result→synthesize). toAnthropicTools runs on the filtered list so
+    // its cache_control marker lands on the last *function* tool; the server
+    // tool is appended after (a few uncached tokens, negligible).
+    const { useNative, functionTools, nativeTool } =
+      resolveNativeWebSearch('anthropic', agent.model, agent.tools || [], { disabled: nativeSearchDisabled });
+    let anthropicTools = functionTools?.length ? toAnthropicTools(functionTools) : undefined;
+    if (useNative && nativeTool) {
+      anthropicTools = [...(anthropicTools || []), nativeTool];
+      console.log(`[anthropic] native web search: server tool injected (${nativeTool.type})`);
+    }
     // Three-tier system message for cache locality. When chat.mjs has built
     // the tier breakdown (stable / context / volatile), emit them as separate
     // blocks with cache_control markers on stable + context. The cache hit
@@ -109,6 +125,14 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
 
     if (!res.ok) {
       const err = await res.text();
+      // Hosted web_search server tool rejected → resend this turn with the Brave
+      // function restored. Bounded: nativeSearchDisabled stays set, so a second
+      // failure falls through to the generic error below (no retry loop).
+      if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(err)) {
+        console.warn(`[anthropic] hosted web_search rejected (400); falling back to Brave web_search`);
+        nativeSearchDisabled = true;
+        continue;
+      }
       yield { type: 'error', message: `Anthropic error ${res.status}: ${err}` };
       return;
     }
@@ -128,6 +152,14 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       }
       if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
         toolUseBlocks.set(event.index, { id: event.content_block.id, name: event.content_block.name, inputJson: '' });
+      }
+      // Hosted server tools (web_search) execute server-side and fold their
+      // results into the text deltas — never registered as a client tool_use, so
+      // the loop below won't try to run them. Surface a transient indicator for
+      // parity with the Codex path; not a token, so voice devices won't speak it.
+      if (event.type === 'content_block_start' && event.content_block?.type === 'server_tool_use'
+          && event.content_block?.name === 'web_search') {
+        yield { type: 'tool_progress', name: 'web_search', text: 'Searching the web…' };
       }
       if (event.type === 'content_block_delta') {
         if (event.delta?.type === 'text_delta') {
