@@ -548,7 +548,15 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     rec.phase = status;
     rec.currentTool = null;
   }
-  if (rec?.rootTaskId === taskId && hasActiveTaskChildren(taskId) && !rec?.originScheduledTaskId) {
+  // When this root delegation finishes but still has child delegations in
+  // flight, deliver its result NOW (report + broadcast + continuation, below)
+  // and keep only the CHIP alive in a "waiting on children" state — it
+  // finalizes from _completeRootChild once the last child drains. This used to
+  // early-return here, which silently dropped the root's agent_report AND its
+  // autoContinue wake, stranding the coordinator. Only the visual chip waits;
+  // the result and the coordinator's reaction must not.
+  const deferChip = rec?.rootTaskId === taskId && hasActiveTaskChildren(taskId) && !rec?.originScheduledTaskId;
+  if (deferChip) {
     deferRootCompletion({
       userId,
       rootTaskId: taskId,
@@ -557,8 +565,6 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       finalText: status === 'done' ? `✓ ${agentName} done` : finalReportPreview,
       finalReportPreview,
     });
-    activeTasks.delete(taskId);
-    return;
   }
   // Retire a finished delegation into the recent ring so check_workers can still
   // show its terminal outcome briefly. (Workers are retired separately via
@@ -582,12 +588,16 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   }
   _completeRootChild(taskId, rec, status, finalReportPreview);
   activeTasks.delete(taskId);
-  if (rec?.rootTaskId === taskId) clearTaskRoot(taskId);
+  // When deferring the chip, keep the root graph (it holds pendingCompletion +
+  // the child set) so the last child can finalize the chip via _completeRootChild.
+  if (rec?.rootTaskId === taskId && !deferChip) clearTaskRoot(taskId);
 
   // Phase 14: finalize the task_proxy watcher (chip) so it shows done/error
   // and slides into the "recent" pile. Lives independently of the activity-
   // panel broadcast below — the chip is the user's primary visible surface.
-  if (rec?.watcherId) {
+  // Skip when deferChip: the chip stays in "waiting on children" (set by
+  // deferRootCompletion above) and finalizes from _completeRootChild instead.
+  if (rec?.watcherId && !deferChip) {
     try {
       const finalText = status === 'cancelled'
         ? `■ ${agentName} cancelled`
