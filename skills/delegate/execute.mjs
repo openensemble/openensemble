@@ -273,6 +273,29 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     };
     return;
   }
+  // 1b. A DELEGATED specialist (depth>=1, i.e. the coordinator already handed it
+  //     this task) must NOT escalate back up the chain. That was the infinite
+  //     loop: Sydney→Rose→(Rose escalates)→Sydney re-delegates→Rose→... Each cycle
+  //     re-woke the TOP-LEVEL coordinator (depth 0) and re-delegated fresh, so the
+  //     depth never accumulated and the max-depth guard below never tripped. A
+  //     delegate must finish its own part and RETURN its result to its caller;
+  //     the coordinator owns the next handoff (e.g. to the email agent).
+  //
+  //     This is scoped to depth>=1 ON PURPOSE. At depth 0 — the user is chatting
+  //     a specialist DIRECTLY, or a watcher fires one standalone — escalation to
+  //     the coordinator IS the correct flow and does NOT loop: it runs
+  //     Rose→Sydney→Gina (Sydney routes to a DIFFERENT agent, terminating), not
+  //     back to Rose. So a directly-asked specialist still does its research and
+  //     escalates to its coordinator to arrange a cross-agent step, exactly as
+  //     before. Only the delegated (depth>=1) case is the loop, and only it is
+  //     blocked here.
+  if (currentDepth >= 1 && callerAgent && callerAgent.skillCategory !== 'coordinator') {
+    yield {
+      type: 'result',
+      text: `You're completing a task your coordinator delegated to you — finish your part and return your findings as your reply (partial/uncertain is fine; state plainly what you could not verify or what you'd need another agent for). Do NOT escalate or re-delegate back to the coordinator — that creates a loop. The coordinator will handle the next step, such as routing the result to the email agent. If YOU need to email the user, use email_user directly.`,
+    };
+    return;
+  }
   if (currentDepth >= MAX_DELEGATION_DEPTH) {
     yield {
       type: 'result',

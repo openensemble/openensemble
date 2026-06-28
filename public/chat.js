@@ -195,16 +195,16 @@ function renderToolPlanPicker() {
     toolPlanState.recipe = recipe;
     toolPlanState.remember = false;
     if (textChanged) toolPlanState.dirty = false;
-    if (recipe) {
-      toolPlanState.mode = recipe.mode || 'selected';
-      toolPlanState.selected = new Set(recipe.selectedTools || []);
-    } else if (suggestions.length) {
-      toolPlanState.mode = 'selected';
-      toolPlanState.selected = new Set(suggestions.filter(s => s.name !== 'email_list_accounts' && s.name !== 'request_tools').map(s => s.name));
-    } else {
-      toolPlanState.mode = 'auto';
-      toolPlanState.selected = new Set();
-    }
+    // RESTORED DEFAULT: do NOT auto-pin tools. OE gets the full toolset and the
+    // agent picks the right one — the way it worked before per-turn tool plans.
+    // Auto-selecting from a saved recipe or keyword suggestion was sending a hard
+    // tool constraint with every message, which stripped specialists of the tools
+    // they actually needed (e.g. a research agent left without research tools) and
+    // forced them to escalate via ask_agent. Suggestions and any saved recipe are
+    // still shown below so the user can opt in MANUALLY, but nothing is
+    // pre-selected; a manual pick sets dirty=true and is preserved as before.
+    toolPlanState.mode = 'auto';
+    toolPlanState.selected = new Set();
   }
   const selectedCount = toolPlanState.mode === 'selected' ? toolPlanState.selected.size : 0;
   const summary = toolPlanState.mode === 'none'

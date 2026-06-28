@@ -462,7 +462,12 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
-const SELECTED_PLAN_CONTROL_TOOLS = new Set(['request_tools']);
+// Tools a remembered/pinned recipe can never drop — the recipe-pin counterpart of
+// tool-router's ALWAYS_TOOL_NAMES. A stale recipe that omits web_search would
+// otherwise strip a research agent's only path to the web (and, on native-search
+// models, the trigger for the model's hosted search). Kept only if the agent
+// already has it — the filter below never adds a tool the agent lacked.
+const SELECTED_PLAN_CONTROL_TOOLS = new Set(['request_tools', 'web_search', 'email_user']);
 
 // Tools that create standing scheduled work (schedule_task / set_reminder /
 // set_alarm all call addTask). Stripped on autonomous runs so a scheduled task,
@@ -1406,6 +1411,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           fullToolNames: (_routerStore.fullTools || []).map(t => t.function?.name).filter(Boolean),
           recoveredMissingTools,
           addedSkills: [...(_routerStore.addedSkills || [])],
+          // Don't learn a recipe from a turn that failed at its job: a specialist
+          // (non-coordinator) that ended by calling ask_agent punted the work, and
+          // an inability/handoff message in the reply means it couldn't finish.
+          // For a coordinator, ask_agent is normal delegation, so it's not a punt.
+          escalated: agent.skillCategory !== 'coordinator' && toolsUsed.some(t => t.name === 'ask_agent'),
+          outcomeText: assistantContent,
           source: silent ? 'auto-scheduled-turn' : 'auto-turn',
         });
         if (learned?.learned) {

@@ -650,6 +650,10 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
         agentId: targetAgentId || rec?.agentId,
         phrase: originalTask || rec?.originalTask || rec?.summary || '',
         toolEvents,
+        // The completion text. A non-exception failure ("I hit a tooling
+        // limitation…", "handed it to…") reads as success to !errorMsg, so scan
+        // the result so those runs aren't memorized as recipes.
+        resultText: result || '',
         source: rec?.isWorker ? 'auto-worker-complete' : 'auto-background-complete',
       }).filter(r => r?.learned);
       if (learned.length) {

@@ -163,14 +163,20 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // Native web search: if the model can search+synthesize in one call AND the
     // agent already holds our Brave `web_search` tool, drop the Brave function
     // and inject the provider's hosted tool instead — one round-trip instead of
-    // search → result → synthesize. wsProvider selects Codex vs grok. `fetch_url`
-    // stays a function tool: it keeps our SSRF-guarded explicit-URL fetch.
+    // search → result → synthesize. wsProvider selects Codex vs grok.
+    //
+    // We ALSO drop `fetch_url` here: gpt's native tool searches AND reads pages
+    // server-side, so on a native-search model ALL web access should go through
+    // gpt. OE's `fetch_url` is a plain HTTP GET (12s timeout, no JS rendering)
+    // that breaks the streamed answer with a tool round and times out on slow or
+    // dynamic pages — exactly the failure we kept hitting. Routing everything
+    // through the native tool keeps the answer streaming and avoids the OE fetch.
     const nativeSearch = nativeWebSearch(wsProvider, agent.model);
     const useNativeSearch = !nativeSearchDisabled
       && nativeSearch?.kind === 'responses'
       && agent.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
     if (useNativeSearch) {
-      responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search');
+      responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search' && t.name !== 'fetch_url');
       responsesTools.push(nativeSearch.tool);
     }
     const body = {
