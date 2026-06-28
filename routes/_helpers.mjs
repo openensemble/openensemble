@@ -416,7 +416,8 @@ export function agentToWire(a) {
            toolSet: a.toolSet ?? 'web', description: a.description ?? '',
            scope: a.scope ?? 'private', skillCategory: a.skillCategory ?? null,
            maxTokens: a.maxTokens ?? null,
-           contextSize: a.contextSize ?? 32768 };
+           contextSize: a.contextSize ?? 32768,
+           reasoningEffort: a.reasoningEffort ?? 'auto' };
 }
 
 // ── News preference detection ────────────────────────────────────────────────

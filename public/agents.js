@@ -321,6 +321,7 @@ async function openNewAgentModal(agent = null) {
   _populateAgentModelSelect(agent);
 
   $('aMaxTokens').value = agent?.maxTokens ?? '';
+  if ($('aReasoningEffort')) $('aReasoningEffort').value = agent?.reasoningEffort ?? 'auto';
   // contextSize: show blank if the value is the default 32768 (agentToWire always populates it)
   const cs = agent?.contextSize;
   $('aContextSize').value = (cs && cs !== 32768) ? cs : '';
@@ -345,6 +346,7 @@ $('btnCreateAgent').addEventListener('click', async () => {
   // Always send — PATCH uses 'in changes' to detect clears. For POST, null is harmless.
   payload.maxTokens = maxTokens;
   payload.contextSize = contextSize;
+  payload.reasoningEffort = $('aReasoningEffort')?.value || 'auto';
 
   if (editingAgentId) {
     await fetch(`/api/agents/${editingAgentId}`, {
@@ -375,4 +377,3 @@ async function deleteAgent(id, name) {
   buildTabs();
   buildAgentDrawer();
 }
-

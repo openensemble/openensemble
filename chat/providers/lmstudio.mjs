@@ -15,6 +15,7 @@ import {
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
+import { effectiveReasoningEffort } from '../../lib/reasoning-effort.mjs';
 
 // ── LM Studio — native /api/v1/chat (stateful, no-tools path) ────────────────
 // Uses previous_response_id so LM Studio maintains context server-side.
@@ -35,7 +36,9 @@ export async function* streamLMStudio(agent, systemPrompt, userText, agentId, si
     stream:        true,
     store:         true,
   };
-  if (agent.think === false) body.reasoning = 'off';
+  const effort = effectiveReasoningEffort(agent, 'auto');
+  if (effort === 'off' || agent.think === false) body.reasoning = 'off';
+  if (effort === 'high') body.reasoning = 'on';
   if (prevId) body.previous_response_id = prevId;
 
   const res = await fetch(getLmstudioNativeUrl(), {
@@ -155,7 +158,9 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     const toolChoice = 'auto';
     const body = { model: agent.model, messages: working, stream: true, tools: lmTools, tool_choice: toolChoice };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
-    if (agent.think === false) body.reasoning = 'off';
+    const effort = effectiveReasoningEffort(agent, 'auto');
+    if (effort === 'off' || agent.think === false) body.reasoning = 'off';
+    if (effort === 'high') body.reasoning = 'on';
 
     const res = await fetch(getLmstudioCompatUrl(), {
       method: 'POST', signal,

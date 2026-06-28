@@ -13,6 +13,7 @@ import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '.
 import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
+import { applyAnthropicReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 
 // Convert Ollama/OpenAI tool format → Anthropic format (with description compression)
 export function toAnthropicTools(tools) {
@@ -62,6 +63,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
   // Set if Anthropic rejects the hosted web_search server tool, so we resend the
   // same turn with the Brave function restored (search still works, via Brave).
   let nativeSearchDisabled = false;
+  let reasoningDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
@@ -110,6 +112,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       stream:     true,
     };
     if (anthropicTools) body.tools = anthropicTools;
+    if (!reasoningDisabled) applyAnthropicReasoning(body, agent);
 
     const res = await fetch(ANTHROPIC_URL, {
       method:  'POST',
@@ -131,6 +134,11 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(err)) {
         console.warn(`[anthropic] hosted web_search rejected (400); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        continue;
+      }
+      if (!reasoningDisabled && isReasoningUnsupportedError(res.status, err)) {
+        console.warn('[anthropic] reasoning effort rejected; retrying without effort field');
+        reasoningDisabled = true;
         continue;
       }
       yield { type: 'error', message: `Anthropic error ${res.status}: ${err}` };

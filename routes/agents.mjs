@@ -15,12 +15,33 @@ import {
 } from './_helpers.mjs';
 import { createCustomAgent, deleteCustomAgent, updateCustomAgent } from '../agents.mjs';
 import { onRoleEnabled, getRoleAssignments, setRoleAssignment, getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools } from '../roles.mjs';
+import { normalizeReasoningEffort, reasoningEffortOptions } from '../lib/reasoning-effort.mjs';
 
 function setRoleAssignmentForUser(roleId, agentId, userId) {
   return setRoleAssignment(roleId, agentId || null, userId);
 }
 
 export async function handle(req, res) {
+  if (req.url.startsWith('/api/reasoning-efforts') && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const url = new URL(req.url, 'http://localhost');
+    const agentId = url.searchParams.get('agent');
+    const model = url.searchParams.get('model');
+    const provider = url.searchParams.get('provider');
+    const agent = agentId ? getAgentsForUser(authId).find(a => a.id === agentId) : null;
+    const resolvedModel = model || agent?.model || '';
+    const resolvedProvider = provider || agent?.provider || '';
+    const current = normalizeReasoningEffort(agent?.reasoningEffort, 'auto');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      model: resolvedModel,
+      provider: resolvedProvider,
+      current,
+      options: reasoningEffortOptions(resolvedProvider, resolvedModel),
+    }));
+    return true;
+  }
+
   // Update an agent's model
   const agentModelMatch = req.url.match(/^\/api\/agent-model\/(\w+)$/);
   if (agentModelMatch && req.method === 'POST') {
@@ -141,7 +162,8 @@ export async function handle(req, res) {
       if (existing >= MAX_AGENTS_PER_USER) {
         res.writeHead(429); res.end(JSON.stringify({ error: `Agent limit reached (${MAX_AGENTS_PER_USER}). Delete some before creating more.` })); return true;
       }
-      let { name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, maxTokens, contextSize } = JSON.parse(await readBody(req));
+      let { name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, maxTokens, contextSize, reasoningEffort } = JSON.parse(await readBody(req));
+      reasoningEffort = normalizeReasoningEffort(reasoningEffort, 'auto');
       if (contextSize != null) {
         contextSize = parseInt(contextSize, 10);
         if (!Number.isFinite(contextSize) || contextSize < 1024 || contextSize > 2_000_000) {
@@ -160,7 +182,7 @@ export async function handle(req, res) {
         // so the safety prefix and identity template apply cleanly.
         systemPrompt = undefined;
       }
-      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, maxTokens, contextSize, ownerId: authId });
+      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, maxTokens, contextSize, reasoningEffort, ownerId: authId });
       if (skillCategory) {
         const { setRoleAssignment } = await import('../roles.mjs');
         setRoleAssignment(skillCategory, agent.id, authId);
@@ -192,6 +214,7 @@ export async function handle(req, res) {
       if ('systemPrompt' in changes) uiChanges.systemPrompt = changes.systemPrompt;
       if (changes.model)     globalChanges.model     = changes.model;
       if (changes.provider)  globalChanges.provider  = changes.provider;
+      if ('reasoningEffort' in changes) globalChanges.reasoningEffort = normalizeReasoningEffort(changes.reasoningEffort, 'auto');
       if ('maxTokens' in changes) globalChanges.maxTokens = changes.maxTokens ? parseInt(changes.maxTokens, 10) : null;
       if ('contextSize' in changes) {
         const cs = changes.contextSize ? parseInt(changes.contextSize, 10) : null;

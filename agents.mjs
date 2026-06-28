@@ -110,7 +110,7 @@ function pickAgentId(name, ownerId) {
   return slug;
 }
 
-export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, maxTokens, contextSize, ownerId = null }) {
+export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, maxTokens, contextSize, reasoningEffort, ownerId = null }) {
   const id = pickAgentId(name, ownerId);
   const agent = {
     id, name, emoji,
@@ -123,6 +123,7 @@ export function createCustomAgent({ name, emoji = '🤖', description, model, pr
     ...(ownerId    ? { ownerId }    : {}),
     ...(maxTokens  ? { maxTokens }  : {}),
     ...(contextSize ? { contextSize } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
   const userId = ownerId ?? 'shared';
   const list = loadUserAgents(userId);
@@ -179,10 +180,11 @@ export function updateAgentMeta(id, changes) {
   const customs = loadCustomAgents();
   if (customs.find(a => a.id === id)) return updateCustomAgent(id, changes);
 
-  // Built-in agents: store name/emoji overrides in config.json agentModels
+  // Built-in agents: store allowed overrides in config.json agentModels
   const allowed = {};
-  if (changes.name)  allowed.name  = changes.name;
-  if (changes.emoji) allowed.emoji = changes.emoji;
+  for (const k of ['name', 'emoji', 'model', 'provider', 'maxTokens', 'contextSize', 'reasoningEffort']) {
+    if (k in changes) allowed[k] = changes[k];
+  }
   if (!Object.keys(allowed).length) return null;
   try {
     const cfg = existsSync(CFG_PATH) ? JSON.parse(readFileSync(CFG_PATH, 'utf8')) : {};

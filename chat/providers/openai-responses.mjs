@@ -17,6 +17,7 @@ import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '.
 import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { nativeWebSearch } from '../../lib/model-capabilities.mjs';
+import { mapOpenAIResponsesReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 
 export function toResponsesInput(messages) {
   // Translate OpenAI-compat messages → Responses API input items.
@@ -128,6 +129,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   // backend dropping hosted-tool support (the way it rejects web_search_preview
   // today) — without it, every web-search turn would die instead of degrading.
   let nativeSearchDisabled = false;
+  let reasoningDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (e.g. the
@@ -157,10 +159,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       // makes gpt-5.x models refuse to call custom function tools with
       // tool_choice:"auto". "high" is needed for reliable tool selection on
       // custom toolsets (coder_*, ask_agent, etc.) — "medium" is too weak.
-      reasoning:    { effort: agent.reasoningEffort ?? 'high' },
       store:        false,
       stream:       true,
     };
+    if (!reasoningDisabled) body.reasoning = mapOpenAIResponsesReasoning(agent);
     if (responsesTools?.length) { body.tools = responsesTools; body.parallel_tool_calls = true; }
 
     const headers = {
@@ -239,6 +241,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           }
           return;
         }
+      } else if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
+        console.warn('[openai-oauth] reasoning effort rejected; retrying without reasoning field');
+        reasoningDisabled = true;
+        continue;
       } else if (res.status === 400 && useNativeSearch && /web_search|unsupported tool/i.test(errText)) {
         // The hosted web_search tool was rejected (e.g. the experimental Codex
         // backend dropped support). Resend this same turn with the Brave

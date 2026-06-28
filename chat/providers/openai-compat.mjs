@@ -15,6 +15,7 @@ import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
+import { applyOpenAICompatReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 
 export async function* streamOpenAICompat(providerKey, agent, systemPrompt, messages, signal, userId = 'default') {
   const cfg = OPENAI_COMPAT_PROVIDERS[providerKey];
@@ -39,6 +40,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
   // injects a tool; the perplexity model-implicit path has nothing to fall back
   // from, so this stays false there.)
   let nativeSearchDisabled = false;
+  let reasoningDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
@@ -65,6 +67,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     if (compatTools)     body.tools      = compatTools;
+    if (!reasoningDisabled) applyOpenAICompatReasoning(body, providerKey, agent);
 
     const res = await fetch(endpoint, {
       method: 'POST', signal,
@@ -82,6 +85,11 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(errText)) {
         console.warn(`[${providerKey}] native web_search rejected (400); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        continue;
+      }
+      if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
+        console.warn(`[${providerKey}] reasoning effort rejected; retrying without reasoning field`);
+        reasoningDisabled = true;
         continue;
       }
       yield { type: 'error', message: `${cfg.displayName} error ${res.status}: ${errText}` };

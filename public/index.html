@@ -1593,6 +1593,15 @@
               <label>Max Output Tokens <span style="opacity:0.5;font-size:11px">(leave blank for default 8192)</span>
                 <input id="aMaxTokens" type="number" min="256" max="200000" step="256" placeholder="8192">
               </label>
+              <label>Reasoning Effort <span style="opacity:0.5;font-size:11px">(use Auto unless you need to pin it)</span>
+                <select id="aReasoningEffort">
+                  <option value="auto">Auto</option>
+                  <option value="off">Off</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
             </div>
           </details>
         </div>

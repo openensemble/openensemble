@@ -14,6 +14,7 @@ import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPr
 import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
+import { effectiveReasoningEffort } from '../../lib/reasoning-effort.mjs';
 
 export async function* streamOllama(agent, systemPrompt, working, signal, userId = 'default') {
   // Inject system as first message — more reliable than top-level system field.
@@ -28,11 +29,12 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     // Compress old tool-call/result pairs before sending to keep context small.
     compressOllamaHistory(ollamaMessages, agent.contextSize ?? 32768);
 
+    const effort = effectiveReasoningEffort(agent, 'auto');
     const body = {
       model:    agent.model,
       messages: ollamaMessages,
       stream:   true,
-      think:    agent.think ?? false,
+      think:    effort === 'high' ? true : effort === 'off' ? false : (agent.think ?? false),
       options:  { num_ctx: agent.contextSize ?? 32768, num_predict: agent.maxTokens ?? 8192 },
     };
     if (agent.tools.length) {

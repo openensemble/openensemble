@@ -1301,6 +1301,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     agentId: agent.id,
     provider: agent.provider,
     model: agent.model,
+    reasoningEffort: agent.reasoningEffort ?? 'auto',
     durationMs: Date.now() - _llmStart,
     bytes: assistantContent ? (typeof assistantContent === 'string' ? assistantContent.length : JSON.stringify(assistantContent).length) : 0,
     // Pre-LLM payload composition (chars; ÷4 ≈ tokens). Lets us audit

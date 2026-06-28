@@ -2117,15 +2117,39 @@ function scrollToBottom() { const m = $('messages'); m.scrollTop = m.scrollHeigh
 // ── Slash Command Menu ─────────────────────────────────────────────────────
 let slashMenuIdx = 0, slashMenuItems = [];
 let _skillsCache = null;
+let _effortCache = null;
 async function _loadSkills() {
   try { _skillsCache = await fetch('/api/roles').then(r => r.json()); } catch { _skillsCache = _skillsCache || []; }
   return _skillsCache;
+}
+async function _loadEfforts() {
+  const agent = agents.find(a => a.id === activeAgent);
+  const key = `${activeAgent}|${agent?.provider || ''}|${agent?.model || ''}|${agent?.reasoningEffort || 'auto'}`;
+  if (_effortCache?.key === key) return _effortCache.data;
+  try {
+    const data = await fetch(`/api/reasoning-efforts?agent=${encodeURIComponent(activeAgent)}`).then(r => r.json());
+    _effortCache = { key, data };
+  } catch {
+    _effortCache = { key, data: { current: agent?.reasoningEffort || 'auto', options: [{ value: 'auto', label: 'Auto', description: 'Use OE defaults.' }] } };
+  }
+  return _effortCache.data;
+}
+async function assignEffortToAgent(agentId, reasoningEffort) {
+  const r = await fetch(`/api/agents/${agentId}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reasoningEffort }),
+  });
+  if (!r.ok) { showToast('Failed to update effort'); return; }
+  try { agents = await fetch('/api/agents').then(r => r.json()); } catch {}
+  _effortCache = null;
+  showToast(`Effort → ${reasoningEffort}`);
 }
 
 const SLASH_COMMANDS = [
   { cmd: '/clear',     icon: 'trash-2',    desc: 'Clear the current chat session',
     action: () => { hideSlashMenu(); $('input').value = ''; clearSession(); } },
   { cmd: '/model',     icon: 'brain',      desc: 'Change the active model' },
+  { cmd: '/effort',    icon: 'gauge',      desc: 'Change reasoning effort for this agent/model' },
   { cmd: '/agent',     icon: 'bot',        desc: 'Switch to a different agent' },
   { cmd: '/claim',     icon: 'wrench',     desc: 'Claim a role for this agent' },
   { cmd: '/release',   icon: 'unlock',     desc: 'Release a role from this agent' },
@@ -2148,6 +2172,25 @@ function _slashGetItems(val) {
           hideSlashMenu(); $('input').value = '';
           assignModelToAgent(activeAgent, m.name, m.provider);
           showToast(`Model → ${m.displayName || m.name}`);
+        }
+      }));
+  }
+  // /effort <filter> → reasoning-effort submenu for the active agent/model
+  if (/^\/effort(?:\s|$)/.test(val)) {
+    const f = val.replace(/^\/effort\s*/i, '').toLowerCase();
+    const agent = agents.find(a => a.id === activeAgent);
+    const cached = _effortCache?.data;
+    if (!cached) { _loadEfforts().then(() => updateSlashMenu()); }
+    const options = cached?.options || [{ value: 'auto', label: 'Auto', description: 'Loading supported efforts…' }];
+    const current = cached?.current || agent?.reasoningEffort || 'auto';
+    return options
+      .filter(o => !f || o.value.toLowerCase().includes(f) || (o.label || '').toLowerCase().includes(f))
+      .map(o => ({
+        label: `${o.label || o.value}${o.value === current ? ' ✓' : ''}`,
+        desc: `${agent?.provider || ''}/${agent?.model || ''} · ${o.description || ''}`,
+        action: () => {
+          hideSlashMenu(); $('input').value = '';
+          assignEffortToAgent(activeAgent, o.value);
         }
       }));
   }

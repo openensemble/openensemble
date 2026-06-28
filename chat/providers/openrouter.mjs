@@ -11,6 +11,7 @@ import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
+import { applyOpenAICompatReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 
 export async function* streamOpenRouter(agent, systemPrompt, messages, signal, userId = 'default') {
   const apiKey = getOpenRouterKey();
@@ -30,6 +31,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
   // Set if OpenRouter rejects the native web_search server tool, so we resend
   // the same turn with the Brave function restored.
   let nativeSearchDisabled = false;
+  let reasoningDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations
@@ -54,6 +56,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     if (orTools) body.tools = orTools;
+    if (!reasoningDisabled) applyOpenAICompatReasoning(body, 'openrouter', agent);
 
     const res = await fetch(OPENROUTER_URL, {
       method: 'POST', signal,
@@ -73,6 +76,11 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(errText)) {
         console.warn(`[openrouter] native web_search rejected (400); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        continue;
+      }
+      if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
+        console.warn('[openrouter] reasoning effort rejected; retrying without reasoning field');
+        reasoningDisabled = true;
         continue;
       }
       yield { type: 'error', message: `OpenRouter error ${res.status}: ${errText}` };
