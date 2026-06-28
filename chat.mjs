@@ -939,7 +939,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     if (agentObj.provider === 'openrouter') {
       return { providerGen: streamOpenRouter(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
-    if (agentObj.provider === 'openai-oauth') {
+    // grok native web search lives ONLY on xAI's Responses API (/v1/responses),
+    // not /chat/completions. When a grok agent holds web_search, route it to the
+    // shared Responses adapter (same one Codex uses; it switches on provider) so
+    // the search runs server-side in one round-trip. grok agents WITHOUT
+    // web_search stay on the /chat/completions (openai-compat) path below.
+    const grokNativeSearch = (agentObj.provider === 'grok' || agentObj.provider === 'xai')
+      && agentObj.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
+    if (agentObj.provider === 'openai-oauth' || grokNativeSearch) {
       return { providerGen: streamOpenAIResponses(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
     if (OPENAI_COMPAT_PROVIDERS[compatProviderKey]) {

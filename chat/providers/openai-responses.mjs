@@ -11,7 +11,7 @@
 
 import { executeToolStreaming } from '../../roles.mjs';
 import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth.mjs';
-import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags } from './_shared.mjs';
+import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
@@ -111,12 +111,35 @@ async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000 } = {})
 }
 
 export async function* streamOpenAIResponses(agent, systemPrompt, messages, signal, userId = 'default') {
+  // This adapter serves BOTH Responses-API providers: ChatGPT Codex
+  // (openai-oauth, per-user OAuth token) and xAI grok (api.x.ai/v1/responses,
+  // bearer API key). They share the Responses wire shape — identical SSE events,
+  // tool/function-call format, and `instructions`/`input` request shape (all
+  // live-verified for grok) — so the entire tool loop below is shared; only
+  // auth, endpoint, headers, and the native-search provider slug differ.
+  const isCodex     = agent.provider !== 'grok' && agent.provider !== 'xai';
+  const wsProvider  = isCodex ? 'openai-oauth' : 'xai';
+  const tag         = isCodex ? 'openai-oauth' : 'grok';
+  const displayName = isCodex ? 'OpenAI Codex' : 'xAI Grok';
+  const endpoint    = isCodex
+    ? `${OPENAI_OAUTH_BASE}/responses`
+    : `${OPENAI_COMPAT_PROVIDERS['xai'].baseUrl.replace(/\/$/, '')}/responses`;
+
   let auth;
-  try {
-    auth = await ensureFreshToken(userId);
-  } catch (e) {
-    yield { type: 'error', message: `OpenAI Codex OAuth: ${e.message}` };
-    return;
+  if (isCodex) {
+    try {
+      auth = await ensureFreshToken(userId);
+    } catch (e) {
+      yield { type: 'error', message: `OpenAI Codex OAuth: ${e.message}` };
+      return;
+    }
+  } else {
+    const key = getCompatKey('xai');
+    if (!key) {
+      yield { type: 'error', message: 'xAI Grok API key not set. Add it in Settings → Providers.' };
+      return;
+    }
+    auth = { access_token: key, account_id: null };
   }
 
   const working = [...messages];
@@ -140,10 +163,9 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // Native web search: if the model can search+synthesize in one call AND the
     // agent already holds our Brave `web_search` tool, drop the Brave function
     // and inject the provider's hosted tool instead — one round-trip instead of
-    // search → result → synthesize. This file IS the openai-oauth path, so we
-    // ask the capability registry for that provider specifically. `fetch_url`
+    // search → result → synthesize. wsProvider selects Codex vs grok. `fetch_url`
     // stays a function tool: it keeps our SSRF-guarded explicit-URL fetch.
-    const nativeSearch = nativeWebSearch('openai-oauth', agent.model);
+    const nativeSearch = nativeWebSearch(wsProvider, agent.model);
     const useNativeSearch = !nativeSearchDisabled
       && nativeSearch?.kind === 'responses'
       && agent.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
@@ -169,12 +191,17 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       'Content-Type':  'application/json',
       'Accept':        'text/event-stream',
       'Authorization': `Bearer ${auth.access_token}`,
-      'OpenAI-Beta':   'responses=experimental',
-      'Originator':    'codex_cli_rs',
     };
-    if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
+    // Codex backend needs these to accept the experimental Responses endpoint;
+    // xAI's /v1/responses is a standard bearer-auth endpoint and rejects unknown
+    // headers on some paths, so only send them for Codex.
+    if (isCodex) {
+      headers['OpenAI-Beta'] = 'responses=experimental';
+      headers['Originator']  = 'codex_cli_rs';
+      if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
+    }
 
-    console.log(`[openai-oauth] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}`);
+    console.log(`[${tag}] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}`);
     // The Codex backend occasionally drops connections at handshake time
     // (manifests as Node fetch's TypeError "fetch failed"). One quick retry
     // with a small backoff resolves the vast majority of these without the
@@ -182,15 +209,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // start flowing, replay would duplicate output.
     let res;
     try {
-      res = await postWithRetry(`${OPENAI_OAUTH_BASE}/responses`, {
+      res = await postWithRetry(endpoint, {
         method: 'POST', signal, headers, body: JSON.stringify(body),
       });
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
       const cause = e?.cause?.code || e?.cause?.message;
-      const tag = cause ? `${e.message} (${cause})` : e.message;
-      console.error(`[openai-oauth] POST failed after retry: ${tag}`);
-      yield { type: 'error', message: `OpenAI Codex: ${tag}` };
+      const errTag = cause ? `${e.message} (${cause})` : e.message;
+      console.error(`[${tag}] POST failed after retry: ${errTag}`);
+      yield { type: 'error', message: `${displayName}: ${errTag}` };
       return;
     }
     if (!res.ok) {
@@ -201,7 +228,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       // Force a refresh and retry once — refresh_token is usually still good
       // unless the user did a full logout, in which case we surface a clear
       // "please reconnect" instead of looping.
-      if (res.status === 401 && /token_invalidated/i.test(errText)) {
+      if (isCodex && res.status === 401 && /token_invalidated/i.test(errText)) {
         // Plain-English message for the user. Used in two spots below: when
         // refresh itself fails, and when the retry after a successful refresh
         // still returns 401. Both cases mean the session is unrecoverable
@@ -242,21 +269,21 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           return;
         }
       } else if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
-        console.warn('[openai-oauth] reasoning effort rejected; retrying without reasoning field');
+        console.warn(`[${tag}] reasoning effort rejected; retrying without reasoning field`);
         reasoningDisabled = true;
         continue;
-      } else if (res.status === 400 && useNativeSearch && /web_search|unsupported tool/i.test(errText)) {
+      } else if ((res.status === 400 || res.status === 422) && useNativeSearch && /web[_ ]?search|unsupported tool|unknown variant/i.test(errText)) {
         // The hosted web_search tool was rejected (e.g. the experimental Codex
         // backend dropped support). Resend this same turn with the Brave
         // web_search function restored — search still works, just via our local
         // path. Bounded: nativeSearchDisabled stays set, so a second failure
         // falls through to the generic error below (no retry loop).
-        console.warn(`[openai-oauth] hosted web_search rejected (${res.status}); falling back to Brave web_search`);
+        console.warn(`[${tag}] hosted web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
         continue;
       } else {
-        console.error(`[openai-oauth] error ${res.status}: ${errText.slice(0, 500)}`);
-        yield { type: 'error', message: `OpenAI Codex error ${res.status}: ${errText}` };
+        console.error(`[${tag}] error ${res.status}: ${errText.slice(0, 500)}`);
+        yield { type: 'error', message: `${displayName} error ${res.status}: ${errText}` };
         return;
       }
     }
@@ -276,8 +303,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       const t = ev.type;
       if (t && !seenEventTypes.has(t)) {
         seenEventTypes.add(t);
-        if (!/^response\.(output_text\.delta|output_item\.(added|done)|function_call_arguments\.delta|created|in_progress|completed|content_part\.(added|done)|output_text\.done|web_search_call\.(in_progress|searching|completed))$/.test(t)) {
-          console.log(`[openai-oauth] unknown SSE event type: ${t}`, JSON.stringify(ev).slice(0, 300));
+        if (!/^response\.(output_text\.(delta|done|annotation\.added)|output_item\.(added|done)|function_call_arguments\.(delta|done)|created|in_progress|completed|content_part\.(added|done)|web_search_call\.(in_progress|searching|completed)|reasoning_summary_part\.(added|done)|reasoning_summary_text\.(delta|done))$/.test(t)) {
+          console.log(`[${tag}] unknown SSE event type: ${t}`, JSON.stringify(ev).slice(0, 300));
         }
       }
       if (t === 'response.output_text.delta' && typeof ev.delta === 'string') {
@@ -340,7 +367,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       }
       if (t === 'response.failed' || t === 'error') {
         const msg = ev.response?.error?.message ?? ev.error?.message ?? 'unknown error';
-        yield { type: 'error', message: `OpenAI Codex: ${msg}` };
+        yield { type: 'error', message: `${displayName}: ${msg}` };
         return;
       }
     }
@@ -448,11 +475,11 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
   yield { type: '__content', content: assistantContent };
   if (totalInputTokens || totalOutputTokens) {
-    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cachedTokens: totalCachedTokens, provider: 'openai-oauth', model: agent.model };
+    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cachedTokens: totalCachedTokens, provider: tag, model: agent.model };
   }
   if (totalInputTokens) {
     const hitRate = totalCachedTokens / totalInputTokens;
     const tierMode = agent._promptTiersAssembled ? 'tiered' : 'flat';
-    console.log(`[openai-oauth] cache: mode=${tierMode} cached=${totalCachedTokens} input=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
+    console.log(`[${tag}] cache: mode=${tierMode} cached=${totalCachedTokens} input=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
   }
 }
