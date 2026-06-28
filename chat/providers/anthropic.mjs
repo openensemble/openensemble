@@ -131,8 +131,8 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       // Hosted web_search server tool rejected → resend this turn with the Brave
       // function restored. Bounded: nativeSearchDisabled stays set, so a second
       // failure falls through to the generic error below (no retry loop).
-      if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(err)) {
-        console.warn(`[anthropic] hosted web_search rejected (400); falling back to Brave web_search`);
+      if ((res.status === 400 || res.status === 422) && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type|unknown variant/i.test(err)) {
+        console.warn(`[anthropic] hosted web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
         continue;
       }

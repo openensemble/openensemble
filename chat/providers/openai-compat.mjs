@@ -82,8 +82,8 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       const errText = await res.text();
       // Injected native web_search tool rejected → resend with Brave restored.
       // Bounded: the flag stays set, so a second failure hits the generic error.
-      if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(errText)) {
-        console.warn(`[${providerKey}] native web_search rejected (400); falling back to Brave web_search`);
+      if ((res.status === 400 || res.status === 422) && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type|unknown variant/i.test(errText)) {
+        console.warn(`[${providerKey}] native web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
         continue;
       }

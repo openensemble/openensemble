@@ -73,8 +73,8 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       const errText = await res.text();
       // Native web_search tool rejected → resend with Brave restored. Bounded:
       // the flag stays set, so a second failure hits the generic error below.
-      if (res.status === 400 && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type/i.test(errText)) {
-        console.warn(`[openrouter] native web_search rejected (400); falling back to Brave web_search`);
+      if ((res.status === 400 || res.status === 422) && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type|unknown variant/i.test(errText)) {
+        console.warn(`[openrouter] native web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
         continue;
       }
