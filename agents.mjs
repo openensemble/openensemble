@@ -110,7 +110,7 @@ function pickAgentId(name, ownerId) {
   return slug;
 }
 
-export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, maxTokens, contextSize, reasoningEffort, ownerId = null }) {
+export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, maxTokens, contextSize, ownerId = null }) {
   const id = pickAgentId(name, ownerId);
   const agent = {
     id, name, emoji,
@@ -123,7 +123,9 @@ export function createCustomAgent({ name, emoji = '🤖', description, model, pr
     ...(ownerId    ? { ownerId }    : {}),
     ...(maxTokens  ? { maxTokens }  : {}),
     ...(contextSize ? { contextSize } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {}),
+    // reasoningEffort is intentionally NOT stored here — it is a per-user
+    // (account-specific) setting kept in each user's agentOverrides, so two
+    // users sharing an agent can pick different efforts. See routes/agents.mjs.
   };
   const userId = ownerId ?? 'shared';
   const list = loadUserAgents(userId);
@@ -180,9 +182,11 @@ export function updateAgentMeta(id, changes) {
   const customs = loadCustomAgents();
   if (customs.find(a => a.id === id)) return updateCustomAgent(id, changes);
 
-  // Built-in agents: store allowed overrides in config.json agentModels
+  // Built-in agents: store allowed overrides in config.json agentModels.
+  // NOTE: reasoningEffort is deliberately excluded — it is per-user state
+  // (users/<id>/agentOverrides), never a global agent-config field.
   const allowed = {};
-  for (const k of ['name', 'emoji', 'model', 'provider', 'maxTokens', 'contextSize', 'reasoningEffort']) {
+  for (const k of ['name', 'emoji', 'model', 'provider', 'maxTokens', 'contextSize']) {
     if (k in changes) allowed[k] = changes[k];
   }
   if (!Object.keys(allowed).length) return null;

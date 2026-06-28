@@ -182,14 +182,19 @@ export async function handle(req, res) {
         // so the safety prefix and identity template apply cleanly.
         systemPrompt = undefined;
       }
-      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, maxTokens, contextSize, reasoningEffort, ownerId: authId });
+      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, maxTokens, contextSize, ownerId: authId });
+      // reasoningEffort is account-specific: persist the creator's choice as a
+      // per-user override rather than on the shared agent record.
+      if (reasoningEffort !== 'auto') {
+        await saveUserAgentOverride(authId, agent.id, { reasoningEffort });
+      }
       if (skillCategory) {
         const { setRoleAssignment } = await import('../roles.mjs');
         setRoleAssignment(skillCategory, agent.id, authId);
       }
       broadcastAgentList();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(agentToWire(agent)));
+      res.end(JSON.stringify(agentToWire({ ...agent, reasoningEffort })));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
     return true;
   }
@@ -214,7 +219,9 @@ export async function handle(req, res) {
       if ('systemPrompt' in changes) uiChanges.systemPrompt = changes.systemPrompt;
       if (changes.model)     globalChanges.model     = changes.model;
       if (changes.provider)  globalChanges.provider  = changes.provider;
-      if ('reasoningEffort' in changes) globalChanges.reasoningEffort = normalizeReasoningEffort(changes.reasoningEffort, 'auto');
+      // reasoningEffort is account-specific — always a per-user override, never
+      // written to the shared agent record or global config. Handled separately
+      // below so user A's "high" never changes user B's effort on the same agent.
       if ('maxTokens' in changes) globalChanges.maxTokens = changes.maxTokens ? parseInt(changes.maxTokens, 10) : null;
       if ('contextSize' in changes) {
         const cs = changes.contextSize ? parseInt(changes.contextSize, 10) : null;
@@ -237,7 +244,21 @@ export async function handle(req, res) {
           saveUserAgentOverride(authId, agentMatch[1], uiChanges);
         }
       }
+      // Per-user reasoning effort: scoped to the calling account, applied over
+      // the agent via getAgentsForUser's agentOverrides merge at chat time.
+      if ('reasoningEffort' in changes) {
+        await saveUserAgentOverride(authId, agentMatch[1], {
+          reasoningEffort: normalizeReasoningEffort(changes.reasoningEffort, 'auto'),
+        });
+      }
       if (Object.keys(globalChanges).length) {
+        // Global agent config (model/provider/maxTokens/contextSize) may only be
+        // changed by the agent's owner (or a privileged user). Non-owners can
+        // still set per-user fields like reasoningEffort above.
+        const customRec = loadCustomAgents().find(a => a.id === agentMatch[1]);
+        if (customRec?.ownerId && customRec.ownerId !== authId && !isPrivileged(authId)) {
+          res.writeHead(403); res.end(JSON.stringify({ error: 'Not your agent' })); return true;
+        }
         updateAgentMeta(agentMatch[1], globalChanges);
       }
       const base = getAgent(agentMatch[1]);

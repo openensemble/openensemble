@@ -15,13 +15,13 @@ import {
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
-import { effectiveReasoningEffort } from '../../lib/reasoning-effort.mjs';
+import { effectiveReasoningEffort, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 
 // ── LM Studio — native /api/v1/chat (stateful, no-tools path) ────────────────
 // Uses previous_response_id so LM Studio maintains context server-side.
 // NOTE: The native endpoint does NOT support tools/tool_choice — those calls
 // fall through to streamLMStudioCompat which uses /v1/chat/completions (SSE).
-export async function* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId = 'default') {
+export async function* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId = 'default', reasoningDisabled = false) {
   if (agent.tools?.length) {
     yield* streamLMStudioCompat(agent, systemPrompt, userText, agentId, signal, userId);
     return;
@@ -37,8 +37,10 @@ export async function* streamLMStudio(agent, systemPrompt, userText, agentId, si
     store:         true,
   };
   const effort = effectiveReasoningEffort(agent, 'auto');
-  if (effort === 'off' || agent.think === false) body.reasoning = 'off';
-  if (effort === 'high') body.reasoning = 'on';
+  if (!reasoningDisabled) {
+    if (effort === 'off' || agent.think === false) body.reasoning = 'off';
+    if (effort === 'high') body.reasoning = 'on';
+  }
   if (prevId) body.previous_response_id = prevId;
 
   const res = await fetch(getLmstudioNativeUrl(), {
@@ -49,9 +51,14 @@ export async function* streamLMStudio(agent, systemPrompt, userText, agentId, si
 
   if (!res.ok) {
     const err = await res.text();
+    if (!reasoningDisabled && body.reasoning !== undefined && isReasoningUnsupportedError(res.status, err)) {
+      console.warn(`[lmstudio] reasoning rejected (${res.status}); retrying without reasoning`);
+      yield* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId, true);
+      return;
+    }
     if (prevId && (res.status === 400 || res.status === 404)) {
       setLmsResponseId(agentId, '');
-      yield* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId);
+      yield* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId, reasoningDisabled);
       return;
     }
     yield { type: 'error', message: `LM Studio error ${res.status}: ${err}` };
@@ -147,6 +154,9 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
   let assistantContent = '';
   let totalCompatTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  // Latches if LM Studio rejects the reasoning hint for this model so the turn
+  // retries without it instead of dying. Persists across tool loops.
+  let reasoningDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations
@@ -159,8 +169,10 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     const body = { model: agent.model, messages: working, stream: true, tools: lmTools, tool_choice: toolChoice };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     const effort = effectiveReasoningEffort(agent, 'auto');
-    if (effort === 'off' || agent.think === false) body.reasoning = 'off';
-    if (effort === 'high') body.reasoning = 'on';
+    if (!reasoningDisabled) {
+      if (effort === 'off' || agent.think === false) body.reasoning = 'off';
+      if (effort === 'high') body.reasoning = 'on';
+    }
 
     const res = await fetch(getLmstudioCompatUrl(), {
       method: 'POST', signal,
@@ -168,7 +180,13 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      yield { type: 'error', message: `LM Studio error ${res.status}: ${await res.text()}` };
+      const errText = await res.text();
+      if (!reasoningDisabled && body.reasoning !== undefined && isReasoningUnsupportedError(res.status, errText)) {
+        console.warn(`[lmstudio] reasoning rejected (${res.status}); retrying without reasoning`);
+        reasoningDisabled = true;
+        continue;
+      }
+      yield { type: 'error', message: `LM Studio error ${res.status}: ${errText}` };
       return;
     }
 

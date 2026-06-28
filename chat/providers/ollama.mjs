@@ -14,7 +14,7 @@ import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPr
 import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
-import { effectiveReasoningEffort } from '../../lib/reasoning-effort.mjs';
+import { effectiveReasoningEffort, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 
 export async function* streamOllama(agent, systemPrompt, working, signal, userId = 'default') {
   // Inject system as first message — more reliable than top-level system field.
@@ -24,6 +24,9 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
   let ollamaInputTokens = 0, ollamaOutputTokens = 0;
   let toolCallsMade = [];  // track all tool calls for fallback summary
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  // Latches if Ollama rejects `think: true` (model has no thinking support) so
+  // the turn retries without it instead of dying. Persists across tool loops.
+  let thinkingDisabled = false;
 
   while (guard.tick()) {
     // Compress old tool-call/result pairs before sending to keep context small.
@@ -34,7 +37,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
       model:    agent.model,
       messages: ollamaMessages,
       stream:   true,
-      think:    effort === 'high' ? true : effort === 'off' ? false : (agent.think ?? false),
+      think:    thinkingDisabled ? false : (effort === 'high' ? true : effort === 'off' ? false : (agent.think ?? false)),
       options:  { num_ctx: agent.contextSize ?? 32768, num_predict: agent.maxTokens ?? 8192 },
     };
     if (agent.tools.length) {
@@ -87,6 +90,11 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
     if (!res.ok) {
       const err = await res.text();
+      if (!thinkingDisabled && body.think && isReasoningUnsupportedError(res.status, err)) {
+        console.warn(`[ollama] thinking rejected (${res.status}); retrying without think`);
+        thinkingDisabled = true;
+        continue;
+      }
       console.error(`[ollama] ERROR ${res.status} agent=${agent.id} model=${agent.model}`);
       yield { type: 'error', message: `Ollama error ${res.status}: ${err}` };
       return;
