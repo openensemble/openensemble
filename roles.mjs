@@ -1389,9 +1389,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
           try {
             watchersMod = await import('./scheduler/watchers.mjs');
+            const taskGraph = await import('./background-tasks.mjs');
+            const rootAgentId = await _resolveAttributionAgent(userId, agentId);
             watcherId = watchersMod.registerWatcher({
               userId,
-              agentId: await _resolveAttributionAgent(userId, agentId),
+              agentId: rootAgentId,
               kind: 'task_proxy',
               label,
               state: {
@@ -1411,7 +1413,15 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               expiresAt: null,
             });
             backgrounded = true;
+            taskGraph.registerTaskRoot({
+              userId,
+              rootTaskId: watcherId,
+              rootWatcherId: watcherId,
+              visibleAgentId: rootAgentId,
+              summary: `${displayName} is still running`,
+            });
             watchersMod.pushWatcherStatus(userId, watcherId, `${displayName} is still running in the background`, {
+              rootTaskId: watcherId,
               phase: 'backgrounded',
               currentTool: name,
               canCancel: false,
@@ -1446,7 +1456,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               targetAgentId: delegatedMeta?.targetAgentId || null,
               args: mergedArgs,
               scheduledCtx: getScheduledContext(),
+              rootTaskId: watcherId,
+              rootWatcherId: watcherId,
             };
+            captured.visibleAgentId = captured.agentId;
             _registerScheduledAutoBgChild({
               scheduledCtx: captured.scheduledCtx,
               userId: captured.userId,
@@ -1457,29 +1470,57 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             (async () => {
               let finalText = '';
               try {
-                while (true) {
-                  const r = await iter.next();
-                  if (r.done) break;
-                  const v = r.value;
-                  rememberDelegationMeta(v);
-                  if (v?.type === 'tool_progress' && v.text) {
-                    watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-1200), {
-                      phase: 'streaming',
-                      currentTool: captured.name,
-                      canCancel: false,
-                    });
-                  } else if (v?.type === 'result' && v.text) {
-                    finalText = String(v.text);
-                    const preview = finalText.split('\n').find(l => l.trim()) || '';
-                    if (preview) {
-                      watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, `${captured.displayName}: ${preview.slice(0, 240)}`, {
-                        phase: 'result',
-                        currentTool: null,
+                const { runInTaskContext } = await import('./lib/task-proxy-context.mjs');
+                await runInTaskContext({
+                  taskId: _autoBgChildId(captured.watcherId),
+                  watcherId: captured.watcherId,
+                  userId: captured.userId,
+                  agentId: captured.agentId,
+                  rootTaskId: captured.rootTaskId,
+                  rootWatcherId: captured.rootWatcherId,
+                  visibleAgentId: captured.visibleAgentId,
+                  spanId: `${captured.rootTaskId}:${captured.name}`,
+                }, async () => {
+                  while (true) {
+                    const r = await iter.next();
+                    if (r.done) break;
+                    const v = r.value;
+                    rememberDelegationMeta(v);
+                    if (v?.type === 'tool_progress' && v.text) {
+                      watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-1200), {
+                        rootTaskId: captured.rootTaskId,
+                        phase: 'streaming',
+                        currentTool: captured.name,
                         canCancel: false,
                       });
+                    } else if (v?.type === 'result' && v.text) {
+                      finalText = String(v.text);
+                      const preview = finalText.split('\n').find(l => l.trim()) || '';
+                      if (preview) {
+                        watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, `${captured.displayName}: ${preview.slice(0, 240)}`, {
+                          rootTaskId: captured.rootTaskId,
+                          phase: 'result',
+                          currentTool: null,
+                          canCancel: false,
+                        });
+                      }
                     }
                   }
+                });
+                const bg = await import('./background-tasks.mjs');
+                const deferred = !captured.scheduledCtx?.originTaskId && bg.deferRootCompletion({
+                  userId: captured.userId,
+                  rootTaskId: captured.rootTaskId,
+                  rootWatcherId: captured.rootWatcherId,
+                  status: 'done',
+                  finalText: `✓ ${captured.displayName} done`,
+                  finalReportPreview: finalText.slice(0, 800),
+                });
+                if (deferred) {
+                  log.info('tool', 'auto-bg root waiting for delegated children', { tool: captured.name, watcherId: captured.watcherId, userId: captured.userId });
+                  return;
                 }
+                bg.clearTaskRoot(captured.rootTaskId);
                 watchersMod.completeWatcher(captured.userId, captured.watcherId, {
                   status: 'done',
                   finalText: `✓ ${captured.displayName} done${finalText ? `: ${finalText.slice(-1200)}` : ''}`,

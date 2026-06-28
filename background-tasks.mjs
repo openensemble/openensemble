@@ -18,6 +18,204 @@ export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
 // in-flight task registry: taskId -> { agentId, userId, agentName, startedAt }
 const activeTasks = new Map();
 
+// Root task graph for nested delegation. Existing ids remain intact:
+// - watcher UUIDs are still the user-visible chip ids
+// - bg_/deleg_/ephemeral ids remain internal runtime ids
+// This graph links them so status lookups can resolve "root -> Gina/Rose/etc"
+// and a root chip does not finish while child delegations are still running.
+const rootTaskGraphs = new Map(); // rootTaskId -> { userId, rootWatcherId, visibleAgentId, children, pendingCompletion }
+
+function _slug(s) {
+  return String(s || 'agent').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'agent';
+}
+
+function _rootChildSnapshot(root) {
+  if (!root?.children?.size) return [];
+  return [...root.children.values()].map(c => ({
+    taskId: c.taskId,
+    watcherId: c.watcherId || null,
+    spanId: c.spanId || null,
+    name: c.name || 'Agent',
+    summary: c.summary || '',
+    status: c.status || 'running',
+    currentTool: c.currentTool || null,
+    startedAt: c.startedAt || null,
+    lastActivityAt: c.lastActivityAt || null,
+  }));
+}
+
+function _ensureRootGraph({ userId, rootTaskId, rootWatcherId = null, visibleAgentId = null, summary = '' }) {
+  if (!rootTaskId) return null;
+  let root = rootTaskGraphs.get(rootTaskId);
+  if (!root) {
+    root = {
+      userId,
+      rootTaskId,
+      rootWatcherId: rootWatcherId || null,
+      visibleAgentId: visibleAgentId || null,
+      summary: summary || '',
+      children: new Map(),
+      pendingCompletion: null,
+    };
+    rootTaskGraphs.set(rootTaskId, root);
+  } else {
+    if (rootWatcherId && !root.rootWatcherId) root.rootWatcherId = rootWatcherId;
+    if (visibleAgentId && !root.visibleAgentId) root.visibleAgentId = visibleAgentId;
+    if (summary && !root.summary) root.summary = summary;
+  }
+  return root;
+}
+
+export function registerTaskRoot({ userId, rootTaskId, rootWatcherId, visibleAgentId = null, summary = '' } = {}) {
+  return !!_ensureRootGraph({ userId, rootTaskId, rootWatcherId, visibleAgentId, summary });
+}
+
+function _attachRootChild(taskId, rec) {
+  if (!rec?.rootTaskId || rec.rootTaskId === taskId) return;
+  const root = _ensureRootGraph({
+    userId: rec.userId,
+    rootTaskId: rec.rootTaskId,
+    rootWatcherId: rec.rootWatcherId || rec.parentWatcherId || null,
+    visibleAgentId: rec.visibleAgentId || null,
+  });
+  if (!root) return;
+  root.children.set(taskId, {
+    taskId,
+    watcherId: rec.watcherId || null,
+    spanId: rec.spanId || null,
+    name: rec.agentName,
+    summary: rec.summary,
+    status: rec.status || 'running',
+    currentTool: rec.currentTool || null,
+    startedAt: rec.startedAt,
+    lastActivityAt: Date.now(),
+  });
+  if (root.rootWatcherId) {
+    const names = _rootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
+    pushWatcherStatus(rec.userId, root.rootWatcherId, `Delegated child task running: ${names || rec.agentName}`, {
+      rootTaskId: rec.rootTaskId,
+      phase: 'child_running',
+      status: 'running',
+      childTasks: _rootChildSnapshot(root),
+      lastActivityAt: Date.now(),
+    });
+  }
+}
+
+function _updateRootChildProgress(rec, extra = {}) {
+  if (!rec?.rootTaskId || rec.rootTaskId === rec.taskId) return;
+  const root = rootTaskGraphs.get(rec.rootTaskId);
+  const child = root?.children?.get(rec.taskId);
+  if (!root || !child) return;
+  Object.assign(child, {
+    status: rec.status || child.status || 'running',
+    currentTool: rec.currentTool || null,
+    lastActivityAt: Date.now(),
+    ...extra,
+  });
+  if (root.rootWatcherId && rec.watcherId !== root.rootWatcherId) {
+    const action = rec.currentTool ? `running ${rec.currentTool}` : (extra.status || child.status || 'running');
+    pushWatcherStatus(rec.userId, root.rootWatcherId, `${rec.agentName || 'Agent'}: ${action}`, {
+      rootTaskId: rec.rootTaskId,
+      phase: 'child_progress',
+      status: 'running',
+      childTasks: _rootChildSnapshot(root),
+      lastActivityAt: Date.now(),
+    });
+  }
+}
+
+export function hasActiveTaskChildren(rootTaskId) {
+  const root = rootTaskGraphs.get(rootTaskId);
+  return !!(root?.children?.size);
+}
+
+export function clearTaskRoot(rootTaskId) {
+  if (!rootTaskId) return false;
+  return rootTaskGraphs.delete(rootTaskId);
+}
+
+export function deferRootCompletion({ userId, rootTaskId, rootWatcherId = null, status = 'done', finalText = '', finalReportPreview = '' } = {}) {
+  const root = rootTaskGraphs.get(rootTaskId);
+  if (!root?.children?.size) return false;
+  if (rootWatcherId && !root.rootWatcherId) root.rootWatcherId = rootWatcherId;
+  root.pendingCompletion = {
+    status,
+    finalText,
+    finalReportPreview,
+    at: Date.now(),
+  };
+  const names = _rootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
+  if (root.rootWatcherId) {
+    pushWatcherStatus(userId || root.userId, root.rootWatcherId, `Waiting on delegated task(s): ${names || 'child task'}`, {
+      rootTaskId,
+      phase: 'waiting_children',
+      status: 'running',
+      childTasks: _rootChildSnapshot(root),
+      finalReportPreview,
+      lastActivityAt: Date.now(),
+    });
+  }
+  return true;
+}
+
+function _completeRootChild(taskId, rec, status, finalReportPreview) {
+  if (!rec?.rootTaskId || rec.rootTaskId === taskId) return;
+  const root = rootTaskGraphs.get(rec.rootTaskId);
+  if (!root) return;
+  const child = root.children.get(taskId);
+  if (child) {
+    child.status = status;
+    child.currentTool = null;
+    child.lastActivityAt = Date.now();
+    child.finalReportPreview = finalReportPreview;
+  }
+  root.children.delete(taskId);
+  if (!root.rootWatcherId) {
+    if (root.children.size === 0 && root.pendingCompletion) rootTaskGraphs.delete(rec.rootTaskId);
+    return;
+  }
+  if (root.pendingCompletion && status !== 'done') {
+    root.pendingCompletion.status = status;
+    root.pendingCompletion.finalText = finalReportPreview || `${rec.agentName || 'Child task'} ${status}`;
+    root.pendingCompletion.finalReportPreview = finalReportPreview;
+  }
+
+  if (root.children.size > 0) {
+    const names = _rootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
+    pushWatcherStatus(rec.userId, root.rootWatcherId, `${rec.agentName || 'Agent'} finished; waiting on ${names || 'remaining child task(s)'}`, {
+      rootTaskId: rec.rootTaskId,
+      phase: 'waiting_children',
+      status: 'running',
+      childTasks: _rootChildSnapshot(root),
+      lastActivityAt: Date.now(),
+    });
+    return;
+  }
+
+  if (root.pendingCompletion) {
+    const finalStatus = root.pendingCompletion.status || 'done';
+    const finalText = root.pendingCompletion.finalText || (finalStatus === 'done'
+      ? '✓ Delegated task tree done'
+      : `Delegated task tree ${finalStatus}`);
+    pushWatcherStatus(rec.userId, root.rootWatcherId, finalText, {
+      rootTaskId: rec.rootTaskId,
+      status: finalStatus,
+      phase: finalStatus,
+      childTasks: [],
+      canCancel: false,
+      currentTool: null,
+      finalReportPreview: root.pendingCompletion.finalReportPreview || finalReportPreview,
+      lastActivityAt: Date.now(),
+    });
+    completeWatcher(rec.userId, root.rootWatcherId, {
+      status: finalStatus,
+      finalText,
+    });
+    rootTaskGraphs.delete(rec.rootTaskId);
+  }
+}
+
 function taskLabel(agentEmoji, agentName, summary) {
   const taskText = `${summary || ''}`.trim();
   return `${agentEmoji || '🤖'} ${agentName || 'Agent'}${taskText ? `: ${taskText.slice(0, 60)}${taskText.length > 60 ? '…' : ''}` : ''}`;
@@ -28,6 +226,13 @@ function taskState(taskId, extra = {}) {
   if (!rec) return null;
   return {
     taskId,
+    rootTaskId: rec.rootTaskId || taskId,
+    parentTaskId: rec.parentTaskId || null,
+    parentWatcherId: rec.parentWatcherId || null,
+    rootWatcherId: rec.rootWatcherId || rec.watcherId || null,
+    spanId: rec.spanId || null,
+    visibleAgentId: rec.visibleAgentId || rec.coordinatorAgentId || null,
+    aliases: rec.aliases || [],
     status: rec.status || 'running',
     targetAgentId: rec.agentId,
     targetAgentName: rec.agentName,
@@ -52,7 +257,9 @@ function pushTaskProgress(taskId, text, extra = {}) {
   if (!rec?.watcherId || !text) return false;
   rec.lastActivityAt = Date.now();
   rec.phase = extra.phase || rec.phase || 'running';
-  return pushWatcherStatus(rec.userId, rec.watcherId, text, taskState(taskId, extra));
+  const pushed = pushWatcherStatus(rec.userId, rec.watcherId, text, taskState(taskId, extra));
+  _updateRootChildProgress({ ...rec, taskId }, { status: extra.phase || rec.phase || 'running' });
+  return pushed;
 }
 
 function trackToolEvent(events, ev) {
@@ -112,11 +319,24 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const summary = (task || '').slice(0, 120);
   const ac = new AbortController();
   const scheduledCtx = getScheduledContext();
+  const rootTaskId = opts?.rootTaskId || taskId;
+  const parentTaskId = opts?.parentTaskId || null;
+  const parentWatcherId = opts?.parentWatcherId || null;
+  const visibleAgentId = opts?.visibleAgentId || coordinatorAgentId;
+  const rootWatcherId = opts?.rootWatcherId || (rootTaskId === taskId ? null : parentWatcherId);
+  const spanId = opts?.spanId || `${rootTaskId}:${_slug(agentName)}:${taskId}`;
   activeTasks.set(taskId, {
     agentId: scopedAgent.id, userId, agentName, agentEmoji,
     startedAt: Date.now(), summary, phase: 'queued', status: 'running',
     originalTask: task,
     coordinatorAgentId,
+    visibleAgentId,
+    rootTaskId,
+    parentTaskId,
+    parentWatcherId,
+    rootWatcherId,
+    spanId,
+    aliases: [taskId, scopedAgent.id].filter(Boolean),
     // Mark this as a coordinator→specialist DELEGATION (distinct from a worker
     // and from a research ephemeral). This is what lets check_workers surface it
     // as user-level background work — so "is Gina still working?" resolves no
@@ -148,7 +368,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   try {
     watcherId = registerWatcher({
       userId,
-      agentId: coordinatorAgentId,   // chip lives in the coordinator's chat
+      agentId: visibleAgentId,       // chip lives in the user's visible chat
       kind: 'task_proxy',
       label: taskLabel(agentEmoji, agentName, summary),
       state: taskState(taskId, { phase: 'queued' }),
@@ -157,7 +377,16 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       // No skillId: system-handler (registered via _systemHandlers in watchers.mjs)
     });
     const rec = activeTasks.get(taskId);
-    if (rec) rec.watcherId = watcherId;
+    if (rec) {
+      rec.watcherId = watcherId;
+      rec.rootWatcherId = rec.rootWatcherId || watcherId;
+      rec.aliases = [...new Set([...(rec.aliases || []), watcherId, rec.rootWatcherId, rec.parentWatcherId].filter(Boolean))];
+      if (rec.rootTaskId === taskId) {
+        registerTaskRoot({ userId, rootTaskId: rec.rootTaskId, rootWatcherId: watcherId, visibleAgentId, summary });
+      } else {
+        _attachRootChild(taskId, rec);
+      }
+    }
     pushTaskProgress(taskId, `Delegated to ${agentName}: ${summary}`, { phase: 'queued' });
   } catch (e) {
     console.warn('[background-tasks] task_proxy watcher registration failed:', e.message);
@@ -190,7 +419,19 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       // Phase-14b: wrap the streamChat loop in a task_proxy context so
       // ask_user_via_task (called inside the agent's tool chain) can find
       // this run's watcherId without any extra parameter threading.
-      const taskCtx = { taskId, watcherId, userId, agentId: scopedAgent.id };
+      const rec = activeTasks.get(taskId);
+      const taskCtx = {
+        taskId,
+        watcherId,
+        userId,
+        agentId: scopedAgent.id,
+        rootTaskId: rec?.rootTaskId || taskId,
+        parentTaskId: rec?.parentTaskId || null,
+        parentWatcherId: rec?.parentWatcherId || null,
+        rootWatcherId: rec?.rootWatcherId || watcherId,
+        visibleAgentId: rec?.visibleAgentId || visibleAgentId,
+        spanId: rec?.spanId || taskId,
+      };
       await runInTaskContext(taskCtx, async () => {
       for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, combinedNote, false, null, { toolPlan: rememberedPlan, routeText, isolatedTaskRun: true })) {
         if (ev.type === 'token') fullText += ev.text;
@@ -307,12 +548,30 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     rec.phase = status;
     rec.currentTool = null;
   }
+  if (rec?.rootTaskId === taskId && hasActiveTaskChildren(taskId) && !rec?.originScheduledTaskId) {
+    deferRootCompletion({
+      userId,
+      rootTaskId: taskId,
+      rootWatcherId: rec.rootWatcherId || rec.watcherId || null,
+      status,
+      finalText: status === 'done' ? `✓ ${agentName} done` : finalReportPreview,
+      finalReportPreview,
+    });
+    activeTasks.delete(taskId);
+    return;
+  }
   // Retire a finished delegation into the recent ring so check_workers can still
   // show its terminal outcome briefly. (Workers are retired separately via
   // _retire from spawnWorker; this is the delegation analogue.)
   if (rec?.isDelegation) {
     recentDelegations.unshift({
       taskId, userId: rec.userId, agentId: rec.agentId,
+      rootTaskId: rec.rootTaskId || taskId,
+      parentTaskId: rec.parentTaskId || null,
+      spanId: rec.spanId || null,
+      watcherId: rec.watcherId || null,
+      rootWatcherId: rec.rootWatcherId || null,
+      visibleAgentId: rec.visibleAgentId || null,
       name: rec.agentName, summary: rec.summary,
       outcome: status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error'),
       finalText: finalReportPreview.slice(0, 240),
@@ -321,7 +580,9 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     });
     if (recentDelegations.length > RECENT_CAP) recentDelegations.length = RECENT_CAP;
   }
+  _completeRootChild(taskId, rec, status, finalReportPreview);
   activeTasks.delete(taskId);
+  if (rec?.rootTaskId === taskId) clearTaskRoot(taskId);
 
   // Phase 14: finalize the task_proxy watcher (chip) so it shows done/error
   // and slides into the "recent" pile. Lives independently of the activity-
@@ -395,6 +656,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   //    multiple background tasks are in flight at once.
   try {
     const { appendToSession } = await import('./sessions.mjs');
+    const reportAgentId = rec?.visibleAgentId || coordinatorAgentId;
     const taskSummary = rec?.summary || '';
     const taskRef = taskSummary
       ? ` — re: "${taskSummary.length > 80 ? taskSummary.slice(0, 80) + '…' : taskSummary}"`
@@ -407,7 +669,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     // reported back). Add kind:'agent_report' so the browser knows to
     // render it with the fancier sender-tagged bubble on reload — same
     // visual as the live broadcast that fires immediately on completion.
-    await appendToSession(coordinatorAgentId, {
+    await appendToSession(reportAgentId, {
       role: 'assistant',
       kind: 'agent_report',
       agentName, agentEmoji,
@@ -415,20 +677,25 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       toolEvents,
       targetAgentId: targetAgentId || rec?.agentId || null,
       originalTask: originalTask || rec?.summary || '',
+      taskId,
+      rootTaskId: rec?.rootTaskId || taskId,
+      parentTaskId: rec?.parentTaskId || null,
+      spanId: rec?.spanId || null,
       ts: Date.now(),
     });
   } catch (e) {
     console.error('[background-tasks] failed to inject session notice:', e.message);
   }
 
-  // 2. Agent report card: render directly in the user's current chat as a notification from the agent.
-  //    coordinatorAgentId is the chat the report belongs to — the browser
+  // 2. Agent report card: render directly in the user's visible chat as a notification from the agent.
+  //    reportAgentId is the chat the report belongs to — the browser
   //    uses it to push the report into sessions[coordinatorAgentId] so the
   //    bubble survives agent-tab switches (without it, the report only
   //    exists in the DOM until the next renderSession wipes it).
+  const reportAgentId = rec?.visibleAgentId || coordinatorAgentId;
   _broadcast?.({
     type:       'agent_report',
-    agent:      coordinatorAgentId,
+    agent:      reportAgentId,
     agentName,
     agentEmoji,
     content,
@@ -436,6 +703,9 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     targetAgentId: targetAgentId || rec?.agentId || null,
     originalTask: originalTask || rec?.summary || '',
     taskId,
+    rootTaskId: rec?.rootTaskId || taskId,
+    parentTaskId: rec?.parentTaskId || null,
+    spanId: rec?.spanId || null,
     ts: Date.now(),
   });
 
@@ -692,6 +962,13 @@ export function listWorkersForOwner(userId, ownerKey) {
       const lastAt = info.lastActivityAt || info.lastUpdateAt || info.startedAt;
       return {
         taskId,
+        rootTaskId: info.rootTaskId || taskId,
+        parentTaskId: info.parentTaskId || null,
+        parentWatcherId: info.parentWatcherId || null,
+        rootWatcherId: info.rootWatcherId || info.watcherId || null,
+        spanId: info.spanId || null,
+        watcherId: info.watcherId || null,
+        visibleAgentId: info.visibleAgentId || null,
         name: info.agentName,
         summary: info.summary,
         currentTool: info.currentTool || null,
@@ -733,6 +1010,13 @@ export function listActiveDelegationsForUser(userId, excludeAgentId = null) {
       const lastAt = info.lastActivityAt || info.lastUpdateAt || info.startedAt;
       return {
         taskId,
+        rootTaskId: info.rootTaskId || taskId,
+        parentTaskId: info.parentTaskId || null,
+        parentWatcherId: info.parentWatcherId || null,
+        rootWatcherId: info.rootWatcherId || info.watcherId || null,
+        spanId: info.spanId || null,
+        watcherId: info.watcherId || null,
+        visibleAgentId: info.visibleAgentId || null,
         name: info.agentName,
         summary: info.summary,
         currentTool: info.currentTool || null,
@@ -741,6 +1025,7 @@ export function listActiveDelegationsForUser(userId, excludeAgentId = null) {
         idleSec: Math.round((now - lastAt) / 1000),
         stalled: (now - lastAt) > 120000,         // no tool activity for >2min
         status: info.status || 'running',
+        childTasks: info.rootTaskId ? _rootChildSnapshot(rootTaskGraphs.get(info.rootTaskId)) : [],
         progress: (info.progress || []).slice(-8),
       };
     });

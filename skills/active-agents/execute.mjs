@@ -32,6 +32,15 @@ export async function executeSkillTool(name, args, userId) {
       const lines = [];
       lines.push(`Task: ${w.label || w.kind} (${w.status})`);
       if (w.state?.targetAgentName) lines.push(`Agent: ${w.state.targetAgentEmoji || ''} ${w.state.targetAgentName}`);
+      if (w.state?.rootTaskId) lines.push(`Root task: ${w.state.rootTaskId}`);
+      if (w.state?.parentTaskId) lines.push(`Parent task: ${w.state.parentTaskId}`);
+      if (w.state?.spanId) lines.push(`Span: ${w.state.spanId}`);
+      if (Array.isArray(w.state?.childTasks) && w.state.childTasks.length) {
+        lines.push('Child tasks:');
+        for (const c of w.state.childTasks) {
+          lines.push(`  - ${c.name || 'Agent'} [${c.taskId}]${c.watcherId ? ` watcher=${c.watcherId}` : ''} — ${c.status || 'running'}${c.currentTool ? `, running ${c.currentTool}` : ''}`);
+        }
+      }
       const elapsed = w.endedAt
         ? fmtElapsed(w.endedAt - (w.createdAt || w.endedAt))
         : fmtElapsed(Date.now() - (w.createdAt || Date.now()));
@@ -80,7 +89,15 @@ export async function executeSkillTool(name, args, userId) {
         const preview = t.lastResultPreview ? ` (last result: "${t.lastResultPreview.replace(/\s+/g, ' ').trim()}…")` : '';
         tail = `\n   ↪ ${t.toolsUsed} tool call${t.toolsUsed === 1 ? '' : 's'} so far${preview}`;
       }
-      return `- ${t.agentEmoji || ''} ${t.agentName} (${t.taskId}) — ${elapsed} elapsed${taskLine}${tail}`;
+      const ids = [];
+      if (t.rootTaskId && t.rootTaskId !== t.taskId) ids.push(`root ${t.rootTaskId}`);
+      if (t.watcherId) ids.push(`watcher ${t.watcherId}`);
+      if (t.spanId) ids.push(`span ${t.spanId}`);
+      const idLine = ids.length ? `\n   ids: ${ids.join(' · ')}` : '';
+      const childLine = Array.isArray(t.childTasks) && t.childTasks.length
+        ? `\n   children: ${t.childTasks.map(c => `${c.name || 'Agent'}=${c.status || 'running'}${c.currentTool ? `/${c.currentTool}` : ''}`).join(', ')}`
+        : '';
+      return `- ${t.agentEmoji || ''} ${t.agentName} (${t.taskId}) — ${elapsed} elapsed${taskLine}${idLine}${childLine}${tail}`;
     });
     return `${mine.length} background agent${mine.length === 1 ? '' : 's'} in flight:\n${lines.join('\n')}`;
   } catch (e) {

@@ -1,7 +1,7 @@
 {
   "id": "active-agents",
   "name": "Active Agents",
-  "description": "Lets the coordinator see what other agents are doing right now — which background ask_agent dispatches are still running, the task summary, and how long they've been at it.",
+  "description": "Lets the coordinator see what other agents are doing right now — background ask_agent dispatches, root task trees, child spans, task summaries, and elapsed time.",
   "icon": "🛰️",
   "category": "service",
   "hidden": true,
@@ -26,7 +26,7 @@
       "type": "function",
       "function": {
         "name": "list_active_agents",
-        "description": "Returns the list of currently-running background agent tasks across the user's session: which agent is working, what task it was given, and how long it has been running. Use this when the user asks 'what is X doing', 'is X still working', 'how's the background job', 'who's busy right now', or similar status-check intents — never guess; always call this tool. For deeper inspection of a specific task (full progress history), call get_task_log with the watcherId.",
+        "description": "Returns the list of currently-running background agent tasks across the user's session: which agent is working, what task it was given, how long it has been running, and any root/parent/span ids tying nested delegations together. Use this when the user asks 'what is X doing', 'is X still working', 'how's the background job', 'who's busy right now', or similar status-check intents — never guess; always call this tool. If a task has children, report the root id plus the running child status. For deeper inspection of a specific task (full progress history), call get_task_log with the watcherId.",
         "parameters": { "type": "object", "properties": {}, "required": [] }
       }
     },
@@ -34,7 +34,7 @@
       "type": "function",
       "function": {
         "name": "get_task_log",
-        "description": "Returns the full progress history for one task_proxy watcher — every tool call and status update the running agent has emitted so far. Use this when the user asks 'show me what the coder has done', 'walk me through what the task has been doing', or after list_active_agents shows a task in flight and they want details. Returns the watcher's label, target agent, status, lastStatusText, history entries, and elapsed time.",
+        "description": "Returns the full progress history for one task_proxy watcher — every tool call and status update the running agent has emitted so far, plus root task id, parent task id, child task summaries, and span id when available. Use this when the user asks 'show me what the coder has done', 'walk me through what the task has been doing', or after list_active_agents shows a task in flight and they want details. Returns the watcher's label, target agent, status, lastStatusText, history entries, and elapsed time.",
         "parameters": {
           "type": "object",
           "properties": {

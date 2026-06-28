@@ -104,7 +104,15 @@ async function* _workerTool(name, args, userId, callerAgentId) {
         const head = d.stalled
           ? `⚠ STALLED — no activity for ${ago(d.idleSec)}`
           : (d.currentTool ? `running ${d.currentTool}` : 'between steps');
-        out.push(`• ${d.name} [${d.taskId}] — ${head}; ${d.toolsUsed} tool calls, ${ago(d.elapsedSec)} elapsed. Job: ${d.summary}`);
+        const ids = [
+          d.rootTaskId && d.rootTaskId !== d.taskId ? `root=${d.rootTaskId}` : null,
+          d.watcherId ? `watcher=${d.watcherId}` : null,
+          d.spanId ? `span=${d.spanId}` : null,
+        ].filter(Boolean).join(' · ');
+        out.push(`• ${d.name} [${d.taskId}] — ${head}; ${d.toolsUsed} tool calls, ${ago(d.elapsedSec)} elapsed. Job: ${d.summary}${ids ? ` (${ids})` : ''}`);
+        if (Array.isArray(d.childTasks) && d.childTasks.length) {
+          out.push(`    children: ${d.childTasks.map(c => `${c.name || 'Agent'}=${c.status || 'running'}${c.currentTool ? `/${c.currentTool}` : ''}`).join(', ')}`);
+        }
         const log = fmtLog(d.progress);
         if (log) out.push(log);
       }
@@ -114,7 +122,12 @@ async function* _workerTool(name, args, userId, callerAgentId) {
       for (const r of recent.slice(0, 5)) {
         const mark = r.outcome === 'done' ? '✓' : (r.outcome === 'stopped' ? '■' : '⚠');
         const verb = r.outcome === 'done' ? 'finished' : (r.outcome === 'stopped' ? 'was stopped' : 'FAILED');
-        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls) — ${r.finalText || r.summary}`);
+        const ids = [
+          r.rootTaskId && r.rootTaskId !== r.taskId ? `root=${r.rootTaskId}` : null,
+          r.watcherId ? `watcher=${r.watcherId}` : null,
+          r.spanId ? `span=${r.spanId}` : null,
+        ].filter(Boolean).join(' · ');
+        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls)${ids ? ` (${ids})` : ''} — ${r.finalText || r.summary}`);
       }
     }
     if (recentDelegations.length) {
@@ -122,7 +135,12 @@ async function* _workerTool(name, args, userId, callerAgentId) {
       for (const r of recentDelegations.slice(0, 5)) {
         const mark = r.outcome === 'done' ? '✓' : (r.outcome === 'stopped' ? '■' : '⚠');
         const verb = r.outcome === 'done' ? 'finished' : (r.outcome === 'stopped' ? 'was stopped' : 'FAILED');
-        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls) — ${r.finalText || r.summary}`);
+        const ids = [
+          r.rootTaskId && r.rootTaskId !== r.taskId ? `root=${r.rootTaskId}` : null,
+          r.watcherId ? `watcher=${r.watcherId}` : null,
+          r.spanId ? `span=${r.spanId}` : null,
+        ].filter(Boolean).join(' · ');
+        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls)${ids ? ` (${ids})` : ''} — ${r.finalText || r.summary}`);
       }
     }
     yield { type: 'result', text: out.join('\n') };
@@ -379,12 +397,26 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // by chat.mjs when multiple ask_agent calls are detected in a single response.
   if (background || _parallel) {
     const { dispatchBackground } = await import('../../background-tasks.mjs');
+    let taskCtx = null;
+    try {
+      const m = await import('../../lib/task-proxy-context.mjs');
+      taskCtx = m.currentTaskContext?.() || null;
+    } catch { /* no root task context */ }
     const autoContinue = callerIsCoordinator;
-    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, { autoContinue, extraSystemNote: noConfirmNote, routeText: directive || null });
+    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, {
+      autoContinue,
+      extraSystemNote: noConfirmNote,
+      routeText: directive || null,
+      rootTaskId: taskCtx?.rootTaskId || null,
+      parentTaskId: taskCtx?.taskId || null,
+      parentWatcherId: taskCtx?.watcherId || null,
+      rootWatcherId: taskCtx?.rootWatcherId || taskCtx?.watcherId || null,
+      visibleAgentId: taskCtx?.visibleAgentId || taskCtx?.agentId || null,
+    });
     // Phrase the result as something the calling agent can relay verbatim to the
     // user — not internal jargon — so the user knows what's happening and that a
     // result will follow, without having to watch logs.
-    yield { type: 'result', text: `Handed this to ${agentName} to work on in the background — the result will be posted here when it's ready. (background task ${taskId})` };
+    yield { type: 'result', text: `Handed this to ${agentName} to work on in the background — the result will be posted here when it's ready. (background task ${taskId}${taskCtx?.rootTaskId ? ` under root ${taskCtx.rootTaskId}` : ''})` };
     return;
   }
 
