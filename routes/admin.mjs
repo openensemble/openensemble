@@ -21,6 +21,7 @@ import {
 } from './_helpers.mjs';
 import { getDefaultRoles } from '../roles.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
+import { listTurnTrees, getTurnDetail } from '../lib/turn-trace-reader.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import {
   getCachedState as getUpdateState, checkForUpdate, isCleanForUpdate,
@@ -294,6 +295,36 @@ export async function handle(req, res) {
     const result = readLog(opts);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
+    return true;
+  }
+
+  // Turn traces (admin only) — the Phase 3 surface over the turn-trace spine.
+  //   ?turnId=<id> | ?rootId=<id>   → full detail for one turn tree + joined
+  //                                   telemetry (invocations / router-mistakes /
+  //                                   corrections stamped with the same turnId).
+  //   (no id)                       → recent turn trees, newest first.
+  // Shared params: ?userId=<id> filter, ?tail=N scan depth (default 4000),
+  //   ?limit=N trees returned (default 50), ?join=0 to skip the telemetry join.
+  if (req.url.startsWith('/api/admin/turns') && req.method === 'GET') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const qs = new URL(req.url, 'http://x').searchParams;
+    const tail = Math.min(Math.max(1, parseInt(qs.get('tail') || '4000', 10) || 4000), 20000);
+    const id = qs.get('turnId') || qs.get('rootId');
+    let payload;
+    if (id) {
+      const detail = getTurnDetail(id, { tail, join: qs.get('join') !== '0' });
+      if (!detail) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `No turn ${id} in the last ${tail} log lines.` }));
+        return true;
+      }
+      payload = detail;
+    } else {
+      const limit = Math.min(Math.max(1, parseInt(qs.get('limit') || '50', 10) || 50), 500);
+      payload = { trees: listTurnTrees({ tail, userId: qs.get('userId') || null, limit }) };
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
     return true;
   }
 

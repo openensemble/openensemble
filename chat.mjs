@@ -27,6 +27,7 @@ import { log } from './logger.mjs';
 import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { beginMemoryScope } from './lib/memory-scope-context.mjs';
+import { getTurn, beginTurn, recordSpan, recordError, finishTurn } from './lib/turn-trace-context.mjs';
 import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
@@ -391,8 +392,22 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   // downstream proposers (routine-proposer) can inspect what the LLM passed.
   let _lastCallArgsByName = Object.create(null);
   let _pendingToolEventsByName = Object.create(null);
+  // Capture the provider's end-of-turn token usage for the turn trace. The
+  // event is still yielded onward (llm-loop records it for billing); we just
+  // also stash it so streamChat can attach it to its span without re-plumbing
+  // usage through every streamChat consumer. inTok/outTok avoid logger.mjs's
+  // /token/ redact key (see lib/turn-trace-context.mjs).
+  let usage = null;
   for await (const event of providerGen) {
     if (event.type === '__content') { assistantContent = event.content; continue; }
+    if (event.type === '__usage') {
+      usage = {
+        inTok: event.inputTokens ?? null,
+        outTok: event.outputTokens ?? null,
+        provider: event.provider ?? null,
+        model: event.model ?? null,
+      };
+    }
     if (event.type === '__hide_turn') { hideTurn = true; hideTaskId = event.taskId || null; continue; }
     if (event.type === 'tool_call' && event.name) {
       _lastCallArgsByName[event.name] = event.args ?? null;
@@ -457,8 +472,8 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
     if (event.type === 'error') { errored = true; break; }
   }
   return errored
-    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, hideTurn: false, hideTaskId: null }
-    : { assistantContent, errored: false, toolsUsed, toolEvents, hideTurn, hideTaskId };
+    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, hideTurn: false, hideTaskId: null, usage }
+    : { assistantContent, errored: false, toolsUsed, toolEvents, hideTurn, hideTaskId, usage };
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
@@ -525,6 +540,31 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // it (see lib/memory-scope-context.mjs). enterWith here propagates through the
   // provider tool-loop to executeToolStreaming, same as toolRouterContext.
   beginMemoryScope();
+  // Turn trace: interactive turns + inline delegation (ask_agent, specialist-
+  // router) already have a store established by chat-dispatch / a parent
+  // streamChat, which we inherit via ALS — this run just adds its span to it.
+  // Direct callers that bypass the dispatcher (background tasks, scheduler,
+  // run-agent-with-retry) have no store, so we lazily begin one here, seeding
+  // rootId from the caller's rootTaskId so bg children join their originating
+  // turn tree. We own (and must flush) the trace only when WE begin it.
+  let _ownsTurnTrace = false;
+  const _streamChatStart = Date.now();
+  // A detached run (background/scheduled/ephemeral — signalled by rootTaskId or
+  // traceSource in turnOpts) inherited the spawning turn's store via ALS, but it
+  // must own a fresh root keyed on its task id. An inline run (specialist-router,
+  // ask_agent) shares the dispatcher's async tree, so getTurn() returns the live
+  // turn and we just add our span to it.
+  const _detachedRun = !!(turnOpts?.rootTaskId || turnOpts?.traceSource);
+  if (_detachedRun || !getTurn()) {
+    beginTurn({
+      userId,
+      agentId: agent?.id ?? agent?.name ?? null,
+      source: turnOpts?.traceSource || (voiceCtx?.source === 'voice-device' ? 'voice-device' : 'background'),
+      rootId: turnOpts?.rootTaskId || null,
+      forceRoot: _detachedRun,
+    });
+    _ownsTurnTrace = true;
+  }
   // Routing/recipe key: when a delegation supplies an explicit `directive` (the
   // short "what the specialist must DO"), route + recover + learn on that rather
   // than the full task body riding along with it (a pasted briefing, doc, list).
@@ -1268,7 +1308,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
 
   const _llmStart = Date.now();
   const shouldBufferForRecovery = Boolean(_routerStore);
-  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
+  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
   let recoveredMissingTools = false;
   if (!errored && shouldBufferForRecovery && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
     const missingSkills = inferMissingToolSkills({ userText: routeText, assistantText: assistantContent, userId });
@@ -1309,13 +1349,47 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           : { ...currentUserTurn, content: `${String(currentUserTurn.content || '')}${retryNote}` };
         const recoveryMessages = [...trimmed, recoveryTurn];
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-        ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = yield* consumeProvider(providerGen, { suppressText: false }));
+        ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false }));
       }
     }
   }
   if (shouldBufferForRecovery && !recoveredMissingTools && assistantContent && !hideTurn && !errored) {
     yield { type: 'token', text: assistantContent };
   }
+  // Turn-trace span for this agent run — metadata only (tool names, counts,
+  // timing, token counts), never prompt/message bodies. recordSpan attaches to
+  // the dispatcher's per-turn store (or our own lazily-begun one); we flush the
+  // whole trace here only when this run owns it (direct background/scheduled
+  // callers). See lib/turn-trace-context.mjs.
+  const _emitTurnTrace = (errInfo = null) => {
+    try {
+      const selectedTools = _routerStore?.initialToolNames
+        ? [...(_routerStore.initialToolNames)]
+        : (agent.tools ?? []).map(t => t.function?.name).filter(Boolean);
+      recordSpan({
+        agent: agent.name ?? agent.id ?? null,
+        agentId: agent.id ?? null,
+        provider: usage?.provider ?? agent.provider ?? null,
+        model: usage?.model ?? agent.model ?? null,
+        tools: selectedTools.slice(0, 50),
+        toolCalls: (toolEvents ?? []).map(t => ({
+          name: t.name,
+          ok: t.status === 'done',
+          ms: t.durationMs ?? null,
+          ...(t.delegated ? { delegated: true } : {}),
+        })),
+        inTok: usage?.inTok ?? null,
+        outTok: usage?.outTok ?? null,
+        ms: Date.now() - _streamChatStart,
+        error: errInfo,
+      });
+      if (errInfo) recordError(errInfo);
+      if (_ownsTurnTrace) {
+        const trace = finishTurn();
+        if (trace) log.info('turn', 'summary', trace);
+      }
+    } catch { /* a trace bug must never break a chat turn */ }
+  };
   const _llmMeta = {
     userId,
     agentId: agent.id,
@@ -1395,6 +1469,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (errored) {
     log.error('chat', 'llm turn errored', _llmMeta);
     recordRunTrace(userId, { ..._traceBase, status: 'error', error: assistantContent || 'Provider turn errored' });
+    _emitTurnTrace(assistantContent || 'Provider turn errored');
     return;
   }
   log.info('chat', 'llm turn complete', _llmMeta);
@@ -1452,5 +1527,6 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       yield { type: 'hide_turn', taskId: hideTaskId };
     }
   }
+  _emitTurnTrace(null);
   yield { type: 'done' };
 }

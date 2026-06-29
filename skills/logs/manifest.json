@@ -1,10 +1,30 @@
 {
   "id": "logs",
   "name": "Server Logs",
-  "description": "Read and scan server logs for errors, warnings, or unusual patterns. Admin/owner only.",
+  "description": "Read and scan server logs and per-turn execution traces (which agent ran, tools called, delegation chain, model, tokens, timing) to diagnose issues. Admin/owner only.",
+  "icon": "🪵",
+  "category": "service",
+  "service": true,
   "always_on": false,
+  "enabled_by_default": false,
   "hidden": false,
-  "systemPromptAddition": "## Server logs\n\nYou can inspect the OpenEnsemble server logs to help the admin diagnose issues. Use `read_logs` to fetch recent entries (optionally filtered by file, level, or keyword) and `scan_for_concerns` to get a high-signal summary of errors and repeated warnings.\n\nWhen the admin asks vague questions like 'is everything OK?', 'anything concerning in the logs?', or 'why did X fail?', default to `scan_for_concerns` first — it returns a digest instead of raw lines. Report findings plainly: counts of each issue class, the first/last time each occurred, and a sentence of impact. Don't dump raw JSON unless asked.\n\nLogs never contain message bodies or prompts — only metadata. If the admin needs deeper evidence, point them at the specific file/timestamp rather than trying to reconstruct content.",
+  "intent_examples": [
+    "read the server logs",
+    "show me recent errors",
+    "scan the logs for problems",
+    "is everything ok on the server",
+    "anything concerning in the logs lately",
+    "what's been failing",
+    "show me my recent turns",
+    "what happened on my last turn",
+    "show me everything from that turn",
+    "which agent ran and what tools did it call",
+    "why did that get emailed twice",
+    "trace the last delegation",
+    "what did the coordinator delegate and to whom",
+    "how long did that turn take and what did it cost"
+  ],
+  "systemPromptAddition": "## Server logs\n\nYou can inspect the OpenEnsemble server logs to help the admin diagnose issues. Use `read_logs` to fetch recent entries (optionally filtered by file, level, or keyword) and `scan_for_concerns` to get a high-signal summary of errors and repeated warnings.\n\nWhen the admin asks vague questions like 'is everything OK?', 'anything concerning in the logs?', or 'why did X fail?', default to `scan_for_concerns` first — it returns a digest instead of raw lines. Report findings plainly: counts of each issue class, the first/last time each occurred, and a sentence of impact. Don't dump raw JSON unless asked.\n\n## Turn traces\n\nEvery chat turn writes one structured trace: which agent(s) ran, the tools each called, the delegation chain, model/provider, token cost, and timing — all under one turnId (delegated sub-agents and background children roll up under a shared rootId). Use `read_turns` with no id to list recent turns, or with a `turnId`/`rootId` to expand one turn end-to-end (its agent spans, delegations, and the joined invocation/routing/correction telemetry). This is the right tool for 'what happened on that last turn?', 'why did the briefing get emailed twice?', 'which agent ran and what did it call?', or 'show me everything from turn X'.\n\nLogs and traces never contain message bodies or prompts — only metadata. If the admin needs deeper evidence, point them at the specific file/timestamp/turnId rather than trying to reconstruct content.",
   "tools": [
     {
       "type": "function",
@@ -34,6 +54,24 @@
           "properties": {
             "since":     { "type": "string", "description": "ISO timestamp or epoch-ms. Default: last 24h." },
             "maxGroups": { "type": "integer", "description": "Max distinct issue groups to return (default 15).", "minimum": 1, "maximum": 50 }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_turns",
+        "description": "Reconstruct chat turn traces from the turn-trace spine. With no id, lists recent turns (newest first) with their agents, tool calls, delegations, token cost and timing. With a turnId or rootId, expands that one turn end-to-end: every agent span, the delegation chain, and the joined per-turn telemetry (tool invocations, routing mistakes, corrections). Use for 'what happened on that turn?', 'which agent ran and what tools did it call?', 'why did X happen twice?', or 'show me everything from turn <id>'. Admin/owner only.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "turnId": { "type": "string", "description": "Expand this specific turn (and the rest of its rootId tree) with joined telemetry." },
+            "rootId": { "type": "string", "description": "Expand a whole turn tree by its root id (alternative to turnId)." },
+            "userId": { "type": "string", "description": "When listing, restrict to one user's turns." },
+            "limit":  { "type": "integer", "description": "When listing, max turn trees to return (1–200). Omit unless the user asks for more/fewer.", "minimum": 1, "maximum": 200, "default": 25 },
+            "tail":   { "type": "integer", "description": "How many recent log lines to scan. Omit unless the user wants to look further back.", "minimum": 1000, "maximum": 20000, "default": 4000 }
           },
           "required": []
         }

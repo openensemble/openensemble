@@ -30,6 +30,7 @@ import { sendToDevice } from '../ws-handler.mjs';
 import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
 import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
+import { recordRouting } from '../lib/turn-trace-context.mjs';
 
 // ── Specialist router (pre-LLM) ───────────────────────────────────────────────
 // Skip the coordinator's reasoning turn when the user's message clearly
@@ -239,6 +240,9 @@ export async function runSpecialistRoute({
       }
     } catch (_) { /* best-effort */ }
     console.log(`[chat] specialist-router: → ${route.name} (${route.skillId}) agent=${route.agentId}`);
+    // Tag the turn trace — the specialist's own span is added by its nested
+    // streamChat (it inherits the dispatcher's turn store via ALS).
+    recordRouting({ mode: 'specialist', specialist: route.skillId ?? null, redirectedTo: route.agentId ?? null, strategy: route.strategy ?? 'regex' });
     let routerBuf = '';
     try {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {

@@ -436,6 +436,19 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       rootWatcherId: taskCtx?.rootWatcherId || taskCtx?.watcherId || null,
       visibleAgentId: taskCtx?.visibleAgentId || taskCtx?.agentId || null,
     });
+    // Turn-trace delegation edge for the backgrounded hop. The bg child runs
+    // detached and records its own rootId-linked trace (rootTaskId → trace
+    // rootId), so here we only note the edge — there's no sync ms to measure.
+    try {
+      const { recordDelegation } = await import('../../lib/turn-trace-context.mjs');
+      recordDelegation({
+        from: callerAgent?.name ?? callerEffectiveId ?? 'coordinator',
+        to: agentName,
+        directive: String(directive || task || '').slice(0, 200),
+        background: true,
+        taskId,
+      });
+    } catch { /* trace best-effort */ }
     // Phrase the result as something the calling agent can relay verbatim to the
     // user — not internal jargon — so the user knows what's happening and that a
     // result will follow, without having to watch logs.
@@ -568,6 +581,10 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const streamLabel = `${agentEmoji} ${agentName}`.trim();
   let syncToolsUsed = 0;
   let syncCurrentTool = null;
+  // Turn-trace delegation edge. The delegated agent's own span is recorded by
+  // its nested streamChat (it inherits the caller's turn store via ALS); this
+  // records the from→to hop + directive so the trace shows the delegation chain.
+  const _delegStart = Date.now();
   try {
     if (syncWatcherId) {
       syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} started working`, {
@@ -639,6 +656,15 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     }
   } finally {
     slot.release();
+    try {
+      const { recordDelegation } = await import('../../lib/turn-trace-context.mjs');
+      recordDelegation({
+        from: callerAgent?.name ?? callerEffectiveId ?? 'coordinator',
+        to: agentName,
+        directive: String(directive || task || '').slice(0, 200),
+        ms: Date.now() - _delegStart,
+      });
+    } catch { /* trace best-effort */ }
   }
 
   if (errText) {

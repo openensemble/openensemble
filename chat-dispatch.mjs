@@ -54,6 +54,8 @@ import {
 import { extractTransactions } from './skills/expenses/execute.mjs';
 import { getRoleAssignments, listRoles } from './roles.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
+import { log } from './logger.mjs';
+import { turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTurnAgent } from './lib/turn-trace-context.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
 
@@ -283,6 +285,19 @@ export async function handleChatMessage({
 
   const toolPlan = normalizeToolPlan(rawToolPlan);
 
+  // Turn trace (correlation spine). One record per top-level turn; nested
+  // streamChat runs (specialist-router, ask_agent delegation) inherit this store
+  // via ALS and push their own spans. Wrapped in turnTraceContext.run() — NOT
+  // bare enterWith — so the store is scoped to THIS turn and restored after: on a
+  // long-lived WS connection enterWith leaks the store into the next message,
+  // which chained unrelated turns under one rootId (depth climbing 0,1,2…). run()
+  // also lets a routine-followup re-entry (await handleChatMessage below) nest as
+  // a child turn and unwind without corrupting this one. beginTurn/recorders
+  // fail-open, so nothing here can break a turn.
+  return turnTraceContext.run(undefined, async () => {
+  beginTurn({ userId, agentId, source: source ?? 'web' });
+  recordRouting({ toolPlan: toolPlan?.mode || 'auto' });
+
   // Snapshot ambient state for voice-device turns. The firmware kills any
   // playing ambient when a wake fires (s_ambient_stop in main.c — barge-in
   // behavior). If this turn doesn't deliberately start a new ambient or
@@ -335,6 +350,8 @@ export async function handleChatMessage({
         if (target.id !== agentId) {
           console.log(`[chat] @-mention redirect: @${handle} → ${target.id} (was ${agentId})`);
           agentId = target.id;
+          recordRouting({ mode: 'redirect', redirectedTo: target.id });
+          setTurnAgent(target.id);
         }
         // Strip the @-handle whether or not the agent changed — it's a
         // routing directive, not part of the conversation content. Without
@@ -560,6 +577,11 @@ export async function handleChatMessage({
   for (const handler of INTERCEPTORS) {
     const r = await handler(ctx);
     if (!r?.handled) continue;
+    // Tag routing for the trace. The specialist router sets its own mode
+    // ('specialist'); for the named fast-paths record which one handled it.
+    if (!getTurn()?.routing?.mode) {
+      recordRouting({ mode: 'fastpath', fastPath: handler.name || null });
+    }
     finalizeTurnOnce();
     if (r.followupPrompt) {
       // Routine's run_prompt action: the trigger phrase set the scene (lights
@@ -623,6 +645,11 @@ export async function handleChatMessage({
     if (ev?.type === 'token' && typeof ev.text === 'string') finalAssistantText += ev.text;
     if (typeof onEvent === 'function') return onEvent(ev);
   };
+  // 'direct' = the addressed agent ran its own LLM turn (no fast-path, no
+  // specialist reroute, no @-redirect). Applies to ANY agent the user is
+  // chatting with — coordinator or specialist — so it must NOT be labelled
+  // 'coordinator' (that wrongly implied the agent's role in the trace).
+  recordRouting({ mode: 'direct' });
   try {
     await runLlmTurn({
       userId, agentId, scopedAgent, scopedSessionKey,
@@ -666,6 +693,14 @@ export async function handleChatMessage({
     // finalized. Without this, an interceptor exception would leave the slot
     // held forever and deadlock the next turn (continuations await the prior).
     finalizeTurnOnce();
+
+    // Flush the turn trace — one greppable `tag:"turn"` record carrying every
+    // span (incl. delegated sub-agents) + the delegation chain + routing. Wrapped
+    // so a trace bug can never break the turn.
+    try {
+      const trace = finishTurn();
+      if (trace) log.info('turn', 'summary', trace);
+    } catch { /* never throw from the finalizer */ }
 
     // Post-turn attachment save/discard prompt. Chat-upload always persists
     // to users/<id>/profile-files/{images,videos,audio,documents}/ — the
@@ -747,6 +782,7 @@ export async function handleChatMessage({
       _ambientRestoreTimers.set(deviceId, restoreTimer);
     }
   }
+  });
 }
 
 // ── Interceptor adapters ──────────────────────────────────────────────────────

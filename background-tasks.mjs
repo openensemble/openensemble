@@ -433,7 +433,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         spanId: rec?.spanId || taskId,
       };
       await runInTaskContext(taskCtx, async () => {
-      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, combinedNote, false, null, { toolPlan: rememberedPlan, routeText, isolatedTaskRun: true })) {
+      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, combinedNote, false, null, { toolPlan: rememberedPlan, routeText, isolatedTaskRun: true, rootTaskId: taskCtx.rootTaskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
         if (ev.type === 'token') fullText += ev.text;
         trackToolEvent(toolEvents, ev);
         // Track in-flight tool calls so list_active_agents can report e.g.
@@ -791,7 +791,7 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
   try {
     const { streamChat } = await import('./chat.mjs');
     let out = '';
-    for await (const ev of streamChat(agent, task, null, null, userId)) {
+    for await (const ev of streamChat(agent, task, null, null, userId, null, null, false, null, { rootTaskId: taskId, traceSource: 'background' })) {
       if (ev.type === 'token') {
         out += ev.text;
         opts.onProgress?.(ev.text);
@@ -923,7 +923,7 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
       const taskCtx = { taskId, watcherId, userId, agentId: workerAgent.id };
       pushTaskProgress(taskId, `${workerName} started working`, { phase: 'running' });
       await runInTaskContext(taskCtx, async () => {
-        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan, isolatedTaskRun: true })) {
+        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan, isolatedTaskRun: true, rootTaskId: taskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
           if (ev.type === 'token') fullText += ev.text;
           trackToolEvent(toolEvents, ev);
           if (ev.type === 'tool_call' && ev.name) {
