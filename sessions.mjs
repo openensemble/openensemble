@@ -200,9 +200,32 @@ export function cleanStaleStreamBuffers() {
         try {
           const buf = JSON.parse(fs.readFileSync(bufPath, 'utf8'));
           if (buf?.content) {
-            // Convert to a final session entry
+            // Convert to a final session entry — but ONLY if the turn didn't
+            // already persist its reply before the crash/restart. A restart
+            // landing between persist() and clearStreamBuffer() (in finalizeTurn)
+            // leaves a stale buffer whose content the .jsonl already holds;
+            // re-appending it produced a duplicate "partial" assistant reply.
+            // Dedupe against the most recent assistant entry to stay idempotent.
             const jsonlFile = path.join(sessDir, file.replace('.streaming', '.jsonl'));
-            fs.appendFileSync(jsonlFile, JSON.stringify({ role: 'assistant', content: buf.content, ts: buf.ts, partial: true }) + '\n');
+            let alreadyPersisted = false;
+            try {
+              if (fs.existsSync(jsonlFile)) {
+                const lines = fs.readFileSync(jsonlFile, 'utf8').trim().split('\n').filter(Boolean);
+                for (let i = lines.length - 1; i >= 0 && i >= lines.length - 5; i--) {
+                  const r = JSON.parse(lines[i]);
+                  if (r.role !== 'assistant') continue;
+                  const a = String(r.content || '').trim();
+                  const b = String(buf.content).trim();
+                  // Equal, or one is a prefix of the other (buffer may hold a
+                  // partial of the final reply, or vice versa).
+                  if (a && b && (a === b || a.startsWith(b) || b.startsWith(a))) alreadyPersisted = true;
+                  break; // only the most recent assistant entry matters
+                }
+              }
+            } catch { /* fall through and recover defensively */ }
+            if (!alreadyPersisted) {
+              fs.appendFileSync(jsonlFile, JSON.stringify({ role: 'assistant', content: buf.content, ts: buf.ts, partial: true }) + '\n');
+            }
           }
           fs.unlinkSync(bufPath);
         } catch (e) {
