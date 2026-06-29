@@ -38,9 +38,16 @@ export async function listMemoryRows({ userId = 'default', table = null, limit =
       console.warn('[cortex] Failed to list rows in', name + ':', e.message);
     }
   }
-  return rows
-    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
-    .slice(0, max);
+  const byRecency = (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''));
+  // Curated, low-volume memories — pinned (immortal) rows and shared user_facts —
+  // must never be evicted by the recency cap. Otherwise high-churn episode tables
+  // (chat history) crowd them out and the control panel shows only a fraction of
+  // the user's pinned/shared facts. Keep all of those, then fill the remaining
+  // budget with the most-recent of everything else.
+  const keep = rows.filter(m => m.immortal || m._table === 'user_facts');
+  const rest = rows.filter(m => !(m.immortal || m._table === 'user_facts')).sort(byRecency);
+  const room = Math.max(0, max - keep.length);
+  return [...keep, ...rest.slice(0, room)].sort(byRecency);
 }
 
 function tableType(name) {
