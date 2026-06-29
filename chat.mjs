@@ -755,7 +755,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Skipped for ephemeral agents (no value in one-shot research) and slash
   // commands. ~5-10ms when the cortex embedder is warm.
   let monitorableBlock = '';
-  if (!agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/')) {
+  // Only on genuine interactive human turns. Scheduled/background re-injection
+  // turns (silent, isolated, or hidden-user) carry system payloads — e.g. the
+  // scheduler's "Background work from your scheduled task has completed …
+  // <scheduled_task>…</scheduled_task>" result block — which the embedding
+  // judge would otherwise mistake for "a changing source the user keeps asking
+  // about," escalating a giant internal prompt into a watch proposal. There is
+  // also no human in the loop to see (let alone accept) the offer on these turns.
+  const interactiveMonitorTurn = !silent && !isolatedTaskRun && turnOpts?.hiddenUser !== true;
+  if (interactiveMonitorTurn && !agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/')) {
     try {
       const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('./lib/monitorable-classifier.mjs');
       const hit = await classifyMonitorable(userText);
