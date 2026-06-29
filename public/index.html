@@ -67,7 +67,16 @@
     <button class="login-btn" id="loginBtn" data-action="doLogin" style="display:none">Sign In</button>
     <!-- Setup form (shown when no users exist) -->
     <div id="loginSetupForm" class="login-setup-form" style="display:none">
-      <div style="font-size:13px;color:var(--muted);text-align:center">Create your first profile to get started</div>
+      <div class="login-setup-intro">
+        <div class="login-setup-kicker">First-run setup</div>
+        <div>Create the owner profile. Model providers, agents, and optional integrations come next inside OpenEnsemble.</div>
+      </div>
+      <div class="login-setup-checklist" aria-label="First-run path">
+        <div><span>1</span><strong>Owner profile</strong><small>Required</small></div>
+        <div><span>2</span><strong>Model provider</strong><small>Next</small></div>
+        <div><span>3</span><strong>First agent</strong><small>Next</small></div>
+        <div><span>4</span><strong>Integrations</strong><small>Optional</small></div>
+      </div>
       <div class="login-emoji-row">
         <select id="setupEmoji">
           <option>🧑</option><option>👩</option><option>👨</option><option>🧒</option>
@@ -78,8 +87,8 @@
       <input type="password" id="setupPw" placeholder="Choose a password" autocomplete="new-password">
       <input type="password" id="setupPw2" placeholder="Confirm password" autocomplete="new-password">
       <div class="login-error" id="setupError"></div>
-      <button class="login-btn" data-action="doSetup">Create Profile & Sign In</button>
-      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--bg3);display:flex;flex-direction:column;gap:8px">
+      <button class="login-btn" data-action="doSetup">Create Owner & Sign In</button>
+      <div class="login-restore-panel">
         <div style="font-size:12px;color:var(--muted);text-align:center">Already have an OpenEnsemble backup?</div>
         <input type="file" id="setupRestoreFile" accept=".tar.gz,.tgz,.oeb,application/gzip,application/octet-stream" style="font-size:12px">
         <input type="password" id="setupRestorePassword" placeholder="Password (only if backup is encrypted)" autocomplete="off" style="font-size:12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;box-sizing:border-box">

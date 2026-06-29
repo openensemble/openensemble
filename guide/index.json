@@ -7,7 +7,7 @@
       ]
     },
     {
-      "title": "Start here",
+      "title": "Getting started",
       "pages": [
         { "slug": "welcome",         "title": "Welcome to OpenEnsemble" },
         { "slug": "getting-started", "title": "Getting started" },
@@ -25,18 +25,24 @@
       ]
     },
     {
-      "title": "Built-in features",
+      "title": "Daily use",
       "pages": [
         { "slug": "tasks",      "title": "Tasks & scheduler" },
         { "slug": "documents",  "title": "Documents & sharing" },
         { "slug": "expenses",   "title": "Expenses" },
-        { "slug": "nodes",      "title": "Remote nodes" },
-        { "slug": "services",   "title": "Service profiles" },
         { "slug": "cortex",     "title": "Cortex (local models)" }
       ]
     },
     {
-      "title": "Voice devices",
+      "title": "Integrations",
+      "pages": [
+        { "slug": "public-access", "title": "Public access (tunnel & Telegram)" },
+        { "slug": "nodes",         "title": "Remote nodes" },
+        { "slug": "services",      "title": "Service profiles" }
+      ]
+    },
+    {
+      "title": "Beta & hardware",
       "pages": [
         { "slug": "voice-devices",         "title": "Voice devices" },
         { "slug": "voice-device-flashing", "title": "Flashing voice devices" },
@@ -48,7 +54,6 @@
       "title": "Setup & administration",
       "pages": [
         { "slug": "users",         "title": "Users & access" },
-        { "slug": "public-access", "title": "Public access (tunnel & Telegram)" },
         { "slug": "backup-update", "title": "Backup, restore, auto-update" },
         { "slug": "security",      "title": "Security model" },
         { "slug": "shortcuts",     "title": "Tips & shortcuts" }

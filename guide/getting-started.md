@@ -1,6 +1,6 @@
 # Getting started
 
-This walk-through assumes you've already run `./install.sh` and the server is up at `http://{ip}:3737`.
+This walk-through assumes you've already run `./install.sh` and the server is up at `http://{ip}:3737`. The goal is a working first chat, not a fully configured install.
 
 ## 1. Create the owner account
 
@@ -33,6 +33,19 @@ Click the agent in the list, type into the input, hit enter. If you created a Co
 ## 5. (Optional) Add more users
 
 In **Settings → Users** you can add additional users on this install — each gets their own isolated agents, skills, sessions, chat history, uploads, and settings. The owner controls which providers and features each user can see.
+
+## Optional setup paths
+
+These are useful, but none of them are required for your first chat.
+
+| Area | When to set it up |
+|---|---|
+| Email, calendar, and web search | When agents need to act on your accounts or browse the web |
+| Public access | When OAuth callbacks, Telegram webhooks, or external sharing links need to reach this server |
+| MCP servers | When you want agents to use tools from external MCP servers |
+| Remote nodes and service profiles | When agents should manage another machine or service |
+| Backup and auto-update | Before relying on the install long-term |
+| Voice devices, STT, and TTS | When you want hands-free use or local speech features |
 
 ## What to look at next
 

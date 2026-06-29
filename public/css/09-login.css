@@ -7,7 +7,8 @@
 #loginScreen.hidden { display: none; }
 .login-panel {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 20px;
-  padding: 36px; width: 380px; max-width: 95vw; display: flex; flex-direction: column; gap: 20px;
+  padding: 36px; width: 420px; max-width: 95vw; max-height: 92vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 20px;
   box-shadow: 0 8px 40px rgba(0,0,0,.35);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
 }
@@ -46,6 +47,32 @@
 .login-setup a { color: var(--accent); cursor: pointer; text-decoration: none; }
 /* Setup (create first user) form */
 .login-setup-form { display: flex; flex-direction: column; gap: 10px; }
+.login-setup-intro {
+  color: var(--muted); text-align: center; font-size: 13px; line-height: 1.45;
+}
+.login-setup-kicker {
+  color: var(--text); font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; margin-bottom: 4px;
+}
+.login-setup-checklist {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+}
+.login-setup-checklist div {
+  display: grid; grid-template-columns: 22px 1fr; grid-template-areas: "num title" "num meta";
+  align-items: center; column-gap: 8px; padding: 9px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg3); min-width: 0;
+}
+.login-setup-checklist span {
+  grid-area: num; width: 22px; height: 22px; border-radius: 50%; display: flex;
+  align-items: center; justify-content: center; background: rgba(91,141,239,.16);
+  color: var(--accent); font-size: 11px; font-weight: 700;
+}
+.login-setup-checklist strong {
+  grid-area: title; color: var(--text); font-size: 12px; line-height: 1.2; min-width: 0;
+}
+.login-setup-checklist small {
+  grid-area: meta; color: var(--muted); font-size: 10px; line-height: 1.2; min-width: 0;
+}
 .login-setup-form input, .login-setup-form select {
   background: var(--bg3); border: 1px solid var(--border); color: var(--text);
   border-radius: 8px; padding: 9px 12px; font-size: 13px; width: 100%; box-sizing: border-box;
@@ -53,3 +80,11 @@
 .login-emoji-row { display: flex; gap: 8px; }
 .login-emoji-row select { width: 70px; flex-shrink: 0; font-size: 18px; }
 .login-emoji-row input { flex: 1; }
+.login-restore-panel {
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--bg3);
+  display: flex; flex-direction: column; gap: 8px;
+}
+@media (max-width: 460px) {
+  .login-panel { padding: 28px 20px; }
+  .login-setup-checklist { grid-template-columns: 1fr; }
+}

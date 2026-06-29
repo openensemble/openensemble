@@ -2,6 +2,8 @@
 
 OpenEnsemble is a self-hosted, multi-user AI assistant platform. You run a single Node.js server, connect the LLM providers you want, and create a roster of specialist agents that talk to each other to get work done.
 
+The first-run path is deliberately short: create the owner account, connect one model provider, create an agent, and send a message. Optional integrations can be added later from Settings.
+
 ## The mental model
 
 - **Agents** are the people on your team. Each one has a name, an emoji, a model, a role, and a set of skills. You can talk to any of them directly.
@@ -15,6 +17,12 @@ OpenEnsemble is a self-hosted, multi-user AI assistant platform. You run a singl
 - It isn't a SaaS — you host it.
 - It isn't tied to one model vendor — every provider is optional.
 - It doesn't lock you in — your data is plain JSON and files under `users/{userId}/`.
+
+## Feature maturity
+
+- **Core:** agents, roles, skills, providers, documents, memory, tasks, and per-user workspaces.
+- **Advanced:** remote nodes, service profiles, public access, backups, auto-update, MCP servers, and multi-user administration.
+- **Beta / hardware:** voice devices, flashing, local speech-to-text, and local text-to-speech.
 
 ## Where to go next
 
