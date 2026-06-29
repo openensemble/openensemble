@@ -191,6 +191,11 @@ async function executeHaIntent(intent) {
  */
 export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
   if (!userText) return null;
+  // HA control stays GLOBAL (any agent fast-paths it): a light/lock command is
+  // harmless and universal, and short-circuiting it to ~200ms from whatever
+  // chat you're in beats falling through to an LLM + escalation. Inbox reading
+  // is scoped (see local-intent-fastpath) because dumping mail into a non-email
+  // agent's chat is a real leak; toggling the kitchen is not.
   try {
     const haIntent = await classifyHaIntent(userText, userId);
     if (!haIntent) return null;

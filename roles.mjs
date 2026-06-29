@@ -605,6 +605,24 @@ export function getAgentAssignedSkills(agentId, userId) {
 }
 
 /**
+ * May this agent run the pre-LLM fast-path for `skillId` (skip the LLM and
+ * execute the skill's intent directly)? The coordinator may fast-path ANY
+ * skill — it owns every cross-agent handoff. A specialist may fast-path only
+ * the skills it's actually assigned (Gina→email, Helen→role_home_assistant).
+ * A non-owner specialist (e.g. the deep-research agent) is denied, so a
+ * paraphrase like "give me the latest US news" can't fire email_list — it
+ * falls through to the agent's LLM, which escalates to the coordinator.
+ * Voice turns resolve to the coordinator by default, so they stay allowed.
+ */
+export function agentCanFastpathSkill(agentId, skillId, userId) {
+  if (!agentId || !skillId) return false;
+  const bare = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  const coordinatorId = getRoleAssignment('coordinator', userId);
+  if (coordinatorId && bare === coordinatorId) return true;
+  return getAgentAssignedSkills(agentId, userId).includes(skillId);
+}
+
+/**
  * Is this skill a worthwhile memory scope? True for service roles, and for any
  * skill assigned to a specific agent (custom specialist skills). Global/utility
  * skills (web, self-mgmt, delegate, tasks) aren't assigned to anyone, so facts

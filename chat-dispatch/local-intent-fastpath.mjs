@@ -37,7 +37,7 @@ export async function tryLocalIntentFastpath({ userText, userId, agentId, onEven
   if (!userText) return null;
   if (!localTierEnabled()) return null;
   try {
-    const match = await dispatch(userText, userId);
+    const match = await dispatch(userText, userId, { agentId });
     if (!match) return null;
 
     // Phase-1 safety: never auto-run a destructive/confirm intent. Fall through
