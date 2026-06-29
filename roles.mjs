@@ -531,6 +531,32 @@ export function clearExecutorCache(skillId, userId = null) {
   _executorBust.set(key, Date.now());
 }
 
+/**
+ * Map of { argName: declaredDefault } from a tool's parameter JSON-schema,
+ * found by tool name across all loaded manifests. Used by the default-arg
+ * learner to skip proposing a value that already equals the schema default
+ * (the model often echoes a documented default verbatim → useless proposal).
+ * Returns null when the tool has no params with a declared `default`.
+ */
+function _toolParamDefaults(toolName) {
+  if (!toolName) return null;
+  for (const wrap of _manifests.values()) {
+    const tools = wrap.manifest?.tools;
+    if (!Array.isArray(tools)) continue;
+    for (const t of tools) {
+      if (t?.function?.name !== toolName) continue;
+      const props = t.function?.parameters?.properties;
+      if (!props || typeof props !== 'object') return null;
+      const out = {};
+      for (const [k, spec] of Object.entries(props)) {
+        if (spec && Object.prototype.hasOwnProperty.call(spec, 'default')) out[k] = spec.default;
+      }
+      return Object.keys(out).length ? out : null;
+    }
+  }
+  return null;
+}
+
 export function getRoleTools(id, userId = null) {
   const tools = getRoleManifest(id, userId)?.tools ?? [];
   // Phase-10: per-user hidden-tools filter. Removes any tool whose
@@ -1812,7 +1838,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     // forget so a slow disk write doesn't block the LLM stream. If the
     // threshold tripped, emit a default_arg proposal off the same async tick.
     if (args && typeof args === 'object') {
-      recordToolCall(userId, name, args).then(async signal => {
+      recordToolCall(userId, name, args, _toolParamDefaults(name)).then(async signal => {
         if (signal?.proposed) {
           try {
             const { proposeDefaultArg } = await import('./lib/proposals.mjs');
