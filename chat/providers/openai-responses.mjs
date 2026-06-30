@@ -144,6 +144,16 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
   const working = [...messages];
 
+  // Stable per-(user, agent) prompt-cache routing hint. Our `instructions`
+  // prefix is long and mostly stable across an agent's turns; this key tells the
+  // Codex/OpenAI Responses backend to land those requests on the same cache
+  // shard, which is what actually lifts CROSS-turn cache hits (without it, only
+  // the intra-turn tool-loop iterations reliably hit). It's a routing hint only
+  // — OpenAI still validates the real prefix, so a stale/colliding key can never
+  // serve the wrong prefix. Codex-only: xAI's /responses may 400 on unknown body
+  // fields, and 100% of our Codex traffic flows through here anyway.
+  const promptCacheKey = isCodex ? `oe:${userId}:${agent.id ?? agent.name ?? 'agent'}` : null;
+
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0, totalCachedTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
@@ -192,6 +202,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     };
     if (!reasoningDisabled) body.reasoning = mapOpenAIResponsesReasoning(agent);
     if (responsesTools?.length) { body.tools = responsesTools; body.parallel_tool_calls = true; }
+    if (promptCacheKey) body.prompt_cache_key = promptCacheKey;
 
     const headers = {
       'Content-Type':  'application/json',
@@ -207,7 +218,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
     }
 
-    console.log(`[${tag}] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}`);
+    console.log(`[${tag}] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}${body.prompt_cache_key ? ` cache_key=${body.prompt_cache_key}` : ''}`);
     // The Codex backend occasionally drops connections at handshake time
     // (manifests as Node fetch's TypeError "fetch failed"). One quick retry
     // with a small backoff resolves the vast majority of these without the
