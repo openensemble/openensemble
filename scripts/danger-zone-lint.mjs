@@ -30,6 +30,25 @@
  *     and `lib/config-secrets.mjs`. Those two files are the only sanctioned
  *     master-key handlers; anything else is suspicious.
  *
+ *   plaintext-secret-write
+ *     fs write of a line that names a secret (apiKey / accessToken /
+ *     refreshToken / clientSecret / password / secret) outside the sanctioned
+ *     crypto + credential + mcp helpers. Secrets must go through the encrypted
+ *     config/credential helpers, never straight to a plaintext file.
+ *
+ *   unsafe-shell-interp
+ *     exec()/execSync() with a `${…}` template interpolation in the CORE
+ *     server (routes/, lib/, scheduler/, chat*). That's where user chat input
+ *     flows, so an interpolated shell is an injection vector. remote/ (the
+ *     node agent's own infra constants) and skills/ (sandboxed under bwrap)
+ *     are a different threat model and are exempt by prefix.
+ *
+ *   hardcoded-users-path
+ *     fs write / mkdir against a hardcoded `users` path segment instead of
+ *     USERS_DIR from lib/paths.mjs. The literal path bypasses the IS_TEST
+ *     base-dir redirect and can scribble into the real users/ tree from a
+ *     test run.
+ *
  * Exit code: 0 if clean, 1 if any rule fired (CI fails the build).
  *
  * Run locally:  node scripts/danger-zone-lint.mjs
@@ -37,7 +56,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -106,6 +125,65 @@ const RULES = [
       'The master-key file is sacred (see feedback_master_key_never_overwrite). ' +
       'Touch it only from lib/crypto.mjs or lib/config-secrets.mjs.',
   },
+  {
+    id: 'plaintext-secret-write',
+    // An fs write whose line also names a secret. Blunt: the keyword must be on
+    // the same line as the write call. Currently zero hits — this is a guard
+    // against a future "just dump the token to a json file" regression.
+    pattern: /\b(writeFile|writeFileSync|appendFile|appendFileSync)\s*\([^)]*(apiKey|api_key|accessToken|refreshToken|clientSecret|password|\bsecret\b)/i,
+    allowedFiles: [
+      'lib/crypto.mjs',
+      'lib/config-secrets.mjs',
+      'lib/credentials.mjs',
+      'lib/backup-crypto.mjs',
+      'lib/email-crypto.mjs',
+      'lib/mcp-config.mjs',
+      'lib/mcp-oauth.mjs',
+      'scripts/danger-zone-lint.mjs',
+      'tests/danger-zone-lint-rules.test.mjs',  // fixtures intentionally trip the rules
+    ],
+    message:
+      'Secrets must go through the encrypted config/credential helpers ' +
+      '(lib/config-secrets.mjs, lib/credentials.mjs), never straight to a ' +
+      'plaintext file. If this write is already-encrypted ciphertext, ' +
+      'oe-allow it with a reason.',
+  },
+  {
+    id: 'unsafe-shell-interp',
+    // exec/execSync with a template interpolation. Scoped to the core server
+    // by exempting remote/ + skills/ + scripts/ (their interpolations are infra
+    // constants or run sandboxed). Static `execSync('command -v x')` is fine.
+    pattern: /\bexec(Sync)?\s*\(\s*`[^`]*\$\{/,
+    allowedFiles: [
+      'scripts/danger-zone-lint.mjs',
+      'tests/danger-zone-lint-rules.test.mjs',  // fixtures intentionally trip the rules
+    ],
+    allowedPrefixes: [
+      'remote/',   // node agent: interpolates OE_USER / install paths, not user input
+      'skills/',   // skill subprocesses run under bwrap (lib/skill-sandbox.mjs)
+      'scripts/',  // dev + smoke scripts, not request-path code
+    ],
+    message:
+      'Interpolating into a shell in the core server is an injection vector ' +
+      '(user chat input reaches here). Pass args as an array to spawn/execFile, ' +
+      'or build the command without `${…}` interpolation.',
+  },
+  {
+    id: 'hardcoded-users-path',
+    // fs write/mkdir against a quoted `users` path segment. USERS_DIR (the
+    // constant, unquoted) is fine; a literal 'users' bypasses the IS_TEST
+    // base-dir redirect in lib/paths.mjs.
+    pattern: /\b(writeFile|writeFileSync|appendFile|appendFileSync|mkdir|mkdirSync)\s*\([^)]*['"][^'"]*\busers\b/,
+    allowedFiles: [
+      'lib/paths.mjs',
+      'routes/_helpers/paths.mjs',
+      'scripts/danger-zone-lint.mjs',
+      'tests/danger-zone-lint-rules.test.mjs',  // fixtures intentionally trip the rules
+    ],
+    message:
+      'Build user-data paths from USERS_DIR (lib/paths.mjs), not a hardcoded ' +
+      "'users' segment — the literal path bypasses the test base-dir redirect.",
+  },
 ];
 
 function shouldScan(absPath) {
@@ -147,11 +225,11 @@ function scan() {
     catch { continue; }
     const lines = text.split('\n');
     for (const rule of RULES) {
-      if (rule.allowedFiles.includes(rel)) continue;
+      if (rule.allowedFiles?.includes(rel)) continue;
+      if (rule.allowedPrefixes?.some(p => rel === p || rel.startsWith(p))) continue;
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        if (!rule.pattern.test(line)) continue;
-        if (/oe-allow\s*:/.test(line)) continue;
+        if (!lineHitsRule(rule, line)) continue;
         hits.push({ rule: rule.id, message: rule.message, file: rel, lineNumber: i + 1, line: line.trim() });
       }
     }
@@ -159,25 +237,37 @@ function scan() {
   return hits;
 }
 
-const hits = scan();
-if (hits.length === 0) {
-  console.log('[danger-zone-lint] clean — 0 hits across the scanned tree.');
-  process.exit(0);
+/** True if `line` trips `rule` and isn't opted out with a trailing oe-allow. */
+export function lineHitsRule(rule, line) {
+  return rule.pattern.test(line) && !/oe-allow\s*:/.test(line);
 }
 
-console.error(`[danger-zone-lint] ${hits.length} hit(s):\n`);
-const byRule = new Map();
-for (const h of hits) {
-  if (!byRule.has(h.rule)) byRule.set(h.rule, []);
-  byRule.get(h.rule).push(h);
-}
-for (const [rule, list] of byRule) {
-  console.error(`  rule ${rule}`);
-  console.error(`    ${list[0].message}`);
-  for (const h of list) {
-    console.error(`    • ${h.file}:${h.lineNumber}  ${h.line.slice(0, 100)}`);
+export { RULES, scan };
+
+// Only run the scan + exit when invoked directly (node scripts/danger-zone-lint.mjs).
+// Importing the module (e.g. from the rule unit tests) must not scan or exit.
+const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (isMain) {
+  const hits = scan();
+  if (hits.length === 0) {
+    console.log('[danger-zone-lint] clean — 0 hits across the scanned tree.');
+    process.exit(0);
   }
-  console.error('');
+
+  console.error(`[danger-zone-lint] ${hits.length} hit(s):\n`);
+  const byRule = new Map();
+  for (const h of hits) {
+    if (!byRule.has(h.rule)) byRule.set(h.rule, []);
+    byRule.get(h.rule).push(h);
+  }
+  for (const [rule, list] of byRule) {
+    console.error(`  rule ${rule}`);
+    console.error(`    ${list[0].message}`);
+    for (const h of list) {
+      console.error(`    • ${h.file}:${h.lineNumber}  ${h.line.slice(0, 100)}`);
+    }
+    console.error('');
+  }
+  console.error('To allow a specific line, append `// oe-allow: <reason>` to it.\n');
+  process.exit(1);
 }
-console.error('To allow a specific line, append `// oe-allow: <reason>` to it.\n');
-process.exit(1);
