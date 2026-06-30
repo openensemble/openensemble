@@ -427,6 +427,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
       const seqResults = [];
       const _imagesByBlockId = new Map();
+      // Terminal handoff: a tool (ask_agent's forward pipeline) may signal that
+      // its result IS the user-facing answer and the model should NOT run
+      // another turn to relay it. We capture that reply, append the normal tool
+      // result for transcript fidelity, then deliver it as assistantContent and
+      // break the loop instead of re-inferring.
+      let _terminalReply = null;
       for (const block of blocks) {
         let args = {};
         try { args = JSON.parse(block.argsJson || '{}'); } catch (e) { console.warn('[openai-oauth] Failed to parse tool args:', e.message); }
@@ -442,6 +448,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           if (chunk.type === 'result') {
             toolResultText = chunk.text;
             if (Array.isArray(chunk._images)) _seqImages = chunk._images;
+            if (chunk._terminal && typeof chunk.text === 'string') _terminalReply = chunk.text;
           }
         }
         const { text: result, _notify, _images } = normalizeToolResult(toolResultText);
@@ -460,6 +467,13 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       }
       { const sc = guard.check(seqResults.map(r => ({ name: r.name, args: r.args })), seqResults.map(r => r.result));
         if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
+      if (_terminalReply != null) {
+        // The pipeline reported its own final answer — deliver it as this
+        // turn's reply and end the loop without another model call.
+        assistantContent = _terminalReply;
+        yield { type: 'replace', text: assistantContent };
+        break;
+      }
       continue;
     }
 
