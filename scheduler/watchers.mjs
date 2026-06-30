@@ -29,7 +29,7 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID, createHash } from 'crypto';
-import { USERS_DIR } from '../lib/paths.mjs';
+import { USERS_DIR, SKILLS_DIR, userSkillsDir } from '../lib/paths.mjs';
 import { log } from '../logger.mjs';
 
 const TICK_MS = 5_000;
@@ -899,6 +899,23 @@ function finalizeWatcher(record, status, finalText) {
   }
 }
 
+// Minimal HTML→text for the plain-text alternative part when a handler fires
+// an HTML-only email body (helpers.fire({ html })). Not a sanitizer — just
+// enough to give clients without HTML rendering, and the chat/tasks-drawer
+// status bubble, a readable fallback.
+function stripHtml(html) {
+  return String(html || '')
+    .replace(/<\s*(br|\/p|\/div|\/tr|\/h[1-6]|\/li)\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim() || 'New update.';
+}
+
 // Run the watcher's onFire action. The supported shapes are:
 //
 //   { type: 'notify' }                 — status bubble only (default; not handled here)
@@ -917,15 +934,19 @@ async function executeOnFire(record) {
   if (!cfg) return;
 
   // ── Email delivery — no LLM, no agent turn ───────────────────────────────
-  // cfg shape: { type: 'email', subject?, to?, account? }
-  // body is the watcher's lastStatusText (or label as fallback).
+  // cfg shape: { type: 'email', subject?, to?, account?, _html? }
+  // body is the watcher's lastStatusText (or label as fallback). When the
+  // handler fired with an HTML body (helpers.fire({ html })), `_html` carries
+  // the rich part; `body` is the plain-text alternative (auto-derived from the
+  // HTML when the handler didn't pass a separate message).
   if (cfg.type === 'email') {
     try {
       const { sendEmailToUser } = await import('../lib/email-delivery.mjs');
       const subject = cfg.subject || `Monitor: ${record.label}`;
-      const body    = record.lastStatusText || `Your monitor "${record.label}" fired.`;
+      const html    = cfg._html || record.lastStatusHtml || undefined;
+      const body    = record.lastStatusText || (html ? stripHtml(html) : null) || `Your monitor "${record.label}" fired.`;
       const r = await sendEmailToUser(record.userId, {
-        subject, body, to: cfg.to, account: cfg.account,
+        subject, body, html, to: cfg.to, account: cfg.account,
       });
       if (!r.ok) log.warn('watchers', 'email onFire failed', { id: record.id, err: r.message });
       else log.info('watchers', 'email onFire sent', { id: record.id, to: cfg.to || '(self)' });
@@ -1128,10 +1149,39 @@ function handlerHelpers(record) {
     type:         (...a) => getBrowser().then(b => b.type(...a)),
     keypress:     (...a) => getBrowser().then(b => b.keypress(...a)),
   };
+  // Sandboxed binary runtime for watcher handlers — the same capability a
+  // skill's tool ctx gets (roles.mjs buildCtx), so a handler can run an
+  // already-provisioned binary (e.g. yt-dlp) on its tick. Scoped to the
+  // watcher's OWNING skill dir. Unlike the tool-ctx version there's no human on
+  // a tick, so ensureRuntime NEVER prompts to download — it resolves a binary
+  // provisioned earlier at tool time and throws if missing. hasRuntime() in
+  // skill code gates on both fns being present.
+  const _skillDir = (() => {
+    if (!record.skillId) return null;
+    const ud = path.join(userSkillsDir(record.userId), record.skillId);
+    if (fs.existsSync(ud)) return ud;
+    const bd = path.join(SKILLS_DIR, record.skillId);
+    return fs.existsSync(bd) ? bd : null;
+  })();
+  const runtimeHelpers = _skillDir ? {
+    ensureRuntime: async ({ name } = {}) => {
+      if (!name) throw new Error('ensureRuntime: { name } required');
+      const rt = await import('../lib/skill-runtime.mjs');
+      const existing = rt.resolveSkillBinary(_skillDir, name);
+      if (existing) return existing;
+      throw new Error(`ensureRuntime: "${name}" is not provisioned for skill "${record.skillId}" — run it once via the skill's own tools first; watcher ticks cannot download binaries.`);
+    },
+    runSandboxed: async (bin, binArgs = [], opts = {}) => {
+      const sb = await import('../lib/skill-sandbox.mjs');
+      const roDirs = [_skillDir, ...(opts.roDirs || [])].filter(Boolean);
+      return sb.runSandboxed(bin, binArgs, { ...opts, roDirs });
+    },
+  } : {};
   return {
     userId: record.userId,
     agentId: record.agentId,
     watcherId: record.id,
+    ...runtimeHelpers,
     browser,
     showImage: async (img) => _showImageFn?.(record.userId, { ...img, agent: record.agentId }),
     showVideo: async (vid) => _showVideoFn?.(record.userId, { ...vid, agent: record.agentId }),
@@ -1171,8 +1221,13 @@ function handlerHelpers(record) {
     //
     // Two call shapes:
     //   fire('message string')   — legacy, watcher-level onFire only.
-    //   fire({ message, subject, telegramPrefix, itemKey, deliver })
-    //                            — object form. For collection watchers, pass
+    //   fire({ message, subject, html, telegramPrefix, itemKey, deliver })
+    //                            — object form. For deliver='email', `html`
+    //                            sends a rich HTML body (multipart/alternative;
+    //                            `message` becomes the plain-text part, or it's
+    //                            auto-derived from `html`), and `subject`
+    //                            overrides the registered subject per fire.
+    //                            For collection watchers, pass
     //                            `itemKey` so an item-level `deliver` override
     //                            (from state.items[].deliver) wins over the
     //                            watcher-level setting; pass `deliver` to force
@@ -1187,6 +1242,7 @@ function handlerHelpers(record) {
       const isObj = arg && typeof arg === 'object';
       const message    = isObj ? arg.message        : arg;
       const subject    = isObj ? arg.subject        : null;
+      const html       = isObj ? arg.html           : null;
       const tgPrefix   = isObj ? arg.telegramPrefix : null;
       const itemKey    = isObj ? arg.itemKey        : null;
       let   forceDeliv = isObj ? arg.deliver        : null;
@@ -1208,12 +1264,20 @@ function handlerHelpers(record) {
         else if (baseCfg.type === 'email')    tempCfg = { ...baseCfg, _bodyOverride: message, ...(subject ? { subject } : {}) };
         else if (baseCfg.type === 'telegram') tempCfg = { ...baseCfg, ...(tgPrefix ? { prefix: tgPrefix } : {}) };
       }
+      // An HTML body and/or a per-fire subject can be supplied even without a
+      // plaintext message — executeOnFire reads `_html` for the rich part and
+      // falls back to a stripped-to-text version for the plain alternative.
+      if (baseCfg.type === 'email' && (html || subject)) {
+        tempCfg = { ...tempCfg, ...(subject ? { subject } : {}), ...(html ? { _html: html } : {}) };
+      }
       const synth = { ...record, onFire: tempCfg };
       // executeOnFire's email/telegram branches read lastStatusText for the
       // body; surface the override through there so the handler doesn't have
       // to mutate persisted state.
       if (message && (baseCfg.type === 'email' || baseCfg.type === 'telegram')) {
         synth.lastStatusText = message;
+      } else if (baseCfg.type === 'email' && html) {
+        synth.lastStatusText = stripHtml(html);
       }
       try {
         await executeOnFire(synth);
