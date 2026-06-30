@@ -183,6 +183,7 @@ export function listLogFiles() {
 
 // Read up to `tail` most recent entries from the given named log file.
 // Optional level filter (info|warn|error) and case-insensitive text search.
+/** @param {{ file?: string, tail?: number, level?: string, q?: string, since?: number }} [opts] */
 export function readLog({ file = 'app', tail = 200, level, q, since } = {}) {
   const filepath = LOG_FILES[file];
   if (!filepath) return { entries: [], totalBytes: 0, file };

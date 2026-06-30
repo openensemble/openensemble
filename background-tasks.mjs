@@ -66,6 +66,7 @@ function _ensureRootGraph({ userId, rootTaskId, rootWatcherId = null, visibleAge
   return root;
 }
 
+/** @param {{ userId?: string, rootTaskId?: string, rootWatcherId?: string|null, visibleAgentId?: string|null, summary?: string }} [opts] */
 export function registerTaskRoot({ userId, rootTaskId, rootWatcherId, visibleAgentId = null, summary = '' } = {}) {
   return !!_ensureRootGraph({ userId, rootTaskId, rootWatcherId, visibleAgentId, summary });
 }
@@ -135,6 +136,7 @@ export function clearTaskRoot(rootTaskId) {
   return rootTaskGraphs.delete(rootTaskId);
 }
 
+/** @param {{ userId?: string, rootTaskId?: string, rootWatcherId?: string|null, status?: string, finalText?: string, finalReportPreview?: string }} [opts] */
 export function deferRootCompletion({ userId, rootTaskId, rootWatcherId = null, status = 'done', finalText = '', finalReportPreview = '' } = {}) {
   const root = rootTaskGraphs.get(rootTaskId);
   if (!root?.children?.size) return false;

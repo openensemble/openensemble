@@ -1192,6 +1192,7 @@ async function buildCtx(userId, agentId, skillId = null) {
     const bd = path.join(SKILLS_DIR, skillId);
     return existsSync(bd) ? bd : null;
   })();
+  /** @param {{ name?: string, url?: string, sha256?: string|null, label?: string|null, confirmTtlMs?: number }} [opts] */
   ctx.ensureRuntime = async ({ name, url, sha256 = null, label = null, confirmTtlMs = 5 * 60 * 1000 } = {}) => {
     if (!_skillDir) throw new Error('ctx.ensureRuntime: skill directory unknown');
     if (!name || !url) throw new Error('ctx.ensureRuntime: { name, url } required');

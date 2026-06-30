@@ -1164,6 +1164,7 @@ function handlerHelpers(record) {
     return fs.existsSync(bd) ? bd : null;
   })();
   const runtimeHelpers = _skillDir ? {
+    /** @param {{ name?: string }} [opts] */
     ensureRuntime: async ({ name } = {}) => {
       if (!name) throw new Error('ensureRuntime: { name } required');
       const rt = await import('../lib/skill-runtime.mjs');
