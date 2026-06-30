@@ -22,6 +22,7 @@ import {
 import { getDefaultRoles } from '../roles.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
 import { listTurnTrees, getTurnDetail } from '../lib/turn-trace-reader.mjs';
+import { computeTurnMetrics } from '../lib/turn-metrics.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import {
   getCachedState as getUpdateState, checkForUpdate, isCleanForUpdate,
@@ -325,6 +326,19 @@ export async function handle(req, res) {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(payload));
+    return true;
+  }
+
+  // Turn metrics (admin only) — local-first dashboard aggregate over the
+  // turn-trace spine. ?range=1h|6h|24h|7d (default 24h), ?userId=<id> filter.
+  // Aggregate + metadata only: no prompts, bodies, or raw tool args.
+  if (req.url.startsWith('/api/admin/turn-metrics') && req.method === 'GET') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const qs = new URL(req.url, 'http://x').searchParams;
+    const range = qs.get('range') || '24h';
+    const metrics = computeTurnMetrics({ range, userId: qs.get('userId') || null });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(metrics));
     return true;
   }
 

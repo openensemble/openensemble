@@ -242,7 +242,7 @@ export async function runSpecialistRoute({
     console.log(`[chat] specialist-router: → ${route.name} (${route.skillId}) agent=${route.agentId}`);
     // Tag the turn trace — the specialist's own span is added by its nested
     // streamChat (it inherits the dispatcher's turn store via ALS).
-    recordRouting({ mode: 'specialist', specialist: route.skillId ?? null, redirectedTo: route.agentId ?? null, strategy: route.strategy ?? 'regex' });
+    recordRouting({ mode: 'specialist', specialist: route.skillId ?? null, redirectedTo: route.agentId ?? null, strategy: route.strategy ?? 'regex', llmAvoided: false });
     let routerBuf = '';
     try {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {

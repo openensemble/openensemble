@@ -580,7 +580,10 @@ export async function handleChatMessage({
     // Tag routing for the trace. The specialist router sets its own mode
     // ('specialist'); for the named fast-paths record which one handled it.
     if (!getTurn()?.routing?.mode) {
-      recordRouting({ mode: 'fastpath', fastPath: handler.name || null });
+      // A named fast-path handled the turn → the coordinator's LLM/cloud call
+      // was avoided entirely. Tag the local win so turn-metrics can count it
+      // (specialist routing sets its own mode above, so it never lands here).
+      recordRouting({ mode: 'fastpath', fastPath: handler.name || null, localHandler: handler.name || null, llmAvoided: true, cloudCall: false });
     }
     finalizeTurnOnce();
     if (r.followupPrompt) {
@@ -649,7 +652,7 @@ export async function handleChatMessage({
   // specialist reroute, no @-redirect). Applies to ANY agent the user is
   // chatting with — coordinator or specialist — so it must NOT be labelled
   // 'coordinator' (that wrongly implied the agent's role in the trace).
-  recordRouting({ mode: 'direct' });
+  recordRouting({ mode: 'direct', llmAvoided: false });
   try {
     await runLlmTurn({
       userId, agentId, scopedAgent, scopedSessionKey,
