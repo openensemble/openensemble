@@ -355,6 +355,27 @@ If your skill is a per-user one (in `users/{userId}/skills/`), the relative impo
 
 ---
 
+## Custom skills run sandboxed (security)
+
+If your skill is a **per-user / custom skill** (it lives in `users/{userId}/skills/`), its `execute.mjs` runs inside an isolated jail — it can touch only its owner's data, never another user's data, the OE config, or any secret. Author within these limits or the tool will fail at runtime:
+
+**File I/O — owner's media/doc folders only.** You may read/write the owner's `documents`, `images`, `videos`, and `audio` folders (via `getUserFilesDir`) plus your own per-skill state dir (below). `research` and `code` are NOT mounted for custom skills, and anything outside these — other users' dirs, `config.json`, OAuth/token files, the master key — does not exist inside the sandbox, so reads fail with `ENOENT`.
+
+**Secrets / API keys — use `ctx.credentials`, never the filesystem.** Don't read token files and don't write a key into a data folder. Store and fetch your skill's own secrets through the brokered store:
+```js
+await ctx.credentials.set('apiKey', value);     // encrypted at rest, scoped to THIS skill
+const key = await ctx.credentials.get('apiKey'); // null until set
+```
+These are namespaced per skill, so no other skill (or user) can read them, and the encryption key never enters the sandbox. This is how a skill like a RunPod client keeps its API key.
+
+**Persistent non-secret state — your state dir.** For a small db / config / cache that must survive across runs, write under `users/{userId}/skills/{skillId}/state/` — the one writable spot inside your skill's own folder, isolated from every other skill.
+
+**Network** is available for `fetch` to external APIs. (Outbound access may later require declaring it in your manifest.)
+
+First-party skills shipped in `skills/` run in-process and are not subject to these limits — but anything authored per-user is, by design.
+
+---
+
 ## Semantic search (optional — only when fuzzy lookup actually helps)
 
 OpenEnsemble ships a bundled embedding model (nomic-embed, 768-dim, normalized vectors). It runs in-process — no HTTP, no API key, ~20ms per call. Skills can reuse it to add fuzzy/semantic lookup over their own stored data.
