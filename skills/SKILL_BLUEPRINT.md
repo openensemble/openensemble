@@ -216,6 +216,91 @@ export default executeSkillTool;
 
 ---
 
+### Signaling failure
+
+When a tool can't complete its job, the runtime needs to **know** it failed — otherwise the
+per-turn trace (`read_turns`) records it as `ok`, flaky-tool proposals never fire, and the
+recipe learner may bank the broken call as a "successful" recipe.
+
+Two correct ways:
+
+```js
+// 1. Let it throw — the dispatcher catches, records the failure, and reports it.
+const data = await fetchThing();          // throws on network error → handled for you
+
+// 2. Caught an error but want a clean message? Use ctx.toolError (5th arg):
+export async function executeSkillTool(name, args, userId, agentId, ctx) {
+  if (name === 'myskill_do_thing') {
+    try {
+      return await doWork(args);
+    } catch (err) {
+      return ctx.toolError(`Couldn't process that: ${err.message}`);
+    }
+  }
+  return null;
+}
+```
+
+❌ **Do not** `return \`Error: ${err.message}\`` as a plain string. That is indistinguishable
+from success to the runtime — it's the one footgun this guidance exists to prevent. `throw` or
+`ctx.toolError(...)` instead. (`return null` is still only for *unrecognized tool names*, never
+for failures.)
+
+---
+
+## Skills that need an external runtime
+
+If your skill shells out to an external binary (`yt-dlp`, `ffmpeg`, …), **the skill
+must own that runtime under its own directory and run it sandboxed** — never
+hardcode an absolute path to somewhere else on disk (a sibling project or a user's
+`~/.local/bin` can be deleted out from under you, surfacing only as a raw `spawn …
+ENOENT`), and never spawn an unsandboxed downloaded binary.
+
+Two `ctx` helpers do this for you:
+
+```js
+export async function executeSkillTool(name, args, userId, agentId, ctx) {
+  if (name === 'myskill_do_thing') {
+    // 1. Provision the binary INTO the skill (consent-gated download, self-heals,
+    //    idempotent). Returns the absolute path under <skill>/bin/.
+    const bin = await ctx.ensureRuntime({
+      name: 'yt-dlp',
+      url: 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux',
+      // sha256: '…',  // optional but recommended — verified before use
+    });
+
+    // 2. Run it SANDBOXED via bubblewrap. System is read-only; the skill dir is
+    //    auto-bound read-only; only writableDirs are writable.
+    const outDir = ctx.userFilesDir?.('videos') || '/tmp';
+    const { code, stdout, stderr } = await ctx.runSandboxed(bin, ['-o', `${outDir}/%(title)s.%(ext)s`, args.url], {
+      writableDirs: [outDir],
+      net: true,                 // yt-dlp needs network; set false for offline tools
+      timeoutMs: 10 * 60 * 1000,
+    });
+    if (code !== 0) return ctx.toolError(`yt-dlp failed: ${stderr.slice(-400)}`);
+    return `Downloaded to ${outDir}`;
+  }
+  return null;
+}
+```
+
+What this gives you, automatically:
+- **`ctx.ensureRuntime({ name, url, sha256? })`** — on first use (or if the binary was
+  later deleted) it asks the user to approve the **exact URL** before downloading
+  into `<skill>/bin/<name>`, verifies the checksum if you give one, and `chmod +x`. No
+  allowlist — a user can request any tool; safety is consent + the sandbox below.
+- **`ctx.runSandboxed(bin, args, { writableDirs, net, timeoutMs })`** — runs the binary
+  under bubblewrap: system read-only, the skill dir read-only, only your declared
+  `writableDirs` writable, isolated namespaces. A downloaded binary can't read
+  credentials, the OE config, or other users' files.
+- A `node` interpreter is always available at `process.execPath` (and inside the
+  sandbox); don't pin a specific nvm path.
+
+Only reach for a manual `resolveBinary`/`spawn` if you're intentionally using a
+system tool the user already trusts — and even then, prefer the helpers above.
+
+---
+
 ## Available imports
 
 **Node built-ins** (no install needed):
@@ -477,6 +562,18 @@ Every proactive skill has the same four pieces — design them in this order:
    - `deliver: 'notify'` — quiet status bubble. Reserve for "just a notification, don't read it to me" cases.
 
    In your handler, call `await helpers.fire(message)` instead of `helpers.fireAgent` — `fire` dispatches based on whatever `deliver` was chosen at registration. The same handler emails OR speaks depending on the mode. Write `message` as plain prose when `deliver: 'email'` (it becomes the email body) and as a TTS-friendly instruction when `deliver: 'agent'` (it becomes the LLM prompt).
+
+   **Rich HTML email + per-fire subject.** For `deliver: 'email'`, use the object form to send a formatted card and a dynamic subject computed from what changed:
+
+   ```js
+   await helpers.fire({
+     subject: `New video from ${ch.name}: ${video.title}`,  // overrides emailSubject for this fire
+     html:    renderCardHtml(video),                          // full HTML body (multipart/alternative)
+     message: `${ch.name} posted "${video.title}" — ${video.url}`, // plain-text alternative
+   });
+   ```
+
+   `html` is delivered as a real `text/html` part (via `lib/email-delivery.mjs` → the email skill's `multipart/alternative`); `message` becomes the plain-text alternative and the status-bubble text. If you omit `message`, a plain-text version is auto-derived from the HTML. `html`/`subject` are ignored for non-email delivery modes, so a single handler stays delivery-agnostic. This is generic — any watcher in any skill can send HTML email this way; nothing skill-specific is required.
 
 ### Changing delivery mode for an existing watcher
 

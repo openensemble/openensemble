@@ -166,6 +166,17 @@ async function runPreWriteGates(skillDir, manifest, code, opts) {
     }
   }
 
+  // Convention nudge (non-blocking, never gated): a skill that catches its own
+  // error and RETURNS an `Error: …` string reads as SUCCESS to the per-turn
+  // trace (read_turns/Lois) and the recipe learner. Steer toward the structured
+  // signal so failures surface honestly. See SKILL_BLUEPRINT.md → "Signaling
+  // failure".
+  try {
+    if (/catch\s*\([^)]*\)\s*\{[^}]*return\s+`?\s*Error/i.test(code) || /return\s+`Error:/.test(code)) {
+      warnParts.push('Convention (non-blocking): this skill returns an `Error: …` string on failure. Prefer `return ctx.toolError(\'…\')` (or `throw`) so the failure is recorded honestly in the turn trace and not learned as a successful recipe. See SKILL_BLUEPRINT.md → "Signaling failure".');
+    }
+  } catch { /* a lint must never block a write */ }
+
   const block = blockParts.length
     ? `${opts.opName} blocked — fix the issues below and retry. If a check is a false positive, set skip_lsp:true and/or skip_validator:true to bypass that specific gate only:\n\n${blockParts.join('\n\n')}`
     : null;
@@ -903,6 +914,23 @@ async function handleDelete(args, userId) {
 
   rmSync(skillDir, { recursive: true, force: true });
 
+  // Skills persist state next to the user dir (e.g. <skillId>-config.json) which
+  // outlives the skill dir, orphaning JSON files on delete. Remove the well-known
+  // patterns. EXACT names only (never a `<skillId>-*` glob) so a sibling skill
+  // whose id shares this prefix — e.g. "<skillId>-music" — is never clobbered.
+  const removedState = [];
+  try {
+    const ownerDir = path.dirname(userSkillsDir(ownerId));
+    const exactNames = new Set([`${skillId}.json`, `${skillId}-config.json`, `${skillId}-state.json`]);
+    for (const ent of readdirSync(ownerDir, { withFileTypes: true })) {
+      if (!ent.isFile()) continue;
+      if (exactNames.has(ent.name) || ent.name.startsWith(`${skillId}.json.nuked-bak`)) {
+        rmSync(path.join(ownerDir, ent.name), { force: true });
+        removedState.push(ent.name);
+      }
+    }
+  } catch (e) { console.warn('[skill-builder] state-file cleanup skipped:', e.message); }
+
   removeRoleManifest(skillId, ownerId);
   clearExecutorCache(skillId, ownerId);
 
@@ -941,7 +969,20 @@ async function handleDelete(args, userId) {
   // Alias cascade-delete: handled by skill-alias-framework via the manifest's
   // cascade_on_tools entry on skill_delete. No explicit call needed here.
 
-  return `Skill "${manifest.name}" (${skillId}) deleted and unloaded.`;
+  // Purge the skill's LEARNED state — standing role rules + skill overrides +
+  // learned dispatch utterances (by skillId), and tool-plan recipes + pinned
+  // default args + tool-failure history (by the manifest's tool names). Free-form
+  // memory facts aren't skill-tagged, so they're deliberately left untouched.
+  let purgeSummary = '';
+  try {
+    const { purgeSkillState, summarizePurge } = await import('../../lib/skill-teardown.mjs');
+    const toolNames = (manifest.tools || []).map(t => t.function?.name).filter(Boolean);
+    purgeSummary = summarizePurge(await purgeSkillState(ownerId, { skillId, toolNames }));
+  } catch (e) { console.warn('[skill-builder] learned-state teardown skipped:', e.message); }
+
+  return `Skill "${manifest.name}" (${skillId}) deleted and unloaded.`
+    + (removedState.length ? ` Removed state files: ${removedState.join(', ')}.` : '')
+    + (purgeSummary ? ` Cleared learned state: ${purgeSummary}.` : '');
 }
 
 async function handleList(userId) {

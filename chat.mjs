@@ -28,6 +28,7 @@ import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingT
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { beginMemoryScope } from './lib/memory-scope-context.mjs';
 import { getTurn, beginTurn, recordSpan, recordError, finishTurn } from './lib/turn-trace-context.mjs';
+import { looksLikeToolError } from './lib/tool-error.mjs';
 import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
@@ -434,9 +435,16 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
     }
     if (event.type === 'tool_result' && event.name) {
       toolsUsed.push({ name: event.name, text: event.text || '', args: _lastCallArgsByName[event.name] ?? null });
+      // A tool that caught its own error and returned an error string (or one
+      // the dispatcher caught and emitted as "Tool error (…)") completes the
+      // tool loop normally — without this it would record status:'done' and the
+      // span's ok:true, masking the failure in read_turns/Lois. See
+      // lib/tool-error.mjs.
+      const _toolErrored = looksLikeToolError(event.text);
+      const _toolStatus = _toolErrored ? 'error' : 'done';
       const pending = _pendingToolEventsByName[event.name]?.shift();
       if (pending) {
-        pending.status = 'done';
+        pending.status = _toolStatus;
         pending.endedAt = Date.now();
         pending.durationMs = pending.endedAt - pending.startedAt;
         pending.preview = event.preview ?? '';
@@ -448,7 +456,7 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
         toolEvents.push({
           name: event.name,
           args: _lastCallArgsByName[event.name] ?? null,
-          status: 'done',
+          status: _toolStatus,
           startedAt: Date.now(),
           endedAt: Date.now(),
           durationMs: 0,
@@ -459,6 +467,9 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
           targetAgentId: event.targetAgentId || null,
         });
       }
+      // Surface the failed tool at the turn level so listTurnTrees' errorCount
+      // (and Lois) reflect it instead of reporting "no errors".
+      if (_toolErrored) { try { recordError(`tool ${event.name}: ${(event.text || '').trim().slice(0, 160)}`); } catch { /* never throw */ } }
       delete _lastCallArgsByName[event.name];
     }
     const isVisibleText = event.type === 'token' || event.type === 'replace';

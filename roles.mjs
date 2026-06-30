@@ -17,7 +17,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync, renameSync, cpSync } from 'fs';
 import { pathToFileURL } from 'url';
 import path from 'path';
-import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir } from './lib/paths.mjs';
+import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir, getUserFilesDir } from './lib/paths.mjs';
 import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helper.mjs';
 import { buildBrowserHelpers } from './lib/browser-helper.mjs';
 import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-helper.mjs';
@@ -32,6 +32,8 @@ import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-
 // can resolve the current device sync.
 _registerVoiceContextResolver(getVoiceContext);
 import { mergeDefaults, recordToolCall, recordPinUsage } from './lib/tool-defaults.mjs';
+import { normalizeToolResult, toolError } from './lib/tool-error.mjs';
+import { hasPendingPrompt } from './lib/credentials.mjs';
 import { recordToolFailure } from './lib/tool-failures.mjs';
 import { isSkillDisabled, getHiddenTools } from './lib/skill-overrides.mjs';
 import {
@@ -1013,6 +1015,11 @@ async function buildCtx(userId, agentId, skillId = null) {
     ? agentId.slice(userId.length + 1)
     : agentId;
   const ctx = { userId, agentId };
+  // Structured failure signal: `return ctx.toolError('…')` records the tool call
+  // as a failure (trace ok:false, flaky-tool proposals, not learned as a recipe)
+  // instead of the legacy `return `Error: …`` string the trace can't read. See
+  // lib/tool-error.mjs + SKILL_BLUEPRINT.md → "Signaling failure".
+  ctx.toolError = (message) => toolError(message);
   ctx.showImage = /** @param {{base64?: string, mimeType?: string, filename?: string, savedPath?: string, prompt?: string}} [opts] */ async ({ base64, mimeType = 'image/png', filename, savedPath, prompt } = {}) => {
     if (!wsAgentId || !base64 || !filename) return 0;
     const desktopSavedPath = await saveDesktopArtifact(userId, {
@@ -1169,6 +1176,49 @@ async function buildCtx(userId, agentId, skillId = null) {
       return m.storeCredential(userId, opts);
     } catch (e) { console.warn('[ctx.storeCredential]', e.message); return null; }
   };
+
+  // ── External-runtime provisioning + sandbox ────────────────────────────────
+  // A skill OWNS its external binaries under <skillDir>/bin (so deleting things
+  // elsewhere can't brick it), provisions them with explicit per-download user
+  // consent (NO allowlist — the user approves the exact URL), and RUNS them
+  // sandboxed via bubblewrap so a third-party binary can't read credentials or
+  // other users' data. See SKILL_BLUEPRINT.md → "Skills that need an external
+  // runtime". (This sandboxes the spawned binary, not the skill's own JS — see
+  // the multi-tenant isolation note.)
+  const _skillDir = (() => {
+    if (!skillId) return null;
+    const ud = path.join(userSkillsDir(userId), skillId);
+    if (existsSync(ud)) return ud;
+    const bd = path.join(SKILLS_DIR, skillId);
+    return existsSync(bd) ? bd : null;
+  })();
+  ctx.ensureRuntime = async ({ name, url, sha256 = null, label = null, confirmTtlMs = 5 * 60 * 1000 } = {}) => {
+    if (!_skillDir) throw new Error('ctx.ensureRuntime: skill directory unknown');
+    if (!name || !url) throw new Error('ctx.ensureRuntime: { name, url } required');
+    const rt = await import('./lib/skill-runtime.mjs');
+    const existing = rt.resolveSkillBinary(_skillDir, name);
+    if (existing) return existing;                       // self-heal / already provisioned
+    // Consent: explicit, per-download, reusing the wired 'confirm' prompt. The
+    // user sees the exact URL; Cancel/timeout rejects and we abort.
+    const m = await import('./lib/credentials.mjs');
+    try {
+      await m.requestCredential({
+        userId, kind: 'confirm', ttlMs: confirmTtlMs,
+        label: label || `Download ${name}?`,
+        description: `The "${skillId}" skill needs to download an external program:\n\n  ${name}\n  from ${url}\n\nI can't guarantee this binary is safe. It will run sandboxed — its filesystem access is limited to the skill's own folder plus any output folder. Type "${name}" to approve, or Cancel to decline.`,
+      });
+    } catch {
+      throw new Error(`Download of ${name} was declined or timed out — cannot continue without it.`);
+    }
+    return rt.provisionBinary({ skillDir: _skillDir, name, url, sha256 });
+  };
+  ctx.runSandboxed = async (bin, binArgs = [], opts = {}) => {
+    const sb = await import('./lib/skill-sandbox.mjs');
+    const roDirs = [_skillDir, ...(opts.roDirs || [])].filter(Boolean);
+    return sb.runSandboxed(bin, binArgs, { ...opts, roDirs });
+  };
+  // Per-user output dir for a skill (creates it). e.g. ctx.userFilesDir('videos').
+  ctx.userFilesDir = (sub) => getUserFilesDir(userId, sub);
 
   return ctx;
 }
@@ -1365,7 +1415,23 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   //   (b) The (possibly-reranked) text is memoized under (toolName, args).
   //       Future identical calls within the same session short-circuit at
   //       the cache check above this function in the dispatcher.
+  // A skill that catches its own error and RETURNS an error string (the legacy
+  // `return `Error: …`` convention, or `ctx.toolError(...)`) otherwise looks
+  // identical to success. These flags, set in _postProcessResult below, route it
+  // through the failure path at the bottom of this function.
+  let _resultWasError = false;
+  let _lastErrText = '';
   const _postProcessResult = async (value) => {
+    // Tool-error tagging — runs for ALL agents (not just ephemeral). Tag the
+    // result so the trace reads ok:false and the bottom counts a failure.
+    if (value?.type === 'result' && typeof value.text === 'string') {
+      const norm = normalizeToolResult(value.text);
+      if (norm.isError) {
+        _resultWasError = true;
+        _lastErrText = norm.text;
+        value = { ...value, text: norm.text, isError: true };
+      }
+    }
     if (!_isEphem(agentId)) return value;
     if (value?.type !== 'result' || typeof value.text !== 'string') return value;
     let outText = value.text;
@@ -1375,6 +1441,26 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     }
     _ephemCacheSet(agentId, name, mergedArgs, outText);
     return outText === value.text ? value : { ...value, text: outText };
+  };
+  // Count a tool failure (threshold-gated tool_failure proposal). Shared by the
+  // throw path (catch below) and the caught-and-returned-error path.
+  const _reportToolFailure = (message) => {
+    recordToolFailure(userId, name, message).then(async signal => {
+      if (signal?.proposed) {
+        try {
+          const { proposeToolFailure } = await import('./lib/proposals.mjs');
+          await proposeToolFailure({
+            userId, agentId: agentId || '',
+            tool: signal.tool,
+            skillId: owningSkillId,
+            recentErrors: signal.recentErrors,
+            count: signal.count,
+          });
+        } catch (err) {
+          console.warn('[tool-failures] propose failed:', err.message);
+        }
+      }
+    }).catch(err => console.warn('[tool-failures] record failed:', err.message));
   };
   // Record this execution for the Phase-3 intent learner — covers coordinator-
   // direct AND delegated-specialist calls (both funnel through here). Cheap,
@@ -1426,8 +1512,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         rememberDelegationMeta(value);
 
         // First time crossing 10s: register chip, yield deferred result,
-        // hand the iterator to a detached worker, and return.
-        if (!backgrounded && Date.now() - startedAt >= AUTO_BG_MS) {
+        // hand the iterator to a detached worker, and return. But never while a
+        // user prompt is pending (consent/credential) — don't hurdle the wait.
+        if (!backgrounded && Date.now() - startedAt >= AUTO_BG_MS && !hasPendingPrompt(userId)) {
           const displayName = delegatedMeta?.agentName || name;
           const displayEmoji = delegatedMeta?.agentEmoji || (delegatedMeta ? '' : '⏵');
           const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
@@ -1671,10 +1758,19 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       // chip, yield deferred result, let the promise resolve into the chip.
       const racePromise = Promise.resolve(result);
       const TIMER_TOKEN = Symbol('AUTO_BG_TIMER');
-      const winner = await Promise.race([
-        racePromise,
-        new Promise(resolve => setTimeout(() => resolve(TIMER_TOKEN), AUTO_BG_MS)),
-      ]);
+      // Don't hurdle over a pending user prompt: while the tool is blocked
+      // waiting for the user to answer a consent/credential prompt (e.g.
+      // ctx.ensureRuntime's download confirmation), the auto-bg timer must NOT
+      // fire a "running in the background" chip. Keep re-racing until the tool
+      // finishes OR no prompt is pending. Once the user answers, the real work
+      // backgrounds normally on the next tick.
+      let winner;
+      do {
+        winner = await Promise.race([
+          racePromise,
+          new Promise(resolve => setTimeout(() => resolve(TIMER_TOKEN), AUTO_BG_MS)),
+        ]);
+      } while (winner === TIMER_TOKEN && hasPendingPrompt(userId));
 
       if (winner === TIMER_TOKEN) {
         const watchersMod = await import('./scheduler/watchers.mjs');
@@ -1720,7 +1816,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           // a delayed { text, _images, _notify } result becomes the string
           // "[object Object]" and its images/notifications are lost.
           const structured = val && typeof val === 'object' && typeof val.text === 'string';
-          const text   = structured ? val.text : String(val ?? '');
+          // Strip the tool-error sentinel the inline path also strips, so a
+          // backgrounded failure reads as "Tool error: …", not a raw NUL marker.
+          const text   = normalizeToolResult(structured ? val.text : String(val ?? '')).text;
           const images = structured && Array.isArray(val._images) ? val._images : null;
           const notify = structured && val._notify ? val._notify : null;
           const key = agentId
@@ -1833,11 +1931,17 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         .catch(() => {});
     }
 
-    // Phase-2: count the call (only the args the model actually supplied —
-    // not mergedArgs — so pinned values don't re-count themselves). Fire-and-
-    // forget so a slow disk write doesn't block the LLM stream. If the
-    // threshold tripped, emit a default_arg proposal off the same async tick.
-    if (args && typeof args === 'object') {
+    if (_resultWasError) {
+      // The skill caught its own error and returned it as a string. Count a
+      // failure (not a default-arg success) so flaky-tool proposals still fire
+      // and the recipe learner doesn't bank a failed call as a success recipe.
+      log.warn('tool', 'tool returned error', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: _lastErrText.slice(0, 200) });
+      _reportToolFailure(_lastErrText);
+    } else if (args && typeof args === 'object') {
+      // Phase-2: count the call (only the args the model actually supplied —
+      // not mergedArgs — so pinned values don't re-count themselves). Fire-and-
+      // forget so a slow disk write doesn't block the LLM stream. If the
+      // threshold tripped, emit a default_arg proposal off the same async tick.
       recordToolCall(userId, name, args, _toolParamDefaults(name)).then(async signal => {
         if (signal?.proposed) {
           try {
@@ -1858,25 +1962,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     yield { type: 'result', text: `Tool error (${name}): ${e.message}` };
 
     // Phase-3: count the failure. Fire-and-forget so the user's bubble lands
-    // immediately. On threshold trip we emit a tool_failure proposal — the
-    // owning-skill id is captured here because the proposer needs to know
-    // whether to route the remedy through refine (user skill) or a diagnostic
-    // (built-in).
-    recordToolFailure(userId, name, e.message).then(async signal => {
-      if (signal?.proposed) {
-        try {
-          const { proposeToolFailure } = await import('./lib/proposals.mjs');
-          await proposeToolFailure({
-            userId, agentId: agentId || '',
-            tool: signal.tool,
-            skillId: owningSkillId,
-            recentErrors: signal.recentErrors,
-            count: signal.count,
-          });
-        } catch (err) {
-          console.warn('[tool-failures] propose failed:', err.message);
-        }
-      }
-    }).catch(err => console.warn('[tool-failures] record failed:', err.message));
+    // immediately. On threshold trip we emit a tool_failure proposal (the
+    // owning-skill id is captured so the proposer can route the remedy through
+    // refine vs a diagnostic). Shared with the caught-and-returned-error path.
+    _reportToolFailure(e.message);
   }
 }
