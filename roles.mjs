@@ -17,7 +17,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync, renameSync, cpSync } from 'fs';
 import { pathToFileURL } from 'url';
 import path from 'path';
-import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir, getUserFilesDir } from './lib/paths.mjs';
+import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir, getUserFilesDir, readConfig } from './lib/paths.mjs';
 import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helper.mjs';
 import { buildBrowserHelpers } from './lib/browser-helper.mjs';
 import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-helper.mjs';
@@ -1224,10 +1224,36 @@ async function buildCtx(userId, agentId, skillId = null) {
   return ctx;
 }
 
+// ── Custom-skill sandbox routing (multi-tenant isolation) ────────────────────
+// Custom (user-authored) skills run their execute.mjs in a bwrap jail via
+// lib/skill-subprocess.mjs so they can't read other users' data, token files, or
+// the master key. Trusted global skills (wrap.userId === null) stay in-process.
+// Flag-gated (config.skillSandbox.enabled, default off) until exercised live.
+function shouldSandboxSkill(wrap) {
+  if (!wrap || wrap.userId == null) return false; // global = first-party = trusted
+  try { return readConfig()?.skillSandbox?.enabled === true; } catch { return false; }
+}
+
+// Run a custom skill's tool in the sandbox, returning a plain value that matches
+// the in-process executor contract so both dispatch seams stay unchanged.
+// Streaming yields are folded into result text for now (live streaming through
+// the jail is a follow-up); failures throw so the normal tool-failure path runs.
+async function runCustomSkillValue({ userId, agentId, skillId, name, args }) {
+  const { runCustomSkillSandboxed } = await import('./lib/skill-subprocess.mjs');
+  const r = await runCustomSkillSandboxed({ userId, agentId, skillId, toolName: name, args, net: true });
+  if (!r.ok) throw new Error(/** @type {any} */ (r).error || `custom skill ${skillId}.${name} failed`);
+  if (Array.isArray(r.events) && r.events.length) {
+    const text = r.events.filter(e => e?.type === 'token').map(e => e.text).join('');
+    if (text) return { type: 'result', text };
+  }
+  return r.result;
+}
+
 // Execute a tool — routes to the skill that owns it, scoped to what `userId` can see.
 export async function executeRoleTool(name, args, userId = 'default', agentId = null) {
   for (const [key, wrap] of visibleEntries(userId)) {
     if (wrap.manifest.tools?.some(t => t.function?.name === name)) {
+      if (shouldSandboxSkill(wrap)) return runCustomSkillValue({ userId, agentId, skillId: wrap.manifest.id, name, args });
       const exec = await getExecutorByKey(key);
       if (exec) return exec(name, args, userId, agentId, await buildCtx(userId, agentId, wrap.manifest.id));
       break;
@@ -1300,6 +1326,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
 
   let skillExec = null;
   let owningSkillId = null;
+  let owningWrap = null;
   // MCP-namespaced server tools (mcp_<server>__<tool>) route to skills/mcp/.
   // Detected by the `__` namespace separator — NOT just the `mcp_` prefix,
   // because the mcp-admin skill's tools (mcp_list_servers, mcp_add_server,
@@ -1311,6 +1338,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     for (const [key, wrap] of visibleEntries(userId)) {
       if (wrap.manifest.id === 'mcp') {
         owningSkillId = 'mcp';
+        owningWrap = wrap;
         skillExec = await getExecutorByKey(key);
         break;
       }
@@ -1320,6 +1348,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     for (const [key, wrap] of visibleEntries(userId)) {
       if (wrap.manifest.tools?.some(t => t.function?.name === resolvedName)) {
         owningSkillId = wrap.manifest.id;
+        owningWrap = wrap;
         skillExec = await getExecutorByKey(key);
         break;
       }
@@ -1327,6 +1356,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   }
 
   if (!skillExec) { yield { type: 'result', text: `Unknown tool: ${name}` }; return; }
+
+  // Custom (user-authored) skills run sandboxed: swap the in-process executor for
+  // a jail-backed wrapper with the SAME (name, args, …) → value contract, so the
+  // streaming dispatch below is untouched. Global skills keep skillExec as-is.
+  if (shouldSandboxSkill(owningWrap)) {
+    const _sandboxedSkillId = owningSkillId;
+    skillExec = (n, a) => runCustomSkillValue({ userId, agentId, skillId: _sandboxedSkillId, name: n, args: a });
+  }
 
   // Memory scoping: note when a *scopable* skill's tool runs, so a fact
   // remembered later this turn scopes to that skill (see pinFact). Scopable =
