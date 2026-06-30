@@ -216,6 +216,111 @@ async function loadDashboard() {
     } catch {}
   }
 
+  // Local-First card (admin/owner only) — the complement of Token Usage: how
+  // many turns OE handled WITHOUT a cloud LLM call (fast-paths + local models).
+  // Range-parameterized, so it re-fetches /api/admin/turn-metrics per toggle.
+  if (_currentUser?.role === 'owner' || _currentUser?.role === 'admin') {
+    const lc = document.createElement('div');
+    lc.className = 'dash-card';
+    lc.style.borderColor = '#43b89c55';
+    body.appendChild(lc);
+
+    const lfRanges = [
+      { label: '1h', range: '1h' },
+      { label: '24h', range: '24h' },
+      { label: '7d', range: '7d' },
+    ];
+    let lfActive = 1; // default 24h
+
+    const tile = (label, value, sub) =>
+      `<div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px">${label}</div>
+        <div style="font-size:20px;font-weight:700;color:var(--text)">${value}</div>
+        ${sub ? `<div style="font-size:11px;color:var(--muted)">${sub}</div>` : ''}
+      </div>`;
+
+    function lfHead(metaHtml) {
+      const tabs = lfRanges.map((t, i) =>
+        `<span data-lfrange="${i}" style="padding:2px 8px;font-size:11px;border-radius:4px;cursor:pointer;${i === lfActive ? 'background:var(--accent);color:#fff' : 'color:var(--muted)'}">${t.label}</span>`
+      ).join('');
+      return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <span>${icon('zap', 24)}</span>
+          <div style="flex:1">
+            <div class="dash-card-title">Local-First (last ${lfRanges[lfActive].label})</div>
+            <div class="dash-card-meta">${metaHtml}</div>
+          </div>
+          <div style="display:flex;gap:4px">${tabs}</div>
+        </div>`;
+    }
+    function lfWireTabs() {
+      lc.querySelectorAll('[data-lfrange]').forEach(el => {
+        el.onclick = () => { lfActive = parseInt(el.dataset.lfrange); renderLocalFirst(); };
+      });
+    }
+
+    async function renderLocalFirst() {
+      lc.innerHTML = lfHead('Loading…');
+      lfWireTabs();
+      let m;
+      try { m = await fetch(`/api/admin/turn-metrics?range=${lfRanges[lfActive].range}`).then(x => x.json()); }
+      catch { lc.innerHTML = lfHead('<span style="color:var(--red)">Failed to load metrics</span>'); lfWireTabs(); return; }
+
+      const t = m.totals || {};
+      const lat = m.latencyMs || {};
+      const secs = (ms) => ((ms || 0) / 1000).toFixed(1) + 's';
+      if (!t.turns) { lc.innerHTML = lfHead('No turns recorded in this window.'); lfWireTabs(); return; }
+
+      const localTurns = (t.llmAvoidedTurns || 0) + (t.localLlmTurns || 0);
+      const meta = `<b>${t.cloudCallsAvoided}</b> of <b>${t.turns}</b> turns avoided a cloud call · <b>${t.cloudCallsAvoidedPct}%</b>`;
+
+      const breakdown = [
+        ['Fast-path (no LLM)', t.llmAvoidedTurns, 'var(--green,#43b89c)'],
+        ['Local LLM', t.localLlmTurns, '#5b9bd5'],
+        ['Cloud', t.cloudTurns, '#e0a05c'],
+        ['Unknown', t.unknownTurns, 'var(--muted)'],
+      ].filter(([, n]) => n > 0).map(([label, n, color]) => {
+        const pct = Math.round((n / t.turns) * 100);
+        return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:1px 0">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color}"></span>
+          <span style="flex:1">${label}</span>
+          <span style="color:var(--muted)">${n} · ${pct}%</span>
+        </div>`;
+      }).join('');
+
+      const handlers = (m.byLocalHandler || []).slice(0, 5).map(h =>
+        `<div style="display:flex;font-size:11px;color:var(--muted);padding:1px 0"><span style="flex:1">${escHtml(h.handler)}</span><span>${h.turns}</span></div>`
+      ).join('') || '<div style="font-size:11px;color:var(--muted)">No local-handler hits yet</div>';
+
+      const slowAgents = (m.slowestAgents || []).slice(0, 3).map(a =>
+        `<div style="display:flex;font-size:11px;color:var(--muted);padding:1px 0"><span style="flex:1">${escHtml(a.agent)}</span><span>${secs(a.avgMs)} avg</span></div>`
+      ).join('') || '<div style="font-size:11px;color:var(--muted)">—</div>';
+
+      lc.innerHTML = lfHead(meta) + `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin:8px 0">
+          ${tile('Avoided', t.cloudCallsAvoidedPct + '%', t.cloudCallsAvoided + ' of ' + t.turns)}
+          ${tile('Local', localTurns, 'fast-path + local')}
+          ${tile('Cloud', t.cloudTurns, t.unknownTurns ? t.unknownTurns + ' unknown' : '')}
+          ${tile('Latency', secs(lat.p95), 'p95 · p50 ' + secs(lat.p50))}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div>
+            <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Routing</div>
+            ${breakdown}
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Top local handlers</div>
+            ${handlers}
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Slowest agents</div>
+          ${slowAgents}
+        </div>`;
+      lfWireTabs();
+    }
+    renderLocalFirst();
+  }
+
 }
 
 const DASH_TOOLS = {
