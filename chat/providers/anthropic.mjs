@@ -59,6 +59,10 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
 
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0;
+  // Turn-wide cache accumulators (the per-iteration cacheCreated/cacheRead below
+  // reset each tool round-trip; these survive the loop so __usage reports the
+  // whole turn's cache behavior, mirroring totalInput/OutputTokens).
+  let totalCacheRead = 0, totalCacheCreated = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
   // Set if Anthropic rejects the hosted web_search server tool, so we resend the
   // same turn with the Brave function restored (search still works, via Brave).
@@ -157,6 +161,8 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         totalInputTokens += u.input_tokens ?? 0;
         cacheCreated += u.cache_creation_input_tokens ?? 0;
         cacheRead    += u.cache_read_input_tokens     ?? 0;
+        totalCacheCreated += u.cache_creation_input_tokens ?? 0;
+        totalCacheRead    += u.cache_read_input_tokens     ?? 0;
       }
       if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
         toolUseBlocks.set(event.index, { id: event.content_block.id, name: event.content_block.name, inputJson: '' });
@@ -298,6 +304,6 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
 
   yield { type: '__content', content: assistantContent };
   if (totalInputTokens || totalOutputTokens) {
-    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: 'anthropic', model: agent.model };
+    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cachedTokens: totalCacheRead, cacheCreatedTokens: totalCacheCreated, provider: 'anthropic', model: agent.model };
   }
 }

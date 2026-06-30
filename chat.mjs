@@ -405,6 +405,11 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
       usage = {
         inTok: event.inputTokens ?? null,
         outTok: event.outputTokens ?? null,
+        // Prompt-cache read hits (OpenAI cached_tokens / Anthropic cache_read) and
+        // Anthropic cache-creation tokens. Named *Tok (not *Tokens) so logger.mjs's
+        // /token/i redact key doesn't blank them on the way to the turn trace.
+        cachedTok: event.cachedTokens ?? null,
+        cacheCreateTok: event.cacheCreatedTokens ?? null,
         provider: event.provider ?? null,
         model: event.model ?? null,
       };
@@ -1377,6 +1382,22 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       const selectedTools = _routerStore?.initialToolNames
         ? [...(_routerStore.initialToolNames)]
         : (agent.tools ?? []).map(t => t.function?.name).filter(Boolean);
+      // Tool-router savings: full set (pre-trim/pre-plan) vs the set actually
+      // shipped this turn. Bytes are exact (the dropped defs JSON-stringified),
+      // not estimated — a real prompt-size signal independent of any pricing.
+      let toolRouter = null;
+      const _fullTools = _routerStore?.fullTools;
+      const _keptNames = _routerStore?.initialToolNames;
+      if (Array.isArray(_fullTools) && _keptNames) {
+        const dropped = _fullTools.filter(t => !_keptNames.has(t.function?.name));
+        toolRouter = {
+          full: _fullTools.length,
+          kept: _keptNames.size,
+          dropped: dropped.length,
+          droppedBytes: dropped.length ? JSON.stringify(dropped).length : 0,
+          recovered: recoveredMissingTools === true,
+        };
+      }
       recordSpan({
         agent: agent.name ?? agent.id ?? null,
         agentId: agent.id ?? null,
@@ -1391,6 +1412,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         })),
         inTok: usage?.inTok ?? null,
         outTok: usage?.outTok ?? null,
+        cachedTok: usage?.cachedTok ?? null,
+        cacheCreateTok: usage?.cacheCreateTok ?? null,
+        toolRouter,
         ms: Date.now() - _streamChatStart,
         error: errInfo,
       });

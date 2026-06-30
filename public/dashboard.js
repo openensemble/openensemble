@@ -267,7 +267,10 @@ async function loadDashboard() {
 
       const t = m.totals || {};
       const lat = m.latencyMs || {};
+      const cache = m.cache || {};
+      const tr = m.toolRouter || {};
       const secs = (ms) => ((ms || 0) / 1000).toFixed(1) + 's';
+      const fmtK = (n) => (n || 0) >= 1000 ? ((n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k') : String(n || 0);
       if (!t.turns) { lc.innerHTML = lfHead('No turns recorded in this window.'); lfWireTabs(); return; }
 
       const localTurns = (t.llmAvoidedTurns || 0) + (t.localLlmTurns || 0);
@@ -301,6 +304,8 @@ async function loadDashboard() {
           ${tile('Local', localTurns, 'fast-path + local')}
           ${tile('Cloud', t.cloudTurns, t.unknownTurns ? t.unknownTurns + ' unknown' : '')}
           ${tile('Latency', secs(lat.p95), 'p95 · p50 ' + secs(lat.p50))}
+          ${(cache.cacheReadTok || 0) > 0 ? tile('Cache hit', cache.hitPct + '%', fmtK(cache.cacheReadTok) + ' tok read') : ''}
+          ${(tr.fullTools || 0) > 0 ? tile('Tools cut', tr.trimmedPct + '%', tr.droppedTools + ' of ' + tr.fullTools) : ''}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
           <div>
