@@ -22,6 +22,7 @@ import { getUser, modifyUser } from '../_helpers.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import { composeSkillSpaBlock } from '../../lib/skill-prompt-composer.mjs';
 import { getCachedMcpToolDefsForAgent } from '../../lib/mcp-tools.mjs';
+import { modelCapabilityPrompt } from '../../lib/model-capabilities.mjs';
 
 const TOOL_SETS_COMPAT = {
   web: 'general', general: 'general', gmail: 'email', email: 'email', none: 'none',
@@ -323,6 +324,7 @@ export function getAgentsForUser(userId) {
     // connection refused. Always use the server's LAN IP when sharing URLs.
     const serverUrlGuidance = `## Server URLs\n\nThis OpenEnsemble server's LAN address is \`${serverIp}\`. When you share any URL that points at this server (dev servers, preview links, running processes, etc.), always use \`http://${serverIp}:<port>\` — NEVER \`http://localhost:<port>\` or \`http://127.0.0.1:<port>\`. The user's browser runs on a different machine than this server, so localhost resolves to their own computer and fails with "connection refused".`;
     const selfReferenceGuidance = `## Speaking about yourself\n\nSpeak in the first person — "I", "me", "my". Do not refer to yourself in the third person by your own name (e.g. don't say "${agentName} sees that..." — say "I see that..."). You may refer to OTHER agents by their name when delegating or quoting them (e.g. "I asked the email agent and they found...").`;
+    const modelCapabilityGuidance = modelCapabilityPrompt(withOverrides.provider ?? 'ollama', withOverrides.model ?? '');
 
     // Escalation guidance for specialists. Coordinators already have a full
     // ask_agent roster and don't need this nudge; specialists need to know
@@ -357,7 +359,7 @@ export function getAgentsForUser(userId) {
     // systemPrompt below is the legacy flat concatenation for callers that
     // haven't migrated to the tier-aware path yet (every non-Anthropic
     // provider — the bytes still match what we used to send).
-    const _stableShellParts = [expandedPrompt, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p);
+    const _stableShellParts = [expandedPrompt, modelCapabilityGuidance, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p);
     const _promptTiers = {
       stable: _stableShellParts.join('\n\n'),
       context: skillPromptAdditions || '',
@@ -368,7 +370,7 @@ export function getAgentsForUser(userId) {
     // SPA section after per-turn tool trimming. Kept for back-compat with
     // the legacy single-string path; new code reads _promptTiers.context
     // directly.
-    const _systemPromptShell = [expandedPrompt, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '').join('\n\n');
+    const _systemPromptShell = [expandedPrompt, modelCapabilityGuidance, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '').join('\n\n');
 
     // Patch ask_agent's agent_id description per-agent. Coordinators see the
     // full delegatable-specialist roster; specialists see only the literal

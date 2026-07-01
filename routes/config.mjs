@@ -21,7 +21,8 @@ import {
   pinAmbientMp3,
 } from './devices.mjs';
 import { ambientFilePath } from '../lib/routines.mjs';
-import { supportsVision } from '../lib/model-capabilities.mjs';
+import { supportsImageGeneration, supportsVision } from '../lib/model-capabilities.mjs';
+import { listOpenAIOAuthModels } from '../lib/openai-codex-models.mjs';
 import {
   probePiperAvailable,
   probeKittenttsAvailable,
@@ -140,20 +141,6 @@ const GROK_MGMT_BASE = 'https://management-api.x.ai/v1';
 // export is a Proxy that transparently merges any runtime-added providers
 // from the oe-admin user-providers overlay (config/user-providers.json).
 const COMPAT_PROVIDERS = OPENAI_COMPAT_PROVIDERS;
-
-// ChatGPT backend (OAuth) — the Codex /responses endpoint accepts these model
-// slugs against a ChatGPT Plus/Pro account. There's no /models endpoint, and
-// the backend rejects every -pro/-codex/-mini/-nano variant of 5.5/5.3 plus
-// the entire o-series and 4o/4.1 families with: "The '<slug>' model is not
-// supported when using Codex with a ChatGPT account." Verified by probing
-// /responses with each slug (scripts/probe-oauth-models.mjs, 2026-04-25).
-const OPENAI_OAUTH_STATIC_MODELS = [
-  { id: 'gpt-5.5',       name: 'GPT-5.5' },
-  { id: 'gpt-5.4',       name: 'GPT-5.4' },
-  { id: 'gpt-5.4-mini',  name: 'GPT-5.4 Mini' },
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
-  { id: 'gpt-5.2',       name: 'GPT-5.2' },
-];
 
 // Perplexity doesn't expose GET /models — hardcode the current Sonar family.
 const PERPLEXITY_STATIC_MODELS = [
@@ -956,7 +943,19 @@ export async function handle(req, res) {
       const data = await resp.json();
       const list = data.models ?? data.data ?? [];
       const models = list
-        .map(m => ({ id: m.id ?? m.name, displayName: m.id ?? m.name, supportsVision: supportsVision('grok', m.id ?? m.name) }))
+        .map(m => {
+          const id = m.id ?? m.name;
+          return {
+            id,
+            displayName: id,
+            supportsVision: supportsVision('grok', id),
+            supportsImageGeneration: supportsImageGeneration('grok', id),
+            capabilities: [
+              ...(supportsVision('grok', id) ? ['image_input'] : []),
+              ...(supportsImageGeneration('grok', id) ? ['image_generation'] : []),
+            ],
+          };
+        })
         .filter(m => m.id)
         .sort((a, b) => a.id.localeCompare(b.id));
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1002,6 +1001,8 @@ export async function handle(req, res) {
           displayName: m.display_name ?? m.id,
           createdAt: m.created_at ?? null,
           supportsVision: supportsVision('anthropic', m.id),
+          supportsImageGeneration: supportsImageGeneration('anthropic', m.id),
+          capabilities: supportsVision('anthropic', m.id) ? ['image_input'] : [],
         }))
         .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 
@@ -1043,16 +1044,22 @@ export async function handle(req, res) {
       // FLUMINA = Fireworks-native image models (Flux). Image-generation, not vision input.
       const fluminaModels = allModels
         .filter(m => m.kind?.startsWith('FLUMINA'))
-        .map(m => ({ id: (m.name ?? '').split('/').pop(), displayName: m.displayName || m.name, supportsVision: false }));
+        .map(m => ({
+          id: (m.name ?? '').split('/').pop(),
+          displayName: m.displayName || m.name,
+          supportsVision: false,
+          supportsImageGeneration: true,
+          capabilities: ['image_generation'],
+        }));
 
       // SD/Playground models exist in the web UI but aren't returned by the listing API
       // They use a different inference endpoint (/inference/v1/image_generation/...)
       const legacyImageModels = [
-        { id: 'stable-diffusion-xl-1024-v1-0',    displayName: 'Stable Diffusion XL',                supportsVision: false },
-        { id: 'playground-v2-1024px-aesthetic',    displayName: 'Playground v2 1024',                supportsVision: false },
-        { id: 'playground-v2-5-1024px-aesthetic',  displayName: 'Playground v2.5 1024',              supportsVision: false },
-        { id: 'SSD-1B',                            displayName: 'Segmind Stable Diffusion 1B',       supportsVision: false },
-        { id: 'japanese-stable-diffusion-xl',      displayName: 'Japanese Stable Diffusion XL',      supportsVision: false },
+        { id: 'stable-diffusion-xl-1024-v1-0',    displayName: 'Stable Diffusion XL',                supportsVision: false, supportsImageGeneration: true, capabilities: ['image_generation'] },
+        { id: 'playground-v2-1024px-aesthetic',    displayName: 'Playground v2 1024',                supportsVision: false, supportsImageGeneration: true, capabilities: ['image_generation'] },
+        { id: 'playground-v2-5-1024px-aesthetic',  displayName: 'Playground v2.5 1024',              supportsVision: false, supportsImageGeneration: true, capabilities: ['image_generation'] },
+        { id: 'SSD-1B',                            displayName: 'Segmind Stable Diffusion 1B',       supportsVision: false, supportsImageGeneration: true, capabilities: ['image_generation'] },
+        { id: 'japanese-stable-diffusion-xl',      displayName: 'Japanese Stable Diffusion XL',      supportsVision: false, supportsImageGeneration: true, capabilities: ['image_generation'] },
       ];
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1095,6 +1102,13 @@ export async function handle(req, res) {
           supportsVision: Array.isArray(m.architecture?.input_modalities)
             ? m.architecture.input_modalities.includes('image')
             : supportsVision('openrouter', m.id),
+          supportsImageGeneration: Array.isArray(m.architecture?.output_modalities)
+            ? m.architecture.output_modalities.includes('image')
+            : supportsImageGeneration('openrouter', m.id),
+          capabilities: [
+            ...(Array.isArray(m.architecture?.input_modalities) && m.architecture.input_modalities.includes('image') ? ['image_input'] : []),
+            ...(Array.isArray(m.architecture?.output_modalities) && m.architecture.output_modalities.includes('image') ? ['image_generation'] : []),
+          ],
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1118,10 +1132,12 @@ export async function handle(req, res) {
   // Returns [{ id, name, contextLen?, created? }] sorted by name.
   if (req.url?.startsWith('/api/provider-models/') && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const prov = req.url.slice('/api/provider-models/'.length).split('?')[0];
-    // OAuth-backed ChatGPT provider: no key field, no /models endpoint — static list.
+    const urlObj = new URL(req.url, 'http://x');
+    const prov = urlObj.pathname.slice('/api/provider-models/'.length);
+    // OAuth-backed ChatGPT provider: pull the account-visible Codex model list
+    // when connected; fall back inside the helper for disconnected setup/admin UI.
     if (prov === 'openai-oauth') {
-      const annotated = OPENAI_OAUTH_STATIC_MODELS.map(m => ({ ...m, supportsVision: supportsVision('openai-oauth', m.id ?? m.name) }));
+      const annotated = await listOpenAIOAuthModels(authId, { refresh: urlObj.searchParams.get('refresh') === '1' });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(annotated));
       return true;
@@ -1146,7 +1162,12 @@ export async function handle(req, res) {
     }
     // Perplexity has no /models endpoint — return the hardcoded Sonar family.
     if (prov === 'perplexity') {
-      const annotated = PERPLEXITY_STATIC_MODELS.map(m => ({ ...m, supportsVision: supportsVision('perplexity', m.id ?? m.name) }));
+      const annotated = PERPLEXITY_STATIC_MODELS.map(m => ({
+        ...m,
+        supportsVision: supportsVision('perplexity', m.id ?? m.name),
+        supportsImageGeneration: supportsImageGeneration('perplexity', m.id ?? m.name),
+        capabilities: supportsVision('perplexity', m.id ?? m.name) ? ['image_input'] : [],
+      }));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(annotated));
       return true;
@@ -1167,6 +1188,11 @@ export async function handle(req, res) {
         contextLen:     m.context_length ?? m.context_window ?? null,
         created:        m.created ?? null,
         supportsVision: supportsVision(prov, m.id ?? m.name, { capabilities: m.capabilities }),
+        supportsImageGeneration: supportsImageGeneration(prov, m.id ?? m.name, { capabilities: m.capabilities }),
+        capabilities: [
+          ...(supportsVision(prov, m.id ?? m.name, { capabilities: m.capabilities }) ? ['image_input'] : []),
+          ...(supportsImageGeneration(prov, m.id ?? m.name, { capabilities: m.capabilities }) ? ['image_generation'] : []),
+        ],
       })).filter(m => m.id).sort((a, b) => String(a.name).localeCompare(String(b.name)));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(models));
@@ -1207,6 +1233,11 @@ export async function handle(req, res) {
         .then(d => (d.models ?? []).map(m => ({
           name: m.name, provider: 'ollama', tier: classifyOllama(m, sourceIsCloud),
           supportsVision: supportsVision('ollama', m.name),
+          supportsImageGeneration: supportsImageGeneration('ollama', m.name),
+          capabilities: [
+            ...(supportsVision('ollama', m.name) ? ['image_input'] : []),
+            ...(supportsImageGeneration('ollama', m.name) ? ['image_generation'] : []),
+          ],
         })));
 
     const ollamaFetches = [];
@@ -1254,6 +1285,7 @@ export async function handle(req, res) {
                   loaded:      (m.loaded_instances?.length ?? 0) > 0,
                   capabilities: caps,
                   supportsVision: supportsVision('lmstudio', id, { capabilities: caps }),
+                  supportsImageGeneration: supportsImageGeneration('lmstudio', id, { capabilities: caps }),
                 };
               })
               .filter(m => m.name);
@@ -1268,6 +1300,7 @@ export async function handle(req, res) {
               loaded:      false,
               capabilities: [],
               supportsVision: supportsVision('lmstudio', m.id),
+              supportsImageGeneration: supportsImageGeneration('lmstudio', m.id),
             }));
         } catch (e) {
           lastErr = e;
@@ -1318,8 +1351,8 @@ export async function handle(req, res) {
 
     const models = [
       // Bundled models — always available, no external runtime required.
-      { name: 'nomic-embed-text-v1', provider: 'builtin', displayName: 'Nomic Embed (built-in)', tier: 'bundled', supportsVision: false },
-      { name: builtinReasonId, provider: 'builtin', displayName: 'OpenEnsemble Reason v1 (built-in)', tier: 'bundled', supportsVision: false },
+      { name: 'nomic-embed-text-v1', provider: 'builtin', displayName: 'Nomic Embed (built-in)', tier: 'bundled', supportsVision: false, supportsImageGeneration: false, capabilities: [] },
+      { name: builtinReasonId, provider: 'builtin', displayName: 'OpenEnsemble Reason v1 (built-in)', tier: 'bundled', supportsVision: false, supportsImageGeneration: false, capabilities: [] },
       ...ollamaMerged,
       ...(lmRes.status === 'fulfilled' ? lmRes.value : []),
     ];

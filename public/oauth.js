@@ -792,8 +792,11 @@ function renderCompatProviderCards(cfg) {
                 style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Disconnect</button>
               <button data-action="refreshOpenAIOAuthStatus"
                 style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Check status</button>
+              <button data-action="loadCompatProviderModels" data-args='${JSON.stringify([p.id, true]).replace(/'/g, "&#39;")}'
+                style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Fetch models</button>
             </div>
             <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:4px">Checking…</div>
+            <div id="providerModels_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px;max-height:140px;overflow-y:auto"></div>
             <div id="providerPaste_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px">If the ChatGPT page ended on a "could not connect" screen (URL starts with <code>http://localhost:1455/auth/callback?code=…</code>), paste that full URL here.</div>
               <input type="text" id="providerPasteInput_${p.id}" placeholder="http://localhost:1455/auth/callback?code=…"
@@ -845,18 +848,27 @@ async function saveCompatProviderKey(providerId, keyField) {
   } catch { showToast('Failed to save key'); }
 }
 
-async function loadCompatProviderModels(providerId) {
+async function loadCompatProviderModels(providerId, refresh = false) {
   const box = $(`providerModels_${providerId}`);
   if (box) box.textContent = 'Loading models…';
   try {
-    const models = await fetch(`/api/provider-models/${providerId}`).then(r => r.json());
+    const models = await fetch(`/api/provider-models/${providerId}${refresh ? '?refresh=1' : ''}`).then(r => r.json());
     if (!Array.isArray(models) || models.length === 0) {
       if (box) box.textContent = 'No models returned. Check that the API key is valid.';
       return;
     }
     if (box) {
       box.innerHTML = `<div style="color:var(--muted);margin-bottom:4px">${models.length} model${models.length === 1 ? '' : 's'} available:</div>`
-        + models.slice(0, 50).map(m => `<div style="font-family:monospace;color:var(--text)">${m.id}${m.contextLen ? ` <span style="color:var(--muted)">(${m.contextLen.toLocaleString()} ctx)</span>` : ''}</div>`).join('')
+        + models.slice(0, 50).map(m => {
+          const caps = [];
+          if (m.supportsVision) caps.push('vision');
+          if (m.supportsImageGeneration) caps.push('image gen');
+          const meta = [
+            ...(m.contextLen ? [`${m.contextLen.toLocaleString()} ctx`] : []),
+            ...caps,
+          ];
+          return `<div style="font-family:monospace;color:var(--text)">${m.id}${meta.length ? ` <span style="color:var(--muted)">(${meta.join(', ')})</span>` : ''}</div>`;
+        }).join('')
         + (models.length > 50 ? `<div style="color:var(--muted);margin-top:4px">…and ${models.length - 50} more</div>` : '');
     }
     // Stash the list so the agent model picker can use it

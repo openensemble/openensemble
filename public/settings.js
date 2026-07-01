@@ -20,7 +20,7 @@ async function loadAnthropicModels() {
   try {
     const data = await fetch('/api/anthropic-models').then(r => r.json());
     if (Array.isArray(data) && data.length) {
-      anthropicModels = data.map(m => ({ name: m.id, provider: 'anthropic', displayName: m.displayName, supportsVision: m.supportsVision === true }));
+      anthropicModels = data.map(m => ({ name: m.id, provider: 'anthropic', displayName: m.displayName, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
     }
   } catch {}
 }
@@ -30,8 +30,8 @@ async function loadAnthropicModels() {
 // xAI's /v1/models, so we keep those as static slugs.
 let grokChatModels = [];
 const grokMediaModels = [
-  { name: 'grok-imagine-image',     provider: 'grok', displayName: 'Grok Imagine (image)' },
-  { name: 'grok-imagine-image-pro', provider: 'grok', displayName: 'Grok Imagine Pro (image)' },
+  { name: 'grok-imagine-image',     provider: 'grok', displayName: 'Grok Imagine (image)',     supportsImageGeneration: true, capabilities: ['image_generation'] },
+  { name: 'grok-imagine-image-pro', provider: 'grok', displayName: 'Grok Imagine Pro (image)', supportsImageGeneration: true, capabilities: ['image_generation'] },
   { name: 'grok-imagine-video',     provider: 'grok', displayName: 'Grok Imagine (video)' },
 ];
 function getGrokModels() {
@@ -47,6 +47,8 @@ async function loadGrokModels() {
         provider: 'grok',
         displayName: `${m.displayName ?? m.id} (chat)`,
         supportsVision: m.supportsVision === true,
+        supportsImageGeneration: m.supportsImageGeneration === true,
+        capabilities: m.capabilities ?? [],
       }));
     }
   } catch {}
@@ -68,7 +70,7 @@ function getCompatProviderModels() {
   const store = window._compatProviderModels ?? {};
   for (const p of getCompatProviderIds()) {
     for (const m of store[p] ?? []) {
-      out.push({ name: m.id, provider: p, displayName: m.name ?? m.id, contextLen: m.contextLen ?? null, supportsVision: m.supportsVision === true });
+      out.push({ name: m.id, provider: p, displayName: m.name ?? m.id, contextLen: m.contextLen ?? null, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] });
     }
   }
   return out;
@@ -78,7 +80,7 @@ async function loadFireworksModels() {
   try {
     const data = await fetch('/api/fireworks-models').then(r => r.json());
     if (Array.isArray(data) && data.length) {
-      fireworksModels = data.map(m => ({ name: m.id, provider: 'fireworks', displayName: m.displayName, supportsVision: m.supportsVision === true }));
+      fireworksModels = data.map(m => ({ name: m.id, provider: 'fireworks', displayName: m.displayName, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
     }
   } catch {}
 }
@@ -87,7 +89,7 @@ async function loadOpenRouterModels() {
   try {
     const data = await fetch('/api/openrouter-models').then(r => r.json());
     if (Array.isArray(data) && data.length) {
-      openrouterModels = data.map(m => ({ name: m.id, provider: 'openrouter', displayName: m.name, contextLen: m.contextLen, supportsVision: m.supportsVision === true }));
+      openrouterModels = data.map(m => ({ name: m.id, provider: 'openrouter', displayName: m.name, contextLen: m.contextLen, supportsVision: m.supportsVision === true, supportsImageGeneration: m.supportsImageGeneration === true, capabilities: m.capabilities ?? [] }));
     }
   } catch {}
 }
@@ -170,6 +172,7 @@ function renderModelBrowser() {
       const meta = [];
       if (m.contextLen) meta.push(`${Math.round(m.contextLen/1000)}k ctx`);
       if (Array.isArray(m.capabilities) && m.capabilities.includes('tool_use')) meta.push('tools');
+      if (m.supportsImageGeneration || (Array.isArray(m.capabilities) && m.capabilities.includes('image_generation'))) meta.push('image gen');
       if (m.loaded) meta.push('● loaded');
       const metaStr = meta.length ? `<span style="color:var(--muted);font-size:11px;margin-left:6px">${meta.join(' · ')}</span>` : '';
       const label = m.displayName && m.displayName !== m.name
@@ -2509,4 +2512,3 @@ function pickMcpCatalogEntry(id) {
   $('mcpAddId')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   $('mcpAddId')?.focus();
 }
-

@@ -10,14 +10,17 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
+import { writeFileSync } from 'fs';
+import path from 'path';
 import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth.mjs';
 import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
-import { nativeWebSearch } from '../../lib/model-capabilities.mjs';
+import { nativeWebSearch, supportsImageGeneration } from '../../lib/model-capabilities.mjs';
 import { mapOpenAIResponsesReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
+import { getUserFilesDir } from '../../lib/paths.mjs';
 
 export function toResponsesInput(messages) {
   // Translate OpenAI-compat messages → Responses API input items.
@@ -91,6 +94,27 @@ function isRetriableNetworkError(e) {
   const causeMsg = e.cause?.message || '';
   const causeCode = e.cause?.code || '';
   return RETRIABLE_NETWORK_RE.test(causeMsg) || RETRIABLE_NETWORK_RE.test(causeCode);
+}
+
+function saveImageGenerationResult(userId, item) {
+  let base64 = item?.result ?? item?.image_base64 ?? item?.b64_json;
+  if (!base64 || typeof base64 !== 'string') return null;
+  if (base64.includes(',')) base64 = base64.split(',').pop();
+  const idPart = String(item.id ?? item.call_id ?? 'openai_image')
+    .replace(/[^a-z0-9]+/gi, '_')
+    .toLowerCase()
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48);
+  const filename = `${idPart || 'openai_image'}_${Date.now()}.png`;
+  let savedPath = null;
+  try {
+    const dir = getUserFilesDir(userId, 'images');
+    savedPath = path.join(dir, filename);
+    writeFileSync(savedPath, Buffer.from(base64, 'base64'));
+  } catch (e) {
+    console.warn('[openai-oauth] Failed to save generated image:', e.message);
+  }
+  return { base64, mimeType: 'image/png', filename, savedPath };
 }
 
 async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000 } = {}) {
@@ -188,6 +212,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     if (useNativeSearch) {
       responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search' && t.name !== 'fetch_url');
       responsesTools.push(nativeSearch.tool);
+    }
+    if (isCodex && supportsImageGeneration('openai-oauth', agent.model)) {
+      responsesTools = responsesTools || [];
+      if (!responsesTools.some(t => t.type === 'image_generation')) {
+        responsesTools.push({ type: 'image_generation' });
+      }
     }
     const body = {
       model:        agent.model,
@@ -306,6 +336,17 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     }
 
     let textContent  = '';
+    const generatedImages = [];
+    const seenImageGenerationItems = new Set();
+    const recordGeneratedImage = (item) => {
+      const key = item?.id ?? item?.call_id ?? item?.result?.slice?.(0, 32);
+      if (key && seenImageGenerationItems.has(key)) return null;
+      const image = saveImageGenerationResult(userId, item);
+      if (!image) return null;
+      if (key) seenImageGenerationItems.add(key);
+      generatedImages.push(image);
+      return image;
+    };
     // call_id → { id (same as call_id), name, argsJson }
     const toolCalls  = new Map();
     // output_index → call_id so *.delta events (keyed by output_index) route correctly
@@ -320,7 +361,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       const t = ev.type;
       if (t && !seenEventTypes.has(t)) {
         seenEventTypes.add(t);
-        if (!/^response\.(output_text\.(delta|done|annotation\.added)|output_item\.(added|done)|function_call_arguments\.(delta|done)|created|in_progress|completed|content_part\.(added|done)|web_search_call\.(in_progress|searching|completed)|reasoning_summary_part\.(added|done)|reasoning_summary_text\.(delta|done))$/.test(t)) {
+        if (!/^response\.(output_text\.(delta|done|annotation\.added)|output_item\.(added|done)|function_call_arguments\.(delta|done)|created|in_progress|completed|content_part\.(added|done)|web_search_call\.(in_progress|searching|completed)|image_generation_call\.(in_progress|generating|partial_image|completed)|reasoning_summary_part\.(added|done)|reasoning_summary_text\.(delta|done))$/.test(t)) {
           console.log(`[${tag}] unknown SSE event type: ${t}`, JSON.stringify(ev).slice(0, 300));
         }
       }
@@ -337,6 +378,9 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           const callId = item.call_id ?? item.id;
           toolCalls.set(callId, { id: callId, name: item.name ?? '', argsJson: typeof item.arguments === 'string' ? item.arguments : '' });
           if (typeof ev.output_index === 'number') indexToCallId.set(ev.output_index, callId);
+        }
+        if (item.type === 'image_generation_call') {
+          yield { type: 'tool_progress', name: 'image_generation', text: 'Generating image...' };
         }
         continue;
       }
@@ -360,6 +404,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
             toolCalls.set(callId, { id: callId, name: item.name ?? '', argsJson: typeof item.arguments === 'string' ? item.arguments : '' });
           }
         }
+        if (item.type === 'image_generation_call') {
+          const image = recordGeneratedImage(item);
+          if (image) yield { type: 'image', ...image, prompt: '' };
+        }
+        continue;
+      }
+      if (t === 'response.image_generation_call.in_progress' || t === 'response.image_generation_call.generating') {
+        yield { type: 'tool_progress', name: 'image_generation', text: 'Generating image...' };
         continue;
       }
       if (t === 'response.web_search_call.in_progress') {
@@ -371,6 +423,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         continue;
       }
       if (t === 'response.completed') {
+        for (const item of ev.response?.output ?? []) {
+          if (item?.type === 'image_generation_call') {
+            const image = recordGeneratedImage(item);
+            if (image) yield { type: 'image', ...image, prompt: '' };
+          }
+        }
         const usage = ev.response?.usage;
         if (usage) {
           totalInputTokens   += usage.input_tokens  ?? 0;
@@ -488,6 +546,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       continue;
     }
 
+    if (generatedImages.length) {
+      const imageText = generatedImages
+        .map(img => `[Image: ${img.filename}]${img.savedPath ? `\nSaved to: ${img.savedPath}` : ''}`)
+        .join('\n\n');
+      textContent = [textContent.trim(), imageText].filter(Boolean).join('\n\n');
+    }
     assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);
     if (assistantContent !== textContent) yield { type: 'replace', text: assistantContent };
     if (firstTokenAt && tokenCount > 0) {
