@@ -16,16 +16,16 @@
     "@lancedb/lancedb": "^0.27.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "busboy": "^1.6.0",
-    "imapflow": "^1.2.18",
-    "node-llama-cpp": "^3.18.1",
+    "imapflow": "^1.4.3",
+    "node-llama-cpp": "^3.19.0",
     "node-pty": "^1.1.0",
-    "nodemailer": "^8.0.7",
+    "nodemailer": "^9.0.3",
     "pdfkit": "^0.18.0",
-    "ws": "^8.18.0"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
+    "@types/node": "^25.9.4",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.4"
+    "vitest": "^4.1.9"
   }
 }
