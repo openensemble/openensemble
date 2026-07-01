@@ -654,7 +654,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // is safe to call unconditionally.
   if (!userToolPlanResult && Array.isArray(agent.tools) && agent.tools.length > 0) {
     try {
-      const trim = await trimToolsForTurn({ agent, userText: routeText, userId, isolatedTaskRun });
+      const trim = await trimToolsForTurn({ agent, userText: routeText, userId, source: voiceCtx?.source ?? null });
       const changed = trim.trimmedTools.length !== trim.fullTools.length;
       agent.tools = trim.trimmedTools;
       // Stash the pre-trim set so request_tools can recover dropped tools — for
@@ -678,6 +678,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // specialist turns the router left untouched. Three-tier path keeps the
       // stable tier byte-identical so Anthropic's cache marker keeps hitting.
       if (changed) recomposeAgentPromptForTools(agent);
+      // Trimmed agents must ASK for a missing tool, not conclude the capability
+      // doesn't exist (the failure mode behind the escalate-and-bounce loop).
+      // Constant line appended after the SPA so the cached prefix stays stable.
+      if (changed && (agent.tools ?? []).some(t => t.function?.name === 'request_tools')) {
+        agent.systemPrompt += '\n\nTool visibility: you hold more tools than are shown this turn. If a tool you need is missing, call request_tools to load it — do not conclude a capability is unavailable, and do not delegate to another agent just to reach a tool you likely own.';
+      }
       log.info('chat', 'tool-router trim', { userId, agentId: agent.id, category: agent.skillCategory, kept: trim.trimmedTools.length, full: trim.fullTools.length, notes: trim.routerNotes, spChars: agent.systemPrompt.length });
     } catch (e) {
       console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message);

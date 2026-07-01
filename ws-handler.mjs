@@ -844,8 +844,15 @@ function onConnection(ws, req) {
         attachment: msg.attachment,
         toolPlan:   msg.toolPlan,
         // Source hint — voice-device chats get a slim tool subset for low
-        // latency. See chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST.
-        source:     typeof msg.source === 'string' ? msg.source : (ws._clientSource ?? null),
+        // latency (chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST); desktop-app
+        // origin keeps the desktop_* tools past the router. The desktop app's
+        // shell reuses the web UI, whose every message says source:'chat-ui' —
+        // the connection-level desktop-app tag (set from the
+        // x-openensemble-desktop-app header at upgrade) must win over that
+        // generic value or the desktop origin is masked.
+        source:     ws._clientSource === 'desktop-app' && (typeof msg.source !== 'string' || msg.source === 'chat-ui')
+                      ? 'desktop-app'
+                      : (typeof msg.source === 'string' ? msg.source : (ws._clientSource ?? null)),
         // Voice-device routing context: deviceId comes from the auth session;
         // wakeSlot is set on the chat message by the firmware when a wake
         // word fires. chat-dispatch resolves slot_assignments and dispatches

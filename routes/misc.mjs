@@ -717,7 +717,8 @@ export async function handle(req, res) {
       const agent = getAgentsForUser(authId).find(a => a.id === agentId);
       if (!agent) { res.writeHead(404); res.end(JSON.stringify({ error: `Unknown agent "${agentId}"` })); return true; }
       const { trimToolsForTurn } = await import('../lib/tool-router.mjs');
-      const trim = await trimToolsForTurn({ agent: { ...agent }, userText: text, userId: authId });
+      const source = typeof body?.source === 'string' ? body.source : null;
+      const trim = await trimToolsForTurn({ agent: { ...agent }, userText: text, userId: authId, source });
       const keptNames = (trim.trimmedTools ?? []).map(t => t.function?.name).filter(Boolean);
       const fullNames = (trim.fullTools ?? []).map(t => t.function?.name).filter(Boolean);
       res.writeHead(200, { 'Content-Type': 'application/json' });
