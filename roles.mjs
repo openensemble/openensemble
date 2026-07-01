@@ -1238,7 +1238,12 @@ async function buildCtx(userId, agentId, skillId = null) {
 // Flag-gated (config.skillSandbox.enabled, default off) until exercised live.
 function shouldSandboxSkill(wrap) {
   if (!wrap || wrap.userId == null) return false; // global = first-party = trusted
-  try { return readConfig()?.skillSandbox?.enabled === true; } catch { return false; }
+  try {
+    const sb = readConfig()?.skillSandbox || {};
+    if (sb.enabled === true) return true;                                   // all custom skills
+    if (Array.isArray(sb.skills) && sb.skills.includes(wrap.manifest?.id)) return true; // per-skill trial
+    return false;
+  } catch { return false; }
 }
 
 // Public form for callers that only have (skillId, userId) — e.g. the watcher
