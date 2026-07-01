@@ -187,6 +187,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   // today) — without it, every web-search turn would die instead of degrading.
   let nativeSearchDisabled = false;
   let reasoningDisabled = false;
+  // Native image generation costs real money per call and a confused agent
+  // can loop it (a delegated "generate then attach" turn produced 8 Grand
+  // Canyon images hunting for a file handle). Hard cap per turn; once hit,
+  // later iterations simply don't offer the tool.
+  const NATIVE_IMAGE_GEN_CAP = 3;
+  let nativeImagesThisTurn = 0;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (e.g. the
@@ -213,7 +219,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search' && t.name !== 'fetch_url');
       responsesTools.push(nativeSearch.tool);
     }
-    if (isCodex && supportsImageGeneration('openai-oauth', agent.model)) {
+    if (isCodex && supportsImageGeneration('openai-oauth', agent.model)
+        && nativeImagesThisTurn < NATIVE_IMAGE_GEN_CAP) {
       responsesTools = responsesTools || [];
       if (!responsesTools.some(t => t.type === 'image_generation')) {
         responsesTools.push({ type: 'image_generation' });
@@ -345,6 +352,18 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       if (!image) return null;
       if (key) seenImageGenerationItems.add(key);
       generatedImages.push(image);
+      nativeImagesThisTurn++;
+      // Hand the MODEL the artifact id immediately. The human-facing
+      // "Saved to:" note lands only at end-of-turn, so mid-turn the model
+      // otherwise has no handle to the file it just produced — a delegated
+      // "generate then attach" task then hunts the filesystem and
+      // regenerates. This note rides the continuation input of any further
+      // rounds in this turn; if the turn ends here it's harmlessly unused.
+      working.push({
+        role: 'user',
+        content: `[server note] Image generated and saved — attachment id: images:${image.filename}. Use exactly this id wherever a file or attachment reference is needed; do not search for the file.`
+          + (nativeImagesThisTurn >= NATIVE_IMAGE_GEN_CAP ? ' Image-generation limit for this turn reached — do not generate more images.' : ''),
+      });
       return image;
     };
     // call_id → { id (same as call_id), name, argsJson }

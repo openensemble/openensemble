@@ -637,9 +637,19 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // ── Stage 1: the first (or only) agent ────────────────────────────────────
   const _delegStart = Date.now();
   const stage1 = { fullText: '', toolsUsed: 0, artifacts: [], errText: null };
+  // Stage-1 insulation: when a forward handoff is declared, the producing
+  // agent must not attempt the handoff itself — cross-agent routing is blocked
+  // for specialists, so a coordinator-authored task that also says "then hand
+  // it off / have X email it" sends the producer hunting for a way to comply
+  // (the Grand-Canyon loop: generate → search for the file → generate again).
+  // The server owns stage 2, so say so inside the task. Server-authored: holds
+  // no matter how the coordinator worded the task.
+  const stage1Task = doHandoff
+    ? `${task}\n\n[Pipeline note — from the server, not the user: do ONLY the production work above. When you finish your reply, your output and any file you produced are handed to ${handoffTo} AUTOMATICALLY. Do not attempt to send, email, attach, route, or hand off anything yourself, and do not search for saved files. Once the artifact exists, describe it in one line and end your reply.]`
+    : task;
   try {
     if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} started working`, { phase: 'running', currentTool: null });
-    yield* runStage(scopedAgent, task, agentName, agentEmoji, combinedNote, directive, rememberedToolPlan, stage1);
+    yield* runStage(scopedAgent, stage1Task, agentName, agentEmoji, combinedNote, directive, rememberedToolPlan, stage1);
   } finally {
     slot.release();
     try {
