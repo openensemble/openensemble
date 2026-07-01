@@ -9,7 +9,7 @@
 //   DELETE /api/learnings/aliases/:phrase
 //   DELETE /api/learnings/routines/:id
 
-let _learnState = { pending: [], learnings: null, busy: new Set() };
+let _learnState = { pending: [], learnings: null, busy: new Set(), policyBusy: false };
 
 function _learnAgo(ms) {
   if (!ms) return '';
@@ -55,6 +55,7 @@ function _renderLearnDrawer() {
   if (!body) return;
   const L = _learnState.learnings || {};
   body.innerHTML = [
+    _renderLearningSettingsSection(L.learningPolicy || {}),
     _renderPendingSection(_learnState.pending),
     _renderRulesSection(L.rules || []),
     _renderDefaultsSection(L.defaults || []),
@@ -76,6 +77,44 @@ function _renderSectionHdr(title, count) {
 
 function _renderEmptyHint(text) {
   return `<div style="color:var(--muted);font-size:12px;font-style:italic;padding:6px 16px 12px">${escHtml(text)}</div>`;
+}
+
+// ── Learning settings ──────────────────────────────────────────────────────
+
+function _renderLearningSettingsSection(policy) {
+  const enabled = policy?.enabled !== false;
+  const disabled = _learnState.policyBusy ? 'disabled' : '';
+  const checked = enabled ? 'checked' : '';
+  const args = JSON.stringify(['$checked']).replace(/"/g, '&quot;');
+  const stateLabel = enabled ? 'On' : 'Off';
+  return _renderSectionHdr('Learning settings', 0) +
+    `<label style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:12px;cursor:pointer">
+      <input type="checkbox" ${checked} ${disabled} data-change-action="learnToggleSuggestions" data-change-args='${args}' style="width:16px;height:16px;accent-color:var(--accent,#4f82ff);cursor:pointer">
+      <span style="flex:1">Learning suggestions</span>
+      <span style="font-size:11px;color:var(--muted)">${stateLabel}</span>
+    </label>`;
+}
+
+async function learnToggleSuggestions(enabled) {
+  if (_learnState.policyBusy) return;
+  _learnState.policyBusy = true;
+  _renderLearnDrawer();
+  try {
+    const r = await fetch('/api/learnings/policy', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled === true }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(`Failed: ${err.error || r.statusText}`);
+    }
+  } catch (e) {
+    alert(`Failed: ${e.message}`);
+  } finally {
+    _learnState.policyBusy = false;
+    loadLearnDrawer();
+  }
 }
 
 // ── Pending proposals ───────────────────────────────────────────────────────
