@@ -211,9 +211,9 @@ async function testPhase1(baseline) {
   fs.rmSync(delLogPath, { force: true });
 }
 
-// ── Phase 2: default-arg pinning via real dispatcher + HTTP accept ──────────
+// ── Phase 2: default-arg suppression + user-authored evidence ───────────────
 async function testPhase2() {
-  section('Phase 2: default-arg pinning');
+  section('Phase 2: default-arg suppression');
 
   const td = await import('/home/shawn/.openensemble/lib/tool-defaults.mjs');
   const prop = await import('/home/shawn/.openensemble/lib/proposals.mjs');
@@ -222,42 +222,27 @@ async function testPhase2() {
   const args = { zip: '99999', limit: 7 };
 
   let signal;
-  for (let i = 1; i <= 3; i++) signal = await td.recordToolCall(USER_ID, fakeTool, args);
-  assert(signal.proposed === true && signal.arg === 'zip', 'counter trips at exact threshold=3', JSON.stringify(signal));
+  for (let i = 1; i <= 4; i++) {
+    signal = await td.recordToolCall(USER_ID, fakeTool, args, null, {
+      userText: 'Use ZIP 99999 for this check.',
+    });
+  }
+  assert(signal.proposed === true && signal.arg === 'zip' && signal.userAuthored === true,
+    'counter trips only with user-authored value evidence', JSON.stringify(signal));
 
-  // Emit proposal — this writes to disk via persistUser
-  const created = await prop.proposeDefaultArg({
+  const stale = await prop.proposeDefaultArg({
     userId: USER_ID, agentId: 'test',
     tool: signal.tool, arg: signal.arg, value: signal.value, count: signal.count,
   });
-  assert(created && created.kind === 'default_arg', 'proposeDefaultArg returns valid proposal', JSON.stringify(created)?.slice(0, 100));
+  assert(stale === null, 'proposeDefaultArg rejects stale calls without userAuthored=true', JSON.stringify(stale));
 
-  await restartServer();   // server's in-memory map rehydrates from disk
-
-  const { data: propsAfter } = await req('GET', '/api/proposals');
-  const visible = (propsAfter.pending || []).find(p => p.id === created.id);
-  assert(visible, 'pending list shows the default_arg proposal after restart', 'missing');
-
-  // Accept via HTTP → verify pin written
-  const { status: aS } = await req('POST', `/api/proposals/${created.id}/accept`);
-  assert(aS === 200, 'POST .../accept 200', `status ${aS}`);
-  await new Promise(r => setTimeout(r, 300));   // applier is fire-and-forget
-
-  const pinsAfter = td.loadDefaults(USER_ID);
-  assert(pinsAfter[fakeTool]?.zip === '99999', 'pin written to tool-defaults.json', JSON.stringify(pinsAfter[fakeTool]));
-
-  // Verify merge: omitting zip should fill it; explicit override should win
-  const filled = td.mergeDefaults(USER_ID, fakeTool, { limit: 7 });
-  assert(filled.zip === '99999', 'mergeDefaults fills omitted zip', JSON.stringify(filled));
-  const overridden = td.mergeDefaults(USER_ID, fakeTool, { zip: 'override', limit: 7 });
-  assert(overridden.zip === 'override', 'user-supplied value wins over pin', JSON.stringify(overridden));
-
-  // DELETE pin via HTTP
-  const { status: dS } = await req('DELETE', `/api/learnings/defaults/${encodeURIComponent(fakeTool)}/${encodeURIComponent('zip')}`);
-  assert(dS === 200, 'DELETE /api/learnings/defaults 200', `status ${dS}`);
-  await new Promise(r => setTimeout(r, 100));
-  const pinsAfterDelete = td.loadDefaults(USER_ID);
-  assert(!(fakeTool in pinsAfterDelete), 'pin removed after DELETE', JSON.stringify(pinsAfterDelete));
+  const absentTool = `phase2_${TAG}_absent`;
+  for (let i = 1; i <= 4; i++) {
+    signal = await td.recordToolCall(USER_ID, absentTool, { units: 'metric' }, null, {
+      userText: 'What is the weather?',
+    });
+  }
+  assert(signal.proposed === false, 'counter ignores values absent from user text', JSON.stringify(signal));
 
   // Verify sensitive-arg blocklist: key/token/secret/password/auth must not trip
   const sensTool = `phase2_${TAG}_sens`;
@@ -771,7 +756,6 @@ async function testPhase8() {
 
   const sweepStatusPath = `${USER_DIR}/week1-sweep.json`;
   const propPath = `${USER_DIR}/proposals.json`;
-  const countsPath = `${USER_DIR}/tool-arg-counts.json`;
   const failPath = `${USER_DIR}/tool-failures.json`;
   const mistakesPath = `${USER_DIR}/router-mistakes.jsonl`;
 
@@ -810,12 +794,6 @@ async function testPhase8() {
   const now = Date.now();
   const day = 86_400_000;
 
-  // Seed tool-arg-counts: 2 occurrences (relaxed threshold) of same value
-  const sweepTool = `phase8_${TAG}_tool`;
-  const counts = readJson(countsPath) || {};
-  counts[`${sweepTool}.zip`] = { 's:99999': [now - 2*day, now - 1*day] };
-  writeJson(countsPath, counts);
-
   // Seed tool-failures: 2 unique error prefixes (relaxed)
   const sweepFailTool = `phase8_${TAG}_failtool`;
   const fail = readJson(failPath) || {};
@@ -838,9 +816,9 @@ async function testPhase8() {
   const { data: f2 } = await req('POST', '/api/learnings/sweep/run');
   assert(f2?.ran === true && typeof f2?.count === 'number',
     'force run executes when not done', JSON.stringify(f2));
-  assert(f2.count >= 3,
-    'force run emits >=3 proposals from seeded signals',
-    `emitted ${f2.count}, expected >=3 (default_arg + tool_failure + routing_override)`);
+  assert(f2.count >= 2,
+    'force run emits >=2 proposals from seeded signals',
+    `emitted ${f2.count}, expected >=2 (tool_failure + routing_override)`);
 
   // Verify sweep marked done after run
   const doneStatus = readJson(sweepStatusPath);

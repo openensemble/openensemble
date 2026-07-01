@@ -131,9 +131,9 @@ function _renderPendingCard(p) {
   const ageNote = p.createdAt ? `<span style="color:var(--muted);font-size:11px">${_learnAgo(p.createdAt)}</span>` : '';
   const policy = p.policy || {};
   const risk = policy.risk || p.risk || '';
-  const confidence = policy.confidence ?? p.confidence;
-  const confidenceLabel = Number.isFinite(confidence) ? ` · ${Math.round(confidence * 100)}%` : '';
-  const kindBadge = `<span style="font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted)">${escHtml(p.kind || '')}${risk ? ` · ${escHtml(risk)}${confidenceLabel}` : ''}</span>`;
+  const score = policy.utilityScore ?? policy.confidence ?? p.utilityScore ?? p.confidence;
+  const scoreLabel = Number.isFinite(score) ? ` · ${Math.round(score * 100)}%` : '';
+  const kindBadge = `<span style="font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted)">${escHtml(p.kind || '')}${risk ? ` · ${escHtml(risk)}${scoreLabel}` : ''}</span>`;
   const message = escHtml(p.message || '').replace(/\n/g, '<br>');
   const preview = policy.preview || p.preview;
   const previewHtml = preview ? `<div style="font-size:11px;line-height:1.35;color:var(--muted);margin:-4px 0 10px">${escHtml(_learnPreviewText(preview))}</div>` : '';

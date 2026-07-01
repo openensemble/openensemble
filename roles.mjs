@@ -2015,6 +2015,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             await proposeDefaultArg({
               userId, agentId: agentId || '',
               tool: signal.tool, arg: signal.arg, value: signal.value, count: signal.count,
+              userAuthored: signal.userAuthored === true,
             });
           } catch (e) {
             console.warn('[tool-defaults] propose failed:', e.message);

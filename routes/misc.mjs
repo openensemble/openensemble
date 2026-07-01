@@ -31,7 +31,7 @@ import { listWatchers, unregisterWatcher, patchWatcher, getWatcher, emitEvent, r
 import { cancelTask } from '../background-tasks.mjs';
 import { profileHealthSignalDetails } from '../lib/watcher-health-details.mjs';
 import { acceptProposal, dismissProposal, blockProposal, snoozeProposal, undoProposal, getProposal, listUserProposals } from '../lib/proposals.mjs';
-import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride, applyLearningKindPolicy, revokeLearningKindPolicy } from '../lib/learnings.mjs';
+import { readLearnings, revokeRule, revokeAlias, revokeRoutine, revokeDefault, revokeRoutingOverride, revokeLearnedIntent, resetSalienceKind, applySkillOverride, revokeSkillOverride, applyLearningKindPolicy, revokeLearningKindPolicy, applyLearningPolicy, revokeLearningPolicy } from '../lib/learnings.mjs';
 import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../lib/week1-sweep.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
@@ -482,6 +482,26 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const kind = decodeURIComponent(resetSalienceMatch[1]);
     const result = await resetSalienceKind(authId, kind);
+    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return true;
+  }
+  if (req.url === '/api/learnings/policy' && req.method === 'PUT') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const body = JSON.parse(await readBody(req));
+      const result = await applyLearningPolicy(authId, body);
+      res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+  if (req.url === '/api/learnings/policy' && req.method === 'DELETE') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const result = await revokeLearningPolicy(authId);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
     return true;
