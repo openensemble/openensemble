@@ -19,6 +19,7 @@ import { pathToFileURL } from 'url';
 import path from 'path';
 import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir, getUserFilesDir, readConfig } from './lib/paths.mjs';
 import { buildSkillCredentials } from './lib/credentials.mjs';
+import { skillDeclaresNetwork } from './lib/skill-net-policy.mjs';
 import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helper.mjs';
 import { buildBrowserHelpers } from './lib/browser-helper.mjs';
 import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-helper.mjs';
@@ -1259,7 +1260,11 @@ export function isSandboxedSkill(skillId, userId) {
 // the jail is a follow-up); failures throw so the normal tool-failure path runs.
 async function runCustomSkillValue({ userId, agentId, skillId, name, args }) {
   const { runCustomSkillSandboxed } = await import('./lib/skill-subprocess.mjs');
-  const r = await runCustomSkillSandboxed({ userId, agentId, skillId, toolName: name, args, net: true });
+  // Default-deny egress: the jail only gets network if the skill's manifest declares
+  // `sandbox.network`. An undeclared (or rogue) skill runs with --unshare-net so it
+  // can't exfiltrate anything it can read. See lib/skill-net-policy.mjs.
+  const net = skillDeclaresNetwork(userId, skillId);
+  const r = await runCustomSkillSandboxed({ userId, agentId, skillId, toolName: name, args, net });
   if (!r.ok) throw new Error(/** @type {any} */ (r).error || `custom skill ${skillId}.${name} failed`);
   if (Array.isArray(r.events) && r.events.length) {
     const text = r.events.filter(e => e?.type === 'token').map(e => e.text).join('');

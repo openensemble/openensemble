@@ -274,7 +274,7 @@ export async function executeSkillTool(name, args, userId, agentId, ctx) {
     const outDir = ctx.userFilesDir?.('videos') || '/tmp';
     const { code, stdout, stderr } = await ctx.runSandboxed(bin, ['-o', `${outDir}/%(title)s.%(ext)s`, args.url], {
       writableDirs: [outDir],
-      net: true,                 // yt-dlp needs network; set false for offline tools
+      net: true,                 // yt-dlp needs network — also declare "sandbox":{"network":true} in your manifest
       timeoutMs: 10 * 60 * 1000,
     });
     if (code !== 0) return ctx.toolError(`yt-dlp failed: ${stderr.slice(-400)}`);
@@ -292,7 +292,9 @@ What this gives you, automatically:
 - **`ctx.runSandboxed(bin, args, { writableDirs, net, timeoutMs })`** — runs the binary
   under bubblewrap: system read-only, the skill dir read-only, only your declared
   `writableDirs` writable, isolated namespaces. A downloaded binary can't read
-  credentials, the OE config, or other users' files.
+  credentials, the OE config, or other users' files. `net: true` is capped by your
+  manifest's `sandbox.network` — a skill that didn't declare network gets none here
+  either, no matter what you pass.
 - A `node` interpreter is always available at `process.execPath` (and inside the
   sandbox); don't pin a specific nvm path.
 
@@ -370,7 +372,11 @@ These are namespaced per skill, so no other skill (or user) can read them, and t
 
 **Persistent non-secret state — your state dir.** For a small db / config / cache that must survive across runs, write under `users/{userId}/skills/{skillId}/state/` — the one writable spot inside your skill's own folder, isolated from every other skill.
 
-**Network** is available for `fetch` to external APIs. (Outbound access may later require declaring it in your manifest.)
+**Network — default-deny, you must declare it.** A custom skill runs with *no* outbound network unless its manifest opts in:
+```json
+"sandbox": { "network": true }
+```
+Without that, `fetch` and any binary you run via `ctx.runSandboxed` have no egress — the jail has its own empty net namespace (it can't even reach the host's `127.0.0.1` services). Declare it only if you actually call out; an undeclared (or malicious) skill can't exfiltrate whatever it can read.
 
 First-party skills shipped in `skills/` run in-process and are not subject to these limits — but anything authored per-user is, by design.
 

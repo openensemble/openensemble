@@ -32,6 +32,7 @@ import { randomUUID, createHash } from 'crypto';
 import { USERS_DIR, SKILLS_DIR, userSkillsDir } from '../lib/paths.mjs';
 import { buildSkillCredentials } from '../lib/credentials.mjs';
 import { buildRuntimeBroker } from '../lib/skill-runtime-broker.mjs';
+import { skillDeclaresNetwork } from '../lib/skill-net-policy.mjs';
 import { log } from '../logger.mjs';
 
 const TICK_MS = 5_000;
@@ -739,7 +740,9 @@ export async function runCustomWatcherSandboxed(record) {
     t: 'job', mode: 'watcher', skillExecPath: execPath, kind: record.kind,
     state: record.state, userId: record.userId, agentId: record.agentId, watcherId: record.id,
   };
-  return runSandboxedJob({ userId: record.userId, skillId: record.skillId, jobPayload, handleRpc, net: true, timeoutMs: 120_000 });
+  // Default-deny egress on ticks too — only skills that declare sandbox.network get it.
+  const net = skillDeclaresNetwork(record.userId, record.skillId);
+  return runSandboxedJob({ userId: record.userId, skillId: record.skillId, jobPayload, handleRpc, net, timeoutMs: 120_000 });
 }
 
 // ── supervisor loop ──────────────────────────────────────────────────────────
