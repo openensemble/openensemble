@@ -548,6 +548,13 @@ const _systemHandlers = new Map();
 export function registerSystemWatcherHandler(kind, fn) {
   _systemHandlers.set(kind, fn);
 }
+// A "system" kind (exec, http_jsonpath, file_stat, task_proxy, …) runs its handler
+// IN-PROCESS in the supervisor. Untrusted (sandboxed) skills must not register one:
+// they'd fail-safe while jailed (no such handler in their execute.mjs), but the record
+// would detonate in-process if the skill were ever de-sandboxed. Trusted callers only.
+export function isSystemWatcherKind(kind) {
+  return _systemHandlers.has(kind);
+}
 
 // ── event bus ────────────────────────────────────────────────────────────────
 //
