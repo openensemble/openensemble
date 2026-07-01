@@ -361,6 +361,13 @@ If your skill is a per-user one (in `users/{userId}/skills/`), the relative impo
 
 If your skill is a **per-user / custom skill** (it lives in `users/{userId}/skills/`), its `execute.mjs` runs inside an isolated jail — it can touch only its owner's data, never another user's data, the OE config, or any secret. Author within these limits or the tool will fail at runtime:
 
+**Consent at create time — ASK THE USER.** New skills are created sandboxed by default (`skill_create` sets `sandbox:{isolate:true}`). Before creating, tell the user the skill will run isolated, and:
+- **Network:** if the skill uses `fetch`/HTTP or downloads a binary, `skill_create` **refuses** until you pass `allow_network` explicitly — network egress lets a skill send data out, so ask the user first, then pass `allow_network:true` (grant) or `false` (offline).
+- **Credentials:** if it stores secrets via `ctx.credentials`, mention that they live in an encrypted per-skill store.
+- **Opting out:** `sandbox:false` runs the skill in-process with full access — only for a trusted admin skill (e.g. one that inspects the OE install), and only with the user's clear OK.
+
+On `skill_update_code`, the tool re-scans and flags if the skill isn't sandboxed or if new code needs network; grant later via `skill_update_manifest({id, sandbox:true})` / `({id, allow_network:true})`.
+
 **File I/O — owner's media/doc folders only.** You may read/write the owner's `documents`, `images`, `videos`, and `audio` folders (via `getUserFilesDir`) plus your own per-skill state dir (below). `research` and `code` are NOT mounted for custom skills, and anything outside these — other users' dirs, `config.json`, OAuth/token files, the master key — does not exist inside the sandbox, so reads fail with `ENOENT`.
 
 **Secrets / API keys — use `ctx.credentials`, never the filesystem.** Don't read token files and don't write a key into a data folder. Store and fetch your skill's own secrets through the brokered store:

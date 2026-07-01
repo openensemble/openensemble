@@ -110,6 +110,20 @@ function validateId(id) {
   return null;
 }
 
+// Scan skill code for the capabilities the sandbox model needs the user to be aware
+// of: outbound network (default-DENIED — a jailed skill has no egress unless the user
+// grants it), the encrypted per-skill credential store, and downloaded binary runtimes
+// (yt-dlp etc., which also imply network). Best-effort static scan — the runtime jail
+// is the real boundary; this just drives the create/update consent prompts.
+function scanSkillCapabilities(code) {
+  const src = String(code || '');
+  const usesRuntime = /\b(ensureRuntime|runSandboxed)\s*\(/.test(src);
+  const usesNetwork = usesRuntime
+    || /\bfetch\s*\(|\bhttps?\.(request|get)\b|['"]node-fetch['"]|\baxios\b|\bnet\.(connect|createConnection)\b|\bdns\./.test(src);
+  const usesCredentials = /\b(ctx|helpers)\s*\.\s*credentials\b/.test(src);
+  return { usesNetwork, usesCredentials, usesRuntime };
+}
+
 /**
  * Pre-write gates: LSP type-check + manifest/code structural validator.
  * Both run together so a single fix-and-retry covers both bug classes
@@ -294,7 +308,7 @@ function cleanLocalIntents(localIntents, toolNames) {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -339,6 +353,19 @@ async function handleCreate(args, userId) {
   const collisions = newNames.filter(n => existingNames.has(n));
   if (collisions.length) {
     return `Tool name collision: ${collisions.join(', ')} already exist in another skill. Use unique prefixed names.`;
+  }
+
+  // ── Sandbox consent (multi-tenant isolation) ─────────────────────────────────
+  // Custom skills run sandboxed by default (isolated to their own data). `sandbox`
+  // defaults true; passing false opts OUT (a trust decision — full in-process access).
+  // Network egress is DENIED unless the user grants it: since it lets a skill send data
+  // out, a network-using skill can't be created until the caller has asked the user and
+  // passes allow_network explicitly (true = grant, false = create offline).
+  const isolate = sandbox !== false;
+  const caps = scanSkillCapabilities(code);
+  if (isolate && caps.usesNetwork && allow_network === undefined) {
+    const why = caps.usesRuntime ? ' (it downloads and runs an external binary)' : '';
+    return `⛔ Network consent needed. This skill makes network calls${why}, and sandboxed skills have NO network access by default — network egress lets a skill send data out, so it needs the user's explicit OK.\n\nAsk the user whether "${name.trim()}" should have network access, then re-call skill_create with allow_network:true (grant) or allow_network:false (create it offline — its fetches will fail until you enable network later).`;
   }
 
   const manifest = {
@@ -388,6 +415,12 @@ async function handleCreate(args, userId) {
   if (coordinator_scope === 'exclude' || coordinator_scope === 'auto' || coordinator_scope === 'include') {
     manifest.coordinator_scope = coordinator_scope;
   }
+  // Sandbox declaration — travels with the skill (roles.shouldSandboxSkill reads
+  // sandbox.isolate; the runtime net policy reads sandbox.network). isolate:false is
+  // the trust opt-out; network only granted when the user allowed it.
+  manifest.sandbox = isolate
+    ? { isolate: true, network: allow_network === true }
+    : { isolate: false };
 
   // Pre-write gates: LSP type-check + manifest/code structural validator.
   // Both run together so a single fix-and-retry handles both. Strict
@@ -494,7 +527,10 @@ async function handleCreate(args, userId) {
   }
 
   const warningTail = args._gateWarnings ? `\n\nNote — warnings (non-blocking):\n${args._gateWarnings}` : '';
-  return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}.${manifest.intent_examples?.length ? ` Tool-router classifier picked up ${manifest.intent_examples.length} intent example(s).` : ''} The skill persists across server restarts.${drawerNote}${warningTail}`;
+  const sandboxLine = isolate
+    ? `\n🔒 Runs sandboxed — isolated to its own data${manifest.sandbox.network ? ', with network access' : ', no network access'}.${caps.usesCredentials ? ' Secrets go in its encrypted per-skill credential store.' : ''}`
+    : `\n⚠️ Created WITHOUT a sandbox — it runs in-process with full access to your data. Only appropriate for trusted admin skills.`;
+  return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}.${manifest.intent_examples?.length ? ` Tool-router classifier picked up ${manifest.intent_examples.length} intent example(s).` : ''} The skill persists across server restarts.${drawerNote}${sandboxLine}${warningTail}`;
 }
 
 async function handleUpdateCode(args, userId) {
@@ -505,7 +541,7 @@ async function handleUpdateCode(args, userId) {
     return 'code must export executeSkillTool.';
   }
 
-  const { getRoleManifest, listAllRoles, clearExecutorCache } = await import('../../roles.mjs');
+  const { getRoleManifest, listAllRoles, clearExecutorCache, isSandboxedSkill } = await import('../../roles.mjs');
 
   // Prefer the caller's own scope. Admins can fall through to any user's custom skill.
   let manifest = getRoleManifest(skillId, userId);
@@ -577,9 +613,25 @@ async function handleUpdateCode(args, userId) {
     });
   } catch (e) { console.debug('[skill-builder] log append (update) failed:', e.message); }
 
+  // Sandbox advisories — surface so the coder can raise them with the user. If the
+  // skill isn't isolated, offer to sandbox it; if the new code adds network calls the
+  // jail won't permit, or uses secrets, flag that. Grants go via skill_update_manifest
+  // (sandbox / allow_network) after the user OKs.
+  const caps = scanSkillCapabilities(code);
+  const sb = onDiskManifest.sandbox || {};
+  const isolated = isSandboxedSkill(skillId, ownerId);
+  const advisories = [];
+  if (!isolated) {
+    advisories.push('This skill is NOT sandboxed (runs in-process with full access). Recommend sandboxing it — ask the user, then call skill_update_manifest({id, sandbox:true}).');
+  } else if (caps.usesNetwork && sb.network !== true) {
+    advisories.push('The updated code makes network calls, but this sandboxed skill has no network access, so those calls will FAIL. Network egress needs the user\'s OK — ask, then call skill_update_manifest({id, allow_network:true}).');
+  }
+  if (caps.usesCredentials) advisories.push('Uses the encrypted per-skill credential store for secrets.');
+  const advisoryTail = advisories.length ? `\n\n🔒 Sandbox notes:\n- ${advisories.join('\n- ')}` : '';
+
   const combinedWarnings = [gateWarnings, smokeWarnings].filter(Boolean).join('\n\n');
   const warningTail = combinedWarnings ? `\n\nNote — warnings (non-blocking):\n${combinedWarnings}` : '';
-  return `Skill "${manifest.name}" (${skillId}) updated and hot-reloaded. New code is active immediately.${warningTail}`;
+  return `Skill "${manifest.name}" (${skillId}) updated and hot-reloaded. New code is active immediately.${advisoryTail}${warningTail}`;
 }
 
 async function handleReadCode(args, userId) {
@@ -811,7 +863,7 @@ async function handleUpdateToolDef(args, userId) {
 // description. Modeled on handleUpdateToolDef — atomic write + re-register so
 // the change is live without a server restart.
 async function handleUpdateManifest(args, userId) {
-  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description } = args;
+  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description, sandbox, allow_network } = args;
   if (!id?.trim()) return 'id is required.';
 
   const skillId = id.trim();
@@ -860,8 +912,18 @@ async function handleUpdateManifest(args, userId) {
     if (!disk.localIntents.length) delete disk.localIntents;
     changed.push(`localIntents(${disk.localIntents?.length ?? 0})`);
   }
+  // Sandbox controls — isolate (run jailed) and network (allow egress). Only grant
+  // network after the user has OK'd it: egress lets the skill send data out.
+  if (typeof sandbox === 'boolean') {
+    disk.sandbox = { ...(disk.sandbox || {}), isolate: sandbox };
+    changed.push(`sandbox.isolate=${sandbox}`);
+  }
+  if (typeof allow_network === 'boolean') {
+    disk.sandbox = { ...(disk.sandbox || {}), network: allow_network };
+    changed.push(`sandbox.network=${allow_network}`);
+  }
   if (!changed.length) {
-    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description.';
+    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description, sandbox, allow_network.';
   }
 
   const backupPath = manifestPath + '.bak';

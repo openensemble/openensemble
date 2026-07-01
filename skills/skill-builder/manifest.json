@@ -214,6 +214,14 @@
             "voice_device": {
               "type": "boolean",
               "description": "Set true when the user will trigger this skill by SPEAKING to an OE voice device (music/media control, smart-home, timers, hands-free lookups). Voice turns run a slim tool allowlist for latency, so WITHOUT this flag the skill's tools are stripped on voice turns and the skill silently does nothing when invoked by voice. Independent of whether the skill outputs audio. Default false (browser/chat-only skills)."
+            },
+            "sandbox": {
+              "type": "boolean",
+              "description": "Run the skill sandboxed — isolated to its own data, unable to read other users, secrets, or the OE config. Default true (recommended). Pass false ONLY for a trusted admin skill that must reach the OE install/other users; that is a trust decision, so confirm with the user first."
+            },
+            "allow_network": {
+              "type": "boolean",
+              "description": "Whether the sandboxed skill may access the network. Sandboxed skills have NO outbound network by default. REQUIRED (true or false) when the skill uses fetch/http or downloads a binary — creation is refused until set. Network egress lets a skill send data OUT, so ASK THE USER before granting. true = grant, false = create it offline."
             }
           },
           "required": [
@@ -447,6 +455,14 @@
             "description": {
               "type": "string",
               "description": "Replace the skill's one-line description."
+            },
+            "sandbox": {
+              "type": "boolean",
+              "description": "Set whether the skill runs sandboxed (isolate). true = jailed to its own data; false = full in-process access (a trust decision — ask the user)."
+            },
+            "allow_network": {
+              "type": "boolean",
+              "description": "Grant (true) or revoke (false) the sandboxed skill s outbound network access. Ask the user first — egress lets the skill send data out."
             }
           },
           "required": [

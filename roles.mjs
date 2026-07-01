@@ -1239,6 +1239,10 @@ async function buildCtx(userId, agentId, skillId = null) {
 // Flag-gated (config.skillSandbox.enabled, default off) until exercised live.
 function shouldSandboxSkill(wrap) {
   if (!wrap || wrap.userId == null) return false; // global = first-party = trusted
+  // Manifest self-declaration (set by skill_create): the portable default — new custom
+  // skills ship with sandbox.isolate:true and travel sandboxed without a config edit.
+  // Explicit isolate:false is a trust opt-out, still overridable by the operator config.
+  if (wrap.manifest?.sandbox?.isolate === true) return true;
   try {
     const sb = readConfig()?.skillSandbox || {};
     if (sb.enabled === true) return true;                                   // all custom skills
