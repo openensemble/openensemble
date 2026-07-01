@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync
 import { pathToFileURL } from 'url';
 import path from 'path';
 import { SKILLS_DIR, CFG_PATH, USERS_DIR, userSkillsDir, getUserFilesDir, readConfig } from './lib/paths.mjs';
+import { buildSkillCredentials } from './lib/credentials.mjs';
 import { buildProposeMonitor, buildCollectionHelpers } from './lib/monitor-helper.mjs';
 import { buildBrowserHelpers } from './lib/browser-helper.mjs';
 import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-helper.mjs';
@@ -1220,6 +1221,12 @@ async function buildCtx(userId, agentId, skillId = null) {
   };
   // Per-user output dir for a skill (creates it). e.g. ctx.userFilesDir('videos').
   ctx.userFilesDir = (sub) => getUserFilesDir(userId, sub);
+
+  // ctx.credentials — per-skill encrypted secret store, namespaced by skillId.
+  // Same accessor the sandbox broker exposes, so a secret set in-process reads
+  // back identically when the skill later runs jailed. Only when we know the
+  // owning skill (non-skill ctx callers don't get it).
+  if (skillId) ctx.credentials = buildSkillCredentials(userId, skillId);
 
   return ctx;
 }

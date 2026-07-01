@@ -30,6 +30,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { USERS_DIR, SKILLS_DIR, userSkillsDir } from '../lib/paths.mjs';
+import { buildSkillCredentials } from '../lib/credentials.mjs';
 import { log } from '../logger.mjs';
 
 const TICK_MS = 5_000;
@@ -716,7 +717,13 @@ export async function runCustomWatcherSandboxed(record) {
   const realHelpers = handlerHelpers(record);
   const handleRpc = async (method, args) => {
     if (typeof method !== 'string' || !method.startsWith('helper.')) throw new Error(`watcher rpc not allowed: ${method}`);
-    const fn = realHelpers[method.slice(7)];
+    // Resolve dotted paths (e.g. 'credentials.get') against the real helpers.
+    const parts = method.slice(7).split('.');
+    let target = realHelpers, fn = null;
+    for (let i = 0; i < parts.length; i++) {
+      if (i === parts.length - 1) fn = target?.[parts[i]];
+      else target = target?.[parts[i]];
+    }
     if (typeof fn !== 'function') throw new Error(`helper.${method.slice(7)} is not available to sandboxed watchers`);
     return await fn(...(Array.isArray(args) ? args : [args]));
   };
@@ -1214,6 +1221,9 @@ export function handlerHelpers(record) {
     userId: record.userId,
     agentId: record.agentId,
     watcherId: record.id,
+    // Per-skill encrypted secret store — same accessor as ctx.credentials, so a
+    // skill's watcher handler reads the same config its tools stored.
+    credentials: record.skillId ? buildSkillCredentials(record.userId, record.skillId) : null,
     ...runtimeHelpers,
     browser,
     showImage: async (img) => _showImageFn?.(record.userId, { ...img, agent: record.agentId }),
