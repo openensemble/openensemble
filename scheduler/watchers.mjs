@@ -706,6 +706,29 @@ function taskProxyHandler(state, helpers) {
 }
 _systemHandlers.set('task_proxy', taskProxyHandler);
 
+// Fire a CUSTOM skill's watcher handler INSIDE the bwrap jail. The handler's
+// helpers.* calls come back as `helper.<m>` RPCs, which we service with the REAL
+// handlerHelpers(record) bound to this process — so fire/postStatus/notify/etc.
+// keep their full behaviour, but the skill's own handler code (the fetch/compare
+// logic) never runs in-process. Returns { ok, result } where result is the
+// serializable { newState, textUpdate, done, … } the supervisor already expects.
+export async function runCustomWatcherSandboxed(record) {
+  const realHelpers = handlerHelpers(record);
+  const handleRpc = async (method, args) => {
+    if (typeof method !== 'string' || !method.startsWith('helper.')) throw new Error(`watcher rpc not allowed: ${method}`);
+    const fn = realHelpers[method.slice(7)];
+    if (typeof fn !== 'function') throw new Error(`helper.${method.slice(7)} is not available to sandboxed watchers`);
+    return await fn(...(Array.isArray(args) ? args : [args]));
+  };
+  const { runSandboxedJob, customSkillBindings } = await import('../lib/skill-subprocess.mjs');
+  const { execPath } = customSkillBindings(record.userId, record.skillId);
+  const jobPayload = {
+    t: 'job', mode: 'watcher', skillExecPath: execPath, kind: record.kind,
+    state: record.state, userId: record.userId, agentId: record.agentId, watcherId: record.id,
+  };
+  return runSandboxedJob({ userId: record.userId, skillId: record.skillId, jobPayload, handleRpc, net: true, timeoutMs: 120_000 });
+}
+
 // ── supervisor loop ──────────────────────────────────────────────────────────
 
 async function tickOne(record) {
@@ -720,34 +743,43 @@ async function tickOne(record) {
       return;
     }
 
-    const handler = await resolveHandler(record);
-    if (!handler) {
+    // Shared failure handling: bump the counter, finalize at the cap, otherwise
+    // back off one cadence. `msg` is only surfaced when we actually finalize.
+    const failTick = (msg) => {
       record.failures++;
-      log.warn('watchers', 'Handler not found', { kind: record.kind, skillId: record.skillId });
-      if (record.failures >= MAX_FAILURES) {
-        finalizeWatcher(record, 'error', `❌ No handler registered for kind=${record.kind}.`);
-      } else {
-        record.nextTickAt = Date.now() + record.cadenceSec * 1000;
-        persistUser(record.userId);
-      }
-      return;
-    }
+      if (record.failures >= MAX_FAILURES) finalizeWatcher(record, 'error', msg);
+      else { record.nextTickAt = Date.now() + record.cadenceSec * 1000; persistUser(record.userId); }
+    };
 
-    // Build a small per-call helpers object for the handler.
-    const helpers = handlerHelpers(record);
+    // Custom (user-authored) skills fire their handler INSIDE the jail so a
+    // watcher tick can't reach other users' data / secrets — same boundary as
+    // their tool calls. Global + system handlers stay in-process.
     let result;
-    try {
-      result = await handler(record.state, helpers);
-    } catch (e) {
-      record.failures++;
-      log.warn('watchers', 'Handler threw', { kind: record.kind, err: e.message });
-      if (record.failures >= MAX_FAILURES) {
-        finalizeWatcher(record, 'error', `❌ ${record.label}: handler failed ${MAX_FAILURES}× — ${e.message}`);
-      } else {
-        record.nextTickAt = Date.now() + record.cadenceSec * 1000;
-        persistUser(record.userId);
+    let sandboxed = false;
+    if (record.skillId) {
+      try { const { isSandboxedSkill } = await import('../roles.mjs'); sandboxed = isSandboxedSkill(record.skillId, record.userId); }
+      catch { sandboxed = false; }
+    }
+    if (sandboxed) {
+      let sres;
+      try { sres = await runCustomWatcherSandboxed(record); }
+      catch (e) { log.warn('watchers', 'Sandboxed handler error', { kind: record.kind, err: e.message }); failTick(`❌ ${record.label}: sandboxed handler error — ${e.message}`); return; }
+      if (!sres.ok) { const serr = /** @type {any} */ (sres).error; log.warn('watchers', 'Sandboxed handler failed', { kind: record.kind, err: serr }); failTick(`❌ ${record.label}: sandboxed handler failed ${MAX_FAILURES}× — ${serr}`); return; }
+      result = sres.result;
+    } else {
+      const handler = await resolveHandler(record);
+      if (!handler) {
+        log.warn('watchers', 'Handler not found', { kind: record.kind, skillId: record.skillId });
+        failTick(`❌ No handler registered for kind=${record.kind}.`);
+        return;
       }
-      return;
+      try {
+        result = await handler(record.state, handlerHelpers(record));
+      } catch (e) {
+        log.warn('watchers', 'Handler threw', { kind: record.kind, err: e.message });
+        failTick(`❌ ${record.label}: handler failed ${MAX_FAILURES}× — ${e.message}`);
+        return;
+      }
     }
 
     record.failures = 0;
@@ -1120,7 +1152,7 @@ function _onFireForDeliver(deliver, record) {
   }
 }
 
-function handlerHelpers(record) {
+export function handlerHelpers(record) {
   // ctx.browser shorthand for watcher handlers — same primitives the
   // skill-side ctx.browser exposes, bound to record.userId. Lets a
   // collection-watcher handler use the user's connected browser as its

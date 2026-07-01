@@ -1234,6 +1234,13 @@ function shouldSandboxSkill(wrap) {
   try { return readConfig()?.skillSandbox?.enabled === true; } catch { return false; }
 }
 
+// Public form for callers that only have (skillId, userId) — e.g. the watcher
+// supervisor deciding whether to fire a handler in the jail.
+export function isSandboxedSkill(skillId, userId) {
+  const key = resolveKey(skillId, userId);
+  return shouldSandboxSkill(key ? _manifests.get(key) : null);
+}
+
 // Run a custom skill's tool in the sandbox, returning a plain value that matches
 // the in-process executor contract so both dispatch seams stay unchanged.
 // Streaming yields are folded into result text for now (live streaming through
