@@ -988,6 +988,32 @@ async function executeOnFire(record) {
   const cfg = record.onFire;
   if (!cfg) return;
 
+  // If the watcher's owning skill is SANDBOXED (untrusted), onFire must not become an
+  // escape hatch out of the jail. This is the single chokepoint — registration-time
+  // onFire AND fire()/fireAgent() at tick time all land here — so the constraints below
+  // cover every path a jailed skill could take.
+  let untrusted = false;
+  if (record.skillId) {
+    try { const { isSandboxedSkill } = await import('../roles.mjs'); untrusted = isSandboxedSkill(record.skillId, record.userId); }
+    catch { untrusted = false; }
+  }
+
+  // Untrusted 'agent' delivery is DOWNGRADED to a plain notification to the owner — no
+  // agent turn, no tools, no confirmation-bypass. Otherwise a jailed skill could set
+  // onFire.prompt (or fireAgent('…')) to make the coordinator take arbitrary actions
+  // with the user's authority. A skill can inform its owner; it can't act as them.
+  if (untrusted && cfg.type === 'agent') {
+    const fireText = record.lastStatusText || `Monitor "${record.label}" fired.`;
+    try {
+      _sendNotificationFn?.(record.userId, {
+        type: 'agent_notification', agent: record.agentId,
+        content: `🔔 ${record.label}: ${fireText}`,
+        from: { userName: record.label || record.skillId }, event: record.kind, data: {}, ts: Date.now(),
+      });
+    } catch (e) { log.warn('watchers', 'untrusted onFire notify threw', { id: record.id, err: e.message }); }
+    return;
+  }
+
   // ── Email delivery — no LLM, no agent turn ───────────────────────────────
   // cfg shape: { type: 'email', subject?, to?, account?, _html? }
   // body is the watcher's lastStatusText (or label as fallback). When the
@@ -1001,7 +1027,9 @@ async function executeOnFire(record) {
       const html    = cfg._html || record.lastStatusHtml || undefined;
       const body    = record.lastStatusText || (html ? stripHtml(html) : null) || `Your monitor "${record.label}" fired.`;
       const r = await sendEmailToUser(record.userId, {
-        subject, body, html, to: cfg.to, account: cfg.account,
+        // Untrusted skills may only email the account owner (self) — ignore a
+        // skill-supplied recipient, else onFire is a data-exfiltration channel.
+        subject, body, html, to: untrusted ? undefined : cfg.to, account: cfg.account,
       });
       if (!r.ok) log.warn('watchers', 'email onFire failed', { id: record.id, err: r.message });
       else log.info('watchers', 'email onFire sent', { id: record.id, to: cfg.to || '(self)' });
