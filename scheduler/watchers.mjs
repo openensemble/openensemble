@@ -31,6 +31,7 @@ import path from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { USERS_DIR, SKILLS_DIR, userSkillsDir } from '../lib/paths.mjs';
 import { buildSkillCredentials } from '../lib/credentials.mjs';
+import { buildRuntimeBroker } from '../lib/skill-runtime-broker.mjs';
 import { log } from '../logger.mjs';
 
 const TICK_MS = 5_000;
@@ -715,8 +716,13 @@ _systemHandlers.set('task_proxy', taskProxyHandler);
 // serializable { newState, textUpdate, done, … } the supervisor already expects.
 export async function runCustomWatcherSandboxed(record) {
   const realHelpers = handlerHelpers(record);
+  // No human is present on a tick, so ensureRuntime resolves-or-throws (no prompt).
+  const runtime = buildRuntimeBroker(record.userId, record.skillId, { allowPrompt: false });
   const handleRpc = async (method, args) => {
     if (typeof method !== 'string' || !method.startsWith('helper.')) throw new Error(`watcher rpc not allowed: ${method}`);
+    // Runtime is clamped — route it to the broker, NOT the unclamped in-process helpers.
+    if (method === 'helper.ensureRuntime') return runtime.ensureRuntime((Array.isArray(args) ? args[0] : args) || {});
+    if (method === 'helper.runSandboxed') { const a = Array.isArray(args) ? args : [args]; return runtime.runSandboxed(a[0], a[1], a[2] || {}); }
     // Resolve dotted paths (e.g. 'credentials.get') against the real helpers.
     const parts = method.slice(7).split('.');
     let target = realHelpers, fn = null;
