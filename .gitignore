@@ -78,8 +78,9 @@ scripts/smoke-plan-*.mjs
 # --- Local tests ---
 /tests/
 
-# --- Local handoff notes ---
+# --- Local handoff/scratch notes (never for the public repo) ---
 *_HANDOFF.md
+/handoffs/
 
 # --- Runtime artifacts ---
 server.pid
