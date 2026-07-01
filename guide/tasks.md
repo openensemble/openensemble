@@ -91,12 +91,9 @@ In the Tasks drawer, hover a task to edit, pause, or delete. Pausing keeps it bu
 
 Schedule parsing is handled by a small bundled local model. It runs on CPU and doesn't call out to a cloud provider, so "every Monday at 9am" is interpreted privately and offline.
 
-Two tiers ship out of the box:
+The bundled scheduler model is `openensemble-plan-360m-v2` (SmolLM2-360M, ~370 MB). It handles natural-language scheduling, reschedule/cancel coverage, and anchored arithmetic ("30 min before my 11am meeting").
 
-- **fast** — `openensemble-plan-v5` (SmolLM2-135M, ~140 MB). Lower latency and RAM, slightly lower accuracy.
-- **accurate** — `openensemble-plan-360m-v2` (SmolLM2-360M, ~370 MB). The default; better at edge-case phrasing, with natural-language scheduling, reschedule/cancel coverage, and anchored-arithmetic ("30 min before my 11am meeting") all working.
-
-**Owner/admin** can change which tier and which runtime hosts the model under **Settings → System → Scheduler Model**:
+**Owner/admin** can change which runtime hosts the model under **Settings → System → Scheduler Model**:
 
 - **Built-in** (default) — runs the bundled GGUF in-process via `node-llama-cpp`. No setup.
 - **Ollama** — pushes our model into your local Ollama and calls it from there. Faster on a GPU box.

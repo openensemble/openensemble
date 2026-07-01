@@ -1,6 +1,6 @@
 # Cortex (local models)
 
-> **Note:** these are small local models (135M–360M params) — fast and free, but not 100% accurate. Expect occasional misfires: a memory saved when it shouldn't have been, a paraphrase missed by the dedup head, a contradiction flagged on agreeing statements. You can correct any of them in chat ("forget that", "that wasn't a preference") and the heads keep improving as the models are retrained.
+> **Note:** these are small local models — fast and free, but not 100% accurate. Expect occasional misfires: a memory saved when it shouldn't have been, a paraphrase missed by the dedup head, a contradiction flagged on agreeing statements. You can correct any of them in chat ("forget that", "that wasn't a preference") and the heads keep improving as the models are retrained.
 
 Cortex is the bundled set of local models OpenEnsemble runs in-process. They handle small, frequent reasoning tasks so the install works offline and doesn't burn cloud tokens for every internal decision.
 
@@ -8,7 +8,7 @@ Cortex is the bundled set of local models OpenEnsemble runs in-process. They han
 
 - **`openensemble-reason-v3`** — a SmolLM2-based GGUF reasoning model used for tiny classifications, agent memory updates, content gating, and similar internal calls.
 - **`nomic-embed-text-v1`** — the embedding model used for memory recall, search, and similarity.
-- **Plan model** — a small bundled model that parses scheduling intent ("every Monday at 9am"). Two tiers ship: **fast** (`openensemble-plan-v5`, SmolLM2-135M, ~140 MB) and **accurate** (`openensemble-plan-360m-v2`, SmolLM2-360M, ~370 MB, default).
+- **Plan model** — `openensemble-plan-360m-v2`, a SmolLM2-360M GGUF that parses scheduling intent ("every Monday at 9am"). A related 360M extract variant powers the local cognition slot-filling tier.
 
 All three run via [`node-llama-cpp`](https://github.com/withcatai/node-llama-cpp) on CPU. No GPU required. They're loaded the first time they're needed and stay resident.
 

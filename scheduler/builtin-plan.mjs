@@ -1,9 +1,10 @@
 /**
  * Smart-scheduler reasoning surface. Text in, text out.
  *
- * Loads the fine-tuned `openensemble-plan-v3` q8_0 GGUF (SmolLM2-135M base
- * + LoRA with task-prefix tokens <parse>, <decide>, <decompose>, <classify>)
- * in its own node-llama-cpp context, fully isolated from the cortex model.
+ * Loads the fine-tuned `openensemble-plan-360m-v2` q8_0 GGUF
+ * (SmolLM2-360M base + LoRA with task-prefix tokens <parse>, <decide>,
+ * <decompose>, <classify>) in its own node-llama-cpp context, fully isolated
+ * from the cortex model.
  *
  * Strict isolation: this module must not be imported from `memory/` and it
  * must not call back into cortex. Own model, own context, own serial queue.
@@ -19,10 +20,9 @@ import { reportRuntimeFailure, clearRuntimeFailure } from '../lib/runtime-warn.m
 
 // The active plan model file is resolved at init time from config —
 // `scheduler.builtinPlanModel` may be a bare GGUF filename (one of the
-// BUNDLED_PLAN_MODELS) OR a tier alias ('fast' | 'accurate'). Defaults to
-// 'accurate' (v22, the current best). Resolved lazily so a user toggling
-// the tier in Settings + calling reloadBuiltinPlan() picks up the new
-// choice without restarting the server.
+// BUNDLED_PLAN_MODELS) or a bundled alias such as 'accurate'. Defaults to
+// the current accurate model. Resolved lazily so runtime changes can call
+// reloadBuiltinPlan() and pick up the new file without restarting the server.
 const CACHE_DIR = path.join(USERS_DIR, '..', 'models');
 
 function resolvePlanModelFile() {
@@ -40,7 +40,7 @@ let MODEL_PATH = path.join(CACHE_DIR, MODEL_FILE);
 
 // Matches the training context (n_ctx_train=8192 in the GGUF). Running below
 // this triggers a "full capacity not utilized" warning from llama.cpp and
-// clips long scheduler prompts. KV cache at 8192 ≈ 110 MB for this 135M model.
+// clips long scheduler prompts.
 const CONTEXT_SIZE = 8192;
 
 let _initPromise = null;
@@ -159,7 +159,7 @@ const TASKS = {
   },
 };
 
-// JSON schemas used for grammar-constrained generation. SmolLM2-135M leaks
+// JSON schemas used for grammar-constrained generation. The plan model can leak
 // across mode/recurrence pairings the training data never showed (mode=
 // "recurring" with no cron + populated window fields, etc.) — the grammar
 // stops invalid combinations at decode time instead of relying on the model.

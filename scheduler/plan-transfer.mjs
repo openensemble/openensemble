@@ -1,5 +1,5 @@
 /**
- * Install the OpenEnsemble-fine-tuned scheduler GGUF (openensemble-plan-v3)
+ * Install the OpenEnsemble-fine-tuned scheduler GGUF
  * into the user's external Ollama or LM Studio runtime. Same shape as
  * memory/reason-transfer.mjs — kept separate so cortex and scheduler stay
  * strictly isolated (see builtin-plan.mjs header).
@@ -22,25 +22,20 @@ import { getBuiltinPlanModelPath, getBuiltinPlanModelId } from './builtin-plan.m
 import { modifyConfig, loadConfig } from '../routes/_helpers.mjs';
 
 // Derive a size-prefixed version suffix from the active GGUF file name so
-// the Ollama tag / LM Studio dir match the bytes being pushed AND the two
-// tiers (135M and 360M) don't collide on the same name. Examples:
-//   openensemble-plan-v5.q8_0.gguf        → "135-v5"
-//   openensemble-plan-360m-v2.q8_0.gguf   → "360-v2"
-// Computed per-call instead of cached at module load so a runtime tier
-// switch (Settings → Plan model) is reflected on the next install push.
+// the Ollama tag / LM Studio dir match the bytes being pushed. Computed
+// per-call instead of cached at module load so runtime model changes are
+// reflected on the next install push.
 function _planTagSuffix() {
   const id = getBuiltinPlanModelId();
   const m360 = id.match(/-360m-v(\d+)\.q\d/i);
   if (m360) return `360-v${m360[1]}`;
-  const m135 = id.match(/-v(\d+)\.q\d/i);
-  if (m135) return `135-v${m135[1]}`;
   return 'v0';
 }
 export const LMSTUDIO_PUBLISHER = 'openensemble';
 export function getOllamaModelTag() { return `openensemble-plan:${_planTagSuffix()}`; }
 export function getLmstudioModelDir() { return `plan-${_planTagSuffix()}`; }
-// Back-compat constants — frozen to whatever tier is active at module load.
-// New code should call the getters above so a runtime tier swap is reflected.
+// Back-compat constants — frozen to whatever model is active at module load.
+// New code should call the getters above so runtime model changes are reflected.
 export const OLLAMA_MODEL_TAG   = getOllamaModelTag();
 export const LMSTUDIO_MODEL_DIR = getLmstudioModelDir();
 

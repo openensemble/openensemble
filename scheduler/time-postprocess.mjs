@@ -1,12 +1,11 @@
 /**
  * Deterministic time post-processor for scheduler parse outputs.
  *
- * The 135M parse model is strong on shape (intent, mode, conditions, priority)
- * but weak on date arithmetic and cron generation — the 2026-04-22 smoke test
- * showed 51/51 JSON parses, 48/51 correct modes, but only 8/51 correct times
- * and 0/14 correct cron expressions. This module patches model output using
- * hand-rolled regex parsers against the original request text so the runtime
- * fires at the right time even when the model hallucinates timestamps.
+ * The plan model is strong on shape (intent, mode, conditions, priority), but
+ * date arithmetic and cron generation are safety-critical enough to verify
+ * deterministically. This module patches model output using hand-rolled regex
+ * parsers against the original request text so the runtime fires at the right
+ * time even when the model hallucinates timestamps.
  *
  * Pure function: no I/O, no imports. Takes the model's parsed record + the
  * original request text + current time; returns a corrected copy. Never
