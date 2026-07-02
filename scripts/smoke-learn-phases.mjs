@@ -211,52 +211,39 @@ async function testPhase1(baseline) {
   fs.rmSync(delLogPath, { force: true });
 }
 
-// ── Phase 2: default-arg suppression + user-authored evidence ───────────────
+// ── Phase 2: default_arg retirement ─────────────────────────────────────────
 async function testPhase2() {
-  section('Phase 2: default-arg suppression');
+  section('Phase 2: default_arg retirement');
 
   const td = await import('/home/shawn/.openensemble/lib/tool-defaults.mjs');
+  const policy = await import('/home/shawn/.openensemble/lib/learning-policy.mjs');
+
+  // The mining path is retired outright: no counter export, no proposer export.
+  assert(td.recordToolCall === undefined, 'recordToolCall no longer exported (mining retired)', 'still exported');
   const prop = await import('/home/shawn/.openensemble/lib/proposals.mjs');
+  assert(prop.proposeDefaultArg === undefined, 'proposeDefaultArg no longer exported (proposer retired)', 'still exported');
 
-  const fakeTool = `phase2_${TAG}_tool`;
-  const args = { zip: '99999', limit: 7 };
-
-  let signal;
-  for (let i = 1; i <= 4; i++) {
-    signal = await td.recordToolCall(USER_ID, fakeTool, args, null, {
-      userText: 'Use ZIP 99999 for this check.',
-    });
-  }
-  assert(signal.proposed === true && signal.arg === 'zip' && signal.userAuthored === true,
-    'counter trips only with user-authored value evidence', JSON.stringify(signal));
-
-  const stale = await prop.proposeDefaultArg({
-    userId: USER_ID, agentId: 'test',
-    tool: signal.tool, arg: signal.arg, value: signal.value, count: signal.count,
+  // Policy hard-denies the kind, so any stale pending card fails at boot sweep.
+  const verdict = policy.evaluateLearningProposal({
+    kind: 'default_arg', userId: USER_ID,
+    tool: `phase2_${TAG}_tool`, arg: 'zip', value: '99999',
+    userAuthored: true, count: 10, evidenceCount: 10,
   });
-  assert(stale === null, 'proposeDefaultArg rejects stale calls without userAuthored=true', JSON.stringify(stale));
+  assert(verdict.allow === false && verdict.reason === 'kind-retired',
+    'evaluateLearningProposal denies default_arg with kind-retired', JSON.stringify(verdict));
+  assert(policy.RETIRED_PROPOSAL_KINDS.has('default_arg'),
+    'default_arg listed in RETIRED_PROPOSAL_KINDS', 'missing');
 
-  const absentTool = `phase2_${TAG}_absent`;
-  for (let i = 1; i <= 4; i++) {
-    signal = await td.recordToolCall(USER_ID, absentTool, { units: 'metric' }, null, {
-      userText: 'What is the weather?',
-    });
-  }
-  assert(signal.proposed === false, 'counter ignores values absent from user text', JSON.stringify(signal));
-
-  // Verify sensitive-arg blocklist: key/token/secret/password/auth must not trip
-  const sensTool = `phase2_${TAG}_sens`;
-  for (let i = 1; i <= 4; i++) await td.recordToolCall(USER_ID, sensTool, { api_key: 'sk-xxx' });
-  const counts = readJson(path.join(USER_DIR, 'tool-arg-counts.json')) || {};
-  const sensKey = `${sensTool}.api_key`;
-  assert(!(sensKey in counts), 'sensitive arg name "api_key" is NOT counted', `found in counts: ${JSON.stringify(counts[sensKey])}`);
-
-  // Verify destructive-tool blocklist
-  const destrTool = `delete_${TAG}_thing`;
-  for (let i = 1; i <= 4; i++) await td.recordToolCall(USER_ID, destrTool, { target: 'x' });
-  const counts2 = readJson(path.join(USER_DIR, 'tool-arg-counts.json')) || {};
-  const destrKey = `${destrTool}.target`;
-  assert(!(destrKey in counts2), 'destructive tool name (delete_*) is NOT counted', `found: ${JSON.stringify(counts2[destrKey])}`);
+  // Accepted pins survive retirement: merge still fills, user args still win.
+  const pinTool = `phase2_${TAG}_pin`;
+  const pinRes = await td.pinDefault(USER_ID, pinTool, 'zip', '99999');
+  assert(pinRes.ok === true, 'pinDefault still writes explicit pins', JSON.stringify(pinRes));
+  const merged = td.mergeDefaults(USER_ID, pinTool, {});
+  assert(merged.zip === '99999', 'mergeDefaults still fills pinned value', JSON.stringify(merged));
+  const overridden = td.mergeDefaults(USER_ID, pinTool, { zip: '11111' });
+  assert(overridden.zip === '11111', 'user-supplied arg still wins over pin', JSON.stringify(overridden));
+  const unpinRes = await td.unpinDefault(USER_ID, pinTool, 'zip');
+  assert(unpinRes.ok === true, 'unpinDefault still revokes pins', JSON.stringify(unpinRes));
 }
 
 // ── Phase 3: tool-failure tracker ───────────────────────────────────────────
@@ -1117,10 +1104,10 @@ async function chat(text, timeoutMs = 60000) {
 async function testPhase12Comprehensive() {
   section('Phase 12: comprehensive Sydney chat test (every phase)');
 
-  // ── Phase 2: dispatcher hook records tool-arg-counts ────────────────
-  // Send something likely to call list_watches (no args). The PURPOSE is to
-  // confirm executeToolStreaming runs through our hook code path without
-  // throwing — the counter doesn't update for empty args, that's expected.
+  // ── Phase 2: dispatcher round-trip (default_arg mining retired) ─────
+  // Send something likely to call list_watches. The PURPOSE is to confirm
+  // executeToolStreaming runs through the pin-merge/failure hooks without
+  // throwing.
   const result1 = await chat('list my active watches please, no commentary');
   assert(!result1.timedOut && result1.events.includes('done'),
     'Sydney chat 1 (list watches) completes', `events: ${[...new Set(result1.events)].join(',')}`);
@@ -1233,10 +1220,8 @@ async function testPhase12Comprehensive() {
 async function testSydneyDispatcher() {
   section('End-to-end: dispatcher hook via real Sydney WS chat');
 
-  // Snapshot pre-state of counters
-  const countsPath = path.join(USER_DIR, 'tool-arg-counts.json');
+  // Snapshot pre-state of the failure counter (arg counting is retired)
   const failPath  = path.join(USER_DIR, 'tool-failures.json');
-  const preCounts = readJson(countsPath) || {};
   const preFails  = readJson(failPath) || {};
   const preLearnings = (await req('GET', '/api/learnings')).data;
 
@@ -1277,16 +1262,12 @@ async function testSydneyDispatcher() {
   assert(!result.timedOut, 'WS chat round-trip completed', 'timed out — Sydney may not be wired up');
 
   // The dispatcher hooks fire even if no tool was called this turn (just no-op).
-  // What we really want to verify: if a tool WAS called, did the counter file
-  // get touched?
-  const postCounts = readJson(countsPath) || {};
   const postFails  = readJson(failPath) || {};
-  const countsChanged = JSON.stringify(preCounts) !== JSON.stringify(postCounts);
   const failsChanged  = JSON.stringify(preFails)  !== JSON.stringify(postFails);
 
-  // We can't strictly require either to change (depends on whether Sydney
-  // called a tool with args). Just print what we observed.
-  console.log(`    counts file changed: ${countsChanged}    failures file changed: ${failsChanged}`);
+  // We can't strictly require a change (depends on whether Sydney called a
+  // tool and whether it failed). Just print what we observed.
+  console.log(`    failures file changed: ${failsChanged}`);
   pass('WS chat → server dispatch round-trip (smoke level)');
 }
 
@@ -1318,7 +1299,7 @@ async function main() {
     writeJson(propPath, propData);
     console.log(`  proposals: ${before} → ${propData.proposals.length}`);
   }
-  for (const fname of ['tool-arg-counts.json', 'tool-failures.json', 'tool-defaults.json']) {
+  for (const fname of ['tool-failures.json', 'tool-defaults.json']) {
     const p = path.join(USER_DIR, fname);
     const d = readJson(p);
     if (!d) continue;

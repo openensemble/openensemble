@@ -56,7 +56,6 @@ import { getRoleAssignments, listRoles } from './roles.mjs';
 import { getSlotAssignment } from './lib/voice-devices.mjs';
 import { log } from './logger.mjs';
 import { turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTurnAgent } from './lib/turn-trace-context.mjs';
-import { runWithLearningTurnContext } from './lib/learning-turn-context.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
 
@@ -655,10 +654,7 @@ export async function handleChatMessage({
   // 'coordinator' (that wrongly implied the agent's role in the trace).
   recordRouting({ mode: 'direct', llmAvoided: false });
   try {
-    const learningUserText = (!_hiddenUser && !_isolatedTaskRun && !_isBackgroundContinuation)
-      ? ctx.userText
-      : '';
-    await runWithLearningTurnContext({ userId, userText: learningUserText }, () => runLlmTurn({
+    await runLlmTurn({
       userId, agentId, scopedAgent, scopedSessionKey,
       userText: ctx.userText, attachment: ctx.attachment,
       toolPlan: ctx.toolPlan,
@@ -666,7 +662,7 @@ export async function handleChatMessage({
       ac, onEvent: wrappedOnEvent, onNotify,
       hiddenUser: _hiddenUser,
       isolatedTaskRun: _isolatedTaskRun,
-    }));
+    });
   } finally {
     finalizeTurnOnce();
   }

@@ -1,18 +1,23 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * One-time cleanup for the default_arg/watch proposer rework.
+ * One-time cleanup for the learning-proposer rework.
  *
- * - Fails pending/snoozed default_arg proposals that predate the user-authored
- *   evidence flag or no longer pass safety gates.
+ * default_arg is RETIRED (see RETIRED_PROPOSAL_KINDS in learning-policy.mjs):
+ * - Fails ALL pending/snoozed default_arg proposals. The boot sweep in
+ *   proposals.mjs does this too (kind-retired), so old installs converge on
+ *   restart even if this script never runs; running it just writes a clearer
+ *   outcome message.
+ * - Deletes users/<id>/tool-arg-counts.json — the mining counter store has no
+ *   reader or writer anymore.
  * - Fails pending/snoozed monitorable watch proposals whose target is a vague
- *   pronoun/state phrase.
- * - Prunes tool-arg-counts buckets that can never produce a valid default.
+ *   pronoun/state phrase (pre-source-extraction cards).
+ *
+ * Accepted pins in tool-defaults.json are untouched — they keep merging.
  */
 import fs from 'fs';
 import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
-import { _testIsPinnable } from '../lib/tool-defaults.mjs';
 import { extractMonitorableSource } from '../lib/monitorable-source.mjs';
 
 function readJsonSafe(p, fallback) {
@@ -21,17 +26,6 @@ function readJsonSafe(p, fallback) {
 
 function writeJson(p, data) {
   fs.writeFileSync(p, JSON.stringify(data, null, 2));
-}
-
-function decodeVKey(vKey) {
-  if (typeof vKey !== 'string') return undefined;
-  if (vKey.startsWith('s:')) return vKey.slice(2);
-  if (vKey.startsWith('n:')) return Number(vKey.slice(2));
-  if (vKey.startsWith('b:')) return vKey.slice(2) === 'true';
-  if (vKey.startsWith('j:')) {
-    try { return JSON.parse(vKey.slice(2)); } catch { return undefined; }
-  }
-  return undefined;
 }
 
 function extractWatchTarget(message) {
@@ -48,8 +42,7 @@ function cleanProposals(userId, userDir) {
     if (rec.status !== 'pending' && rec.status !== 'snoozed') continue;
     let reason = null;
     if (rec.kind === 'default_arg') {
-      if (rec.userAuthored !== true) reason = 'default_arg lacks user-authored evidence';
-      else if (!_testIsPinnable(rec.tool, rec.arg, rec.value)) reason = 'default_arg no longer passes safety gates';
+      reason = 'the default_arg proposer is retired (tool args are model-authored, not user preferences)';
     } else if (rec.kind === 'watch' && !rec.watchSourceKey && /monitor for:/i.test(rec.message || '')) {
       const source = extractMonitorableSource(extractWatchTarget(rec.message));
       if (!source.ok) reason = 'watch proposal lacks a nameable source';
@@ -64,41 +57,21 @@ function cleanProposals(userId, userDir) {
   return changed;
 }
 
-function cleanCounts(userDir) {
+function removeCountsFile(userDir) {
   const p = path.join(userDir, 'tool-arg-counts.json');
-  const counts = readJsonSafe(p, null);
-  if (!counts || typeof counts !== 'object') return 0;
-  let removed = 0;
-  for (const [key, valueBuckets] of Object.entries({ ...counts })) {
-    if (!key.includes('.') || !valueBuckets || typeof valueBuckets !== 'object') {
-      delete counts[key];
-      removed++;
-      continue;
-    }
-    const dot = key.indexOf('.');
-    const tool = key.slice(0, dot);
-    const arg = key.slice(dot + 1);
-    for (const [vKey] of Object.entries({ ...valueBuckets })) {
-      const value = decodeVKey(vKey);
-      if (value === undefined || !_testIsPinnable(tool, arg, value)) {
-        delete valueBuckets[vKey];
-        removed++;
-      }
-    }
-    if (!Object.keys(valueBuckets).length) delete counts[key];
-  }
-  if (removed) writeJson(p, counts);
-  return removed;
+  if (!fs.existsSync(p)) return 0;
+  fs.rmSync(p, { force: true });
+  return 1;
 }
 
 let proposalCount = 0;
-let countBuckets = 0;
+let countFilesRemoved = 0;
 for (const entry of fs.existsSync(USERS_DIR) ? fs.readdirSync(USERS_DIR, { withFileTypes: true }) : []) {
   if (!entry.isDirectory()) continue;
   const userId = entry.name;
   const userDir = path.join(USERS_DIR, userId);
   proposalCount += cleanProposals(userId, userDir);
-  countBuckets += cleanCounts(userDir);
+  countFilesRemoved += removeCountsFile(userDir);
 }
 
-console.log(JSON.stringify({ ok: true, proposalsPurged: proposalCount, countBucketsPruned: countBuckets }, null, 2));
+console.log(JSON.stringify({ ok: true, proposalsPurged: proposalCount, countFilesRemoved }, null, 2));

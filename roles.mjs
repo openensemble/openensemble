@@ -33,7 +33,7 @@ import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-
 // One-time: hand the voice-context getter to device-helper so ctx.device.id()
 // can resolve the current device sync.
 _registerVoiceContextResolver(getVoiceContext);
-import { mergeDefaults, recordToolCall, recordPinUsage } from './lib/tool-defaults.mjs';
+import { mergeDefaults, recordPinUsage } from './lib/tool-defaults.mjs';
 import { normalizeToolResult, toolError } from './lib/tool-error.mjs';
 import { hasPendingPrompt } from './lib/credentials.mjs';
 import { recordToolFailure } from './lib/tool-failures.mjs';
@@ -533,32 +533,6 @@ export function clearExecutorCache(skillId, userId = null) {
   if (!key) return;
   _executors.delete(key);
   _executorBust.set(key, Date.now());
-}
-
-/**
- * Map of { argName: declaredDefault } from a tool's parameter JSON-schema,
- * found by tool name across all loaded manifests. Used by the default-arg
- * learner to skip proposing a value that already equals the schema default
- * (the model often echoes a documented default verbatim → useless proposal).
- * Returns null when the tool has no params with a declared `default`.
- */
-function _toolParamDefaults(toolName) {
-  if (!toolName) return null;
-  for (const wrap of _manifests.values()) {
-    const tools = wrap.manifest?.tools;
-    if (!Array.isArray(tools)) continue;
-    for (const t of tools) {
-      if (t?.function?.name !== toolName) continue;
-      const props = t.function?.parameters?.properties;
-      if (!props || typeof props !== 'object') return null;
-      const out = {};
-      for (const [k, spec] of Object.entries(props)) {
-        if (spec && Object.prototype.hasOwnProperty.call(spec, 'default')) out[k] = spec.default;
-      }
-      return Object.keys(out).length ? out : null;
-    }
-  }
-  return null;
 }
 
 export function getRoleTools(id, userId = null) {
@@ -2038,25 +2012,6 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       // and the recipe learner doesn't bank a failed call as a success recipe.
       log.warn('tool', 'tool returned error', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: _lastErrText.slice(0, 200) });
       _reportToolFailure(_lastErrText);
-    } else if (args && typeof args === 'object') {
-      // Phase-2: count the call (only the args the model actually supplied —
-      // not mergedArgs — so pinned values don't re-count themselves). Fire-and-
-      // forget so a slow disk write doesn't block the LLM stream. If the
-      // threshold tripped, emit a default_arg proposal off the same async tick.
-      recordToolCall(userId, name, args, _toolParamDefaults(name)).then(async signal => {
-        if (signal?.proposed) {
-          try {
-            const { proposeDefaultArg } = await import('./lib/proposals.mjs');
-            await proposeDefaultArg({
-              userId, agentId: agentId || '',
-              tool: signal.tool, arg: signal.arg, value: signal.value, count: signal.count,
-              userAuthored: signal.userAuthored === true,
-            });
-          } catch (e) {
-            console.warn('[tool-defaults] propose failed:', e.message);
-          }
-        }
-      }).catch(e => console.warn('[tool-defaults] record failed:', e.message));
     }
   } catch (e) {
     console.error(`[skills] Runtime error in tool "${name}":`, e.message);
