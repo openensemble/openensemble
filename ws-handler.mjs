@@ -42,7 +42,7 @@ import { getVoiceRef } from './lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from './lib/voice-tts-stream.mjs';
 import { getSessionMeta, setSessionDeviceId, adoptSession } from './routes/_helpers/auth-sessions.mjs';
 import { getSlotAssignment, findDeviceByTokenPrefix, findDeviceByTokenAnyUser, recordTokenSecret, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice } from './lib/voice-devices.mjs';
-import { getAmbientForDevice } from './routes/devices.mjs';
+import { getAmbientForDevice, dropAmbientForDevice } from './routes/devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
 import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
 
@@ -609,6 +609,23 @@ function onConnection(ws, req) {
       if (ws._deviceId && Number.isInteger(msg.slot)) {
         handleWwUploadAck(ws._deviceId, msg.slot, !!msg.ok, msg.err);
       }
+      return;
+    }
+
+    // Device tore down ambient on its own (fw >= 0.2.62 sends this on
+    // physical mute). Drop the server-side session — marker, TTL timer, and
+    // in-flight ffmpeg pipe — or getAmbientForDevice keeps reporting it
+    // active and the wake-mid-ambient resume logic resurrects the "muted
+    // away" ambient after the next turn (the zombie-ambient bug).
+    if (msg.type === 'ambient_stopped') {
+      if (!ws._deviceId) return;
+      const had = !!getAmbientForDevice(ws._deviceId);
+      dropAmbientForDevice(ws._deviceId);
+      log.info('voice', 'device stopped ambient', {
+        deviceId: ws._deviceId,
+        reason: typeof msg.reason === 'string' ? msg.reason : null,
+        hadServerSession: had,
+      });
       return;
     }
 
