@@ -326,6 +326,126 @@ async function loadDashboard() {
     renderLocalFirst();
   }
 
+  // Reliability card (admin/owner only) — the trust complement of Local-First:
+  // tool failure rates by skill and provider plus recent errors, over the same
+  // turn-trace spine (per-tool ok is honest since the trace-honesty fix).
+  if (_currentUser?.role === 'owner' || _currentUser?.role === 'admin') {
+    const rc = document.createElement('div');
+    rc.className = 'dash-card';
+    rc.style.borderColor = '#43b89c55';
+    body.appendChild(rc);
+
+    const rlRanges = [
+      { label: '1h', range: '1h' },
+      { label: '24h', range: '24h' },
+      { label: '7d', range: '7d' },
+    ];
+    let rlActive = 1; // default 24h
+
+    const rlTile = (label, value, sub) =>
+      `<div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px">${label}</div>
+        <div style="font-size:20px;font-weight:700;color:var(--text)">${value}</div>
+        ${sub ? `<div style="font-size:11px;color:var(--muted)">${sub}</div>` : ''}
+      </div>`;
+    const rlCol = (title, rowsHtml) =>
+      `<div>
+        <div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">${title}</div>
+        ${rowsHtml}
+      </div>`;
+    const rlAgo = (iso) => {
+      const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+      if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+      return `${Math.floor(s / 86400)}d ago`;
+    };
+
+    function rlHead(metaHtml) {
+      const tabs = rlRanges.map((t, i) =>
+        `<span data-rlrange="${i}" style="padding:2px 8px;font-size:11px;border-radius:4px;cursor:pointer;${i === rlActive ? 'background:var(--accent);color:#fff' : 'color:var(--muted)'}">${t.label}</span>`
+      ).join('');
+      return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <span>${icon('activity', 24)}</span>
+          <div style="flex:1">
+            <div class="dash-card-title">Reliability (last ${rlRanges[rlActive].label})</div>
+            <div class="dash-card-meta">${metaHtml}</div>
+          </div>
+          <div style="display:flex;gap:4px">${tabs}</div>
+        </div>`;
+    }
+    function rlWireTabs() {
+      rc.querySelectorAll('[data-rlrange]').forEach(el => {
+        el.onclick = () => { rlActive = parseInt(el.dataset.rlrange); renderReliability(); };
+      });
+    }
+
+    async function renderReliability() {
+      rc.innerHTML = rlHead('Loading…');
+      rlWireTabs();
+      let m;
+      try { m = await fetch(`/api/admin/reliability?range=${rlRanges[rlActive].range}`).then(x => x.json()); }
+      catch { rc.innerHTML = rlHead('<span style="color:var(--red)">Failed to load metrics</span>'); rlWireTabs(); return; }
+
+      const t = m.totals || {};
+      if (!t.turns) { rc.innerHTML = rlHead('No turns recorded in this window.'); rlWireTabs(); return; }
+      const anyFailures = (t.toolFailures || 0) + (t.providerErrors || 0) > 0;
+      rc.style.borderColor = anyFailures ? '#e0a05c55' : '#43b89c55';
+
+      const meta = anyFailures
+        ? `<b>${t.toolFailures}</b> of <b>${t.toolCalls}</b> tool calls failed · <b>${t.providerErrors}</b> provider error${t.providerErrors === 1 ? '' : 's'}`
+        : `All <b>${t.toolCalls}</b> tool calls ok across <b>${t.turns}</b> turns`;
+
+      const statRow = (name, calls, failures, failPct) =>
+        `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:1px 0">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${failures > 0 ? '#e0a05c' : 'var(--green,#43b89c)'}"></span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(name)}</span>
+          <span style="color:${failures > 0 ? 'var(--text)' : 'var(--muted)'}">${failures > 0 ? `${failures} of ${calls} · ${failPct}%` : `${calls} ok`}</span>
+        </div>`;
+
+      const skillRows = (m.bySkill || []).slice(0, 6)
+        .map(s => statRow(s.skill, s.calls, s.failures, s.failPct)).join('')
+        || '<div style="font-size:11px;color:var(--muted)">No tool calls in this window</div>';
+      const providerRows = (m.byProvider || []).slice(0, 6)
+        .map(p => statRow(p.provider, p.toolCalls, p.toolFailures + p.providerErrors,
+          p.providerErrors ? Math.round(((p.toolFailures + p.providerErrors) / Math.max(1, p.spans + p.toolCalls)) * 100) : p.toolFailPct)).join('')
+        || '<div style="font-size:11px;color:var(--muted)">—</div>';
+
+      const failingTools = (m.byTool || []).filter(x => x.failures > 0).slice(0, 5);
+      const failingHtml = failingTools.length ? failingTools.map(x =>
+        `<div style="padding:2px 0">
+          <div style="display:flex;gap:8px;font-size:12px">
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>${escHtml(x.tool)}</b> <span style="color:var(--muted)">· ${escHtml(x.skill)}</span></span>
+            <span>${x.failures} of ${x.calls} · ${x.failPct}%</span>
+          </div>
+          ${x.lastError ? `<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">↳ ${escHtml(x.lastError)}</div>` : ''}
+        </div>`).join('') : '';
+
+      const recentHtml = (m.recentErrors || []).slice(0, 4).map(e =>
+        `<div style="display:flex;gap:8px;font-size:11px;color:var(--muted);padding:1px 0">
+          <span style="white-space:nowrap">${e.atIso ? rlAgo(e.atIso) : '—'}</span>
+          <span style="white-space:nowrap">${escHtml(e.agent || '?')}</span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(e.error)}</span>
+        </div>`).join('');
+
+      rc.innerHTML = rlHead(meta) + `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin:8px 0">
+          ${rlTile('Tool success', t.toolSuccessPct + '%', t.toolCalls + ' calls')}
+          ${rlTile('Failures', t.toolFailures, t.toolFailurePct + '% of calls')}
+          ${rlTile('Provider errors', t.providerErrors, t.spans + ' LLM runs')}
+          ${rlTile('Turns w/ errors', t.turnsWithErrors, 'of ' + t.turns)}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          ${rlCol('By skill', skillRows)}
+          ${rlCol('By provider', providerRows)}
+        </div>
+        ${failingHtml ? `<div style="margin-top:10px">${rlCol('Failing tools', failingHtml)}</div>` : ''}
+        ${recentHtml ? `<div style="margin-top:10px">${rlCol('Recent errors', recentHtml)}</div>` : ''}`;
+      rlWireTabs();
+    }
+    renderReliability();
+  }
+
 }
 
 const DASH_TOOLS = {

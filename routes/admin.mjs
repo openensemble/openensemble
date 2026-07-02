@@ -19,10 +19,11 @@ import {
   CFG_PATH, USERS_PATH, ACTIVITY_DIR, NOTES_PATH, EXPENSES_DB, EXPENSE_GROUPS_PATH,
   getAgentsForUser, getUserCoordinatorAgentId,
 } from './_helpers.mjs';
-import { getDefaultRoles } from '../roles.mjs';
+import { getDefaultRoles, listAllRoles } from '../roles.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
 import { listTurnTrees, getTurnDetail } from '../lib/turn-trace-reader.mjs';
 import { computeTurnMetrics } from '../lib/turn-metrics.mjs';
+import { computeReliabilityMetrics, buildToolSkillMap } from '../lib/reliability-metrics.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import {
   getCachedState as getUpdateState, checkForUpdate, isCleanForUpdate,
@@ -337,6 +338,24 @@ export async function handle(req, res) {
     const qs = new URL(req.url, 'http://x').searchParams;
     const range = qs.get('range') || '24h';
     const metrics = computeTurnMetrics({ range, userId: qs.get('userId') || null });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(metrics));
+    return true;
+  }
+
+  // Reliability metrics (admin only) — failure rates by tool/skill/provider
+  // over the turn-trace spine (per-tool ok is honest since the trace-honesty
+  // fix). ?range=1h|6h|24h|7d (default 24h), ?userId=<id> filter. Aggregate +
+  // metadata only: error strings were truncated at record time, no prompts or
+  // raw tool args.
+  if (req.url.startsWith('/api/admin/reliability') && req.method === 'GET') {
+    const authId = requirePrivileged(req, res); if (!authId) return true;
+    const qs = new URL(req.url, 'http://x').searchParams;
+    const metrics = computeReliabilityMetrics({
+      range: qs.get('range') || '24h',
+      userId: qs.get('userId') || null,
+      toolSkillMap: buildToolSkillMap(listAllRoles()),
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(metrics));
     return true;
