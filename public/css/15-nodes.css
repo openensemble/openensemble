@@ -291,6 +291,10 @@
   border-color: rgba(248, 81, 73, 0.35);
 }
 
+.node-onboarding-status-warning {
+  border-color: rgba(210, 153, 34, 0.35);
+}
+
 .node-onboarding-spinner {
   width: 12px;
   height: 12px;
@@ -313,6 +317,11 @@
 .node-onboarding-status-error .node-onboarding-spinner {
   border-color: var(--red);
   background: var(--red);
+}
+
+.node-onboarding-status-warning .node-onboarding-spinner {
+  border-color: var(--yellow);
+  background: var(--yellow);
 }
 
 @keyframes nodeSpin {
@@ -648,6 +657,99 @@
   align-items: center;
   gap: 6px;
   padding: 4px 0;
+}
+
+/* ── Combined System Health block inside each node card ─────────────────── */
+.node-system-health {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.node-system-health-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.node-system-health-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+.node-system-health-detail {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.35;
+}
+.node-system-health-meta {
+  margin-top: 6px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+.node-system-health-skipped {
+  color: var(--yellow);
+}
+.node-system-health-actions {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.node-system-health-actions .cdraw-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.node-autofix-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.node-autofix-toggle input {
+  appearance: none;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--border);
+  position: relative;
+  cursor: pointer;
+  transition: background .15s;
+}
+.node-autofix-toggle input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left .15s;
+}
+.node-autofix-toggle input:checked {
+  background: var(--accent);
+}
+.node-autofix-toggle input:checked::after {
+  left: 18px;
+}
+.node-autofix-disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.node-autofix-disabled input {
+  cursor: default;
 }
 
 /* ── Shared node health detail view ─────────────────────────────────────── */

@@ -134,7 +134,9 @@ function handleServerMessage(msg) {
         // and the last bubble doubles up after a WS reconnect.
         const clientOnly = clientMsgs.filter(m =>
           (m.ts || 0) > lastServerTs &&
-          !serverMsgs.some(s => s.role === m.role && s.content === m.content));
+          !(typeof sessionHasEquivalent === 'function'
+            ? sessionHasEquivalent(serverMsgs, m)
+            : serverMsgs.some(s => s.role === m.role && s.content === m.content)));
         sessions[msg.agent] = clientOnly.length > 0
           ? [...serverMsgs, ...clientOnly]
           : serverMsgs;

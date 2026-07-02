@@ -2,7 +2,12 @@
   "id": "gcal",
   "name": "Google Calendar",
   "description": "View and manage your Google Calendar events",
-  "icon": "\ud83d\udcc5",
+  "icon": "📅",
+  "selected_plan_keep": [
+    "gcal_create",
+    "gcal_create_batch",
+    "gcal_update"
+  ],
   "category": "utility",
   "service": true,
   "enabled_by_default": false,
@@ -30,13 +35,13 @@
     "can you tell me how my schedule looks"
   ],
   "setup": "Enable to start Google Calendar authorization in your browser.",
-  "systemPromptAddition": "## Google Calendar\n\n### Core Rule: Always use live data\nNever answer scheduling questions from memory. Always call gcal_list for current events. \"What am I doing tomorrow?\" = call gcal_list with tomorrow's date range, every time.\n\n\"Recheck\", \"check again\", \"look again\" \u2014 call the tool again immediately. Never restate a previous answer.\n\n### Displaying events\nFormat each event as:\n  \ud83d\udcc5 **[Title]** \u2014 Day, Month Date \u00b7 Time \u2013 Time (timezone)\n  ID: <eventId>\n  \u2192 Location (if set) \u00b7 Attendees (if any) \u00b7 Notes (if any)\n\nAlways include the raw event ID \u2014 needed for follow-up actions like \"update that\" or \"delete it\".\n\nGroup by day when showing multiple events.\n\n### Confirmation rules\n- {{USER_NAME}} directly commands a delete (\"delete that\", \"cancel that meeting\", \"remove it\") after you showed the event \u2192 call gcal_delete immediately. His command IS the confirmation.\n- Creating or updating an event \u2192 always show the full event details first and wait for explicit approval before calling the tool.\n- Quick add \u2192 call it, then show {{USER_NAME}} what Google parsed so he can verify the time and title were understood correctly.\n- NEVER say an action was completed unless you called the tool and received a successful response. If you did not call a tool, the action did not happen.\n\n### Moving events\n\"Move [event] to [day/time]\" always means call gcal_update with the existing eventId and new start/end \u2014 never gcal_delete + gcal_create. Moving preserves the event ID, description, attendees, and all metadata.\n\n### Conflict checking\nBefore creating or moving a SINGLE event into a time slot, call gcal_list for that window. If a conflict exists, flag it: \"You already have [X] at that time \u2014 still want to create this?\"\n\n### Bulk creation (many events at once)\nWhen adding MORE THAN ~3 events at once \u2014 a whole sports schedule, an imported list, a series \u2014 use gcal_create_batch with the full array in ONE call. Do NOT loop gcal_create and do NOT call gcal_list once per event to conflict-check: gcal_create_batch does a single dedupe pre-scan internally (skipExisting defaults true) and skips anything already on the calendar, plus it handles rate-limit retries server-side. Show the user a brief summary first (\"Adding 56 LG Twins games, Apr\u2013Sep, to your primary calendar \u2014 go ahead?\"), confirm ONCE, then make the single batch call and report the created/skipped/failed counts it returns.\n\n### Recurring events\nWhen updating or deleting a recurring event, always clarify scope before acting:\n\"This will affect just this occurrence. Should it apply to all future occurrences, or every instance of this event?\"\nWait for the answer before calling the tool.\n\n### Time zones\nAlways use explicit timezones in ISO 8601 format. Never leave a time ambiguous. If a time is given without a timezone, use America/Los_Angeles unless told otherwise.\n\n### Scheduling workflows\nWhen asked to \"schedule X\" or \"find time for X\":\n1. Call gcal_list for the relevant window to see what's already booked\n2. Propose specific open slots based on what you find\n3. Show the full draft event (title, time, location if provided) and wait for confirmation\n4. Then call gcal_create\n\nWhen asked \"what's on my calendar [period]\":\n1. Call gcal_list with that time range\n2. Group by day, format each event as above\n3. Proactively flag conflicts, back-to-back meetings, or unusually long gaps\n\n### Multiple calendars\nOn first use each session, call gcal_list_calendars to learn what calendars exist. Reference them by name in responses (\"your Work calendar\", \"your Personal calendar\").\n\n### Tone\nConcise. Lead with the schedule. Flag conflicts and time-sensitive items proactively. Suggest optimizations (\"You have a 3-hour gap Tuesday \u2014 good time for that call?\") but only act on your own suggestions after explicit confirmation.",
+  "systemPromptAddition": "## Google Calendar\n\n### Core Rule: Always use live data\nNever answer scheduling questions from memory. Always call gcal_list for current events. \"What am I doing tomorrow?\" = call gcal_list with tomorrow's date range, every time.\n\n\"Recheck\", \"check again\", \"look again\" — call the tool again immediately. Never restate a previous answer.\n\n### Displaying events\nFormat each event as:\n  📅 **[Title]** — Day, Month Date · Time – Time (timezone)\n  ID: <eventId>\n  → Location (if set) · Attendees (if any) · Notes (if any)\n\nAlways include the raw event ID — needed for follow-up actions like \"update that\" or \"delete it\".\n\nGroup by day when showing multiple events.\n\n### Confirmation rules\n- {{USER_NAME}} directly commands a delete (\"delete that\", \"cancel that meeting\", \"remove it\") after you showed the event → call gcal_delete immediately. His command IS the confirmation.\n- Creating or updating an event → always show the full event details first and wait for explicit approval before calling the tool.\n- Quick add → call it, then show {{USER_NAME}} what Google parsed so he can verify the time and title were understood correctly.\n- NEVER say an action was completed unless you called the tool and received a successful response. If you did not call a tool, the action did not happen.\n\n### Moving events\n\"Move [event] to [day/time]\" always means call gcal_update with the existing eventId and new start/end — never gcal_delete + gcal_create. Moving preserves the event ID, description, attendees, and all metadata.\n\n### Conflict checking\nBefore creating or moving a SINGLE event into a time slot, call gcal_list for that window. If a conflict exists, flag it: \"You already have [X] at that time — still want to create this?\"\n\n### Bulk creation (many events at once)\nWhen adding MORE THAN ~3 events at once — a whole sports schedule, an imported list, a series — use gcal_create_batch with the full array in ONE call. Do NOT loop gcal_create and do NOT call gcal_list once per event to conflict-check: gcal_create_batch does a single dedupe pre-scan internally (skipExisting defaults true) and skips anything already on the calendar, plus it handles rate-limit retries server-side. Show the user a brief summary first (\"Adding 56 LG Twins games, Apr–Sep, to your primary calendar — go ahead?\"), confirm ONCE, then make the single batch call and report the created/skipped/failed counts it returns.\n\n### Recurring events\nWhen updating or deleting a recurring event, always clarify scope before acting:\n\"This will affect just this occurrence. Should it apply to all future occurrences, or every instance of this event?\"\nWait for the answer before calling the tool.\n\n### Time zones\nAlways use explicit timezones in ISO 8601 format. Never leave a time ambiguous. If a time is given without a timezone, use America/Los_Angeles unless told otherwise.\n\n### Scheduling workflows\nWhen asked to \"schedule X\" or \"find time for X\":\n1. Call gcal_list for the relevant window to see what's already booked\n2. Propose specific open slots based on what you find\n3. Show the full draft event (title, time, location if provided) and wait for confirmation\n4. Then call gcal_create\n\nWhen asked \"what's on my calendar [period]\":\n1. Call gcal_list with that time range\n2. Group by day, format each event as above\n3. Proactively flag conflicts, back-to-back meetings, or unusually long gaps\n\n### Multiple calendars\nOn first use each session, call gcal_list_calendars to learn what calendars exist. Reference them by name in responses (\"your Work calendar\", \"your Personal calendar\").\n\n### Tone\nConcise. Lead with the schedule. Flag conflicts and time-sensitive items proactively. Suggest optimizations (\"You have a 3-hour gap Tuesday — good time for that call?\") but only act on your own suggestions after explicit confirmation.",
   "tools": [
     {
       "type": "function",
       "function": {
         "name": "gcal_list",
-        "description": "List events from Google Calendar. Always scope with timeMin/timeMax \u2014 never list without a time range. When asked 'what's on my calendar today/tomorrow/this week', compute the appropriate ISO 8601 range. Default calendarId is 'primary'.",
+        "description": "List events from Google Calendar. Always scope with timeMin/timeMax — never list without a time range. When asked 'what's on my calendar today/tomorrow/this week', compute the appropriate ISO 8601 range. Default calendarId is 'primary'.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -149,21 +154,57 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "summary": { "type": "string", "description": "Event title" },
-                  "start": { "type": "string", "description": "Start (ISO 8601 datetime with timezone, or date like 2026-03-25 for all-day)" },
-                  "end": { "type": "string", "description": "End (ISO 8601 datetime with timezone, or date for all-day)" },
-                  "description": { "type": "string", "description": "Event description/notes" },
-                  "location": { "type": "string", "description": "Event location" },
-                  "attendees": { "type": "array", "items": { "type": "string" }, "description": "Attendee email addresses" },
-                  "allDay": { "type": "boolean", "description": "If true, all-day event (start/end are dates like 2026-03-25)" }
+                  "summary": {
+                    "type": "string",
+                    "description": "Event title"
+                  },
+                  "start": {
+                    "type": "string",
+                    "description": "Start (ISO 8601 datetime with timezone, or date like 2026-03-25 for all-day)"
+                  },
+                  "end": {
+                    "type": "string",
+                    "description": "End (ISO 8601 datetime with timezone, or date for all-day)"
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Event description/notes"
+                  },
+                  "location": {
+                    "type": "string",
+                    "description": "Event location"
+                  },
+                  "attendees": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Attendee email addresses"
+                  },
+                  "allDay": {
+                    "type": "boolean",
+                    "description": "If true, all-day event (start/end are dates like 2026-03-25)"
+                  }
                 },
-                "required": ["summary", "start", "end"]
+                "required": [
+                  "summary",
+                  "start",
+                  "end"
+                ]
               }
             },
-            "calendarId": { "type": "string", "description": "Calendar ID to add all events to (default: primary)" },
-            "skipExisting": { "type": "boolean", "description": "If true (default), skip any event already on the calendar (same title + same day) so re-running won't duplicate. Set false to force-create every event." }
+            "calendarId": {
+              "type": "string",
+              "description": "Calendar ID to add all events to (default: primary)"
+            },
+            "skipExisting": {
+              "type": "boolean",
+              "description": "If true (default), skip any event already on the calendar (same title + same day) so re-running won't duplicate. Set false to force-create every event."
+            }
           },
-          "required": ["events"]
+          "required": [
+            "events"
+          ]
         }
       }
     },
@@ -214,7 +255,7 @@
       "type": "function",
       "function": {
         "name": "gcal_delete",
-        "description": "Delete a calendar event. If {{USER_NAME}} directly says 'delete that event', 'cancel that meeting', or 'remove it' after you showed the event \u2014 his command IS the confirmation, call immediately. For recurring events, always clarify scope first: this occurrence, all future, or all instances.",
+        "description": "Delete a calendar event. If {{USER_NAME}} directly says 'delete that event', 'cancel that meeting', or 'remove it' after you showed the event — his command IS the confirmation, call immediately. For recurring events, always clarify scope first: this occurrence, all future, or all instances.",
         "parameters": {
           "type": "object",
           "properties": {

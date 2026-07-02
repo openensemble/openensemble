@@ -105,7 +105,7 @@
       "type": "function",
       "function": {
         "name": "profile_set_trust_state",
-        "description": "Update a profile's trust state. 'reviewed' = low-risk fixes auto-apply; 'proven' = low + medium-risk fixes auto-apply (high-risk still always confirms). Use 'reviewed' after {{USER_NAME}} has eyeballed the profile. 'proven' is staged behind APPROVE PROVEN — do NOT call it speculatively; only when {{USER_NAME}} explicitly asks to elevate.",
+        "description": "Update a profile's trust state. 'reviewed' starts monitoring and permits low-risk fixes only when the node Auto-fix gate is enabled; 'proven' also permits medium-risk fixes behind the same gate (high-risk still always confirms). Use 'reviewed' after {{USER_NAME}} has eyeballed the profile. 'proven' is staged behind APPROVE PROVEN — do NOT call it speculatively; only when {{USER_NAME}} explicitly asks to elevate.",
         "parameters": {
           "type": "object",
           "properties": {

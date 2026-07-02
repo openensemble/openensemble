@@ -35,8 +35,8 @@ function trustStateLabel(state) {
 }
 
 function trustStateHint(state) {
-  if (state === 'reviewed') return 'monitoring on, low-risk auto-fixes allowed';
-  if (state === 'proven') return 'monitoring on, medium-risk auto-fixes allowed';
+  if (state === 'reviewed') return 'monitoring on, low-risk fixes gated by node Auto-fix';
+  if (state === 'proven') return 'monitoring on, medium-risk fixes gated by node Auto-fix';
   return 'monitoring off, auto-fixes off';
 }
 
@@ -172,7 +172,7 @@ async function execProfileSetTrustState(args, userId) {
   }
   if (state === 'proven' && !args._userApproved) {
     _pendingProven.set(userId, { node_id, service_id });
-    return `⚠️ Promoting "${service_id}" on "${node_id}" to **proven** elevates autonomy: medium-risk fixes (service restarts, reloads, reversible config changes) on verified operations will auto-apply when troubleshooting fires, instead of being proposed. High-risk ops still always require confirmation. Type **APPROVE PROVEN** in chat to confirm, or say anything else to cancel.`;
+    return `⚠️ Promoting "${service_id}" on "${node_id}" to **proven** permits medium-risk fixes (service restarts, reloads, reversible config changes) on verified operations when the node Auto-fix gate is enabled. High-risk ops still always require confirmation. Type **APPROVE PROVEN** in chat to confirm, or say anything else to cancel.`;
   }
   let updated;
   try {

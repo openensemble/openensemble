@@ -67,6 +67,8 @@ function persistNodes() {
         // this node's guest (Proxmox LXC/VM, ZFS dataset on TrueNAS, etc.).
         // Enables host-level rollback for high-risk ops via lib/host-snapshot.mjs.
         parentHost: entry.parentHost || null,
+        autoFixEnabled: !!entry.autoFixEnabled,
+        onboarding: entry.onboarding || null,
         version: entry.version,
         registeredAt: entry.registeredAt,
         disconnectedAt: entry.ws ? null : (entry.disconnectedAt ?? Date.now()),
@@ -108,6 +110,8 @@ export function loadPersistedNodes() {
         accessLocked: !!n.accessLocked,
         readableFolders: Array.isArray(n.readableFolders) ? n.readableFolders : [],
         parentHost: n.parentHost || null,
+        autoFixEnabled: !!n.autoFixEnabled,
+        onboarding: n.onboarding || null,
         version: n.version || 'unknown',
         registeredAt: n.registeredAt || now,
         lastHeartbeat: n.registeredAt || now,
@@ -194,6 +198,59 @@ function notifyCoordinator(userId, message) {
   } catch (e) {
     console.warn('[nodes] Failed to notify coordinator:', e.message);
   }
+}
+
+function shouldAutoOnboardNode(entry, info = {}) {
+  if (info.autoOnboard === false) return false;
+  // Unit tests register fake WebSockets that never answer node_exec. Keep the
+  // historical fake-node behavior unless a test explicitly opts in.
+  if ((process.env.VITEST === 'true' || process.env.NODE_ENV === 'test') && info.autoOnboard !== true) return false;
+  if (entry.platform !== 'linux') return false;
+  return entry.onboarding?.status !== 'full';
+}
+
+function ensureDraftSystemProfile(userId, nodeId, entry) {
+  import('../../lib/node-system-profile.mjs')
+    .then(({ ensureNodeSystemProfile }) => ensureNodeSystemProfile(userId, nodeId, {
+      hostname: entry.hostname,
+      platform: entry.platform,
+    }))
+    .catch(e => console.warn(`[nodes] system-profile bootstrap failed for ${nodeId}: ${e.message}`));
+}
+
+function scheduleAutoOnboarding(userId, nodeId, entry, info = {}) {
+  if (!shouldAutoOnboardNode(entry, info)) {
+    ensureDraftSystemProfile(userId, nodeId, entry);
+    return;
+  }
+  const timer = setTimeout(async () => {
+    const current = nodes.get(nodeId);
+    if (!current || current.userId !== userId || !current.ws) return;
+    try {
+      const { runNodeOnboarding } = await import('../../lib/node-onboarding.mjs');
+      const result = await runNodeOnboarding({
+        userId,
+        node: nodeToWire(current),
+        scope: 'safe',
+        execFn: async (command) => sendCommand(nodeId, userId, {
+          type: 'exec',
+          command,
+          timeout: 45,
+        }),
+      });
+      setNodeOnboardingState(nodeId, userId, result);
+      broadcastNodeEvent(userId, {
+        type: 'node_health',
+        nodeId,
+        health: current.health,
+        message: `${current.hostname} System Health ${result.status === 'full' ? 'fully onboarded' : 'partially onboarded'}`,
+      });
+    } catch (e) {
+      console.warn(`[nodes] auto-onboarding failed for ${nodeId}: ${e.message}`);
+      ensureDraftSystemProfile(userId, nodeId, current);
+    }
+  }, 1500);
+  timer.unref?.();
 }
 
 // ── Revocation ────────────────────────────────────────────────────────────────
@@ -289,6 +346,8 @@ export function registerNode(ws, userId, info) {
     readableFolders: oldEntry?.readableFolders || [],
     // Same for parent_host — agent never knows about this; preserve it.
     parentHost: oldEntry?.parentHost || null,
+    autoFixEnabled: !!oldEntry?.autoFixEnabled,
+    onboarding: oldEntry?.onboarding || null,
     tokenHash: oldEntry?.tokenHash || null,
     tokenPrefix: oldEntry?.tokenPrefix || null,
     version: info.version || 'unknown',
@@ -311,13 +370,10 @@ export function registerNode(ws, userId, info) {
 
   console.log(`[nodes] ${isReconnect ? 'Reconnected' : 'Registered'}: ${nodeId} (${info.hostname}) for user ${userId}`);
 
-  // Auto-create the baseline 'system' health profile on first registration.
-  // Idempotent — re-running on every reconnect is fine (no-ops once the
-  // profile exists). Dynamic import to avoid circular deps with health-monitor
-  // / service-profile through the registry's many consumers.
-  import('../../lib/node-system-profile.mjs')
-    .then(({ ensureNodeSystemProfile }) => ensureNodeSystemProfile(userId, nodeId, { hostname: entry.hostname, platform: entry.platform }))
-    .catch(e => console.warn(`[nodes] system-profile bootstrap failed for ${nodeId}: ${e.message}`));
+  // New Linux nodes should populate System Health on their own. The background
+  // pass is read-only and safe; the drawer's Onboard button remains for
+  // re-running checks or explicitly including restart-required work later.
+  scheduleAutoOnboarding(userId, nodeId, entry, info);
 
   if (isReconnect) {
     const downtime = oldEntry?.disconnectedAt ? now - oldEntry.disconnectedAt : 0;
@@ -474,6 +530,8 @@ function nodeToWire(entry) {
     accessLocked: entry.accessLocked,
     readableFolders: entry.readableFolders || [],
     parentHost: entry.parentHost || null,
+    autoFixEnabled: !!entry.autoFixEnabled,
+    onboarding: entry.onboarding || null,
     version: entry.version || 'unknown',
     registeredAt: entry.registeredAt,
     lastHeartbeat: entry.lastHeartbeat,
@@ -574,6 +632,27 @@ export function getParentHost(nodeId, userId) {
   return entry?.parentHost || null;
 }
 
+export function setNodeAutoFix(nodeId, userId, enabled) {
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return null;
+  entry.autoFixEnabled = !!enabled;
+  persistNodes();
+  return nodeToWire(entry);
+}
+
+export function getNodeAutoFixEnabled(nodeId, userId) {
+  const entry = resolveNodeEntry(nodeId, userId);
+  return entry ? !!entry.autoFixEnabled : null;
+}
+
+export function setNodeOnboardingState(nodeId, userId, onboarding) {
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return null;
+  entry.onboarding = onboarding && typeof onboarding === 'object' ? onboarding : null;
+  persistNodes();
+  return nodeToWire(entry);
+}
+
 export function setReadableFolders(nodeId, userId, paths) {
   const entry = resolveNodeEntry(nodeId, userId);
   if (!entry) return null;
@@ -588,8 +667,8 @@ export function setReadableFolders(nodeId, userId, paths) {
 
 // True if `path` is reachable under one of the allowlisted prefixes. We
 // require an exact match or a path-segment-aligned prefix match so a
-// `readableFolders=['/home/shawn/Documents']` setting does NOT permit reads
-// of `/home/shawn/Documents.bak/foo` or other accidental siblings.
+// `readableFolders=['/home/user/Documents']` setting does NOT permit reads
+// of `/home/user/Documents.bak/foo` or other accidental siblings.
 //
 // Also rejects paths containing `..` to keep the canonical form. Symlink
 // traversal beyond the allowlist is the agent's concern — defense in depth

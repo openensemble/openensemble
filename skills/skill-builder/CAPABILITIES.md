@@ -341,6 +341,23 @@ the flag just as much as one that streams audio via `ctx.device`. Leave
 it off (default) only for skills the user will exclusively use in the
 browser/chat UI.
 
+**Protect terminal tools from remembered tool plans (`selected_plan_keep`):**
+
+The server remembers per-task tool "recipes" and trims an agent's toolset
+to the remembered list on matching turns. If your skill has a TERMINAL
+tool — the save/send/deliver/finalize step without which its workflows
+cannot complete (like `save_research` for research or `email_compose` for
+email) — declare it at the manifest top level:
+
+```json
+"selected_plan_keep": ["myskill_save_result"]
+```
+
+Those tools then survive recipe trimming for any agent that holds the
+skill. Declare ONLY genuinely terminal tools: every entry ships its
+schema on every plan-constrained turn, so listing read/query tools here
+wastes tokens and defeats the trimming.
+
 **Audio-source guidance for the skill:**
 
 When the user names an external music/podcast/audio service ("YouTube

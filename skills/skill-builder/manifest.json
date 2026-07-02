@@ -152,6 +152,13 @@
                 ]
               }
             },
+            "selected_plan_keep": {
+              "type": "array",
+              "description": "OPTIONAL. Exact tool names from THIS skill that must survive remembered selected tool plans. Use only for genuinely terminal save/send/deliver/finalize tools whose absence would make the workflow fail, such as a save or email-compose tool. Do not list read/query tools; every entry ships its schema on plan-constrained turns.",
+              "items": {
+                "type": "string"
+              }
+            },
             "coordinator_scope": {
               "type": "string",
               "enum": [
@@ -380,7 +387,7 @@
       "type": "function",
       "function": {
         "name": "skill_update_manifest",
-        "description": "Update manifest-LEVEL fields on an existing user skill (not a specific tool's def — use skill_update_tool_def for that, and skill_update_code/skill_patch_code for code). Use this to set voice_device after the fact, amend the systemPromptAddition the owning agent reads, or change intent_examples/coordinator_scope/description. Changes are live on the next turn without a server restart. Provide id plus at least one field to change.",
+        "description": "Update manifest-LEVEL fields on an existing user skill (not a specific tool's def — use skill_update_tool_def for that, and skill_update_code/skill_patch_code for code). Use this to set voice_device after the fact, amend the systemPromptAddition the owning agent reads, change intent_examples/coordinator_scope/description, or set selected_plan_keep for terminal tools. Changes are live on the next turn without a server restart. Provide id plus at least one field to change.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -441,6 +448,13 @@
                   "id",
                   "tool"
                 ]
+              }
+            },
+            "selected_plan_keep": {
+              "type": "array",
+              "description": "Replace the manifest-level selected_plan_keep list. Entries must be exact tool names from THIS skill. Use only for terminal save/send/deliver/finalize tools that must survive selected recipe trimming. Pass [] to clear.",
+              "items": {
+                "type": "string"
               }
             },
             "coordinator_scope": {
@@ -560,7 +574,7 @@
             },
             "patch": {
               "type": "object",
-              "description": "Partial spec to merge. Common keys: tools, openQuestions, credentials, sources, dataStorage, assignTo, watcher, collection, aliasCatalog, sampleDialogs, intentExamples, coordinatorScope, systemPromptAddition, code, drawer, watchers, rejectedCapabilities. Add only the fields you want to change."
+              "description": "Partial spec to merge. Common keys: tools, openQuestions, credentials, sources, dataStorage, assignTo, watcher, collection, aliasCatalog, sampleDialogs, intentExamples, coordinatorScope, selected_plan_keep, systemPromptAddition, code, drawer, watchers, rejectedCapabilities. Add only the fields you want to change."
             }
           },
           "required": [

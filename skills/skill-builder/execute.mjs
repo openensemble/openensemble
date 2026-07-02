@@ -307,8 +307,33 @@ function cleanLocalIntents(localIntents, toolNames) {
   return out.length ? out : null;
 }
 
+function cleanSelectedPlanKeep(selectedPlanKeep, toolNames) {
+  if (!Array.isArray(selectedPlanKeep)) return null;
+  const valid = new Set(toolNames);
+  const values = [];
+  const invalid = [];
+  const seen = new Set();
+  const seenInvalid = new Set();
+  for (const raw of selectedPlanKeep) {
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    if (!name) continue;
+    if (!valid.has(name)) {
+      if (!seenInvalid.has(name)) {
+        seenInvalid.add(name);
+        invalid.push(name);
+      }
+      continue;
+    }
+    if (!seen.has(name)) {
+      seen.add(name);
+      values.push(name);
+    }
+  }
+  return { values, invalid };
+}
+
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, selected_plan_keep, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -353,6 +378,13 @@ async function handleCreate(args, userId) {
   const collisions = newNames.filter(n => existingNames.has(n));
   if (collisions.length) {
     return `Tool name collision: ${collisions.join(', ')} already exist in another skill. Use unique prefixed names.`;
+  }
+  if (selected_plan_keep !== undefined && !Array.isArray(selected_plan_keep)) {
+    return 'selected_plan_keep must be an array of exact tool names from this skill.';
+  }
+  const selectedPlanKeep = cleanSelectedPlanKeep(selected_plan_keep, newNames);
+  if (selectedPlanKeep?.invalid.length) {
+    return `selected_plan_keep references tools not in this skill: ${selectedPlanKeep.invalid.join(', ')}. Use exact names from tools[].function.name.`;
   }
 
   // ── Sandbox consent (multi-tenant isolation) ─────────────────────────────────
@@ -404,6 +436,9 @@ async function handleCreate(args, userId) {
   {
     const cleaned = cleanLocalIntents(localIntents, newNames);
     if (cleaned) manifest.localIntents = cleaned;
+  }
+  if (selectedPlanKeep?.values.length) {
+    manifest.selected_plan_keep = selectedPlanKeep.values;
   }
   // voice_device: when true, the skill's tools survive the voice-device tool
   // allowlist (chat-dispatch.mjs voiceToolAllowlistFor) so the user can trigger
@@ -860,10 +895,10 @@ async function handleUpdateToolDef(args, userId) {
 
 // Update manifest-LEVEL fields (not a specific tool) on an existing skill:
 // voice_device, systemPromptAddition, intent_examples, coordinator_scope,
-// description. Modeled on handleUpdateToolDef — atomic write + re-register so
-// the change is live without a server restart.
+// selected_plan_keep, description. Modeled on handleUpdateToolDef — atomic
+// write + re-register so the change is live without a server restart.
 async function handleUpdateManifest(args, userId) {
-  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description, sandbox, allow_network } = args;
+  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, selected_plan_keep, coordinator_scope, description, sandbox, allow_network } = args;
   if (!id?.trim()) return 'id is required.';
 
   const skillId = id.trim();
@@ -885,6 +920,7 @@ async function handleUpdateManifest(args, userId) {
   catch (e) { return `Could not parse manifest.json: ${e.message}`; }
 
   const changed = [];
+  const toolNames = (disk.tools ?? []).map(t => t.function?.name).filter(Boolean);
   if (voice_device === true)  { disk.voice_device = true;       changed.push('voice_device=true'); }
   else if (voice_device === false) { delete disk.voice_device;  changed.push('voice_device=false'); }
   if (typeof systemPromptAddition === 'string' && systemPromptAddition.trim()) {
@@ -907,10 +943,23 @@ async function handleUpdateManifest(args, userId) {
   }
   // localIntents — local cognition tier (see SKILL_BLUEPRINT). Pass [] to clear.
   if (Array.isArray(localIntents)) {
-    const toolNames = (disk.tools ?? []).map(t => t.function?.name).filter(Boolean);
     disk.localIntents = cleanLocalIntents(localIntents, toolNames) ?? [];
     if (!disk.localIntents.length) delete disk.localIntents;
     changed.push(`localIntents(${disk.localIntents?.length ?? 0})`);
+  }
+  // selected_plan_keep — terminal tools that survive selected recipe trimming.
+  // Pass [] to clear.
+  if (selected_plan_keep !== undefined) {
+    if (!Array.isArray(selected_plan_keep)) {
+      return 'selected_plan_keep must be an array of exact tool names from this skill. Pass [] to clear.';
+    }
+    const cleaned = cleanSelectedPlanKeep(selected_plan_keep, toolNames);
+    if (cleaned.invalid.length) {
+      return `selected_plan_keep references tools not in this skill: ${cleaned.invalid.join(', ')}. Existing tools: ${toolNames.join(', ') || '(none)'}.`;
+    }
+    if (cleaned.values.length) disk.selected_plan_keep = cleaned.values;
+    else delete disk.selected_plan_keep;
+    changed.push(`selected_plan_keep(${cleaned.values.length})`);
   }
   // Sandbox controls — isolate (run jailed) and network (allow egress). Only grant
   // network after the user has OK'd it: egress lets the skill send data out.
@@ -923,7 +972,7 @@ async function handleUpdateManifest(args, userId) {
     changed.push(`sandbox.network=${allow_network}`);
   }
   if (!changed.length) {
-    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, coordinator_scope, description, sandbox, allow_network.';
+    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, selected_plan_keep, coordinator_scope, description, sandbox, allow_network.';
   }
 
   const backupPath = manifestPath + '.bak';
@@ -1114,6 +1163,10 @@ function renderDraftSummary(draft) {
     lines.push('');
   }
 
+  const keep = Array.isArray(s.selected_plan_keep) ? s.selected_plan_keep : s.selectedPlanKeep;
+  if (Array.isArray(keep) && keep.length) {
+    lines.push(`**Protected terminal tools**: ${keep.map(t => `\`${t}\``).join(', ')}`);
+  }
   if (s.dataStorage) lines.push(`**Stores data at**: \`${s.dataStorage}\``);
   if (s.assignTo)   lines.push(`**Will be owned by**: \`${s.assignTo}\``);
   lines.push('');
@@ -1287,6 +1340,7 @@ async function handleDraftBuild(args, userId) {
     drawer: s.drawer,
     watchers: s.watchers,
     intent_examples: s.intentExamples,
+    selected_plan_keep: Array.isArray(s.selected_plan_keep) ? s.selected_plan_keep : s.selectedPlanKeep,
     coordinator_scope: s.coordinatorScope,
     voice_device: s.voiceDevice === true || s.voice_device === true,
     assign_to: s.assignTo,

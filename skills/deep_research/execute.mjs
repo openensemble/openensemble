@@ -381,7 +381,9 @@ function execUpdateResearch(documentId, content, tags, userId) {
     doc.updatedAt = new Date().toISOString();
     if (tags) doc.tags = tags;
     saveIndex(userId, index);
-    return { success: true, message: `Document "${doc.title}" updated successfully.` };
+    // id included so pipeline handoffs can whitelist the updated doc as a
+    // produced artifact (extractProducedBodyDocIds) — same shape as save_research.
+    return { success: true, id: doc.id, message: `Document "${doc.title}" updated successfully.` };
   }
 
   // If no content yet, return existing content for merging

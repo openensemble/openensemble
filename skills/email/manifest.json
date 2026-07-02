@@ -3,26 +3,55 @@
   "name": "Email (All Accounts)",
   "description": "Unified email access across Gmail, Microsoft/Exchange, and IMAP accounts.",
   "icon": "📬",
+  "selected_plan_keep": [
+    "email_compose"
+  ],
   "category": "email",
   "service": true,
   "enabled_by_default": false,
   "defaultToolIds": [
-    "email_list_accounts", "email_list", "email_read", "email_thread",
-    "email_reply", "email_compose",
-    "email_trash", "email_batch_trash", "email_batch_label", "email_label_query",
-    "email_purge_sender", "email_mark_read", "email_inbox_stats", "email_count", "email_list_labels", "email_learned_labels", "email_correct_label", "email_remove_label_correction", "email_sort_local",
-    "set_reminder", "schedule_task", "list_watches", "cancel_watch", "update_watch", "create_watch",
-    "remember_fact", "recall_facts", "forget_fact",
-    "skill_add_rule", "skill_remove_rule", "skill_list_rules",
-    "list_profile_files", "get_research",
-    "fetch_url", "web_search",
+    "email_list_accounts",
+    "email_list",
+    "email_read",
+    "email_thread",
+    "email_reply",
+    "email_compose",
+    "email_trash",
+    "email_batch_trash",
+    "email_batch_label",
+    "email_label_query",
+    "email_purge_sender",
+    "email_mark_read",
+    "email_inbox_stats",
+    "email_count",
+    "email_list_labels",
+    "email_learned_labels",
+    "email_correct_label",
+    "email_remove_label_correction",
+    "email_sort_local",
+    "set_reminder",
+    "schedule_task",
+    "list_watches",
+    "cancel_watch",
+    "update_watch",
+    "create_watch",
+    "remember_fact",
+    "recall_facts",
+    "forget_fact",
+    "skill_add_rule",
+    "skill_remove_rule",
+    "skill_list_rules",
+    "list_profile_files",
+    "get_research",
+    "fetch_url",
+    "web_search",
     "ask_agent",
     "request_tools"
   ],
   "alias_catalog": {
-    "entity_kind":   "email_account",
+    "entity_kind": "email_account",
     "noun_singular": "account",
-    "noun_plural":   "accounts",
+    "noun_plural": "accounts",
     "extra_phrase_patterns": [
       "\\bmy\\s+([A-Za-z][A-Za-z0-9 _-]{1,30}?)\\s+(?:email|emails|mail|account|acct|inbox)\\b",
       "\\bthe\\s+([A-Za-z][A-Za-z0-9 _-]{1,30}?)\\s+(?:email|account|inbox)\\b",
@@ -34,13 +63,21 @@
       "\\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})\\b"
     ],
     "catalog_source": {
-      "type":      "config_file",
-      "path":      "users/{userId}/email-accounts.json",
-      "format":    "array"
+      "type": "config_file",
+      "path": "users/{userId}/email-accounts.json",
+      "format": "array"
     },
-    "id_field":     "id",
-    "name_fields":  ["label", "username", "smtpUsername"],
-    "id_arg_names": ["account", "account_id", "accountId"],
+    "id_field": "id",
+    "name_fields": [
+      "label",
+      "username",
+      "smtpUsername"
+    ],
+    "id_arg_names": [
+      "account",
+      "account_id",
+      "accountId"
+    ],
     "cascade_on_tools": []
   },
   "intent_patterns": [
@@ -106,7 +143,11 @@
       "function": {
         "name": "email_list_accounts",
         "description": "List all connected email accounts (Gmail, Microsoft, IMAP). Call this when you need to know what accounts are available or when the user mentions an account by name.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     },
     {
@@ -117,9 +158,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label (e.g. 'Personal', 'Work'). Defaults to primary account if omitted." },
-            "query": { "type": "string", "description": "Optional search filter. Omit for recent inbox (works on all providers). Gmail accepts Gmail search syntax (e.g. 'from:uber is:unread'). Microsoft accepts free-text/KQL (e.g. 'from:uber subject:receipt'). IMAP runs a substring search over subject/from/body. Do NOT pass Gmail-only tokens like 'in:inbox' to non-Gmail accounts — they will return zero matches." },
-            "maxResults": { "type": "number", "description": "Max messages to return. Default 10." }
+            "account": {
+              "type": "string",
+              "description": "Account label (e.g. 'Personal', 'Work'). Defaults to primary account if omitted."
+            },
+            "query": {
+              "type": "string",
+              "description": "Optional search filter. Omit for recent inbox (works on all providers). Gmail accepts Gmail search syntax (e.g. 'from:uber is:unread'). Microsoft accepts free-text/KQL (e.g. 'from:uber subject:receipt'). IMAP runs a substring search over subject/from/body. Do NOT pass Gmail-only tokens like 'in:inbox' to non-Gmail accounts — they will return zero matches."
+            },
+            "maxResults": {
+              "type": "number",
+              "description": "Max messages to return. Default 10."
+            }
           },
           "required": []
         }
@@ -133,10 +183,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Defaults to primary." },
-            "messageId": { "type": "string", "description": "The message ID from email_list." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Defaults to primary."
+            },
+            "messageId": {
+              "type": "string",
+              "description": "The message ID from email_list."
+            }
           },
-          "required": ["messageId"]
+          "required": [
+            "messageId"
+          ]
         }
       }
     },
@@ -148,10 +206,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be Gmail or Microsoft." },
-            "threadId": { "type": "string", "description": "Thread ID from email_list." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be Gmail or Microsoft."
+            },
+            "threadId": {
+              "type": "string",
+              "description": "Thread ID from email_list."
+            }
           },
-          "required": ["threadId"]
+          "required": [
+            "threadId"
+          ]
         }
       }
     },
@@ -163,11 +229,23 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be Gmail or Microsoft." },
-            "messageId": { "type": "string", "description": "The message ID to reply to." },
-            "body": { "type": "string", "description": "The reply text (plain text)." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be Gmail or Microsoft."
+            },
+            "messageId": {
+              "type": "string",
+              "description": "The message ID to reply to."
+            },
+            "body": {
+              "type": "string",
+              "description": "The reply text (plain text)."
+            }
           },
-          "required": ["messageId", "body"]
+          "required": [
+            "messageId",
+            "body"
+          ]
         }
       }
     },
@@ -179,15 +257,42 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be Gmail or Microsoft." },
-            "to": { "type": "string", "description": "Recipient email address(es), comma-separated." },
-            "subject": { "type": "string", "description": "Email subject." },
-            "body": { "type": "string", "description": "Plain text email body (used as fallback when html_body is provided)." },
-            "html_body": { "type": "string", "description": "Optional HTML email body. When provided, sends a rich HTML email with images, links, and formatting. The plain text `body` is used as fallback for clients that don't render HTML." },
-            "body_doc_id": { "type": "string", "description": "Send a large, ALREADY-WRITTEN body by reference instead of pasting it into `body`. Pass a doc handle ('research:doc_xxx' or 'documents:doc_xxx'); the server reads the doc and uses its text AS the inline email body (markdown is auto-rendered to HTML). Use this whenever the body is long content someone already produced — a briefing, a synthesized report — so you don't re-type it. It becomes INLINE body text, NOT an attachment (use attachment_doc_ids for files). Supersedes `body`. The doc is a transient handoff buffer and is deleted automatically once the email sends." },
-            "attachment_doc_ids": { "type": "array", "items": { "type": "string" }, "description": "Optional list of file IDs to attach. Accepts profile-file IDs from list_profile_files (e.g. 'images:sunset.png', 'videos:clip.mp4', 'audio:recording.wav', 'documents:doc_abc', 'research:doc_xyz'). Use this whenever the user asks to email/send an image, video, audio clip, or document — never just mention the file in the body without attaching it." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be Gmail or Microsoft."
+            },
+            "to": {
+              "type": "string",
+              "description": "Recipient email address(es), comma-separated."
+            },
+            "subject": {
+              "type": "string",
+              "description": "Email subject."
+            },
+            "body": {
+              "type": "string",
+              "description": "Plain text email body (used as fallback when html_body is provided)."
+            },
+            "html_body": {
+              "type": "string",
+              "description": "Optional HTML email body. When provided, sends a rich HTML email with images, links, and formatting. The plain text `body` is used as fallback for clients that don't render HTML."
+            },
+            "body_doc_id": {
+              "type": "string",
+              "description": "Send a large, ALREADY-WRITTEN body by reference instead of pasting it into `body`. Pass a doc handle ('research:doc_xxx' or 'documents:doc_xxx'); the server reads the doc and uses its text AS the inline email body (markdown is auto-rendered to HTML). Use this whenever the body is long content someone already produced — a briefing, a synthesized report — so you don't re-type it. It becomes INLINE body text, NOT an attachment (use attachment_doc_ids for files). Supersedes `body`. The doc is a transient handoff buffer and is deleted automatically once the email sends."
+            },
+            "attachment_doc_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional list of file IDs to attach. Accepts profile-file IDs from list_profile_files (e.g. 'images:sunset.png', 'videos:clip.mp4', 'audio:recording.wav', 'documents:doc_abc', 'research:doc_xyz'). Use this whenever the user asks to email/send an image, video, audio clip, or document — never just mention the file in the body without attaching it."
+            }
           },
-          "required": ["to", "subject"]
+          "required": [
+            "to",
+            "subject"
+          ]
         }
       }
     },
@@ -199,10 +304,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be Gmail or Microsoft." },
-            "messageId": { "type": "string", "description": "The message ID to trash." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be Gmail or Microsoft."
+            },
+            "messageId": {
+              "type": "string",
+              "description": "The message ID to trash."
+            }
           },
-          "required": ["messageId"]
+          "required": [
+            "messageId"
+          ]
         }
       }
     },
@@ -214,10 +327,21 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be Gmail or Microsoft." },
-            "messageIds": { "type": "array", "items": { "type": "string" }, "description": "List of message IDs to trash." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be Gmail or Microsoft."
+            },
+            "messageIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of message IDs to trash."
+            }
           },
-          "required": ["messageIds"]
+          "required": [
+            "messageIds"
+          ]
         }
       }
     },
@@ -229,12 +353,35 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be a Gmail account." },
-            "messageIds": { "type": "array", "items": { "type": "string" }, "description": "List of message IDs to update." },
-            "addLabels": { "type": "array", "items": { "type": "string" }, "description": "Label names to add (e.g. ['Example', 'Work']). Use exact label names or system labels like 'INBOX', 'STARRED'." },
-            "removeLabels": { "type": "array", "items": { "type": "string" }, "description": "Label names to remove (e.g. ['INBOX'] to archive, ['Promotions'] to unlabel). Does NOT delete the email." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be a Gmail account."
+            },
+            "messageIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of message IDs to update."
+            },
+            "addLabels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Label names to add (e.g. ['Example', 'Work']). Use exact label names or system labels like 'INBOX', 'STARRED'."
+            },
+            "removeLabels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Label names to remove (e.g. ['INBOX'] to archive, ['Promotions'] to unlabel). Does NOT delete the email."
+            }
           },
-          "required": ["messageIds"]
+          "required": [
+            "messageIds"
+          ]
         }
       }
     },
@@ -246,12 +393,32 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be a Gmail account." },
-            "query": { "type": "string", "description": "Gmail search query (e.g. 'from:example.com', 'from:newsletter@example.com', 'subject:Invoice'). Supports full Gmail search syntax including domain wildcards." },
-            "addLabels": { "type": "array", "items": { "type": "string" }, "description": "Label names to add to all matched emails." },
-            "removeLabels": { "type": "array", "items": { "type": "string" }, "description": "Label names to remove from all matched emails. Use 'INBOX' to archive." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be a Gmail account."
+            },
+            "query": {
+              "type": "string",
+              "description": "Gmail search query (e.g. 'from:example.com', 'from:newsletter@example.com', 'subject:Invoice'). Supports full Gmail search syntax including domain wildcards."
+            },
+            "addLabels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Label names to add to all matched emails."
+            },
+            "removeLabels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Label names to remove from all matched emails. Use 'INBOX' to archive."
+            }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         }
       }
     },
@@ -263,10 +430,22 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label." },
-            "sender": { "type": "string", "description": "Sender email or domain to purge (e.g. 'newsletter@example.com' or 'example.com'). Builds a from: query automatically. Use this OR query, not both." },
-            "query": { "type": "string", "description": "Free-text or provider-native search query when not filtering by sender. Gmail accepts full search syntax (e.g. 'label:Promotions', 'subject:Invoice is:unread'); Microsoft accepts KQL ('from:uber subject:receipt'); IMAP runs a substring search across subject/from/body. Use this OR sender, not both." },
-            "permanent": { "type": "boolean", "description": "If true, permanently deletes instead of trashing (Gmail and Microsoft). IMAP always permanently expunges; this flag is a no-op there." }
+            "account": {
+              "type": "string",
+              "description": "Account label."
+            },
+            "sender": {
+              "type": "string",
+              "description": "Sender email or domain to purge (e.g. 'newsletter@example.com' or 'example.com'). Builds a from: query automatically. Use this OR query, not both."
+            },
+            "query": {
+              "type": "string",
+              "description": "Free-text or provider-native search query when not filtering by sender. Gmail accepts full search syntax (e.g. 'label:Promotions', 'subject:Invoice is:unread'); Microsoft accepts KQL ('from:uber subject:receipt'); IMAP runs a substring search across subject/from/body. Use this OR sender, not both."
+            },
+            "permanent": {
+              "type": "boolean",
+              "description": "If true, permanently deletes instead of trashing (Gmail and Microsoft). IMAP always permanently expunges; this flag is a no-op there."
+            }
           },
           "required": []
         }
@@ -280,11 +459,25 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be Gmail or Microsoft." },
-            "messageIds": { "type": "array", "items": { "type": "string" }, "description": "List of message IDs." },
-            "unread": { "type": "boolean", "description": "Set to true to mark as unread. Default false (mark as read)." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be Gmail or Microsoft."
+            },
+            "messageIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of message IDs."
+            },
+            "unread": {
+              "type": "boolean",
+              "description": "Set to true to mark as unread. Default false (mark as read)."
+            }
           },
-          "required": ["messageIds"]
+          "required": [
+            "messageIds"
+          ]
         }
       }
     },
@@ -296,7 +489,10 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Defaults to primary." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Defaults to primary."
+            }
           },
           "required": []
         }
@@ -310,8 +506,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be a Gmail account. Defaults to primary." },
-            "query": { "type": "string", "description": "Gmail search query to count. Defaults to 'in:inbox has:nouserlabels' (inbox mail with no user label = still needs sorting). Accepts full Gmail search syntax." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be a Gmail account. Defaults to primary."
+            },
+            "query": {
+              "type": "string",
+              "description": "Gmail search query to count. Defaults to 'in:inbox has:nouserlabels' (inbox mail with no user label = still needs sorting). Accepts full Gmail search syntax."
+            }
           },
           "required": []
         }
@@ -325,7 +527,10 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be a Gmail account. Defaults to primary." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be a Gmail account. Defaults to primary."
+            }
           },
           "required": []
         }
@@ -339,7 +544,10 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Defaults to primary." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Defaults to primary."
+            }
           },
           "required": []
         }
@@ -353,11 +561,26 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "account": { "type": "string", "description": "Account label. Must be a Gmail account. Defaults to primary." },
-            "maxResults": { "type": "number", "description": "How many recent inbox emails to consider per batch. Default 50, max 200. Use 200 to drain a large inbox in the fewest passes." },
-            "query": { "type": "string", "description": "Gmail search to sort over. Default 'in:inbox'." },
-            "archive": { "type": "boolean", "description": "Remove matched emails from the inbox after labeling (a normal sort). Default true; set false to label but keep in inbox." },
-            "apply": { "type": "boolean", "description": "Default true (actually label/archive). Set false for a dry-run preview that changes nothing — useful to show the user what the local tier would do." }
+            "account": {
+              "type": "string",
+              "description": "Account label. Must be a Gmail account. Defaults to primary."
+            },
+            "maxResults": {
+              "type": "number",
+              "description": "How many recent inbox emails to consider per batch. Default 50, max 200. Use 200 to drain a large inbox in the fewest passes."
+            },
+            "query": {
+              "type": "string",
+              "description": "Gmail search to sort over. Default 'in:inbox'."
+            },
+            "archive": {
+              "type": "boolean",
+              "description": "Remove matched emails from the inbox after labeling (a normal sort). Default true; set false to label but keep in inbox."
+            },
+            "apply": {
+              "type": "boolean",
+              "description": "Default true (actually label/archive). Set false for a dry-run preview that changes nothing — useful to show the user what the local tier would do."
+            }
           },
           "required": []
         }
@@ -371,13 +594,37 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "sender": { "type": "string", "description": "The sender this rule applies to — a full email address (e.g. 'billing@acme.com') to pin just that address, or a bare domain (e.g. 'acme.com') for the whole domain." },
-            "labels": { "type": "array", "items": { "type": "string" }, "description": "The label(s) mail from this sender should get. One or more. If the user lists 'Inbox' as one of them, pass keep_inbox:true instead of including 'Inbox' here." },
-            "keep_inbox": { "type": "boolean", "description": "True = label the mail but LEAVE it in the inbox (don't archive). Set this when the user says 'keep it in my inbox' or lists 'Inbox' as one of the labels. Default false (archived out of inbox like a normal sort)." },
-            "subject_contains": { "type": "array", "items": { "type": "string" }, "description": "Optional. Keywords that make the rule CONDITIONAL — only applies when the subject contains one of these. Use for 'from X when it's about Y → label Z'." },
-            "account": { "type": "string", "description": "Account label. Defaults to primary." }
+            "sender": {
+              "type": "string",
+              "description": "The sender this rule applies to — a full email address (e.g. 'billing@acme.com') to pin just that address, or a bare domain (e.g. 'acme.com') for the whole domain."
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The label(s) mail from this sender should get. One or more. If the user lists 'Inbox' as one of them, pass keep_inbox:true instead of including 'Inbox' here."
+            },
+            "keep_inbox": {
+              "type": "boolean",
+              "description": "True = label the mail but LEAVE it in the inbox (don't archive). Set this when the user says 'keep it in my inbox' or lists 'Inbox' as one of the labels. Default false (archived out of inbox like a normal sort)."
+            },
+            "subject_contains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional. Keywords that make the rule CONDITIONAL — only applies when the subject contains one of these. Use for 'from X when it's about Y → label Z'."
+            },
+            "account": {
+              "type": "string",
+              "description": "Account label. Defaults to primary."
+            }
           },
-          "required": ["sender", "labels"]
+          "required": [
+            "sender",
+            "labels"
+          ]
         }
       }
     },
@@ -389,12 +636,29 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "sender": { "type": "string", "description": "The sender whose explicit correction(s) should be removed — a full email address (e.g. 'billing@acme.com') or a bare domain (e.g. 'acme.com')." },
-            "subject_contains": { "type": "array", "items": { "type": "string" }, "description": "Optional. Remove only the conditional correction whose subject keywords match this list. Omit to remove all explicit corrections for the sender." },
-            "all": { "type": "boolean", "description": "True = remove all explicit corrections for this sender. Default true when subject_contains is omitted." },
-            "account": { "type": "string", "description": "Account label. Defaults to primary." }
+            "sender": {
+              "type": "string",
+              "description": "The sender whose explicit correction(s) should be removed — a full email address (e.g. 'billing@acme.com') or a bare domain (e.g. 'acme.com')."
+            },
+            "subject_contains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional. Remove only the conditional correction whose subject keywords match this list. Omit to remove all explicit corrections for the sender."
+            },
+            "all": {
+              "type": "boolean",
+              "description": "True = remove all explicit corrections for this sender. Default true when subject_contains is omitted."
+            },
+            "account": {
+              "type": "string",
+              "description": "Account label. Defaults to primary."
+            }
           },
-          "required": ["sender"]
+          "required": [
+            "sender"
+          ]
         }
       }
     }

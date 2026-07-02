@@ -4,6 +4,10 @@
   "description": "Multi-step web research with persistent document storage",
   "icon": "📚",
   "category": "service",
+  "selected_plan_keep": [
+    "save_research",
+    "update_research"
+  ],
   "service": true,
   "enabled_by_default": true,
   "intent_patterns": [
@@ -42,11 +46,16 @@
             },
             "depth": {
               "type": "string",
-              "enum": ["standard", "deep"],
+              "enum": [
+                "standard",
+                "deep"
+              ],
               "description": "Depth per sub-angle (if the planner decomposes the topic). Default: standard. Only affects the fallback single-pass path — parallel workers always use standard depth internally."
             }
           },
-          "required": ["topic"]
+          "required": [
+            "topic"
+          ]
         }
       }
     },
@@ -64,16 +73,24 @@
             },
             "depth": {
               "type": "string",
-              "enum": ["quick", "standard", "deep"],
+              "enum": [
+                "quick",
+                "standard",
+                "deep"
+              ],
               "description": "Research depth: quick (3 searches), standard (6 searches), deep (10 searches + URL fetches). Default: standard"
             },
             "urls": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Optional list of specific URLs to fetch and include as primary sources in the research"
             }
           },
-          "required": ["topic"]
+          "required": [
+            "topic"
+          ]
         }
       }
     },
@@ -95,11 +112,16 @@
             },
             "tags": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Tags for categorization and search (e.g. ['quantum computing', 'physics', '2026'])"
             }
           },
-          "required": ["title", "content"]
+          "required": [
+            "title",
+            "content"
+          ]
         }
       }
     },
@@ -132,7 +154,9 @@
               "description": "The document ID to retrieve"
             }
           },
-          "required": ["documentId"]
+          "required": [
+            "documentId"
+          ]
         }
       }
     },
@@ -154,11 +178,16 @@
             },
             "tags": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Updated tags (optional — keeps existing tags if omitted)"
             }
           },
-          "required": ["documentId", "content"]
+          "required": [
+            "documentId",
+            "content"
+          ]
         }
       }
     },
@@ -175,7 +204,9 @@
               "description": "The document ID to delete"
             }
           },
-          "required": ["documentId"]
+          "required": [
+            "documentId"
+          ]
         }
       }
     }

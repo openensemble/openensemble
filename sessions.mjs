@@ -78,8 +78,8 @@ const _lineCounts     = new Map(); // agentId → estimated line count
 export function appendToSession(agentId, ...messages) {
   // Ephemeral agents (spawned per-call by deep_research_parallel etc.) have
   // no persistent session — skip all disk writes for IDs prefixed "ephemeral_".
-  if (typeof agentId === 'string' && agentId.startsWith('ephemeral_')) return;
-  withSessionLock('session:' + agentId, async () => {
+  if (typeof agentId === 'string' && agentId.startsWith('ephemeral_')) return Promise.resolve();
+  return withSessionLock('session:' + agentId, async () => {
     const sessDir = getSessionsDir(agentId);
     await fsp.mkdir(sessDir, { recursive: true });
     const p = sessionPath(agentId);

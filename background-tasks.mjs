@@ -131,19 +131,24 @@ export async function bootRecoverInterruptedTasks() {
     //    the session that holds the old promise now also holds the cancellation.
     const reportAgentId = e.visibleAgentId || e.coordinatorAgentId;
     const content = `[${name}'s background task was interrupted — re: "${e.summary}"]\nThe server restarted while ${name} was working on this. The task was cancelled and did NOT finish. If it is still wanted, it must be started again.`;
+    const displayContent = `The server restarted while ${name} was working on this. The task was cancelled and did not finish. If it is still wanted, it must be started again.`;
+    const reportId = e.spanId || taskId;
     if (reportAgentId) {
       try {
         const { appendToSession } = await import('./sessions.mjs');
-        appendToSession(reportAgentId, {
+        await appendToSession(reportAgentId, {
           role: 'assistant',
           kind: 'agent_report',
+          reportId,
           agentName: name, agentEmoji: e.agentEmoji || '🤖',
           content,
+          displayContent,
           toolEvents: [],
           targetAgentId: e.agentId || null,
           originalTask: e.summary || '',
           taskId,
           rootTaskId: e.rootTaskId || taskId,
+          spanId: e.spanId || null,
           ts: now,
         });
       } catch (err) {
@@ -156,13 +161,16 @@ export async function bootRecoverInterruptedTasks() {
     _broadcast?.({
       type: 'agent_report',
       agent: reportAgentId,
+      reportId,
       agentName: name, agentEmoji: e.agentEmoji || '🤖',
       content,
+      displayContent,
       toolEvents: [],
       targetAgentId: e.agentId || null,
       originalTask: e.summary || '',
       taskId,
       rootTaskId: e.rootTaskId || taskId,
+      spanId: e.spanId || null,
       ts: now,
     });
   }
@@ -174,7 +182,7 @@ export async function bootRecoverInterruptedTasks() {
 // Root task graph for nested delegation. Existing ids remain intact:
 // - watcher UUIDs are still the user-visible chip ids
 // - bg_/deleg_/ephemeral ids remain internal runtime ids
-// This graph links them so status lookups can resolve "root -> Gina/Rose/etc"
+// This graph links them so status lookups can resolve "root -> child agent"
 // and a root chip does not finish while child delegations are still running.
 const rootTaskGraphs = new Map(); // rootTaskId -> { userId, rootWatcherId, visibleAgentId, children, pendingCompletion }
 
@@ -417,7 +425,7 @@ function pushTaskProgress(taskId, text, extra = {}) {
   return pushed;
 }
 
-function trackToolEvent(events, ev) {
+function trackToolEvent(events, ev, agentId = null) {
   if (!Array.isArray(events) || !ev?.name) return;
   if (ev.type === 'tool_call') {
     events.push({
@@ -425,13 +433,30 @@ function trackToolEvent(events, ev) {
       args: ev.args || null,
       startedAt: Date.now(),
       status: 'running',
-      agentId: ev.agentId || null,
+      agentId: ev.agentId || agentId || null,
     });
     return;
   }
   const rec = [...events].reverse().find(e => e.name === ev.name && e.status !== 'done');
   if (ev.type === 'tool_progress' && rec) {
     rec.progressPreview = String(ev.text || '').slice(-1000);
+    return;
+  }
+  // Provider-hosted web search never emits a local tool_call — only a transient
+  // tool_progress with no preceding record (openai-responses.mjs). Without a
+  // synthetic record here the recipe learner never sees web_search on
+  // native-search models, so learned recipes chronically omit the agent's only
+  // path to the web. web_search ONLY — other hosted progress (image_generation)
+  // must not fabricate recipe entries.
+  if (ev.type === 'tool_progress' && ev.name === 'web_search' && !rec) {
+    const aid = ev.agentId || agentId || null;
+    if (!events.some(e => e.name === 'web_search' && e.native && e.agentId === aid)) {
+      events.push({
+        name: 'web_search', args: null, startedAt: Date.now(), endedAt: Date.now(),
+        durationMs: 0, status: 'done', native: true, agentId: aid,
+        preview: 'provider-hosted web search',
+      });
+    }
     return;
   }
   if (ev.type === 'tool_result') {
@@ -442,6 +467,73 @@ function trackToolEvent(events, ev) {
     target.status = 'done';
     target.preview = ev.preview || String(ev.text || '').split('\n').find(l => l.trim()) || '';
     target.text = String(ev.text || '').slice(0, 10000);
+  }
+}
+
+// Doc ids PRODUCED by a pipeline stage — from doc-PRODUCING tools only.
+// Deliberately NOT a generic id regex over every tool result: list_research /
+// list_profile_files output OLD doc ids, and harvesting those would whitelist
+// exactly the stale documents the handoff guard exists to block.
+const DOC_PRODUCING_TOOLS = new Set(['save_research', 'update_research', 'deep_research_parallel']);
+function extractProducedBodyDocIds(ev) {
+  if (ev?.type !== 'tool_result' || !DOC_PRODUCING_TOOLS.has(ev.name)) return [];
+  const text = String(ev.text || '');
+  const ids = new Set();
+  if (ev.name === 'save_research' || ev.name === 'update_research') {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed?.id) ids.add(`research:${parsed.id}`);
+    } catch { /* not JSON — fall through to the pattern below */ }
+  }
+  // deep_research_parallel: "… synthesized into document doc_xxxxxxxx."
+  for (const m of text.matchAll(/\bdocument\s+(doc_[a-f0-9]{6,})\b/ig)) ids.add(`research:${m[1]}`);
+  return [...ids];
+}
+
+// Only the doc-handoff phrasings — NOT generic "email the briefing", which
+// legitimately emails the handed-off TEXT with no document involved.
+function handoffExpectsProducedDoc(directive = '') {
+  return /\bbody_doc_id\b|\b(?:saved|produced|generated) document\b|\bsaves?d?\b.{0,40}\bas a document\b|\bdocument (?:it|she|he|they) (?:saved|produced)\b/i
+    .test(String(directive));
+}
+
+// Real email intent only — deliberately NOT generic "send", which would catch
+// Telegram, push notifications, "send to calendar", etc. Used to arm the
+// body-doc handoff guard and to decide whether a failed scheduled run owes the
+// user a failure email.
+function impliesEmailDelivery(text = '') {
+  return /\b(?:e-?mail\w*|mail(?:ed|ing)?|body_doc_id|email_compose|email_user)\b/i.test(String(text));
+}
+
+// A scheduled run whose whole point was emailing the user must not fail
+// SILENTLY — the user reads "no email arrived" as "my install is down". This
+// is a deterministic system notice from the failure path; never model-written
+// content, never a stale document substitute. One notice per scheduled task
+// per day.
+const _failureEmailSentKeys = new Set();
+async function sendScheduledFailureEmail({ userId, taskId, originScheduledTaskId, pipeName, originalTask, reason }) {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${originScheduledTaskId || taskId}:${day}`;
+  if (_failureEmailSentKeys.has(key)) return;
+  _failureEmailSentKeys.add(key);
+  const subject = `Scheduled task failed - ${day}`;
+  const body = [
+    'OpenEnsemble ran a scheduled task, but the run failed before the requested email could be produced.',
+    '',
+    `Task: ${String(originalTask || '(unknown)').slice(0, 300)}`,
+    `Pipeline: ${pipeName}`,
+    `Task ID: ${taskId}`,
+    `Reason: ${String(reason || 'unknown').slice(0, 500)}`,
+    '',
+    'No older saved document or stale content was substituted.',
+    'OpenEnsemble itself is running — this was a task failure, not an installation outage.',
+  ].join('\n');
+  try {
+    const mod = await import('./skills/email-send/execute.mjs');
+    const res = await mod.default('email_user', { subject, body }, userId);
+    console.log('[background-tasks] scheduled failure notice emailed:', String(res).slice(0, 120));
+  } catch (e) {
+    console.warn('[background-tasks] scheduled failure email failed:', e.message);
   }
 }
 
@@ -503,7 +595,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     aliases: [taskId, scopedAgent.id].filter(Boolean),
     // Mark this as a coordinator→specialist DELEGATION (distinct from a worker
     // and from a research ephemeral). This is what lets check_workers surface it
-    // as user-level background work — so "is Gina still working?" resolves no
+    // as user-level background work — so "is the specialist still working?" resolves no
     // matter which agent the user happens to ask. See listActiveDelegationsForUser.
     isDelegation: true,
     abort: () => ac.abort(),
@@ -599,9 +691,14 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       const runBgStage = async (stageAgent, stageTask, stageName, stageNote, stageRoute, stagePlan) => {
         let text = '';
         const artifacts = [];
+        const bodyDocIds = [];
         for await (const ev of streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, { toolPlan: stagePlan, routeText: stageRoute, isolatedTaskRun: true, rootTaskId: taskCtx.rootTaskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
           if (ev.type === 'token') text += ev.text;
-          trackToolEvent(toolEvents, ev);
+          // Tag with the stage agent so completion-time recipe learning can
+          // attribute per stage — a forward pipeline shares this ONE array
+          // across both stages, and learning a downstream agent's calls into
+          // an upstream agent's recipe causes future routing mistakes.
+          trackToolEvent(toolEvents, ev, stageAgent.id);
           // Track in-flight tool calls so list_active_agents can report e.g.
           // "the coder is currently running coder_edit_file" instead of just
           // an opaque spinner.
@@ -632,6 +729,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
             });
           }
           if (ev.type === 'tool_result' && ev.name) {
+            for (const id of extractProducedBodyDocIds(ev)) bodyDocIds.push(id);
             const r = activeTasks.get(taskId);
             const preview = String(ev.text || '').split('\n').find(l => l.trim()) || '';
             currentTool = null;
@@ -660,7 +758,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         // An abort can end the provider stream without an error event — don't
         // let a cancelled run masquerade as a completed one (or start stage 2).
         if (ac.signal.aborted) throw new Error('cancelled');
-        return { text, artifacts };
+        return { text, artifacts, bodyDocIds: [...new Set(bodyDocIds)] };
       };
 
       const routeText = (typeof opts?.routeText === 'string' && opts.routeText.trim()) ? opts.routeText.trim() : task;
@@ -676,7 +774,28 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
           const artifactNote = stage1.artifacts.length
             ? `\n\nFILES PRODUCED BY ${agentName} — attach these EXACT ids via attachment_doc_ids (do not rename them and do not look them up again): ${JSON.stringify(stage1.artifacts)}`
             : '';
-          const stage2Task = `${handoff.directive || 'Continue this task using the result below.'}\n\n[Result from ${agentName}]:\n${stage1.text.trim() || '(no text reply)'}${artifactNote}`;
+          // Pipeline-bound doc handoff: stage 2 may only email documents stage 1
+          // actually produced THIS run. If the directive promised a produced
+          // document and there is none, fail closed — never let the consumer
+          // stage hunt old files and mail a stale doc as a substitute
+          // (2026-07-02 daily-briefing failure). resolveBodyDoc enforces
+          // allowedBodyDocIds deterministically; the note below is just steering.
+          const producedDocIds = stage1.bodyDocIds || [];
+          if (handoffExpectsProducedDoc(handoff.directive) && !producedDocIds.length) {
+            throw new Error(`${agentName} did not produce a saved document this run, so the ${stage2Name} handoff was stopped instead of emailing an older file.`);
+          }
+          // Arm the guard for ANY email handoff — including with an EMPTY
+          // allowlist when nothing was produced. Otherwise a text-based email
+          // handoff leaves body_doc_id unguarded and the consumer can still
+          // substitute an old file; with the guard armed it must inline the
+          // handed-off text via `body` instead (the resolver error says so).
+          if (producedDocIds.length || impliesEmailDelivery(handoff.directive)) {
+            taskCtx.allowedBodyDocIds = producedDocIds;
+          }
+          const bodyDocNote = producedDocIds.length
+            ? `\n\nDOCUMENT HANDOFF — for body_doc_id use ONLY one of these exact ids (produced this run): ${JSON.stringify(producedDocIds)}. Do not call list_profile_files or list_research to find a substitute.`
+            : '';
+          const stage2Task = `${handoff.directive || 'Continue this task using the result below.'}\n\n[Result from ${agentName}]:\n${stage1.text.trim() || '(no text reply)'}${artifactNote}${bodyDocNote}`;
           const deleg2Id = `ephemeral_deleg_d${handoff.depth || 1}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${handoff.agent.id}`;
           const scoped2 = { ...handoff.agent, id: deleg2Id, ephemeral: true };
           scoped2.systemPrompt = `${handoff.agent.systemPrompt}\n\n## Current Date\nToday: ${new Date().toISOString().slice(0, 10)}`;
@@ -702,8 +821,19 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, finalText.trim() || `${pipeName} completed the task.`, null, null, toolEvents, scopedAgent.id, task);
     } catch (err) {
       console.error('[background-tasks] error in task', taskId, err.message);
+      const failMsg = ac.signal.aborted ? 'Task cancelled by user.' : err.message;
+      // Scheduled run that was supposed to end in an email → deterministic
+      // failure notice so the user knows OE is alive and the run failed.
+      if (!ac.signal.aborted && scheduledNote
+          && impliesEmailDelivery(`${handoff?.directive || ''} ${task || ''}`)) {
+        await sendScheduledFailureEmail({
+          userId, taskId,
+          originScheduledTaskId: activeTasks.get(taskId)?.originScheduledTaskId,
+          pipeName, originalTask: task, reason: failMsg,
+        });
+      }
       await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, null,
-        ac.signal.aborted ? 'Task cancelled by user.' : err.message,
+        failMsg,
         ac.signal.aborted ? 'cancelled' : 'error');
     }
   })();
@@ -841,31 +971,19 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
 
   const content = errorMsg ?? result;
 
-  // For a scheduled run, just record this delegation's completion in the
-  // barrier. The barrier (scheduler.runTask) reacts to the aggregated results
-  // and stamps/removes the scheduled task exactly once when everything drains —
-  // this path must NOT stamp it itself (that was the double-finalize / one-shot-
-  // removed-out-from-under-pending-work bug).
-  if (rec?.originScheduledTaskId) {
-    completeScheduledChild({
-      userId,
-      scheduledCtx: {
-        originTaskId: rec.originScheduledTaskId,
-        originTaskOwnerId: rec.originScheduledTaskOwnerId,
-        originTaskAgent: rec.originScheduledTaskAgent,
-      },
-      childId: taskId,
-      resultText: result || `${agentName} completed the task.`,
-      errorMsg,
-    });
-  }
-
   if (!errorMsg && Array.isArray(toolEvents) && toolEvents.length) {
     try {
+      // Learn ONLY from the target agent's own tool calls. A forward pipeline
+      // accumulates both stages into one toolEvents array; banking stage-2's
+      // calls into the upstream agent's recipe poisons the
+      // recipe for every future match. Untagged events (legacy shape) pass
+      // through so plain delegations keep learning as before.
+      const learnAgentId = targetAgentId || rec?.agentId;
+      const ownEvents = toolEvents.filter(e => !e?.agentId || e.agentId === learnAgentId);
       const learned = learnToolPlanFromToolEvents(userId, {
-        agentId: targetAgentId || rec?.agentId,
+        agentId: learnAgentId,
         phrase: originalTask || rec?.originalTask || rec?.summary || '',
-        toolEvents,
+        toolEvents: ownEvents,
         // The completion text. A non-exception failure ("I hit a tooling
         // limitation…", "handed it to…") reads as success to !errorMsg, so scan
         // the result so those runs aren't memorized as recipes.
@@ -894,6 +1012,8 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     const notice = errorMsg
       ? `[${agentName} ran into a problem${taskRef}]\n${errorMsg}`
       : `[${agentName} replied${taskRef}]\n${result}`;
+    const reportTs = Date.now();
+    const reportId = rec?.spanId || taskId;
     // Keep role:'assistant' so the LLM reads this as part of the
     // conversation on its next turn (it needs to know what the specialist
     // reported back). Add kind:'agent_report' so the browser knows to
@@ -902,8 +1022,10 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     await appendToSession(reportAgentId, {
       role: 'assistant',
       kind: 'agent_report',
+      reportId,
       agentName, agentEmoji,
       content: notice,
+      displayContent: content,
       toolEvents,
       targetAgentId: targetAgentId || rec?.agentId || null,
       originalTask: originalTask || rec?.summary || '',
@@ -911,33 +1033,48 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       rootTaskId: rec?.rootTaskId || taskId,
       parentTaskId: rec?.parentTaskId || null,
       spanId: rec?.spanId || null,
-      ts: Date.now(),
+      ts: reportTs,
+    });
+    // 2. Agent report card: render directly in the user's visible chat as a
+    // notification from the agent. Use the same report id + timestamp as the
+    // persisted row so session reloads can dedupe the live and saved copies.
+    _broadcast?.({
+      type:       'agent_report',
+      agent:      reportAgentId,
+      reportId,
+      agentName,
+      agentEmoji,
+      content:    notice,
+      displayContent: content,
+      toolEvents,
+      targetAgentId: targetAgentId || rec?.agentId || null,
+      originalTask: originalTask || rec?.summary || '',
+      taskId,
+      rootTaskId: rec?.rootTaskId || taskId,
+      parentTaskId: rec?.parentTaskId || null,
+      spanId: rec?.spanId || null,
+      ts: reportTs,
     });
   } catch (e) {
     console.error('[background-tasks] failed to inject session notice:', e.message);
   }
 
-  // 2. Agent report card: render directly in the user's visible chat as a notification from the agent.
-  //    reportAgentId is the chat the report belongs to — the browser
-  //    uses it to push the report into sessions[coordinatorAgentId] so the
-  //    bubble survives agent-tab switches (without it, the report only
-  //    exists in the DOM until the next renderSession wipes it).
-  const reportAgentId = rec?.visibleAgentId || coordinatorAgentId;
-  _broadcast?.({
-    type:       'agent_report',
-    agent:      reportAgentId,
-    agentName,
-    agentEmoji,
-    content,
-    toolEvents,
-    targetAgentId: targetAgentId || rec?.agentId || null,
-    originalTask: originalTask || rec?.summary || '',
-    taskId,
-    rootTaskId: rec?.rootTaskId || taskId,
-    parentTaskId: rec?.parentTaskId || null,
-    spanId: rec?.spanId || null,
-    ts: Date.now(),
-  });
+  // For a scheduled run, record this delegation's completion in the barrier
+  // AFTER the report has been persisted+broadcast. Otherwise the barrier's
+  // reaction turn can race ahead and land in chat before the child report.
+  if (rec?.originScheduledTaskId) {
+    completeScheduledChild({
+      userId,
+      scheduledCtx: {
+        originTaskId: rec.originScheduledTaskId,
+        originTaskOwnerId: rec.originScheduledTaskOwnerId,
+        originTaskAgent: rec.originScheduledTaskAgent,
+      },
+      childId: taskId,
+      resultText: result || `${agentName} completed the task.`,
+      errorMsg,
+    });
+  }
 
   // Direct (non-scheduled) delegations get the coordinator's inline react step.
   // Scheduled runs react+finalize via the barrier (scheduler.runScheduledReaction),
@@ -1125,7 +1262,7 @@ export function registerSyncDelegation({ taskId, userId, agentId, agentName, age
       pushWorkerProgress(taskId, { kind: 'result', tool: name, text: String(preview || '').slice(0, 160) });
     },
     // Pipeline stage transition — updates what check_workers + the chip header
-    // call this delegation (e.g. "Trixie" → "Trixie → Gina").
+    // call this delegation (for example, "agent" -> "agent -> specialist").
     setStageName(name) {
       const r = activeTasks.get(taskId);
       if (r && name) r.agentName = name;
@@ -1198,7 +1335,7 @@ const recentWorkers = [];
 const RECENT_CAP = 12;
 
 // Same idea for coordinator→specialist DELEGATIONS (dispatchBackground). Lets
-// check_workers report a terminal outcome ("Gina finished — 56 events added")
+// check_workers report a terminal outcome ("specialist finished - 56 events added")
 // for a moment after the task ends, instead of the task simply vanishing the
 // instant it completes and leaving the next "is it done?" with nothing to show.
 const recentDelegations = [];
@@ -1302,7 +1439,7 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
       await runInTaskContext(taskCtx, async () => {
         for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, { toolPlan: rememberedPlan, isolatedTaskRun: true, rootTaskId: taskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
           if (ev.type === 'token') fullText += ev.text;
-          trackToolEvent(toolEvents, ev);
+          trackToolEvent(toolEvents, ev, workerAgent.id);
           if (ev.type === 'tool_call' && ev.name) {
             const rec = activeTasks.get(taskId);
             if (rec) { rec.toolsUsed = (rec.toolsUsed || 0) + 1; rec.currentTool = ev.name; rec.lastUpdateAt = Date.now(); }
@@ -1387,7 +1524,7 @@ export function listRecentWorkersForOwner(userId, ownerKey) {
  * user-level background work (the coordinator handed a job to a specialist on
  * the user's behalf), so ANY agent the user asks — the specialist they're
  * chatting with, the coordinator, anyone — should be able to surface it. This
- * is the fix for the "is Gina still working?" black hole: the job was always
+ * is the fix for the "is the specialist still working?" black hole: the job was always
  * live in activeTasks, but check_workers only ever looked at isWorker records.
  *
  * `excludeAgentId` drops the caller's own delegation session so a running

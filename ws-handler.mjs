@@ -102,7 +102,7 @@ const WS_MAX_MISSED_PONGS = 3;
 // Doing that on EVERY reconnect turns a flapping Wi-Fi link into an all-night
 // reboot/reconnect storm (observed 2026-06-22: ambient streaming → WS drop →
 // reconnect → re-push → reload-fail → reboot → repeat, leaving the device deaf
-// to "hey sydney"). A real config change (version bump) is never debounced —
+// to the wake phrase. A real config change (version bump) is never debounced —
 // only identical re-pushes whose sole purpose is "in case NVS was reset" are.
 const VOICE_CONFIG_REPUSH_DEBOUNCE_MS = 10 * 60 * 1000; // 10 min
 // key `${userId}:${deviceId}` -> { at, version } of the last actual push.
@@ -111,6 +111,8 @@ const _lastVoiceConfigPush = new Map();
 // reconnect loop) shouldn't be able to hoard server sockets — each open
 // connection costs a heartbeat timer slot and keepalive memory.
 const MAX_WS_PER_USER = 20;
+const VOICE_STOP_SUPPRESS_MS = 30_000;
+const VOICE_ERROR_FALLBACK = 'Something went wrong.';
 
 let _wss = null;
 let _nodeWss = null;
@@ -146,6 +148,64 @@ function enforceWsCap(ws) {
 }
 
 const sessionKey = (userId, agentId) => `${userId}_${agentId}`;
+
+function makeVoiceTurn({ ws, effectiveUserId, agentId, wakeSlot }) {
+  if (!ws?._deviceId) return null;
+  return {
+    id: randomBytes(4).toString('hex'),
+    deviceId: ws._deviceId,
+    authUserId: ws._userId,
+    effectiveUserId,
+    agentId,
+    wakeSlot,
+    startedAt: Date.now(),
+  };
+}
+
+function suppressVoiceOutput(ws, reason, { sendDone = false } = {}) {
+  if (!ws?._deviceId) return null;
+  const active = ws._activeVoiceTurn ?? null;
+  const hadStreamer = !!ws._ttsStreamer;
+  try { ws._ttsStreamer?.abort(); } catch {}
+  ws._ttsStreamer = null;
+  ws._voiceOutputSuppression = {
+    turnId: active?.id ?? null,
+    until: Date.now() + VOICE_STOP_SUPPRESS_MS,
+    reason,
+  };
+
+  let abortedChat = false;
+  if (active?.effectiveUserId && active?.agentId) {
+    abortChat(active.effectiveUserId, active.agentId);
+    abortedChat = true;
+  }
+
+  if (sendDone && ws.readyState === ws.OPEN) {
+    try { ws.send(JSON.stringify({ type: 'done', agent: active?.agentId ?? 'system' })); } catch {}
+  }
+
+  log.info('voice', 'voice output suppressed', {
+    reason,
+    deviceId: ws._deviceId,
+    turnId: active?.id ?? null,
+    authUserId: active?.authUserId ?? ws._userId ?? null,
+    effectiveUserId: active?.effectiveUserId ?? null,
+    agentId: active?.agentId ?? null,
+    wakeSlot: active?.wakeSlot ?? null,
+    hadStreamer,
+    abortedChat,
+    sentDone: !!sendDone,
+  });
+  return active;
+}
+
+function isVoiceOutputSuppressed(ws, turn) {
+  if (!ws?._deviceId) return false;
+  const s = ws._voiceOutputSuppression;
+  if (!s) return false;
+  if (turn?.id && s.turnId === turn.id) return true;
+  return !s.turnId && Date.now() < s.until;
+}
 
 export function initWs(httpServer) {
   _wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
@@ -523,6 +583,7 @@ function onConnection(ws, req) {
    // Hoisted above the try so the catch below can tell chat failures apart
    // from other frame types when picking the device-spoken fallback.
    let msg;
+   let messageVoiceTurn = null;
    try {
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg !== 'object') return;
@@ -580,7 +641,12 @@ function onConnection(ws, req) {
         const fwReported = typeof msg.firmware_version === 'string' &&
           msg.firmware_version.length > 0 && msg.firmware_version.length < 32
             ? msg.firmware_version : null;
-        touchDevice(ws._userId, ws._deviceId, fwReported ? { fw_version: fwReported } : {});
+        const muteReported = typeof msg.mute_state === 'boolean' ? msg.mute_state : undefined;
+        if (typeof muteReported === 'boolean') ws._voiceMuteState = muteReported;
+        touchDevice(ws._userId, ws._deviceId, {
+          ...(fwReported ? { fw_version: fwReported } : {}),
+          ...(typeof muteReported === 'boolean' ? { mute_state: muteReported } : {}),
+        });
         // Backfill the token's sha256 so a future expiry can be auto-recovered by
         // strong hash match. Idempotent — only writes when the token changes.
         recordTokenSecret(ws._userId, ws._deviceId, msg.token);
@@ -621,10 +687,14 @@ function onConnection(ws, req) {
       if (!ws._deviceId) return;
       const had = !!getAmbientForDevice(ws._deviceId);
       dropAmbientForDevice(ws._deviceId);
+      const reason = typeof msg.reason === 'string' ? msg.reason : null;
+      const active = ws._activeVoiceTurn ?? null;
+      if (active) suppressVoiceOutput(ws, reason || 'ambient_stopped', { sendDone: true });
       log.info('voice', 'device stopped ambient', {
         deviceId: ws._deviceId,
-        reason: typeof msg.reason === 'string' ? msg.reason : null,
+        reason,
         hadServerSession: had,
+        activeTurnId: active?.id ?? null,
       });
       return;
     }
@@ -709,9 +779,16 @@ function onConnection(ws, req) {
     if (msg.type === 'stop') {
       // Barge-in / mute: halt any in-flight server-side TTS push immediately so
       // the device stops getting audio frames, then abort the LLM turn.
-      try { ws._ttsStreamer?.abort(); } catch {}
-      const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
-      if (stopAgent) abortChat(ws._userId, stopAgent);
+      if (ws._deviceId) {
+        const stoppedTurn = suppressVoiceOutput(ws, 'stop', { sendDone: true });
+        if (!stoppedTurn) {
+          const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
+          if (stopAgent) abortChat(ws._userId, stopAgent);
+        }
+      } else {
+        const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
+        if (stopAgent) abortChat(ws._userId, stopAgent);
+      }
       return;
     }
 
@@ -830,6 +907,22 @@ function onConnection(ws, req) {
           return;
         }
       }
+      const routedAgentId = slotAssignment
+        ? (slotAssignment.agentId || getUserCoordinatorAgentId(effectiveUserId))
+        : (msg.agent || getUserCoordinatorAgentId(effectiveUserId));
+      const voiceTurn = makeVoiceTurn({ ws, effectiveUserId, agentId: routedAgentId, wakeSlot });
+      if (voiceTurn) {
+        messageVoiceTurn = voiceTurn;
+        ws._activeVoiceTurn = voiceTurn;
+        log.info('voice', 'voice turn started', {
+          deviceId: voiceTurn.deviceId,
+          turnId: voiceTurn.id,
+          authUserId: voiceTurn.authUserId,
+          effectiveUserId: voiceTurn.effectiveUserId,
+          agentId: voiceTurn.agentId,
+          wakeSlot: voiceTurn.wakeSlot,
+        });
+      }
       // Server-side voice TTS streaming: when the device advertises the
       // capability (msg.tts_stream) and the provider is Pocket TTS, the server
       // segments + synthesizes + pushes PCM audio frames itself (see
@@ -907,25 +1000,30 @@ function onConnection(ws, req) {
         onEvent: (e) => {
           // Voice-device fan-out: the firmware only TTS's `token` events
           // (oe_ws.c emits OE_WS_EVT_CHAT_TOKEN → speak). Plain `error`
-          // events arrive but are silently dropped, so a turn that errors
-          // out (e.g. ChatGPT 401 token_invalidated → "please reconnect")
-          // leaves the device blinking with no audible feedback. Convert
-          // error → token + done for the originating voice device so the
-          // message is actually spoken. Other tabs/clients still see the
-          // raw `error` so the UI can render it appropriately.
+          // events arrive but are silently dropped. Keep voice errors short
+          // and generic, and never speak them after physical stop/mute.
+          // Other tabs/clients still see the raw `error` so the UI can
+          // render it appropriately.
           const isVoiceOrigin = !!ws._deviceId;
+          const voiceSuppressed = isVoiceOrigin && isVoiceOutputSuppressed(ws, voiceTurn);
+          const staleVoiceTurn = isVoiceOrigin && voiceTurn && ws._activeVoiceTurn?.id !== voiceTurn.id;
           if (ttsStreamer && isVoiceOrigin) {
             // Streaming path: the server synthesizes + pushes tts_audio frames;
             // the device never receives raw token/done. Route the text through
             // the streamer; pass status/other events through unchanged.
-            if (e?.type === 'token' && typeof e.text === 'string') ttsStreamer.pushText(e.text);
+            if (voiceSuppressed || staleVoiceTurn) {
+              try { ttsStreamer.abort(); } catch {}
+            } else if (e?.type === 'token' && typeof e.text === 'string') ttsStreamer.pushText(e.text);
             else if (e?.type === 'done') ttsStreamer.finish();
-            else if (e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) { ttsStreamer.pushText(e.message); ttsStreamer.finish(); }
+            else if (e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) { ttsStreamer.pushText(VOICE_ERROR_FALLBACK); ttsStreamer.finish(); }
             else if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(e)); } catch {} }
           } else if (ws.readyState === ws.OPEN) {
             try {
-              if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
-                ws.send(JSON.stringify({ type: 'token', text: e.message, agent: e.agent ?? 'system' }));
+              if (isVoiceOrigin && (voiceSuppressed || staleVoiceTurn)) {
+                // Stop/mute already sent `done`; old-turn events must not
+                // leak into the device after a new wake has started.
+              } else if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
+                ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: e.agent ?? 'system' }));
                 ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system' }));
               } else {
                 ws.send(JSON.stringify(e));
@@ -961,12 +1059,15 @@ function onConnection(ws, req) {
       if (ws._deviceId && msg?.type === 'chat') {
         // Voice devices drop bare `error` frames (firmware only speaks
         // token/done), so a throw during a chat turn would leave the device
-        // in THINKING until its 90 s awaiting-reply watchdog. Kill any
-        // half-started audio stream and route the failure through the
-        // legacy spoken path instead.
-        try { ws._ttsStreamer?.abort(); } catch {}
-        ws.send(JSON.stringify({ type: 'token', text: 'Sorry — something went wrong handling that.', agent: 'system' }));
-        ws.send(JSON.stringify({ type: 'done', agent: 'system' }));
+        // in THINKING until its 90 s awaiting-reply watchdog. After a
+        // physical stop/mute, unblock with `done` only.
+        const staleVoiceTurn = messageVoiceTurn && ws._activeVoiceTurn?.id !== messageVoiceTurn.id;
+        const suppressed = isVoiceOutputSuppressed(ws, messageVoiceTurn ?? ws._activeVoiceTurn ?? null);
+        if (!staleVoiceTurn) {
+          try { ws._ttsStreamer?.abort(); } catch {}
+          if (!suppressed) ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: 'system' }));
+          ws.send(JSON.stringify({ type: 'done', agent: 'system' }));
+        }
       } else {
         ws.send(JSON.stringify({ type: 'error', message: 'Server error processing message', agent: 'system' }));
       }
@@ -991,7 +1092,7 @@ export function broadcast(msg) {
   if (!_wss) return;
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   for (const client of _wss.clients)
-    if (client.readyState === client.OPEN) try { client.send(data); } catch {}
+    if (client.readyState === client.OPEN && !client._deviceId) try { client.send(data); } catch {}
 }
 
 export function broadcastAgentList() {
@@ -999,6 +1100,7 @@ export function broadcastAgentList() {
   const cache = new Map();
   for (const client of _wss.clients) {
     if (client.readyState !== client.OPEN) continue;
+    if (client._deviceId) continue;
     const uid = client._userId;
     let data = cache.get(uid);
     if (!data) {
@@ -1014,7 +1116,7 @@ export function broadcastToUsers(userIds, msg) {
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   const idSet = new Set(userIds);
   for (const client of _wss.clients)
-    if (client.readyState === client.OPEN && idSet.has(client._userId)) try { client.send(data); } catch {}
+    if (client.readyState === client.OPEN && !client._deviceId && idSet.has(client._userId)) try { client.send(data); } catch {}
 }
 
 /** Send a message to every tab the given user has open. Returns delivery count. */
@@ -1023,7 +1125,7 @@ export function sendToUser(userId, msg) {
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   let delivered = 0;
   for (const client of _wss.clients) {
-    if (client.readyState === client.OPEN && client._userId === userId) {
+    if (client.readyState === client.OPEN && !client._deviceId && client._userId === userId) {
       try { client.send(data); delivered++; } catch {}
     }
   }

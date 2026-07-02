@@ -3,6 +3,9 @@
   "name": "Telegram",
   "description": "Send messages to the user's linked Telegram chat using their personal bot.",
   "icon": "💬",
+  "selected_plan_keep": [
+    "send_telegram_message"
+  ],
   "category": "utility",
   "enabled_by_default": true,
   "systemPromptAddition": "## Telegram Delivery\n\nYou can push messages to the user's Telegram via `send_telegram_message`. The user's chat ID is already known to the server — just provide the text. Returns an error string if the user hasn't linked a bot/chat yet.\n\n- Use this when the user asks to send/deliver/push something to Telegram, or for scheduled tasks whose prompt says to deliver via Telegram.\n- Telegram is plain text + minimal Markdown. No HTML, no images, no file attachments.\n- For long content (briefings, summaries), send it as one message — don't chunk unless the result errors with a length issue.\n- After sending, briefly confirm in your reply (\"Sent to your Telegram.\"). Don't paste the entire body back.",
@@ -15,9 +18,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "text": { "type": "string", "description": "The message body. Plain text or minimal Markdown." }
+            "text": {
+              "type": "string",
+              "description": "The message body. Plain text or minimal Markdown."
+            }
           },
-          "required": ["text"]
+          "required": [
+            "text"
+          ]
         }
       }
     }

@@ -453,6 +453,25 @@ function migrateLegacyUserSkills() {
 
 // ── Public registry API ───────────────────────────────────────────────────────
 
+/**
+ * Tools a remembered "selected" tool plan may never drop, as declared by skill
+ * manifests (`"selected_plan_keep": ["save_research", ...]`). Lets a skill
+ * protect its role-critical tools from stale recipes without a chat.mjs edit.
+ * Union across ALL loaded manifests is safe: the plan filter only KEEPS tools
+ * the agent already holds, so a declaration from a skill an agent lacks (or
+ * another user's custom skill) is a no-op for that agent.
+ */
+export function getSelectedPlanKeepTools() {
+  const keep = new Set();
+  for (const wrap of _manifests.values()) {
+    const arr = wrap?.manifest?.selected_plan_keep;
+    if (Array.isArray(arr)) {
+      for (const t of arr) if (typeof t === 'string' && t) keep.add(t);
+    }
+  }
+  return keep;
+}
+
 /** Return all skill manifests visible to `userId` — globals + that user's own skills. */
 export function listRoles(userId = null) {
   const out = [];
@@ -612,7 +631,7 @@ export function getAgentAssignedSkills(agentId, userId) {
  * May this agent run the pre-LLM fast-path for `skillId` (skip the LLM and
  * execute the skill's intent directly)? The coordinator may fast-path ANY
  * skill — it owns every cross-agent handoff. A specialist may fast-path only
- * the skills it's actually assigned (Gina→email, Helen→role_home_assistant).
+ * the skills it's actually assigned (for example, specialist -> email).
  * A non-owner specialist (e.g. the deep-research agent) is denied, so a
  * paraphrase like "give me the latest US news" can't fire email_list — it
  * falls through to the agent's LLM, which escalates to the coordinator.
@@ -1115,8 +1134,8 @@ async function buildCtx(userId, agentId, skillId = null) {
   // skillId is passed in by the dispatcher (executeRoleTool / the generator
   // at the bottom of this file) and identifies the SKILL that owns the tool
   // being executed — not the agent calling it. That matters for log routing:
-  // Sydney (coordinator) calling the youtube skill's tool should write
-  // entries to users/<id>/skills/youtube/runtime.log, not sydney/runtime.log.
+  // The coordinator calling a skill's tool should write entries to
+  // users/<id>/skills/<skill>/runtime.log, not the coordinator's runtime.log.
   // Falls back to wsAgentId only when buildCtx is reached from a non-skill
   // path (rare; mostly chat-side direct ctx usage).
   ctx.log = buildSkillLogger({ userId, skillId: skillId || wsAgentId || 'unknown', agentId: wsAgentId });

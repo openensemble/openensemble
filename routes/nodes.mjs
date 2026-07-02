@@ -16,7 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-  removeNode, pushUpdate, pushUninstall, getNodes, getNode,
+  removeNode, pushUpdate, pushUninstall, getNodes, getNode, setNodeAutoFix, setNodeOnboardingState,
   sendCommand, sendCommandStreaming,
 } from '../skills/nodes/node-registry.mjs';
 import { requireAuth, readBody, getUser, getSessionUserId, getAuthToken, clearUserNodeSessions } from './_helpers.mjs';
@@ -29,6 +29,7 @@ import { verifyProfileReadonly } from '../lib/capability-dispatcher.mjs';
 import { makeNodeExecFn } from '../lib/node-exec-wrapper.mjs';
 import { applyProposedFix } from '../lib/fix-proposer.mjs';
 import { resolveTokenStorage } from '../lib/token-storage.mjs';
+import { runNodeOnboarding, summarizeNodeSystemHealth } from '../lib/node-onboarding.mjs';
 import {
   registerProfileHealthWatchers,
   unregisterProfileHealthWatchers,
@@ -146,12 +147,19 @@ export async function handle(req, res) {
         profiles: getNodeProfilesSummary(userId, n.nodeId, n.hostname),
       };
       const ops = buildNodeOpsView(userId, node);
+      const systemHealth = summarizeNodeSystemHealth({
+        node,
+        profiles: node.profiles,
+        onboarding: n.onboarding,
+        autoFixEnabled: n.autoFixEnabled,
+      });
       return {
         ...node,
         reliability: ops.reliability,
         actionItems: ops.actionItems,
         qualityGates: ops.qualityGates,
         eventLog: ops.eventLog,
+        systemHealth,
       };
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -331,8 +339,8 @@ export async function handle(req, res) {
 
   // POST /api/nodes/:nodeId/profile/:serviceId/onboard
   // Approves an existing profile after verifying read-only diagnostics.
-  // target=reviewed starts monitoring + low-risk auto-fixes; target=proven is
-  // the explicit second step for medium-risk auto-fixes.
+  // target=reviewed starts monitoring; target=proven is the explicit second
+  // step that permits medium-risk fixes when the node Auto-fix gate is on.
   const profileOnboardMatch = p.match(/^\/api\/nodes\/([^/]+)\/profile\/([^/]+)\/onboard$/);
   const legacySystemOnboardMatch = p.match(/^\/api\/nodes\/([^/]+)\/system-profile\/onboard$/);
   if ((profileOnboardMatch || legacySystemOnboardMatch) && req.method === 'POST') {
@@ -450,6 +458,108 @@ export async function handle(req, res) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+    return true;
+  }
+
+  // POST /api/nodes/:nodeId/onboard — run the guided System Health onboarding
+  // workflow. This starts read-only host/service monitoring and records whether
+  // every detected profile was onboarded or only a partial set could be enabled.
+  const onboardMatch = p.match(/^\/api\/nodes\/([^/]+)\/onboard$/);
+  if (onboardMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeId = decodeURIComponent(onboardMatch[1]);
+    const node = getNode(nodeId, userId);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Node not found' }));
+      return true;
+    }
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return true;
+    }
+    try {
+      const result = await runNodeOnboarding({
+        userId,
+        node,
+        scope: body.scope || 'safe',
+        execFn: async (command) => sendCommand(node.nodeId, userId, {
+          type: 'exec',
+          command,
+          timeout: 45,
+        }),
+      });
+      setNodeOnboardingState(node.nodeId, userId, result);
+      const profiles = getNodeProfilesSummary(userId, node.nodeId, node.hostname);
+      const systemHealth = summarizeNodeSystemHealth({
+        node: { ...node, onboarding: result },
+        profiles,
+        onboarding: result,
+        autoFixEnabled: node.autoFixEnabled,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, onboarding: result, profiles, systemHealth }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+
+  // PATCH /api/nodes/:nodeId/auto-fix — per-node gate for autonomous fixes.
+  // Monitoring can run without this; autonomous fixes only turn on after
+  // System Health is fully onboarded.
+  const autoFixMatch = p.match(/^\/api\/nodes\/([^/]+)\/auto-fix$/);
+  if (autoFixMatch && req.method === 'PATCH') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const nodeId = decodeURIComponent(autoFixMatch[1]);
+    const node = getNode(nodeId, userId);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Node not found' }));
+      return true;
+    }
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return true;
+    }
+    const enabled = !!body.enabled;
+    const profiles = getNodeProfilesSummary(userId, node.nodeId, node.hostname);
+    const systemHealth = summarizeNodeSystemHealth({
+      node,
+      profiles,
+      onboarding: node.onboarding,
+      autoFixEnabled: node.autoFixEnabled,
+    });
+    if (enabled && !systemHealth.autoFixAvailable) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'Auto-fix is available after System Health is fully onboarded.',
+        systemHealth,
+      }));
+      return true;
+    }
+    const updated = setNodeAutoFix(node.nodeId, userId, enabled);
+    const updatedHealth = summarizeNodeSystemHealth({
+      node: updated,
+      profiles,
+      onboarding: updated?.onboarding,
+      autoFixEnabled: updated?.autoFixEnabled,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, node: updated, systemHealth: updatedHealth }));
     return true;
   }
 

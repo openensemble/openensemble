@@ -459,6 +459,18 @@ function renderSession() {
 }
 
 function orderSessionForRender(messages) {
+  const sourceMessages = messages || [];
+  const orderedMessages = sourceMessages
+    .map((m, i) => {
+      const t = Number(m?.ts);
+      return {
+        m,
+        i,
+        t: Number.isFinite(t) && t > 0 ? t : Number.MAX_SAFE_INTEGER - (sourceMessages.length - i),
+      };
+    })
+    .sort((a, b) => (a.t - b.t) || (a.i - b.i))
+    .map(x => x.m);
   const out = [];
   const pendingReports = new Map();
   let pendingLegacyReports = [];
@@ -499,7 +511,7 @@ function orderSessionForRender(messages) {
     return `autobg_${m.hideTaskId}`;
   };
 
-  for (const m of messages) {
+  for (const m of orderedMessages) {
     if (isLegacyAutoBgReport(m)) {
       pendingLegacyReports.push(m);
       continue;
@@ -2005,6 +2017,28 @@ function openToolModal(name, text) {
   body.innerHTML = renderMarkdown(text ?? '');
   backdrop.classList.add('open');
 }
+function sessionMessageKey(m) {
+  if (!m || typeof m !== 'object') return null;
+  if (m.role === 'agent_report' || m.kind === 'agent_report') {
+    if (m.reportId) return `agent_report:${m.reportId}`;
+    if (m.spanId) return `agent_report:${m.spanId}`;
+    if (m.taskId) return `agent_report:${m.taskId}:${m.targetAgentId || ''}`;
+  }
+  if (m.role === 'proposal' && m.proposalId) return `proposal:${m.proposalId}`;
+  if (m.role === 'proposal_outcome' && m.proposalId) return `proposal_outcome:${m.proposalId}:${m.status || ''}`;
+  if (m.role === 'attachment_decision' && m.decisionId) return `attachment_decision:${m.decisionId}`;
+  if (m.role === 'attachment_decision_outcome' && m.decisionId) return `attachment_decision_outcome:${m.decisionId}`;
+  return null;
+}
+function sameSessionMessage(a, b) {
+  const ak = sessionMessageKey(a);
+  const bk = sessionMessageKey(b);
+  if (ak && bk && ak === bk) return true;
+  return a?.role === b?.role && a?.content === b?.content;
+}
+function sessionHasEquivalent(messages, msg) {
+  return (messages || []).some(m => sameSessionMessage(m, msg));
+}
 function appendError(msg) {
   const el = document.createElement('div');
   el.className = 'msg assistant';
@@ -2031,23 +2065,32 @@ function appendNotification(msg) {
 }
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
-  const { agent, agentName, agentEmoji, content, ts, toolEvents, targetAgentId, originalTask, taskId, tool, status } = msg;
+  const { agent, reportId, agentName, agentEmoji, content, displayContent, ts, toolEvents, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, spanId, tool, status } = msg;
+  const report = { role: 'agent_report', reportId, agentName, agentEmoji, content, displayContent, toolEvents, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, spanId, tool, status, ts };
   // Push into the target coordinator's session cache so the report survives
   // agent-tab switches. Without this, the DOM bubble is the only copy
   // browser-side and it gets wiped on the next renderSession (e.g. when
   // the user switches agents and switches back).
+  let addedToSession = false;
   if (agent) {
     if (!sessions[agent]) sessions[agent] = [];
     // Use role:'agent_report' so renderSession can route this back through
     // _renderAgentReportEl below. Keep the same shape we just received so
     // the renderer can reconstruct identical DOM.
-    sessions[agent].push({ role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, tool, status, ts: ts ?? Date.now() });
+    if (!sessionHasEquivalent(sessions[agent], report)) {
+      sessions[agent].push(report);
+      addedToSession = true;
+    }
   }
   // Only paint into the visible chat panel when the report's target
   // coordinator is the agent currently being viewed. A report fired while
   // the user is on a different agent's tab should NOT appear there.
   if (!agent || agent === activeAgent) {
-    const report = { role: 'agent_report', agentName, agentEmoji, content, toolEvents, targetAgentId, originalTask, taskId, tool, status, ts };
+    if (agent && typeof renderSession === 'function' && !streamEl) {
+      renderSession();
+      return;
+    }
+    if (agent && !addedToSession) return;
     if (isNodeExecTaskReport(report)) appendNodeExecTaskReport(report, null, true);
     else _renderAgentReportEl(report);
   }
@@ -2065,11 +2108,17 @@ function _legacyAgentReportMatch(content) {
   return { agentName: m[1].trim(), body: m[2] };
 }
 
-function _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents = null, targetAgentId = null, originalTask = '', ts }) {
+function _agentReportBody(content, displayContent = null) {
+  if (typeof displayContent === 'string') return displayContent;
+  if (typeof content !== 'string') return content;
+  return content
+    .replace(/^\[[^\]]+ finished in background\]\n/, '')
+    .replace(/^\[[^\]]+ (?:replied|ran into a problem)(?:\s+—\s+re:[^\]]*)?\]\n/, '');
+}
+
+function _renderAgentReportEl({ agentName, agentEmoji, content, displayContent = null, toolEvents = null, targetAgentId = null, originalTask = '', ts }) {
   const timeStr = new Date(ts ?? Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const bodyContent = typeof content === 'string'
-    ? content.replace(/^\[[^\]]+ finished in background\]\n/, '')
-    : content;
+  const bodyContent = _agentReportBody(content, displayContent);
   const el = document.createElement('div');
   el.className = 'msg agent-report';
   el.innerHTML = `
@@ -2084,7 +2133,7 @@ function _renderAgentReportEl({ agentName, agentEmoji, content, toolEvents = nul
     appendToolRun(toolEvents, ts ?? Date.now(), false, {
       persisted: true,
       recipeAgentId: targetAgentId,
-      recipePhrase: originalTask || content || '',
+      recipePhrase: originalTask || displayContent || content || '',
     });
   }
   scrollToBottom();

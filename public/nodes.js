@@ -154,7 +154,7 @@ async function loadNodes() {
     return;
   }
 
-  let html = pairBtnHtml + renderNodeWalkthroughCard() + renderNodesActionQueue(_nodesList) + '<div style="padding:10px">';
+  let html = pairBtnHtml + renderNodesActionQueue(_nodesList) + '<div style="padding:10px">';
   for (const node of _nodesList) {
     html += renderNodeCard(node);
   }
@@ -240,7 +240,7 @@ function showNodeWalkthrough() {
         </div>
         <div class="node-walkthrough-step">
           <span class="node-walkthrough-step-num">3</span>
-          <div><b>Use quick actions deliberately.</b> Terminal opens a shell. Status refreshes inventory. Update, Install, Restart, Shut Down, and Upgrade Agent act on the remote machine.</div>
+          <div><b>Use quick actions deliberately.</b> Terminal opens a shell. Refresh updates inventory. Update, Install, Restart, Shut Down, and Upgrade Agent act on the remote machine.</div>
         </div>
         <div class="node-walkthrough-step">
           <span class="node-walkthrough-step-num">4</span>
@@ -337,8 +337,8 @@ function renderNodeCard(node) {
       ${canDo(node.accessLevel, 'install') ? `<button class="cdraw-btn" data-action="nodeQuickAction" data-args='${JSON.stringify([node.nodeId, "install"]).replace(/'/g, "&#39;")}' title="Install package">
         <i data-lucide="package-plus" style="width:13px;height:13px"></i> Install
       </button>` : ''}
-      <button class="cdraw-btn" data-action="nodeRefreshStatus" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Refresh status">
-        <i data-lucide="activity" style="width:13px;height:13px"></i> Status
+      <button class="cdraw-btn" data-action="nodeRefreshStatus" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Refresh node inventory">
+        <i data-lucide="refresh-cw" style="width:13px;height:13px"></i> Refresh
       </button>
       <button class="cdraw-btn" data-action="openNodeHealth" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="View health signals and open incidents">
         <i data-lucide="heart-pulse" style="width:13px;height:13px"></i> Health
@@ -350,7 +350,7 @@ function renderNodeCard(node) {
         <i data-lucide="trash-2" style="width:13px;height:13px"></i> Remove
       </button>
     </div>
-    ${renderProfilesSection(node)}
+    ${renderSystemHealthSection(node)}
   </div>`;
 }
 
@@ -372,6 +372,76 @@ function renderNodeQualitySummary(node) {
   if (warn) parts.push(`<span style="color:var(--yellow)">${warn} warning${warn === 1 ? '' : 's'}</span>`);
   if (failingGates) parts.push(`<span style="color:var(--red)">${failingGates} failed gate${failingGates === 1 ? '' : 's'}</span>`);
   return `<div class="node-quality-summary">${parts.join(' · ')}</div>`;
+}
+
+function renderSystemHealthSection(node) {
+  const health = node.systemHealth || summarizeNodeHealthClient(node);
+  const badgeClass = health.status === 'healthy' ? 'green' : health.status === 'failed' ? 'red' : 'yellow';
+  const autoFixDisabled = !health.autoFixAvailable;
+  const autoFixTitle = autoFixDisabled
+    ? 'Auto-fix is available after System Health is fully onboarded'
+    : 'Allow OE to apply verified fixes when health signals fail';
+  const skippedCount = Array.isArray(health.skipped) ? health.skipped.length : 0;
+  const skipped = skippedCount
+    ? `<div class="node-system-health-skipped">${skippedCount} item${skippedCount === 1 ? '' : 's'} skipped during onboarding</div>`
+    : '';
+  return `<div class="node-system-health">
+    <div class="node-system-health-head">
+      <div>
+        <div class="node-system-health-title">System Health</div>
+        <div class="node-system-health-detail">${escHtml(health.detail || 'No checks active yet')}</div>
+      </div>
+      <span class="cdraw-badge ${badgeClass}">${escHtml(health.label || 'Degraded')}</span>
+    </div>
+    <div class="node-system-health-meta">
+      <span>${escHtml(health.onboardedLabel || 'Not onboarded')}</span>
+      ${skipped}
+    </div>
+    <div class="node-system-health-actions">
+      <button class="cdraw-btn" data-action="openNodeOnboarding" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="Walk through host health and service checks">
+        <i data-lucide="route" style="width:12px;height:12px"></i> Onboard
+      </button>
+      <button class="cdraw-btn" data-action="openNodeHealth" data-args='${JSON.stringify([node.nodeId]).replace(/'/g, "&#39;")}' title="View health details">
+        <i data-lucide="heart-pulse" style="width:12px;height:12px"></i> Details
+      </button>
+      <label class="node-autofix-toggle ${autoFixDisabled ? 'node-autofix-disabled' : ''}" title="${escHtml(autoFixTitle)}">
+        <span>Auto-fix</span>
+        <input type="checkbox" ${health.autoFixEnabled ? 'checked' : ''} ${autoFixDisabled ? 'disabled' : ''}
+          data-change-action="toggleNodeAutoFix"
+          data-change-args='${JSON.stringify([node.nodeId, "$checked"]).replace(/'/g, "&#39;")}'>
+      </label>
+    </div>
+  </div>`;
+}
+
+function summarizeNodeHealthClient(node) {
+  const profiles = Array.isArray(node.profiles) ? node.profiles : [];
+  const totalChecks = profiles.reduce((n, p) => n + (p.signals_total || 0), 0);
+  const activeChecks = profiles.reduce((n, p) => n + (p.watcher_active ? (p.signals_total || 0) : 0), 0);
+  const failingChecks = profiles.reduce((n, p) => n + (p.signals_unhealthy || 0), 0);
+  const pendingChecks = profiles.reduce((n, p) => n + (p.signals_unknown || 0), 0);
+  const inactive = profiles.filter(p => p.signals_total && !p.watcher_active).length;
+  const status = (node.health === 'disconnected' || node.health === 'stale' || failingChecks)
+    ? 'failed'
+    : (!profiles.length || inactive || pendingChecks)
+      ? 'degraded'
+      : 'healthy';
+  const services = profiles.filter(p => p.service_id !== 'system').length;
+  const activeProfiles = profiles.filter(p => p.trust_state !== 'unverified' && p.watcher_active).length;
+  const draftProfiles = profiles.filter(p => p.trust_state === 'unverified').length;
+  let onboardingStatus = node.onboarding?.status || (activeProfiles ? 'partial' : 'not_started');
+  if (onboardingStatus === 'full' && (draftProfiles || inactive || totalChecks === 0)) {
+    onboardingStatus = activeProfiles ? 'partial' : 'not_started';
+  }
+  return {
+    status,
+    label: status === 'healthy' ? 'Healthy' : status === 'failed' ? 'Failed' : 'Degraded',
+    detail: `${activeChecks}/${totalChecks || 0} checks active · ${services} managed service${services === 1 ? '' : 's'}`,
+    onboardedLabel: onboardingStatus === 'full' ? 'Fully onboarded' : onboardingStatus === 'partial' ? 'Partially onboarded' : 'Not onboarded',
+    autoFixEnabled: !!node.autoFixEnabled,
+    autoFixAvailable: onboardingStatus === 'full' && totalChecks > 0,
+    skipped: node.onboarding?.skipped || [],
+  };
 }
 
 // Compact per-profile rollup shown inside each node card. When no profiles
@@ -796,12 +866,12 @@ async function openNodeOnboarding(nodeId) {
       <div class="node-walkthrough-modal-head">
         <i data-lucide="route" style="width:18px;height:18px"></i>
         <div>
-          <div class="node-walkthrough-modal-title">Onboard ${escHtml(node.hostname)}</div>
-          <div class="node-walkthrough-modal-subtitle">Approve Host health, then set up service profiles</div>
+          <div class="node-walkthrough-modal-title">System Health: ${escHtml(node.hostname)}</div>
+          <div class="node-walkthrough-modal-subtitle">Host health and managed services in one pass</div>
         </div>
       </div>
       <div id="nodeOnboardBody_${escHtml(nodeId)}" class="node-onboarding-body">
-        ${renderNodeOnboardingBody(node)}
+        ${renderSystemOnboardingStart(node)}
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
         <button class="cdraw-btn" data-action="_nodePairModalCloseInner" style="font-size:12px;padding:6px 12px">Done</button>
@@ -811,6 +881,138 @@ async function openNodeOnboarding(nodeId) {
   document.body.appendChild(modal);
   requestAnimationFrame(() => modal.classList.add('show'));
   lucide.createIcons();
+}
+
+function renderSystemOnboardingStart(node) {
+  const health = node.systemHealth || summarizeNodeHealthClient(node);
+  return `
+    <div class="node-onboarding-status">
+      <span class="node-onboarding-spinner" aria-hidden="true"></span>
+      <div>
+        <b>Current status: ${escHtml(health.label || 'Degraded')}</b>
+        <div>${escHtml(health.detail || 'No checks active yet')} · ${escHtml(health.onboardedLabel || 'Not onboarded')}</div>
+      </div>
+    </div>
+    <div class="node-onboarding-step">
+      <div>
+        <b>1. Safe checks</b>
+        <div>Start read-only host and service health checks. No restarts, installs, permission changes, or package actions.</div>
+      </div>
+      <button class="cdraw-btn cdraw-btn-primary" data-action="startNodeOnboarding" data-args='${JSON.stringify([node.nodeId, 'safe']).replace(/'/g, "&#39;")}'>
+        <i data-lucide="shield-check" style="width:12px;height:12px;margin-right:4px"></i> Run Safe Checks
+      </button>
+    </div>
+    <div class="node-onboarding-step">
+      <div>
+        <b>2. All non-restart checks</b>
+        <div>Enable every detected monitoring check that can run without restarting services or the node agent.</div>
+      </div>
+      <button class="cdraw-btn" data-action="startNodeOnboarding" data-args='${JSON.stringify([node.nodeId, 'no_restart']).replace(/'/g, "&#39;")}'>
+        <i data-lucide="activity" style="width:12px;height:12px;margin-right:4px"></i> Run Non-Restart Checks
+      </button>
+    </div>
+    <div class="node-onboarding-step">
+      <div>
+        <b>3. Include restart-required checks</b>
+        <div>Use this when you are ready to include checks or setup steps that may require a service or agent restart. Destructive changes still ask first.</div>
+      </div>
+      <button class="cdraw-btn" data-action="startNodeOnboarding" data-args='${JSON.stringify([node.nodeId, 'include_restart']).replace(/'/g, "&#39;")}'>
+        <i data-lucide="rotate-ccw" style="width:12px;height:12px;margin-right:4px"></i> Include Restart-Required
+      </button>
+    </div>
+  `;
+}
+
+function nodeOnboardingBody(nodeId) {
+  return document.querySelector(`[id="nodeOnboardBody_${CSS.escape(nodeId)}"]`);
+}
+
+async function startNodeOnboarding(nodeId, scope) {
+  const node = _nodesList.find(n => n.nodeId === nodeId);
+  const body = nodeOnboardingBody(nodeId);
+  if (!node || !body) return;
+  body.innerHTML = `<div class="node-onboarding-status node-onboarding-status-running">
+    <span class="node-onboarding-spinner" aria-hidden="true"></span>
+    <div>
+      <b>Onboarding System Health</b>
+      <div>Checking host health, detecting managed services, creating monitoring profiles, and starting watchers.</div>
+    </div>
+  </div>`;
+  lucide.createIcons();
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/onboard`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    body.innerHTML = renderNodeOnboardingResult(data.onboarding, data.systemHealth);
+    showNodeToast(data.onboarding?.status === 'full' ? 'System Health fully onboarded' : 'System Health partially onboarded', data.onboarding?.status === 'full' ? 'success' : 'warning');
+    await loadNodes();
+  } catch (e) {
+    body.innerHTML = `<div class="node-onboarding-status node-onboarding-status-error">
+      <span class="node-onboarding-spinner" aria-hidden="true"></span>
+      <div>
+        <b>Onboarding failed</b>
+        <div>${escHtml(e.message)}</div>
+      </div>
+    </div>`;
+    showNodeToast(`Onboarding failed: ${e.message}`, 'error');
+  }
+  lucide.createIcons();
+}
+
+function renderNodeOnboardingResult(onboarding, health) {
+  const full = onboarding?.status === 'full';
+  const detected = onboarding?.services?.detected || [];
+  const onboarded = onboarding?.services?.onboarded || [];
+  const skipped = [
+    ...(onboarding?.skipped || []),
+    ...(onboarding?.services?.skipped || []),
+  ];
+  const skippedHtml = skipped.length
+    ? `<div class="node-onboarding-step">
+        <b>Needs attention</b>
+        <div class="node-onboarding-services">${skipped.map(s => `<div class="node-onboarding-row"><span>${escHtml(s.label || s.kind || 'item')}</span><span class="node-health-muted">${escHtml(s.reason || 'skipped')}</span></div>`).join('')}</div>
+      </div>`
+    : '';
+  return `
+    <div class="node-onboarding-status ${full ? 'node-onboarding-status-done' : 'node-onboarding-status-warning'}">
+      <span class="node-onboarding-spinner" aria-hidden="true"></span>
+      <div>
+        <b>${full ? 'Fully onboarded' : 'Partially onboarded'}</b>
+        <div>${escHtml(onboarding?.summary || health?.detail || '')}</div>
+      </div>
+    </div>
+    <div class="node-onboarding-step">
+      <b>Checks active</b>
+      <div>${escHtml(health?.detail || 'Health watchers started.')}</div>
+    </div>
+    <div class="node-onboarding-step">
+      <b>Managed services</b>
+      <div>${detected.length ? `${detected.length} detected · ${onboarded.length} onboarded` : 'No known managed services detected. Host health is still active.'}</div>
+      ${onboarded.length ? `<div class="node-onboarding-services">${onboarded.map(s => `<div class="node-onboarding-row"><span>${escHtml(s.label || s.kind)}</span><span class="cdraw-badge green">Monitoring</span></div>`).join('')}</div>` : ''}
+    </div>
+    ${skippedHtml}
+  `;
+}
+
+async function toggleNodeAutoFix(nodeId, enabled) {
+  try {
+    const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/auto-fix`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!enabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    showNodeToast(`Auto-fix ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    await loadNodes();
+  } catch (e) {
+    showNodeToast(e.message, 'error');
+    await loadNodes();
+  }
 }
 
 function renderNodeOnboardingBody(node, detection = null) {

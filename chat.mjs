@@ -30,6 +30,7 @@ import { beginMemoryScope } from './lib/memory-scope-context.mjs';
 import { getTurn, beginTurn, recordSpan, recordError, finishTurn } from './lib/turn-trace-context.mjs';
 import { looksLikeToolError } from './lib/tool-error.mjs';
 import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
+import { getSelectedPlanKeepTools } from './roles.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
@@ -389,6 +390,9 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   let hideTaskId = null;
   const toolsUsed = [];
   const toolEvents = [];
+  // One synthetic web_search record per turn when the provider's hosted search
+  // runs (it emits only tool_progress, never a local tool_call/result pair).
+  let _nativeSearchRecorded = false;
   // Latest tool_call args by name, attached to the matching tool_result so
   // downstream proposers (routine-proposer) can inspect what the LLM passed.
   let _lastCallArgsByName = Object.create(null);
@@ -436,6 +440,17 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
         const clean = String(event.text ?? '').slice(-1200);
         pending.progressPreview = clean;
         pending.updatedAt = Date.now();
+      } else if (event.name === 'web_search' && !_nativeSearchRecorded) {
+        // Provider-hosted web search emits ONLY this progress event — no local
+        // tool_call/tool_result pair — so without a synthetic record hosted
+        // searches are invisible to toolsUsed/toolEvents: recipe learning
+        // omits the agent's only path to the web and turn traces under-report
+        // the turn. Once per turn, web_search only — other hosted progress
+        // (image_generation) must not fabricate tool records.
+        _nativeSearchRecorded = true;
+        const now = Date.now();
+        toolsUsed.push({ name: 'web_search', text: 'provider-hosted web search', args: null });
+        toolEvents.push({ name: 'web_search', args: null, startedAt: now, endedAt: now, durationMs: 0, status: 'done', native: true });
       }
     }
     if (event.type === 'tool_result' && event.name) {
@@ -526,7 +541,18 @@ function withRetryNote(userTurn, retryNote) {
 // otherwise strip a research agent's only path to the web (and, on native-search
 // models, the trigger for the model's hosted search). Kept only if the agent
 // already has it — the filter below never adds a tool the agent lacked.
+// This hardcoded set is the provider/meta base ONLY. Skill-critical tools
+// (e.g. deep_research's save_research) are declared by each skill's manifest
+// via `"selected_plan_keep": [...]` and unioned in at apply time — add new
+// protections THERE, not here (getSelectedPlanKeepTools in roles.mjs).
 const SELECTED_PLAN_CONTROL_TOOLS = new Set(['request_tools', 'web_search', 'email_user']);
+
+// Tools omitted from the missing-tool recovery retry note's FALLBACK list —
+// deliberately not the same set as SELECTED_PLAN_CONTROL_TOOLS: plan
+// preservation and recovery naming are different jobs. save_research is
+// plan-preserved above AND nameable in recovery — a model claiming "I don't
+// have a save tool" should be told save_research is right there.
+const RECOVERY_NOTE_EXCLUDED_TOOLS = new Set(['request_tools', 'web_search', 'email_user']);
 
 // Tools that create standing scheduled work (schedule_task / set_reminder /
 // set_alarm all call addTask). Stripped on autonomous runs so a scheduled task,
@@ -568,6 +594,7 @@ function applyUserToolPlan(agent, plan) {
   }
   const selected = new Set(clean.selectedTools);
   const controlTools = new Set(SELECTED_PLAN_CONTROL_TOOLS);
+  try { for (const t of getSelectedPlanKeepTools()) controlTools.add(t); } catch { /* registry not loaded yet — base set still applies */ }
   if (agent.skillCategory === 'coordinator' || selected.size === 0) controlTools.add('ask_agent');
   agent.tools = agent.tools.filter(t => {
     const name = t.function?.name;
@@ -1377,7 +1404,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       for (const s of addedSkills) _routerStore.addedSkills.add(s);
       const availableActionToolNames = (agent.tools ?? [])
         .map(t => t.function?.name)
-        .filter(n => n && !SELECTED_PLAN_CONTROL_TOOLS.has(n) && n !== 'ask_agent');
+        .filter(n => n && !RECOVERY_NOTE_EXCLUDED_TOOLS.has(n) && n !== 'ask_agent');
       if (addedToolNames.length || availableActionToolNames.length) {
         recoveredMissingTools = true;
         if (addedToolNames.length) recomposeSystemPromptForCurrentTools();
