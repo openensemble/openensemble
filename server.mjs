@@ -69,6 +69,7 @@ import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
 import { handle as handleHomeAssistant }  from './routes/home-assistant.mjs';
 import { handle as handleMcp }            from './routes/mcp.mjs';
+import { handle as handleMcpOutbound }    from './lib/mcp-outbound.mjs';
 import { handle as handleRunInspector }   from './routes/run-inspector.mjs';
 import { handle as handleSkillPermissions } from './routes/skill-permissions.mjs';
 import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
@@ -216,6 +217,7 @@ const routeHandlers = [
   handleGuide,
   handleHomeAssistant,
   handleMcp,
+  handleMcpOutbound,  // /mcp — OE exposed AS an MCP server (bearer PAT auth)
   handleRunInspector,
   handleSkillPermissions,
 ];

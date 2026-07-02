@@ -8,12 +8,18 @@
  *   POST   /api/mcp/servers/:id/unassign          — remove an agent_id
  *   POST   /api/mcp/refresh                       — re-read + reconnect
  *
+ * Outbound MCP access tokens (OE as an MCP server — /mcp endpoint):
+ *   GET    /api/mcp/tokens                        — list own tokens
+ *   POST   /api/mcp/tokens                        — mint; returns raw token ONCE
+ *   DELETE /api/mcp/tokens/:id                    — revoke
+ *
  * Mutations require non-child accounts (same rationale as the mcp-admin
  * skill's MUTATION_TOOLS gate — MCP servers spawn subprocesses with user
  * credentials in env). Reads are open to any authenticated session.
  */
 
-import { requireAuth, readBody, getUserRole, safeError } from './_helpers.mjs';
+import { requireAuth, readBody, getUserRole, safeError, getAgentsForUser } from './_helpers.mjs';
+import { createAccessToken, listAccessTokens, revokeAccessToken, VALID_SCOPES } from '../lib/mcp-access-tokens.mjs';
 import {
   getServersForUser, addServer, removeServer, assignServer, unassignServer,
   updateServer,
@@ -340,6 +346,56 @@ export async function handle(req, res) {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+    return true;
+  }
+
+  // ── Outbound MCP access tokens ─────────────────────────────────────────────
+
+  // GET /api/mcp/tokens — list this user's tokens (no secrets).
+  if (req.url === '/api/mcp/tokens' && req.method === 'GET') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ tokens: listAccessTokens(userId), validScopes: VALID_SCOPES }));
+    return true;
+  }
+
+  // POST /api/mcp/tokens — mint. The raw token appears ONLY in this response.
+  if (req.url === '/api/mcp/tokens' && req.method === 'POST') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    if (!requireAdult(req, res, userId)) return true;
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' })); return true;
+    }
+    const agentId = typeof body?.agentId === 'string' && body.agentId ? body.agentId : null;
+    if (agentId && !getAgentsForUser(userId).some(a => a.id === agentId)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `You have no agent with id "${agentId}".` })); return true;
+    }
+    try {
+      const { token, record } = createAccessToken(userId, {
+        name: body?.name,
+        scopes: Array.isArray(body?.scopes) ? body.scopes : undefined,
+        agentId,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, token, record }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
+  }
+
+  // DELETE /api/mcp/tokens/:id — revoke one of the caller's own tokens.
+  const tokenDelMatch = req.url.match(/^\/api\/mcp\/tokens\/([^/]+)$/);
+  if (tokenDelMatch && req.method === 'DELETE') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    if (!requireAdult(req, res, userId)) return true;
+    const removed = revokeAccessToken(userId, decodeURIComponent(tokenDelMatch[1]));
+    res.writeHead(removed ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(removed ? { ok: true } : { error: 'not found' }));
     return true;
   }
 

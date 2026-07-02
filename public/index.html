@@ -1465,6 +1465,10 @@
         <div class="stab-panel" id="stab-panel-mcp">
           <div style="font-size:11px;color:var(--muted);margin-bottom:16px">Register Model Context Protocol servers and assign them to your agents. Each server runs as a subprocess on this host with the env vars you provide (encrypted at rest); the tools it exposes get merged into the agents you assign. Adult accounts only.</div>
           <div id="mcpServersBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
+
+          <div class="settings-section-title" style="margin-top:24px;margin-bottom:6px">External access — use your agents from other apps</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px">This server is also an MCP server. Create an access token and add it to Claude Code, Claude Desktop, Cursor, or any MCP client to talk to your agents and memory from there. Anything you send through an external client flows to that client's AI provider and may appear in its logs. Adult accounts only.</div>
+          <div id="mcpTokensBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
         </div>
 
         <!-- ── Browser Bridge tab ── -->

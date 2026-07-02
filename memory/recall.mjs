@@ -50,7 +50,7 @@ function scopeClause(myRoles) {
 }
 
 // ── recall — vector search with Ebbinghaus reranking ─────────────────────────
-export async function recall({ agentId = 'main', type = 'episodes', query, queryVec: precomputedVec, topK = 5, includeShared = true, recencyBoost = false, timeAnchor = null, userId = 'default', myRoles = null }) {
+export async function recall({ agentId = 'main', type = 'episodes', query, queryVec: precomputedVec = undefined, topK = 5, includeShared = true, recencyBoost = false, timeAnchor = null, userId = 'default', myRoles = null }) {
   const queryVec = precomputedVec ?? await embed(query);
   const tableName = type === 'user_facts' ? 'user_facts' : `${agentId}_${type}`;
   const table = await getTable(tableName, userId);

@@ -869,7 +869,7 @@ function switchSettingsTab(name) {
     if (typeof loadTunnelStatus === 'function') loadTunnelStatus();
     if (typeof loadTailscaleStatus === 'function') loadTailscaleStatus();
   }
-  if (name === 'mcp' && typeof loadMcpServers === 'function') loadMcpServers();
+  if (name === 'mcp' && typeof loadMcpServers === 'function') { loadMcpServers(); loadMcpTokens(); }
   if (name === 'browser' && typeof loadBrowserBridge === 'function') loadBrowserBridge();
 }
 
@@ -2239,7 +2239,125 @@ async function authorizeMcpOAuth(serverId) {
   setTimeout(loadMcpServers, 8000);
 }
 
+// ── Outbound MCP access tokens (OE as an MCP server) ─────────────────────────
+// The raw token exists only in this response — held here just long enough to
+// render the one-time box; cleared next time the list re-renders without it.
+let _mcpMintedToken = null;
+let _mcpMintedName = null;
 
+async function loadMcpTokens() {
+  const body = $('mcpTokensBody');
+  if (!body) return;
+  try {
+    const r = await fetch('/api/mcp/tokens').then(r => r.json());
+    if (r.error) throw new Error(r.error);
+    renderMcpTokens(r.tokens ?? []);
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red,#e05c5c);font-size:12px">Failed to load access tokens: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderMcpTokens(tokens) {
+  const body = $('mcpTokensBody');
+  if (!body) return;
+  const agentList = (typeof agents !== 'undefined' && Array.isArray(agents) ? agents : []).filter(a => a.id);
+  const scopeLabel = { 'chat': 'chat', 'memory-read': 'memory read', 'memory-write': 'memory write' };
+  const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString() : 'never';
+
+  const mintedHtml = _mcpMintedToken ? `
+    <div style="border:1px solid var(--accent);border-radius:8px;padding:12px;margin-bottom:12px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px">Token "${escHtml(_mcpMintedName ?? '')}" created — copy it now, it won't be shown again</div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+        <code style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:11px;word-break:break-all">${escHtml(_mcpMintedToken)}</code>
+        <button data-action="copyMcpMintedToken" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:11px;cursor:pointer;font-weight:600">Copy</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Claude Code:</div>
+      <pre style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:10px;overflow-x:auto;margin:0 0 8px 0">claude mcp add --transport http openensemble ${escHtml(location.origin)}/mcp --header "Authorization: Bearer ${escHtml(_mcpMintedToken)}"</pre>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Claude Desktop / Cursor (mcpServers entry):</div>
+      <pre style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:10px;overflow-x:auto;margin:0">${escHtml(JSON.stringify({ openensemble: { type: 'http', url: location.origin + '/mcp', headers: { Authorization: 'Bearer ' + _mcpMintedToken } } }, null, 2))}</pre>
+    </div>` : '';
+
+  const listHtml = tokens.length === 0
+    ? `<div style="font-size:12px;color:var(--muted);padding:6px 0 10px">No access tokens yet.</div>`
+    : `<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">${tokens.map(t => `
+        <div style="border:1px solid var(--border);border-radius:8px;padding:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:13px;font-weight:600">${escHtml(t.name)} <span style="font-size:10px;color:var(--muted);font-family:'Fira Code',monospace">oemcp_${escHtml(t.id)}_…</span></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">
+              ${(t.scopes ?? []).map(s => `<span style="padding:1px 6px;background:var(--bg3);border-radius:4px;margin-right:4px">${escHtml(scopeLabel[s] ?? s)}</span>`).join('')}
+              ${t.agentId ? `<span style="padding:1px 6px;background:var(--bg3);border-radius:4px;margin-right:4px">bound: ${escHtml(t.agentId)}</span>` : ''}
+              created ${fmtDate(t.createdAt)} · last used ${fmtDate(t.lastUsedAt)}
+            </div>
+          </div>
+          <button data-action="revokeMcpToken" data-args='${escHtml(JSON.stringify([t.id, t.name]))}' style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:2px 10px;font-size:11px;cursor:pointer">Revoke</button>
+        </div>`).join('')}</div>`;
+
+  const formHtml = `
+    <details style="border:1px dashed var(--border);border-radius:8px;padding:10px">
+      <summary style="cursor:pointer;font-size:12px;font-weight:600">+ Create an access token</summary>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+        <label style="font-size:11px;color:var(--muted)">Name (what will use it)</label>
+        <input id="mcpTokenName" placeholder="laptop claude code" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+        <label style="font-size:11px;color:var(--muted)">Scopes</label>
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mcpTokenScopeChat" checked> Chat — ask your agents (they can use their tools, including ones with side effects)</label>
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mcpTokenScopeMemRead" checked> Memory read — recall stored facts and past conversations</label>
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mcpTokenScopeMemWrite"> Memory write — pin and forget facts</label>
+        <label style="font-size:11px;color:var(--muted)">Limit to one agent (optional)</label>
+        <select id="mcpTokenAgent" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;max-width:280px">
+          <option value="">All my agents</option>
+          ${agentList.map(a => `<option value="${escHtml(a.id)}">${escHtml(a.name ?? a.id)}</option>`).join('')}
+        </select>
+        <button data-action="createMcpToken" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600;align-self:flex-start">Create token</button>
+        <div id="mcpTokenCreateStatus" style="font-size:11px;color:var(--muted);min-height:14px"></div>
+      </div>
+    </details>`;
+
+  body.innerHTML = mintedHtml + listHtml + formHtml;
+}
+
+async function createMcpToken() {
+  const status = $('mcpTokenCreateStatus');
+  const scopes = [];
+  if ($('mcpTokenScopeChat')?.checked) scopes.push('chat');
+  if ($('mcpTokenScopeMemRead')?.checked) scopes.push('memory-read');
+  if ($('mcpTokenScopeMemWrite')?.checked) scopes.push('memory-write');
+  if (scopes.length === 0) { if (status) status.textContent = 'Pick at least one scope.'; return; }
+  const payload = {
+    name: $('mcpTokenName')?.value.trim(),
+    scopes,
+    agentId: $('mcpTokenAgent')?.value || null,
+  };
+  if (status) status.textContent = 'Creating…';
+  try {
+    const r = await fetch('/api/mcp/tokens', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }).then(r => r.json());
+    if (r.error) throw new Error(r.error);
+    _mcpMintedToken = r.token;
+    _mcpMintedName = r.record?.name ?? payload.name;
+    await loadMcpTokens();
+  } catch (e) {
+    if (status) status.textContent = `Failed: ${e.message}`;
+  }
+}
+
+function copyMcpMintedToken() {
+  if (!_mcpMintedToken) return;
+  navigator.clipboard?.writeText(_mcpMintedToken).catch(() => {});
+}
+
+async function revokeMcpToken(id, name) {
+  if (!confirm(`Revoke access token "${name}"? Any client using it stops working immediately.`)) return;
+  // Revoking invalidates the one-time mint box too if it's the same token.
+  try {
+    const r = await fetch(`/api/mcp/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(r => r.json());
+    if (r.error) throw new Error(r.error);
+    if (_mcpMintedToken?.startsWith(`oemcp_${id}_`)) { _mcpMintedToken = null; _mcpMintedName = null; }
+    await loadMcpTokens();
+  } catch (e) {
+    alert(`Failed to revoke: ${e.message}`);
+  }
+}
 
 async function openMcpEditDialog(serverId) {
   // Pull fresh server data to pre-fill the form. Secrets (env values,
