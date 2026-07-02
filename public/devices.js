@@ -623,6 +623,12 @@ function renderDevices() {
         </div>
         <div style="text-align:center;font-size:11px;color:var(--muted)">${metaBits}</div>
         <div style="text-align:center;font-size:11px;color:var(--muted);margin-top:4px"><span>${fwLabel}</span>${updateBtn}</div>
+        <div style="text-align:center;font-size:11px;color:var(--muted);margin-top:6px">
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="For headphones or an external amp on the 3.5mm jack: keeps the internal speaker amp off during playback, so the mic stays at full sensitivity and barge-in works at normal voice. With this off, the on-board speaker plays and the echo canceller suppresses the mic while audio is playing.">
+            <input type="checkbox" ${d.headphone_mode ? 'checked' : ''} data-change-action="setDeviceHeadphone" data-change-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}'>
+            Headphone / line-out mode
+          </label>
+        </div>
         ${d.online ? `<div style="text-align:center;margin-top:6px"><button class="cdraw-btn" data-action="enterApMode" data-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 9px" title="Wipe Wi-Fi/pairing and reboot into the setup AP (oe-voice-XXXX) so you can move this device to a different Wi-Fi network">⟳ Reset Wi-Fi</button></div>` : ''}
         <div data-ota-status="${escHtml(d.id)}" style="text-align:center;font-size:11px;color:var(--muted);margin-top:4px;display:none"></div>
       </div>
@@ -1753,6 +1759,14 @@ window.deleteWakeword = async function (id) {
 };
 window.setDeviceSpeak = function (id, ev) {
   patchDevice(id, { speak_replies: !!ev.target.checked });
+};
+
+// Headphone / line-out mode: PATCH persists server-side and live-pushes
+// set_headphone_mode over the device WS (routes/devices.mjs); the firmware
+// stores it in NVS so it survives reboots. Voice fast-path equivalent:
+// "headphone mode on/off" (chat-dispatch/voice-preprocess.mjs).
+window.setDeviceHeadphone = function (id, ev) {
+  patchDevice(id, { headphone_mode: !!ev.target.checked });
 };
 
 // Clear a wake-slot on someone else's device that's pointing at me.
