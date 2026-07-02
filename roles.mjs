@@ -1543,7 +1543,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       let backgrounded = false;
       let watcherId = null;
       let watchersMod = null;
-      /** @type {{agentName?: string, agentEmoji?: string, targetAgentId?: string} | null} */
+      /** @type {{agentName?: string, agentEmoji?: string, targetAgentId?: string, chipWatcherId?: string, chipTaskId?: string} | null} */
       let delegatedMeta = null;
 
       const rememberDelegationMeta = (value) => {
@@ -1562,6 +1562,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           ...(agentName ? { agentName } : {}),
           ...(agentEmoji ? { agentEmoji } : {}),
           ...(value.targetAgentId ? { targetAgentId: value.targetAgentId } : {}),
+          // The delegate skill already runs a task_proxy chip + registry entry
+          // for this delegation — remember them so the auto-bg crossing below
+          // ADOPTS that chip instead of registering a duplicate.
+          ...(value.chipWatcherId ? { chipWatcherId: value.chipWatcherId } : {}),
+          ...(value.chipTaskId ? { chipTaskId: value.chipTaskId } : {}),
         };
       };
 
@@ -1584,31 +1589,40 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           const displayName = delegatedMeta?.agentName || name;
           const displayEmoji = delegatedMeta?.agentEmoji || (delegatedMeta ? '' : '⏵');
           const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
+          const adoptedChipId = delegatedMeta?.chipWatcherId || null;
           try {
             watchersMod = await import('./scheduler/watchers.mjs');
             const taskGraph = await import('./background-tasks.mjs');
             const rootAgentId = await _resolveAttributionAgent(userId, agentId);
-            watcherId = watchersMod.registerWatcher({
-              userId,
-              agentId: rootAgentId,
-              kind: 'task_proxy',
-              label,
-              state: {
-                taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                status: 'running',
-                targetAgentName: displayName,
-                targetAgentEmoji: displayEmoji || '⏵',
-                ...(delegatedMeta?.targetAgentId ? { targetAgentId: delegatedMeta.targetAgentId } : {}),
-                tool: name,
-                phase: 'backgrounded',
-                summary: `${displayName} is still running`,
-                startedAt,
-                lastActivityAt: Date.now(),
-                canCancel: false,
-              },
-              cadenceSec: 30,
-              expiresAt: null,
-            });
+            if (adoptedChipId) {
+              // The delegate skill already registered a task_proxy chip for
+              // this delegation — ADOPT it instead of creating a second one.
+              // (The old behavior double-chipped every sync delegation that
+              // crossed 10s: one chip from the skill, one from this net.)
+              watcherId = adoptedChipId;
+            } else {
+              watcherId = watchersMod.registerWatcher({
+                userId,
+                agentId: rootAgentId,
+                kind: 'task_proxy',
+                label,
+                state: {
+                  taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                  status: 'running',
+                  targetAgentName: displayName,
+                  targetAgentEmoji: displayEmoji || '⏵',
+                  ...(delegatedMeta?.targetAgentId ? { targetAgentId: delegatedMeta.targetAgentId } : {}),
+                  tool: name,
+                  phase: 'backgrounded',
+                  summary: `${displayName} is still running`,
+                  startedAt,
+                  lastActivityAt: Date.now(),
+                  canCancel: false,
+                },
+                cadenceSec: 30,
+                expiresAt: null,
+              });
+            }
             backgrounded = true;
             taskGraph.registerTaskRoot({
               userId,
@@ -1621,7 +1635,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               rootTaskId: watcherId,
               phase: 'backgrounded',
               currentTool: name,
-              canCancel: false,
+              // An adopted delegation chip keeps its Stop button (the sync
+              // registry entry is abortable); a fresh auto-bg chip has no
+              // abort handle, so it stays non-cancellable.
+              ...(adoptedChipId ? {} : { canCancel: false }),
             });
             // Push the just-yielded value into the chip too
             if (value?.type === 'tool_progress' && value.text) {
@@ -1651,6 +1668,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               displayName,
               displayEmoji,
               targetAgentId: delegatedMeta?.targetAgentId || null,
+              adopted: !!adoptedChipId,
+              chipTaskId: delegatedMeta?.chipTaskId || null,
               args: mergedArgs,
               scheduledCtx: getScheduledContext(),
               rootTaskId: watcherId,
@@ -1705,23 +1724,30 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   }
                 });
                 const bg = await import('./background-tasks.mjs');
-                const deferred = !captured.scheduledCtx?.originTaskId && bg.deferRootCompletion({
-                  userId: captured.userId,
-                  rootTaskId: captured.rootTaskId,
-                  rootWatcherId: captured.rootWatcherId,
-                  status: 'done',
-                  finalText: `✓ ${captured.displayName} done`,
-                  finalReportPreview: finalText.slice(0, 800),
-                });
-                if (deferred) {
-                  log.info('tool', 'auto-bg root waiting for delegated children', { tool: captured.name, watcherId: captured.watcherId, userId: captured.userId });
-                  return;
+                if (captured.adopted) {
+                  // Chip + root-graph finalization belong to the delegate
+                  // skill's sync-delegation handle (children-aware, already ran
+                  // when the generator finished). This drain only delivers the
+                  // result to the session/UI below.
+                } else {
+                  const deferred = !captured.scheduledCtx?.originTaskId && bg.deferRootCompletion({
+                    userId: captured.userId,
+                    rootTaskId: captured.rootTaskId,
+                    rootWatcherId: captured.rootWatcherId,
+                    status: 'done',
+                    finalText: `✓ ${captured.displayName} done`,
+                    finalReportPreview: finalText.slice(0, 800),
+                  });
+                  if (deferred) {
+                    log.info('tool', 'auto-bg root waiting for delegated children', { tool: captured.name, watcherId: captured.watcherId, userId: captured.userId });
+                    return;
+                  }
+                  bg.clearTaskRoot(captured.rootTaskId);
+                  watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                    status: 'done',
+                    finalText: `✓ ${captured.displayName} done${finalText ? `: ${finalText.slice(-1200)}` : ''}`,
+                  });
                 }
-                bg.clearTaskRoot(captured.rootTaskId);
-                watchersMod.completeWatcher(captured.userId, captured.watcherId, {
-                  status: 'done',
-                  finalText: `✓ ${captured.displayName} done${finalText ? `: ${finalText.slice(-1200)}` : ''}`,
-                });
                 // Append the result into the agent session so the next LLM
                 // turn has context. Best-effort; chip is the primary surface.
                 if (captured.agentId) {
@@ -1787,6 +1813,15 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 }
                 log.info('tool', 'auto-bg tool complete', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, durationMs: Date.now() - captured.startedAt });
               } catch (err) {
+                // If the delegate skill died before finalizing its registry
+                // entry, clean it up here — a leaked entry reads as "still
+                // running" to check_workers until the 24h reaper.
+                try {
+                  if (captured.chipTaskId) {
+                    const bg = await import('./background-tasks.mjs');
+                    bg.completeSyncDelegation(captured.chipTaskId, { outcome: 'error', finalText: `⚠ ${captured.displayName} failed: ${err.message}` });
+                  }
+                } catch { /* best-effort */ }
                 watchersMod.completeWatcher(captured.userId, captured.watcherId, {
                   status: 'error',
                   finalText: `⚠ ${captured.name} failed: ${err.message}`,

@@ -472,9 +472,17 @@ setInterval(() => {
  */
 export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId, agentName, agentEmoji = '🤖', opts = {}) {
   const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const summary = (task || '').slice(0, 120);
+  // opts.summary lets the caller keep server-authored task suffixes (e.g. the
+  // pipeline insulation note) out of the user-visible chip label.
+  const summary = (opts?.summary || task || '').slice(0, 120);
   const ac = new AbortController();
   const scheduledCtx = getScheduledContext();
+  // Coordinator-declared forward pipeline (produce → hand off → consume): both
+  // stages run inside this ONE background task — one chip, one journal entry,
+  // one AbortController covering the whole chain. `handoff.agent` is the real
+  // (unscoped) second-stage agent record, resolved by the delegate skill.
+  const handoff = (opts?.handoff && opts.handoff.agent) ? opts.handoff : null;
+  const pipeName = handoff ? `${agentName} → ${handoff.name || handoff.agent.name || 'Agent'}` : agentName;
   const rootTaskId = opts?.rootTaskId || taskId;
   const parentTaskId = opts?.parentTaskId || null;
   const parentWatcherId = opts?.parentWatcherId || null;
@@ -482,7 +490,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const rootWatcherId = opts?.rootWatcherId || (rootTaskId === taskId ? null : parentWatcherId);
   const spanId = opts?.spanId || `${rootTaskId}:${_slug(agentName)}:${taskId}`;
   activeTasks.set(taskId, {
-    agentId: scopedAgent.id, userId, agentName, agentEmoji,
+    agentId: scopedAgent.id, userId, agentName: pipeName, agentEmoji,
     startedAt: Date.now(), summary, phase: 'queued', status: 'running',
     originalTask: task,
     coordinatorAgentId,
@@ -526,7 +534,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       userId,
       agentId: visibleAgentId,       // chip lives in the user's visible chat
       kind: 'task_proxy',
-      label: taskLabel(agentEmoji, agentName, summary),
+      label: taskLabel(agentEmoji, pipeName, summary),
       state: taskState(taskId, { phase: 'queued' }),
       cadenceSec: 30,
       expiresAt: null,   // indefinite — task runs as long as it takes
@@ -555,7 +563,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     // launch new delegations. The coordinator will see the decline in its session.
     const { isUserTimeBlocked } = await import('./routes/_helpers.mjs');
     if (isUserTimeBlocked(userId)) {
-      await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, null,
+      await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, null,
         'Access is restricted at this time — delegation refused.');
       return;
     }
@@ -566,13 +574,9 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       // was called from within scheduledContext.run(...). null in non-scheduled chats.
       const scheduledNote = getScheduledNote();
       const combinedNote = [scheduledNote, opts?.extraSystemNote].filter(Boolean).join('\n\n') || null;
-      let fullText = '';
       let toolsUsed = 0;
       let currentTool = null;
       const toolEvents = [];
-      const routeText = (typeof opts?.routeText === 'string' && opts.routeText.trim()) ? opts.routeText.trim() : task;
-      const rememberedPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: routeText });
-      pushTaskProgress(taskId, `${agentName} started working`, { phase: 'running' });
       // Phase-14b: wrap the streamChat loop in a task_proxy context so
       // ask_user_via_task (called inside the agent's tool chain) can find
       // this run's watcherId without any extra parameter threading.
@@ -589,62 +593,116 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         visibleAgentId: rec?.visibleAgentId || visibleAgentId,
         spanId: rec?.spanId || taskId,
       };
+      // Streams ONE agent's work into this task's chip/progress state and
+      // returns its reply text + any media artifacts it produced. Runs once
+      // for a plain delegation, twice for a forward pipeline.
+      const runBgStage = async (stageAgent, stageTask, stageName, stageNote, stageRoute, stagePlan) => {
+        let text = '';
+        const artifacts = [];
+        for await (const ev of streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, { toolPlan: stagePlan, routeText: stageRoute, isolatedTaskRun: true, rootTaskId: taskCtx.rootTaskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
+          if (ev.type === 'token') text += ev.text;
+          trackToolEvent(toolEvents, ev);
+          // Track in-flight tool calls so list_active_agents can report e.g.
+          // "the coder is currently running coder_edit_file" instead of just
+          // an opaque spinner.
+          if (ev.type === 'tool_call' && ev.name) {
+            toolsUsed++;
+            currentTool = ev.name;
+            const r = activeTasks.get(taskId);
+            if (r) {
+              r.toolsUsed = toolsUsed;
+              r.currentTool = ev.name;
+              r.lastUpdateAt = Date.now();
+            }
+            // Rolling progress log so check_workers can replay what this delegation
+            // has actually done (same surface workers use).
+            pushWorkerProgress(taskId, { kind: 'tool', tool: ev.name });
+            // Push to the watcher chip — the chip is the user-visible surface.
+            // History accumulates each tool call so list_watches/get_task_log
+            // can replay what happened.
+            if (r?.watcherId) {
+              pushTaskProgress(taskId, `${stageName} is using ${ev.name}`, { currentTool: ev.name, toolsUsed, phase: 'tool' });
+            }
+          }
+          if (ev.type === 'tool_progress' && ev.text) {
+            pushTaskProgress(taskId, String(ev.text).slice(-1200), {
+              currentTool,
+              toolsUsed,
+              phase: 'streaming',
+            });
+          }
+          if (ev.type === 'tool_result' && ev.name) {
+            const r = activeTasks.get(taskId);
+            const preview = String(ev.text || '').split('\n').find(l => l.trim()) || '';
+            currentTool = null;
+            if (r) {
+              r.currentTool = null;
+              r.lastResultPreview = preview.slice(0, 160);
+              r.lastUpdateAt = Date.now();
+            }
+            // First non-empty result line usually carries the domain number
+            // ("Event created…", "56 events added") — keep it for status reports.
+            pushWorkerProgress(taskId, { kind: 'result', tool: ev.name, text: preview.slice(0, 160) });
+            if (preview) {
+              pushTaskProgress(taskId, `${ev.name}: ${preview.slice(0, 240)}`, { currentTool: null, phase: 'result' });
+            }
+          }
+          // Capture produced files so a handoff stage can attach them — the id
+          // format matches list_profile_files / attachment_doc_ids.
+          if ((ev.type === 'image' || ev.type === 'video' || ev.type === 'audio') && ev.filename) {
+            const folder = ev.type === 'image' ? 'images' : ev.type === 'video' ? 'videos' : 'audio';
+            artifacts.push(`${folder}:${ev.filename}`);
+            pushWorkerProgress(taskId, { kind: 'result', tool: ev.type, text: `produced ${ev.filename}` });
+            pushTaskProgress(taskId, `${stageName} produced ${ev.filename}`, { currentTool: null, phase: 'result' });
+          }
+          if (ev.type === 'error') throw new Error(ev.message);
+        }
+        // An abort can end the provider stream without an error event — don't
+        // let a cancelled run masquerade as a completed one (or start stage 2).
+        if (ac.signal.aborted) throw new Error('cancelled');
+        return { text, artifacts };
+      };
+
+      const routeText = (typeof opts?.routeText === 'string' && opts.routeText.trim()) ? opts.routeText.trim() : task;
+      const rememberedPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: routeText });
+      pushTaskProgress(taskId, `${agentName} started working`, { phase: 'running' });
+      let finalText = '';
       await runInTaskContext(taskCtx, async () => {
-      for await (const ev of streamChat(scopedAgent, task, ac.signal, null, userId, null, combinedNote, false, null, { toolPlan: rememberedPlan, routeText, isolatedTaskRun: true, rootTaskId: taskCtx.rootTaskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
-        if (ev.type === 'token') fullText += ev.text;
-        trackToolEvent(toolEvents, ev);
-        // Track in-flight tool calls so list_active_agents can report e.g.
-        // "the coder is currently running coder_edit_file" instead of just
-        // an opaque spinner.
-        if (ev.type === 'tool_call' && ev.name) {
-          toolsUsed++;
-          currentTool = ev.name;
-          const rec = activeTasks.get(taskId);
-          if (rec) {
-            rec.toolsUsed = toolsUsed;
-            rec.currentTool = ev.name;
-            rec.lastUpdateAt = Date.now();
-          }
-          // Rolling progress log so check_workers can replay what this delegation
-          // has actually done (same surface workers use).
-          pushWorkerProgress(taskId, { kind: 'tool', tool: ev.name });
-          // Push to the watcher chip — the chip is the user-visible surface.
-          // History accumulates each tool call so list_watches/get_task_log
-          // can replay what happened.
-          if (rec?.watcherId) {
-            pushTaskProgress(taskId, `${agentName} is using ${ev.name}`, { currentTool: ev.name, toolsUsed, phase: 'tool' });
-          }
+        const stage1 = await runBgStage(scopedAgent, task, agentName, combinedNote, routeText, rememberedPlan);
+        finalText = stage1.text;
+        if (handoff) {
+          const stage2Name = handoff.name || handoff.agent.name || 'Agent';
+          pushTaskProgress(taskId, `✓ ${agentName} finished — handing off to ${stage2Name}`, { phase: 'handoff', currentTool: null });
+          const artifactNote = stage1.artifacts.length
+            ? `\n\nFILES PRODUCED BY ${agentName} — attach these EXACT ids via attachment_doc_ids (do not rename them and do not look them up again): ${JSON.stringify(stage1.artifacts)}`
+            : '';
+          const stage2Task = `${handoff.directive || 'Continue this task using the result below.'}\n\n[Result from ${agentName}]:\n${stage1.text.trim() || '(no text reply)'}${artifactNote}`;
+          const deleg2Id = `ephemeral_deleg_d${handoff.depth || 1}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${handoff.agent.id}`;
+          const scoped2 = { ...handoff.agent, id: deleg2Id, ephemeral: true };
+          scoped2.systemPrompt = `${handoff.agent.systemPrompt}\n\n## Current Date\nToday: ${new Date().toISOString().slice(0, 10)}`;
+          try {
+            const { buildContextHints } = await import('./lib/context-resolvers.mjs');
+            const { hints } = await buildContextHints(userId, stage2Task);
+            if (hints) scoped2.systemPrompt += `\n\n## Pre-resolved references\n${hints}`;
+          } catch { /* best-effort */ }
+          try {
+            const { initSession } = await import('./lib/ephemeral-tool-cache.mjs');
+            initSession(deleg2Id, stage2Task);
+          } catch { /* best-effort */ }
+          const r = activeTasks.get(taskId);
+          // Alias the stage-2 ephemeral session onto this task so check_workers
+          // called from INSIDE stage 2 doesn't list the agent's own pipeline.
+          if (r) r.aliases = [...new Set([...(r.aliases || []), deleg2Id])];
+          const terminalNote = `[HANDOFF — FINAL STEP] You are the last step of a pipeline the coordinator set up. Act now with your tools — do NOT show a draft and wait, the coordinator already authorized this whole chain. Your reply is delivered to the user verbatim as the final word on this task, so make it a clean, complete summary of what you did.`;
+          const stage2Note = [scheduledNote, terminalNote].filter(Boolean).join('\n\n');
+          const stage2 = await runBgStage(scoped2, stage2Task, stage2Name, stage2Note, handoff.directive || undefined, null);
+          finalText = stage2.text;
         }
-        if (ev.type === 'tool_progress' && ev.text) {
-          pushTaskProgress(taskId, String(ev.text).slice(-1200), {
-            currentTool,
-            toolsUsed,
-            phase: 'streaming',
-          });
-        }
-        if (ev.type === 'tool_result' && ev.name) {
-          const rec = activeTasks.get(taskId);
-          const preview = String(ev.text || '').split('\n').find(l => l.trim()) || '';
-          currentTool = null;
-          if (rec) {
-            rec.currentTool = null;
-            rec.lastResultPreview = preview.slice(0, 160);
-            rec.lastUpdateAt = Date.now();
-          }
-          // First non-empty result line usually carries the domain number
-          // ("Event created…", "56 events added") — keep it for status reports.
-          pushWorkerProgress(taskId, { kind: 'result', tool: ev.name, text: preview.slice(0, 160) });
-          if (preview) {
-            pushTaskProgress(taskId, `${ev.name}: ${preview.slice(0, 240)}`, { currentTool: null, phase: 'result' });
-          }
-        }
-        if (ev.type === 'error') throw new Error(ev.message);
-      }
-      });   // end runInTaskContext
-      await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, fullText.trim() || `${agentName} completed the task.`, null, null, toolEvents, scopedAgent.id, task);
+      });
+      await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, finalText.trim() || `${pipeName} completed the task.`, null, null, toolEvents, scopedAgent.id, task);
     } catch (err) {
       console.error('[background-tasks] error in task', taskId, err.message);
-      await _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, null,
+      await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, null,
         ac.signal.aborted ? 'Task cancelled by user.' : err.message,
         ac.signal.aborted ? 'cancelled' : 'error');
     }
@@ -919,7 +977,13 @@ export function cancelTask(userId, id, reason = 'cancelled') {
     // the root's rootTaskId but have their own AbortControllers, so aborting
     // only the root would leave orphaned child delegations running (and
     // reporting) with no visible chip left to stop them from.
-    const root = rootTaskGraphs.get(taskId);
+    // The graph may be keyed by this task's own id, by its rootTaskId, or by
+    // its watcher id (auto-bg ADOPTS the sync delegation's chip as the root
+    // key) — check all three or the cascade silently misses the children.
+    const root = rootTaskGraphs.get(taskId)
+      || (info.rootTaskId && rootTaskGraphs.get(info.rootTaskId))
+      || (info.watcherId && rootTaskGraphs.get(info.watcherId))
+      || null;
     if (root?.children?.size) {
       for (const childId of root.children.keys()) {
         if (childId === taskId) continue;
@@ -945,6 +1009,133 @@ export function cancelTask(userId, id, reason = 'cancelled') {
 
 export function getActiveTasks() {
   return [...activeTasks.entries()].map(([taskId, info]) => ({ taskId, ...info }));
+}
+
+// ── Sync (in-turn) delegation tracking ───────────────────────────────────────
+// A sync delegation streams into the caller's open turn, but it is still real
+// background-shaped work: it can outlive the visible turn (the auto-bg net
+// detaches it at 10s), the user may want to cancel it, and check_workers
+// should see it. Registering it in the SAME activeTasks registry buys all of
+// that at once: cancelTask finds it by taskId or watcherId (chip Stop button),
+// listActiveDelegationsForUser lists it, the restart journal covers it, and
+// it can join a root task graph like any dispatched child.
+//
+// The delegate skill drives the record through the returned handle. Completion
+// does NOT inject an agent_report — the sync result returns inline in the
+// caller's turn (or via the auto-bg drain once the turn detached).
+
+/**
+ * Complete a sync delegation: retire it to the recent ring, drop it from the
+ * registry + journal, and finalize its chip. Children-aware: when the auto-bg
+ * net ADOPTED this delegation's chip as a root (roles.mjs keys the root graph
+ * by the watcherId), a chip with still-running child delegations defers to
+ * deferRootCompletion instead of reading "done" under them.
+ */
+export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '', finalReportPreview = '' } = {}) {
+  const rec = activeTasks.get(taskId);
+  if (!rec || !rec.isSync) return false;
+  const status = (outcome === 'stopped' || outcome === 'cancelled') ? 'cancelled' : (outcome === 'error' ? 'error' : 'done');
+  rec.status = status;
+  rec.phase = status;
+  rec.currentTool = null;
+  recentDelegations.unshift({
+    taskId, userId: rec.userId, agentId: rec.agentId,
+    rootTaskId: rec.rootTaskId || taskId,
+    parentTaskId: rec.parentTaskId || null,
+    spanId: rec.spanId || null,
+    watcherId: rec.watcherId || null,
+    rootWatcherId: rec.rootWatcherId || null,
+    visibleAgentId: rec.visibleAgentId || null,
+    name: rec.agentName, summary: rec.summary,
+    outcome: status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error'),
+    finalText: String(finalReportPreview || finalText || '').slice(0, 240),
+    toolsUsed: rec.toolsUsed || 0,
+    startedAt: rec.startedAt, endedAt: Date.now(),
+  });
+  if (recentDelegations.length > RECENT_CAP) recentDelegations.length = RECENT_CAP;
+  _completeRootChild(taskId, rec, status, String(finalReportPreview || finalText || '').slice(0, 800));
+  activeTasks.delete(taskId);
+  _journalRemove(taskId);
+
+  if (rec.watcherId) {
+    const rootKey = [taskId, rec.rootTaskId, rec.watcherId].find(k => k && rootTaskGraphs.get(k)?.children?.size);
+    if (rootKey) {
+      deferRootCompletion({ userId: rec.userId, rootTaskId: rootKey, rootWatcherId: rec.watcherId, status, finalText, finalReportPreview });
+    } else {
+      if (finalText) {
+        pushWatcherStatus(rec.userId, rec.watcherId, finalText, {
+          taskId, status, phase: status,
+          canCancel: false, cancelling: false, currentTool: null,
+          lastActivityAt: Date.now(), finalReportPreview,
+        });
+      }
+      completeWatcher(rec.userId, rec.watcherId, { status, finalText });
+      for (const k of [taskId, rec.rootTaskId, rec.watcherId]) {
+        const g = k && rootTaskGraphs.get(k);
+        if (g && !g.children.size) rootTaskGraphs.delete(k);
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Register a sync delegation. Returns a small handle the delegate skill uses
+ * to keep the record honest while it streams, or null on bad input.
+ */
+export function registerSyncDelegation({ taskId, userId, agentId, agentName, agentEmoji = '🤖', summary = '', watcherId = null, visibleAgentId = null, abort = null, rootTaskId = null, parentTaskId = null, parentWatcherId = null, rootWatcherId = null }) {
+  if (!taskId || !userId) return null;
+  const rTask = rootTaskId || taskId;
+  activeTasks.set(taskId, {
+    agentId, userId, agentName, agentEmoji,
+    startedAt: Date.now(), summary: String(summary || '').slice(0, 120),
+    phase: 'running', status: 'running',
+    watcherId: watcherId || null,
+    visibleAgentId: visibleAgentId || null,
+    rootTaskId: rTask,
+    parentTaskId: parentTaskId || null,
+    parentWatcherId: parentWatcherId || null,
+    rootWatcherId: rootWatcherId || watcherId || null,
+    spanId: `${rTask}:${_slug(agentName)}:${taskId}`,
+    aliases: [taskId, agentId, watcherId].filter(Boolean),
+    isDelegation: true,
+    isSync: true,
+    abort: typeof abort === 'function' ? abort : null,
+  });
+  const rec = activeTasks.get(taskId);
+  if (rec.rootTaskId !== taskId) _attachRootChild(taskId, rec);
+  _journalAdd(taskId);
+  return {
+    taskId,
+    noteToolCall(name) {
+      const r = activeTasks.get(taskId);
+      if (!r || !name) return;
+      r.toolsUsed = (r.toolsUsed || 0) + 1;
+      r.currentTool = name;
+      r.lastUpdateAt = Date.now();
+      pushWorkerProgress(taskId, { kind: 'tool', tool: name });
+      _updateRootChildProgress({ ...r, taskId });
+    },
+    noteToolResult(name, preview) {
+      const r = activeTasks.get(taskId);
+      if (!r || !name) return;
+      r.currentTool = null;
+      r.lastResultPreview = String(preview || '').slice(0, 160);
+      r.lastUpdateAt = Date.now();
+      pushWorkerProgress(taskId, { kind: 'result', tool: name, text: String(preview || '').slice(0, 160) });
+    },
+    // Pipeline stage transition — updates what check_workers + the chip header
+    // call this delegation (e.g. "Trixie" → "Trixie → Gina").
+    setStageName(name) {
+      const r = activeTasks.get(taskId);
+      if (r && name) r.agentName = name;
+    },
+    isCancelling() {
+      const r = activeTasks.get(taskId);
+      return !!r && r.status === 'cancelling';
+    },
+    complete(o) { return completeSyncDelegation(taskId, o); },
+  };
 }
 
 /**
@@ -1205,7 +1396,8 @@ export function listRecentWorkersForOwner(userId, ownerKey) {
 export function listActiveDelegationsForUser(userId, excludeAgentId = null) {
   const now = Date.now();
   return [...activeTasks.entries()]
-    .filter(([, info]) => info.isDelegation && info.userId === userId && info.agentId !== excludeAgentId)
+    .filter(([, info]) => info.isDelegation && info.userId === userId && info.agentId !== excludeAgentId
+      && !(excludeAgentId && (info.aliases || []).includes(excludeAgentId)))
     .map(([taskId, info]) => {
       const lastAt = info.lastActivityAt || info.lastUpdateAt || info.startedAt;
       return {
@@ -1274,11 +1466,20 @@ export function describeBackgroundWorkForSession(userId, sessionAgentId = null) 
   return lines.join(' | ');
 }
 
-/** Stop a worker by id. ownerKey (if given) must match — you can only stop your own. */
+/**
+ * Stop a worker OR a delegated background task by id. Workers are owner-scoped
+ * (ownerKey must match — you can only stop your own); delegations are
+ * user-level work (any agent the user asks may stop them, mirroring how
+ * check_workers surfaces them to every agent).
+ */
 export function stopWorker(userId, taskId, ownerKey = null) {
   const info = activeTasks.get(taskId);
-  if (!info || !info.isWorker || info.userId !== userId) return { ok: false, reason: 'not found' };
-  if (ownerKey && info.ownerKey !== ownerKey) return { ok: false, reason: 'that worker belongs to a different agent' };
+  if (!info || info.userId !== userId) return { ok: false, reason: 'not found' };
+  if (info.isWorker) {
+    if (ownerKey && info.ownerKey !== ownerKey) return { ok: false, reason: 'that worker belongs to a different agent' };
+  } else if (!info.isDelegation) {
+    return { ok: false, reason: 'not a worker or delegated task' };
+  }
   const r = cancelTask(userId, taskId, 'stopped_by_manager');
   return r.ok ? { ok: true, name: info.agentName } : { ok: false, reason: r.reason || 'not cancellable' };
 }

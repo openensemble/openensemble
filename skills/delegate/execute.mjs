@@ -319,6 +319,23 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   }
   const newDepth = currentDepth + 1;
 
+  // Resolve the handoff target UP FRONT so a typo'd handoff_to fails fast —
+  // before any stage-1 work — and the coordinator can immediately re-route,
+  // instead of finding out after the producer already ran.
+  let handoffTarget = null;
+  if (doHandoff) {
+    const needle = handoffTo.toLowerCase();
+    handoffTarget = agents.find(a => a.id === handoffTo)
+      ?? agents.find(a => a.name?.toLowerCase() === needle)
+      ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle))
+      ?? agents.find(a => a.role?.toLowerCase() === needle)
+      ?? agents.find(a => a.skillCategory?.toLowerCase() === needle);
+    if (!handoffTarget) {
+      yield { type: 'result', text: `Handoff target '${handoffTo}' not found — no pipeline was started. Pick a valid agent for handoff_to, or delegate normally and route the result yourself.` };
+      return;
+    }
+  }
+
   // ── Decide sync vs background ──────────────────────────────────────────
   // Auto-backgrounding (the task-shaped keyword heuristic) applies ONLY when the
   // COORDINATOR is dispatching DOWN to a specialist — the case where a long task
@@ -330,7 +347,14 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // below, since multiple live streams can't share one chat.
   const LONG_TASK_RE = /\b(create|build|make|generate|refactor|rewrite|fix|update|modify|change|delete|remove|install|deploy|configure|setup|set up|investigate|debug|trace|run|execute|test|download|upload|patch|migrate|optimize|implement|write|edit|read|search|analyze|review)\b/i;
   let background;
-  if (typeof args.background === 'boolean') {
+  if (doHandoff) {
+    // A declared forward pipeline is by construction long (produce, then
+    // consume) — run it DETACHED by default so the coordinator stays free to
+    // keep chatting and delegating while it runs. Both stages execute inside
+    // one background task (one chip, one cancel). Explicit background:false
+    // keeps the old in-turn pipeline for callers that need the result now.
+    background = args.background !== false;
+  } else if (typeof args.background === 'boolean') {
     background = args.background;                  // LLM was explicit — honor it
   } else if (callerIsCoordinator) {
     background = LONG_TASK_RE.test(rawTask);       // coordinator → specialist: long tasks detach
@@ -338,11 +362,6 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   } else {
     background = false;                            // specialist → coordinator escalation: stream live
   }
-  // A declared forward pipeline must run synchronously so we can capture the
-  // second agent's reply and return it as the terminal answer. If the whole
-  // chain runs long (e.g. image generation), the roles.mjs 10s auto-bg net
-  // still detaches it to a chip — we don't need to pre-background it here.
-  if (doHandoff) background = false;
 
   // Every coordinator delegation is ephemeral: a fresh session per call with no
   // prior history loaded and nothing persisted back. Prevents cross-task context
@@ -445,15 +464,30 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       taskCtx = m.currentTaskContext?.() || null;
     } catch { /* no root task context */ }
     const autoContinue = callerIsCoordinator;
-    const taskId = dispatchBackground(scopedAgent, task, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, {
+    const handoffName = handoffTarget ? (handoffTarget.name ?? handoffTo) : null;
+    // Stage-1 insulation for a backgrounded pipeline — same server-authored
+    // note the sync path uses (see stage1Task below): the producer must not
+    // attempt the handoff itself, the runtime owns stage 2.
+    const bgTask = doHandoff
+      ? `${task}\n\n[Pipeline note — from the server, not the user: do ONLY the production work above. When you finish your reply, your output and any file you produced are handed to ${handoffName} AUTOMATICALLY. Do not attempt to send, email, attach, route, or hand off anything yourself, and do not search for saved files. Once the artifact exists, describe it in one line and end your reply.]`
+      : task;
+    const taskId = dispatchBackground(scopedAgent, bgTask, userId, callerAgentId ?? `${userId}_${agent_id}`, agentName, agentEmoji, {
       autoContinue,
       extraSystemNote: noConfirmNote,
+      summary: task,   // chip shows the task, not the server's pipeline note
       routeText: directive || null,
       rootTaskId: taskCtx?.rootTaskId || null,
       parentTaskId: taskCtx?.taskId || null,
       parentWatcherId: taskCtx?.watcherId || null,
       rootWatcherId: taskCtx?.rootWatcherId || taskCtx?.watcherId || null,
       visibleAgentId: taskCtx?.visibleAgentId || taskCtx?.agentId || null,
+      handoff: doHandoff ? {
+        agent: handoffTarget,
+        name: handoffName,
+        emoji: handoffTarget.emoji ?? '🤖',
+        directive: handoffDirective,
+        depth: newDepth,
+      } : null,
     });
     // Turn-trace delegation edge for the backgrounded hop. The bg child runs
     // detached and records its own rootId-linked trace (rootTaskId → trace
@@ -462,7 +496,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       const { recordDelegation } = await import('../../lib/turn-trace-context.mjs');
       recordDelegation({
         from: callerAgent?.name ?? callerEffectiveId ?? 'coordinator',
-        to: agentName,
+        to: doHandoff ? `${agentName} → ${handoffName}` : agentName,
         directive: String(directive || task || '').slice(0, 200),
         background: true,
         taskId,
@@ -471,16 +505,26 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     // Phrase the result as something the calling agent can relay verbatim to the
     // user — not internal jargon — so the user knows what's happening and that a
     // result will follow, without having to watch logs.
-    yield { type: 'result', text: `Handed this to ${agentName} to work on in the background — the result will be posted here when it's ready. (background task ${taskId}${taskCtx?.rootTaskId ? ` under root ${taskCtx.rootTaskId}` : ''})` };
+    yield {
+      type: 'result',
+      text: doHandoff
+        ? `Started the ${agentName} → ${handoffName} pipeline in the background: ${agentName} is working now, and when it finishes its output (plus any file it produced) is handed to ${handoffName} automatically to finish the job. Live progress shows in the task chip (it can be stopped from there too); the final result will be posted here when ${handoffName} is done. (background task ${taskId})`
+        : `Handed this to ${agentName} to work on in the background — the result will be posted here when it's ready. (background task ${taskId}${taskCtx?.rootTaskId ? ` under root ${taskCtx.rootTaskId}` : ''})`,
+    };
     return;
   }
 
+  // Sync delegations are abortable too: the chip's Stop button (DELETE
+  // /api/watchers/<id> → cancelTask) finds this delegation in the shared
+  // activeTasks registry via its watcherId and fires this controller, which
+  // kills the in-flight streamChat for whichever stage is running.
+  const syncAbort = new AbortController();
+  const syncWatcherTaskId = `deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   let syncWatcherId = null;
-  let syncWatcherTaskId = null;
   let syncWatchers = null;
+  let syncHandle = null;
   try {
     syncWatchers = await import('../../scheduler/watchers.mjs');
-    syncWatcherTaskId = `deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     syncWatcherId = syncWatchers.registerWatcher({
       userId,
       agentId: callerAgentId ?? `${userId}_${callerEffectiveId || agent_id}`,
@@ -498,18 +542,58 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         phase: 'queued',
         toolsUsed: 0,
         currentTool: null,
-        canCancel: false,
+        canCancel: true,
       },
       cadenceSec: 30,
       expiresAt: null,
     });
     syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Delegating to ${agentName}: ${taskSummary}`, {
       phase: 'queued',
-      canCancel: false,
+      canCancel: true,
     });
   } catch (e) {
     console.warn('[delegate] sync task_proxy watcher registration failed:', e.message);
   }
+  try {
+    const bgMod = await import('../../background-tasks.mjs');
+    let taskCtx0 = null;
+    try {
+      const m = await import('../../lib/task-proxy-context.mjs');
+      taskCtx0 = m.currentTaskContext?.() || null;
+    } catch { /* not inside a task */ }
+    syncHandle = bgMod.registerSyncDelegation({
+      taskId: syncWatcherTaskId,
+      userId,
+      agentId: scopedAgent.id,
+      agentName,
+      agentEmoji,
+      summary: taskSummary,
+      watcherId: syncWatcherId,
+      visibleAgentId: callerAgentId ?? `${userId}_${callerEffectiveId || agent_id}`,
+      abort: () => syncAbort.abort(),
+      rootTaskId: taskCtx0?.rootTaskId || null,
+      parentTaskId: taskCtx0?.taskId || null,
+      parentWatcherId: taskCtx0?.watcherId || null,
+      rootWatcherId: taskCtx0?.rootWatcherId || taskCtx0?.watcherId || null,
+    });
+  } catch (e) {
+    console.warn('[delegate] sync delegation registration failed:', e.message);
+  }
+
+  // Single finalization point for the sync chip + registry entry — EVERY exit
+  // path below must pass through here exactly once, or the delegation leaks in
+  // activeTasks (check_workers would report it running forever).
+  const finishSync = (outcome, finalText, finalReportPreview = '') => {
+    if (syncHandle) {
+      syncHandle.complete({ outcome, finalText, finalReportPreview });
+    } else if (syncWatcherId) {
+      const status = (outcome === 'stopped') ? 'cancelled' : (outcome === 'error' ? 'error' : 'done');
+      if (finalReportPreview) {
+        syncWatchers.pushWatcherStatus(userId, syncWatcherId, finalText, { status, phase: status, currentTool: null, canCancel: false, finalReportPreview });
+      }
+      syncWatchers.completeWatcher(userId, syncWatcherId, { status, finalText });
+    }
+  };
 
   // Queue behind any in-flight run on the target agent. If busy, surface a
   // visible indicator so the user sees we're waiting instead of silently hanging.
@@ -543,12 +627,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     clearTimeout(_to);
     waitedMs = Date.now() - waitStart;
     if (timedOut) {
-      if (syncWatcherId) {
-        syncWatchers.completeWatcher(userId, syncWatcherId, {
-          status: 'error',
-          finalText: `⚠ ${agentName} stayed busy after ${Math.round(waitedMs / 1000)}s`,
-        });
-      }
+      finishSync('error', `⚠ ${agentName} stayed busy after ${Math.round(waitedMs / 1000)}s`);
       yield {
         type: 'tool_result',
         name: 'waiting_for_agent',
@@ -573,6 +652,14 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         currentTool: null,
       });
     }
+  }
+
+  // The user may have hit Stop while we were queued behind the busy agent —
+  // don't start work that was already cancelled.
+  if (syncAbort.signal.aborted) {
+    finishSync('stopped', `■ ${agentName} cancelled`);
+    yield { type: 'result', text: `The user cancelled the delegation to ${agentName} before it started — stop this line of work and do not retry unless asked.` };
+    return;
   }
 
   // Claim the busy slot so any subsequent delegate calls (or WS messages) see us.
@@ -604,34 +691,52 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // text + any media artifacts (images/videos/audio it produced) into `cap`.
   // Reused for BOTH stages of a forward pipeline, so each shows up as its own
   // labelled sub-stream and the user watches stage 1 then stage 2 in real time.
+  // Sentinel for a user-cancelled stage — distinguished from a real error so
+  // the exit path below can finalize the chip as cancelled, not failed.
+  const CANCELLED = '__delegation_cancelled__';
   async function* runStage(stageAgent, stageTask, sName, sEmoji, sNote, sRouteText, sToolPlan, cap) {
     const sLabel = `${sEmoji} ${sName}`.trim();
     let sCurrentTool = null;
-    for await (const event of streamChat(stageAgent, stageTask, null, null, userId, null, sNote, false, null, { toolPlan: sToolPlan, routeText: sRouteText || undefined })) {
-      if (event.type === 'token') {
-        cap.fullText += event.text;
-        yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: sLabel, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id };
-      } else if (event.type === 'tool_call' && event.name) {
-        cap.toolsUsed++;
-        sCurrentTool = event.name;
-        yield { type: 'tool_call', name: event.name, args: event.args || null, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id };
-        if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${sName} is using ${event.name}`, { phase: 'tool', currentTool: event.name, toolsUsed: cap.toolsUsed });
-      } else if (event.type === 'tool_progress' && event.text && syncWatcherId) {
-        syncWatchers.pushWatcherStatus(userId, syncWatcherId, String(event.text).slice(-1200), { phase: 'streaming', currentTool: sCurrentTool, toolsUsed: cap.toolsUsed });
-      } else if (event.type === 'tool_result' && event.name) {
-        const preview = String(event.text || '').split('\n').find(l => l.trim()) || '';
-        sCurrentTool = null;
-        yield { type: 'tool_result', name: event.name, text: event.text || '', preview, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id };
-        if (preview && syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${event.name}: ${preview.slice(0, 240)}`, { phase: 'result', currentTool: null, toolsUsed: cap.toolsUsed });
-      } else if ((event.type === 'image' || event.type === 'video' || event.type === 'audio') && event.filename) {
-        // Capture the produced file so a handoff target can attach it. The id
-        // format matches what list_profile_files / attachment_doc_ids expect.
-        const folder = event.type === 'image' ? 'images' : event.type === 'video' ? 'videos' : 'audio';
-        cap.artifacts.push(`${folder}:${event.filename}`);
-        yield { type: 'tool_progress', name: 'ask_agent', text: `\n_[${sName} produced ${event.filename}]_\n`, sourceLabel: sLabel, delegated: true, agentName: sName, agentEmoji: sEmoji };
-        if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${sName} produced ${event.filename}`, { phase: 'result', currentTool: null, toolsUsed: cap.toolsUsed });
-      } else if (event.type === 'error') { cap.errText = `Error from ${sName}: ${event.message}`; break; }
+    // chipWatcherId/chipTaskId ride on every delegated event so the auto-bg
+    // net (roles.mjs) can ADOPT this delegation's existing chip when the call
+    // crosses 10s, instead of registering a second chip for the same work.
+    const chipIds = { chipWatcherId: syncWatcherId, chipTaskId: syncWatcherTaskId };
+    try {
+      for await (const event of streamChat(stageAgent, stageTask, syncAbort.signal, null, userId, null, sNote, false, null, { toolPlan: sToolPlan, routeText: sRouteText || undefined })) {
+        if (event.type === 'token') {
+          cap.fullText += event.text;
+          yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: sLabel, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id, ...chipIds };
+        } else if (event.type === 'tool_call' && event.name) {
+          cap.toolsUsed++;
+          sCurrentTool = event.name;
+          syncHandle?.noteToolCall(event.name);
+          yield { type: 'tool_call', name: event.name, args: event.args || null, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id, ...chipIds };
+          if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${sName} is using ${event.name}`, { phase: 'tool', currentTool: event.name, toolsUsed: cap.toolsUsed });
+        } else if (event.type === 'tool_progress' && event.text && syncWatcherId) {
+          syncWatchers.pushWatcherStatus(userId, syncWatcherId, String(event.text).slice(-1200), { phase: 'streaming', currentTool: sCurrentTool, toolsUsed: cap.toolsUsed });
+        } else if (event.type === 'tool_result' && event.name) {
+          const preview = String(event.text || '').split('\n').find(l => l.trim()) || '';
+          sCurrentTool = null;
+          syncHandle?.noteToolResult(event.name, preview);
+          yield { type: 'tool_result', name: event.name, text: event.text || '', preview, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id, ...chipIds };
+          if (preview && syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${event.name}: ${preview.slice(0, 240)}`, { phase: 'result', currentTool: null, toolsUsed: cap.toolsUsed });
+        } else if ((event.type === 'image' || event.type === 'video' || event.type === 'audio') && event.filename) {
+          // Capture the produced file so a handoff target can attach it. The id
+          // format matches what list_profile_files / attachment_doc_ids expect.
+          const folder = event.type === 'image' ? 'images' : event.type === 'video' ? 'videos' : 'audio';
+          cap.artifacts.push(`${folder}:${event.filename}`);
+          yield { type: 'tool_progress', name: 'ask_agent', text: `\n_[${sName} produced ${event.filename}]_\n`, sourceLabel: sLabel, delegated: true, agentName: sName, agentEmoji: sEmoji, ...chipIds };
+          if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${sName} produced ${event.filename}`, { phase: 'result', currentTool: null, toolsUsed: cap.toolsUsed });
+        } else if (event.type === 'error') { cap.errText = `Error from ${sName}: ${event.message}`; break; }
+      }
+    } catch (err) {
+      // Providers may throw (rather than yield an error event) on abort.
+      cap.errText = syncAbort.signal.aborted ? CANCELLED : `Error from ${sName}: ${err.message}`;
+      return;
     }
+    // An abort can also end the stream cleanly — don't let a cancelled stage
+    // read as completed (or start the handoff stage).
+    if (syncAbort.signal.aborted && !cap.errText) cap.errText = CANCELLED;
   }
 
   // ── Stage 1: the first (or only) agent ────────────────────────────────────
@@ -645,7 +750,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // The server owns stage 2, so say so inside the task. Server-authored: holds
   // no matter how the coordinator worded the task.
   const stage1Task = doHandoff
-    ? `${task}\n\n[Pipeline note — from the server, not the user: do ONLY the production work above. When you finish your reply, your output and any file you produced are handed to ${handoffTo} AUTOMATICALLY. Do not attempt to send, email, attach, route, or hand off anything yourself, and do not search for saved files. Once the artifact exists, describe it in one line and end your reply.]`
+    ? `${task}\n\n[Pipeline note — from the server, not the user: do ONLY the production work above. When you finish your reply, your output and any file you produced are handed to ${handoffTarget?.name ?? handoffTo} AUTOMATICALLY. Do not attempt to send, email, attach, route, or hand off anything yourself, and do not search for saved files. Once the artifact exists, describe it in one line and end your reply.]`
     : task;
   try {
     if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${agentName} started working`, { phase: 'running', currentTool: null });
@@ -668,17 +773,11 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   let isTerminal = false;
   let stage2Name = null;
   if (!errText && doHandoff) {
-    const needle = handoffTo.toLowerCase();
-    const target2 = agents.find(a => a.id === handoffTo)
-      ?? agents.find(a => a.name?.toLowerCase() === needle)
-      ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle))
-      ?? agents.find(a => a.role?.toLowerCase() === needle)
-      ?? agents.find(a => a.skillCategory?.toLowerCase() === needle);
-    if (!target2) {
-      fullText = `${fullText}\n\n[Handoff target '${handoffTo}' not found — could not forward this to a second agent. Route the result yourself.]`;
-    } else {
+    const target2 = handoffTarget;   // resolved (and validated) before stage 1
+    {
       stage2Name = target2.name ?? handoffTo;
       const stage2Emoji = target2.emoji ?? '🤖';
+      syncHandle?.setStageName(`${agentName} → ${stage2Name}`);
       const artifactNote = stage1.artifacts.length
         ? `\n\nFILES PRODUCED BY ${agentName} — attach these EXACT ids via attachment_doc_ids (do not rename them and do not look them up again): ${JSON.stringify(stage1.artifacts)}`
         : '';
@@ -725,7 +824,13 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   }
 
   if (errText) {
-    if (syncWatcherId) syncWatchers.completeWatcher(userId, syncWatcherId, { status: 'error', finalText: `⚠ ${stage2Name || agentName} failed: ${errText}` });
+    const failName = stage2Name || agentName;
+    if (errText === CANCELLED || syncAbort.signal.aborted) {
+      finishSync('stopped', `■ ${failName} cancelled`, fullText.trim().slice(0, 800));
+      yield { type: 'result', text: `The user cancelled the delegation to ${failName} before it finished — stop this line of work and do not retry unless asked.` };
+      return;
+    }
+    finishSync('error', `⚠ ${failName} failed: ${errText}`, String(errText).slice(0, 800));
     yield { type: 'result', text: errText };
     return;
   }
@@ -733,10 +838,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     ? `[Note: waited ${Math.round(waitedMs / 1000)}s for ${agentName} to finish a prior task before delegating.]\n\n`
     : '';
   const finalAgentName = stage2Name || agentName;
-  if (syncWatcherId) {
-    syncWatchers.pushWatcherStatus(userId, syncWatcherId, `✓ ${finalAgentName} replied`, { status: 'done', phase: 'done', currentTool: null, canCancel: false, finalReportPreview: fullText.trim().slice(0, 800) });
-    syncWatchers.completeWatcher(userId, syncWatcherId, { status: 'done', finalText: `✓ ${finalAgentName} replied` });
-  }
+  finishSync('done', `✓ ${finalAgentName} replied`, fullText.trim().slice(0, 800));
   // _terminal tells the provider tool-loop to deliver this reply as the turn's
   // final answer and NOT run another coordinator inference (see openai-responses).
   yield { type: 'result', text: waitNote + (fullText.trim() || `No response from ${finalAgentName}.`), ...(isTerminal ? { _terminal: true } : {}) };
