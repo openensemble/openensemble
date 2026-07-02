@@ -77,7 +77,7 @@ import { registerAlarm, getCachedAlarmTts, sendAlarmArm } from './lib/alarms.mjs
 import { formatDurationAdj } from './lib/voice-timer.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
-import { setBackgroundBroadcastFn } from './background-tasks.mjs';
+import { setBackgroundBroadcastFn, bootRecoverInterruptedTasks } from './background-tasks.mjs';
 import { setNodesBroadcastFn } from './skills/nodes/execute.mjs';
 import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
 import { startUpdateChecker } from './lib/update.mjs';
@@ -880,6 +880,14 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     showImage:        (userId, msg) => sendToUser(userId, { type: 'image', ...msg }),
     showVideo:        (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
   });
+
+  // Restart recovery for in-flight background delegations/workers: anything
+  // still in the on-disk journal was killed by this restart — mark it
+  // cancelled, finalize its chip, and notify the owning chat so the
+  // coordinator can't claim it's "already in progress" from stale session
+  // memory. Must run after startWatcherSupervisor (completeWatcher only sees
+  // watcher files already loaded into memory).
+  bootRecoverInterruptedTasks().catch(e => log.warn?.('background-tasks', 'boot recovery failed', { err: e.message }));
 
   // Profile health monitor: per-service watchers fire the troubleshooting
   // loop on healthy→unhealthy transitions. ctxResolver wires through the

@@ -28,6 +28,7 @@ gmail-credentials.json
 /messages.json
 /threads.json
 /active-sessions.json
+/background-task-journal.json
 /nodes.json
 /invites.json
 /MCP_TODO.md

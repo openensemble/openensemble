@@ -6,17 +6,170 @@
  * and an agent_report card is broadcast to the UI.
  */
 
+import fs from 'fs';
+import path from 'path';
 import { registerWatcher, pushWatcherStatus, completeWatcher } from './scheduler/watchers.mjs';
 import { runInTaskContext } from './lib/task-proxy-context.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
 import { learnToolPlanFromToolEvents, matchToolPlan } from './lib/tool-plan-memory.mjs';
 import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-child-barrier.mjs';
+import { BASE_DIR } from './lib/paths.mjs';
 
 let _broadcast = null;
 export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
 
 // in-flight task registry: taskId -> { agentId, userId, agentName, startedAt }
 const activeTasks = new Map();
+
+// ── restart journal ───────────────────────────────────────────────────────────
+// activeTasks / rootTaskGraphs / the recent* rings are all in-memory, so a
+// server restart used to erase every trace that a delegation or worker ever
+// existed: the chip stayed "running" until the 1h watcher boot-reap,
+// check_workers reported ambiguous silence ("no background work"), and nobody
+// was told — which is how the coordinator ends up answering "already in
+// progress" from its own stale session promise. The journal is a tiny on-disk
+// mirror of in-flight tasks: entry added at dispatch, removed on completion.
+// Anything still present at boot was killed by the restart, by definition —
+// bootRecoverInterruptedTasks marks each one cancelled everywhere the truth is
+// consumed: the recent rings (check_workers), the watcher chip (UI), and the
+// owning chat session (the coordinator's next turn).
+const JOURNAL_PATH = path.join(BASE_DIR, 'background-task-journal.json');
+
+function _journalLoad() {
+  try { return JSON.parse(fs.readFileSync(JOURNAL_PATH, 'utf8')) || {}; }
+  catch { return {}; }
+}
+
+function _journalSave(entries) {
+  try { fs.writeFileSync(JOURNAL_PATH, JSON.stringify(entries, null, 2), { mode: 0o600 }); }
+  catch (e) { console.warn('[background-tasks] journal write failed:', e.message); }
+}
+
+function _journalAdd(taskId) {
+  const rec = activeTasks.get(taskId);
+  if (!rec) return;
+  const entries = _journalLoad();
+  entries[taskId] = {
+    userId: rec.userId,
+    kind: rec.isWorker ? 'worker' : 'delegation',
+    agentId: rec.agentId,
+    agentName: rec.agentName,
+    agentEmoji: rec.agentEmoji || '🤖',
+    summary: rec.summary || '',
+    watcherId: rec.watcherId || null,
+    rootTaskId: rec.rootTaskId || taskId,
+    ownerKey: rec.ownerKey || null,
+    coordinatorAgentId: rec.coordinatorAgentId || null,
+    visibleAgentId: rec.visibleAgentId || null,
+    startedAt: rec.startedAt,
+  };
+  _journalSave(entries);
+}
+
+function _journalRemove(taskId) {
+  const entries = _journalLoad();
+  if (!(taskId in entries)) return;
+  delete entries[taskId];
+  _journalSave(entries);
+}
+
+/**
+ * Restart recovery — called once from server boot, AFTER startWatcherSupervisor
+ * (completeWatcher only sees watcher files already loaded into memory). Every
+ * journal entry at this point is a task the restart killed mid-flight; mark it
+ * cancelled + notify, do NOT auto-resume: silently re-running a side-effectful
+ * task ("send the email") after a restart is worse than asking again.
+ */
+export async function bootRecoverInterruptedTasks() {
+  const entries = _journalLoad();
+  const ids = Object.keys(entries);
+  if (!ids.length) return 0;
+  const now = Date.now();
+  for (const [taskId, e] of Object.entries(entries)) {
+    const name = e.agentName || 'Agent';
+    const interruptNote = 'Interrupted by a server restart — did not finish.';
+
+    // 1. Terminal fact for check_workers (the rings are in-memory, also lost).
+    if (e.kind === 'worker') {
+      recentWorkers.unshift({
+        taskId, ownerKey: e.ownerKey, userId: e.userId,
+        name, summary: e.summary, outcome: 'stopped',
+        finalText: interruptNote, toolsUsed: 0,
+        startedAt: e.startedAt, endedAt: now,
+      });
+      if (recentWorkers.length > RECENT_CAP) recentWorkers.length = RECENT_CAP;
+    } else {
+      recentDelegations.unshift({
+        taskId, userId: e.userId, agentId: e.agentId,
+        rootTaskId: e.rootTaskId || taskId,
+        parentTaskId: null, spanId: null,
+        watcherId: e.watcherId || null, rootWatcherId: null,
+        visibleAgentId: e.visibleAgentId || null,
+        name, summary: e.summary, outcome: 'stopped',
+        finalText: interruptNote, toolsUsed: 0,
+        startedAt: e.startedAt, endedAt: now,
+      });
+      if (recentDelegations.length > RECENT_CAP) recentDelegations.length = RECENT_CAP;
+    }
+
+    // 2. Finalize the chip now instead of waiting out the 1h watcher boot-reap.
+    //    completeWatcher no-ops if the reap already moved it to recent.
+    if (e.watcherId) {
+      try {
+        completeWatcher(e.userId, e.watcherId, {
+          status: 'error',
+          finalText: `⚠ ${name} interrupted by server restart`,
+        });
+      } catch (err) {
+        console.warn('[background-tasks] restart chip finalize failed:', err.message);
+      }
+    }
+
+    // 3. Session notice — same agent_report shape _onComplete injects — so the
+    //    owning chat's LLM reads the interruption as conversation fact on its
+    //    next turn. This is what kills the "already in progress" fabrication:
+    //    the session that holds the old promise now also holds the cancellation.
+    const reportAgentId = e.visibleAgentId || e.coordinatorAgentId;
+    const content = `[${name}'s background task was interrupted — re: "${e.summary}"]\nThe server restarted while ${name} was working on this. The task was cancelled and did NOT finish. If it is still wanted, it must be started again.`;
+    if (reportAgentId) {
+      try {
+        const { appendToSession } = await import('./sessions.mjs');
+        appendToSession(reportAgentId, {
+          role: 'assistant',
+          kind: 'agent_report',
+          agentName: name, agentEmoji: e.agentEmoji || '🤖',
+          content,
+          toolEvents: [],
+          targetAgentId: e.agentId || null,
+          originalTask: e.summary || '',
+          taskId,
+          rootTaskId: e.rootTaskId || taskId,
+          ts: now,
+        });
+      } catch (err) {
+        console.warn('[background-tasks] restart-notice inject failed:', err.message);
+      }
+    }
+
+    // 4. Best-effort UI card (usually nobody is connected mid-restart; the
+    //    session notice above is the durable copy).
+    _broadcast?.({
+      type: 'agent_report',
+      agent: reportAgentId,
+      agentName: name, agentEmoji: e.agentEmoji || '🤖',
+      content,
+      toolEvents: [],
+      targetAgentId: e.agentId || null,
+      originalTask: e.summary || '',
+      taskId,
+      rootTaskId: e.rootTaskId || taskId,
+      ts: now,
+    });
+  }
+  _journalSave({});
+  console.log(`[background-tasks] boot: marked ${ids.length} restart-interrupted task(s) cancelled and notified owners`);
+  return ids.length;
+}
 
 // Root task graph for nested delegation. Existing ids remain intact:
 // - watcher UUIDs are still the user-visible chip ids
@@ -302,6 +455,7 @@ setInterval(() => {
     if (info.startedAt && (now - info.startedAt) > TASK_TTL_MS) {
       console.warn('[background-tasks] Reaping stale task:', taskId, 'agent:', info.agentName);
       activeTasks.delete(taskId);
+      _journalRemove(taskId);
     }
   }
 }, 60 * 60 * 1000).unref();
@@ -393,6 +547,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   } catch (e) {
     console.warn('[background-tasks] task_proxy watcher registration failed:', e.message);
   }
+  _journalAdd(taskId);
 
   // Fire and forget — do not await
   (async () => {
@@ -590,6 +745,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   }
   _completeRootChild(taskId, rec, status, finalReportPreview);
   activeTasks.delete(taskId);
+  _journalRemove(taskId);
   // When deferring the chip, keep the root graph (it holds pendingCompletion +
   // the child set) so the last child can finalize the chip via _completeRootChild.
   if (rec?.rootTaskId === taskId && !deferChip) clearTaskRoot(taskId);
@@ -759,6 +915,29 @@ export function cancelTask(userId, id, reason = 'cancelled') {
       currentTool: null,
     });
     try { info.abort(reason); } catch { /* already stopping */ }
+    // Cancelling a root cancels its still-running children too. Children share
+    // the root's rootTaskId but have their own AbortControllers, so aborting
+    // only the root would leave orphaned child delegations running (and
+    // reporting) with no visible chip left to stop them from.
+    const root = rootTaskGraphs.get(taskId);
+    if (root?.children?.size) {
+      for (const childId of root.children.keys()) {
+        if (childId === taskId) continue;
+        const child = activeTasks.get(childId);
+        if (!child || child.status === 'cancelling' || typeof child.abort !== 'function') continue;
+        child.status = 'cancelling';
+        child.phase = 'cancelling';
+        child.currentTool = null;
+        pushTaskProgress(childId, `Cancelling ${child.agentName || 'task'}...`, {
+          status: 'cancelling',
+          phase: 'cancelling',
+          canCancel: false,
+          cancelling: true,
+          currentTool: null,
+        });
+        try { child.abort(reason); } catch { /* already stopping */ }
+      }
+    }
     return { ok: true, taskId, watcherId: info.watcherId };
   }
   return { ok: false, reason: 'not found' };
@@ -888,6 +1067,10 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
   activeTasks.set(taskId, {
     agentId: workerAgent.id, userId, agentName: workerName, agentEmoji: emoji,
     startedAt: Date.now(), summary, ownerKey, isWorker: true, phase: 'queued',
+    // chipOwnerId doubles as the report target on completion (_onComplete gets
+    // it as a parameter) — keep it on the record too so the restart journal
+    // knows which chat to notify when this worker dies with the process.
+    visibleAgentId: chipOwnerId,
     status: 'running', abort: () => ac.abort(),
   });
 
@@ -908,6 +1091,7 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
   } catch (e) {
     console.warn('[workers] task_proxy watcher registration failed:', e.message);
   }
+  _journalAdd(taskId);
 
   (async () => {
     const { isUserTimeBlocked } = await import('./routes/_helpers.mjs');
@@ -1053,6 +1237,41 @@ export function listRecentDelegationsForUser(userId, excludeAgentId = null) {
   return recentDelegations
     .filter(r => r.userId === userId && r.agentId !== excludeAgentId)
     .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
+}
+
+/**
+ * One-line ground-truth summary of a user's background work — the server-side
+ * equivalent of check_workers, for chat.mjs's "already in progress" truthfulness
+ * gate. The gate injects this into a retry note so the model answers from
+ * verified status instead of its own stale promises in session memory.
+ */
+export function describeBackgroundWorkForSession(userId, sessionAgentId = null) {
+  // Session ids arrive wrapped (`user_<uid>_<agentId>` or `ephemeral_deleg_…`) —
+  // unwrap to the stable agent id for the worker-owner lookup. Keep in sync
+  // with _parseCallerSession in skills/delegate/execute.mjs.
+  const raw = String(sessionAgentId || '');
+  const m = raw.match(/^ephemeral_deleg_d\d+_\d+_[a-z0-9]+_(.+)$/)
+    || raw.match(/^ephemeral_deleg_\d+_[a-z0-9]+_(.+)$/)
+    || raw.match(/^user_[a-z0-9]+_(.+)$/);
+  const ownerKey = m ? m[1] : (raw || null);
+  const ago = s => s < 90 ? `${s}s` : `${Math.round(s / 60)}m`;
+  const lines = [];
+  for (const d of listActiveDelegationsForUser(userId, sessionAgentId)) {
+    lines.push(`RUNNING: ${d.name} — "${d.summary}" (${d.toolsUsed} tool calls, started ${ago(d.elapsedSec)} ago${d.stalled ? ', STALLED' : ''})`);
+  }
+  for (const w of (ownerKey ? listWorkersForOwner(userId, ownerKey) : [])) {
+    lines.push(`RUNNING worker: ${w.name} — "${w.summary}" (${w.toolsUsed} tool calls, started ${ago(w.elapsedSec)} ago${w.stalled ? ', STALLED' : ''})`);
+  }
+  const recent = [
+    ...listRecentDelegationsForUser(userId, sessionAgentId),
+    ...(ownerKey ? listRecentWorkersForOwner(userId, ownerKey) : []),
+  ].sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0)).slice(0, 5);
+  for (const r of recent) {
+    const verb = r.outcome === 'done' ? 'FINISHED' : (r.outcome === 'stopped' ? 'STOPPED' : 'FAILED');
+    lines.push(`${verb} ${ago(r.endedAgoSec)} ago: ${r.name} — ${r.finalText || r.summary}`);
+  }
+  if (!lines.length) return 'NONE — no delegations or background workers are running for this user, and none finished recently.';
+  return lines.join(' | ');
 }
 
 /** Stop a worker by id. ownerKey (if given) must match — you can only stop your own. */

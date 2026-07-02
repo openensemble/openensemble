@@ -493,6 +493,34 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
+
+// A reply asserting background work is pending/in-flight, or promising a
+// follow-up when it lands. Paired with the status-tool check below: making
+// either claim WITHOUT having checked (or started) anything this turn is the
+// fabricated-status failure — the coordinator re-asserting its own stale
+// "I'll let you know when it's done" promise after a restart killed the run.
+const IN_PROGRESS_REPLY_RE = /\b(?:already\s+(?:in\s+progress|under\s?way|working|running|on\s+it)|still\s+(?:working|running|in\s+progress|going)|(?:is|are|['’]s)\s+(?:currently\s+)?working\s+on\s+(?:it|that|this)|(?:i|we)(?:['’]ll|\s+will)\s+(?:let\s+you\s+know|update\s+you|report\s+back|ping\s+you|follow\s+up)\s+(?:when|once|as\s+soon\s+as)|(?:hasn['’]?t|haven['’]?t)\s+(?:finished|completed)\s+yet|not\s+(?:done|finished)\s+yet)\b/i;
+// Tools whose use this turn makes an in-progress claim legitimate: the model
+// either checked real status or just started/stopped the work it's describing.
+const BACKGROUND_STATUS_TOOLS = new Set([
+  'check_workers', 'list_active_agents', 'list_watches', 'get_task_log',
+  'spawn_worker', 'stop_worker', 'ask_agent', 'report_progress',
+]);
+
+// Append a [System note: …] to the (possibly multi-part) user turn — used by
+// the buffered-recovery retries to re-run the turn with server guidance.
+function withRetryNote(userTurn, retryNote) {
+  return Array.isArray(userTurn.content)
+    ? {
+        ...userTurn,
+        content: userTurn.content.map((part, idx, arr) =>
+          idx === arr.length - 1 && part?.type === 'text'
+            ? { ...part, text: `${part.text || ''}${retryNote}` }
+            : part
+        ),
+      }
+    : { ...userTurn, content: `${String(userTurn.content || '')}${retryNote}` };
+}
 // Tools a remembered/pinned recipe can never drop — the recipe-pin counterpart of
 // tool-router's ALWAYS_TOOL_NAMES. A stale recipe that omits web_search would
 // otherwise strip a research agent's only path to the web (and, on native-search
@@ -1359,23 +1387,42 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           originalReply: String(assistantContent || '').slice(0, 240),
         });
         const retryNote = `\n\n[System note: Your prior draft said you lacked a tool. The server has verified these tools are available for this same user request: ${retryToolNames.join(', ')}. Use the appropriate tool now if needed; do not repeat the missing-tool apology unless the tool call actually fails.]`;
-        const recoveryTurn = Array.isArray(currentUserTurn.content)
-          ? {
-              ...currentUserTurn,
-              content: currentUserTurn.content.map((part, idx, arr) =>
-                idx === arr.length - 1 && part?.type === 'text'
-                  ? { ...part, text: `${part.text || ''}${retryNote}` }
-                  : part
-              ),
-            }
-          : { ...currentUserTurn, content: `${String(currentUserTurn.content || '')}${retryNote}` };
-        const recoveryMessages = [...trimmed, recoveryTurn];
+        const recoveryMessages = [...trimmed, withRetryNote(currentUserTurn, retryNote)];
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
         ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false }));
       }
     }
   }
-  if (shouldBufferForRecovery && !recoveredMissingTools && assistantContent && !hideTurn && !errored) {
+  // Truthfulness gate for background-work status claims. After a restart kills
+  // an in-flight delegation, the coordinator's session still contains its own
+  // "I'll let you know when it's done" promise — and it will re-assert
+  // "already in progress" from that memory without ever calling check_workers.
+  // If a buffered draft claims work is pending and NO status-bearing tool ran
+  // this turn, don't just nudge it to check: the ground truth is in-process,
+  // so inject the server-verified status and re-run once. Skipped for
+  // isolatedTaskRun — a specialist reporting on its own in-flight work
+  // mid-delegation is not making a checkable claim about background tasks.
+  let recoveredProgressClaim = false;
+  if (!errored && shouldBufferForRecovery && !recoveredMissingTools && !hideTurn && !isolatedTaskRun
+      && IN_PROGRESS_REPLY_RE.test(assistantContent || '')
+      && !toolsUsed.some(t => BACKGROUND_STATUS_TOOLS.has(t.name))) {
+    try {
+      const { describeBackgroundWorkForSession } = await import('./background-tasks.mjs');
+      const verified = describeBackgroundWorkForSession(userId, agent.id);
+      log.info('chat', 'in-progress claim recovery retry', {
+        userId, agentId: agent.id, verified: verified.slice(0, 240),
+        originalReply: String(assistantContent || '').slice(0, 240),
+      });
+      const retryNote = `\n\n[System note: Your prior draft claimed background work was in progress (or promised a follow-up), but no status tool was called this turn. The server checked directly. Verified background-work status: ${verified}\nAnswer from ONLY this verified status. If a task is not listed as running, it is NOT running — a server restart cancels in-flight tasks; if that happened, say so plainly and offer to start it again. If your claim was about something other than delegated/background tasks, disregard this note and answer as before.]`;
+      const recoveryMessages = [...trimmed, withRetryNote(currentUserTurn, retryNote)];
+      ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
+      ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false }));
+      recoveredProgressClaim = true;
+    } catch (e) {
+      log.warn('chat', 'in-progress claim recovery failed', { err: e.message });
+    }
+  }
+  if (shouldBufferForRecovery && !recoveredMissingTools && !recoveredProgressClaim && assistantContent && !hideTurn && !errored) {
     yield { type: 'token', text: assistantContent };
   }
   // Turn-trace span for this agent run — metadata only (tool names, counts,
