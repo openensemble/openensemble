@@ -21,11 +21,12 @@ import os from 'node:os';
 const OE_DEFAULT_VOICE_STATE = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
 import { getAgentScope } from './agents.mjs';
 
-// Boot identity — fresh random value every server start. Sent to clients on
-// pong + agent_list so they can detect server restart unambiguously even
-// when their TCP socket appears healthy. Required for the voice-device:
-// esp_websocket_client_is_connected() returns cached state and doesn't
-// notice a server restart on its own.
+// Boot identity — fresh random value every server start. Sent to browser
+// clients on agent_list and to any client on pong so they can detect a
+// server restart unambiguously even when their TCP socket appears healthy.
+// Voice devices don't receive agent_list (they only need to connect and
+// run wake words); if firmware ever wants restart detection, the pong
+// path carries boot_id.
 const BOOT_ID = randomBytes(8).toString('hex');
 console.log(`[ws] boot_id: ${BOOT_ID}`);
 import { handleChatMessage, abortChat, getActiveStreams } from './chat-dispatch.mjs';
@@ -482,17 +483,17 @@ function onConnection(ws, req) {
   async function sendInitialData() {
     console.log('[ws] client connected, user:', ws._userId, 'device:', ws._deviceId ?? '-', 'source:', ws._clientSource ?? '-');
     log.info('ws', 'client connected', { userId: ws._userId, deviceId: ws._deviceId ?? null, source: ws._clientSource ?? null });
+    // Voice devices get nothing here. They only upstream wake-word/STT
+    // chats and consume control + TTS frames (firmware oe_client/oe_ws.c
+    // handle_message; main.c has no agent_list handler and never reads
+    // boot_id — restart detection, if ever needed, rides on pong). Shipping
+    // agent_list + every agent's last-60 messages (~1 MB measured on a
+    // 16-agent user) on every reconnect forced the ESP32 to grow a
+    // never-shrinking heap accumulator per fragmented frame and burned
+    // marginal-Wi-Fi airtime exactly when the link was already flapping.
+    if (ws._deviceId) return;
     const userAgents = getAgentsForUser(ws._userId);
     ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire), boot_id: BOOT_ID }));
-    // Voice devices consume only control + TTS frames (see firmware
-    // oe_client/oe_ws.c handle_message) — they have no chat history UI.
-    // Shipping every agent's last-60 messages (measured ~1 MB on a
-    // 16-agent user) on every reconnect forces the ESP32 to grow a
-    // never-shrinking heap accumulator per fragmented frame and burns
-    // marginal-Wi-Fi airtime exactly when the link is already flapping.
-    // agent_list stays: it's small and carries boot_id for restart
-    // detection.
-    if (ws._deviceId) return;
     // Load every agent's session in parallel — loadSession is async since
     // the previous commit; the prior serial sync version was 5+ blocking
     // reads at WS connect time. Parallel async makes total wall time =
