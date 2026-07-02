@@ -510,6 +510,7 @@ function orderSessionForRender(messages) {
     if (m?.role !== 'assistant' || !m.hidden || !m.hideTaskId) return null;
     return `autobg_${m.hideTaskId}`;
   };
+  const hiddenTaskIds = new Set(orderedMessages.map(hiddenTaskId).filter(Boolean));
 
   for (const m of orderedMessages) {
     if (isLegacyAutoBgReport(m)) {
@@ -533,6 +534,10 @@ function orderSessionForRender(messages) {
         if (attached) continue;
       }
       if (seenHiddenTasks.has(taskId)) {
+        out.push(m);
+        continue;
+      }
+      if (!hiddenTaskIds.has(taskId)) {
         out.push(m);
         continue;
       }
