@@ -24,6 +24,7 @@ import { resolveTokenStorage } from './lib/token-storage.mjs';
 import { loadProfile as loadServiceProfile } from './lib/service-profile.mjs';
 import { setProposalBroadcastFn, bootLoadProposals } from './lib/proposals.mjs';
 import { startVoiceUdpLog } from './lib/voice-udplog.mjs';
+import { startVoiceDeviceMonitor, stopVoiceDeviceMonitor } from './lib/voice-device-monitor.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
 import { getRateLimit } from './rate-limit.mjs';
@@ -442,6 +443,12 @@ initWs(httpServer);
 // device can be watched live without a serial cable, and the datagrams survive
 // WS drops. Tail /tmp/oe-voice-udplog.log.
 startVoiceUdpLog();
+
+// Voice-device offline alerting — notifies the owner (Telegram/email) when a
+// paired device stays unreachable past the threshold, once per episode, with
+// a recovery note when it returns. Must start after initWs: it reads the live
+// WS client set via isDeviceOnline. See lib/voice-device-monitor.mjs.
+startVoiceDeviceMonitor();
 
 setBroadcastFn(broadcastAgentList);
 setBackgroundBroadcastFn(broadcast);
@@ -1065,6 +1072,7 @@ async function shutdown(signal) {
   stopScheduler();
   stopWatcherSupervisor();
   stopAllWatchers();
+  stopVoiceDeviceMonitor();
   stopTunnelSupervisor().catch(() => {});
   _stopUpdateChecker?.();
 

@@ -484,6 +484,15 @@ function onConnection(ws, req) {
     log.info('ws', 'client connected', { userId: ws._userId, deviceId: ws._deviceId ?? null, source: ws._clientSource ?? null });
     const userAgents = getAgentsForUser(ws._userId);
     ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire), boot_id: BOOT_ID }));
+    // Voice devices consume only control + TTS frames (see firmware
+    // oe_client/oe_ws.c handle_message) — they have no chat history UI.
+    // Shipping every agent's last-60 messages (measured ~1 MB on a
+    // 16-agent user) on every reconnect forces the ESP32 to grow a
+    // never-shrinking heap accumulator per fragmented frame and burns
+    // marginal-Wi-Fi airtime exactly when the link is already flapping.
+    // agent_list stays: it's small and carries boot_id for restart
+    // detection.
+    if (ws._deviceId) return;
     // Load every agent's session in parallel — loadSession is async since
     // the previous commit; the prior serial sync version was 5+ blocking
     // reads at WS connect time. Parallel async makes total wall time =
@@ -510,8 +519,10 @@ function onConnection(ws, req) {
   }
 
   ws.on('message', async (raw) => {
+   // Hoisted above the try so the catch below can tell chat failures apart
+   // from other frame types when picking the device-spoken fallback.
+   let msg;
    try {
-    let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg !== 'object') return;
 
@@ -808,6 +819,11 @@ function onConnection(ws, req) {
       // on-device sentence accumulation / per-sentence pull / drain race. Old
       // firmware omits msg.tts_stream and keeps the legacy `token` path.
       let ttsStreamer = null;
+      // A device plays exactly one reply at a time. If a previous turn's
+      // streamer is still pumping (a barge-in chat that raced the stop
+      // frame, or an overlapping announcement), kill it before wiring a
+      // new one — two live pumps interleave frames into the same I²S ring.
+      if (ws._deviceId) { try { ws._ttsStreamer?.abort(); } catch {} ws._ttsStreamer = null; }
       try {
         const _cfg = loadConfig();
         if (msg.tts_stream === true && ws._deviceId && _cfg.ttsProvider === 'pocket-tts') {
@@ -919,7 +935,20 @@ function onConnection(ws, req) {
    } catch (e) {
     // Never let a malformed message kill the process. Log and notify the client.
     console.error('[ws] handler error:', e?.stack ?? e?.message ?? e);
-    try { ws.send(JSON.stringify({ type: 'error', message: 'Server error processing message', agent: 'system' })); } catch {}
+    try {
+      if (ws._deviceId && msg?.type === 'chat') {
+        // Voice devices drop bare `error` frames (firmware only speaks
+        // token/done), so a throw during a chat turn would leave the device
+        // in THINKING until its 90 s awaiting-reply watchdog. Kill any
+        // half-started audio stream and route the failure through the
+        // legacy spoken path instead.
+        try { ws._ttsStreamer?.abort(); } catch {}
+        ws.send(JSON.stringify({ type: 'token', text: 'Sorry — something went wrong handling that.', agent: 'system' }));
+        ws.send(JSON.stringify({ type: 'done', agent: 'system' }));
+      } else {
+        ws.send(JSON.stringify({ type: 'error', message: 'Server error processing message', agent: 'system' }));
+      }
+    } catch {}
    }
   });
 
