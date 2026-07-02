@@ -24,6 +24,7 @@ import { resolveTokenStorage } from './lib/token-storage.mjs';
 import { loadProfile as loadServiceProfile } from './lib/service-profile.mjs';
 import { setProposalBroadcastFn, bootLoadProposals } from './lib/proposals.mjs';
 import { startVoiceUdpLog } from './lib/voice-udplog.mjs';
+import { recordDeviceDiag } from './lib/voice-device-health.mjs';
 import { startVoiceDeviceMonitor, stopVoiceDeviceMonitor } from './lib/voice-device-monitor.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
@@ -441,8 +442,12 @@ initWs(httpServer);
 // Voice-device UDP diagnostic sink — devices (fw >= 0.2.52) forward their
 // [boot]/[hb]/[ambient-stats] heartbeat lines here over UDP so a Wi-Fi-only
 // device can be watched live without a serial cable, and the datagrams survive
-// WS drops. Tail /tmp/oe-voice-udplog.log.
-startVoiceUdpLog();
+// WS drops. Tail /tmp/oe-voice-udplog.log. The health loop consumes the same
+// stream: cap_sps mic-liveness ([hb], fw >= 0.2.61) catches devices that are
+// online-but-deaf, [boot] frequency catches reboot storms; each confirmed
+// episode notifies the owner once, with a recovery follow-up. Must be wired
+// after initWs — attribution resolves sender IP via the live WS client set.
+startVoiceUdpLog({ onLine: recordDeviceDiag });
 
 // Voice-device offline alerting — notifies the owner (Telegram/email) when a
 // paired device stays unreachable past the threshold, once per episode, with

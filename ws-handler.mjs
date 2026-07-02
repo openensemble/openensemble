@@ -1053,6 +1053,24 @@ export function isDeviceOnline(deviceId) {
 }
 
 /**
+ * Resolve a LAN IP to the voice device currently connected from it, or null.
+ * Used by the health loop to attribute UDP diag datagrams ([hb]/[boot]),
+ * which carry only their sender address. LAN-scoped by nature: devices talk
+ * to OE directly on the local network, so remoteAddress is the device's own
+ * IP (the WAN-NAT ambiguity that makes IP monitoring useless does not apply).
+ */
+export function getDeviceIdForIp(ip) {
+  if (!_wss || !ip) return null;
+  const want = String(ip).replace(/^::ffff:/, '');
+  for (const client of _wss.clients) {
+    if (client.readyState !== client.OPEN || !client._deviceId) continue;
+    const addr = client._socket?.remoteAddress?.replace(/^::ffff:/, '');
+    if (addr === want) return { deviceId: client._deviceId, userId: client._userId };
+  }
+  return null;
+}
+
+/**
  * If this client is a voice-device WS and the user's voice-config has
  * advanced since the last push to this device, OTA-resend the wake words
  * for every configured slot. Skips silently for browser sessions and for
