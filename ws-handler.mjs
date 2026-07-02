@@ -856,7 +856,11 @@ function onConnection(ws, req) {
 
       await handleChatMessage({
         userId:     ws._userId,
-        agentId:    msg.agent,
+        // Empty string → undefined so chat-dispatch's coordinator fallback
+        // kicks in (?? only catches nullish). Voice devices with no default
+        // agent configured send no agent field at all (fw >= 0.2.62), but an
+        // explicit "" from any client should mean "coordinator" too.
+        agentId:    msg.agent || undefined,
         text:       msg.text,
         attachment: msg.attachment,
         toolPlan:   msg.toolPlan,
