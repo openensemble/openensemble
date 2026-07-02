@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.60-audio-stereo",
+  "version": "0.2.61-fullduplex",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
