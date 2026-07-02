@@ -588,6 +588,11 @@ async function finalizeScheduledTask(task, { succeeded, output, lastError, manua
 // Track pending timers so we can cancel them on shutdown
 const _timers = new Map(); // taskId -> timeoutId
 
+function findFreshScheduledTask(task) {
+  return task.ownerId ? findTaskById(task.id, task.ownerId)
+                      : loadAllTasksForScheduler().find(t => t.id === task.id);
+}
+
 // Schedule a single task (schedules → runs → reschedules daily, or runs once)
 function scheduleTask(task, broadcast) {
   if (!task.enabled) return;
@@ -625,13 +630,23 @@ function scheduleTask(task, broadcast) {
   const timerId = setTimeout(async () => {
     _timers.delete(task.id);
     if (!_schedulerRunning) return;
-    const current = task.ownerId ? findTaskById(task.id, task.ownerId)
-                                 : loadAllTasksForScheduler().find(t => t.id === task.id);
-    if (current?.enabled) await runTask(current, broadcast);
-    if (task.repeat !== 'once') {
-      const fresh = task.ownerId ? findTaskById(task.id, task.ownerId)
-                                 : loadAllTasksForScheduler().find(t => t.id === task.id);
-      if (fresh) scheduleTask(fresh, broadcast);
+    try {
+      const current = findFreshScheduledTask(task);
+      if (current?.enabled) await runTask(current, broadcast);
+    } catch (e) {
+      const err = e?.message || String(e);
+      console.error(`[scheduler] Task timer for "${task.label}" failed:`, err);
+      log.error('scheduler', 'task timer failed', { taskId: task.id, label: task.label, err });
+    } finally {
+      if (!_schedulerRunning || task.repeat === 'once') return;
+      try {
+        const fresh = findFreshScheduledTask(task);
+        if (fresh?.enabled) scheduleTask(fresh, broadcast);
+      } catch (e) {
+        const err = e?.message || String(e);
+        console.error(`[scheduler] Failed to re-arm task "${task.label}":`, err);
+        log.error('scheduler', 'task rearm failed', { taskId: task.id, label: task.label, err });
+      }
     }
   }, delay);
   _timers.set(task.id, timerId);
