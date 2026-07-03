@@ -20,7 +20,7 @@ import http from 'http';
 import https from 'https';
 import { URL } from 'url';
 import {
-  requireAuth, requirePrivileged, readBody,
+  requireAuth, requirePrivileged, isPrivileged, readBody,
   loadConfig, modifyConfig,
 } from './_helpers.mjs';
 import { invalidateCache as invalidateHaCache, ensureCache as ensureHaCache } from '../lib/ha-cache.mjs';
@@ -128,11 +128,15 @@ export async function handle(req, res) {
   };
 
   if (req.url === '/api/home-assistant' && req.method === 'GET') {
-    if (!requireAuth(req, res)) return true;
+    const authId = requireAuth(req, res); if (!authId) return true;
     const cfg = loadConfig();
     const ha = cfg.homeAssistant || {};
+    // The HA base URL is internal-network reconnaissance — only admins (who
+    // configure it) get it back. Everyone else still learns whether HA is
+    // configured, which is all the non-admin UI needs.
+    const priv = isPrivileged(authId);
     return json({
-      url: ha.url || '',
+      url: priv ? (ha.url || '') : '',
       allowSelfSigned: !!ha.allowSelfSigned,
       hasToken: !!(ha.token && String(ha.token).length > 0),
       configured: !!(ha.url && ha.token),

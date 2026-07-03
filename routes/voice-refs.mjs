@@ -39,9 +39,20 @@ function transcodeToWav(inputBuf) {
       '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-f', 'wav', 'pipe:1',
     ]);
     const out = [];
+    let errBuf = '';
     ff.stdout.on('data', c => out.push(c));
-    ff.on('error', reject);
-    ff.on('close', code => code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(`ffmpeg exited ${code}`)));
+    // Drain stderr — an undrained pipe fills its buffer and deadlocks ffmpeg;
+    // keep the tail for the error message.
+    ff.stderr.on('data', c => { if (errBuf.length < 8192) errBuf += c; });
+    // A wedged ffmpeg (malformed container that stalls the demuxer) used to
+    // hang the upload request forever.
+    const killer = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* gone */ } }, 30_000);
+    ff.on('error', (e) => { clearTimeout(killer); reject(e); });
+    ff.on('close', code => {
+      clearTimeout(killer);
+      if (code === 0) resolve(Buffer.concat(out));
+      else reject(new Error(`ffmpeg exited ${code}${errBuf ? `: ${errBuf.trim().slice(0, 300)}` : ''}`));
+    });
     ff.stdin.on('error', () => {}); // ignore EPIPE if ffmpeg bails early
     ff.stdin.end(inputBuf);
   });

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { randomBytes } from 'crypto';
 import {
   requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole, sanitizeUserForWire,
-  isPrivileged, loadUsers, modifyUsers, modifyUser, hashPassword, validatePassword, verifyPassword, readBody,
+  isPrivileged, loadUsers, loadConfig, modifyUsers, modifyUser, hashPassword, validatePassword, verifyPassword, readBody,
   createSession, clearUserSessions, clearUserSessionsExcept, modifyExpGroups, isTimeBlocked, parseMultipart,
   safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB, getClientIp,
   setSessionCookie,
@@ -56,6 +56,14 @@ export async function handle(req, res) {
   if (req.url === '/api/users' && req.method === 'GET') {
     const authId = getSessionUserId(getAuthToken(req));
     const privileged = authId && isPrivileged(authId);
+    // Pre-auth roster feeds the login picker (deliberate family-install UX).
+    // security.hideLoginRoster=true opts out for exposed installs — the
+    // picker then falls back to a manual username field.
+    if (!authId && loadConfig()?.security?.hideLoginRoster === true) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('[]');
+      return true;
+    }
     const safe = loadUsers().map(u => {
       if (!authId) return { id: u.id, name: u.name, emoji: u.emoji, color: u.color, avatar: u.avatar ?? null };
       const full = sanitizeUserForWire(u);

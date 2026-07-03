@@ -73,7 +73,14 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Invalid JSON' }));
       return true;
     }
-    const saved = saveRoutines(userId, body?.routines || []);
+    // Full-replace endpoint: a body MISSING the key must not silently save
+    // an empty list and wipe every routine. An explicit [] still clears.
+    if (!Array.isArray(body?.routines)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'body.routines must be an array (send [] to clear)' }));
+      return true;
+    }
+    const saved = saveRoutines(userId, body.routines);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(saved));
     return true;

@@ -76,7 +76,14 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Invalid JSON' }));
       return true;
     }
-    const assignments = body?.slot_assignments || {};
+    // Full-replace endpoint: a body MISSING the key must not silently save an
+    // empty map and wipe every slot. An explicit {} still clears.
+    if (!body || typeof body.slot_assignments !== 'object' || body.slot_assignments === null || Array.isArray(body.slot_assignments)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'body.slot_assignments must be an object (send {} to clear)' }));
+      return true;
+    }
+    const assignments = body.slot_assignments;
     // Impersonation guard: a non-admin may only bind a slot to their OWN
     // account. Pinning ownerUserId to the caller stops them pointing a slot at
     // another user and speaking as that user. Admins may assign any account

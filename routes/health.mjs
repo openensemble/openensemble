@@ -282,12 +282,26 @@ async function buildFullHealth() {
   };
 }
 
+// Cache the expensive full-health build (provider probes + session-dir walk)
+// for a short TTL. /health is unauthenticated and outside the /api edge rate
+// limiter, so without this a hammer loop amplified into ~13 upstream provider
+// calls + a full session-dir read PER REQUEST.
+const HEALTH_CACHE_MS = 10_000;
+let _healthCache = { at: 0, promise: null };
+function buildFullHealthCached() {
+  const now = Date.now();
+  if (_healthCache.promise && (now - _healthCache.at) < HEALTH_CACHE_MS) return _healthCache.promise;
+  _healthCache = { at: now, promise: buildFullHealth() };
+  _healthCache.promise.catch(() => { _healthCache = { at: 0, promise: null }; });
+  return _healthCache.promise;
+}
+
 export async function handle(req, res) {
   // Public health check — liveness only. Provider availability and uptime
   // are reconnaissance gifts to an unauthenticated caller; admin dashboard
   // gets the full picture via /api/admin/health below.
   if (req.url === '/health' && req.method === 'GET') {
-    const health = await buildFullHealth();
+    const health = await buildFullHealthCached();
     const status = health.ok ? 200 : 503;
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: health.ok }));
@@ -297,7 +311,7 @@ export async function handle(req, res) {
   // Admin health — full details for dashboard
   if (req.url === '/api/admin/health' && req.method === 'GET') {
     const authId = requirePrivileged(req, res); if (!authId) return true;
-    const health = await buildFullHealth();
+    const health = await buildFullHealthCached();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(health));
     return true;

@@ -56,9 +56,10 @@ export async function handle(req, res) {
     return true;
   }
 
-  // List agents
+  // List agents (auth required — unauthenticated calls used to leak the
+  // global agent roster: names, models, providers)
   if (req.url === '/api/agents' && req.method === 'GET') {
-    const callerUserId = getSessionUserId(getAuthToken(req));
+    const callerUserId = requireAuth(req, res); if (!callerUserId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(getAgentsForUser(callerUserId).map(agentToWire)));
     return true;
@@ -327,8 +328,11 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     try {
       const { skillId, agentId } = JSON.parse(await readBody(req));
-      // Allow non-admin users to assign a role only to their own custom agents
-      if (!isPrivileged(authId)) {
+      // Allow non-admin users to assign a role only to their own custom agents.
+      // A null/absent agentId is an UNASSIGN of their own per-user assignment —
+      // always allowed (the old gate 403'd it, so non-admins could never clear
+      // an assignment they had made).
+      if (!isPrivileged(authId) && agentId != null) {
         const { loadCustomAgents } = await import('../agents.mjs');
         const ownedAgent = loadCustomAgents().find(a => a.id === agentId && a.ownerId === authId);
         if (!ownedAgent) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true; }
@@ -400,6 +404,10 @@ export async function handle(req, res) {
     if (!isPrivileged(authId)) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true; }
     const id = decodeURIComponent(req.url.slice('/api/roles/'.length));
     try {
+      // Path-safety: the id comes from the URL and is matched against a
+      // manifest whose own `id` field is attacker-influenceable data — never
+      // let it traverse out of skills/ into an rmSync.
+      if (!/^[\w][\w.-]*$/.test(id) || id.includes('..')) throw new Error('Invalid role id');
       const manifest = getRoleManifest(id);
       if (!manifest) throw new Error('Role not found');
       if (!manifest.service) throw new Error('Cannot delete tools, only roles');
@@ -407,6 +415,16 @@ export async function handle(req, res) {
       fs.rmSync(skillDir, { recursive: true, force: true });
       removeRoleManifest(id);
       await modifyConfig(cfg => { if (cfg.skillAssignments) delete cfg.skillAssignments[id]; });
+      // Cascade per-user assignments too — stale profile.skillAssignments
+      // entries kept pointing at the deleted role.
+      try {
+        const { loadUsers, modifyUser } = await import('./_helpers.mjs');
+        for (const u of loadUsers()) {
+          if (u.skillAssignments && id in u.skillAssignments) {
+            await modifyUser(u.id, p => { if (p.skillAssignments) delete p.skillAssignments[id]; });
+          }
+        }
+      } catch (e) { console.warn('[roles] per-user assignment cascade failed:', e.message); }
       broadcastAgentList();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));

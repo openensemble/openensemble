@@ -2114,14 +2114,20 @@ export async function handle(req, res) {
       }
       if (!audioBuf) throw new Error('No audio part in request');
 
-      // Debug dump: save the most recent upload so we can inspect malformed
-      // WAVs / silence / clipped audio when STT rejects with "could not
-      // process file". Overwrites previous /tmp/oe-stt-last.* every call.
-      try {
-        const fs = await import('fs');
-        fs.writeFileSync(`/tmp/oe-stt-last-${audioName.replace(/[^\w.-]/g, '_')}`, audioBuf);
-        console.log(`[stt] dump: ${audioBuf.length} bytes (${audioMime}) → /tmp/oe-stt-last-*`);
-      } catch (e) { console.warn('[stt] dump failed:', e.message); }
+      // Debug dump — OPT-IN via config.sttDebugDump. The old always-on dump
+      // wrote every user's voice audio to world-readable /tmp on the hot
+      // path; now it's off by default and lands under the install's logs/.
+      if (loadConfig()?.sttDebugDump === true) {
+        try {
+          const fs = await import('fs');
+          const pathMod = await import('path');
+          const { BASE_DIR } = await import('../lib/paths.mjs');
+          const dumpPath = pathMod.join(BASE_DIR, 'logs', `stt-last-${audioName.replace(/[^\w.-]/g, '_')}`);
+          fs.mkdirSync(pathMod.dirname(dumpPath), { recursive: true });
+          fs.writeFileSync(dumpPath, audioBuf, { mode: 0o600 });
+          console.log(`[stt] dump: ${audioBuf.length} bytes (${audioMime}) → ${dumpPath}`);
+        } catch (e) { console.warn('[stt] dump failed:', e.message); }
+      }
 
       // Send to configured STT provider (OpenAI-compatible multipart).
       // sttMode=local routes to the Faster-Whisper service regardless of the

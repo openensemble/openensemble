@@ -36,7 +36,7 @@ export async function handle(req, res) {
     const index = loadIndex(userId);
     const doc = index.find(d => d.id === docId);
     if (!doc) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
-    const filePath = path.join(getUserResearchDir(userId), doc.filename);
+    const filePath = path.join(getUserResearchDir(userId), path.basename(doc.filename)) // index data is user-editable — never let it traverse;
     try {
       const content = fs.readFileSync(filePath, 'utf8');
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -60,7 +60,7 @@ export async function handle(req, res) {
       const idx = index.findIndex(d => d.id === docId);
       if (idx === -1) return { notFound: true };
       const doc = index[idx];
-      try { fs.unlinkSync(path.join(dir, doc.filename)); } catch {}
+      try { fs.unlinkSync(path.join(dir, path.basename(doc.filename))); } catch {}
       index.splice(idx, 1);
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));

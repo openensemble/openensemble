@@ -40,14 +40,20 @@ function sendJSON(res, status, body) {
 
 // Run a scripts/ install/uninstall script (the local llama.cpp GPU server),
 // capturing its output. Resolves { code, log } — never rejects.
-function runScript(script, env) {
+function runScript(script, env, timeoutMs = 30 * 60_000) {
   return new Promise((resolve) => {
     const out = [];
     const c = spawn('bash', [path.join(REPO_ROOT, 'scripts', script)],
       { env: { ...process.env, ...env, HOME: os.homedir() } });
+    // Install scripts compile llama.cpp — slow is normal, forever is not.
+    const killer = setTimeout(() => {
+      out.push(`\n[timeout] ${script} exceeded ${Math.round(timeoutMs / 60000)} min — killed`);
+      try { c.kill('SIGKILL'); } catch { /* gone */ }
+    }, timeoutMs);
+    c.on('close', () => clearTimeout(killer));
     c.stdout.on('data', d => out.push(d.toString()));
     c.stderr.on('data', d => out.push(d.toString()));
-    c.on('error', e => resolve({ code: 1, log: e.message }));
+    c.on('error', e => { clearTimeout(killer); resolve({ code: 1, log: e.message }); });
     c.on('exit', code => resolve({ code: code ?? 1, log: out.join('') }));
   });
 }
@@ -79,7 +85,9 @@ export async function handle(req, res) {
     // Flip back to builtin without re-running an install — the GGUF is
     // already on disk from postinstall, so nothing to transfer.
     if (url.pathname === '/api/plan-runtime/select' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { sendJSON(res, 400, { error: 'Invalid JSON body' }); return true; }
       const provider = body?.provider;
       if (provider !== 'builtin') {
         sendJSON(res, 400, { error: 'Use /ollama or /lmstudio to switch to those runtimes (transfer required).' });
@@ -104,7 +112,9 @@ export async function handle(req, res) {
     //      that runtime — otherwise the user's `planModel` config tag stays
     //      pinned to the previous tier and inference goes to the wrong model.
     if (url.pathname === '/api/plan-runtime/builtin-tier' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { sendJSON(res, 400, { error: 'Invalid JSON body' }); return true; }
       const tier = body?.tier;
       if (!BUNDLED_PLAN_MODELS[tier]) {
         sendJSON(res, 400, { error: `tier must be one of: ${Object.keys(BUNDLED_PLAN_MODELS).join(', ')}` });
@@ -159,7 +169,9 @@ export async function handle(req, res) {
     // user message passes to the agent untouched — the agent then calls its
     // own set_reminder / schedule_task / delete_task tools (skills/tasks).
     if (url.pathname === '/api/plan-runtime/use-builtin-plan' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { sendJSON(res, 400, { error: 'Invalid JSON body' }); return true; }
       const enabled = !!body?.enabled;
       await modifyConfig(x => {
         x.scheduler = x.scheduler ?? {};
