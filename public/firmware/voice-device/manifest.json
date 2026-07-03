@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.63-ota-verify",
+  "version": "0.2.64-nospeech-vad",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
@@ -12,7 +12,7 @@
       "name": "bootloader",
       "offset": "0x0",
       "file": "bootloader.bin",
-      "sha256": "cabfe41ec75235af7a8ca6e29f905f6a7831ae6e33f602fdbbe176209b31fd0b"
+      "sha256": "967efd4ce9d63f3b35d907ff436530c92479ff8f767c9a4493a7f70e695c8d05"
     },
     {
       "name": "partition-table",
@@ -30,7 +30,7 @@
       "name": "app",
       "offset": "0x20000",
       "file": "oe_voice_device.bin",
-      "sha256": "e7809a1f00b952da18c5d32601d0994c4d6469d83dab6a4d4ac4896ba19eae7c"
+      "sha256": "a709166f64ae27e44e9a270ac1ea3e3013b72befba0b346c66e449c946848aa0"
     },
     {
       "name": "wakewords",
