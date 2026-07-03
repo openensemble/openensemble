@@ -67,6 +67,14 @@ function _agentIdFromSessionKey(sessionKey, userId) {
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
 
+async function _emitAutoBgNotify(userId, agentId, notify) {
+  if (!userId || !agentId || !notify) return;
+  try {
+    const { emitAgentNotification } = await import('./ws-handler.mjs');
+    emitAgentNotification(userId, _agentIdFromSessionKey(agentId, userId), notify);
+  } catch (_) { /* best-effort */ }
+}
+
 // Tools whose background completion warrants waking the owning agent with a
 // concise report-back turn. Most auto-backgrounded tools just drop their
 // result into the task chip + agent_report bubble — the user already sees it,
@@ -143,6 +151,71 @@ function _completeScheduledAutoBgChild({ scheduledCtx, userId, watcherId, result
     resultText,
     errorMsg,
   });
+}
+
+async function _emitAutoBgToolReport({
+  userId,
+  agentId,
+  toolName,
+  displayName = null,
+  displayEmoji = '⏵',
+  watcherId,
+  rootWatcherId = null,
+  targetAgentId = null,
+  content,
+  status = 'done',
+  images = null,
+  notify = null,
+}) {
+  if (!userId || !watcherId) return;
+  const name = displayName || toolName || 'Tool';
+  const body = String(content || `${name} completed.`).slice(0, 4000);
+  const key = agentId
+    ? (String(agentId).startsWith(`${userId}_`) ? String(agentId) : `${userId}_${agentId}`)
+    : null;
+  const ts = Date.now();
+  const report = {
+    role: 'assistant',
+    kind: 'agent_report',
+    agentName: name,
+    agentEmoji: displayEmoji || '⏵',
+    ...(targetAgentId ? { targetAgentId } : {}),
+    content: body,
+    taskId: `autobg_${watcherId}`,
+    watcherId,
+    rootWatcherId: rootWatcherId || watcherId,
+    tool: toolName,
+    status,
+    ...(images ? { images } : {}),
+    ...(notify ? { notify } : {}),
+    ts,
+  };
+  if (key) {
+    try {
+      const { appendToSession } = await import('./sessions.mjs');
+      await appendToSession(key, report);
+    } catch (_) { /* best-effort */ }
+  }
+  try {
+    const { sendToUser } = await import('./ws-handler.mjs');
+    sendToUser(userId, {
+      type: 'agent_report',
+      agent: key || agentId || null,
+      agentName: report.agentName,
+      agentEmoji: report.agentEmoji,
+      ...(targetAgentId ? { targetAgentId } : {}),
+      content: body,
+      ...(images ? { images } : {}),
+      ...(notify ? { notify } : {}),
+      taskId: report.taskId,
+      watcherId,
+      rootWatcherId: report.rootWatcherId,
+      tool: toolName,
+      status,
+      ts,
+    });
+  } catch (_) { /* best-effort */ }
+  await _emitAutoBgNotify(userId, key || agentId, notify);
 }
 
 // Wrapper shape: { manifest, userId, dir }
@@ -1678,6 +1751,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             });
             (async () => {
               let finalText = '';
+              let finalImages = null;
+              let finalNotify = null;
               try {
                 const { runInTaskContext } = await import('./lib/task-proxy-context.mjs');
                 await runInTaskContext({
@@ -1702,8 +1777,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                         currentTool: captured.name,
                         canCancel: false,
                       });
-                    } else if (v?.type === 'result' && v.text) {
-                      finalText = String(v.text);
+                    } else if (v?.type === 'result') {
+                      finalText = String(v.text || '');
+                      if (Array.isArray(v._images)) finalImages = v._images;
+                      if (v._notify) finalNotify = v._notify;
                       const preview = finalText.split('\n').find(l => l.trim()) || '';
                       if (preview) {
                         watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, `${captured.displayName}: ${preview.slice(0, 240)}`, {
@@ -1717,6 +1794,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   }
                 });
                 const bg = await import('./background-tasks.mjs');
+                const finalReportImages = Array.isArray(finalImages) ? finalImages : null;
                 if (captured.adopted) {
                   // Chip + root-graph finalization belong to the delegate
                   // skill's sync-delegation handle (children-aware, already ran
@@ -1761,8 +1839,12 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                       ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
                       content: (finalText || `${captured.displayName} completed.`).slice(0, 4000),
                       taskId: `autobg_${captured.watcherId}`,
+                      watcherId: captured.watcherId,
+                      rootWatcherId: captured.rootWatcherId || captured.watcherId,
                       tool: captured.name,
                       status: 'done',
+                      ...(finalReportImages ? { images: finalReportImages } : {}),
+                      ...(finalNotify ? { notify: finalNotify } : {}),
                       ts: Date.now(),
                     });
                   } catch (_) { /* best-effort */ }
@@ -1782,11 +1864,16 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
                     content: finalText || `${captured.displayName} completed.`,
                     taskId: `autobg_${captured.watcherId}`,
+                    watcherId: captured.watcherId,
+                    rootWatcherId: captured.rootWatcherId || captured.watcherId,
                     tool: captured.name,
                     status: 'done',
+                    ...(finalReportImages ? { images: finalReportImages } : {}),
+                    ...(finalNotify ? { notify: finalNotify } : {}),
                     ts: Date.now(),
                   });
                 } catch (_) { /* best-effort */ }
+                await _emitAutoBgNotify(captured.userId, captured.agentId, finalNotify);
                 _completeScheduledAutoBgChild({
                   scheduledCtx: captured.scheduledCtx,
                   userId: captured.userId,
@@ -1818,6 +1905,18 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 watchersMod.completeWatcher(captured.userId, captured.watcherId, {
                   status: 'error',
                   finalText: `⚠ ${captured.name} failed: ${err.message}`,
+                });
+                await _emitAutoBgToolReport({
+                  userId: captured.userId,
+                  agentId: captured.agentId,
+                  toolName: captured.name,
+                  displayName: captured.displayName,
+                  displayEmoji: captured.displayEmoji || '⏵',
+                  watcherId: captured.watcherId,
+                  rootWatcherId: captured.rootWatcherId || captured.watcherId,
+                  targetAgentId: captured.targetAgentId,
+                  content: `${captured.displayName || captured.name} failed: ${err.message}`,
+                  status: 'error',
                 });
                 _completeScheduledAutoBgChild({
                   scheduledCtx: captured.scheduledCtx,
@@ -1932,9 +2031,12 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 agentEmoji: '⏵',
                 content: (text || `${name} completed.`).slice(0, 4000),
                 taskId: `autobg_${wid}`,
+                watcherId: wid,
+                rootWatcherId: wid,
                 tool: name,
                 status: 'done',
                 ...(images ? { images } : {}),
+                ...(notify ? { notify } : {}),
                 ts: Date.now(),
               });
             } catch (_) { /* best-effort */ }
@@ -1950,11 +2052,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               ...(images ? { images } : {}),
               ...(notify ? { notify } : {}),
               taskId: `autobg_${wid}`,
+              watcherId: wid,
+              rootWatcherId: wid,
               tool: name,
               status: 'done',
               ts: Date.now(),
             });
           } catch (_) { /* best-effort */ }
+          await _emitAutoBgNotify(userId, attribAgentId || agentId, notify);
           _completeScheduledAutoBgChild({
             scheduledCtx,
             userId,
@@ -1977,6 +2082,17 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           watchersMod.completeWatcher(userId, wid, {
             status: 'error',
             finalText: `⚠ ${name} failed: ${err.message}`,
+          });
+          await _emitAutoBgToolReport({
+            userId,
+            agentId: attribAgentId,
+            toolName: name,
+            displayName: name,
+            displayEmoji: '⏵',
+            watcherId: wid,
+            rootWatcherId: wid,
+            content: `${name} failed: ${err.message}`,
+            status: 'error',
           });
           _completeScheduledAutoBgChild({
             scheduledCtx,

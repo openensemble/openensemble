@@ -346,16 +346,20 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // (several delegations in one response) still backgrounds at the dispatch check
   // below, since multiple live streams can't share one chat.
   const LONG_TASK_RE = /\b(create|build|make|generate|refactor|rewrite|fix|update|modify|change|delete|remove|install|deploy|configure|setup|set up|investigate|debug|trace|run|execute|test|download|upload|patch|migrate|optimize|implement|write|edit|read|search|analyze|review)\b/i;
+  const FOREGROUND_INTENT_RE = /\b(?:wait(?:ing)?(?:\s+for\s+it)?|while\s+i\s+wait|right\s+here|in\s+this\s+(?:turn|reply|message)|foreground|synchronously|sync|do(?:\s+not|n't)\s+background|no\s+background)\b/i;
+  const wantsForeground = args.background === false && FOREGROUND_INTENT_RE.test(`${rawTask || ''}\n${directive || ''}`);
   let background;
   if (doHandoff) {
     // A declared forward pipeline is by construction long (produce, then
     // consume) — run it DETACHED by default so the coordinator stays free to
     // keep chatting and delegating while it runs. Both stages execute inside
-    // one background task (one chip, one cancel). Explicit background:false
-    // keeps the old in-turn pipeline for callers that need the result now.
-    background = args.background !== false;
+    // one background task (one chip, one cancel). A foreground override must
+    // reflect user-visible wait intent in the delegated task text; otherwise a
+    // model's incidental background:false would make identical image prompts
+    // flip between sync and async handling.
+    background = !wantsForeground;
   } else if (typeof args.background === 'boolean') {
-    background = args.background;                  // LLM was explicit — honor it
+    background = args.background || (callerIsCoordinator && !wantsForeground && LONG_TASK_RE.test(rawTask));
   } else if (callerIsCoordinator) {
     background = LONG_TASK_RE.test(rawTask);       // coordinator → specialist: long tasks detach
     if (background) console.log('[delegate] auto-background:true (coordinator→specialist, task-shaped) for', agent_id);
@@ -725,6 +729,11 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
           // format matches what list_profile_files / attachment_doc_ids expect.
           const folder = event.type === 'image' ? 'images' : event.type === 'video' ? 'videos' : 'audio';
           cap.artifacts.push(`${folder}:${event.filename}`);
+          if (event.type === 'image' && event.base64) {
+            if (!Array.isArray(cap.images)) cap.images = [];
+            cap.images.push({ base64: event.base64, mediaType: event.mimeType || event.mediaType || 'image/png' });
+          }
+          yield { ...event, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id, ...chipIds };
           yield { type: 'tool_progress', name: 'ask_agent', text: `\n_[${sName} produced ${event.filename}]_\n`, sourceLabel: sLabel, delegated: true, agentName: sName, agentEmoji: sEmoji, ...chipIds };
           if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `${sName} produced ${event.filename}`, { phase: 'result', currentTool: null, toolsUsed: cap.toolsUsed });
         } else if (event.type === 'error') { cap.errText = `Error from ${sName}: ${event.message}`; break; }
@@ -741,7 +750,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
 
   // ── Stage 1: the first (or only) agent ────────────────────────────────────
   const _delegStart = Date.now();
-  const stage1 = { fullText: '', toolsUsed: 0, artifacts: [], errText: null };
+  const stage1 = { fullText: '', toolsUsed: 0, artifacts: [], images: [], errText: null };
   // Stage-1 insulation: when a forward handoff is declared, the producing
   // agent must not attempt the handoff itself — cross-agent routing is blocked
   // for specialists, so a coordinator-authored task that also says "then hand
@@ -772,6 +781,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // wrap-up turn either.
   let isTerminal = false;
   let stage2Name = null;
+  let finalImages = stage1.images;
   if (!errText && doHandoff) {
     const target2 = handoffTarget;   // resolved (and validated) before stage 1
     {
@@ -800,7 +810,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         initSession(deleg2Id, stage2Task);
       } catch { /* best-effort */ }
       const slot2 = markAgentBusy(`${userId}_${target2.id}`);
-      const stage2 = { fullText: '', toolsUsed: 0, artifacts: [], errText: null };
+      const stage2 = { fullText: '', toolsUsed: 0, artifacts: [], images: [], errText: null };
       const _stage2Start = Date.now();
       if (syncWatcherId) syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Handing off to ${stage2Name}`, { phase: 'running', currentTool: null });
       try {
@@ -818,6 +828,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         errText = stage2.errText;
       } else {
         fullText = stage2.fullText;
+        finalImages = stage2.images;
         isTerminal = terminal;
       }
     }
@@ -841,7 +852,12 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   finishSync('done', `✓ ${finalAgentName} replied`, fullText.trim().slice(0, 800));
   // _terminal tells the provider tool-loop to deliver this reply as the turn's
   // final answer and NOT run another coordinator inference (see openai-responses).
-  yield { type: 'result', text: waitNote + (fullText.trim() || `No response from ${finalAgentName}.`), ...(isTerminal ? { _terminal: true } : {}) };
+  yield {
+    type: 'result',
+    text: waitNote + (fullText.trim() || `No response from ${finalAgentName}.`),
+    ...(finalImages.length ? { _images: finalImages } : {}),
+    ...(isTerminal ? { _terminal: true } : {}),
+  };
 }
 
 export default executeSkillTool;

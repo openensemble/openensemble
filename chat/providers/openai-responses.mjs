@@ -530,9 +530,11 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         for await (const chunk of executeToolStreaming(block.name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              toolResultText += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
+          if (chunk.type === '__hide_turn')         yield { type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId };
           if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
           if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
           if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
+          if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') yield chunk;
           if (chunk.type === 'result') {
             toolResultText = chunk.text;
             if (Array.isArray(chunk._images)) _seqImages = chunk._images;

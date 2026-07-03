@@ -138,16 +138,20 @@ export async function drainToolWithEvents(name, args, userId, agentId, allowedTo
   // draining and synthesises a follow-up user message via
   // buildImageUserMessage in chat/providers/_shared.mjs.
   let _images = null;
+  let _notify = null;
   try {
     for await (const chunk of executeToolStreaming(name, args, userId, agentId, allowedTools)) {
       if (chunk.type === 'token')              toolResult += chunk.text;
       if (chunk.type === 'permission_request') events.push(chunk);
+      if (chunk.type === '__hide_turn')         events.push({ type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId });
       if (chunk.type === 'tool_call')          events.push({ type: 'tool_call', name: chunk.name, args: chunk.args });
       if (chunk.type === 'tool_progress')      events.push({ type: 'tool_progress', name: chunk.name, text: chunk.text });
       if (chunk.type === 'tool_result')        events.push({ type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) });
+      if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') events.push(chunk);
       if (chunk.type === 'result') {
         toolResult = chunk.text;
         if (Array.isArray(chunk._images)) _images = chunk._images;
+        if (chunk._notify) _notify = chunk._notify;
       }
     }
   } catch (e) {
@@ -158,5 +162,5 @@ export async function drainToolWithEvents(name, args, userId, agentId, allowedTo
   // Tool could have packaged images either in the result chunk or as an
   // object return that normalizeToolResult unpacked. Prefer the chunk
   // path since it's the canonical streaming flow.
-  return { text: norm.text, _notify: norm._notify, _images: _images ?? norm._images, events };
+  return { text: norm.text, _notify: _notify ?? norm._notify, _images: _images ?? norm._images, events };
 }
