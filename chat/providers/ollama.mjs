@@ -23,6 +23,10 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
   let assistantContent = '';
   let ollamaInputTokens = 0, ollamaOutputTokens = 0;
   let toolCallsMade = [];  // track all tool calls for fallback summary
+  // Hoisted out of the token loop: getStripThinkingTags → loadConfig does a
+  // statSync per call, which at per-token frequency is a syscall storm.
+  // agent.think and the global flag can't change mid-turn anyway.
+  const stripTags = agent.think !== false && getStripThinkingTags();
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
   // Latches if Ollama rejects `think: true` (model has no thinking support) so
   // the turn retries without it instead of dying. Persists across tool loops.
@@ -48,14 +52,19 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     }
 
     // ── Ollama request diagnostics ─────────────────────────────────────────
+    // One summary line always; the per-message dump (a console line per
+    // history entry, per tool loop) only under OE_OLLAMA_DEBUG=1 — on long
+    // sessions it was hundreds of synchronous stdout writes per turn.
     const bodyJson = JSON.stringify(body);
     const approxTokens = Math.round(bodyJson.length / 4);
     console.log(`[ollama] loop=${guard.count} agent=${agent.id} model=${agent.model} msgs=${ollamaMessages.length} tools=${agent.tools.length} body=${bodyJson.length}b (~${approxTokens} tokens)`);
-    ollamaMessages.forEach((m, i) => {
-      const tcInfo = m.tool_calls ? ` tool_calls=[${m.tool_calls.map(t => t.function?.name ?? '?').join(',')}]` : '';
-      const contentLen = m.content?.length ?? 0;
-      console.log(`[ollama]   [${i}] role=${m.role} content=${contentLen}c${tcInfo}`);
-    });
+    if (process.env.OE_OLLAMA_DEBUG === '1') {
+      ollamaMessages.forEach((m, i) => {
+        const tcInfo = m.tool_calls ? ` tool_calls=[${m.tool_calls.map(t => t.function?.name ?? '?').join(',')}]` : '';
+        const contentLen = m.content?.length ?? 0;
+        console.log(`[ollama]   [${i}] role=${m.role} content=${contentLen}c${tcInfo}`);
+      });
+    }
     // ──────────────────────────────────────────────────────────────────────
 
     // Retry on transient cloud 500s (Ollama cloud backend occasionally fails)
@@ -140,7 +149,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
         // Track <think> blocks per token (not accumulated content — multi-block safe).
         // Skip filtering when think is explicitly disabled or when globally turned off.
-        if (agent.think !== false && getStripThinkingTags()) {
+        if (stripTags) {
           if (!inThink && msg.content.includes('<think>')) {
             const before = msg.content.split('<think>')[0];
             if (before) yield { type: 'token', text: before };
@@ -267,7 +276,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     }
 
     // ── Text response complete ─────────────────────────────────────────────────
-    assistantContent = (agent.think !== false && getStripThinkingTags())
+    assistantContent = stripTags
       ? stripReasoningPreamble(stripThinking(content))
       : stripReasoningPreamble(content);
     if (assistantContent !== content) yield { type: 'replace', text: assistantContent };

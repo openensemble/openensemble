@@ -747,43 +747,16 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // "summarize" doesn't ship its labeling tools. trimToolsForTurn is a no-op
   // when the tool-level flag is off and the agent isn't a coordinator, so this
   // is safe to call unconditionally.
-  if (!userToolPlanResult && Array.isArray(agent.tools) && agent.tools.length > 0) {
-    try {
-      const trim = await trimToolsForTurn({ agent, userText: routeText, userId, source: voiceCtx?.source ?? null });
-      const changed = trim.trimmedTools.length !== trim.fullTools.length;
-      agent.tools = trim.trimmedTools;
-      // Stash the pre-trim set so request_tools can recover dropped tools — for
-      // every agent, not just coordinators (specialists are trimmed too, so
-      // they need the same recovery net). Only meaningful when the agent
-      // actually carries request_tools, but harmless otherwise.
-      _routerStore = {
-        agent, fullTools: trim.fullTools,
-        // Empty by design when the tool-level pass applies, so request_tools can
-        // recover a dropped tool from an otherwise-kept skill (recovery gate).
-        initiallyIncludedSkills: trim.initiallyIncludedSkills,
-        // The skills actually kept this turn — for telemetry/learning, which
-        // must NOT see the deliberately-empty recovery set above.
-        keptSkills: trim.skillsKept || trim.initiallyIncludedSkills,
-        addedSkills: new Set(),
-        initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
-      };
-      toolRouterContext.enterWith(_routerStore);
-      // Recompose the SPA portion of the system prompt against the trimmed
-      // tool set only when the set actually changed — avoids needless work on
-      // specialist turns the router left untouched. Three-tier path keeps the
-      // stable tier byte-identical so Anthropic's cache marker keeps hitting.
-      if (changed) recomposeAgentPromptForTools(agent);
-      // Trimmed agents must ASK for a missing tool, not conclude the capability
-      // doesn't exist (the failure mode behind the escalate-and-bounce loop).
-      // Constant line appended after the SPA so the cached prefix stays stable.
-      if (changed && (agent.tools ?? []).some(t => t.function?.name === 'request_tools')) {
-        agent.systemPrompt += '\n\nTool visibility: you hold more tools than are shown this turn. If a tool you need is missing, call request_tools to load it — do not conclude a capability is unavailable, and do not delegate to another agent just to reach a tool you likely own.';
-      }
-      log.info('chat', 'tool-router trim', { userId, agentId: agent.id, category: agent.skillCategory, kept: trim.trimmedTools.length, full: trim.fullTools.length, notes: trim.routerNotes, spChars: agent.systemPrompt.length });
-    } catch (e) {
-      console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message);
-    }
-  }
+  // Kicked off here, consumed just below — the trim (embedding call) runs
+  // concurrently with the other independent pre-LLM lookups (cortex recall,
+  // trigger nudge, cross-agent reads, monitorable classify) started next.
+  // The bookkeeping (agent.tools mutation, recompose, enterWith) happens at
+  // the await point in THIS async context so the ALS store propagates to the
+  // provider dispatch.
+  const _trimPromise = (!userToolPlanResult && Array.isArray(agent.tools) && agent.tools.length > 0)
+    ? trimToolsForTurn({ agent, userText: routeText, userId, source: voiceCtx?.source ?? null })
+        .catch(e => { console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message); return null; })
+    : null;
   // Flush any deferred skill-proposal candidate from the prior turn. The
   // proposer stashes after qualifying multi-tool turns and only emits on the
   // next turn — so we can drop the candidate if the user's current message
@@ -823,40 +796,143 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // General/manager agents: skip episode storage (task requests aren't useful memories)
   // but still run processSignals to capture genuine preferences/corrections
   const skipEpisodes = schedulerFired || agent.ephemeral || agent.skillCategory === 'general';
+  // ── Concurrent pre-LLM lookups ────────────────────────────────────────
+  // Cortex recall, trigger nudge, cross-agent reads, and the monitorable
+  // classifier are mutually independent and don't read agent.tools or
+  // agent.systemPrompt — so they run concurrently with each other AND with
+  // the tool-router trim kicked off above. Each catches internally so a
+  // failure degrades to its previous behavior (empty block / null ctx).
+  // Awaited below in the original consumption order; the awaits all sit
+  // before the tier assembly, so prompt bytes are unchanged.
+
   // 1. Build rich cortex context (relevant memories, preferences, past episodes)
-  // Expand deictic/pronominal queries ("tell me more about that") with recent context
-  const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
-  let recallQuery = userText;
-  if (!isolatedTaskRun && (userText.length < 50 || NEEDS_CONTEXT_RE.test(userText))) {
-    const recentMsgs = await loadSession(agent.id, 4);
-    if (recentMsgs.length) {
-      const lastUser = recentMsgs.filter(m => m.role === 'user').slice(-1)[0];
-      const lastAsst = recentMsgs.filter(m => m.role === 'assistant').slice(-1)[0];
-      const ctx_parts = [lastUser?.content?.slice(0, 150), lastAsst?.content?.slice(0, 150)].filter(Boolean);
-      if (ctx_parts.length) recallQuery = `${userText} [context: ${ctx_parts.join(' ')}]`;
-    }
-  }
+  // Expand deictic/pronominal queries ("tell me more about that") with recent context.
   // Ephemeral agents (deep_research_parallel workers, etc.) skip cortex loads
   // — they're pure stateless one-shots and shouldn't read the user's memory.
-  const ctx = agent.ephemeral
-    ? null
-    : await buildAgentContext(agent.id, recallQuery, userId, { includeEpisodes: !isolatedTaskRun }).catch(() => null);
-  const memBlock = ctx ? formatContext(ctx) : '';
+  const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
+  const _ctxPromise = agent.ephemeral ? Promise.resolve(null) : (async () => {
+    let recallQuery = userText;
+    if (!isolatedTaskRun && (userText.length < 50 || NEEDS_CONTEXT_RE.test(userText))) {
+      const recentMsgs = await loadSession(agent.id, 4);
+      if (recentMsgs.length) {
+        const lastUser = recentMsgs.filter(m => m.role === 'user').slice(-1)[0];
+        const lastAsst = recentMsgs.filter(m => m.role === 'assistant').slice(-1)[0];
+        const ctx_parts = [lastUser?.content?.slice(0, 150), lastAsst?.content?.slice(0, 150)].filter(Boolean);
+        if (ctx_parts.length) recallQuery = `${userText} [context: ${ctx_parts.join(' ')}]`;
+      }
+    }
+    return buildAgentContext(agent.id, recallQuery, userId, { includeEpisodes: !isolatedTaskRun }).catch(() => null);
+  })();
 
   // Per-turn user-skill trigger nudge. Embedding-ranked when cortex is up
   // (top-K skills by cosine similarity to userText), all-triggers fallback
   // when not. Empty string for ephemeral agents and for users with no custom
   // skills — buildTriggerNudgeBlock handles both. Concatenated into the
   // system prompt below alongside memBlock.
-  let skillTriggersBlock = '';
-  if (!agent.ephemeral && userId && userId !== 'default') {
-    try {
-      const { buildTriggerNudgeBlock } = await import('./lib/skill-triggers.mjs');
-      skillTriggersBlock = await buildTriggerNudgeBlock(userId, userText);
-    } catch (e) {
-      console.debug('[skill-triggers] nudge build failed:', e.message);
+  const _triggersPromise = (!agent.ephemeral && userId && userId !== 'default')
+    ? (async () => {
+        try {
+          const { buildTriggerNudgeBlock } = await import('./lib/skill-triggers.mjs');
+          return (await buildTriggerNudgeBlock(userId, userText)) || '';
+        } catch (e) {
+          console.debug('[skill-triggers] nudge build failed:', e.message);
+          return '';
+        }
+      })()
+    : Promise.resolve('');
+
+  // Cross-agent context — let this agent see recent messages from other agents.
+  // Skip for ephemeral agents: "ephemeral" means a hermetic run with no carried-over
+  // context, and crossAgentRead would silently leak another agent's history.
+  const _crossAgentPromise = (!isolatedTaskRun && !agent.ephemeral && agent.crossAgentRead?.length && userId && userId !== 'default')
+    ? (async () => {
+        const parts = [];
+        for (const otherId of agent.crossAgentRead) {
+          const recent = await loadCrossAgentContext(userId, otherId, 3);
+          // Filter to only user/assistant messages (skip notifications, system)
+          const useful = recent.filter(m => m.role === 'user' || m.role === 'assistant');
+          if (useful.length) {
+            const lines = useful.map(m => `${m.role}: ${m.content.slice(0, 200)}`).join('\n');
+            parts.push(`### ${otherId}\n${lines}`);
+          }
+        }
+        return parts.length ? `\n\n## Recent activity from other agents\n${parts.join('\n\n')}` : '';
+      })().catch(e => { console.warn('[chat] cross-agent context failed:', e.message); return ''; })
+    : Promise.resolve('');
+
+  // Monitorable-intent classifier — embedding-based judge that fires when
+  // the user's message looks like "any new X from Y?", "what's on sale at Z?",
+  // "is the item back in stock?", etc. On a hit, a small per-user ledger
+  // decides whether to ask once, suppress during cooldown, or escalate a
+  // repeated topic into a proposal bubble.
+  // Skipped for ephemeral agents (no value in one-shot research) and slash
+  // commands. ~5-10ms when the cortex embedder is warm.
+  // Only on genuine interactive human turns. Scheduled/background re-injection
+  // turns (silent, isolated, or hidden-user) carry system payloads — e.g. the
+  // scheduler's "Background work from your scheduled task has completed …
+  // <scheduled_task>…</scheduled_task>" result block — which the embedding
+  // judge would otherwise mistake for "a changing source the user keeps asking
+  // about," escalating a giant internal prompt into a watch proposal. There is
+  // also no human in the loop to see (let alone accept) the offer on these turns.
+  const interactiveMonitorTurn = !silent && !isolatedTaskRun && turnOpts?.hiddenUser !== true;
+  const _monitorablePromise = (interactiveMonitorTurn && !agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/'))
+    ? (async () => {
+        try {
+          const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('./lib/monitorable-classifier.mjs');
+          const hit = await classifyMonitorable(userText);
+          if (hit.monitorable) {
+            const offer = await recordMonitorableHit({ userId, agentId: agent.id, userText, hit });
+            log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched, action: offer.action, count: offer.count });
+            if (offer.action === 'ask') return buildMonitorableSystemNote(hit);
+          }
+        } catch (e) {
+          console.debug('[monitorable-classifier] failed:', e.message);
+        }
+        return '';
+      })()
+    : Promise.resolve('');
+
+  // Now consume the trim. The bookkeeping runs HERE (not inside the promise)
+  // so toolRouterContext.enterWith lands in streamChat's own async context and
+  // propagates to the provider tool-loop. Must complete before basePrompt is
+  // read below — recompose rewrites agent.systemPrompt.
+  const _trim = _trimPromise ? await _trimPromise : null;
+  if (_trim) {
+    const changed = _trim.trimmedTools.length !== _trim.fullTools.length;
+    agent.tools = _trim.trimmedTools;
+    // Stash the pre-trim set so request_tools can recover dropped tools — for
+    // every agent, not just coordinators (specialists are trimmed too, so
+    // they need the same recovery net). Only meaningful when the agent
+    // actually carries request_tools, but harmless otherwise.
+    _routerStore = {
+      agent, fullTools: _trim.fullTools,
+      // Empty by design when the tool-level pass applies, so request_tools can
+      // recover a dropped tool from an otherwise-kept skill (recovery gate).
+      initiallyIncludedSkills: _trim.initiallyIncludedSkills,
+      // The skills actually kept this turn — for telemetry/learning, which
+      // must NOT see the deliberately-empty recovery set above.
+      keptSkills: _trim.skillsKept || _trim.initiallyIncludedSkills,
+      addedSkills: new Set(),
+      initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
+    };
+    toolRouterContext.enterWith(_routerStore);
+    // Recompose the SPA portion of the system prompt against the trimmed
+    // tool set only when the set actually changed — avoids needless work on
+    // specialist turns the router left untouched. Three-tier path keeps the
+    // stable tier byte-identical so Anthropic's cache marker keeps hitting.
+    if (changed) recomposeAgentPromptForTools(agent);
+    // Trimmed agents must ASK for a missing tool, not conclude the capability
+    // doesn't exist (the failure mode behind the escalate-and-bounce loop).
+    // Constant line appended after the SPA so the cached prefix stays stable.
+    if (changed && (agent.tools ?? []).some(t => t.function?.name === 'request_tools')) {
+      agent.systemPrompt += '\n\nTool visibility: you hold more tools than are shown this turn. If a tool you need is missing, call request_tools to load it — do not conclude a capability is unavailable, and do not delegate to another agent just to reach a tool you likely own.';
     }
+    log.info('chat', 'tool-router trim', { userId, agentId: agent.id, category: agent.skillCategory, kept: _trim.trimmedTools.length, full: _trim.fullTools.length, notes: _trim.routerNotes, spChars: agent.systemPrompt.length });
   }
+
+  const ctx = await _ctxPromise;
+  const memBlock = ctx ? formatContext(ctx) : '';
+  const skillTriggersBlock = await _triggersPromise;
 
   // Inject current name so renaming takes effect in the LLM's self-awareness.
   // Anthropic models are trained to always identify as Claude — skip for them.
@@ -876,23 +952,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       }
     } catch { /* ignore */ }
   }
-  // 1b. Cross-agent context — let this agent see recent messages from other agents.
-  // Skip for ephemeral agents: "ephemeral" means a hermetic run with no carried-over
-  // context, and crossAgentRead would silently leak another agent's history.
-  let crossAgentBlock = '';
-  if (!isolatedTaskRun && !agent.ephemeral && agent.crossAgentRead?.length && userId && userId !== 'default') {
-    const parts = [];
-    for (const otherId of agent.crossAgentRead) {
-      const recent = await loadCrossAgentContext(userId, otherId, 3);
-      // Filter to only user/assistant messages (skip notifications, system)
-      const useful = recent.filter(m => m.role === 'user' || m.role === 'assistant');
-      if (useful.length) {
-        const lines = useful.map(m => `${m.role}: ${m.content.slice(0, 200)}`).join('\n');
-        parts.push(`### ${otherId}\n${lines}`);
-      }
-    }
-    if (parts.length) crossAgentBlock = `\n\n## Recent activity from other agents\n${parts.join('\n\n')}`;
-  }
+  // 1b. Cross-agent context — kicked off above, awaited here.
+  const crossAgentBlock = await _crossAgentPromise;
 
   // systemNote: one-shot directive from the dispatcher (e.g. scheduler-intent
   // outcome). Goes into the system prompt — not userText — so the UI doesn't
@@ -904,35 +965,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const desktopFoldersBlock = buildDesktopFoldersBlock(userId, voiceCtx?.source);
   const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
 
-  // Monitorable-intent classifier — embedding-based judge that fires when
-  // the user's message looks like "any new X from Y?", "what's on sale at Z?",
-  // "is the item back in stock?", etc. On a hit, a small per-user ledger
-  // decides whether to ask once, suppress during cooldown, or escalate a
-  // repeated topic into a proposal bubble.
-  // Skipped for ephemeral agents (no value in one-shot research) and slash
-  // commands. ~5-10ms when the cortex embedder is warm.
-  let monitorableBlock = '';
-  // Only on genuine interactive human turns. Scheduled/background re-injection
-  // turns (silent, isolated, or hidden-user) carry system payloads — e.g. the
-  // scheduler's "Background work from your scheduled task has completed …
-  // <scheduled_task>…</scheduled_task>" result block — which the embedding
-  // judge would otherwise mistake for "a changing source the user keeps asking
-  // about," escalating a giant internal prompt into a watch proposal. There is
-  // also no human in the loop to see (let alone accept) the offer on these turns.
-  const interactiveMonitorTurn = !silent && !isolatedTaskRun && turnOpts?.hiddenUser !== true;
-  if (interactiveMonitorTurn && !agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/')) {
-    try {
-      const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('./lib/monitorable-classifier.mjs');
-      const hit = await classifyMonitorable(userText);
-      if (hit.monitorable) {
-        const offer = await recordMonitorableHit({ userId, agentId: agent.id, userText, hit });
-        if (offer.action === 'ask') monitorableBlock = buildMonitorableSystemNote(hit);
-        log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched, action: offer.action, count: offer.count });
-      }
-    } catch (e) {
-      console.debug('[monitorable-classifier] failed:', e.message);
-    }
-  }
+  // Monitorable-intent classifier — kicked off above, awaited here.
+  const monitorableBlock = await _monitorablePromise;
   // Three-tier assembly for cache_control-aware providers (Anthropic).
   // Other providers concatenate the same three strings into systemPrompt
   // and ignore the tiers field — byte-identical to the legacy path.
@@ -987,9 +1021,21 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // it wrote. Same idea for `via:` on router-routed turns — the coordinator
   // needs to know the prior reply came from a specialist, not its own run.
   const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
-  const history = isolatedTaskRun ? [] : (await loadSession(agent.id))
-    .filter(m => LLM_ROLES.has(m.role))
-    .map(({ role, content, name, toolsUsed, toolResults, via, viaName }) => {
+  const _histSrc = isolatedTaskRun ? [] : (await loadSession(agent.id)).filter(m => LLM_ROLES.has(m.role));
+  // Full tool-result bodies are inlined ONLY for the last two assistant
+  // turns that carry them. Follow-ups ("delete it", "reply to that", "open
+  // the second one") reference recent handles — while re-inflating EVERY
+  // older turn's results (up to 10 KB per tool) freights the whole history
+  // window with stale payloads, evicts real conversation at the trim, and
+  // churns the provider prompt cache. Older turns keep the compact
+  // "[tools used this turn: …]" suffix.
+  const _fullResultIdx = new Set();
+  for (let i = _histSrc.length - 1; i >= 0 && _fullResultIdx.size < 2; i--) {
+    const m = _histSrc[i];
+    if (m.role === 'assistant' && Array.isArray(m.toolResults) && m.toolResults.length) _fullResultIdx.add(i);
+  }
+  const history = _histSrc
+    .map(({ role, content, name, toolsUsed, toolResults, via, viaName }, _idx) => {
       let body = content;
       if (role === 'assistant' && via) {
         body = `${body || ''}\n[note: this reply was produced by the ${viaName ?? via} specialist via the pre-LLM router — you (the coordinator) did not run a turn]`;
@@ -1002,8 +1048,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // file paths, urls, etc. from prior tool returns — required for
       // follow-ups like "delete it" / "reply to that" / "open the second
       // one" to work without the assistant's user-facing prose having to
-      // echo those handles back to the user.
-      if (role === 'assistant' && Array.isArray(toolResults) && toolResults.length) {
+      // echo those handles back to the user. Recent-turns-only, see above.
+      if (role === 'assistant' && _fullResultIdx.has(_idx) && Array.isArray(toolResults) && toolResults.length) {
         const formatted = toolResults
           .map(r => `${r.name} →\n${r.text}`)
           .join('\n\n---\n\n');
@@ -1570,6 +1616,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     model: agent.model,
     reasoningEffort: agent.reasoningEffort ?? 'auto',
     durationMs: Date.now() - _llmStart,
+    // Time from streamChat entry to first provider dispatch — the serial
+    // pre-LLM assembly cost (router trim, cortex recall, trigger nudge,
+    // cross-agent reads, monitorable classify, history build). Watch this
+    // to catch regressions in the concurrent pre-LLM kickoff above.
+    preLlmMs: _llmStart - _streamChatStart,
     bytes: assistantContent ? (typeof assistantContent === 'string' ? assistantContent.length : JSON.stringify(assistantContent).length) : 0,
     // Pre-LLM payload composition (chars; ÷4 ≈ tokens). Lets us audit
     // prompt/tool/history bloat from app.log without re-running the turn.

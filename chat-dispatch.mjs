@@ -627,7 +627,7 @@ export async function handleChatMessage({
   // must NOT run the scheduler-intent interceptor — it calls addTask directly,
   // so a scheduled briefing whose reaction prompt echoes "daily ... briefing"
   // would spawn a duplicate of itself. A task must never create a task.
-  const schedulerNote = await buildSchedulerNote({
+  const _schedulerNotePromise = buildSchedulerNote({
     userId, agentId, userText: ctx.userText,
     skipIntercept: _isBackgroundContinuation || _isolatedTaskRun,
   });
@@ -636,25 +636,34 @@ export async function handleChatMessage({
   // and this turn is a short affirmation ("yes"), consume the pending
   // clarification and persist the alias before we run the next turn. Runs
   // BEFORE the resolver so the next call already benefits from the new alias.
-  try {
-    const { maybeConsumeAffirmation } = await import('./lib/alias-learner.mjs');
-    await maybeConsumeAffirmation(userId, ctx.userText);
-  } catch (e) { console.warn('[chat-dispatch] consume-affirmation failed:', e.message); }
-
+  //
   // Context resolvers — skill-aliases, agent-aliases, etc. Each scans the
   // user's text for entity references (e.g. "the youtube downloader skill",
   // "ask <agent>"), resolves to a concrete id via stored aliases + catalog
   // fallback, and contributes a one-line system note so the LLM can call
   // the right tool without enumerating. First-time fallback hits auto-save
   // as new aliases. See lib/context-resolvers.mjs to add new entity types.
+  //
+  // The affirmation→hints chain must stay ordered, but it touches only alias
+  // stores while buildSchedulerNote touches only scheduler state — so the two
+  // run concurrently to cut serial pre-LLM latency.
+  const _hintsPromise = (async () => {
+    try {
+      const { maybeConsumeAffirmation } = await import('./lib/alias-learner.mjs');
+      await maybeConsumeAffirmation(userId, ctx.userText);
+    } catch (e) { console.warn('[chat-dispatch] consume-affirmation failed:', e.message); }
+    try {
+      const { buildContextHints } = await import('./lib/context-resolvers.mjs');
+      return (await buildContextHints(userId, ctx.userText)).hints || '';
+    } catch (e) {
+      console.warn('[chat-dispatch] context-resolvers failed:', e.message);
+      return '';
+    }
+  })();
+  const schedulerNote = await _schedulerNotePromise;
   let resolvedNote = schedulerNote;
-  try {
-    const { buildContextHints } = await import('./lib/context-resolvers.mjs');
-    const { hints } = await buildContextHints(userId, ctx.userText);
-    if (hints) resolvedNote = resolvedNote ? `${resolvedNote}\n${hints}` : hints;
-  } catch (e) {
-    console.warn('[chat-dispatch] context-resolvers failed:', e.message);
-  }
+  const _hints = await _hintsPromise;
+  if (_hints) resolvedNote = resolvedNote ? `${resolvedNote}\n${_hints}` : _hints;
   // Capture the assistant's final reply so the learner can scan it for
   // "did you mean X?" patterns and stash a pending clarification.
   let finalAssistantText = '';
