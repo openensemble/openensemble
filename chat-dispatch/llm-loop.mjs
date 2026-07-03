@@ -367,7 +367,10 @@ export async function runLlmTurn({
       const fo = cfg.providerFailover;
       if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && !toolInvoked) {
         console.log(`[failover] Primary ${scopedAgent.provider}/${scopedAgent.model} failed: ${failoverError.message} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
-        onEvent({ type: 'token', text: `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
+        // Voice devices TTS every token — never speak provider/model names
+        // (spoken errors are provider-agnostic by rule). Web keeps the
+        // informative version.
+        onEvent({ type: 'token', text: source === 'voice-device' ? 'One moment — retrying. ' : `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
 
         const fallbackAgent = {
           ...scopedAgent,
@@ -408,7 +411,10 @@ export async function runLlmTurn({
       const fo = cfg.providerFailover;
       if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && RETRIABLE_RE.test(e.message ?? '') && !toolInvoked) {
         console.log(`[failover] Primary threw: ${enrichedMessage} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
-        onEvent({ type: 'token', text: `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
+        // Voice devices TTS every token — never speak provider/model names
+        // (spoken errors are provider-agnostic by rule). Web keeps the
+        // informative version.
+        onEvent({ type: 'token', text: source === 'voice-device' ? 'One moment — retrying. ' : `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
         try {
           const fallbackAgent = { ...scopedAgent, provider: fo.fallbackProvider, model: fo.fallbackModel };
           const fallbackError = await runStream(fallbackAgent);

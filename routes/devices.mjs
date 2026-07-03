@@ -98,6 +98,20 @@ export function pinAmbientMp3(marker) {
   if (t) { clearTimeout(t); _ambientTimers.delete(marker); }
 }
 
+// Re-arm the orphan-cleanup TTL after a pinned stream dies (ffmpeg exit /
+// grace expiry → forceKill in routes/config.mjs). Pinning cancels the 4h TTL
+// while the stream is live; without re-arming, the marker survived forever —
+// getAmbientForDevice() reported phantom ambient (arming the loose-stop
+// matcher and disabling the wake avg-prob gate) and the next wake resurrected
+// the loop hours later. The short window still lets the device's HTTP retry
+// re-attach (the cold-start path re-pins, cancelling this timer again).
+export function rearmAmbientTtl(marker, ms = 10 * 60 * 1000) {
+  if (!_ambientStreamCache.has(marker)) return;
+  const t = _ambientTimers.get(marker);
+  if (t) clearTimeout(t);
+  _ambientTimers.set(marker, setTimeout(() => dropAmbientMp3(marker), ms));
+}
+
 export function cacheAmbientStream(deviceId, meta) {
   // Drop any prior ambient marker for this device so we don't leak entries
   // when the user fires a second routine while the first is still playing.

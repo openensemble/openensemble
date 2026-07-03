@@ -34,6 +34,7 @@ import {
 import { sendToDevice } from '../ws-handler.mjs';
 import { updateDevice } from '../lib/voice-devices.mjs';
 import { broadcastAlarmStop, hasActiveAlarms } from '../lib/alarms.mjs';
+import { abortChat } from './slot-registry.mjs';
 import { stopAmbientOnDevice } from '../lib/ambient-playback.mjs';
 import { getAmbientForDevice } from '../routes/devices.mjs';
 
@@ -149,7 +150,9 @@ function classifyVoiceIntent(text, { ambientActive = false } = {}) {
 
   // Stop / cancel — barge-in firmware has already killed local audio; we
   // mark this `replaces` so the chat pipeline doesn't generate a reply.
-  if (/^(stop|cancel|never\s*mind|shut\s+up|that('s|s)\s+enough)\b/.test(t)) {
+  // Only near-bare forms short-circuit: "cancel my 3pm reminder" is a real
+  // request that must reach the LLM, not get swallowed by a false "okay".
+  if (/^(stop|cancel|never\s*mind|shut\s+up|that('s|s)\s+enough)(\s+(it|that|this|everything|talking|playing|the\s+(music|song|audio|sound|alarm|timer|noise)|(playing\s+)?(music|audio)))?[.!?\s]*$/.test(t)) {
     return { type: 'stop' };
   }
 
@@ -163,7 +166,7 @@ function classifyVoiceIntent(text, { ambientActive = false } = {}) {
  * the side effect but the caller can continue if desired (in practice
  * we still short-circuit for all of these because they're terminal).
  */
-function executeVoiceIntent(intent, deviceId, userId) {
+function executeVoiceIntent(intent, deviceId, userId, agentId = null) {
   if (!deviceId) return { replaces: false };
   switch (intent.type) {
     case 'volume_up':
@@ -205,6 +208,13 @@ function executeVoiceIntent(intent, deviceId, userId) {
       // skips. Without this, a stop after several TV-driven wakes would be
       // immediately undone by 3-second-delayed resumes already in flight.
       if (deviceId) markStopIntent(deviceId);
+      // Abort the in-flight LLM turn too. This fast-path runs before
+      // openTurn(), so "stop" during THINKING used to only silence audio —
+      // the prior turn's tool calls (an email send, an HA action) kept
+      // executing in the background with their tokens dropped as stale.
+      if (userId && agentId) {
+        try { abortChat(userId, agentId); } catch (e) { console.warn('[chat] voice-stop abort failed:', e.message); }
+      }
       // Local audio was already stopped by the barge-in handler in
       // firmware when the wake fired. Also broadcast alarm_stop to every
       // device holding an active alarm for this user — devices halt their
@@ -360,7 +370,7 @@ export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agent
   const ambientActive = !!(deviceId && getAmbientForDevice(deviceId));
   const intent = classifyVoiceIntent(rawText, { ambientActive });
   if (!intent) return null;
-  const { replaces } = executeVoiceIntent(intent, deviceId, userId);
+  const { replaces } = executeVoiceIntent(intent, deviceId, userId, agentId);
   console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);
   if (!replaces) return null;
   // Short audible confirmation so the user hears that the device got it.

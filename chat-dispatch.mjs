@@ -567,7 +567,11 @@ export async function handleChatMessage({
     // coordinator when the user's text suggests something else (e.g. "what's
     // the duration", "extract the chords") so the LLM can pick the right tool.
     tryTranscribeAttachmentFastpath,
-    tryApprovalIntercept,
+    // Staged-approval intercepts act on — and on any miss, CLEAR — pending
+    // destructive ops, so only a real user turn may run them. A background
+    // continuation or hidden internal turn arriving between "stage" and the
+    // user's APPROVE used to wipe the staged op before they could confirm.
+    ...((_isBackgroundContinuation || _hiddenUser) ? [] : [tryApprovalIntercept]),
     slashAdapter,
     financePreprocess,
     ...(allowIntentFastpaths ? [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath] : []),

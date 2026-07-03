@@ -18,7 +18,7 @@ import { getVoiceRef } from '../lib/voice-refs.mjs';
 import {
   takeTestMp3,
   takeAmbientStream, registerAmbientResponse, unregisterAmbientResponse,
-  pinAmbientMp3,
+  pinAmbientMp3, rearmAmbientTtl,
 } from './devices.mjs';
 import { ambientFilePath } from '../lib/routines.mjs';
 import { supportsImageGeneration, supportsVision } from '../lib/model-capabilities.mjs';
@@ -1796,6 +1796,10 @@ export async function handle(req, res) {
             try { ff.kill('SIGKILL'); } catch {}
             _ambientStreams.delete(trimmedText);
             unregisterAmbientResponse(trimmedText);
+            // The stream is dead — re-arm the orphan TTL so the pinned marker
+            // can't live forever as phantom ambient (zombie resurrect on next
+            // wake). A prompt device HTTP retry re-attaches and re-pins.
+            rearmAmbientTtl(trimmedText);
           };
           streamEntry.forceKill = forceKill;
           _ambientStreams.set(trimmedText, streamEntry);
