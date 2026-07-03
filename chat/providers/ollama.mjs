@@ -125,10 +125,13 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
       const msg = chunk.message ?? {};
 
-      // Tool call response (not streamed token-by-token)
+      // Tool calls — accumulate, don't break: Ollama ≥0.8 can stream tool
+      // calls across several chunks (breaking on the first dropped the rest
+      // of a parallel batch), and the final done chunk that carries usage
+      // stats still needs reading. The stream ends itself after done:true.
       if (msg.tool_calls?.length) {
-        toolCalls = msg.tool_calls;
-        break;
+        toolCalls = (toolCalls ?? []).concat(msg.tool_calls);
+        continue;
       }
 
       // Streaming text token

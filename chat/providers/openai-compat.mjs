@@ -8,7 +8,7 @@
 
 import { executeToolStreaming } from '../../roles.mjs';
 import {
-  OPENAI_COMPAT_PROVIDERS, readAnthropicSSE, getCompatKey,
+  OPENAI_COMPAT_PROVIDERS, readAnthropicSSE, getCompatKey, fetchWithRetry,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
@@ -33,7 +33,10 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
   ];
 
   let assistantContent = '';
-  let totalInputTokens = 0, totalOutputTokens = 0;
+  // cachedTokens must live at function scope like the other totals — the final
+  // __usage yield below the loop reads it (declared inside the loop it was a
+  // latent ReferenceError, masked while usage always read 0).
+  let totalInputTokens = 0, totalOutputTokens = 0, cachedTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
   // Set if the provider rejects an injected native web_search tool, so we resend
   // the same turn with the Brave function restored. (Only the grok/xai path
@@ -41,6 +44,12 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
   // from, so this stays false there.)
   let nativeSearchDisabled = false;
   let reasoningDisabled = false;
+  // o-series / gpt-5 on /chat/completions reject max_tokens with "use
+  // max_completion_tokens" — latch and resend with the renamed field.
+  let useMaxCompletionTokens = false;
+  // Strict-validation providers (e.g. Mistral) may reject stream_options —
+  // latch and resend without it (usage then reads 0 for that provider only).
+  let streamUsageDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
@@ -65,18 +74,24 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       messages: working,
       stream:   true,
     };
-    if (agent.maxTokens) body.max_tokens = agent.maxTokens;
+    if (agent.maxTokens) {
+      if (useMaxCompletionTokens) body.max_completion_tokens = agent.maxTokens;
+      else                        body.max_tokens            = agent.maxTokens;
+    }
+    // Without this OpenAI(-compat) sends no usage chunk at all and every
+    // cost/cache metric reads 0.
+    if (!streamUsageDisabled) body.stream_options = { include_usage: true };
     if (compatTools)     body.tools      = compatTools;
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, providerKey, agent);
 
-    const res = await fetch(endpoint, {
+    const res = await fetchWithRetry(endpoint, {
       method: 'POST', signal,
       headers: {
         'Content-Type':  'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
-    });
+    }, { label: providerKey });
 
     if (!res.ok) {
       const errText = await res.text();
@@ -85,6 +100,19 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       if ((res.status === 400 || res.status === 422) && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type|unknown variant/i.test(errText)) {
         console.warn(`[${providerKey}] native web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        continue;
+      }
+      // These two must run BEFORE the reasoning check: their rejection text
+      // ("Unsupported parameter: …") also matches isReasoningUnsupportedError,
+      // which would burn the reasoning retry on the wrong field and then fail.
+      if (!useMaxCompletionTokens && body.max_tokens !== undefined && res.status === 400 && /max_completion_tokens/i.test(errText)) {
+        console.warn(`[${providerKey}] max_tokens rejected for ${agent.model}; retrying with max_completion_tokens`);
+        useMaxCompletionTokens = true;
+        continue;
+      }
+      if (!streamUsageDisabled && (res.status === 400 || res.status === 422) && /stream_options/i.test(errText)) {
+        console.warn(`[${providerKey}] stream_options rejected; retrying without usage reporting`);
+        streamUsageDisabled = true;
         continue;
       }
       if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
@@ -102,20 +130,13 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     let tokenCount   = 0;
     const startedAt  = Date.now();
     let firstTokenAt = null;
-    let cachedTokens = 0;
+    let iterUsage    = null;
 
     for await (const event of readAnthropicSSE(res.body)) {
-      if (event.usage) {
-        totalInputTokens  += event.usage.prompt_tokens     ?? 0;
-        totalOutputTokens += event.usage.completion_tokens ?? 0;
-        // OpenAI-shape providers expose prefix-cache hits via the optional
-        // `prompt_tokens_details.cached_tokens` field on the final usage
-        // chunk. Capture so we can log a hit rate parallel to Anthropic's
-        // explicit cache_control telemetry — and measure whether the
-        // three-tier system-prompt reorder is actually buying us anything.
-        // Not all OpenAI-compat providers populate this; missing field = 0.
-        cachedTokens += event.usage.prompt_tokens_details?.cached_tokens ?? 0;
-      }
+      // Keep the LAST usage seen this completion, accumulate after the loop.
+      // Most providers send usage once on the final chunk; Perplexity sends a
+      // CUMULATIVE usage on every chunk, so `+=` per event would overcount.
+      if (event.usage) iterUsage = event.usage;
       // Mid-stream error chunk (no `choices`) — surface it instead of silently
       // skipping via the `!choice` continue below, which would end the turn with
       // partial/empty text that reads as success downstream.
@@ -144,7 +165,18 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       }
 
       if (choice.finish_reason) finishReason = choice.finish_reason;
-      if (finishReason === 'tool_calls' || finishReason === 'stop') break;
+      // No break on finish_reason: with stream_options.include_usage the usage
+      // chunk arrives AFTER the final choice chunk — breaking here discarded it
+      // (usage always read 0). The reader ends at [DONE]/EOF.
+    }
+    if (iterUsage) {
+      totalInputTokens  += iterUsage.prompt_tokens     ?? 0;
+      totalOutputTokens += iterUsage.completion_tokens ?? 0;
+      // OpenAI-shape providers expose prefix-cache hits via the optional
+      // `prompt_tokens_details.cached_tokens` field on the usage chunk.
+      // Capture so we can log a hit rate parallel to Anthropic's explicit
+      // cache_control telemetry. Not all providers populate this; missing = 0.
+      cachedTokens += iterUsage.prompt_tokens_details?.cached_tokens ?? 0;
     }
 
     if (toolCalls.size > 0) {

@@ -7,7 +7,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey } from './_shared.mjs';
+import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
@@ -118,7 +118,10 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     if (anthropicTools) body.tools = anthropicTools;
     if (!reasoningDisabled) applyAnthropicReasoning(body, agent);
 
-    const res = await fetch(ANTHROPIC_URL, {
+    // Retried on 429/529/5xx + network failures (honoring Retry-After) — a
+    // single overloaded_error used to throw straight out of the generator
+    // while every other provider path had some retry story.
+    const res = await fetchWithRetry(ANTHROPIC_URL, {
       method:  'POST',
       signal,
       headers: {
@@ -128,7 +131,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         'content-type':           'application/json',
       },
       body: JSON.stringify(body),
-    });
+    }, { label: 'anthropic' });
 
     if (!res.ok) {
       const err = await res.text();

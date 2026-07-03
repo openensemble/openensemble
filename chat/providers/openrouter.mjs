@@ -4,7 +4,7 @@
 
 import { executeToolStreaming } from '../../roles.mjs';
 import {
-  OPENROUTER_URL, readAnthropicSSE, getOpenRouterKey,
+  OPENROUTER_URL, readAnthropicSSE, getOpenRouterKey, fetchWithRetry,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
@@ -12,6 +12,42 @@ import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '.
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 import { applyOpenAICompatReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
+
+/**
+ * Anthropic-model prompt caching via OpenRouter: OpenRouter forwards
+ * `cache_control` markers inside message content parts straight to Anthropic.
+ * Mark the system prompt (stable prefix) and the tail of the newest markable
+ * message so turn N+1 reuses the turn-N prefix — the same 20–40% input-token
+ * saving the direct Anthropic path already gets (see anthropic.mjs). Uses 2 of
+ * Anthropic's 4 breakpoint slots. Non-Anthropic models never see this shape.
+ */
+export function withAnthropicCacheBreakpoints(messages) {
+  if (!messages.length) return messages;
+  const out = messages.map(m => ({ ...m }));
+  if (out[0]?.role === 'system' && typeof out[0].content === 'string' && out[0].content) {
+    out[0].content = [{ type: 'text', text: out[0].content, cache_control: { type: 'ephemeral' } }];
+  }
+  // Walk back to the newest user/assistant message whose content can carry a
+  // marker (tool messages and content:null tool_call stubs are skipped — a
+  // marker on an earlier message still caches everything before it).
+  for (let i = out.length - 1; i > 0; i--) {
+    const m = out[i];
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    if (typeof m.content === 'string' && m.content) {
+      out[i] = { ...m, content: [{ type: 'text', text: m.content, cache_control: { type: 'ephemeral' } }] };
+      break;
+    }
+    if (Array.isArray(m.content) && m.content.length) {
+      const blocks = m.content.map(b => ({ ...b }));
+      for (let j = blocks.length - 1; j >= 0; j--) {
+        if (blocks[j].type === 'text') { blocks[j] = { ...blocks[j], cache_control: { type: 'ephemeral' } }; break; }
+      }
+      out[i] = { ...m, content: blocks };
+      break;
+    }
+  }
+  return out;
+}
 
 export async function* streamOpenRouter(agent, systemPrompt, messages, signal, userId = 'default') {
   const apiKey = getOpenRouterKey();
@@ -26,7 +62,8 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
   ];
 
   let assistantContent = '';
-  let totalInputTokens = 0, totalOutputTokens = 0;
+  let totalInputTokens = 0, totalOutputTokens = 0, cachedTokens = 0;
+  const isAnthropicModel = /^anthropic\//i.test(String(agent.model || ''));
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
   // Set if OpenRouter rejects the native web_search server tool, so we resend
   // the same turn with the Brave function restored.
@@ -51,14 +88,18 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     }
     const body = {
       model:    agent.model,
-      messages: working,
+      messages: isAnthropicModel ? withAnthropicCacheBreakpoints(working) : working,
       stream:   true,
+      // Final SSE chunk then carries {prompt_tokens, completion_tokens,
+      // prompt_tokens_details.cached_tokens} — without it OpenRouter sends no
+      // usage at all and cost/cache metrics read 0.
+      usage:    { include: true },
     };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     if (orTools) body.tools = orTools;
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, 'openrouter', agent);
 
-    const res = await fetch(OPENROUTER_URL, {
+    const res = await fetchWithRetry(OPENROUTER_URL, {
       method: 'POST', signal,
       headers: {
         'Content-Type':  'application/json',
@@ -67,7 +108,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
         'X-Title':       'OpenEnsemble',
       },
       body: JSON.stringify(body),
-    });
+    }, { label: 'openrouter' });
 
     if (!res.ok) {
       const errText = await res.text();
@@ -93,13 +134,12 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     let tokenCount   = 0;
     const startedAt  = Date.now();
     let firstTokenAt = null;
+    let iterUsage    = null;
 
     for await (const event of readAnthropicSSE(res.body)) {
-      // Token usage (OpenRouter sends this in the last chunk or as a separate event)
-      if (event.usage) {
-        totalInputTokens  += event.usage.prompt_tokens     ?? 0;
-        totalOutputTokens += event.usage.completion_tokens ?? 0;
-      }
+      // Keep the LAST usage seen this completion; accumulated after the loop
+      // (guards against providers that repeat cumulative usage per chunk).
+      if (event.usage) iterUsage = event.usage;
       // Mid-stream error chunk (no `choices`) — surface it instead of silently
       // skipping via the `!choice` continue below, which would end the turn with
       // partial/empty text that reads as success downstream.
@@ -128,7 +168,13 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       }
 
       if (choice.finish_reason) finishReason = choice.finish_reason;
-      if (finishReason === 'tool_calls' || finishReason === 'stop') break;
+      // No break on finish_reason: the usage chunk arrives AFTER the final
+      // choice chunk — breaking here discarded it. The reader ends at [DONE].
+    }
+    if (iterUsage) {
+      totalInputTokens  += iterUsage.prompt_tokens     ?? 0;
+      totalOutputTokens += iterUsage.completion_tokens ?? 0;
+      cachedTokens      += iterUsage.prompt_tokens_details?.cached_tokens ?? 0;
     }
 
     if (toolCalls.size > 0) {
@@ -227,6 +273,10 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
 
   yield { type: '__content', content: assistantContent };
   if (totalInputTokens || totalOutputTokens) {
-    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, provider: 'openrouter', model: agent.model };
+    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cachedTokens, provider: 'openrouter', model: agent.model };
+  }
+  if (totalInputTokens && isAnthropicModel) {
+    const hitRate = totalInputTokens ? (cachedTokens / totalInputTokens) : 0;
+    console.log(`[openrouter] cache: cached=${cachedTokens} input=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
   }
 }

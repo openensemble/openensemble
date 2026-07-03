@@ -8,6 +8,9 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-03
 
+**Cloud replies retry through brief provider hiccups; token/cost metrics stop reading zero**
+A momentary provider overload (the classic Anthropic 529, a 429 rate-limit, or a dropped connection) used to fail the whole turn immediately. All cloud providers now retry the request a couple of times with short waits (respecting the provider's requested back-off) before giving up — nothing double-executes, since only the initial request is retried. Separately, token usage for OpenAI-compatible providers and OpenRouter was always recorded as 0 (the usage report was never requested, and when present it arrived after the point the stream stopped reading); real input/output/cached-token counts now land in your usage metrics. Claude models routed through OpenRouter also get prompt caching now (20–40% cheaper long conversations, same as the direct Anthropic path), local models via Ollama no longer lose the second tool call when the model fires two at once, and screenshots/generated images now reach LM Studio vision models instead of a "can't see images" note.
+
 **Chat stays where you're reading while a reply streams**
 Scrolling up to re-read something while the assistant was still typing used to be impossible — every token yanked the view back to the bottom, several times a second. Now the chat only follows the stream while you're already at the bottom: scroll up and it stays put, with a **↓ Jump to latest** pill you can tap to catch back up. Sending a message or switching agents still lands you at the latest message. Streaming is also much smoother in long replies (the whole message no longer re-renders on every token), and you can select text mid-stream without losing the selection.
 

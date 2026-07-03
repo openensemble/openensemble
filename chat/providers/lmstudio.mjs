@@ -153,10 +153,13 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
   ];
   let assistantContent = '';
   let totalCompatTokens = 0;
+  let lmInputTokens = 0, lmOutputTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
   // Latches if LM Studio rejects the reasoning hint for this model so the turn
   // retries without it instead of dying. Persists across tool loops.
   let reasoningDisabled = false;
+  // Same latch for stream_options on older LM Studio builds.
+  let streamUsageDisabled = false;
 
   while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations
@@ -168,6 +171,9 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     const toolChoice = 'auto';
     const body = { model: agent.model, messages: working, stream: true, tools: lmTools, tool_choice: toolChoice };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
+    // Ask for real usage on the final chunk instead of approximating from
+    // streamed token counts. Older builds that reject it hit the latch below.
+    if (!streamUsageDisabled) body.stream_options = { include_usage: true };
     const effort = effectiveReasoningEffort(agent, 'auto');
     if (!reasoningDisabled) {
       if (effort === 'off' || agent.think === false) body.reasoning = 'off';
@@ -181,6 +187,13 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     });
     if (!res.ok) {
       const errText = await res.text();
+      // Checked before the reasoning latch — a stream_options rejection text
+      // ("unsupported/unknown parameter") would otherwise burn that retry.
+      if (!streamUsageDisabled && (res.status === 400 || res.status === 422) && /stream_options/i.test(errText)) {
+        console.warn(`[lmstudio] stream_options rejected; retrying without usage reporting`);
+        streamUsageDisabled = true;
+        continue;
+      }
       if (!reasoningDisabled && body.reasoning !== undefined && isReasoningUnsupportedError(res.status, errText)) {
         console.warn(`[lmstudio] reasoning rejected (${res.status}); retrying without reasoning`);
         reasoningDisabled = true;
@@ -196,8 +209,10 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     let tokenCount   = 0;
     const startedAt  = Date.now();
     let firstTokenAt = null;
+    let iterUsage    = null;
 
     for await (const event of readAnthropicSSE(res.body)) {
+      if (event.usage) iterUsage = event.usage; // last one wins; summed after the loop
       // Mid-stream error chunk (no `choices`) — surface it instead of silently
       // skipping via the `!choice` continue below, which would end the turn with
       // partial/empty text that reads as success downstream.
@@ -225,7 +240,12 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
         if (tc.function?.name)      entry.name     += tc.function.name;
         if (tc.function?.arguments) entry.argsJson += tc.function.arguments;
       }
-      if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop') break;
+      // No break on finish_reason — the usage chunk arrives after the final
+      // choice chunk when stream_options.include_usage is set. Ends at [DONE].
+    }
+    if (iterUsage) {
+      lmInputTokens  += iterUsage.prompt_tokens     ?? 0;
+      lmOutputTokens += iterUsage.completion_tokens ?? 0;
     }
 
     // Some LM Studio-compatible models stream their entire response in
@@ -335,8 +355,11 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
   }
 
   yield { type: '__content', content: assistantContent };
-  // LM Studio compat: approximate tokens from streamed token count
-  if (totalCompatTokens > 0) {
+  // Prefer real usage from stream_options.include_usage; fall back to the
+  // old approximation (streamed token count + chars/4) when unavailable.
+  if (lmInputTokens || lmOutputTokens) {
+    yield { type: '__usage', inputTokens: lmInputTokens, outputTokens: lmOutputTokens, provider: 'lmstudio', model: agent.model };
+  } else if (totalCompatTokens > 0) {
     const approxInput = Math.ceil(userText.length / 4);
     yield { type: '__usage', inputTokens: approxInput, outputTokens: totalCompatTokens, provider: 'lmstudio', model: agent.model };
   }

@@ -120,6 +120,48 @@ export function getStripThinkingTags() {
   return loadConfig()?.stripThinkingTags !== false;
 }
 
+// ── Resilient fetch ──────────────────────────────────────────────────────────
+// Shared retry wrapper for the initial provider request. Retries transient
+// statuses (honoring Retry-After, capped at 8s) and network-level failures
+// with short backoff. Only the request initiation is retried — nothing has
+// streamed and no tool has run yet, so a retry can't double-execute anything.
+// Non-retryable 4xx (400/401/403/404/422) return immediately so per-provider
+// fallback handlers (native web_search, reasoning, max_completion_tokens,
+// stream_options) see them untouched.
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 529]);
+
+function _retryDelay(ms, signal) {
+  return new Promise(resolve => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener?.('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
+
+export async function fetchWithRetry(url, opts = {}, { tries = 3, label = 'provider' } = {}) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, opts);
+    } catch (e) {
+      if (e.name === 'AbortError' || opts.signal?.aborted) throw e;
+      lastErr = e;
+      if (attempt === tries) throw e;
+      console.warn(`[${label}] fetch failed (${e.message}) — retrying (${attempt}/${tries})`);
+      await _retryDelay(1000 * attempt, opts.signal);
+      continue;
+    }
+    if (res.ok || !RETRYABLE_STATUS.has(res.status) || attempt === tries) return res;
+    const ra = parseFloat(res.headers.get('retry-after'));
+    const delayMs = Math.min(Number.isFinite(ra) && ra > 0 ? ra * 1000 : 1000 * 2 ** (attempt - 1), 8000);
+    try { await res.text(); } catch { /* drain to release the socket */ }
+    console.warn(`[${label}] ${res.status} — retrying in ${delayMs}ms (${attempt}/${tries})`);
+    await _retryDelay(delayMs, opts.signal);
+    if (opts.signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
+  }
+  throw lastErr ?? new Error(`${label}: retries exhausted`);
+}
+
 // ── Stream readers ───────────────────────────────────────────────────────────
 
 // Read an NDJSON (newline-delimited JSON) stream from a Response body
@@ -231,9 +273,11 @@ export function buildImageUserMessage(provider, images, text) {
   // OpenAI Chat-Completions + Responses API both accept image_url parts
   // in user messages. The Responses converter (chat/providers/openai-
   // responses.mjs toResponsesInput) reshapes image_url → input_image so
-  // we don't need a separate branch here.
+  // we don't need a separate branch here. LM Studio's /v1/chat/completions
+  // accepts the same image_url shape (its tool path is the only caller;
+  // the native /api/v1/chat path never carries tool images).
   const isOpenAiLike =
-    provider === 'openai-oauth' || provider === 'openrouter' ||
+    provider === 'openai-oauth' || provider === 'openrouter' || provider === 'lmstudio' ||
     OPENAI_COMPAT_PROVIDERS[provider === 'grok' ? 'xai' : provider];
   if (isOpenAiLike) {
     return {
@@ -247,8 +291,8 @@ export function buildImageUserMessage(provider, images, text) {
       ],
     };
   }
-  // LM Studio + anything else: fall back to a text-only note. The LLM
-  // won't see the pixels but at least won't crash on an unknown content
-  // shape, and will know an image WOULD have been here.
+  // Anything else: fall back to a text-only note. The LLM won't see the
+  // pixels but at least won't crash on an unknown content shape, and will
+  // know an image WOULD have been here.
   return { role: 'user', content: `${text}\n\n[${safeImages.length} image(s) attached but ${provider} doesn't accept vision input in this code path]` };
 }
