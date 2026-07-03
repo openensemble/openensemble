@@ -182,6 +182,14 @@ export async function handle(req, res) {
   //   agent?, confirm:"CREATE EXEC WATCH" }
   if (req.url === '/api/watchers/exec' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    // Exec watchers run an arbitrary shell command on a repeating cadence as the
+    // OE process owner — admin-only. The client-supplied confirm phrase is a
+    // speed-bump, not an authorization control.
+    if (!isPrivileged(authId)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'exec watchers are admin-only' }));
+      return true;
+    }
     try {
       const body = JSON.parse(await readBody(req));
       if (body.confirm !== 'CREATE EXEC WATCH') {

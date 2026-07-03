@@ -89,7 +89,7 @@ import { runBootCheck, aliveResponse, cancelCommitDeadline } from './lib/oe-admi
 // Shared helpers
 import {
   loadConfig, loadUsers, loadPersistedSessions, setBroadcastFn, setUserBroadcastFn,
-  CFG_PATH,
+  CFG_PATH, getClientIp,
 } from './routes/_helpers.mjs';
 import { log, configureLogger } from './logger.mjs';
 
@@ -344,7 +344,7 @@ const httpServer = http.createServer(async (req, res) => {
 
   // Rate-limit API endpoints
   if (req.url.startsWith('/api/')) {
-    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+    const ip = getClientIp(req);
     const isUpload = req.url.includes('upload') || req.url.includes('restore') || req.url.includes('avatar');
     const { limited, remaining, resetAt } = getRateLimit(ip, isUpload);
     res.setHeader('X-RateLimit-Remaining', remaining);

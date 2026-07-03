@@ -10,7 +10,7 @@ import {
   requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole, sanitizeUserForWire,
   isPrivileged, loadUsers, modifyUsers, modifyUser, hashPassword, validatePassword, verifyPassword, readBody,
   createSession, clearUserSessions, clearUserSessionsExcept, modifyExpGroups, isTimeBlocked, parseMultipart,
-  safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB,
+  safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB, getClientIp,
   setSessionCookie,
 } from './_helpers.mjs';
 import { migrateSharedCortexToUser } from '../memory.mjs';
@@ -175,7 +175,7 @@ export async function handle(req, res) {
         if (snap[snapIdx].skillsLocked) { res.writeHead(403); res.end(JSON.stringify({ error: 'Your tools are managed by an administrator' })); return true; }
       }
       if (changes.newPassword) {
-        const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+        const ip = getClientIp(req);
         if (isAuthRateLimited(`pw:${ip}:${targetId}`)) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Too many attempts. Try again in a minute.' }));
@@ -423,7 +423,7 @@ export async function handle(req, res) {
   if (req.url.match(/^\/api\/users\/[^/]+\/switch$/) && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const targetId = req.url.split('/')[3];
-    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+    const ip = getClientIp(req);
     if (isAuthRateLimited(`sw:${ip}:${targetId}`)) {
       res.writeHead(429, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Too many attempts. Try again in a minute.' }));

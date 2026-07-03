@@ -681,7 +681,10 @@ function renderPronounceButtons(html) {
   return html.replace(/⟨pronounce:([^:⟩]+):([^⟩]+)⟩/g, (_, lang, text) => {
     const safeLang = lang.replace(/['"\\]/g, '');
     const safeText = text.replace(/['"\\]/g, '');
-    const display = text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    // `text` is already HTML-escaped by DOMPurify upstream in the renderMarkdown
+    // pipeline. Do NOT entity-decode it back into raw HTML before innerHTML —
+    // that turned encoded `<img onerror=…>` into a live tag (stored XSS).
+    const display = safeText;
     return `<button class="pronounce-btn" data-action="pronounceWord" data-args='${JSON.stringify([safeText, safeLang]).replace(/'/g, "&#39;")}' title="Listen to pronunciation"><span class="pronounce-icon">🔊</span> ${display}</button>`;
   });
 }

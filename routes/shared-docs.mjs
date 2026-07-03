@@ -427,10 +427,20 @@ export async function handle(req, res) {
       return true;
     }
     const stat = fs.statSync(filePath);
+    // `doc.mimeType` is attacker-controlled (from the upload's multipart header).
+    // Only render inline the MIME types that can't execute script in the OE
+    // origin; SVG (scriptable) and everything else (html, …) are forced to
+    // download. `nosniff` stops the browser from re-interpreting a mislabeled
+    // file (e.g. HTML labeled image/png) as something executable.
+    const mime = String(doc.mimeType || '').toLowerCase();
+    const inlineSafe = mime !== 'image/svg+xml' &&
+      (/^image\//.test(mime) || /^video\//.test(mime) || /^audio\//.test(mime) ||
+       mime === 'application/pdf' || mime === 'text/plain');
     res.writeHead(200, {
-      'Content-Type': doc.mimeType,
+      'Content-Type': inlineSafe ? doc.mimeType : 'application/octet-stream',
       'Content-Length': stat.size,
-      'Content-Disposition': `inline; filename="${encodeURIComponent(doc.filename)}"`,
+      'Content-Disposition': `${inlineSafe ? 'inline' : 'attachment'}; filename="${encodeURIComponent(doc.filename)}"`,
+      'X-Content-Type-Options': 'nosniff',
       'Cache-Control': 'private, max-age=3600',
     });
     fs.createReadStream(filePath).pipe(res);

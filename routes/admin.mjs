@@ -17,7 +17,7 @@ import {
   setSessionCookie,
   getDefaultChildSafetyPrompt, safeId, getUserDir, safeError,
   CFG_PATH, USERS_PATH, ACTIVITY_DIR, NOTES_PATH, EXPENSES_DB, EXPENSE_GROUPS_PATH,
-  getAgentsForUser, getUserCoordinatorAgentId,
+  getAgentsForUser, getUserCoordinatorAgentId, getClientIp,
 } from './_helpers.mjs';
 import { getDefaultRoles, listAllRoles } from '../roles.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
@@ -501,7 +501,7 @@ export async function handle(req, res) {
 
   if (req.url.match(/^\/api\/invite\/[a-f0-9]+$/) && req.method === 'POST') {
     const token = req.url.split('/').pop();
-    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+    const ip = getClientIp(req);
     if (isInviteRateLimited(`${ip}:${token}`, INVITE_RATE_MAX) || isInviteRateLimited(`ip:${ip}`, INVITE_RATE_IP_MAX)) {
       res.writeHead(429, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Too many attempts. Try again in a minute.' }));

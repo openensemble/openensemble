@@ -13,7 +13,7 @@ import fs   from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
-import { requireAuth, readBody, getUserDir, loadConfig } from './_helpers.mjs';
+import { requireAuth, readBody, getUserDir, loadConfig, safeId } from './_helpers.mjs';
 import { seedGmailAccount } from './email-accounts.mjs';
 import { ensureFreshToken, resolveTokenPath, getClientCredentials, CREDS_PATH, GOOGLE_AUTH_BASE_DIR as BASE_DIR } from '../lib/google-auth.mjs';
 import { readEncryptedJsonFile, writeEncryptedJsonFile } from '../lib/encrypted-file.mjs';
@@ -98,7 +98,10 @@ export async function handle(req, res) {
     const userId = requireAuth(req, res); if (!userId) return true;
     const service = url.searchParams.get('service');
     if (!SCOPES[service]) { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid service' })); return true; }
-    const accountId = url.searchParams.get('accountId') || null;
+    // Sanitize: accountId becomes part of the token filename (path traversal
+    // vector otherwise). Legit ids are `acct_<hex>`, so safeId is a no-op on them.
+    const rawAccountId = url.searchParams.get('accountId');
+    const accountId = rawAccountId ? safeId(rawAccountId) : null;
     const nonce = randomBytes(16).toString('hex');
     const redirectUri = getRedirectUri(req);
     // Store the redirect URI with the state — Google verifies that the URI used

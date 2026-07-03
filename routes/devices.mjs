@@ -7,7 +7,7 @@
  * voice, wake-word slot, speak-replies), and revocation.
  */
 
-import { requireAuth, readBody, revokeSessionByPrefix, clearUserVoiceDeviceSessions } from './_helpers.mjs';
+import { requireAuth, readBody, revokeSessionByPrefix, clearUserVoiceDeviceSessions, isChildRequest } from './_helpers.mjs';
 import { listDevices, getDevice, updateDevice, removeDevice, findIncomingSlots, clearSlotAssignment } from '../lib/voice-devices.mjs';
 import { handlePairingRoutes } from './devices/pairing.mjs';
 import { sendToDevice, isDeviceOnline } from '../ws-handler.mjs';
@@ -153,6 +153,14 @@ export function getAmbientForDevice(deviceId) {
 export async function handle(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
+  // Child accounts cannot change voice devices — an admin manages them.
+  if (/^(POST|PUT|DELETE|PATCH)$/.test(req.method)
+      && (p.startsWith('/api/devices') || p.startsWith('/api/voice-chime'))
+      && isChildRequest(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Voice devices are managed by an admin for this account.' }));
+    return true;
+  }
 
   // Pairing endpoints first so /api/devices/pair and /api/devices/redeem
   // don't fall through to the generic /api/devices/:id handlers below.

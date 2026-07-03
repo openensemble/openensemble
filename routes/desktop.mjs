@@ -53,11 +53,15 @@ function resolveSharedFile(userId, filename, fileType) {
     if (!s.sharedWith.includes(userId)) continue;
     // Match by filename (also basenamed — ignore any stored traversal)
     if (path.basename(s.filename ?? '') !== safeFilename) continue;
-    // Search all possible directories for the file
-    const searchDirs = fileType === 'image' ? ['images', 'documents']
-                     : fileType === 'video' ? ['videos', 'documents']
-                     : fileType === 'audio' ? ['audio', 'documents']
-                     : fileType === 'research' ? ['research']
+    // Derive the search dirs from the SHARE's own type, not the requester-
+    // supplied fileType — otherwise a share for one file can be used to read a
+    // different, same-named file in another type's directory (cross-type IDOR).
+    // Falls back to the requested type only for legacy shares with no fileType.
+    const shareType = s.fileType || fileType;
+    const searchDirs = shareType === 'image' ? ['images', 'documents']
+                     : shareType === 'video' ? ['videos', 'documents']
+                     : shareType === 'audio' ? ['audio', 'documents']
+                     : shareType === 'research' ? ['research']
                      : ['documents', 'images', 'videos', 'audio'];
     for (const dir of searchDirs) {
       // Try the actual filename
@@ -512,9 +516,15 @@ export async function handle(req, res) {
       let found = false;
       try {
         const shares = JSON.parse(fs.readFileSync(sharingPath, 'utf8'));
+        // The URL segment is a directory name (images/videos/…); a share stores
+        // a singular type (image/video/…). Require the share to actually be for
+        // THIS type — otherwise any same-named share the owner made grants read
+        // of their file in an arbitrary type directory (cross-type IDOR).
+        const TYPE_DIR = { image: 'images', video: 'videos', document: 'documents', invoice: 'invoices', audio: 'audio', research: 'research' };
         for (const s of shares) {
           if (!s.sharedWith.includes(userId)) continue;
           if (s.filename !== safeName) continue;
+          if (TYPE_DIR[s.fileType] !== fileType) continue;
           const ownerPath = path.join(getUserDir(s.ownerId), fileType, safeName);
           if (fs.existsSync(ownerPath)) {
             const stat = fs.statSync(ownerPath);

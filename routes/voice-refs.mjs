@@ -11,7 +11,7 @@
  */
 
 import { spawn } from 'child_process';
-import { requireAuth, readBody } from './_helpers.mjs';
+import { requireAuth, readBody, isChildRequest } from './_helpers.mjs';
 import {
   validateUpload, addVoiceRef, listVoiceRefs, deleteVoiceRef, getVoiceRef,
 } from '../lib/voice-refs.mjs';
@@ -48,6 +48,13 @@ function transcodeToWav(inputBuf) {
 }
 
 export async function handle(req, res) {
+  // Child accounts cannot change voice references — an admin manages voice devices.
+  if (/^(POST|PUT|DELETE|PATCH)$/.test(req.method)
+      && req.url.startsWith('/api/voice-refs') && isChildRequest(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Voice devices are managed by an admin for this account.' }));
+    return true;
+  }
   if (req.url === '/api/voice-refs' && req.method === 'GET') {
     const userId = requireAuth(req, res);
     if (!userId) return true;

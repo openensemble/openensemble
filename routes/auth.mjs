@@ -5,7 +5,7 @@
 import {
   requireAuth, getAuthToken, getSessionUserId, getUser, sanitizeUserForWire,
   createSession, createMediaToken, deleteSession, verifyPassword, readBody, isTimeBlocked,
-  setSessionCookie, clearSessionCookie,
+  setSessionCookie, clearSessionCookie, getClientIp,
 } from './_helpers.mjs';
 import { log } from '../logger.mjs';
 
@@ -74,7 +74,7 @@ export async function handle(req, res) {
   if (req.url === '/api/login' && req.method === 'POST') {
     try {
       const { userId, password } = JSON.parse(await readBody(req));
-      const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+      const ip = getClientIp(req);
       if (isRateLimited(`${ip}:${userId ?? ''}`, RATE_LIMIT_MAX) || isRateLimited(`ip:${ip}`, RATE_LIMIT_IP_MAX)) {
         log.warn('auth', 'login rate-limited', { ip, userId });
         res.writeHead(429, { 'Content-Type': 'application/json' });

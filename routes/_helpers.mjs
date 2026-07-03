@@ -27,6 +27,8 @@ import {
   getUserDir,
 } from './_helpers/paths.mjs';
 import { withLock, atomicWriteSync, makeModify } from './_helpers/io-lock.mjs';
+import { resolveClientIp } from './_helpers/client-ip.mjs';
+import { getSessionUserId as _gsuid, getAuthToken as _gtok } from './_helpers/auth-sessions.mjs';
 import { encryptConfigSecrets, decryptedConfigView, encryptProfileSecrets, decryptedProfileView } from '../lib/config-secrets.mjs';
 import { listAgents, getAgent, getAgentScope, loadCustomAgents, updateAgentMeta, invalidateModelOverridesCache } from '../agents.mjs';
 import { getDefaultRoles, listRoles, getRoleAssignments } from '../roles.mjs';
@@ -98,6 +100,19 @@ const ENV_MAP = {
   OE_VISION_PROVIDER:  'visionProvider',
   OE_VISION_MODEL:     'visionModel',
 };
+
+// Resolve the real client IP for rate-limiting. X-Forwarded-For / CF-Connecting-IP
+// are honoured ONLY when the request arrived from a trusted proxy
+// (config.security.trustedProxies); otherwise the (unspoofable) socket peer is
+// used. Defaults to loopback so same-machine nginx works out of the box — add
+// your reverse-proxy's address for a separate-box setup. See _helpers/client-ip.mjs.
+const DEFAULT_TRUSTED_PROXIES = ['127.0.0.1', '::1'];
+export function getClientIp(req) {
+  const cfg = loadConfig();
+  const configured = cfg?.security?.trustedProxies;
+  const trusted = Array.isArray(configured) && configured.length ? configured : DEFAULT_TRUSTED_PROXIES;
+  return resolveClientIp(req, trusted) || 'unknown';
+}
 
 export function loadConfig() {
   let cfg;
@@ -318,6 +333,14 @@ export function getUser(id) {
 }
 /** @param {string|null|undefined} id @returns {'owner'|'admin'|'user'|'child'} */
 export function getUserRole(id) { return getUser(id)?.role ?? 'user'; }
+
+// True if the request's authenticated caller is a child account. Used to lock
+// children out of voice-device management (an admin manages those for them).
+// No response is written — the caller decides what to do (typically 403).
+export function isChildRequest(req) {
+  const uid = _gsuid(_gtok(req));
+  return uid ? getUserRole(uid) === 'child' : false;
+}
 
 /**
  * Strip secrets before sending a user object to the browser. SINGLE chokepoint —

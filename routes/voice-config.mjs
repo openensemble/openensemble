@@ -15,7 +15,7 @@
  * once instead of per-device. See lib/voice-config.mjs for the schema.
  */
 
-import { requireAuth, readBody, getUser } from './_helpers.mjs';
+import { requireAuth, readBody, getUser, isPrivileged, isChildRequest } from './_helpers.mjs';
 import { readVoiceConfig, writeVoiceConfig, pushConfigToDevice } from '../lib/voice-config.mjs';
 import { listDevices, markVoiceConfigPushed } from '../lib/voice-devices.mjs';
 
@@ -51,6 +51,14 @@ async function pushToAllDevices(userId) {
 }
 
 export async function handle(req, res) {
+  // Child accounts cannot change voice devices — an admin manages them. (Hiding
+  // the drawer in the child UI is a separate nicety; this is the hard gate.)
+  if (/^(POST|PUT|DELETE|PATCH)$/.test(req.method)
+      && req.url.startsWith('/api/voice-config') && isChildRequest(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Voice devices are managed by an admin for this account.' }));
+    return true;
+  }
   if (req.url === '/api/voice-config' && req.method === 'GET') {
     const userId = requireAuth(req, res);
     if (!userId) return true;
@@ -68,7 +76,17 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'Invalid JSON' }));
       return true;
     }
-    const saved = writeVoiceConfig(userId, body?.slot_assignments || {}, {
+    const assignments = body?.slot_assignments || {};
+    // Impersonation guard: a non-admin may only bind a slot to their OWN
+    // account. Pinning ownerUserId to the caller stops them pointing a slot at
+    // another user and speaking as that user. Admins may assign any account
+    // (legitimate household setup — one device, a slot per family member).
+    if (!isPrivileged(userId)) {
+      for (const a of Object.values(assignments)) {
+        if (a && typeof a === 'object') a.ownerUserId = userId;
+      }
+    }
+    const saved = writeVoiceConfig(userId, assignments, {
       userExists: (id) => !!getUser(id),
     });
     // SAVE ONLY — no auto-push. The device gets changes when the user clicks
