@@ -99,6 +99,14 @@ export async function handle(req, res) {
     // `errors[]` rather than failing the whole call so partial-success is
     // observable.
     let deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
+    // A caller-supplied deviceId must belong to the caller — the TTS half was
+    // ownership-filtered but the ambient half sent straight to any device id,
+    // letting user A start looping audio on user B's device.
+    if (deviceId && !listDevices(userId).some(d => d.id === deviceId)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'deviceId is not one of your paired devices' }));
+      return true;
+    }
     if (!deviceId) deviceId = resolveRoutineDeviceId(routine, null);
     if (!deviceId) {
       const devs = listDevices(userId);
@@ -142,7 +150,13 @@ export async function handle(req, res) {
     const { userId, routine } = hit;
     let body = {};
     try { body = JSON.parse(await readBody(req) || '{}'); } catch { /* optional body */ }
-    const deviceId = resolveRoutineDeviceId(routine, typeof body.deviceId === 'string' ? body.deviceId : null);
+    // The webhook is unauthenticated (capability URL) — a caller-supplied
+    // deviceId is honored only when it's one of the routine OWNER's paired
+    // devices; anything else silently falls back to the routine's own target
+    // (a 403 would leak which device ids exist).
+    let requested = typeof body.deviceId === 'string' ? body.deviceId : null;
+    if (requested && !listDevices(userId).some(d => d.id === requested)) requested = null;
+    const deviceId = resolveRoutineDeviceId(routine, requested);
     const result = await executeRoutine(routine, { userId, deviceId });
     // Webhook fires don't have an open chat session — push TTS via the
     // MP3-marker path so an idle paired device speaks the reply, then start any

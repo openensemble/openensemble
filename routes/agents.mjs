@@ -205,6 +205,12 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     try {
       const changes = JSON.parse(await readBody(req));
+      // Existence check BEFORE any mutation — updateAgentMeta/saveUserAgentOverride
+      // used to run first, so a PATCH against a garbage id wrote a global
+      // agentModels entry (or a per-user override) into config before 404ing.
+      if (!getAgent(agentMatch[1])) {
+        res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return true;
+      }
       const uiChanges = {};
       const globalChanges = {};
       if (changes.name)     uiChanges.name     = changes.name;
@@ -216,7 +222,13 @@ export async function handle(req, res) {
       // and the UI would re-render the old value on next load, looking
       // like the change had "reverted".
       if ('description' in changes)  uiChanges.description  = changes.description;
-      if ('systemPrompt' in changes) uiChanges.systemPrompt = changes.systemPrompt;
+      // Mirror the create-time child clamp: a child can't author prompt text.
+      // Without this, PATCH stored a verbatim systemPrompt and broke the
+      // invariant (the safety prefix still prepends, but jailbreak-suffix
+      // text landed in the stored prompt).
+      if ('systemPrompt' in changes && getUser(authId)?.role !== 'child') {
+        uiChanges.systemPrompt = changes.systemPrompt;
+      }
       if (changes.model)     globalChanges.model     = changes.model;
       if (changes.provider)  globalChanges.provider  = changes.provider;
       // reasoningEffort is account-specific — always a per-user override, never
@@ -254,9 +266,13 @@ export async function handle(req, res) {
       if (Object.keys(globalChanges).length) {
         // Global agent config (model/provider/maxTokens/contextSize) may only be
         // changed by the agent's owner (or a privileged user). Non-owners can
-        // still set per-user fields like reasoningEffort above.
+        // still set per-user fields like reasoningEffort above. The old guard
+        // (`customRec?.ownerId && …`) skipped entirely when the id matched no
+        // custom record — built-in agents and ownerless legacy records were
+        // globally writable by ANY authenticated user, children included.
         const customRec = loadCustomAgents().find(a => a.id === agentMatch[1]);
-        if (customRec?.ownerId && customRec.ownerId !== authId && !isPrivileged(authId)) {
+        const ownsIt = Boolean(customRec && customRec.ownerId === authId);
+        if (!ownsIt && !isPrivileged(authId)) {
           res.writeHead(403); res.end(JSON.stringify({ error: 'Not your agent' })); return true;
         }
         updateAgentMeta(agentMatch[1], globalChanges);

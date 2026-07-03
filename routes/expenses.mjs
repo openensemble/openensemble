@@ -85,6 +85,16 @@ async function extractText(fileData, ext) {
   return '';
 }
 
+// Book-level authorization. The transaction routes used to gate on expense-
+// GROUP membership + bookId match only — any group member who knew/guessed a
+// private bookId could read, edit, or delete its transactions. The book's own
+// ownerId/sharedWith (already enforced for the book list) is the boundary.
+// 'none' (un-booked transactions) stays group-scoped by design.
+function canAccessBook(authId, bookId) {
+  if (!bookId || bookId === 'none') return true;
+  return getExpBooksForUser(authId).some(b => b.id === bookId);
+}
+
 export async function handle(req, res) {
   // Chat file upload (images + docs for any agent)
   if (req.url === '/api/chat-upload' && req.method === 'POST') {
@@ -357,8 +367,9 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const params = new URL(req.url, 'http://x').searchParams;
     const bookParam = params.get('bookId');
-    // Require a bookId — never return cross-book results
-    if (!bookParam) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('[]'); return true; }
+    // Require a bookId — never return cross-book results. An inaccessible
+    // book returns the same empty shape (no probe signal for guessed ids).
+    if (!bookParam || !canAccessBook(authId, bookParam)) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('[]'); return true; }
     let list = fs.existsSync(EXPENSES_DB) ? JSON.parse(fs.readFileSync(EXPENSES_DB, 'utf8')) : [];
     const memberIds = getExpGroupMemberIds(authId);
     const usersSnap = loadUsers();
@@ -384,7 +395,7 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const params = new URL(req.url, 'http://x').searchParams;
     const bookParam = params.get('bookId');
-    if (!bookParam) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('[]'); return true; }
+    if (!bookParam || !canAccessBook(authId, bookParam)) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('[]'); return true; }
     let list = fs.existsSync(EXPENSES_DB) ? JSON.parse(fs.readFileSync(EXPENSES_DB, 'utf8')) : [];
     const memberIds = getExpGroupMemberIds(authId);
     list = list.filter(t => memberIds.includes(t.userId));
@@ -400,7 +411,7 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const params = new URL(req.url, 'http://x').searchParams;
     const bookParam = params.get('bookId');
-    if (!bookParam) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ byMonth: {}, total: 0, count: 0 })); return true; }
+    if (!bookParam || !canAccessBook(authId, bookParam)) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ byMonth: {}, total: 0, count: 0 })); return true; }
     let list = fs.existsSync(EXPENSES_DB) ? JSON.parse(fs.readFileSync(EXPENSES_DB, 'utf8')) : [];
     list = list.filter(t => getExpGroupMemberIds(authId).includes(t.userId));
     if (bookParam === 'none') list = list.filter(t => !t.bookId);
@@ -426,10 +437,28 @@ export async function handle(req, res) {
     try {
       const changes = JSON.parse(await readBody(req));
       const allowed = ['category', 'description', 'merchant', 'date', 'amount'];
+      // Coerce/validate before writing. Uncoerced PATCH values used to land
+      // verbatim: {"amount":"50"} made the summary reducer string-concatenate
+      // into NaN, and a cleared date broke slice/localeCompare with a 500.
+      if ('amount' in changes) {
+        const amt = parseFloat(changes.amount);
+        if (!Number.isFinite(amt)) { res.writeHead(400); res.end(JSON.stringify({ error: 'amount must be a number' })); return true; }
+        changes.amount = amt;
+      }
+      if ('date' in changes && !(typeof changes.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(changes.date))) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'date must be YYYY-MM-DD' })); return true;
+      }
+      for (const k of ['category', 'description', 'merchant']) {
+        if (k in changes) changes[k] = String(changes[k] ?? '');
+      }
       const memberIds = getExpGroupMemberIds(authId);
+      const accessibleBooks = getExpBooksForUser(authId).map(b => b.id);
       const updated = await withLock(EXPENSES_DB, () => {
         const list = fs.existsSync(EXPENSES_DB) ? JSON.parse(fs.readFileSync(EXPENSES_DB, 'utf8')) : [];
-        const idx = list.findIndex(t => t.id === id && memberIds.includes(t.userId));
+        // Book boundary: a transaction inside a book the caller can't access
+        // is 404, even for same-group members (see canAccessBook).
+        const idx = list.findIndex(t => t.id === id && memberIds.includes(t.userId)
+          && (!t.bookId || accessibleBooks.includes(t.bookId)));
         if (idx === -1) return null;
         for (const k of allowed) { if (k in changes) list[idx][k] = changes[k]; }
         fs.writeFileSync(EXPENSES_DB, JSON.stringify(list, null, 2));
@@ -446,9 +475,11 @@ export async function handle(req, res) {
     const authId = requireAuth(req, res); if (!authId) return true;
     const id = req.url.split('/').pop();
     const memberIds = getExpGroupMemberIds(authId);
+    const accessibleBooks = getExpBooksForUser(authId).map(b => b.id);
     const found = await withLock(EXPENSES_DB, () => {
       const list = fs.existsSync(EXPENSES_DB) ? JSON.parse(fs.readFileSync(EXPENSES_DB, 'utf8')) : [];
-      const idx = list.findIndex(t => t.id === id && memberIds.includes(t.userId));
+      const idx = list.findIndex(t => t.id === id && memberIds.includes(t.userId)
+        && (!t.bookId || accessibleBooks.includes(t.bookId)));
       if (idx === -1) return false;
       list.splice(idx, 1);
       fs.writeFileSync(EXPENSES_DB, JSON.stringify(list, null, 2));
