@@ -396,7 +396,19 @@ async function runTask(task, broadcast, opts = {}) {
     const resolved = getAgentsForUser(userId).find(a => a.id === task.agent)
       ?? (isChild ? null : getAgent(task.agent));
     if (!resolved) {
-      console.error(`[scheduler] Unknown agent "${task.agent}" for task "${task.id}"`);
+      // Stamp + disable instead of silently returning — the task used to
+      // stay "enabled" forever with no lastRun/lastError (a zombie the user
+      // couldn't see failing). An agent that no longer exists can never
+      // succeed, so this mirrors the consecutive-failures auto-disable.
+      console.error(`[scheduler] Unknown agent "${task.agent}" for task "${task.id}" — disabling`);
+      log.error('scheduler', 'task agent unresolvable', { taskId: task.id, label: task.label, agent: task.agent });
+      await updateTask(task.id, {
+        lastRun: new Date().toISOString(),
+        lastError: `Agent "${task.agent}" not found — re-assign the task to an existing agent and re-enable it.`,
+        enabled: false,
+        disabledReason: `agent "${task.agent}" not found`,
+      });
+      if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent });
       return;
     }
 

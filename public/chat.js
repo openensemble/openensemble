@@ -468,7 +468,10 @@ function renderSession(opts) {
     if (m.scheduled)                 appendTaskHeader(m.content, m.ts, false);
     else if (m.role === 'notification') appendNotification({ agent: activeAgent, content: m.content, from: m.from, ts: m.ts });
     else if (m.role === 'user' && !m.hidden)        appendUserBubble(m.content, m.ts, false, m.attachment ?? null);
-    else if (m.role === 'assistant' && m.image)    appendImageBubble(m.image, m.ts, false);
+    else if (m.role === 'assistant' && m.image) {
+      if (m.image.base64) appendImageBubble(m.image, m.ts, false);
+      else appendReportImageBubble(m.image, m.ts, false); // saved-file row (no inline base64)
+    }
     else if (m.role === 'assistant' && m.video)    appendVideoBubble(m.video, m.ts, false);
     else if (m.role === 'status' && m.status)     appendStatusBubble(m.status, m.ts, false);
     else if (m.role === 'proposal' && m.proposalId) appendProposalBubble(m, false);
@@ -660,7 +663,12 @@ function appendAgentReportTaskChip(report, scroll = true) {
   const watcherId = agentReportWatcherId(report);
   if (!watcherId) return false;
   const ownWatcherId = typeof report.watcherId === 'string' ? report.watcherId : '';
-  const foldedIntoRoot = !!(ownWatcherId && watcherId !== ownWatcherId);
+  // Fold whenever the DISPLAY watcher differs from the report's own —
+  // including when the child has NO own watcherId (failed registration):
+  // the old `ownWatcherId && …` predicate rendered such a report as a fresh
+  // final chip under the ROOT's id, overwriting the still-running root
+  // chip's header and marking it done.
+  const foldedIntoRoot = watcherId !== ownWatcherId;
   const existing = document.querySelector(`.msg.task-chip[data-watcher-id="${CSS.escape(watcherId)}"]`);
   const existingAgent = existing?.querySelector('.task-chip-header span')?.textContent?.trim() || '';
   const existingTask = existing?.querySelector('.task-chip-task')?.textContent?.trim() || '';
@@ -882,7 +890,14 @@ function appendAgentReportImages(report, scroll = true) {
   if (!images.length) return false;
   const ts = report.ts || Date.now();
   let rendered = false;
+  // Skip images that already exist as their own session image rows (the live
+  // tool-image event persists one for visible turns) — an adopted delegation's
+  // report carrying the same file used to render it twice.
+  const sessionImageFiles = new Set((sessions[activeAgent] ?? [])
+    .filter(m => m.role === 'assistant' && m.image?.filename)
+    .map(m => m.image.filename));
   images.forEach((image, idx) => {
+    if (image?.filename && sessionImageFiles.has(image.filename)) return;
     if (appendReportImageBubble(image, ts + idx, false, idx)) rendered = true;
   });
   if (rendered && scroll) scrollToBottom();

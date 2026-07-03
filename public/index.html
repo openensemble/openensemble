@@ -15,10 +15,14 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<!-- Vendored, pinned copies (lucide 0.575.0, marked 16.4.1, dompurify 3.3.1,
+     chart.js 4.5.1). CDN loads meant the app broke offline, and an unpinned
+     lucide@latest / marked could ship breaking (or malicious) changes on any
+     reload — DOMPurify from a CDN is the XSS sanitizer itself. -->
+<script src="/vendor/lucide.min.js"></script>
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/chart.umd.min.js"></script>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>

@@ -138,7 +138,7 @@ function _modelContextWindow(model) {
   return null;
 }
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false } = {}) {
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [] } = {}) {
   // Record a compact summary of which tools fired this turn so future loads
   // of this session can show the assistant what it actually did, not just
   // what it said. Without this, short follow-ups ("send", "again", "do that
@@ -209,8 +209,26 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     : { role: 'assistant', content: assistantContent, ts: Date.now() };
   if (hideTurn) assistantEntry.hidden = true;
   if (hideTaskId) assistantEntry.hideTaskId = hideTaskId;
+  // Tool-produced images persist as their own rows on VISIBLE turns so they
+  // survive a reload (base64 stripped when a saved file exists — same policy
+  // as persistedReportImage). Hidden turns skip: the chip/agent_report owns
+  // that surface and persists its own copy.
+  const imageEntries = (!hideTurn && Array.isArray(turnImages) && turnImages.length)
+    ? turnImages.map(img => ({
+        role: 'assistant',
+        image: {
+          mimeType: img.mimeType || 'image/png',
+          ...(img.filename ? { filename: img.filename } : {}),
+          ...(img.savedPath ? { savedPath: img.savedPath } : {}),
+          ...(img.base64 && !img.savedPath && !img.filename ? { base64: img.base64 } : {}),
+        },
+        content: `[Image: ${img.filename || 'generated image'}]`,
+        ts: Date.now(),
+      }))
+    : [];
   appendToSession(agent.id,
     { role: 'user', content: sessionText, ts: Date.now(), ...(hiddenUser ? { hidden: true } : {}) },
+    ...imageEntries,
     assistantEntry);
 
   // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
@@ -390,6 +408,7 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   let hideTaskId = null;
   const toolsUsed = [];
   const toolEvents = [];
+  const turnImages = [];
   // One synthetic web_search record per turn when the provider's hosted search
   // runs (it emits only tool_progress, never a local tool_call/result pair).
   let _nativeSearchRecorded = false;
@@ -419,6 +438,18 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
       };
     }
     if (event.type === '__hide_turn') { hideTurn = true; hideTaskId = event.taskId || null; continue; }
+    // Tool-produced images: collect for turn persistence (sync delegations'
+    // image bubbles used to vanish on reload — nothing wrote them to the
+    // session). Hidden turns skip persisting them (the chip/agent_report owns
+    // that surface; persisting both double-rendered on reload).
+    if (event.type === 'image' && (event.filename || event.base64)) {
+      turnImages.push({
+        base64: event.base64 || null,
+        mimeType: event.mimeType || event.mediaType || 'image/png',
+        filename: event.filename || null,
+        savedPath: event.savedPath || null,
+      });
+    }
     if (event.type === 'tool_call' && event.name) {
       _lastCallArgsByName[event.name] = event.args ?? null;
       const rec = {
@@ -1405,7 +1436,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // replaced with the corrected reply. `canRecover` only gates whether the
   // recovery passes run — it no longer suppresses streaming.
   const canRecover = Boolean(_routerStore);
-  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false });
+  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage, turnImages } = yield* consumeProvider(providerGen, { suppressText: false });
   let recoveredMissingTools = false;
   if (!errored && canRecover && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
     const missingSkills = inferMissingToolSkills({ userText: routeText, assistantText: assistantContent, userId });
@@ -1441,7 +1472,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         // the device speaks it — then the corrected reply streams live after it.
         yield { type: 'token', text: `\n\n${MISSING_TOOL_NOTICE}\n\n` };
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-        ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false }));
+        { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = _r); turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
       }
     }
   }
@@ -1471,7 +1502,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // the notice + corrected reply both stream as tokens to reach voice + text.
       yield { type: 'token', text: `\n\n${IN_PROGRESS_NOTICE}\n\n` };
       ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-      ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false }));
+      { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = _r); turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
       recoveredProgressClaim = true;
     } catch (e) {
       log.warn('chat', 'in-progress claim recovery failed', { err: e.message });
@@ -1659,7 +1690,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     }
   }
   if (assistantContent) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true });
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true, turnImages });
     // Phase-14 chip-replaces-turn: emit __content only when we're NOT
     // hiding the turn. The browser would otherwise render the coordinator's
     // assistant bubble alongside the chip — redundant.

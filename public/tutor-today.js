@@ -33,9 +33,7 @@ function startTutorSession() {
   } catch {}
 }
 
-function escHtml(s) {
-  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
+// escHtml comes from core.js (single canonical definition).
 
 function renderTutorToday({ stats, level, intoLevel, nextLevelAt, recap, subjects, dueReviews }) {
   if (!stats || (stats.xp === 0 && !Object.keys(stats.subjects || {}).length)) {

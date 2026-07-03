@@ -340,9 +340,9 @@ function setNotesBadge(count) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function escHtml(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+// escHtml comes from core.js — a local copy here (without single-quote
+// escaping) used to load later and silently replace the strict global one
+// for every caller in the app.
 
 function fmtRelTime(iso) {
   const d = new Date(iso);

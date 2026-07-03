@@ -203,7 +203,7 @@ function showPasswordModal(title, onConfirm, onCancel) {
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 const AVATAR_COLORS = ['#e53935','#8e24aa','#1e88e5','#00897b','#f4511e','#6d4c41','#546e7a','#3949ab'];
@@ -255,7 +255,10 @@ async function runSearch(query) {
       const name = agent?.name ?? r.agent;
       const emoji = agent?.emoji ?? '🤖';
       const date = r.ts ? new Date(r.ts).toLocaleDateString() : '';
-      const snippet = escHtml(r.content).replace(new RegExp(`(${escHtml(query)})`, 'gi'), '<mark>$1</mark>');
+      // Escape regex metacharacters — searching "c++" or "(test" used to
+      // throw and blank the results pane.
+      const safeQuery = escHtml(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const snippet = escHtml(r.content).replace(new RegExp(`(${safeQuery})`, 'gi'), '<mark>$1</mark>');
       return `<div class="search-result" data-action="_searchResultClick" data-args='${JSON.stringify([r.agent]).replace(/'/g, "&#39;")}' style="padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:4px;border:1px solid var(--border)">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
           <span>${emoji}</span><strong style="font-size:13px">${escHtml(name)}</strong>

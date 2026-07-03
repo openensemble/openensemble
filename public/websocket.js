@@ -235,7 +235,12 @@ function handleServerMessage(msg) {
         sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
       }
       streamEl = null; streamBuf = '';
-      appendMessage('assistant', msg.text, { agent: msg.agent });
+      // appendMessage never existed — this threw a ReferenceError the moment
+      // a permission request reached the active agent, killing the handler
+      // before the input unlock below.
+      if (!sessions[msg.agent]) sessions[msg.agent] = [];
+      sessions[msg.agent].push({ role: 'assistant', content: msg.text, ts: Date.now() });
+      appendAssistantBubble(msg.text, Date.now(), true);
       // Unlock input so user can type APPROVE or DENY (bypasses streaming guard)
       awaitingPermission = true;
       $('btnSend').disabled = false;
