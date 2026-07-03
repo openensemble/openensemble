@@ -359,7 +359,15 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     // flip between sync and async handling.
     background = !wantsForeground;
   } else if (typeof args.background === 'boolean') {
-    background = args.background || (callerIsCoordinator && !wantsForeground && LONG_TASK_RE.test(rawTask));
+    // Explicit background is honored as-is (owner decision 2026-07-03). The
+    // old LONG_TASK_RE veto made background:false nearly dead — "read that
+    // file and tell me" produced a chip instead of an answer while the
+    // manifest promised FALSE works. Worst case is bounded anyway: a sync
+    // tool call that runs past 10s auto-backgrounds into a chip (roles.mjs
+    // AUTO_BG_MS net). Declared handoff pipelines keep their own override
+    // above — an incidental background:false must not flip identical
+    // pipelines between sync and async.
+    background = args.background;
   } else if (callerIsCoordinator) {
     background = LONG_TASK_RE.test(rawTask);       // coordinator → specialist: long tasks detach
     if (background) console.log('[delegate] auto-background:true (coordinator→specialist, task-shaped) for', agent_id);
