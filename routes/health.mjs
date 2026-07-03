@@ -114,6 +114,11 @@ function gmailTokenStatus(userId) {
   } catch (e) { console.warn('[health] Failed to read Gmail token for', userId + ':', e.message); return { exists: false, expired: true }; }
 }
 
+// Per-file line-count memo keyed by (size, mtime) — every health build used
+// to read the full contents of every session file just to count lines.
+// Steady-state builds now stat each file and only re-read the ones that
+// actually changed since the last build.
+const _sessLineCache = new Map(); // filename -> { size, mtimeMs, lines }
 function countSessionFiles() {
   const sessDir = path.join(BASE_DIR, 'sessions');
   if (!fs.existsSync(sessDir)) return { files: 0, totalLines: 0 };
@@ -121,8 +126,16 @@ function countSessionFiles() {
   let totalLines = 0;
   for (const f of files) {
     try {
-      const content = fs.readFileSync(path.join(sessDir, f), 'utf8');
-      totalLines += content.split('\n').filter(Boolean).length;
+      const p = path.join(sessDir, f);
+      const st = fs.statSync(p);
+      const hit = _sessLineCache.get(f);
+      if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) {
+        totalLines += hit.lines;
+        continue;
+      }
+      const lines = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).length;
+      _sessLineCache.set(f, { size: st.size, mtimeMs: st.mtimeMs, lines });
+      totalLines += lines;
     } catch (e) { console.warn('[health] Failed to read session file', f + ':', e.message); }
   }
   return { files: files.length, totalLines };

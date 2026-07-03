@@ -119,7 +119,7 @@ function loadUserWatchers(userId) {
   return data;
 }
 
-function persistUser(userId) {
+function _writeUserNow(userId) {
   const data = _byUser.get(userId);
   if (!data) return;
   const p = watchersPath(userId);
@@ -130,6 +130,39 @@ function persistUser(userId) {
     log.warn('watchers', `Failed to persist ${userId} watchers`, { err: e.message });
   }
 }
+
+// Debounced persistence for HIGH-FREQUENCY updates (pushWatcherStatus gets a
+// call per tool_progress chunk — tens per second during a streaming
+// delegation, each of which used to stringify + writeFileSync the user's
+// whole watchers file on the event loop). The in-memory _byUser map is the
+// source of truth, so deferring the disk write only risks losing the last
+// ≤1.5s of progress TEXT on a hard crash; structural transitions (register,
+// finalize, unwatch, patch) still write through immediately.
+const FLUSH_DEBOUNCE_MS = 1500;
+const _dirtyUsers = new Set();
+let _flushTimer = null;
+
+function persistUser(userId, { debounce = false } = {}) {
+  if (!debounce) {
+    _dirtyUsers.delete(userId);
+    _writeUserNow(userId);
+    return;
+  }
+  _dirtyUsers.add(userId);
+  if (_flushTimer) return;
+  _flushTimer = setTimeout(() => {
+    _flushTimer = null;
+    for (const uid of _dirtyUsers) _writeUserNow(uid);
+    _dirtyUsers.clear();
+  }, FLUSH_DEBOUNCE_MS);
+  _flushTimer.unref?.();
+}
+
+// Graceful-shutdown net: flush any pending debounced writes synchronously.
+process.on('exit', () => {
+  for (const uid of _dirtyUsers) _writeUserNow(uid);
+  _dirtyUsers.clear();
+});
 
 function loadAllUsersFromDisk() {
   if (!fs.existsSync(USERS_DIR)) return;
@@ -464,7 +497,8 @@ export function pushWatcherStatus(userId, watcherId, text, extraState = null) {
     pushHistory(record, { text, ts: Date.now() });
     _sendStatusFn?.(userId, watcherStatusPayload(record, text));
   }
-  persistUser(userId);
+  // Debounced: this runs per tool_progress chunk during streaming delegations.
+  persistUser(userId, { debounce: true });
   return true;
 }
 

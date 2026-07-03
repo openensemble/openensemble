@@ -187,18 +187,31 @@ export function getStreamBuffer(agentId) {
   } catch { return null; }
 }
 
-/** Recover any leftover .streaming files from a previous server crash. */
-export function cleanStaleStreamBuffers() {
+/**
+ * Recover any leftover .streaming files from a previous server crash.
+ * Async and fire-and-forget from module load — the walk used to run
+ * synchronously at import (readdir × every user × every session file),
+ * stalling boot on large installs. Deferral is safe because only buffers
+ * whose mtime predates THIS process's start are touched: a .streaming file
+ * created by a live turn after boot is active, not stale, and unlinking it
+ * would corrupt an in-flight stream's crash net.
+ */
+const _bootTs = Date.now();
+export async function cleanStaleStreamBuffers() {
+  const fsp = fs.promises;
   try {
     if (!fs.existsSync(USERS_DIR)) return;
-    for (const userDir of fs.readdirSync(USERS_DIR)) {
+    for (const userDir of await fsp.readdir(USERS_DIR)) {
       const sessDir = path.join(USERS_DIR, userDir, 'sessions');
-      if (!fs.existsSync(sessDir)) continue;
-      for (const file of fs.readdirSync(sessDir)) {
+      let files;
+      try { files = await fsp.readdir(sessDir); } catch { continue; }
+      for (const file of files) {
         if (!file.endsWith('.streaming')) continue;
         const bufPath = path.join(sessDir, file);
         try {
-          const buf = JSON.parse(fs.readFileSync(bufPath, 'utf8'));
+          const st = await fsp.stat(bufPath).catch(() => null);
+          if (!st || st.mtimeMs >= _bootTs) continue; // active (post-boot) buffer
+          const buf = JSON.parse(await fsp.readFile(bufPath, 'utf8'));
           if (buf?.content) {
             // Convert to a final session entry — but ONLY if the turn didn't
             // already persist its reply before the crash/restart. A restart
@@ -210,7 +223,7 @@ export function cleanStaleStreamBuffers() {
             let alreadyPersisted = false;
             try {
               if (fs.existsSync(jsonlFile)) {
-                const lines = fs.readFileSync(jsonlFile, 'utf8').trim().split('\n').filter(Boolean);
+                const lines = (await fsp.readFile(jsonlFile, 'utf8')).trim().split('\n').filter(Boolean);
                 for (let i = lines.length - 1; i >= 0 && i >= lines.length - 5; i--) {
                   const r = JSON.parse(lines[i]);
                   if (r.role !== 'assistant') continue;
@@ -224,13 +237,13 @@ export function cleanStaleStreamBuffers() {
               }
             } catch { /* fall through and recover defensively */ }
             if (!alreadyPersisted) {
-              fs.appendFileSync(jsonlFile, JSON.stringify({ role: 'assistant', content: buf.content, ts: buf.ts, partial: true }) + '\n');
+              await fsp.appendFile(jsonlFile, JSON.stringify({ role: 'assistant', content: buf.content, ts: buf.ts, partial: true }) + '\n');
             }
           }
-          fs.unlinkSync(bufPath);
+          await fsp.unlink(bufPath);
         } catch (e) {
           console.warn('[sessions] Failed to recover stream buffer', file, e.message);
-          try { fs.unlinkSync(bufPath); } catch {}
+          await fsp.unlink(bufPath).catch(() => {});
         }
       }
     }
@@ -239,8 +252,9 @@ export function cleanStaleStreamBuffers() {
   }
 }
 
-// Run cleanup on module load (recovers from server crashes)
-cleanStaleStreamBuffers();
+// Run cleanup on module load (recovers from server crashes). Fire-and-forget:
+// the mtime gate above makes it safe to run concurrently with new turns.
+cleanStaleStreamBuffers().catch(e => console.warn('[sessions] Stream buffer cleanup failed:', e.message));
 
 // ── Cross-agent context ─────────────────────────────────────────────────────
 // async because it just forwards to loadSession, which is async since

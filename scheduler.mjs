@@ -123,10 +123,64 @@ export function saveTasks(tasks) {
   }
 }
 
-const modifyTasks = fn => withLock(TASKS_LOCK_KEY, () => {
-  const data = loadAllTasksForScheduler();
-  const result = fn(data);
-  saveTasks(data);
+// Save ONE owner's task list (no lock — callers hold TASKS_LOCK_KEY).
+// Atomic write; an empty list removes the file (only if it parses, matching
+// saveTasks' corrupt-file preservation rule).
+function saveOwnerTasks(ownerKey, tasks) {
+  const p = taskPath(ownerKey);
+  if (!tasks.length) {
+    if (existsSync(p) && taskFileParses(p)) try { unlinkSync(p); } catch {}
+    return;
+  }
+  mkdirSync(path.dirname(p), { recursive: true });
+  atomicWriteSync(p, JSON.stringify(tasks, null, 2));
+}
+
+// Which owner file holds this task id? Read-only scan, first hit wins —
+// mirrors loadAllTasksForScheduler's sources without concatenating them.
+function findOwnerKeyForTask(id) {
+  if (existsSync(USERS_DIR)) {
+    try {
+      for (const entry of readdirSync(USERS_DIR, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const p = path.join(USERS_DIR, entry.name, 'tasks.json');
+        try {
+          if (existsSync(p) && JSON.parse(readFileSync(p, 'utf8')).some(t => t?.id === id)) return entry.name;
+        } catch {}
+      }
+    } catch {}
+  }
+  if (existsSync(TASKS_DIR)) {
+    try {
+      for (const f of readdirSync(TASKS_DIR)) {
+        if (!f.endsWith('.json')) continue;
+        try {
+          if (JSON.parse(readFileSync(path.join(TASKS_DIR, f), 'utf8')).some(t => t?.id === id)) return f.slice(0, -5);
+        } catch {}
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// Per-owner mutation. The old modifyTasks was load-ALL + save-ALL: every
+// lastRun stamp re-serialized every owner's tasks.json and swept every
+// owner's file for deletion. The owner is always derivable (task.ownerId on
+// create, id→owner scan on update/remove), so mutations now touch exactly
+// one file. Same lock key, so concurrent mutations still serialize.
+const modifyTasksForOwner = (ownerKey, fn) => withLock(TASKS_LOCK_KEY, () => {
+  const tasks = loadTasksForOwner(ownerKey);
+  const result = fn(tasks);
+  saveOwnerTasks(ownerKey, tasks);
+  return result;
+});
+
+const modifyTaskById = (id, fn) => withLock(TASKS_LOCK_KEY, () => {
+  const ownerKey = findOwnerKeyForTask(id);
+  if (ownerKey === null) return undefined;
+  const tasks = loadTasksForOwner(ownerKey);
+  const result = fn(tasks);
+  saveOwnerTasks(ownerKey, tasks);
   return result;
 });
 
@@ -144,10 +198,10 @@ export async function addTask(task) {
   }
   const id = `task_${Date.now()}`;
   const entry = { id, enabled: true, ...task };
-  // modifyTasks goes through withLock and is async — must await or callers
+  // modifyTasksForOwner goes through withLock and is async — must await or callers
   // get a Promise where they expect a task object (then `task.enabled` is
   // undefined, scheduleTask bails, and chat outcomes show "label=undefined").
-  const saved = await modifyTasks(tasks => { tasks.push(entry); return entry; });
+  const saved = await modifyTasksForOwner(entry.ownerId ?? 'system', tasks => { tasks.push(entry); return entry; });
   if (_broadcast) {
     _broadcast({ type: 'task_created', task: saved, ownerId: saved.ownerId ?? null });
   }
@@ -155,11 +209,15 @@ export async function addTask(task) {
 }
 
 export function removeTask(id) {
-  return modifyTasks(tasks => { const i = tasks.findIndex(t => t.id === id); if (i !== -1) tasks.splice(i, 1); });
+  return modifyTaskById(id, tasks => { const i = tasks.findIndex(t => t.id === id); if (i !== -1) tasks.splice(i, 1); });
 }
 
 export function updateTask(id, patch) {
-  return modifyTasks(tasks => { const i = tasks.findIndex(t => t.id === id); if (i !== -1) Object.assign(tasks[i], patch); });
+  // ownerId is pinned at creation — a patch can't migrate a task to another
+  // owner's file (route PATCH bodies pass through here verbatim, and the old
+  // load-all/save-all path would silently re-home the record).
+  const { ownerId: _pinned, ...rest } = patch ?? {};
+  return modifyTaskById(id, tasks => { const i = tasks.findIndex(t => t.id === id); if (i !== -1) Object.assign(tasks[i], rest); });
 }
 
 // ── Scheduling ────────────────────────────────────────────────────────────────

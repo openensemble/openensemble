@@ -10,6 +10,7 @@ import { CFG_PATH, USERS_DIR, readConfig } from './lib/paths.mjs';
 import { withLock, atomicWriteSync } from './routes/_helpers/io-lock.mjs';
 // Simple in-process caches — invalidated on write or file change
 let _customAgentsCache = null; // cache of ALL agents across all user files
+let _agentByIdCache = null;    // Map id → agent, rebuilt with _customAgentsCache
 let _modelOverridesCache = null;
 
 // Invalidate caches when files change externally (direct edits, model hot-swap).
@@ -19,7 +20,7 @@ const _watchedAgentFiles = new Set();
 function watchAgentsFile(filePath) {
   if (_watchedAgentFiles.has(filePath) || !existsSync(filePath)) return;
   try {
-    const w = watch(filePath, () => { _customAgentsCache = null; });
+    const w = watch(filePath, () => { _customAgentsCache = null; _agentByIdCache = null; });
     w.on('error', e => console.warn('[agents] agents.json watcher error:', e.message));
     _watchedAgentFiles.add(filePath);
   } catch (e) { console.warn('[agents] failed to watch', filePath, ':', e.message); }
@@ -57,6 +58,7 @@ function saveUserAgents(userId, list) {
   // silently drop every custom agent for this user on the next load.
   atomicWriteSync(p, JSON.stringify(list, null, 2));
   _customAgentsCache = null;
+  _agentByIdCache = null;
   watchAgentsFile(p);
 }
 
@@ -72,6 +74,20 @@ export function loadCustomAgents() {
     }
     return (_customAgentsCache = agents);
   } catch { return (_customAgentsCache = []); }
+}
+
+// O(1) id lookup for the hot paths (getAgent runs per chat dispatch,
+// getCoordinatorModel per reasoning-effort resolution). First-writer-wins on
+// a duplicate id, matching what .find() over the flattened array returned.
+function findAgentById(id) {
+  if (!_agentByIdCache) {
+    const map = new Map();
+    for (const a of loadCustomAgents()) {
+      if (a?.id != null && !map.has(a.id)) map.set(a.id, a);
+    }
+    _agentByIdCache = map;
+  }
+  return _agentByIdCache.get(id) ?? null;
 }
 
 function buildSystemPrompt(name, emoji, description) {
@@ -243,7 +259,7 @@ export function getCoordinatorAgentId() {
 function getCoordinatorModel() {
   const coordId = getCoordinatorAgentId();
   const overrides = getAgentModelOverrides()[coordId] ?? {};
-  const agent = loadCustomAgents().find(a => a.id === coordId);
+  const agent = findAgentById(coordId);
   return {
     model:    overrides.model    ?? agent?.model    ?? 'claude-sonnet-4-6',
     provider: overrides.provider ?? agent?.provider ?? 'anthropic',
@@ -251,7 +267,7 @@ function getCoordinatorModel() {
 }
 
 export function getAgentScope(id) {
-  const agent = loadCustomAgents().find(a => a.id === id);
+  const agent = findAgentById(id);
   const overrides = getAgentModelOverrides()[id] ?? {};
   const scope = overrides.scope ?? agent?.scope ?? 'private';
   const shareGroup = overrides.shareGroup ?? agent?.shareGroup ?? null;
@@ -261,7 +277,7 @@ export function getAgentScope(id) {
 
 export function getAgent(id) {
   const overrides = getAgentModelOverrides();
-  const agent = loadCustomAgents().find(a => a.id === id) ?? null;
+  const agent = findAgentById(id);
   if (!agent) return null;
   const a = overrides[id] ? { ...agent, ...overrides[id] } : agent;
   return { ...a, tools: a.tools ?? [] };
