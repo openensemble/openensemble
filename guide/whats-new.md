@@ -6,6 +6,25 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-07-03
+
+**Chat stays where you're reading while a reply streams**
+Scrolling up to re-read something while the assistant was still typing used to be impossible — every token yanked the view back to the bottom, several times a second. Now the chat only follows the stream while you're already at the bottom: scroll up and it stays put, with a **↓ Jump to latest** pill you can tap to catch back up. Sending a message or switching agents still lands you at the latest message. Streaming is also much smoother in long replies (the whole message no longer re-renders on every token), and you can select text mid-stream without losing the selection.
+
+**Long chats load faster and stop bloating the tab**
+Very long sessions used to render every message on every update, which made switching to a busy agent slow and let long-lived tabs eat memory. The chat now renders the most recent 150 messages with a **Load earlier messages** button at the top — click it to page further back without losing your place. Generated-image memory is also reclaimed when bubbles re-render, so image-heavy chats no longer grow the tab's footprint over time.
+
+**Stop and errors no longer tangle the next reply**
+After pressing **Stop** (or after a turn failed), the next reply could get glued onto the aborted bubble. Both now finalize cleanly: what streamed before the Stop stays as its own message, and the next reply starts fresh. A connection blip mid-reply also no longer leaves the text painting into a bubble that's no longer on screen.
+
+**Voice-device dropdowns save on every input method**
+In Settings → Devices, picking a voice, wake word, or user with the keyboard (or on many phone pickers) silently didn't save — only mouse clicks did. All the slot dropdowns now save on the actual change, whatever input method you use.
+
+**Tutor quizzes: switching agents mid-answer no longer eats the reply**
+Answering a tutor widget (quiz, flashcard…) and switching agent tabs before the response finished used to swallow the reply — and could swallow the *next* reply too. The response now survives the switch and shows as a normal message when you come back.
+
+---
+
 ## 2026-06-08
 
 **Removing a voice user now frees its slot and wipes the wake word off your devices**

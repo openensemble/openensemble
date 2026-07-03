@@ -405,6 +405,7 @@ async function send() {
   sessions[activeAgent].push(sessionEntry);
   updateSessionWarning();
   const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachment);
+  scrollToBottom(true); // sending always jumps to the bottom, even from scrollback
   // Remember this attempt so it can be cleared/retried if the turn errors.
   lastSentAttempt = { agent: activeAgent, text, attachment, userBubbleEl, sessionEntry };
   $('input').value = '';
@@ -427,10 +428,43 @@ async function send() {
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
-function renderSession() {
+// Cap how much history is rendered per pass — long-lived sessions otherwise
+// grow the DOM without bound and make every re-render O(history). "Load
+// earlier" expands the window and preserves the reading position. Reset to
+// the base window on agent switch.
+const HISTORY_RENDER_WINDOW = 150;
+let _historyWindow = HISTORY_RENDER_WINDOW;
+
+function _loadEarlierMessages() {
+  const m = $('messages');
+  const prevHeight = m.scrollHeight, prevTop = m.scrollTop;
+  _historyWindow += HISTORY_RENDER_WINDOW;
+  renderSession({ keepScroll: true });
+  m.scrollTop = prevTop + (m.scrollHeight - prevHeight);
+}
+
+function renderSession(opts) {
+  const keepScroll = Boolean(opts && opts.keepScroll === true);
   const msgs = $('messages');
-  [...msgs.children].forEach(el => { if (!el.id) el.remove(); });
-  orderSessionForRender(sessions[activeAgent] ?? []).forEach(m => {
+  [...msgs.children].forEach(el => {
+    if (el.id) return;
+    // Image bubbles hold object URLs — revoke before dropping the element or
+    // every re-render leaks the decoded image memory for the tab's lifetime.
+    el.querySelectorAll('img[src^="blob:"]').forEach(img => { try { URL.revokeObjectURL(img.src); } catch {} });
+    el.remove();
+  });
+  const ordered = orderSessionForRender(sessions[activeAgent] ?? []);
+  const start = Math.max(0, ordered.length - _historyWindow);
+  if (start > 0) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'load-earlier-btn';
+    btn.textContent = `Load earlier messages (${start} more)`;
+    btn.style.cssText = 'display:block;margin:10px auto;padding:6px 14px;font-size:12px;border-radius:16px;border:1px solid var(--border);background:var(--bg2);color:var(--muted);cursor:pointer';
+    btn.addEventListener('click', _loadEarlierMessages);
+    insertBefore(btn);
+  }
+  ordered.slice(start).forEach(m => {
     if (m.scheduled)                 appendTaskHeader(m.content, m.ts, false);
     else if (m.role === 'notification') appendNotification({ agent: activeAgent, content: m.content, from: m.from, ts: m.ts });
     else if (m.role === 'user' && !m.hidden)        appendUserBubble(m.content, m.ts, false, m.attachment ?? null);
@@ -470,6 +504,7 @@ function renderSession() {
       appendAssistantBubble(m.content, m.ts, false);
     }
   });
+  if (keepScroll) return;
   const headers = $('messages').querySelectorAll('.task-header[data-ts]');
   if (headers.length) {
     const today = new Date().toDateString();
@@ -2311,6 +2346,7 @@ function retryFailedAttempt() {
   sessions[activeAgent].push(sessionEntry);
   updateSessionWarning();
   const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachment);
+  scrollToBottom(true);
   lastSentAttempt = { agent: activeAgent, text, attachment, userBubbleEl, sessionEntry };
   setStreaming(true); setTyping(true);
   const payload = { type: 'chat', agent: activeAgent, text };
@@ -2446,7 +2482,55 @@ function addTimestamp(el, ts = Date.now()) {
   if (t) t.textContent = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 function insertBefore(el) { $('messages').insertBefore(el, $('typing')); }
-function scrollToBottom() { const m = $('messages'); m.scrollTop = m.scrollHeight; }
+
+// ── Scroll management ─────────────────────────────────────────────────────────
+// Auto-scroll follows new content only while the user is at (or near) the
+// bottom. Scrolling up pauses following and shows a "Jump to latest" pill;
+// scrolling back down, clicking the pill, or sending a message resumes it.
+// Without this, per-token scrollToBottom() yanks the viewport while reading
+// scrollback — several times a second during streaming.
+let _autoScroll = true;
+let _jumpPillEl = null;
+
+function _isNearBottom() {
+  const m = $('messages');
+  return m.scrollHeight - m.scrollTop - m.clientHeight < 80;
+}
+
+function _updateJumpPill() {
+  if (!_jumpPillEl) {
+    _jumpPillEl = document.createElement('button');
+    _jumpPillEl.type = 'button';
+    _jumpPillEl.textContent = '↓ Jump to latest';
+    _jumpPillEl.style.cssText = 'position:fixed;transform:translateX(-50%);z-index:40;padding:6px 14px;font-size:12px;border-radius:16px;border:1px solid var(--border);background:var(--bg2);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);display:none';
+    _jumpPillEl.addEventListener('click', () => scrollToBottom(true));
+    document.body.appendChild(_jumpPillEl);
+  }
+  if (_autoScroll) { _jumpPillEl.style.display = 'none'; return; }
+  const r = $('messages').getBoundingClientRect();
+  _jumpPillEl.style.left = `${r.left + r.width / 2}px`;
+  _jumpPillEl.style.bottom = `${Math.max(0, window.innerHeight - r.bottom) + 12}px`;
+  _jumpPillEl.style.display = 'block';
+}
+
+(function _initScrollTracking() {
+  const attach = () => {
+    const m = $('messages');
+    if (!m) return;
+    m.addEventListener('scroll', () => {
+      const nb = _isNearBottom();
+      if (nb !== _autoScroll) { _autoScroll = nb; _updateJumpPill(); }
+    }, { passive: true });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', attach);
+  else attach();
+})();
+
+function scrollToBottom(force = false) {
+  if (force && !_autoScroll) { _autoScroll = true; _updateJumpPill(); }
+  if (!_autoScroll) return;
+  const m = $('messages'); m.scrollTop = m.scrollHeight;
+}
 // escHtml defined below in Shared helpers section (with full quote escaping)
 
 // ── Slash Command Menu ─────────────────────────────────────────────────────

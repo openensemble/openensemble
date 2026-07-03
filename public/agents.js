@@ -112,6 +112,15 @@ function buildAgentDrawer() {
 
 function switchAgent(id) {
   if (id === activeAgent) { closeAllDrawers(); return; }
+  // A reply streaming into a tutor widget must be released before we leave —
+  // otherwise _activeWidgetTarget stays armed and the next reply (on any
+  // agent) routes into a widget element that no longer exists. If the turn is
+  // still running, its widget buffer becomes the background stream buffer so
+  // the reply survives as a normal bubble on switch-back.
+  let widgetBuf = '';
+  if (typeof getActiveWidgetTarget === 'function' && getActiveWidgetTarget()) {
+    widgetBuf = widgetStreamFinish() || '';
+  }
   // Save current agent's streaming state if still active
   if (streaming) {
     // Capture tool pill names from DOM before clearing
@@ -122,10 +131,11 @@ function switchAgent(id) {
         if (name) savedToolNames.push(name);
       });
     }
-    agentStreams[activeAgent] = { buf: streamBuf, toolNames: savedToolNames, active: true };
+    agentStreams[activeAgent] = { buf: widgetBuf || streamBuf, toolNames: savedToolNames, active: true };
   }
   activeAgent = id;
   streamEl = null; streamBuf = ''; toolPillsEl = null;
+  _historyWindow = HISTORY_RENDER_WINDOW; // new pane starts at the base window
   buildTabs();
   buildAgentDrawer();
   if (!(id in sessions)) {
@@ -134,6 +144,7 @@ function switchAgent(id) {
   }
 
   renderSession();
+  scrollToBottom(true); // switching agents always lands at the latest message
   // Restore streaming state if the new agent is still generating
   const bg = agentStreams[id];
   if (bg?.active) {

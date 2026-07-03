@@ -77,17 +77,21 @@ const WIDGET_BUILDERS = {
 // only and re-resolve DOM nodes each token so renders survive DOM rebuilds.
 const _widgetTargets = new Map(); // wid -> { buf: string, kind: string }
 let _activeWidgetTarget = null; // wid currently receiving stream
+let _activeWidgetTargetAgent = null; // agent that owns the streaming widget
 
 function setWidgetStreamTarget(wid, kind) {
   _widgetTargets.set(wid, { buf: '', kind });
   _activeWidgetTarget = wid;
+  _activeWidgetTargetAgent = (typeof activeAgent !== 'undefined') ? activeAgent : null;
 }
 
 function getActiveWidgetTarget() { return _activeWidgetTarget; }
+function getActiveWidgetTargetAgent() { return _activeWidgetTargetAgent; }
 
 function clearActiveWidgetTarget() {
   const wid = _activeWidgetTarget;
   _activeWidgetTarget = null;
+  _activeWidgetTargetAgent = null;
   return wid;
 }
 
@@ -123,6 +127,7 @@ function widgetStreamFinish() {
   const entry = _widgetTargets.get(wid);
   _widgetTargets.delete(wid);
   _activeWidgetTarget = null;
+  _activeWidgetTargetAgent = null;
   return entry?.buf || '';
 }
 

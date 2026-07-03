@@ -6,6 +6,14 @@ function clientSessionAgentId(agent) {
   if (typeof agent !== 'string' || !agent) return agent;
   const uid = (typeof _currentUser !== 'undefined' && _currentUser?.id) ? String(_currentUser.id) : '';
   if (uid && agent.startsWith(`${uid}_`)) return agent.slice(uid.length + 1);
+  // Fallback for the window before _currentUser is set: real user ids are
+  // plain slugs ("default", "debug_user"), so match the tail against the
+  // known agent list — an exact match means it's already raw (custom agent
+  // ids like "agent_2df…" contain underscores and must not be stripped).
+  const list = (typeof agents !== 'undefined' && Array.isArray(agents)) ? agents : [];
+  if (list.some(a => a.id === agent)) return agent;
+  const known = list.find(a => a.id && agent.endsWith(`_${a.id}`));
+  if (known) return known.id;
   return agent.replace(/^user_[^_]+_/, '');
 }
 
@@ -41,6 +49,17 @@ function connect() {
   };
   ws.onclose = () => {
     clearTimeout(_pingTimer);
+    // Mirror forceReconnect: commit any in-progress stream to the session and
+    // null the stream state. Without this, reconnect's session_loaded re-render
+    // detaches the live bubble while tokens keep painting into the detached
+    // node — the user sees a typing dot but no text.
+    const wasStreaming = streaming;
+    if (streamEl && streamBuf && activeAgent) {
+      if (!sessions[activeAgent]) sessions[activeAgent] = [];
+      sessions[activeAgent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
+    }
+    streamEl = null; streamBuf = ''; resetToolRun();
+    if (!wasStreaming) { setStreaming(false); setTyping(false); }
     setStatus('offline');
     const delay = _reconnectDelay;
     _reconnectDelay = Math.min(_reconnectDelay * 1.5, 15000);
@@ -119,6 +138,27 @@ window.addEventListener('pageshow', (e) => {
   if (e.persisted) forceReconnect();
 });
 
+// ── Streaming render batching ─────────────────────────────────────────────────
+// Tokens can arrive hundreds of times per second; re-parsing the whole growing
+// markdown buffer per token is O(n²) and kills text selection. Batch renders to
+// one per animation frame. Commit points (done / permission_request / Stop)
+// call flushStreamRender() so the final tokens are painted before the bubble
+// is finalized.
+let _streamRAF = 0;
+function scheduleStreamRender() {
+  if (_streamRAF) return;
+  _streamRAF = requestAnimationFrame(() => {
+    _streamRAF = 0;
+    if (!streamEl) return; // turn ended/committed while the frame was queued
+    streamEl.innerHTML = renderMarkdown(streamBuf);
+    scrollToBottom();
+  });
+}
+function flushStreamRender() {
+  if (_streamRAF) { cancelAnimationFrame(_streamRAF); _streamRAF = 0; }
+  if (streamEl) streamEl.innerHTML = renderMarkdown(streamBuf);
+}
+
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
   switch (msg.type) {
@@ -184,11 +224,12 @@ function handleServerMessage(msg) {
       }
       if (!streamEl) { streamBuf = ''; streamEl = appendStreamingBubble(); setTyping(false); }
       streamBuf += msg.text;
-      if (streamEl) { streamEl.innerHTML = renderMarkdown(streamBuf); scrollToBottom(); }
+      scheduleStreamRender();
       break;
     case 'permission_request':
       if (msg.agent !== activeAgent) break;
       // Commit any in-progress stream bubble
+      flushStreamRender();
       if (streamEl && streamBuf) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
         sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
@@ -288,6 +329,16 @@ function handleServerMessage(msg) {
       break;
     case 'done':
       if (msg.agent !== activeAgent) {
+        // If this agent's reply was streaming into a tutor widget when the user
+        // switched away, finalize that buffer here — otherwise the target stays
+        // armed and silently swallows the next active-agent reply.
+        if (typeof getActiveWidgetTargetAgent === 'function' && getActiveWidgetTargetAgent() === msg.agent) {
+          const wbuf = widgetStreamFinish();
+          if (wbuf) {
+            if (!sessions[msg.agent]) sessions[msg.agent] = [];
+            sessions[msg.agent].push({ role: 'assistant', content: wbuf, ts: Date.now(), hidden: true });
+          }
+        }
         // Background agent finished — save to session, clear stream state
         const bg = agentStreams[msg.agent];
         if (bg?.buf) {
@@ -312,6 +363,7 @@ function handleServerMessage(msg) {
         setStreaming(false);
         break;
       }
+      flushStreamRender();
       if (streamEl && streamBuf) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
         updateToolRunHeader(liveToolRun, true);
@@ -351,6 +403,12 @@ function handleServerMessage(msg) {
         break;
       }
       if (msg.agent && msg.agent !== activeAgent) break;
+      // Finalize any partial stream so the NEXT reply gets a fresh bubble —
+      // without this, its tokens concatenate onto the aborted reply's buffer.
+      // The partial text stays visible but is NOT committed to the session
+      // (the failed turn was never persisted server-side; retry resends it).
+      flushStreamRender();
+      streamEl = null; streamBuf = ''; resetToolRun();
       setStreaming(false); setTyping(false); showTurnError(msg.message); break;
     case 'proposal':
       // Friction-tracker proposal — actionable repeat detected, two-button

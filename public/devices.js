@@ -1023,7 +1023,7 @@ function renderVoiceConfigPanel(roster, deviceCount) {
         .join('');
       const elOpts = '<option value="">(device default)</option>' + (optgroups || '<option disabled>No voices found — check ElevenLabs API key</option>');
       voiceControl = `<span style="display:flex;gap:4px;align-items:center;min-width:0">
-           <select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="flex:1;min-width:0;padding:4px 6px;font-size:12px">${elOpts}</select>
+           <select class="cdraw-input" data-change-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="flex:1;min-width:0;padding:4px 6px;font-size:12px">${elOpts}</select>
          </span>`;
     } else if (_ttsProvider === 'pocket-tts') {
       // "(OE Default)" = empty value → server uses the bundled default voice-state.
@@ -1032,14 +1032,14 @@ function renderVoiceConfigPanel(roster, deviceCount) {
         .concat(_voiceRefs
           .map(r => `<option value="${escHtml(r.id)}" ${r.id === curVoice ? 'selected' : ''}>${escHtml(r.label)}</option>`))
         .join('');
-      voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${refOpts}</select>`;
+      voiceControl = `<select class="cdraw-input" data-change-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${refOpts}</select>`;
     } else if (_ttsProvider === 'kittentts') {
       // KittenTTS exposes 8 preset voices (expr-voice-{2,3,4,5}-{m,f}). No
       // cloning, no numeric speaker ids — just a fixed dropdown.
       const ktOpts = ['<option value="">(device default)</option>']
         .concat(_kittenttsVoices.map(v => `<option value="${escHtml(v)}" ${v === curVoice ? 'selected' : ''}>${escHtml(v)}</option>`))
         .join('');
-      voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${ktOpts}</select>`;
+      voiceControl = `<select class="cdraw-input" data-change-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${ktOpts}</select>`;
     } else if (_ttsProvider === 'piper') {
       // Voice picker now lists installed voices (from /api/tts/piper/voices).
       // Multi-speaker voices (libritts_r) expose a secondary speaker_id field.
@@ -1070,7 +1070,7 @@ function renderVoiceConfigPanel(roster, deviceCount) {
       const speakerInput = isMulti
         ? `<input type="number" class="cdraw-input piper-speaker-input" min="0" max="${maxSpk}" step="1"
               placeholder="speaker 0-${maxSpk}" value="${escHtml(speakerId)}"
-              data-action="setSlotPiperVoice" data-args='${slotArgs}'
+              data-change-action="setSlotPiperVoice" data-args='${slotArgs}'
               style="padding:4px 6px;font-size:12px;min-width:0">`
         : '';
       const previewBtn = voiceId
@@ -1082,14 +1082,14 @@ function renderVoiceConfigPanel(roster, deviceCount) {
       voiceControl = `
         <div class="piper-slot-controls" data-slot="${slotIdx}" style="display:flex;flex-direction:column;gap:4px;min-width:0">
           <div style="display:flex;gap:4px;align-items:center;min-width:0">
-            <select class="cdraw-input piper-voice-select" data-action="setSlotPiperVoice" data-args='${slotArgs}' style="flex:1;min-width:0;padding:4px 6px;font-size:12px">${voiceOpts}</select>
+            <select class="cdraw-input piper-voice-select" data-change-action="setSlotPiperVoice" data-args='${slotArgs}' style="flex:1;min-width:0;padding:4px 6px;font-size:12px">${voiceOpts}</select>
             ${previewBtn}
           </div>
           ${speakerInput}
           ${noVoicesHint}
         </div>`;
     } else {
-      voiceControl = `<select class="cdraw-input" data-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${['<option value="">(device default)</option>'].concat(OPENAI_TTS_VOICES.map(v => `<option value="${v}" ${v === curVoice ? 'selected' : ''}>${v}</option>`)).join('')}</select>`;
+      voiceControl = `<select class="cdraw-input" data-change-action="setSlotVoice" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0">${['<option value="">(device default)</option>'].concat(OPENAI_TTS_VOICES.map(v => `<option value="${v}" ${v === curVoice ? 'selected' : ''}>${v}</option>`)).join('')}</select>`;
     }
     const curWw = a?.wakewordId || '';
     const wwOpts = ['<option value="">(no wake word — pick one)</option>']
@@ -1141,7 +1141,7 @@ function renderVoiceConfigPanel(roster, deviceCount) {
             <label style="font-size:11px;color:var(--muted)">Voice</label>
             ${voiceControl}
             <label style="font-size:11px;color:var(--muted)">Wake</label>
-            <select class="cdraw-input" data-action="setSlotWakeword" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0" title="Wake word that fires this slot — pushed OTA to every device">${wwOpts}</select>
+            <select class="cdraw-input" data-change-action="setSlotWakeword" data-args='${JSON.stringify([slotIdx]).replace(/'/g, '&#39;')}' style="padding:4px 6px;font-size:12px;min-width:0" title="Wake word that fires this slot — pushed OTA to every device">${wwOpts}</select>
             ${probInput}
           </div>
         </div>
@@ -1157,7 +1157,7 @@ function renderVoiceConfigPanel(roster, deviceCount) {
     const opts = ['<option value="">+ Add a user…</option>']
       .concat(addCandidates.map(u => `<option value="${escHtml(u.id)}">${escHtml(u.name || u.id)}</option>`))
       .join('');
-    addControl = `<select class="cdraw-input" data-action="addSlotUser" style="padding:4px 8px;font-size:12px;min-width:0">${opts}</select>`;
+    addControl = `<select class="cdraw-input" data-change-action="addSlotUser" style="padding:4px 8px;font-size:12px;min-width:0">${opts}</select>`;
   }
   const emptyState = assignedSlots.length === 0
     ? '<div style="font-size:11px;color:var(--muted);padding:8px 10px;text-align:center;background:var(--bg2);border-radius:6px">No users in this voice configuration yet. Pick one below to start.</div>'

@@ -163,6 +163,17 @@ async function init() {
     $('btnStop').addEventListener('click', () => {
       if (ws && ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'stop', agent: activeAgent }));
+      // The server emits no terminal event for an aborted turn — finalize the
+      // partial reply here, or the next turn's tokens append onto this bubble.
+      // Commit what streamed so far (client-side only; the server never
+      // persisted the aborted turn) so it survives an agent switch.
+      flushStreamRender();
+      if (streamEl && streamBuf && activeAgent) {
+        if (!sessions[activeAgent]) sessions[activeAgent] = [];
+        sessions[activeAgent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
+        addTimestamp(streamEl.closest('.msg'));
+      }
+      streamEl = null; streamBuf = ''; resetToolRun();
       setStreaming(false); setTyping(false);
     });
     $('btnAttach').addEventListener('click', () => $('chatFileInput').click());
