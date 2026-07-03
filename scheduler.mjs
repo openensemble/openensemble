@@ -3,12 +3,12 @@
  * Runs tasks at set times, saves results to agent sessions.
  */
 
-import { readFileSync, writeFileSync, readdirSync, unlinkSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, readdirSync, unlinkSync, mkdirSync, existsSync } from 'fs';
 import path from 'path';
 import { getAgent } from './agents.mjs';
 import { streamChat } from './chat.mjs';
 import { appendToSession } from './sessions.mjs';
-import { withLock, getAgentsForUser, getUser, isUserTimeBlocked, loadConfig } from './routes/_helpers.mjs';
+import { withLock, atomicWriteSync, getAgentsForUser, getUser, isUserTimeBlocked, loadConfig } from './routes/_helpers.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { log } from './logger.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
@@ -75,6 +75,15 @@ export function findTaskById(id, ownerId) {
   return loadTasksForOwner(ownerId).find(t => t.id === id) ?? null;
 }
 
+// A task file is only safe to DELETE (as "this owner has no tasks now") if we
+// can actually read it. An unparseable file was silently skipped by
+// loadAllTasksForScheduler, so its owner being absent from byOwner means "we
+// failed to read them", not "they have no tasks" — deleting would turn a
+// transient/corrupt read into permanent task loss.
+function taskFileParses(p) {
+  try { JSON.parse(readFileSync(p, 'utf8')); return true; } catch { return false; }
+}
+
 export function saveTasks(tasks) {
   const byOwner = new Map();
   for (const task of tasks) {
@@ -85,16 +94,19 @@ export function saveTasks(tasks) {
   for (const [owner, ownerTasks] of byOwner) {
     const p = taskPath(owner);
     mkdirSync(path.dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify(ownerTasks, null, 2));
+    // Atomic (temp-file + rename) so a crash mid-write can't leave a truncated
+    // tasks.json that the next load skips and this function then deletes.
+    atomicWriteSync(p, JSON.stringify(ownerTasks, null, 2));
   }
-  // Remove task files for owners with no remaining tasks
+  // Remove task files for owners with no remaining tasks — but only files we can
+  // parse (see taskFileParses), so a corrupt file is preserved for recovery.
   if (existsSync(USERS_DIR)) {
     try {
       for (const entry of readdirSync(USERS_DIR, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
         if (!byOwner.has(entry.name)) {
           const p = path.join(USERS_DIR, entry.name, 'tasks.json');
-          if (existsSync(p)) try { unlinkSync(p); } catch {}
+          if (existsSync(p) && taskFileParses(p)) try { unlinkSync(p); } catch {}
         }
       }
     } catch {}
@@ -104,7 +116,8 @@ export function saveTasks(tasks) {
       for (const f of readdirSync(TASKS_DIR)) {
         if (!f.endsWith('.json')) continue;
         const owner = f.slice(0, -5);
-        if (!byOwner.has(owner)) try { unlinkSync(path.join(TASKS_DIR, f)); } catch {}
+        const p = path.join(TASKS_DIR, f);
+        if (!byOwner.has(owner) && taskFileParses(p)) try { unlinkSync(p); } catch {}
       }
     } catch {}
   }
@@ -588,6 +601,24 @@ async function finalizeScheduledTask(task, { succeeded, output, lastError, manua
 // Track pending timers so we can cancel them on shutdown
 const _timers = new Map(); // taskId -> timeoutId
 
+// setTimeout clamps any delay above ~24.86 days (2^31-1 ms) down to 1ms and
+// fires immediately. Count long delays down in max-sized chunks so far-future
+// one-shots ("remind me in 2 months") and long intervals ("every 30 days") fire
+// on schedule instead of the instant they're armed.
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+function scheduleLongTimeout(taskId, delay, onFire) {
+  let remaining = Math.max(0, delay);
+  const step = () => {
+    if (remaining > MAX_TIMEOUT_MS) {
+      remaining -= MAX_TIMEOUT_MS;
+      _timers.set(taskId, setTimeout(step, MAX_TIMEOUT_MS));
+    } else {
+      _timers.set(taskId, setTimeout(onFire, remaining));
+    }
+  };
+  step();
+}
+
 function findFreshScheduledTask(task) {
   return task.ownerId ? findTaskById(task.id, task.ownerId)
                       : loadAllTasksForScheduler().find(t => t.id === task.id);
@@ -627,7 +658,7 @@ function scheduleTask(task, broadcast) {
   const eta = new Date(Date.now() + delay);
   console.log(`[scheduler] "${task.label}" scheduled for ${label} (runs at: ${eta.toLocaleString()})`);
 
-  const timerId = setTimeout(async () => {
+  scheduleLongTimeout(task.id, delay, async () => {
     _timers.delete(task.id);
     if (!_schedulerRunning) return;
     try {
@@ -648,8 +679,7 @@ function scheduleTask(task, broadcast) {
         log.error('scheduler', 'task rearm failed', { taskId: task.id, label: task.label, err });
       }
     }
-  }, delay);
-  _timers.set(task.id, timerId);
+  });
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

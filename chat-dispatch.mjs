@@ -321,11 +321,15 @@ export async function handleChatMessage({
   // busy-slot. finalizeTurnOnce() is idempotent and a no-op until busySlot is
   // assigned (markAgentBusy below), so early returns before that are safe.
   let busySlot = null;
+  // This turn's AbortController. Passed to finalizeTurn so that when a barge-in
+  // (a second interactive message) has already replaced the controller under our
+  // key, our cleanup doesn't tear down the newer turn's controller/stream/buffer.
+  let turnAc = null;
   let _turnFinalized = false;
   const finalizeTurnOnce = () => {
     if (_turnFinalized || !busySlot) return;
     _turnFinalized = true;
-    finalizeTurn(`${userId}_${agentId}`, busySlot);
+    finalizeTurn(`${userId}_${agentId}`, busySlot, turnAc);
   };
 
   try {
@@ -476,6 +480,7 @@ export async function handleChatMessage({
   // stream rather than waiting for it.
   if (_isBackgroundContinuation) await busySlot.waitTurn();
   const ac = openTurn(scopedSessionKey, userId, agentId);
+  turnAc = ac;
 
   const scopedAgent = { ...agent, id: `${userId}_${agentId}` };
   {

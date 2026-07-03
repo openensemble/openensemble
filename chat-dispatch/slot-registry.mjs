@@ -131,9 +131,18 @@ export function abortAllChats() {
  * @param {string} scopedSessionKey   `${userId}_${agentId}`
  * @param {{release: () => void}} busySlot  slot returned by markAgentBusy
  */
-export function finalizeTurn(scopedSessionKey, busySlot) {
-  abortControllers.delete(scopedSessionKey);
-  activeStreams.delete(scopedSessionKey);
-  clearStreamBuffer(scopedSessionKey);
+export function finalizeTurn(scopedSessionKey, busySlot, ownAc = null) {
+  // Only tear down the abort/stream registries + buffer if THIS turn still owns
+  // the key. A barge-in (a second interactive message on the same agent) calls
+  // openTurn(), which replaces the controller under this key; without this
+  // ownership check the first turn's finalize would delete the SECOND turn's
+  // controller + stream entry + buffer, leaving it unkillable (Stop finds no
+  // controller) and invisible to WS reconnect. ownAc omitted → legacy callers
+  // keep the old unconditional cleanup.
+  if (!ownAc || abortControllers.get(scopedSessionKey) === ownAc) {
+    abortControllers.delete(scopedSessionKey);
+    activeStreams.delete(scopedSessionKey);
+    clearStreamBuffer(scopedSessionKey);
+  }
   busySlot.release();
 }

@@ -331,13 +331,20 @@ export async function runLlmTurn({
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false,
 }) {
   let streamBuf = '';
+  // Once a tool has been invoked this attempt, a side effect (email_send, an HA
+  // service call, a purchase) may already have executed — so we must NOT re-run
+  // the whole turn on a fallback provider, or that tool fires twice. Tracked on
+  // both the emit callback and the yielded stream to be robust to either path.
+  let toolInvoked = false;
 
   async function runStream(agentObj) {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
+      if (e.type === 'tool_call') toolInvoked = true;
       onEvent({ ...e, agent: agentId });
     }, userId ?? 'default', attachment, schedulerNote, false, { source, deviceId }, { toolPlan, hiddenUser, isolatedTaskRun })) {
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
+      if (event.type === 'tool_call') toolInvoked = true;
       // Check if this error is retriable — return it instead of emitting
       if (event.type === 'error' && RETRIABLE_RE.test(event.message ?? '')) {
         return event; // signal caller to attempt failover
@@ -358,7 +365,7 @@ export async function runLlmTurn({
     if (failoverError) {
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
-      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel) {
+      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && !toolInvoked) {
         console.log(`[failover] Primary ${scopedAgent.provider}/${scopedAgent.model} failed: ${failoverError.message} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         onEvent({ type: 'token', text: `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
 
@@ -372,7 +379,11 @@ export async function runLlmTurn({
           onEvent({ ...fallbackError, agent: agentId });
         }
       } else {
-        // No failover configured — emit the original error
+        // No failover (not configured, or a tool already ran this turn — re-running
+        // would double-execute its side effects). Emit the original error.
+        if (toolInvoked && fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel) {
+          console.log(`[failover] skipped — a tool already ran this turn; re-running on ${fo.fallbackProvider}/${fo.fallbackModel} could double-execute side effects`);
+        }
         onEvent({ ...failoverError, agent: agentId });
       }
     }
@@ -395,7 +406,7 @@ export async function runLlmTurn({
       // Attempt failover on thrown errors too (e.g. fetch failures)
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
-      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && RETRIABLE_RE.test(e.message ?? '')) {
+      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && RETRIABLE_RE.test(e.message ?? '') && !toolInvoked) {
         console.log(`[failover] Primary threw: ${enrichedMessage} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         onEvent({ type: 'token', text: `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
         try {

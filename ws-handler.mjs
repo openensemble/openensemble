@@ -914,6 +914,11 @@ function onConnection(ws, req) {
       if (voiceTurn) {
         messageVoiceTurn = voiceTurn;
         ws._activeVoiceTurn = voiceTurn;
+        // A new wake = a fresh turn whose output must play. Clear any stale
+        // suppression from a prior stop/barge-in — otherwise a suppression
+        // recorded with a null turnId (stop on a socket with no active turn,
+        // e.g. after reconnect) blanket-drops this turn's audio for 30s.
+        ws._voiceOutputSuppression = null;
         log.info('voice', 'voice turn started', {
           deviceId: voiceTurn.deviceId,
           turnId: voiceTurn.id,
