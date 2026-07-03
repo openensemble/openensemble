@@ -8,7 +8,7 @@ import fs   from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import {
-  requireAuth, loadUsers, readBody, withLock, BASE_DIR, safeError, getUserDir,
+  requireAuth, loadUsers, readBody, withLock, atomicWriteSync, BASE_DIR, safeError, getUserDir,
 } from './_helpers.mjs';
 
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
@@ -18,7 +18,7 @@ function loadSharing() {
 }
 
 function saveSharing(shares) {
-  fs.writeFileSync(SHARING_PATH, JSON.stringify(shares, null, 2));
+  atomicWriteSync(SHARING_PATH, JSON.stringify(shares, null, 2));
 }
 
 const modifySharing = fn => withLock(SHARING_PATH + '.lock', () => {

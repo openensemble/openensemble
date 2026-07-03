@@ -11,7 +11,7 @@ import { randomBytes } from 'crypto';
 import { pipeline } from 'stream/promises';
 import busboy from 'busboy';
 import {
-  requireAuth, isPrivileged, loadUsers, readBody, parseMultipart, withLock, BASE_DIR, safeError, getUserDir,
+  requireAuth, isPrivileged, loadUsers, readBody, parseMultipart, withLock, atomicWriteSync, BASE_DIR, safeError, getUserDir,
 } from './_helpers.mjs';
 
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
@@ -53,7 +53,7 @@ function loadUserIndex(userId) {
 function saveUserIndex(userId, docs) {
   const dir = getUserDocsDir(userId);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(getUserIndexPath(userId), JSON.stringify(docs, null, 2));
+  atomicWriteSync(getUserIndexPath(userId), JSON.stringify(docs, null, 2));
 }
 
 const modifyUserIndex = (userId, fn) => withLock(getUserIndexPath(userId) + '.lock', () => {
@@ -67,7 +67,7 @@ function loadSharing() {
 }
 
 function saveSharing(shares) {
-  fs.writeFileSync(SHARING_PATH, JSON.stringify(shares, null, 2));
+  atomicWriteSync(SHARING_PATH, JSON.stringify(shares, null, 2));
 }
 
 const modifySharing = fn => withLock(SHARING_PATH + '.lock', () => {

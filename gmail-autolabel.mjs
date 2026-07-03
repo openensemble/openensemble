@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { getAccessToken as getGoogleAccessToken } from './lib/google-auth.mjs';
 import { log } from './logger.mjs';
+import { atomicWriteSync } from './routes/_helpers/io-lock.mjs';
 
 const BASE_DIR   = path.dirname(fileURLToPath(import.meta.url));
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -32,7 +33,7 @@ export function loadConfig(userId) {
 }
 
 export function saveConfig(userId, cfg) {
-  fs.writeFileSync(configPath(userId), JSON.stringify(cfg, null, 2));
+  atomicWriteSync(configPath(userId), JSON.stringify(cfg, null, 2));
 }
 
 async function getAccessToken(userId, accountId) {
