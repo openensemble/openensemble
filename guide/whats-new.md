@@ -8,7 +8,14 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-03
 
-**"Share with everyone" documents actually reach everyone now**
+**Replies start faster, and voice replies stop pausing mid-thought**
+A round of performance work across the whole turn path. The fixed setup cost before every reply (memory recall, tool selection, context building — previously run one after another) now runs in parallel, cutting it to roughly a third. On voice devices, the next sentence of a reply is now synthesized *while* the current one is still playing, so longer answers no longer have awkward silent gaps between sentences. Long conversations also stop re-sending every old tool result with every message, which keeps more of your actual conversation in the model's context and makes long sessions cheaper.
+
+**The app stays responsive while background work streams**
+While a delegated/background task was streaming progress, the browser fired a task-list refresh (two requests plus a full drawer re-render) for every progress update, and the server rewrote the whole watcher file for each one — with enough updates this made everything feel sticky. Progress updates now batch (the drawer refreshes at most every couple of seconds, immediately when something finishes), the tool-activity panel only re-renders when it's actually open, and the tool-suggestion bar under the composer no longer re-scans on every keystroke. Server-side, scheduled-task bookkeeping now touches only the affected user's file instead of rewriting every user's tasks on each fire.
+
+**Email sorting and large code projects: less waiting**
+Sorting a big inbox re-read the learned label store once per email (200 emails = 200 reads of the same file) — it's now read once per change. For IMAP accounts, message previews fetch only the first 2 KB instead of entire message bodies, and operations reuse one connection instead of a fresh login per action. The Code Projects pane also stops freezing the server while it sizes up large projects.
 The 🌐 Everyone button on document sharing looked like it worked, but other users could never see or open the document — the share was recorded on the file yet never entered the discovery list, so it silently behaved like "share with nobody". Everyone-shares now show up (and open) for every user, existing everyone-shared documents are repaired automatically, and un-sharing removes both visibility and access as expected.
 
 **Cloud replies retry through brief provider hiccups; token/cost metrics stop reading zero**
