@@ -1347,9 +1347,27 @@ async function runCustomSkillValue({ userId, agentId, skillId, name, args }) {
 export async function executeRoleTool(name, args, userId = 'default', agentId = null) {
   for (const [key, wrap] of visibleEntries(userId)) {
     if (wrap.manifest.tools?.some(t => t.function?.name === name)) {
-      if (shouldSandboxSkill(wrap)) return runCustomSkillValue({ userId, agentId, skillId: wrap.manifest.id, name, args });
+      const skillId = wrap.manifest.id;
+      // Same last-line gates executeToolStreaming enforces. This entry point
+      // (the local-intent fast-path via runIntent, and executeTool callers
+      // like /api/email/action) used to skip all three — a child whose phrase
+      // matched a localIntent of a non-allowed skill ran the tool ungated,
+      // and disabled-skill / hidden-tool overrides didn't apply here.
+      if (userId) {
+        const profile = _readUserProfile(userId);
+        if (profile?.role === 'child' && Array.isArray(profile.allowedSkills) && !profile.allowedSkills.includes(skillId)) {
+          return `Tool "${name}" is not permitted for this account.`;
+        }
+        if (isSkillDisabled(userId, skillId, !!wrap.manifest?.always_on)) {
+          return `Tool "${name}" is from a disabled skill.`;
+        }
+        if (getHiddenTools(userId, skillId).includes(name)) {
+          return `Tool "${name}" is hidden by your settings.`;
+        }
+      }
+      if (shouldSandboxSkill(wrap)) return runCustomSkillValue({ userId, agentId, skillId, name, args });
       const exec = await getExecutorByKey(key);
-      if (exec) return exec(name, args, userId, agentId, await buildCtx(userId, agentId, wrap.manifest.id));
+      if (exec) return exec(name, args, userId, agentId, await buildCtx(userId, agentId, skillId));
       break;
     }
   }
@@ -1594,11 +1612,6 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       }
     }).catch(err => console.warn('[tool-failures] record failed:', err.message));
   };
-  // Record this execution for the Phase-3 intent learner — covers coordinator-
-  // direct AND delegated-specialist calls (both funnel through here). Cheap,
-  // synchronous, never throws into dispatch. The local fastpath uses a different
-  // executor, so local successes are intentionally NOT recorded.
-  try { recordToolExecution(userId, name); } catch { /* never block tool dispatch */ }
   try {
     const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId, owningSkillId));
 
@@ -2130,6 +2143,18 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       });
     }
     log.info('tool', 'tool complete', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart });
+
+    // Phase-3 intent learner: record AFTER completion and ONLY on success.
+    // Recording pre-exec (the old shape) learned a FAILED tool as a good
+    // utterance→tool mapping — the learned_intent proposal even asserts the
+    // tool "ran anyway". Covers coordinator-direct AND delegated-specialist
+    // calls (both funnel through here); the local fastpath uses a different
+    // executor, so local successes are intentionally NOT recorded. Auto-
+    // backgrounded tools (the return paths above) also don't record: their
+    // result lands after the turn, and the recorder is consumed at turn end.
+    if (!_resultWasError) {
+      try { recordToolExecution(userId, name); } catch { /* never block tool dispatch */ }
+    }
 
     // Alias-framework cascade: any registered manifest can declare
     // cascade_on_tools — when one of those tools succeeds, drop user-stored
