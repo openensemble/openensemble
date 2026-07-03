@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { getAccessToken as getGoogleAccessToken } from './lib/google-auth.mjs';
 import { log } from './logger.mjs';
-import { atomicWriteSync } from './routes/_helpers/io-lock.mjs';
+import { atomicWriteSync, withLock } from './routes/_helpers/io-lock.mjs';
 
 const BASE_DIR   = path.dirname(fileURLToPath(import.meta.url));
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -104,6 +104,20 @@ async function getOrCreateLabel(userId, accountId, labelName) {
   return created.id;
 }
 
+// Locked, targeted update of ONE account's history cursor (+ lastChecked). The
+// accounts poll near-simultaneously; a whole-config load-modify-save let one
+// account's save clobber another's cursor — re-processing old mail and
+// re-archiving messages the user had pulled back to the inbox.
+async function saveCursor(userId, acctKey, historyId) {
+  await withLock(configPath(userId), () => {
+    const cfg = loadConfig(userId);
+    cfg.lastHistoryIdByAccount = cfg.lastHistoryIdByAccount ?? {};
+    cfg.lastHistoryIdByAccount[acctKey] = historyId;
+    cfg.lastChecked = Date.now();
+    atomicWriteSync(configPath(userId), JSON.stringify(cfg, null, 2));
+  });
+}
+
 async function pollNewMessages(userId, accountId) {
   const cfg = loadConfig(userId);
   if (!cfg.enabled) return;
@@ -129,17 +143,32 @@ async function pollNewMessages(userId, accountId) {
     // On first run, seed the historyId without processing anything
     if (!lastHistoryId) {
       const profile = await gmailFetch(userId, accountId, '/profile');
-      cfg.lastHistoryIdByAccount[acctKey] = profile.historyId;
-      saveConfig(userId, cfg);
+      await saveCursor(userId, acctKey, profile.historyId);
       console.log(`[autolabel] Initialized historyId=${profile.historyId} for user ${userId} account ${acctKey}`);
       return;
     }
 
-    const histRes = await gmailFetch(userId, accountId,
-      `/history?startHistoryId=${lastHistoryId}&historyTypes=messageAdded&labelId=INBOX`
-    );
-    const records = histRes.history ?? [];
-    const newHistoryId = histRes.historyId ?? lastHistoryId;
+    // Follow nextPageToken so a burst of >100 history records isn't skipped —
+    // the cursor advances to the latest historyId below, so anything not fetched
+    // here would be lost. Bounded; if capped, don't advance so the remainder is
+    // caught next poll (already-processed messages re-label idempotently).
+    const records = [];
+    let newHistoryId = lastHistoryId;
+    let pageToken = null;
+    const MAX_HISTORY_PAGES = 50;
+    let pages = 0;
+    do {
+      const histRes = await gmailFetch(userId, accountId,
+        `/history?startHistoryId=${lastHistoryId}&historyTypes=messageAdded&labelId=INBOX${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`
+      );
+      if (histRes.history) records.push(...histRes.history);
+      newHistoryId = histRes.historyId ?? newHistoryId;
+      pageToken = histRes.nextPageToken ?? null;
+    } while (pageToken && ++pages < MAX_HISTORY_PAGES);
+    if (pageToken) {
+      console.warn(`[autolabel] history paging capped at ${MAX_HISTORY_PAGES} pages for ${userId}/${acctKey}; continuing next poll`);
+      newHistoryId = lastHistoryId; // don't advance — catch the remainder next poll
+    }
 
     for (const record of records) {
       for (const added of record.messagesAdded ?? []) {
@@ -167,17 +196,12 @@ async function pollNewMessages(userId, accountId) {
       }
     }
 
-    cfg.lastChecked = Date.now();
-    if (newHistoryId !== lastHistoryId) cfg.lastHistoryIdByAccount[acctKey] = newHistoryId;
-    saveConfig(userId, cfg);
+    await saveCursor(userId, acctKey, newHistoryId);
   } catch (e) {
     if (e.message?.includes('404') || e.message?.includes('startHistoryId')) {
       // historyId too old — reset so it reseeds on next poll
       console.warn(`[autolabel] historyId expired for ${userId} account ${acctKey}, resetting`);
-      const cfg2 = loadConfig(userId);
-      cfg2.lastHistoryIdByAccount = cfg2.lastHistoryIdByAccount ?? {};
-      cfg2.lastHistoryIdByAccount[acctKey] = null;
-      saveConfig(userId, cfg2);
+      await saveCursor(userId, acctKey, null);
       return;
     }
     console.error(`[autolabel] Poll error for ${userId}:`, e.message);
