@@ -214,43 +214,56 @@ export function resolveUserProjectDir(userId, name) {
 // (file count, total size, mtime). Honors the same skip-segments as the
 // client-side mirror so node_modules / .venv don't inflate the sizes we
 // advertise in the Code Projects pane.
-export function listUserProjects(userId) {
+//
+// Async + memoized (30s TTL per project): the walk used to stat every file
+// of every project synchronously on the event loop per GET — a few large
+// repos froze the whole server for the duration. The totals feed a UI pane,
+// so ≤30s staleness is fine.
+const PROJECT_META_TTL_MS = 30_000;
+const _projectMetaCache = new Map(); // dir -> { at, meta }
+export async function listUserProjects(userId) {
   const ws = getWorkspace(userId);
-  const entries = readdirSync(ws, { withFileTypes: true }).filter(e => e.isDirectory());
+  const entries = (await readdir(ws, { withFileTypes: true })).filter(e => e.isDirectory());
   const projects = [];
   for (const e of entries) {
     const dir = path.join(ws, e.name);
+    const hit = _projectMetaCache.get(dir);
+    if (hit && Date.now() - hit.at < PROJECT_META_TTL_MS) {
+      projects.push({ name: e.name, ...hit.meta });
+      continue;
+    }
     let fileCount = 0;
     let totalSize = 0;
     let latestMtime = 0;
-    const walk = (d) => {
+    const walk = async (d) => {
       let children;
-      try { children = readdirSync(d, { withFileTypes: true }); }
+      try { children = await readdir(d, { withFileTypes: true }); }
       catch { return; }
       for (const c of children) {
         if (WALK_SKIP_SEGMENTS.has(c.name)) continue;
         const abs = path.join(d, c.name);
-        if (c.isDirectory()) { walk(abs); continue; }
+        if (c.isDirectory()) { await walk(abs); continue; }
         if (!c.isFile()) continue;
         try {
-          const st = statSync(abs);
+          const st = await stat(abs);
           fileCount += 1;
           totalSize += st.size;
           if (st.mtimeMs > latestMtime) latestMtime = st.mtimeMs;
         } catch {}
       }
     };
-    walk(dir);
+    await walk(dir);
     // Fall back to the project dir's own mtime if we found no files (empty project).
     if (latestMtime === 0) {
-      try { latestMtime = statSync(dir).mtimeMs; } catch {}
+      try { latestMtime = (await stat(dir)).mtimeMs; } catch {}
     }
-    projects.push({
-      name: e.name,
+    const meta = {
       fileCount,
       size: totalSize,
       mtime: latestMtime ? new Date(latestMtime).toISOString() : null,
-    });
+    };
+    _projectMetaCache.set(dir, { at: Date.now(), meta });
+    projects.push({ name: e.name, ...meta });
   }
   return { workspace: ws, projects };
 }

@@ -482,8 +482,10 @@ function handleServerMessage(msg) {
         if (existingIdx >= 0) arr[existingIdx] = statusEntry;
         else arr.push(statusEntry);
       }
-      // Refresh the tasks drawer so its watcher rows stay current.
-      if (typeof loadTaskList === 'function') loadTaskList();
+      // Refresh the tasks drawer so its watcher rows stay current. Debounced
+      // — this fires per progress push; final transitions refresh immediately.
+      if (typeof loadTaskListSoon === 'function') loadTaskListSoon({ immediate: !!msg.final });
+      else if (typeof loadTaskList === 'function') loadTaskList();
       break;
     case 'memory_stored':
     case 'memory_forgotten': {

@@ -37,7 +37,11 @@ export async function handle(req, res) {
             || a.name.localeCompare(b.name);
         });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ skills, agents }));
+      // Slim roster only — the resolved agents carry fully-composed system
+      // prompts + full tool schemas (hundreds of KB, and a child user's
+      // entry included the verbatim child-safety prompt). The panel needs
+      // id/name/emoji at most.
+      res.end(JSON.stringify({ skills, agents: [...agentById.values()] }));
     } catch (e) { safeError(res, e); }
     return true;
   }

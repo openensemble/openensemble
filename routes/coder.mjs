@@ -71,7 +71,7 @@ export async function handle(req, res) {
   if (req.url === '/api/coder/projects' && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
     try {
-      const info = listUserProjects(userId);
+      const info = await listUserProjects(userId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(info));
     } catch (e) { safeError(res, e); }

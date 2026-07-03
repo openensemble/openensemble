@@ -75,14 +75,23 @@ function tokenScore(a, b) {
   return overlap / Math.max(at.size, bt.size);
 }
 
+// Parsed once and reused — matchToolRecipe runs on every picker render
+// (every composer keystroke) and used to JSON.parse the whole store each
+// time. Invalidated on save and on cross-tab storage events.
+let _toolRecipesCache = null;
+window.addEventListener('storage', (e) => {
+  if (e.key === TOOL_PLAN_STORAGE_KEY) _toolRecipesCache = null;
+});
 function loadToolRecipes() {
+  if (_toolRecipesCache) return _toolRecipesCache;
   try {
     const parsed = JSON.parse(localStorage.getItem(TOOL_PLAN_STORAGE_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
+    return (_toolRecipesCache = Array.isArray(parsed) ? parsed : []);
+  } catch { return (_toolRecipesCache = []); }
 }
 
 function saveToolRecipes(recipes) {
+  _toolRecipesCache = null;
   try { localStorage.setItem(TOOL_PLAN_STORAGE_KEY, JSON.stringify(recipes.slice(0, TOOL_PLAN_MAX_RECIPES))); } catch {}
 }
 
@@ -1943,6 +1952,7 @@ function ensureToolRun() {
     const steps = el.querySelector('.tool-run-steps');
     const open = steps.hasAttribute('hidden');
     steps.toggleAttribute('hidden', !open);
+    if (open) flushStaleToolRunSteps(steps);
     head.setAttribute('aria-expanded', open ? 'true' : 'false');
     el.classList.toggle('open', open);
   });
@@ -2068,6 +2078,30 @@ function hydrateToolEvents(events, toolResults = null) {
   });
 }
 
+// Coalesced step rendering. updateToolRunHeader fires per tool start /
+// progress chunk / result, and renderToolRunSteps rebuilds every row (with
+// listeners) from scratch each time. Collapsed panels — the default state —
+// defer the rebuild until the user actually expands (see the head click
+// handlers); visible panels batch to at most one rebuild per frame.
+function scheduleToolRunSteps(stepsEl, events) {
+  if (!stepsEl) return;
+  if (stepsEl.hasAttribute('hidden')) { stepsEl._staleEvents = events; return; }
+  stepsEl._staleEvents = null;
+  if (stepsEl._stepsRaf) return;
+  stepsEl._stepsRaf = requestAnimationFrame(() => {
+    stepsEl._stepsRaf = null;
+    renderToolRunSteps(stepsEl, events);
+  });
+}
+
+// Render deferred step rows when a collapsed panel is expanded.
+function flushStaleToolRunSteps(stepsEl) {
+  if (stepsEl?._staleEvents) {
+    renderToolRunSteps(stepsEl, stepsEl._staleEvents);
+    stepsEl._staleEvents = null;
+  }
+}
+
 function updateToolRunHeader(run, done = false) {
   if (!run?.el) return;
   const { title, meta } = summarizeToolRun(run.events, done);
@@ -2076,7 +2110,7 @@ function updateToolRunHeader(run, done = false) {
   run.el.classList.toggle('tool-run-done', done);
   const spinner = run.el.querySelector('.tool-run-spinner');
   if (spinner) spinner.outerHTML = done ? icon('check', 13) : '<span class="pill-spinner tool-run-spinner"></span>';
-  renderToolRunSteps(run.el.querySelector('.tool-run-steps'), run.events);
+  scheduleToolRunSteps(run.el.querySelector('.tool-run-steps'), run.events);
   if (done) attachToolRunRecipeActions(run.el, run.events);
 }
 

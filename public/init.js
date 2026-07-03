@@ -65,7 +65,10 @@ async function init() {
       else hideSlashMenu();
       if ($('input').value.startsWith('@')) { updateAtMenu(); }
       else hideAtMenu();
-      renderToolPlanPicker();
+      // Debounced: the picker run (catalog regexes + recipe matching + full
+      // innerHTML rebuild) is too heavy to repeat on every keystroke.
+      clearTimeout(window._toolPickerDebounce);
+      window._toolPickerDebounce = setTimeout(() => renderToolPlanPicker(), 150);
       // If we're in recall mode and the user just typed (current value diverges
       // from what we set), exit recall so the next ArrowUp restarts at newest.
       // Programmatic .value sets do NOT fire 'input', so this only catches

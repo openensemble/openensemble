@@ -82,6 +82,22 @@ async function loadTaskList() {
   renderTasks(); updateTasksBadge();
 }
 
+// Trailing-debounced wrapper for high-frequency callers. The WS status
+// handler fires once per tool_progress chunk, and each loadTaskList call is
+// two fetches + a full drawer re-render — a request-per-second loop during
+// any streaming delegation, even with the drawer closed. Structural
+// transitions (a watcher finishing) refresh immediately.
+let _taskListDebounce = null;
+function loadTaskListSoon({ immediate = false } = {}) {
+  if (immediate) {
+    clearTimeout(_taskListDebounce); _taskListDebounce = null;
+    loadTaskList();
+    return;
+  }
+  if (_taskListDebounce) return;
+  _taskListDebounce = setTimeout(() => { _taskListDebounce = null; loadTaskList(); }, 2000);
+}
+
 // Format a "time ago" / "time until" tail for the watcher meta row.
 function _watcherEtaText(w) {
   if (w.expiresAt === null || w.expiresAt === undefined) return 'indefinite';
