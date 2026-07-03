@@ -1023,6 +1023,13 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     approxTokens += (trimmed[i].content?.length ?? 0) / 4;
     if (approxTokens > TOKEN_BUDGET) { trimmed = trimmed.slice(i + 1); break; }
   }
+  // Anthropic requires the first message to be role:user; an arbitrary trim
+  // index can leave an assistant (or orphaned partial) message first, which
+  // 400s the request exactly when the conversation gets long. Drop leading
+  // non-user entries after a trim.
+  if (trimmed.length < history.length) {
+    while (trimmed.length && trimmed[0].role !== 'user') trimmed.shift();
+  }
 
   // Pre-LLM size snapshot — measurement-only, surfaced on the
   // "llm turn complete" log line so we can audit prompt/tools/history

@@ -48,7 +48,7 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
       const { model, provider } = JSON.parse(await readBody(req));
-      updateAgentMeta(agentModelMatch[1], { model, provider });
+      await updateAgentMeta(agentModelMatch[1], { model, provider });
       broadcastAgentList();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
@@ -275,7 +275,7 @@ export async function handle(req, res) {
         if (!ownsIt && !isPrivileged(authId)) {
           res.writeHead(403); res.end(JSON.stringify({ error: 'Not your agent' })); return true;
         }
-        updateAgentMeta(agentMatch[1], globalChanges);
+        await updateAgentMeta(agentMatch[1], globalChanges);
       }
       const base = getAgent(agentMatch[1]);
       if (!base) { res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return true; }

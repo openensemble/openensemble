@@ -3,10 +3,11 @@
  * Each agent has an id, display name, model, system prompt, and tool list.
  */
 
-import { readFileSync, existsSync, writeFileSync, readdirSync, mkdirSync, watch } from 'fs';
+import { readFileSync, existsSync, readdirSync, mkdirSync, watch } from 'fs';
 import { randomBytes } from 'crypto';
 import path from 'path';
 import { CFG_PATH, USERS_DIR, readConfig } from './lib/paths.mjs';
+import { withLock, atomicWriteSync } from './routes/_helpers/io-lock.mjs';
 // Simple in-process caches — invalidated on write or file change
 let _customAgentsCache = null; // cache of ALL agents across all user files
 let _modelOverridesCache = null;
@@ -52,7 +53,9 @@ function saveUserAgents(userId, list) {
   const dir = path.join(USERS_DIR, userId);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const p = getUserAgentsPath(userId);
-  writeFileSync(p, JSON.stringify(list, null, 2));
+  // Atomic temp+rename — a crash mid-write used to truncate agents.json and
+  // silently drop every custom agent for this user on the next load.
+  atomicWriteSync(p, JSON.stringify(list, null, 2));
   _customAgentsCache = null;
   watchAgentsFile(p);
 }
@@ -177,7 +180,7 @@ export async function deleteCustomAgent(id) {
 }
 
 // Update name/emoji for ANY agent (built-in or custom) — built-ins stored in config.json
-export function updateAgentMeta(id, changes) {
+export async function updateAgentMeta(id, changes) {
   // Custom agents: update the JSON file
   const customs = loadCustomAgents();
   if (customs.find(a => a.id === id)) return updateCustomAgent(id, changes);
@@ -191,10 +194,16 @@ export function updateAgentMeta(id, changes) {
   }
   if (!Object.keys(allowed).length) return null;
   try {
-    const cfg = existsSync(CFG_PATH) ? JSON.parse(readFileSync(CFG_PATH, 'utf8')) : {};
-    cfg.agentModels = cfg.agentModels ?? {};
-    cfg.agentModels[id] = { ...(cfg.agentModels[id] ?? {}), ...allowed };
-    writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2));
+    // Same lock key as routes/_helpers modifyConfig, so this raw round-trip
+    // (encrypted values stay encrypted — we never touch them) can't interleave
+    // with a lock-holding Settings save and lose one side's fields. Atomic
+    // temp+rename write so a crash can't tear config.json.
+    await withLock(CFG_PATH, () => {
+      const cfg = existsSync(CFG_PATH) ? JSON.parse(readFileSync(CFG_PATH, 'utf8')) : {};
+      cfg.agentModels = cfg.agentModels ?? {};
+      cfg.agentModels[id] = { ...(cfg.agentModels[id] ?? {}), ...allowed };
+      atomicWriteSync(CFG_PATH, JSON.stringify(cfg, null, 2));
+    });
     invalidateModelOverridesCache();
     return getAgent(id);
   } catch (e) { console.warn('[agents] Failed to update agent meta:', e.message); return null; }

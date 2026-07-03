@@ -151,13 +151,25 @@ export async function handle(req, res) {
     }
     try {
       const changes = JSON.parse(await readBody(req));
-      // Strip fields that must only be set via their approved mutation paths.
-      // Direct injection of passwordHash/pinHash would bypass the currentPassword
-      // check and the validatePassword length minimum.
-      delete changes.passwordHash;
-      delete changes.pinHash;
-      delete changes.id;
-      delete changes.createdAt;
+      // ALLOWLIST, not denylist: any field not explicitly editable is dropped,
+      // so a future sensitive profile field is safe by default instead of one
+      // missing strip-line away from a self-service privilege hole (the old
+      // shape Object.assign'd everything after deleting known-bad keys —
+      // passwordHash/pinHash/id/createdAt now fall out automatically).
+      // pin/newPassword are transformed into pinHash/passwordHash below,
+      // AFTER this filter, so the computed values still apply.
+      const EDITABLE_FIELDS = new Set([
+        'name', 'emoji', 'role', 'locked', 'accessSchedule', 'telegramAllowed',
+        'allowedSkills', 'allowedFeatures', 'allowedModels', 'allowedOAuthProviders',
+        'childSafetyPrompt', 'skillsLocked', 'skills', 'exitPinUserId', 'parentId',
+        'reminderChannel', 'reminderEmailId', 'reminderVoiceDeviceId',
+        'pin', 'newPassword', 'currentPassword',
+        // legacy fields old clients still send; validated/stripped below
+        'allowedAgents', 'workspace',
+      ]);
+      for (const k of Object.keys(changes)) {
+        if (!EDITABLE_FIELDS.has(k)) delete changes[k];
+      }
       // Pre-flight validation on a snapshot (async work like hashing must happen outside the lock)
       const snap = loadUsers();
       const snapIdx = snap.findIndex(u => u.id === targetId);

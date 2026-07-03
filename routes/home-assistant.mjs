@@ -147,7 +147,7 @@ export async function handle(req, res) {
     const url = body.url == null ? null : String(body.url).trim();
     // Empty url + empty token = clear the integration.
     if (url === '' && (body.token == null || body.token === '')) {
-      modifyConfig((c) => { delete c.homeAssistant; });
+      await modifyConfig((c) => { delete c.homeAssistant; });
       invalidateHaCache();
       invalidateServicesCache();
       return json({ ok: true, cleared: true });
@@ -156,7 +156,10 @@ export async function handle(req, res) {
       if (!url) return json({ error: 'URL is required.' }, 400);
       if (!/^https?:\/\//.test(url)) return json({ error: 'URL must start with http:// or https://' }, 400);
     }
-    modifyConfig((c) => {
+    // AWAIT the write: modifyConfig is async — replying "ok" before it
+    // commits let a racing cache refresh re-cache the OLD credentials, so a
+    // rotated HA token kept "working" against the revoked value.
+    await modifyConfig((c) => {
       const cur = c.homeAssistant || {};
       const next = { ...cur };
       if (url != null) next.url = url.replace(/\/+$/, '');

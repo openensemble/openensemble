@@ -830,9 +830,14 @@ async function financePreprocess(ctx) {
     const cfg  = loadConfig();
     const txns = (await extractTransactions(cfg, ctx.attachment)).filter(t => parseFloat(t.amount) > 0);
     const block = txns.length ? JSON.stringify(txns, null, 2) : '[]';
-    ctx.userText = (ctx.userText || 'I uploaded a financial statement.') +
+    // Intent test runs on the ORIGINAL user text only. Testing after the
+    // extracted JSON was appended meant merchant names ("APPLE STORE",
+    // "RECORD SHOP") or a filename like import.csv flipped view-only uploads
+    // into an auto-import.
+    const originalText = ctx.userText || '';
+    ctx.userText = (originalText || 'I uploaded a financial statement.') +
       `\n\n<uploaded_statement filename="${ctx.attachment.name}">\n${block}\n</uploaded_statement>`;
-    const wantsSave = /\b(save|add|store|import|record|put)\b/i.test(ctx.userText);
+    const wantsSave = /\b(save|add|store|import|record|put)\b/i.test(originalText);
     ctx.userText += wantsSave
       ? `\n\n${txns.length} transaction(s) were extracted. The user wants them saved — call expense_add_batch NOW with all transactions, then show a summary table.`
       : `\n\n${txns.length} transaction(s) were extracted. Show them in a table and ask the user if they'd like to save them.`;
