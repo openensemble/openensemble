@@ -1866,7 +1866,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                       rootWatcherId: captured.rootWatcherId || captured.watcherId,
                       tool: captured.name,
                       status: 'done',
-                      ...(finalReportImages ? { images: finalReportImages } : {}),
+                      // Durable rows strip inline base64 (multi-MB per image,
+                      // re-shipped on every session_loaded) — the saved file
+                      // reference renders instead. Live broadcast below keeps
+                      // the pixels for immediate display.
+                      ...(finalReportImages ? { images: finalReportImages.map(bg.persistedReportImage).filter(Boolean) } : {}),
                       ...(finalNotify ? { notify: finalNotify } : {}),
                       ts: Date.now(),
                     });
@@ -2058,6 +2062,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           if (key) {
             try {
               const { appendToSession } = await import('./sessions.mjs');
+              const { persistedReportImage } = await import('./background-tasks.mjs');
               await appendToSession(key, {
                 role: 'assistant',
                 kind: 'agent_report',
@@ -2069,7 +2074,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 rootWatcherId: wid,
                 tool: name,
                 status: 'done',
-                ...(images ? { images } : {}),
+                // Durable rows strip inline base64 — see the streaming path.
+                ...(images ? { images: images.map(persistedReportImage).filter(Boolean) } : {}),
                 ...(notify ? { notify } : {}),
                 ts: Date.now(),
               });

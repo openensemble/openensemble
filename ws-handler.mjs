@@ -1085,6 +1085,18 @@ function onConnection(ws, req) {
     // code 1006 = abnormal (no close frame: network drop / TCP RST); 1000/1001 = clean.
     console.log(`[ws] client disconnected device=${ws._deviceId ?? '-'} user=${ws._userId} code=${code ?? '?'}${r ? ' reason=' + r : ''}`);
     log.info('ws', 'client disconnected', { userId: ws._userId, deviceId: ws._deviceId ?? null, code: code ?? null, reason: r || null });
+    // A device socket dropping mid-turn used to orphan the LLM turn — tokens
+    // streamed to nobody while tools kept executing. Abort it; the device
+    // starts a fresh turn on its next wake after reconnecting. abortChat is
+    // a no-op when the turn already finished.
+    const turn = ws._activeVoiceTurn;
+    if (turn?.effectiveUserId && turn?.agentId) {
+      try {
+        abortChat(turn.effectiveUserId, turn.agentId);
+        log.info('voice', 'aborted turn on device disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });
+      } catch { /* best-effort */ }
+      ws._activeVoiceTurn = null;
+    }
   });
   ws.on('error', e => {
     console.error('[ws] error:', e.message, 'device=' + (ws._deviceId ?? '-'));

@@ -254,7 +254,7 @@ export async function handle(req, res) {
             }
           });
         } else {
-          saveUserAgentOverride(authId, agentMatch[1], uiChanges);
+          await saveUserAgentOverride(authId, agentMatch[1], uiChanges); // fire-and-forget made the change look reverted on a fast reload
         }
       }
       // Per-user reasoning effort: scoped to the calling account, applied over

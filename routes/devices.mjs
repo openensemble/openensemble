@@ -677,7 +677,9 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'device not found' }));
       return true;
     }
-    const sent = stopAmbientOnDevice(deviceId);
+    // stopAmbientOnDevice is async — without await the Promise was always
+    // truthy and this route reported ok:true even for offline devices.
+    const sent = await stopAmbientOnDevice(deviceId);
     res.writeHead(sent ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: !!sent }));
     return true;

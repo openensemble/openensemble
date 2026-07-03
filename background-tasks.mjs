@@ -533,7 +533,7 @@ function mergeReportImages(images) {
   return out;
 }
 
-function persistedReportImage(img) {
+export function persistedReportImage(img) {
   if (!img?.filename && !img?.base64) return null;
   const out = {
     ...(img.filename ? { filename: img.filename } : {}),

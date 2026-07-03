@@ -12,7 +12,7 @@
  *   POST /api/tutor/tz              — capture user tz on first tutor interaction
  */
 
-import { requireAuth, readBody, getUser, saveUser } from './_helpers.mjs';
+import { requireAuth, readBody, getUser, modifyUser } from './_helpers.mjs';
 import {
   loadTutorStats, recordSessionActivity, getWeeklyRecap, setUserTz, setWeeklyGoal,
   masteryBand, levelProgress,
@@ -35,14 +35,18 @@ function readPrefs(userId) {
   return { ...DEFAULT_REMINDER_PREFS, ...(user?.tutorReminders || {}) };
 }
 
-function writePrefs(userId, patch) {
-  const user = getUser(userId);
-  if (!user) throw new Error('user not found');
-  const current = { ...DEFAULT_REMINDER_PREFS, ...(user.tutorReminders || {}) };
-  const next = { ...current, ...patch };
-  if (patch.quietHours) next.quietHours = { ...current.quietHours, ...patch.quietHours };
-  user.tutorReminders = next;
-  saveUser(user);
+async function writePrefs(userId, patch) {
+  // Locked, surgical write via modifyUser — the old getUser→mutate→saveUser
+  // was an unlocked read-modify-write on profile.json that could clobber a
+  // concurrent profile save.
+  let next = null;
+  const updated = await modifyUser(userId, user => {
+    const current = { ...DEFAULT_REMINDER_PREFS, ...(user.tutorReminders || {}) };
+    next = { ...current, ...patch };
+    if (patch.quietHours) next.quietHours = { ...current.quietHours, ...patch.quietHours };
+    user.tutorReminders = next;
+  });
+  if (!updated) throw new Error('user not found');
   return next;
 }
 
@@ -56,12 +60,11 @@ async function rebuildTutorTasks(userId) {
   const stats = loadTutorStats(userId);
   const tz = stats.tz || null;
 
-  for (const t of loadTasksForOwner(userId)) {
-    if (t?.meta?.tutor) {
-      try { removeTask(t.id); } catch {}
-    }
-  }
-  if (!prefs.enabled || prefs.channel === 'off') return { added: 0 };
+  // Add-then-remove (not remove-then-add): if an add throws, the user's
+  // existing reminders survive instead of having been deleted already.
+  const priorTutorTaskIds = loadTasksForOwner(userId).filter(t => t?.meta?.tutor).map(t => t.id);
+  const removePrior = () => { for (const id of priorTutorTaskIds) { try { removeTask(id); } catch { /* already gone */ } } };
+  if (!prefs.enabled || prefs.channel === 'off') { removePrior(); return { added: 0 }; }
 
   const added = [];
   added.push(await addTask({
@@ -97,6 +100,7 @@ async function rebuildTutorTasks(userId) {
     repeat: 'daily', // handler self-gates to Sunday user-local
     meta: { tutor: true, kind: 'week_wrap' },
   }));
+  removePrior();
   // Avoid dragging the scheduler import surface into this module; a dynamic
   // reload is triggered elsewhere via scheduleNewTask (addTask) already.
   return { added: added.length };
@@ -147,8 +151,15 @@ export async function handle(req, res) {
       }
       if (patch.channel === 'off') patch.enabled = false;
       if (patch.channel && patch.channel !== 'off' && patch.enabled === undefined) patch.enabled = true;
-      writePrefs(userId, patch);
-      const rebuilt = await rebuildTutorTasks(userId);
+      await writePrefs(userId, patch);
+      let rebuilt;
+      try { rebuilt = await rebuildTutorTasks(userId); }
+      catch (e) {
+        // The prefs DID save — don't blame the user's input for a task-layer
+        // failure (the old shape also deleted the tasks first, so a failed
+        // rebuild silently removed the reminders).
+        return json(res, 500, { error: 'Preferences saved, but rebuilding the reminder tasks failed', detail: e.message });
+      }
       return json(res, 200, { ok: true, prefs: readPrefs(userId), tasks: rebuilt });
     } catch (e) {
       return json(res, 400, { error: 'Invalid body', detail: e.message });
@@ -205,7 +216,10 @@ export async function handle(req, res) {
     try {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       const tz = String(body.tz || '').trim();
-      if (!tz || !/^[A-Za-z_]+\/[A-Za-z_+-]+/.test(tz)) return json(res, 400, { error: 'Invalid tz' });
+      if (!tz || tz.length > 64 || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+){1,2}$/.test(tz)) return json(res, 400, { error: 'Invalid tz' });
+      // The regex only checks shape — let Intl reject unknown zone names.
+      try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); }
+      catch { return json(res, 400, { error: `Unknown timezone "${tz}"` }); }
       await setUserTz(userId, tz);
       return json(res, 200, { ok: true, tz });
     } catch (e) {
@@ -216,9 +230,11 @@ export async function handle(req, res) {
   if (url === '/api/tutor/goal' && req.method === 'PUT') {
     try {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      const minutesPerWeek = Number.isFinite(+body.minutesPerWeek) ? +body.minutesPerWeek : undefined;
-      const daysPerWeek = Number.isFinite(+body.daysPerWeek) ? +body.daysPerWeek : undefined;
+      const minutesPerWeek = Number.isFinite(+body.minutesPerWeek) ? Math.round(+body.minutesPerWeek) : undefined;
+      const daysPerWeek = Number.isFinite(+body.daysPerWeek) ? Math.round(+body.daysPerWeek) : undefined;
       if (minutesPerWeek === undefined && daysPerWeek === undefined) return json(res, 400, { error: 'Provide minutesPerWeek or daysPerWeek' });
+      if (minutesPerWeek !== undefined && (minutesPerWeek < 1 || minutesPerWeek > 10080)) return json(res, 400, { error: 'minutesPerWeek must be 1–10080' });
+      if (daysPerWeek !== undefined && (daysPerWeek < 1 || daysPerWeek > 7)) return json(res, 400, { error: 'daysPerWeek must be 1–7' });
       const goal = await setWeeklyGoal(userId, { minutesPerWeek, daysPerWeek });
       return json(res, 200, { ok: true, goal });
     } catch (e) {

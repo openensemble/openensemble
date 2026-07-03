@@ -151,9 +151,17 @@ export function updateCustomAgent(id, changes) {
   const prev = list[idx];
   const next = { ...prev, ...changes };
   if (!changes.systemPrompt && (changes.name || changes.emoji || changes.description)) {
-    next.systemPrompt = buildSystemPrompt(
-      next.name, next.emoji, next.description ?? prev.description ?? ''
-    );
+    // Rebuild the template prompt ONLY when the stored prompt is still the
+    // template for the OLD identity — renaming used to rebuild
+    // unconditionally, silently wiping a user's customized prompt. If the
+    // template renderer ever changes shape, mismatches fail SAFE (keep the
+    // stored prompt).
+    const prevTemplate = buildSystemPrompt(prev.name, prev.emoji, prev.description ?? '');
+    if (!prev.systemPrompt || prev.systemPrompt === prevTemplate) {
+      next.systemPrompt = buildSystemPrompt(
+        next.name, next.emoji, next.description ?? prev.description ?? ''
+      );
+    }
   }
   list[idx] = next;
   saveUserAgents(userId, list);
