@@ -297,20 +297,24 @@ function findDayOfWeek(text) {
 // in the NEXT ISO-week (Mon-Sun) relative to today. On Wed, "next Tuesday"
 // → 6 days (Tuesday of the following ISO week), "next Friday" → 9 days.
 function advanceToDow(date, dow, next) {
+  // LOCAL day math. atClock() plants the wall-clock hour in LOCAL time, so
+  // the weekday walk must use the same calendar — getUTCDay/setUTCDate rolled
+  // to "tomorrow" once local evening passed the UTC date line (~7-8pm in US
+  // timezones), landing "remind me Monday 8am" a day or a whole week late.
   const d = new Date(date.getTime());
   if (!next) {
-    const current = d.getUTCDay();
+    const current = d.getDay();
     const delta = (dow - current + 7) % 7;
-    d.setUTCDate(d.getUTCDate() + (delta === 0 ? 7 : delta));
+    d.setDate(d.getDate() + (delta === 0 ? 7 : delta));
     return d;
   }
   // next=true: find Monday of next ISO week, then advance to dow.
-  const current = d.getUTCDay();
+  const current = d.getDay();
   const daysToMonday = ((8 - current) % 7) || 7; // always 1..7
   const nextMon = new Date(d.getTime());
-  nextMon.setUTCDate(nextMon.getUTCDate() + daysToMonday);
+  nextMon.setDate(nextMon.getDate() + daysToMonday);
   const offsetFromMon = (dow - 1 + 7) % 7; // Mon=0, Sun=6
-  nextMon.setUTCDate(nextMon.getUTCDate() + offsetFromMon);
+  nextMon.setDate(nextMon.getDate() + offsetFromMon);
   return nextMon;
 }
 

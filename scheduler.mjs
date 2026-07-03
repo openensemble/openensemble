@@ -275,11 +275,26 @@ function msUntilNext(hour, minute, tz = null) {
     const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
     const nowH = parseInt(parts.hour);
     const nowM = parseInt(parts.minute);
-    const nowTotal = nowH * 60 + nowM;
+    const nowTotal = (nowH % 24) * 60 + nowM;
     const targetTotal = hour * 60 + minute;
     // Minutes until the next occurrence
     const deltaMin = targetTotal > nowTotal ? (targetTotal - nowTotal) : (targetTotal - nowTotal + 24 * 60);
-    return deltaMin * 60_000;
+    // The wall-clock delta assumes a fixed UTC offset — across a DST
+    // transition night it's 1h off. Verify the candidate instant's wall clock
+    // in tz and nudge by the residual error (bounded: at most two passes).
+    let candidate = now.getTime() + deltaMin * 60_000;
+    for (let i = 0; i < 2; i++) {
+      const p2 = Object.fromEntries(fmt.formatToParts(new Date(candidate)).map(p => [p.type, p.value]));
+      const gotTotal = (parseInt(p2.hour) % 24) * 60 + parseInt(p2.minute);
+      let err = targetTotal - gotTotal;
+      if (err > 720) err -= 1440;
+      if (err < -720) err += 1440;
+      if (err === 0) break;
+      candidate += err * 60_000;
+    }
+    // Never 0/negative (spring-forward can make the target wall time not
+    // exist) — floor at one minute so the timer can't spin-fire.
+    return Math.max(candidate - now.getTime(), 60_000);
   } catch (e) {
     console.warn(`[scheduler] Invalid tz "${tz}", falling back to server-local:`, e.message);
     return msUntilNext(hour, minute, null);
@@ -312,7 +327,16 @@ async function runTask(task, broadcast, opts = {}) {
 
   try {
     if (!manual && task.repeat !== 'once') {
-      const day = new Date().getDay();
+      // Evaluate "what day is it" in the TASK's timezone when it has one —
+      // the server-local day is wrong for tz tasks near local midnight.
+      let day = new Date().getDay();
+      if (task.timezone) {
+        try {
+          const wd = new Intl.DateTimeFormat('en-US', { timeZone: task.timezone, weekday: 'short' }).format(new Date());
+          const idx = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(wd);
+          if (idx >= 0) day = idx;
+        } catch { /* invalid tz — keep server-local day */ }
+      }
       const allowed = parseCronDow(task.dow);
       if (allowed && !allowed.has(day)) {
         const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][day];
@@ -430,6 +454,9 @@ async function runTask(task, broadcast, opts = {}) {
       originTaskId: task.id,
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
+      // Per-fire nonce for the child barrier — overlapping fires of the same
+      // recurring task must not share a barrier group (see keyFor).
+      runId: `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       scheduledNote,
       manual,
     };
@@ -449,6 +476,7 @@ async function runTask(task, broadcast, opts = {}) {
       originTaskId: task.id,
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
+      originTaskRunId: scheduledCtx.runId,
     });
 
     if (!succeeded) console.error(`[scheduler] Task "${task.label}" main turn failed after ${MAX_ATTEMPTS} attempts`);
@@ -637,17 +665,30 @@ function scheduleTask(task, broadcast) {
     delay = msUntilDatetime(task.datetime);
     label = new Date(task.datetime).toLocaleString();
   } else if (task.repeat === 'interval') {
-    // Fixed-cadence tasks: fire one interval from now, then re-arm after each
-    // run (handled by the reschedule below, same as daily). A missing/invalid
-    // intervalMs means a malformed task — skip rather than spin every minute.
+    // Fixed-cadence tasks: anchored to lastRun, not to boot. Arming a full
+    // interval from every boot meant a task whose interval never elapsed
+    // between OE's frequent restarts NEVER fired while showing enabled
+    // ("every 2 days" on a box that restarts daily). An overdue task fires
+    // promptly once, then re-arms normally (lastRun is stamped per fire).
+    // A missing/invalid intervalMs means a malformed task — skip rather than
+    // spin every minute.
     const raw = Number(task.intervalMs);
     if (!Number.isFinite(raw) || raw <= 0) {
       console.warn(`[scheduler] Task "${task.label}" has invalid intervalMs=${task.intervalMs}; not scheduled.`);
       return;
     }
-    delay = Math.max(raw, MIN_INTERVAL_MS);
-    label = `every ${formatInterval(delay)}`;
+    const interval = Math.max(raw, MIN_INTERVAL_MS);
+    const lastRun = Date.parse(task.lastRun || '') || 0;
+    delay = lastRun ? Math.max(0, (lastRun + interval) - Date.now()) : interval;
+    label = `every ${formatInterval(interval)}`;
   } else {
+    // Guard, don't throw: a task with a missing/malformed time must not kill
+    // the caller (startScheduler's arm loop schedules every other task after
+    // this one).
+    if (typeof task.time !== 'string' || !/^\d{1,2}:\d{1,2}$/.test(task.time.trim())) {
+      console.warn(`[scheduler] Task "${task.label}" has no valid time (time=${JSON.stringify(task.time)}); not scheduled.`);
+      return;
+    }
     const { hour, minute } = parseTime(task.time);
     delay = msUntilNext(hour, minute, task.timezone ?? null);
     const hhmm = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
@@ -696,7 +737,15 @@ export function startScheduler(broadcast) {
     console.log('[scheduler] No tasks configured.');
     return;
   }
-  for (const task of tasks) scheduleTask(task, broadcast);
+  for (const task of tasks) {
+    // Per-task isolation: one malformed task must not abort the arm loop and
+    // leave every task after it unscheduled.
+    try { scheduleTask(task, broadcast); }
+    catch (e) {
+      console.error(`[scheduler] Failed to schedule "${task.label || task.id}":`, e.message);
+      log.error('scheduler', 'task arm failed', { taskId: task.id, label: task.label, err: e.message });
+    }
+  }
 }
 
 export function isSchedulerRunning() { return _schedulerRunning; }

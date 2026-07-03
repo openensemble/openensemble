@@ -680,6 +680,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     originScheduledTaskId: opts?.originScheduledTaskId || scheduledCtx?.originTaskId || null,
     originScheduledTaskOwnerId: opts?.originScheduledTaskOwnerId || scheduledCtx?.originTaskOwnerId || userId || null,
     originScheduledTaskAgent: opts?.originScheduledTaskAgent || scheduledCtx?.originTaskAgent || null,
+    originScheduledRunId: scheduledCtx?.runId || null, // barrier per-fire nonce — completion must rejoin the SAME fire's group
     originScheduledNote: scheduledCtx?.scheduledNote || null,
   });
   if (scheduledCtx?.originTaskId) {
@@ -1169,6 +1170,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
         originTaskId: rec.originScheduledTaskId,
         originTaskOwnerId: rec.originScheduledTaskOwnerId,
         originTaskAgent: rec.originScheduledTaskAgent,
+        runId: rec.originScheduledRunId || null,
       },
       childId: taskId,
       resultText: result || `${agentName} completed the task.`,
@@ -1246,6 +1248,13 @@ export function cancelTask(userId, id, reason = 'cancelled') {
 
 export function getActiveTasks() {
   return [...activeTasks.entries()].map(([taskId, info]) => ({ taskId, ...info }));
+}
+
+// Liveness probe for the task_proxy silence reaper (scheduler/watchers.mjs):
+// a task still registered here is running, however long its current tool has
+// been silent. Dynamic-imported there to avoid a static import cycle.
+export function isTaskActive(taskId) {
+  return activeTasks.has(taskId);
 }
 
 // ── Sync (in-turn) delegation tracking ───────────────────────────────────────

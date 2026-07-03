@@ -689,7 +689,7 @@ _systemHandlers.set('event_subscription', eventSubscriptionHandler);
 // crash-detection layer (the first two are promise-catch + boot-reap).
 const TASK_PROXY_SILENCE_MS = 5 * 60 * 1000;
 const TASK_PROXY_NUDGE_MS = 60 * 60 * 1000;   // 1h re-broadcast when awaiting input
-function taskProxyHandler(state, helpers) {
+async function taskProxyHandler(state, helpers) {
   // Phase-14d: awaiting_input watchers sit indefinitely, but periodically
   // re-broadcast the question so a forgotten chip surfaces again.
   if (state?.awaiting_input) {
@@ -706,10 +706,20 @@ function taskProxyHandler(state, helpers) {
   if (state?.completed) return { newState: state, done: true };
   const lastActivity = state?.lastActivityAt || state?.startedAt || 0;
   if (lastActivity && Date.now() - lastActivity > TASK_PROXY_SILENCE_MS) {
+    // A single long tool call (big local inference, long node_exec) emits no
+    // progress for >5 min while very much alive — cross-check the task
+    // registry and defer while the task is still registered. Reaping applies
+    // only to tasks that vanished without completing (crash/kill). Dynamic
+    // import: background-tasks statically imports this module.
+    try {
+      const { isTaskActive } = await import('../background-tasks.mjs');
+      if (state?.taskId && isTaskActive(state.taskId)) return { newState: state };
+    } catch { /* registry unavailable — fall through to reap */ }
     return {
       newState: { ...state, failed: true, failureReason: 'no progress in 5min — may have crashed' },
       textUpdate: `⚠ Task went silent for >5 min: ${state.label || state.targetAgentName || 'unknown task'}`,
       done: true,
+      failed: true, // finalize as error, not a green "done" chip
     };
   }
   return { newState: state };   // benign heartbeat tick
@@ -818,6 +828,7 @@ async function tickOne(record) {
       }
       if (result.nextCadenceSec) {
         record.cadenceSec = Math.max(5, Number(result.nextCadenceSec));
+        record.origCadenceSec = null; // handler's explicit choice becomes the new baseline
       }
       if (result.textUpdate) {
         // Dedup consecutive identical updates so the chat doesn't fill with
@@ -829,6 +840,13 @@ async function tickOne(record) {
           record.lastChangeAt = Date.now();
           record.stuckAnnounced = false;
           record.stuckSinceAt = null;
+          // Visible change ends the stuck back-off — restore the original
+          // cadence. Without this, one quiet afternoon permanently rewrote a
+          // 300s price-alert to hourly polling for the rest of its life.
+          if (record.origCadenceSec) {
+            record.cadenceSec = record.origCadenceSec;
+            record.origCadenceSec = null;
+          }
           pushHistory(record, { text: result.textUpdate, ts: Date.now() });
           if (_sendStatusFn) {
             _sendStatusFn(record.userId, {
@@ -844,7 +862,10 @@ async function tickOne(record) {
         }
       }
       if (result.done) {
-        finalizeWatcher(record, 'done', result.textUpdate || `✓ ${record.label} done.`);
+        // A handler can flag the terminal state as a failure — a silent-task
+        // reap must not render as a green "done" chip with an error message.
+        const finalStatus = result.failed ? 'error' : 'done';
+        finalizeWatcher(record, finalStatus, result.textUpdate || `✓ ${record.label} done.`);
         return;
       }
     }
@@ -865,6 +886,8 @@ async function tickOne(record) {
       record.stuckSinceAt = record.stuckSinceAt || Date.now();
       record.stuckRecoveryCount = Number(record.stuckRecoveryCount || 0) + 1;
       const oldCadence = record.cadenceSec;
+      // Remember the pre-backoff cadence so a visible change can restore it.
+      record.origCadenceSec = record.origCadenceSec || oldCadence;
       record.cadenceSec = Math.min(STUCK_BACKOFF_MAX_SEC, Math.max(record.cadenceSec, record.cadenceSec * 2));
       const minutes = Math.round(sinceChange / 60_000);
       const backoffText = record.cadenceSec !== oldCadence ? `; backing off checks to every ${record.cadenceSec}s` : '';

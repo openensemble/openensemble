@@ -37,6 +37,26 @@ import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
 import { getGmailAuthHeader } from './gmail.mjs';
 
+// Translate the 5-field cron shapes the scheduler can actually run into its
+// native {repeat, time, dow, intervalMs} fields. Returns null for anything
+// unsupported (day-of-month / month restrictions, step hours, etc.) so the
+// POST /api/tasks route can reject instead of persisting a dead task.
+function cronToTaskFields(cron) {
+  const parts = String(cron || '').trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [min, hour, dom, mon, dow] = parts;
+  const everyN = min.match(/^\*\/(\d+)$/);
+  if (everyN && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
+    return { repeat: 'interval', intervalMs: Math.max(1, parseInt(everyN[1], 10)) * 60_000 };
+  }
+  if (!/^\d{1,2}$/.test(min) || !/^\d{1,2}$/.test(hour)) return null;
+  if (+min > 59 || +hour > 23) return null;
+  if (dom !== '*' || mon !== '*') return null;
+  if (dow !== '*' && !/^[\d,-]+$/.test(dow)) return null;
+  const time = `${String(+hour).padStart(2, '0')}:${String(+min).padStart(2, '0')}`;
+  return { repeat: 'daily', time, ...(dow !== '*' ? { dow } : {}) };
+}
+
 async function getEmailUnreadCount(userId) {
   // Load user's email accounts
   const acctPath = path.join(getUserDir(userId), 'email-accounts.json');
@@ -600,7 +620,7 @@ export async function handle(req, res) {
     }
     try {
       const body = JSON.parse(await readBody(req));
-      const { label, agent, cron, prompt, timezone, enabled } = body;
+      const { label, agent, cron, prompt, timezone, enabled, repeat, time, dow, intervalMs, datetime } = body;
       // Per-user task cap — prevents a misbehaving account from scheduling
       // thousands of frequent-cron jobs that would swamp the scheduler.
       const MAX_TASKS_PER_USER = 100;
@@ -608,7 +628,25 @@ export async function handle(req, res) {
       if (existing >= MAX_TASKS_PER_USER) {
         res.writeHead(429); res.end(JSON.stringify({ error: `Task limit reached (${MAX_TASKS_PER_USER}). Delete some before adding more.` })); return true;
       }
-      const task = await addTask({ label, agent, cron, prompt, timezone, enabled, ownerId: authId });
+      // The scheduler runs {repeat, time, dow, intervalMs, datetime} — it
+      // never reads `cron`. Translate the supported 5-field shapes so this
+      // route can't park an unschedulable task (which used to sit "enabled"
+      // forever and, pre-guard, crashed the boot arm loop via parseTime).
+      let fields = { repeat, time, dow, intervalMs, datetime };
+      for (const k of Object.keys(fields)) if (fields[k] == null) delete fields[k];
+      if (cron != null && !fields.time && !fields.intervalMs && !fields.datetime) {
+        const translated = cronToTaskFields(cron);
+        if (!translated) {
+          res.writeHead(400); res.end(JSON.stringify({ error: `Unsupported cron expression "${cron}" — supported: "M H * * dow" (daily/weekly) or "*/N * * * *" (interval)` })); return true;
+        }
+        fields = { ...fields, ...translated };
+      }
+      const schedulable = Number(fields.intervalMs) > 0 || typeof fields.datetime === 'string'
+        || (typeof fields.time === 'string' && /^\d{1,2}:\d{1,2}$/.test(fields.time.trim()));
+      if (!schedulable) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'Task needs a schedulable shape: time ("HH:MM"), intervalMs, datetime, or a supported cron' })); return true;
+      }
+      const task = await addTask({ label, agent, ...(cron != null ? { cron } : {}), ...fields, prompt, timezone, enabled, ownerId: authId });
       scheduleNewTask(task);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(task));
