@@ -1656,15 +1656,18 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         };
       };
 
+      let iterFinished = false;
+      try {
       while (true) {
         let next;
         try { next = await iter.next(); }
         catch (err) {
           // Tool threw during iteration — bubble up. The outer catch handles
           // background-mode case separately via the detached IIFE below.
+          iterFinished = true; // the iterator is already done after a throw
           throw err;
         }
-        if (next.done) break;
+        if (next.done) { iterFinished = true; break; }
         const value = next.value;
         rememberDelegationMeta(value);
 
@@ -1964,6 +1967,17 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         }
 
         yield await _postProcessResult(value);
+      }
+      } finally {
+        // Consumer teardown (turn aborted / Stop) abandons THIS generator at a
+        // yield; without forwarding the finalization, the skill's iterator
+        // stays suspended forever — its finally blocks (busy-slot release,
+        // sync-delegation finishSync) never run and the delegation reads as
+        // "running" until the 24h reaper. Skip when the iterator was handed
+        // to the detached auto-bg worker (it owns draining it now).
+        if (!iterFinished && !backgrounded) {
+          try { Promise.resolve(iter.return?.()).catch(() => {}); } catch { /* best-effort */ }
+        }
       }
     } else {
       // ── Single-promise path ─────────────────────────────────────────────
