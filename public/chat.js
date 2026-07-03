@@ -2551,7 +2551,11 @@ function _updateJumpPill() {
     _jumpPillEl = document.createElement('button');
     _jumpPillEl.type = 'button';
     _jumpPillEl.textContent = '↓ Jump to latest';
-    _jumpPillEl.style.cssText = 'position:fixed;transform:translateX(-50%);z-index:40;padding:6px 14px;font-size:12px;border-radius:16px;border:1px solid var(--border);background:var(--bg2);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);display:none';
+    // z-index must beat .workspace (a stacking context at 60, styles.css) or
+    // the pill shows through the transparent chat background but hit-testing
+    // sends every click to .messages — visible yet unclickable. Stay below
+    // drawers (200) and modals (1100+).
+    _jumpPillEl.style.cssText = 'position:fixed;transform:translateX(-50%);z-index:150;padding:6px 14px;font-size:12px;border-radius:16px;border:1px solid var(--border);background:var(--bg2);color:var(--fg);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);display:none';
     _jumpPillEl.addEventListener('click', () => scrollToBottom(true));
     document.body.appendChild(_jumpPillEl);
   }
