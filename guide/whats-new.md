@@ -8,6 +8,9 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-03
 
+**"Share with everyone" documents actually reach everyone now**
+The 🌐 Everyone button on document sharing looked like it worked, but other users could never see or open the document — the share was recorded on the file yet never entered the discovery list, so it silently behaved like "share with nobody". Everyone-shares now show up (and open) for every user, existing everyone-shared documents are repaired automatically, and un-sharing removes both visibility and access as expected.
+
 **Cloud replies retry through brief provider hiccups; token/cost metrics stop reading zero**
 A momentary provider overload (the classic Anthropic 529, a 429 rate-limit, or a dropped connection) used to fail the whole turn immediately. All cloud providers now retry the request a couple of times with short waits (respecting the provider's requested back-off) before giving up — nothing double-executes, since only the initial request is retried. Separately, token usage for OpenAI-compatible providers and OpenRouter was always recorded as 0 (the usage report was never requested, and when present it arrived after the point the stream stopped reading); real input/output/cached-token counts now land in your usage metrics. Claude models routed through OpenRouter also get prompt caching now (20–40% cheaper long conversations, same as the direct Anthropic path), local models via Ollama no longer lose the second tool call when the model fires two at once, and screenshots/generated images now reach LM Studio vision models instead of a "can't see images" note.
 

@@ -50,7 +50,7 @@ function resolveSharedFile(userId, filename, fileType) {
   if (!safeFilename || safeFilename === '.' || safeFilename === '..') return null;
   const shares = loadSharing();
   for (const s of shares) {
-    if (!s.sharedWith.includes(userId)) continue;
+    if (!s.sharedWith.includes(userId) && !s.sharedWith.includes('*')) continue; // '*' = shared with everyone
     // Match by filename (also basenamed — ignore any stored traversal)
     if (path.basename(s.filename ?? '') !== safeFilename) continue;
     // Derive the search dirs from the SHARE's own type, not the requester-
@@ -124,7 +124,7 @@ export async function handle(req, res) {
     const seenFiles = new Set(images.map(i => i.filename));
     const shares = loadSharing();
     for (const s of shares) {
-      if (!s.sharedWith.includes(userId)) continue;
+      if (!s.sharedWith.includes(userId) && !s.sharedWith.includes('*')) continue; // '*' = shared with everyone
       if (seenFiles.has(s.filename)) continue;
       // Check if this shared file is an image (by fileType or by mime-type heuristic)
       const ext = path.extname(s.filename).toLowerCase();
@@ -212,7 +212,7 @@ export async function handle(req, res) {
     const seenVids = new Set(videos.map(v => v.filename));
     const vidShares = loadSharing();
     for (const s of vidShares) {
-      if (!s.sharedWith.includes(userId)) continue;
+      if (!s.sharedWith.includes(userId) && !s.sharedWith.includes('*')) continue; // '*' = shared with everyone
       if (seenVids.has(s.filename)) continue;
       const ext = path.extname(s.filename).toLowerCase();
       const isVid = s.fileType === 'video' || VIDEO_EXTS.has(ext);
@@ -522,7 +522,7 @@ export async function handle(req, res) {
         // of their file in an arbitrary type directory (cross-type IDOR).
         const TYPE_DIR = { image: 'images', video: 'videos', document: 'documents', invoice: 'invoices', audio: 'audio', research: 'research' };
         for (const s of shares) {
-          if (!s.sharedWith.includes(userId)) continue;
+          if (!s.sharedWith.includes(userId) && !s.sharedWith.includes('*')) continue; // '*' = shared with everyone
           if (s.filename !== safeName) continue;
           if (TYPE_DIR[s.fileType] !== fileType) continue;
           const ownerPath = path.join(getUserDir(s.ownerId), fileType, safeName);

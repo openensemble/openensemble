@@ -99,9 +99,10 @@ function resolveFilePath(doc, requesterId = null) {
 function canAccess(doc, userId) {
   if (doc.uploadedBy === userId) return true;
   if (doc.sharedWith?.includes('*') || doc.sharedWith?.includes(userId)) return true;
-  // Check sharing.json
+  // Check sharing.json ('*' = shared with everyone)
   const shares = loadSharing();
-  return shares.some(s => s.fileId === doc.id && s.ownerId === doc.uploadedBy && s.sharedWith.includes(userId));
+  return shares.some(s => s.fileId === doc.id && s.ownerId === doc.uploadedBy
+    && (s.sharedWith.includes(userId) || s.sharedWith.includes('*')));
 }
 
 async function extractText(fileData, ext) {
@@ -130,14 +131,50 @@ async function extractText(fileData, ext) {
   return '';
 }
 
+// One-shot backfill: '*' docs uploaded before share-with-everyone actually
+// worked have the flag on the doc entry but no sharing.json record (upload
+// used to skip record creation for '*'), so discovery never surfaced them.
+// Create the missing records once per process.
+let _starBackfillDone = false;
+async function _backfillStarShares() {
+  if (_starBackfillDone) return;
+  _starBackfillDone = true;
+  try {
+    const users = loadUsers();
+    for (const u of users) {
+      const docs = loadUserIndex(u.id);
+      for (const doc of docs) {
+        if (!doc.sharedWith?.includes('*')) continue;
+        await modifySharing(shares => {
+          if (shares.some(s => s.fileId === doc.id && s.ownerId === u.id)) return;
+          shares.push({
+            id: 'share_' + randomBytes(6).toString('hex'),
+            ownerId: u.id,
+            fileType: 'document',
+            fileId: doc.id,
+            filePath: `documents/${doc.id}${doc.ext}`,
+            filename: doc.filename,
+            sharedWith: ['*'],
+            sharedAt: doc.createdAt || new Date().toISOString(),
+          });
+          console.log(`[shared-docs] backfilled '*' share record for ${doc.filename} (owner ${u.id})`);
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('[shared-docs] star-share backfill failed:', e.message);
+  }
+}
+
 // Collect all docs visible to this user: own docs + docs shared with them
 function getVisibleDocs(userId) {
   // Own docs
   const ownDocs = loadUserIndex(userId);
 
-  // Docs shared with this user via sharing.json
+  // Docs shared with this user via sharing.json ('*' = everyone)
   const shares = loadSharing();
-  const sharedWithMe = shares.filter(s => s.sharedWith.includes(userId) && s.ownerId !== userId);
+  const sharedWithMe = shares.filter(s =>
+    (s.sharedWith.includes(userId) || s.sharedWith.includes('*')) && s.ownerId !== userId);
   const sharedDocs = [];
   for (const share of sharedWithMe) {
     const ownerDocs = loadUserIndex(share.ownerId);
@@ -178,9 +215,9 @@ function findDoc(docId, userId) {
   let doc = ownDocs.find(d => d.id === docId);
   if (doc) return doc;
 
-  // Check sharing.json to find the owner
+  // Check sharing.json to find the owner ('*' = shared with everyone)
   const shares = loadSharing();
-  const share = shares.find(s => s.fileId === docId && s.sharedWith.includes(userId));
+  const share = shares.find(s => s.fileId === docId && (s.sharedWith.includes(userId) || s.sharedWith.includes('*')));
   if (share) {
     const ownerDocs = loadUserIndex(share.ownerId);
     doc = ownerDocs.find(d => d.id === docId);
@@ -207,6 +244,7 @@ export async function handle(req, res) {
   // ── GET /api/shared-docs — list accessible docs ────────────────────────────
   if (pathname === '/api/shared-docs' && req.method === 'GET') {
     const userId = requireAuth(req, res); if (!userId) return true;
+    await _backfillStarShares();
     const users = loadUsers();
     const docs  = getVisibleDocs(userId)
       .map(d => ({
@@ -313,8 +351,11 @@ export async function handle(req, res) {
       };
       await modifyUserIndex(userId, docs => docs.push(entry));
 
-      // If shared with specific users, add to sharing.json
-      if (sharedWith.length > 0 && !sharedWith.includes('*')) {
+      // Shared with users OR everyone ('*') — either way the share record is
+      // the discovery mechanism. Upload used to skip the record for '*',
+      // which made "share with everyone" a silent no-op: canAccess honored
+      // it, but no other user could ever FIND the doc.
+      if (sharedWith.length > 0) {
         await modifySharing(shares => {
           shares.push({
             id: 'share_' + randomBytes(6).toString('hex'),
@@ -323,7 +364,7 @@ export async function handle(req, res) {
             fileId: id,
             filePath: `documents/${id}${ext}`,
             filename: fileName,
-            sharedWith,
+            sharedWith: sharedWith.includes('*') ? ['*'] : sharedWith,
             sharedAt: new Date().toISOString(),
           });
         });
@@ -519,13 +560,15 @@ export async function handle(req, res) {
         if (body.description !== undefined) d.description = body.description;
       });
 
-      // Update sharing.json if sharedWith changed
+      // Update sharing.json if sharedWith changed ('*' = everyone gets a
+      // record too — it's the discovery mechanism; see the upload path).
       if (Array.isArray(body.sharedWith)) {
         await modifySharing(shares => {
           const idx = shares.findIndex(s => s.fileId === doc.id && s.ownerId === doc.uploadedBy);
-          if (body.sharedWith.length > 0 && !body.sharedWith.includes('*')) {
+          if (body.sharedWith.length > 0) {
+            const nextShared = body.sharedWith.includes('*') ? ['*'] : body.sharedWith;
             if (idx !== -1) {
-              shares[idx].sharedWith = body.sharedWith;
+              shares[idx].sharedWith = nextShared;
             } else {
               shares.push({
                 id: 'share_' + randomBytes(6).toString('hex'),
@@ -534,7 +577,7 @@ export async function handle(req, res) {
                 fileId: doc.id,
                 filePath: `documents/${doc.id}${doc.ext}`,
                 filename: doc.filename,
-                sharedWith: body.sharedWith,
+                sharedWith: nextShared,
                 sharedAt: new Date().toISOString(),
               });
             }

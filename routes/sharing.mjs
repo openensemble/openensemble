@@ -64,11 +64,11 @@ export async function handle(req, res) {
     const shares = loadSharing();
     const users  = loadUsers();
     const result = shares
-      .filter(s => s.ownerId === userId || s.sharedWith.includes(userId))
+      .filter(s => s.ownerId === userId || s.sharedWith.includes(userId) || s.sharedWith.includes('*'))
       .map(s => ({
         ...s,
         ownerName: users.find(u => u.id === s.ownerId)?.name ?? 'Unknown',
-        sharedWithNames: s.sharedWith.map(uid => users.find(u => u.id === uid)?.name ?? uid),
+        sharedWithNames: s.sharedWith.map(uid => uid === '*' ? 'Everyone' : (users.find(u => u.id === uid)?.name ?? uid)),
         isOwn: s.ownerId === userId,
       }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
