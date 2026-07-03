@@ -13,16 +13,30 @@
 // loops share this class. The hard ceiling (default 500) is a last resort;
 // stall detection (identical-call and error-loop) is the real brake.
 export class LoopGuard {
-  constructor(maxLoops = 500) {
+  constructor(maxLoops = 500, maxWallMs = 15 * 60_000) {
     this.maxLoops = maxLoops;
     this.count = 0;
     this.recentSigs = [];
     this.consecutiveErrors = 0;
     this.WINDOW = 4;        // identical-call window
     this.ERROR_WINDOW = 5;  // consecutive all-error iterations before break
+    // Wall-clock budget: a model legally alternating two non-erroring calls
+    // (list→read→list→read) never trips the identical-call window and could
+    // spin all 500 iterations — an unbounded-cost turn at cloud pricing.
+    this.deadline = Date.now() + maxWallMs;
+    this._wallLogged = false;
   }
   /** Call at the top of each while iteration. Returns false → stop. */
-  tick() { return ++this.count < this.maxLoops; }
+  tick() {
+    if (Date.now() > this.deadline) {
+      if (!this._wallLogged) {
+        this._wallLogged = true;
+        console.warn(`[loop-guard] turn wall-clock budget exhausted after ${this.count} tool rounds`);
+      }
+      return false;
+    }
+    return ++this.count < this.maxLoops;
+  }
   /**
    * Call after tool execution, before `continue`.
    * @param {Array<{name:string, args:string}>} calls  — tool name + raw args JSON

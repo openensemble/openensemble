@@ -245,7 +245,12 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         }
-        working.push({ role: 'assistant', content: results.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })) });
+        working.push({ role: 'assistant', content: [
+          // Keep the pre-tool preamble in history — dropping it left the
+          // model re-deriving its own reasoning on the next round.
+          ...(textContent.trim() ? [{ type: 'text', text: textContent }] : []),
+          ...results.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })),
+        ] });
         working.push({ role: 'user',      content: results.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: applyRedactions(r.result) })) });
         // After the tool_result message, append any vision attachments
         // (browser_screenshot etc.) as a synthesized user message so the
@@ -298,7 +303,10 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       }
       // Anthropic requires all tool_use blocks in one assistant message
       // and all tool_result blocks in one user message
-      working.push({ role: 'assistant', content: seqResults.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })) });
+      working.push({ role: 'assistant', content: [
+        ...(textContent.trim() ? [{ type: 'text', text: textContent }] : []),
+        ...seqResults.map(r => ({ type: 'tool_use', id: r.block.id, name: r.block.name, input: r.toolArgs })),
+      ] });
       working.push({ role: 'user',      content: seqResults.map(r => ({ type: 'tool_result', tool_use_id: r.block.id, content: applyRedactions(r.result) })) });
       // Vision attachments — same pattern as the parallel path above.
       for (const { block, _images } of seqResults) {

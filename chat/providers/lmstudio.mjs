@@ -234,10 +234,14 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
         yield { type: 'token', text: delta.content };
       }
       for (const tc of delta.tool_calls ?? []) {
-        const idx = tc.index ?? 0;
+        // Key by index when present (spec), else by id — compat servers that
+        // omit index on parallel calls used to collapse them all into idx 0.
+        const idx = tc.index ?? tc.id ?? 0;
         if (!toolCalls.has(idx)) toolCalls.set(idx, { id: tc.id ?? `tc${idx}`, name: '', argsJson: '' });
         const entry = toolCalls.get(idx);
-        if (tc.function?.name)      entry.name     += tc.function.name;
+        // ||= not +=: some servers resend the FULL name on every delta, which
+        // += turned into "web_searchweb_search".
+        if (tc.function?.name)      entry.name   ||= tc.function.name;
         if (tc.function?.arguments) entry.argsJson += tc.function.arguments;
       }
       // No break on finish_reason — the usage chunk arrives after the final
@@ -282,7 +286,7 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
           return { block, toolArgs, result: text, _notify, _images, events };
         }));
         const assistantToolCalls = results.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
-        working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
+        working.push({ role: 'assistant', content: textContent.trim() ? textContent : null, tool_calls: assistantToolCalls }); // keep the pre-tool preamble in history — dropping it left the model re-deriving its own reasoning next round
         for (const { block, result, _notify, events } of results) {
           for (const ev of events) yield ev;
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
@@ -301,7 +305,7 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
 
       // Sequential execution for single or mixed tool calls
       const assistantToolCalls = blocks.map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: b.argsJson } }));
-      working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
+      working.push({ role: 'assistant', content: textContent.trim() ? textContent : null, tool_calls: assistantToolCalls }); // keep the pre-tool preamble in history — dropping it left the model re-deriving its own reasoning next round
       const lmSeqResults = [];
       const _imagesByBlockId = new Map();
       for (const block of blocks) {

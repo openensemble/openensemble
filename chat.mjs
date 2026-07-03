@@ -117,7 +117,7 @@ function _modelContextWindow(model) {
   const m = model.toLowerCase();
   // OpenAI: gpt-5.x family ships at 200k+; gpt-4.1/4o-class at 128k; old 3.5 at 16k
   if (/^gpt-5/.test(m))                     return 272000;
-  if (/^gpt-4o/.test(m) || /^gpt-4\.1/.test(m) || /^gpt-4-turbo/.test(m)) return 128000;
+  if (/^gpt-4o/.test(m) || /^gpt-4\.1/.test(m) || /^gpt-4\.5/.test(m) || /^gpt-4-turbo/.test(m)) return 128000;
   if (/^gpt-4/.test(m))                     return 8192;
   if (/^gpt-3\.5/.test(m))                  return 16385;
   if (/^o\d/.test(m))                       return 200000;          // o1 / o3 family
@@ -454,7 +454,11 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
       }
     }
     if (event.type === 'tool_result' && event.name) {
-      toolsUsed.push({ name: event.name, text: event.text || '', args: _lastCallArgsByName[event.name] ?? null });
+      // Take args from the matching pending record (FIFO per name), not the
+      // by-name map — parallel same-name calls clobbered the map, so the
+      // first result carried the SECOND call's args in traces/recipes.
+      const _matched = _pendingToolEventsByName[event.name]?.[0] ?? null;
+      toolsUsed.push({ name: event.name, text: event.text || '', args: (_matched?.args ?? _lastCallArgsByName[event.name]) ?? null });
       // A tool that caught its own error and returned an error string (or one
       // the dispatcher caught and emitted as "Tool error (…)") completes the
       // tool loop normally — without this it would record status:'done' and the

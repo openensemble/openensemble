@@ -183,7 +183,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
       // Add the assistant's tool-call message to working history.
       // Truncate large string arguments (e.g. file content in coder_write_file)
       // so accumulated tool-call history doesn't bloat the context.
-      ollamaMessages.push({ role: 'assistant', content: '', tool_calls: compressToolCalls(toolCalls) });
+      ollamaMessages.push({ role: 'assistant', content: content.trim() ? content : '', tool_calls: compressToolCalls(toolCalls) }); // keep the pre-tool preamble in history
 
       // Multiple tool calls in one assistant turn — run in parallel.
       // All tools run via executeToolStreaming (blocking per-tool, full

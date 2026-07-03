@@ -397,6 +397,11 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           const callId = item.call_id ?? item.id;
           toolCalls.set(callId, { id: callId, name: item.name ?? '', argsJson: typeof item.arguments === 'string' ? item.arguments : '' });
           if (typeof ev.output_index === 'number') indexToCallId.set(ev.output_index, callId);
+          // Argument deltas reference the fc_… ITEM id, not the call_… id the
+          // map is keyed by — without this alias every delta missed and only
+          // the final done re-delivery saved the args (a stream ending without
+          // done yielded {}). Keys are disjoint (numbers vs fc_ strings).
+          if (item.id && item.id !== callId) indexToCallId.set(item.id, callId);
         }
         if (item.type === 'image_generation_call') {
           yield { type: 'tool_progress', name: 'image_generation', text: 'Generating image...' };
@@ -404,7 +409,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         continue;
       }
       if (t === 'response.function_call_arguments.delta') {
-        const callId = ev.item_id ?? indexToCallId.get(ev.output_index);
+        const callId = indexToCallId.get(ev.item_id) ?? ev.item_id ?? indexToCallId.get(ev.output_index);
         const entry = callId && toolCalls.get(callId);
         if (entry && typeof ev.delta === 'string') entry.argsJson += ev.delta;
         continue;

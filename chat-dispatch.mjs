@@ -462,7 +462,12 @@ export async function handleChatMessage({
     return;
   }
 
-  if (!rawText?.trim() && !rawAttachment) return;
+  if (!rawText?.trim() && !rawAttachment) {
+    // Terminal event even for a no-op — a client showing a pending state on
+    // send otherwise hangs until its own timeout.
+    onEvent({ type: 'done', agent: agentId });
+    return;
+  }
   recordActivity(userId, agentId, { message: true });
 
   // Profile intercepts: news-topic preference (side-effect; pipeline continues)
