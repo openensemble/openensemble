@@ -593,10 +593,15 @@ function renderDevices() {
 
   const rows = _devicesList.map(d => {
     const lastSeen = d.last_seen ? fmtTimeAgo(d.last_seen) : 'never';
-    const dot = d.online
+    const degraded = d.online && (d.health?.micDead || d.health?.rebootStorm);
+    const dot = degraded
+      ? '<span title="Degraded" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e05c5c;margin-right:6px;vertical-align:middle"></span>'
+      : d.online
       ? '<span title="Online" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#3cc36f;margin-right:6px;vertical-align:middle"></span>'
       : '<span title="Offline" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e0a030;margin-right:6px;vertical-align:middle"></span>';
-    const status = d.online
+    const status = degraded
+      ? '<span style="color:#e05c5c;font-weight:600">Degraded</span>'
+      : d.online
       ? '<span style="color:#3cc36f;font-weight:600">Online</span>'
       : `<span style="color:#e0a030;font-weight:600">Offline</span> · last seen ${escHtml(lastSeen)}`;
     // Firmware row: current version + an Update button when an upgrade is
@@ -613,6 +618,9 @@ function renderDevices() {
     const metaBits = [
       `${dot}${status}`,
       d.mute_state ? '<span style="color:var(--red,#e05c5c);font-weight:600">muted</span>' : null,
+      d.health?.micDead ? '<span style="color:#e05c5c;font-weight:600" title="Heartbeat reports no microphone capture while the control socket is online">mic stalled</span>' : null,
+      d.health?.rebootStorm ? '<span style="color:#e05c5c;font-weight:600" title="Recent boot telemetry indicates repeated restarts">rebooting repeatedly</span>' : null,
+      Number.isFinite(d.health?.capSps) ? `<span title="Capture samples per second">mic ${Math.round(d.health.capSps)}/s</span>` : null,
     ].filter(Boolean).join(' · ');
     return `
       <div class="cdraw-row" data-device-row="${escHtml(d.id)}" style="display:block;padding:14px 14px;border-bottom:1px solid var(--border);background:transparent;border-radius:0;margin-bottom:0">

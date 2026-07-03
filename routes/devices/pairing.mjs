@@ -28,7 +28,7 @@ import {
 } from '../_helpers/pairing-ratelimit.mjs';
 import { registerDevice } from '../../lib/voice-devices.mjs';
 
-const _pairingCodes = new Map(); // code → { userId, createdAt }
+const _pairingCodes = new Map(); // code → { userId, createdAt, redeemed? }
 const PAIRING_TTL = 10 * 60 * 1000;
 
 function generatePairingCode(userId) {
@@ -49,8 +49,15 @@ function redeemPairingCode(code) {
     _pairingCodes.delete(key);
     return null;
   }
-  _pairingCodes.delete(key);
-  return entry;
+  return { key, entry };
+}
+
+function canonicalServerHint(req) {
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').trim();
+  if (!host) return null;
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
+    || (req.socket?.encrypted ? 'https' : 'http');
+  return `${proto}://${host}`.replace(/\/+$/, '');
 }
 
 export const PAIRING_CODE_TTL_SECONDS = PAIRING_TTL / 1000;
@@ -96,8 +103,8 @@ export async function handlePairingRoutes(req, res, pathname) {
       res.end(JSON.stringify({ error: 'code is required' }));
       return true;
     }
-    const entry = redeemPairingCode(body.code);
-    if (!entry) {
+    const redeem = redeemPairingCode(body.code);
+    if (!redeem) {
       recordRedeemFailure(ip);
       noteGlobalFail();
       res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -105,6 +112,12 @@ export async function handlePairingRoutes(req, res, pathname) {
       return true;
     }
     clearRedeemFailures(ip);
+    const { entry } = redeem;
+    if (entry.redeemed) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(entry.redeemed));
+      return true;
+    }
     const token = createSession(entry.userId, { kind: 'voice-device' });
     // Field-name compat: the XVF3800 firmware (and older clients) send
     // `device_name`; some 3rd-party clients send `name`. Accept either —
@@ -122,8 +135,14 @@ export async function handlePairingRoutes(req, res, pathname) {
     // Bind deviceId back into the session so the WS handler can resolve
     // slot_agent_map without a per-message token-prefix lookup.
     setSessionDeviceId(token, device.id);
+    entry.redeemed = {
+      token,
+      userId: entry.userId,
+      deviceId: device.id,
+      server_hint: canonicalServerHint(req),
+    };
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ token, userId: entry.userId, deviceId: device.id }));
+    res.end(JSON.stringify(entry.redeemed));
     return true;
   }
 

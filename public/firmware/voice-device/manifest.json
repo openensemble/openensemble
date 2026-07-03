@@ -11,27 +11,32 @@
     {
       "name": "bootloader",
       "offset": "0x0",
-      "file": "bootloader.bin"
+      "file": "bootloader.bin",
+      "sha256": "0ab62250e03044d15c8d3736a3801a78a9696333d362efe391726b978e70b54c"
     },
     {
       "name": "partition-table",
       "offset": "0x8000",
-      "file": "partition-table.bin"
+      "file": "partition-table.bin",
+      "sha256": "4764a4aba0063a0781824da26af110596c528f8f0d92019fc0a83a95d17deaaa"
     },
     {
       "name": "ota-data",
       "offset": "0x10000",
-      "file": "ota_data_initial.bin"
+      "file": "ota_data_initial.bin",
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
     },
     {
       "name": "app",
       "offset": "0x20000",
-      "file": "oe_voice_device.bin"
+      "file": "oe_voice_device.bin",
+      "sha256": "c6ad70235665327d9e5235984a302ac3e6f7a83a7001f292edf0516417feec66"
     },
     {
       "name": "wakewords",
       "offset": "0x620000",
-      "file": "wakewords.bin"
+      "file": "wakewords.bin",
+      "sha256": "12a7ec876c3dcd80039b9ccc2fda11cd38960e7614c839eb7eefef8d8d235601"
     }
   ]
 }

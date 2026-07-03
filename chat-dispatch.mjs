@@ -53,7 +53,7 @@ import {
 } from './chat-dispatch/profile-intercepts.mjs';
 import { extractTransactions } from './skills/expenses/execute.mjs';
 import { getRoleAssignments, listRoles } from './roles.mjs';
-import { getSlotAssignment } from './lib/voice-devices.mjs';
+import { getDevice, getSlotAssignment } from './lib/voice-devices.mjs';
 import { log } from './logger.mjs';
 import { turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTurnAgent } from './lib/turn-trace-context.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
@@ -279,6 +279,10 @@ export async function handleChatMessage({
       agentId = assignment.agentId ?? null;
       console.log(`[chat] voice-device slot=${wakeSlot} device=${deviceId} auth_user=${userId} acting_as=${effectiveUserId} agent=${agentId ?? '(coordinator)'}`);
     }
+  }
+  if (!agentId && deviceId && effectiveUserId === userId) {
+    const deviceDefault = getDevice(userId, deviceId)?.default_agent_id ?? null;
+    if (deviceDefault) agentId = deviceDefault;
   }
   userId = effectiveUserId;
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
@@ -762,13 +766,11 @@ export async function handleChatMessage({
       }
     }
 
-    // Ambient auto-restore: voice-device wakes interrupt ambient playback
-    // (XVF3800 firmware sets s_ambient_stop on wake — barge-in). If this
-    // turn neither started a new ambient nor explicitly stopped the old
-    // one, the user is left in silence. Re-emit play_ambient after a short
-    // grace period so any TTS reply finishes first. Marker-identity check
-    // ensures we never resurrect an ambient the routine intentionally
-    // replaced (different marker) or the user said "stop" to (null marker).
+    // Ambient auto-restore backstop: current firmware pauses/resumes ambient
+    // locally around a wake turn. Keep this server-side marker check only as
+    // a recovery nudge for older or wedged devices; the same-marker send is
+    // intentionally conservative and must never resurrect an ambient session
+    // the user stopped or a routine replaced.
     if (_ambientAtStart && deviceId) {
       // Trailing-edge debounce (see _ambientRestoreTimers): cancel any restore
       // already queued for this device so back-to-back wakes coalesce into a

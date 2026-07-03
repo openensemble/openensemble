@@ -217,9 +217,9 @@ function executeVoiceIntent(intent, deviceId, userId, agentId = null) {
       }
       // Local audio was already stopped by the barge-in handler in
       // firmware when the wake fired. Also broadcast alarm_stop to every
-      // device holding an active alarm for this user — devices halt their
-      // ring loops and send alarm_acked back, which cleans up the server
-      // registry. The firmware's wake-while-alarm-firing path already
+      // device holding an active alarm for this user; the server removes
+      // those registry entries immediately so stale alarms do not poison
+      // future stop intents. The firmware's wake-while-alarm-firing path already
       // dismisses locally without an STT roundtrip, so this catches the
       // typed/UI-driven stops that don't go through the device's wake.
       if (userId && hasActiveAlarms(userId)) {

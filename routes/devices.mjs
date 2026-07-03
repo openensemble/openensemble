@@ -8,7 +8,7 @@
  */
 
 import { requireAuth, readBody, revokeSessionByPrefix, clearUserVoiceDeviceSessions, isChildRequest } from './_helpers.mjs';
-import { listDevices, getDevice, updateDevice, removeDevice, findIncomingSlots, clearSlotAssignment } from '../lib/voice-devices.mjs';
+import { listDevices, getDevice, updateDevice, removeDevice, findIncomingSlots, clearSlotAssignment, recordDeviceOtaProgress } from '../lib/voice-devices.mjs';
 import { handlePairingRoutes } from './devices/pairing.mjs';
 import { sendToDevice, isDeviceOnline } from '../ws-handler.mjs';
 import { randomBytes } from 'crypto';
@@ -308,7 +308,12 @@ export async function handle(req, res) {
   if (p === '/api/devices' && req.method === 'GET') {
     const userId = requireAuth(req, res);
     if (!userId) return true;
-    const devices = listDevices(userId).map(d => ({ ...d, online: isDeviceOnline(d.id) }));
+    const { getDeviceHealth } = await import('../lib/voice-device-health.mjs');
+    const devices = listDevices(userId).map(d => ({
+      ...d,
+      online: isDeviceOnline(d.id),
+      health: getDeviceHealth(d.id),
+    }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ devices }));
     return true;
@@ -785,6 +790,19 @@ export async function handle(req, res) {
       return true;
     }
     const sent = sendToDevice(id, { type: 'ota_check' });
+    if (sent) {
+      let target = null;
+      try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'public', 'firmware', 'voice-device', 'manifest.json'), 'utf8'));
+        target = typeof manifest.version === 'string' ? manifest.version : null;
+      } catch {}
+      recordDeviceOtaProgress(userId, id, {
+        phase: 'requested',
+        target_version: target,
+        bytes_done: 0,
+        total: 0,
+      });
+    }
     res.writeHead(sent ? 202 : 502, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ nudged: !!sent }));
     return true;

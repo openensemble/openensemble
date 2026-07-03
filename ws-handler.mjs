@@ -41,7 +41,7 @@ import {
 import { getVoiceRef } from './lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from './lib/voice-tts-stream.mjs';
 import { getSessionMeta, setSessionDeviceId, adoptSession } from './routes/_helpers/auth-sessions.mjs';
-import { getSlotAssignment, findDeviceByTokenPrefix, findDeviceByTokenAnyUser, recordTokenSecret, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice } from './lib/voice-devices.mjs';
+import { getSlotAssignment, findDeviceByTokenPrefix, findDeviceByTokenAnyUser, recordTokenSecret, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice, recordDeviceOtaProgress } from './lib/voice-devices.mjs';
 import { getAmbientForDevice, dropAmbientForDevice } from './routes/devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
 import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
@@ -107,6 +107,7 @@ const WS_MAX_MISSED_PONGS = 3;
 const VOICE_CONFIG_REPUSH_DEBOUNCE_MS = 10 * 60 * 1000; // 10 min
 // key `${userId}:${deviceId}` -> { at, version } of the last actual push.
 const _lastVoiceConfigPush = new Map();
+const VOICE_CONFIG_PUSH_CONNECT_DELAY_MS = 1500;
 // Per-user concurrent WebSocket cap. A compromised account (or a buggy
 // reconnect loop) shouldn't be able to hoard server sockets — each open
 // connection costs a heartbeat timer slot and keepalive memory.
@@ -135,16 +136,67 @@ function isSameOriginWs(req) {
   } catch { return false; }
 }
 
+function wsClientIp(req) {
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return (xff || req.socket?.remoteAddress || '').replace(/^::ffff:/, '') || null;
+}
+
 function enforceWsCap(ws) {
   if (!ws._userId) return true;
   let count = 0;
-  for (const c of _wss.clients) if (c._userId === ws._userId && c !== ws) count++;
+  for (const c of _wss.clients) {
+    if (c === ws) continue;
+    if (c.readyState !== c.OPEN && c.readyState !== c.CONNECTING) continue;
+    if (c._userId === ws._userId) count++;
+  }
   if (count >= MAX_WS_PER_USER) {
     ws.send(JSON.stringify({ type: 'error', message: 'Too many concurrent connections' }));
     ws.close(4008, 'Connection cap reached');
     return false;
   }
   return true;
+}
+
+function closeOlderDeviceSockets(ws) {
+  if (!_wss || !ws?._deviceId) return 0;
+  let closed = 0;
+  for (const c of _wss.clients) {
+    if (c === ws) continue;
+    if (c._deviceId !== ws._deviceId) continue;
+    if (c.readyState !== c.OPEN && c.readyState !== c.CONNECTING) continue;
+    try { c.close(4009, 'Superseded by newer device connection'); } catch {}
+    setTimeout(() => {
+      try {
+        if (c.readyState !== c.CLOSED) c.terminate();
+      } catch {}
+    }, 1000).unref?.();
+    closed++;
+  }
+  if (closed) log.info('ws', 'closed older voice-device socket(s)', { userId: ws._userId, deviceId: ws._deviceId, closed });
+  return closed;
+}
+
+function reconcileVoiceDeviceState(ws) {
+  if (!ws?._deviceId || !ws?._userId) return;
+  const d = getDevice(ws._userId, ws._deviceId);
+  if (!d) return;
+  try {
+    if (d.name) sendToDevice(ws._deviceId, { type: 'set_device_name', name: d.name });
+    sendToDevice(ws._deviceId, { type: 'set_headphone_mode', enabled: !!d.headphone_mode });
+  } catch (e) {
+    console.warn(`[ws] device-state reconcile failed for ${ws._deviceId}: ${e.message}`);
+  }
+}
+
+function scheduleVoiceConfigPush(ws) {
+  if (!ws?._deviceId || !ws?._userId) return;
+  if (ws._voiceConfigPushTimer) clearTimeout(ws._voiceConfigPushTimer);
+  ws._voiceConfigPushTimer = setTimeout(() => {
+    ws._voiceConfigPushTimer = null;
+    if (ws.readyState !== ws.OPEN || !ws._authenticated || !ws._deviceId) return;
+    maybePushVoiceConfig(ws);
+  }, VOICE_CONFIG_PUSH_CONNECT_DELAY_MS);
+  ws._voiceConfigPushTimer.unref?.();
 }
 
 const sessionKey = (userId, agentId) => `${userId}_${agentId}`;
@@ -165,8 +217,11 @@ function makeVoiceTurn({ ws, effectiveUserId, agentId, wakeSlot }) {
 function suppressVoiceOutput(ws, reason, { sendDone = false } = {}) {
   if (!ws?._deviceId) return null;
   const active = ws._activeVoiceTurn ?? null;
-  const hadStreamer = !!ws._ttsStreamer;
-  try { ws._ttsStreamer?.abort(); } catch {}
+  const streamer = ws._ttsStreamer ?? null;
+  const hadStreamer = !!streamer;
+  try { streamer?.abort?.({ close: true, sendDone }); } catch {
+    try { streamer?.abort?.(); } catch {}
+  }
   ws._ttsStreamer = null;
   ws._voiceOutputSuppression = {
     turnId: active?.id ?? null,
@@ -180,7 +235,7 @@ function suppressVoiceOutput(ws, reason, { sendDone = false } = {}) {
     abortedChat = true;
   }
 
-  if (sendDone && ws.readyState === ws.OPEN) {
+  if (sendDone && !hadStreamer && ws.readyState === ws.OPEN) {
     try { ws.send(JSON.stringify({ type: 'done', agent: active?.agentId ?? 'system' })); } catch {}
   }
 
@@ -504,6 +559,8 @@ function initBrowserExtWss() {
 export function getBrowserExtClientCount() { return _browserExtWss?.clients?.size ?? 0; }
 
 function onConnection(ws, req) {
+  try { ws._socket?.setKeepAlive?.(true, WS_PING_INTERVAL); } catch {}
+  ws._clientIp = wsClientIp(req);
   const desktopHeader = String(req.headers['x-openensemble-desktop-app'] || '').trim() === '1';
   const desktopUa = /\bOpenEnsembleDesktop\b/i.test(String(req.headers['user-agent'] || ''));
   ws._clientSource = desktopHeader || desktopUa ? 'desktop-app' : null;
@@ -528,6 +585,7 @@ function onConnection(ws, req) {
     // deviceId at creation time. Null for browser sessions.
     ws._deviceId = resolveDeviceId(cookieOrHeaderToken, cookieMeta);
     ws._authenticated = true;
+    if (ws._deviceId) closeOlderDeviceSockets(ws);
     if (!enforceWsCap(ws)) return;
   } else {
     // New path: require auth via first message
@@ -575,8 +633,11 @@ function onConnection(ws, req) {
 
   if (ws._authenticated) {
     sendInitialData();
-    maybePushVoiceConfig(ws);
-    if (ws._deviceId) touchDevice(ws._userId, ws._deviceId);
+    if (ws._deviceId) {
+      touchDevice(ws._userId, ws._deviceId);
+      reconcileVoiceDeviceState(ws);
+      scheduleVoiceConfigPush(ws);
+    }
   }
 
   ws.on('message', async (raw) => {
@@ -628,6 +689,7 @@ function onConnection(ws, req) {
       ws._userId = userId;
       ws._deviceId = recoveredDeviceId ?? resolveDeviceId(msg.token, meta);
       ws._authenticated = true;
+      if (ws._deviceId) closeOlderDeviceSockets(ws);
       if (!enforceWsCap(ws)) return;
       sendInitialData();
       if (ws._deviceId) {
@@ -638,9 +700,8 @@ function onConnection(ws, req) {
         // sees the just-reported version — otherwise the first reconnect
         // after an OTA up to 0.2.48 would still read the stale older version
         // and skip clears for one extra round-trip.
-        const fwReported = typeof msg.firmware_version === 'string' &&
-          msg.firmware_version.length > 0 && msg.firmware_version.length < 32
-            ? msg.firmware_version : null;
+        const fwReported = typeof msg.firmware_version === 'string' && msg.firmware_version.length > 0
+            ? msg.firmware_version.slice(0, 64) : null;
         const muteReported = typeof msg.mute_state === 'boolean' ? msg.mute_state : undefined;
         if (typeof muteReported === 'boolean') ws._voiceMuteState = muteReported;
         touchDevice(ws._userId, ws._deviceId, {
@@ -650,8 +711,9 @@ function onConnection(ws, req) {
         // Backfill the token's sha256 so a future expiry can be auto-recovered by
         // strong hash match. Idempotent — only writes when the token changes.
         recordTokenSecret(ws._userId, ws._deviceId, msg.token);
+        reconcileVoiceDeviceState(ws);
       }
-      maybePushVoiceConfig(ws);
+      scheduleVoiceConfigPush(ws);
       return;
     }
 
@@ -715,6 +777,7 @@ function onConnection(ws, req) {
         target_version: typeof msg.target_version === 'string' ? msg.target_version : null,
         err: typeof msg.err === 'string' ? msg.err : null,
       };
+      recordDeviceOtaProgress(ws._userId, ws._deviceId, payload);
       const wire = JSON.stringify(payload);
       for (const client of _wss.clients) {
         if (client === ws) continue;
@@ -798,7 +861,7 @@ function onConnection(ws, req) {
       // email/telegram needed since device clearly received the arm).
       const id = typeof msg.id === 'string' ? msg.id : null;
       if (id) {
-        const ok = markAlarmFired(ws._userId, id);
+        const ok = markAlarmFired(ws._userId, id, ws._deviceId ?? null);
         console.log(`[alarm] fired ack from device=${ws._deviceId ?? '?'} id=${id} known=${ok}`);
       }
       return;
@@ -808,7 +871,7 @@ function onConnection(ws, req) {
       // Device reports user-dismissed. Remove from registry.
       const id = typeof msg.id === 'string' ? msg.id : null;
       if (id) {
-        const ok = markAlarmAcked(ws._userId, id);
+        const ok = markAlarmAcked(ws._userId, id, ws._deviceId ?? null);
         console.log(`[alarm] acked from device=${ws._deviceId ?? '?'} id=${id} known=${ok}`);
       }
       return;
@@ -856,6 +919,8 @@ function onConnection(ws, req) {
       // leaving B's UI silently empty.
       let effectiveUserId = ws._userId;
       let slotAssignment = null;
+      const devicePrefs = ws._deviceId ? getDevice(ws._userId, ws._deviceId) : null;
+      const deviceSpeakReplies = !ws._deviceId || devicePrefs?.speak_replies !== false;
       if (ws._deviceId && wakeSlot !== null) {
         slotAssignment = getSlotAssignment(ws._userId, ws._deviceId, wakeSlot);
         if (slotAssignment) effectiveUserId = slotAssignment.ownerUserId;
@@ -909,7 +974,7 @@ function onConnection(ws, req) {
       }
       const routedAgentId = slotAssignment
         ? (slotAssignment.agentId || getUserCoordinatorAgentId(effectiveUserId))
-        : (msg.agent || getUserCoordinatorAgentId(effectiveUserId));
+        : (msg.agent || devicePrefs?.default_agent_id || getUserCoordinatorAgentId(effectiveUserId));
       const voiceTurn = makeVoiceTurn({ ws, effectiveUserId, agentId: routedAgentId, wakeSlot });
       if (voiceTurn) {
         messageVoiceTurn = voiceTurn;
@@ -939,11 +1004,12 @@ function onConnection(ws, req) {
       // streamer is still pumping (a barge-in chat that raced the stop
       // frame, or an overlapping announcement), kill it before wiring a
       // new one — two live pumps interleave frames into the same I²S ring.
-      if (ws._deviceId) { try { ws._ttsStreamer?.abort(); } catch {} ws._ttsStreamer = null; }
+      if (ws._deviceId) { try { ws._ttsStreamer?.abort({ close: true, sendDone: true }); } catch {} ws._ttsStreamer = null; }
       try {
         const _cfg = loadConfig();
-        if (msg.tts_stream === true && ws._deviceId && _cfg.ttsProvider === 'pocket-tts') {
-          let v = (slotAssignment?.ttsVoice) || _cfg.ttsVoice || '';
+        if (deviceSpeakReplies && msg.tts_stream === true && ws._deviceId && _cfg.ttsProvider === 'pocket-tts') {
+          const deviceVoice = devicePrefs?.tts_voice && devicePrefs.tts_voice !== 'alloy' ? devicePrefs.tts_voice : null;
+          let v = (slotAssignment?.ttsVoice) || deviceVoice || _cfg.ttsVoice || '';
           let refPath = null, presetVoice = null;
           if (typeof v === 'string' && v.startsWith('ref_')) {
             const ref = getVoiceRef(ws._userId, v);   // refs owned by the auth (device-paired) user
@@ -1012,11 +1078,12 @@ function onConnection(ws, req) {
           const isVoiceOrigin = !!ws._deviceId;
           const voiceSuppressed = isVoiceOrigin && isVoiceOutputSuppressed(ws, voiceTurn);
           const staleVoiceTurn = isVoiceOrigin && voiceTurn && ws._activeVoiceTurn?.id !== voiceTurn.id;
+          const voiceSilent = isVoiceOrigin && !deviceSpeakReplies;
           if (ttsStreamer && isVoiceOrigin) {
             // Streaming path: the server synthesizes + pushes tts_audio frames;
             // the device never receives raw token/done. Route the text through
             // the streamer; pass status/other events through unchanged.
-            if (voiceSuppressed || staleVoiceTurn) {
+            if (voiceSuppressed || staleVoiceTurn || voiceSilent) {
               try { ttsStreamer.abort(); } catch {}
             } else if (e?.type === 'token' && typeof e.text === 'string') ttsStreamer.pushText(e.text);
             else if (e?.type === 'done') ttsStreamer.finish();
@@ -1027,6 +1094,10 @@ function onConnection(ws, req) {
               if (isVoiceOrigin && (voiceSuppressed || staleVoiceTurn)) {
                 // Stop/mute already sent `done`; old-turn events must not
                 // leak into the device after a new wake has started.
+              } else if (voiceSilent) {
+                if (e?.type === 'done' || e?.type === 'error') {
+                  ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system' }));
+                }
               } else if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
                 ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: e.agent ?? 'system' }));
                 ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system' }));
@@ -1069,9 +1140,13 @@ function onConnection(ws, req) {
         const staleVoiceTurn = messageVoiceTurn && ws._activeVoiceTurn?.id !== messageVoiceTurn.id;
         const suppressed = isVoiceOutputSuppressed(ws, messageVoiceTurn ?? ws._activeVoiceTurn ?? null);
         if (!staleVoiceTurn) {
-          try { ws._ttsStreamer?.abort(); } catch {}
-          if (!suppressed) ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: 'system' }));
-          ws.send(JSON.stringify({ type: 'done', agent: 'system' }));
+          const streamer = ws._ttsStreamer ?? null;
+          try { streamer?.abort?.({ close: true, sendDone: true }); } catch {
+            try { streamer?.abort?.(); } catch {}
+          }
+          ws._ttsStreamer = null;
+          if (!streamer && !suppressed) ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: 'system' }));
+          if (!streamer) ws.send(JSON.stringify({ type: 'done', agent: 'system' }));
         }
       } else {
         ws.send(JSON.stringify({ type: 'error', message: 'Server error processing message', agent: 'system' }));
@@ -1081,6 +1156,10 @@ function onConnection(ws, req) {
   });
 
   ws.on('close', (code, reason) => {
+    if (ws._voiceConfigPushTimer) {
+      clearTimeout(ws._voiceConfigPushTimer);
+      ws._voiceConfigPushTimer = null;
+    }
     const r = reason ? reason.toString().slice(0, 80) : '';
     // code 1006 = abnormal (no close frame: network drop / TCP RST); 1000/1001 = clean.
     console.log(`[ws] client disconnected device=${ws._deviceId ?? '-'} user=${ws._userId} code=${code ?? '?'}${r ? ' reason=' + r : ''}`);
@@ -1200,7 +1279,7 @@ export function getDeviceIdForIp(ip) {
   const want = String(ip).replace(/^::ffff:/, '');
   for (const client of _wss.clients) {
     if (client.readyState !== client.OPEN || !client._deviceId) continue;
-    const addr = client._socket?.remoteAddress?.replace(/^::ffff:/, '');
+    const addr = (client._clientIp || client._socket?.remoteAddress || '').replace(/^::ffff:/, '');
     if (addr === want) return { deviceId: client._deviceId, userId: client._userId };
   }
   return null;
