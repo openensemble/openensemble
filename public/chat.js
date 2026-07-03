@@ -1,5 +1,11 @@
 // ── Attachment state ──────────────────────────────────────────────────────────
 let pendingAttachment = null; // { id, name, mimeType, base64, extractedText, isImage, isFinanceFile }
+// Retry-on-error state. A failed turn is never persisted server-side (the LLM
+// never sees it), so recovery is purely client-side: we remember the last
+// outgoing message and, if it errors, keep it on screen with a Retry button
+// until the user retries or types a fresh message.
+let lastSentAttempt = null; // { agent, text, attachment, userBubbleEl, sessionEntry } — in flight
+let failedAttempt = null;   // same shape + errorEl — set once a turn has errored
 
 // ── Pre-send tool planning ───────────────────────────────────────────────────
 const TOOL_PLAN_STORAGE_KEY = 'oe.toolPlanRecipes.v1';
@@ -364,6 +370,12 @@ async function send() {
   let text = $('input').value.trim();
   if ((!text && !pendingAttachment) || (streaming && !awaitingPermission) || !ws || ws.readyState !== WebSocket.OPEN) return;
 
+  // A fresh send supersedes any failed attempt still showing — the message the
+  // user just typed is almost always what they were retrying. Remove its bubble
+  // + error so nothing stale lingers (it was never persisted, so the LLM is
+  // unaffected).
+  clearFailedAttempt();
+
   // @-mention redirect: "@<agent> make me a skill" switches the active agent
   // BEFORE we push the user bubble so the message + reply both land in
   // that agent's chat panel. The server's chat-dispatch also handles the
@@ -389,9 +401,12 @@ async function send() {
   const displayText = text || (attachment ? `[${attachment.name}]` : '');
 
   if (!sessions[activeAgent]) sessions[activeAgent] = [];
-  sessions[activeAgent].push({ role: 'user', content: displayText, ts: Date.now(), attachment });
+  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachment };
+  sessions[activeAgent].push(sessionEntry);
   updateSessionWarning();
-  appendUserBubble(displayText, Date.now(), true, attachment);
+  const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachment);
+  // Remember this attempt so it can be cleared/retried if the turn errors.
+  lastSentAttempt = { agent: activeAgent, text, attachment, userBubbleEl, sessionEntry };
   $('input').value = '';
   resizeTextarea();
   clearAttachment();
@@ -426,8 +441,17 @@ function renderSession() {
     else if (m.role === 'proposal_outcome' && m.proposalId) applyProposalOutcome(m.proposalId, m.status, m.outcome);
     else if (m.role === 'attachment_decision' && m.decisionId) appendAttachmentDecisionBubble(m, false);
     else if (m.role === 'attachment_decision_outcome' && m.decisionId) applyAttachmentDecisionOutcome(m.decisionId, m.decision);
-    else if ((m.role === 'agent_report' || m.kind === 'agent_report') && isNodeExecTaskReport(m)) appendNodeExecTaskReport(m, null, false);
-    else if (m.role === 'agent_report' || m.kind === 'agent_report') _renderAgentReportEl(m);
+    else if ((m.role === 'agent_report' || m.kind === 'agent_report') && isNodeExecTaskReport(m)) {
+      appendNodeExecTaskReport(m, null, false);
+      appendAgentReportImages(m, false);
+    }
+    else if ((m.role === 'agent_report' || m.kind === 'agent_report') && appendAgentReportTaskChip(m, false)) {
+      appendAgentReportImages(m, false);
+    }
+    else if (m.role === 'agent_report' || m.kind === 'agent_report') {
+      _renderAgentReportEl(m);
+      appendAgentReportImages(m, false);
+    }
     else if (m.role === 'assistant' && !m.hidden && _legacyAgentReportMatch(m.content)) {
       // Legacy entries persisted before the kind:'agent_report' field
       // shipped — content starts with "[<name> finished in background]\n"
@@ -570,6 +594,83 @@ function orderSessionForRender(messages) {
   return out;
 }
 
+function chatSessionAgentId(agent) {
+  if (typeof clientSessionAgentId === 'function') return clientSessionAgentId(agent);
+  if (typeof agent !== 'string' || !agent) return agent;
+  const uid = (typeof _currentUser !== 'undefined' && _currentUser?.id) ? String(_currentUser.id) : '';
+  if (uid && agent.startsWith(`${uid}_`)) return agent.slice(uid.length + 1);
+  return agent.replace(/^user_[^_]+_/, '');
+}
+
+function isNestedTaskProxyStatus(status) {
+  const state = status?.state || {};
+  return status?.kind === 'task_proxy'
+    && typeof status.watcherId === 'string'
+    && typeof state.rootWatcherId === 'string'
+    && state.rootWatcherId
+    && state.rootWatcherId !== status.watcherId;
+}
+
+function agentReportWatcherId(report) {
+  if (!(report?.role === 'agent_report' || report?.kind === 'agent_report')) return '';
+  if (typeof report.rootWatcherId === 'string' && report.rootWatcherId) return report.rootWatcherId;
+  if (typeof report.watcherId === 'string' && report.watcherId) return report.watcherId;
+  if (typeof report.taskId === 'string' && report.taskId.startsWith('autobg_')) {
+    return report.taskId.slice('autobg_'.length);
+  }
+  return '';
+}
+
+function appendAgentReportTaskChip(report, scroll = true) {
+  const watcherId = agentReportWatcherId(report);
+  if (!watcherId) return false;
+  const ownWatcherId = typeof report.watcherId === 'string' ? report.watcherId : '';
+  const foldedIntoRoot = !!(ownWatcherId && watcherId !== ownWatcherId);
+  const existing = document.querySelector(`.msg.task-chip[data-watcher-id="${CSS.escape(watcherId)}"]`);
+  const existingAgent = existing?.querySelector('.task-chip-header span')?.textContent?.trim() || '';
+  const existingTask = existing?.querySelector('.task-chip-task')?.textContent?.trim() || '';
+  const body = String(_agentReportBody(report.content, report.displayContent) || report.content || `${report.agentName || report.tool || 'Agent'} completed.`);
+  const agentName = report.agentName || report.tool || 'Agent';
+  const agentEmoji = report.agentEmoji || '⏵';
+  const status = report.status === 'error'
+    ? 'error'
+    : report.status === 'cancelled'
+      ? 'cancelled'
+      : 'done';
+  const statusText = foldedIntoRoot ? `${agentEmoji} ${agentName}: ${body}` : body;
+  if (foldedIntoRoot && existing) {
+    const statusLine = existing.querySelector('.task-chip-status');
+    if (statusLine) {
+      const wasAtBottom = statusLine.scrollHeight - statusLine.scrollTop - statusLine.clientHeight < 4;
+      statusLine.textContent = statusText;
+      if (wasAtBottom) statusLine.scrollTop = statusLine.scrollHeight;
+    }
+    if (scroll) scrollToBottom();
+    return true;
+  }
+  return appendTaskChip({
+    kind: 'task_proxy',
+    watcherId,
+    label: foldedIntoRoot && existingAgent ? existingAgent : `${agentEmoji} ${agentName}`,
+    text: statusText,
+    final: true,
+    finalStatus: status,
+    state: {
+      status,
+      targetAgentName: foldedIntoRoot && existingAgent ? existingAgent : agentName,
+      targetAgentEmoji: foldedIntoRoot ? '' : agentEmoji,
+      summary: foldedIntoRoot && existingTask ? existingTask : (report.originalTask || report.tool || ''),
+      tool: report.tool || '',
+      phase: status,
+      startedAt: report.startedAt || null,
+      lastActivityAt: report.ts || Date.now(),
+      currentTool: null,
+      canCancel: false,
+      finalReportPreview: body.slice(0, 800),
+    },
+  }, report.ts || Date.now(), scroll) !== false;
+}
+
 function appendNodeExecTaskReport(report, turn, scroll = true) {
   const taskId = typeof report?.taskId === 'string' && report.taskId.startsWith('autobg_')
     ? report.taskId.slice('autobg_'.length)
@@ -683,6 +784,75 @@ function appendImageBubble(image, ts = Date.now(), scroll = true) {
   if (scroll) scrollToBottom();
   return el;
 }
+
+function reportImageFilename(image, idx = 0, ts = Date.now()) {
+  if (image?.filename) return image.filename;
+  if (image?.savedPath) {
+    const parts = String(image.savedPath).split(/[\\/]/);
+    const base = parts[parts.length - 1];
+    if (base) return base;
+  }
+  const mime = String(image?.mimeType || image?.mediaType || 'image/png');
+  const ext = mime.includes('jpeg') ? 'jpg' : mime.split('/').pop() || 'png';
+  return `agent-report-image-${ts}-${idx + 1}.${ext}`;
+}
+
+function appendReportImageBubble(image, ts = Date.now(), scroll = true, idx = 0) {
+  if (!image) return null;
+  const normalized = {
+    ...image,
+    mimeType: image.mimeType || image.mediaType || 'image/png',
+    filename: reportImageFilename(image, idx, ts),
+  };
+  if (normalized.base64) return appendImageBubble(normalized, ts, scroll);
+
+  const token = typeof getMediaTokenSync === 'function' ? getMediaTokenSync() : '';
+  const src = normalized.url || (normalized.filename
+    ? `/api/desktop/images/${encodeURIComponent(normalized.filename)}${token ? `?token=${encodeURIComponent(token)}` : ''}`
+    : '');
+  if (!src) return null;
+
+  const el = msgEl('assistant');
+  const bubble = el.querySelector('.msg-bubble');
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = normalized.filename;
+  img.style.cssText = 'max-width:100%;border-radius:8px;display:block';
+  bubble.appendChild(img);
+
+  const meta = document.createElement('div');
+  meta.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:var(--muted)';
+  const dl = document.createElement('a');
+  dl.innerHTML = `${icon('download', 12)} Download`;
+  dl.href = src;
+  dl.download = normalized.filename;
+  dl.style.cssText = 'color:var(--accent);text-decoration:none;cursor:pointer;flex-shrink:0';
+  meta.appendChild(dl);
+  if (normalized.savedPath) {
+    const saved = document.createElement('span');
+    saved.innerHTML = `${icon('save', 12)} Saved to ${escHtml(normalized.savedPath)}`;
+    saved.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    meta.appendChild(saved);
+  }
+  bubble.appendChild(meta);
+
+  addTimestamp(el, ts);
+  insertBefore(el);
+  if (scroll) scrollToBottom();
+  return el;
+}
+
+function appendAgentReportImages(report, scroll = true) {
+  const images = Array.isArray(report?.images) ? report.images : [];
+  if (!images.length) return false;
+  const ts = report.ts || Date.now();
+  let rendered = false;
+  images.forEach((image, idx) => {
+    if (appendReportImageBubble(image, ts + idx, false, idx)) rendered = true;
+  });
+  if (rendered && scroll) scrollToBottom();
+  return rendered;
+}
 // Watcher status updates — muted/italic, distinct from assistant bubbles.
 // Sourced from scheduler/watchers.mjs supervisor pushing WS type='status'
 // messages. The `📡` prefix marks these as poll-driven, not agent-spoken.
@@ -753,6 +923,10 @@ async function cancelTaskChip(watcherId, btn) {
 //   - Final outcome text (when done/error)
 function appendTaskChip(status, ts = Date.now(), scroll = true) {
   const watcherId = status.watcherId || '';
+  if (isNestedTaskProxyStatus(status)) {
+    if (watcherId) document.querySelector(`.msg.task-chip[data-watcher-id="${CSS.escape(watcherId)}"]`)?.remove();
+    return;
+  }
   let el = watcherId ? document.querySelector(`.msg.task-chip[data-watcher-id="${CSS.escape(watcherId)}"]`) : null;
   const isUpdate = !!el;
   const final = !!status.final;
@@ -882,6 +1056,46 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   metaLine.textContent = metaBits.join(' · ');
   metaLine.style.display = metaBits.length ? '' : 'none';
 
+  let childrenEl = el.querySelector('.task-chip-children');
+  if (!childrenEl) {
+    childrenEl = document.createElement('div');
+    childrenEl.className = 'task-chip-children';
+    childrenEl.style.cssText = 'display:grid;gap:4px;margin-bottom:6px;font-size:11px;color:var(--text)';
+    el.insertBefore(childrenEl, metaLine.nextSibling);
+  }
+  if (Array.isArray(state.childTasks)) {
+    const childRows = state.childTasks.filter(c => c?.taskId || c?.name).slice(-6);
+    if (childRows.length) {
+      childrenEl.innerHTML = '';
+      for (const child of childRows) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:rgba(127,127,127,0.04)';
+        const left = document.createElement('div');
+        left.style.cssText = 'min-width:0;display:grid;gap:1px';
+        const name = document.createElement('div');
+        name.textContent = child.name || 'Agent';
+        name.style.cssText = 'font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        const detail = document.createElement('div');
+        detail.textContent = child.summary || child.finalReportPreview || '';
+        detail.style.cssText = 'color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        left.appendChild(name);
+        if (detail.textContent) left.appendChild(detail);
+        const stateEl = document.createElement('div');
+        stateEl.textContent = child.currentTool ? `using ${child.currentTool}` : (child.status || 'running');
+        stateEl.style.cssText = 'color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums';
+        row.appendChild(left);
+        row.appendChild(stateEl);
+        childrenEl.appendChild(row);
+      }
+      childrenEl.style.display = '';
+    } else {
+      childrenEl.innerHTML = '';
+      childrenEl.style.display = 'none';
+    }
+  } else if (!childrenEl.children.length) {
+    childrenEl.style.display = 'none';
+  }
+
   // Latest status line (current tool, last result, awaiting question, final
   // output). Fixed-height with internal scrollbar so streaming node_exec
   // output doesn't repeatedly resize the chat while apt/dpkg prints.
@@ -909,9 +1123,9 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
     recent.style.cssText = 'margin-top:6px;font-size:11px;color:var(--muted);line-height:1.4;display:grid;gap:3px;max-height:4.2em;overflow:hidden';
     el.appendChild(recent);
   }
-  const history = Array.isArray(status.recentHistory) ? status.recentHistory.slice(-4) : [];
-  const rows = history.filter(h => h?.text && h.text !== status.text);
-  if (rows.length) {
+  const history = Array.isArray(status.recentHistory) ? status.recentHistory.slice(-4) : null;
+  const rows = history ? history.filter(h => h?.text && h.text !== status.text) : null;
+  if (rows?.length) {
     recent.innerHTML = '';
     for (const h of rows) {
       const row = document.createElement('div');
@@ -927,7 +1141,7 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
       recent.appendChild(row);
     }
     recent.style.display = '';
-  } else {
+  } else if (history) {
     recent.style.display = 'none';
   }
 
@@ -2027,6 +2241,7 @@ function sessionMessageKey(m) {
   if (m.role === 'agent_report' || m.kind === 'agent_report') {
     if (m.reportId) return `agent_report:${m.reportId}`;
     if (m.spanId) return `agent_report:${m.spanId}`;
+    if (m.watcherId) return `agent_report:${m.watcherId}:${m.targetAgentId || ''}`;
     if (m.taskId) return `agent_report:${m.taskId}:${m.targetAgentId || ''}`;
   }
   if (m.role === 'proposal' && m.proposalId) return `proposal:${m.proposalId}`;
@@ -2044,11 +2259,63 @@ function sameSessionMessage(a, b) {
 function sessionHasEquivalent(messages, msg) {
   return (messages || []).some(m => sameSessionMessage(m, msg));
 }
-function appendError(msg) {
+function appendError(msg, onRetry = null) {
   const el = document.createElement('div');
   el.className = 'msg assistant';
-  el.innerHTML = `<div class="msg-bubble" style="color:#f44336;border:1px solid #f44336">⚠ ${escHtml(msg)}</div>`;
+  const retryBtn = onRetry
+    ? ` <button class="retry-failed-btn" style="margin-left:8px;padding:2px 10px;font-size:0.85em;background:transparent;border:1px solid #f44336;color:#f44336;border-radius:5px;cursor:pointer;vertical-align:middle;">↻ Retry</button>`
+    : '';
+  el.innerHTML = `<div class="msg-bubble" style="color:#f44336;border:1px solid #f44336">⚠ ${escHtml(msg)}${retryBtn}</div>`;
+  if (onRetry) el.querySelector('.retry-failed-btn').addEventListener('click', onRetry);
   insertBefore(el); scrollToBottom();
+  return el;
+}
+
+// A turn errored. Keep the failed message + error on screen with a Retry button.
+// The failed turn is never persisted server-side, so the LLM never sees it — we
+// only manage the client-side view here.
+function showTurnError(message) {
+  const forThisAgent = lastSentAttempt && lastSentAttempt.agent === activeAgent;
+  const errorEl = appendError(message, forThisAgent ? retryFailedAttempt : null);
+  if (forThisAgent) {
+    // Drop the optimistic in-memory entry so an agent switch / re-render doesn't
+    // resurrect it as a normal message. The visible bubble stays until the user
+    // retries or types a new message.
+    const arr = sessions[lastSentAttempt.agent];
+    if (arr) { const i = arr.indexOf(lastSentAttempt.sessionEntry); if (i !== -1) arr.splice(i, 1); }
+    failedAttempt = { ...lastSentAttempt, errorEl };
+    lastSentAttempt = null;
+  }
+}
+
+// Remove the on-screen failed message + its error bubble. Called before any
+// fresh send (Retry button or a newly-typed message).
+function clearFailedAttempt() {
+  if (!failedAttempt) return;
+  try { failedAttempt.userBubbleEl?.remove(); } catch {}
+  try { failedAttempt.errorEl?.remove(); } catch {}
+  failedAttempt = null;
+}
+
+// Retry button: resend the exact text/attachment that failed, as a fresh turn.
+// Self-contained (doesn't touch the composer, so a half-typed draft survives).
+function retryFailedAttempt() {
+  if (!failedAttempt) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
+  const { agent, text, attachment } = failedAttempt;
+  clearFailedAttempt();
+  if (agent !== activeAgent) return;
+  const displayText = text || (attachment ? `[${attachment.name}]` : '');
+  if (!sessions[activeAgent]) sessions[activeAgent] = [];
+  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachment };
+  sessions[activeAgent].push(sessionEntry);
+  updateSessionWarning();
+  const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachment);
+  lastSentAttempt = { agent: activeAgent, text, attachment, userBubbleEl, sessionEntry };
+  setStreaming(true); setTyping(true);
+  const payload = { type: 'chat', agent: activeAgent, text };
+  if (attachment) payload.attachment = attachment;
+  ws.send(JSON.stringify(payload));
 }
 function appendNotification(msg) {
   const agentId = msg.agent;
@@ -2070,34 +2337,48 @@ function appendNotification(msg) {
 }
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
-  const { agent, reportId, agentName, agentEmoji, content, displayContent, ts, toolEvents, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, spanId, tool, status } = msg;
-  const report = { role: 'agent_report', reportId, agentName, agentEmoji, content, displayContent, toolEvents, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, spanId, tool, status, ts };
+  const { agent, reportId, agentName, agentEmoji, content, displayContent, ts, toolEvents, images, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, watcherId, rootWatcherId, spanId, tool, status } = msg;
+  const report = { role: 'agent_report', reportId, agentName, agentEmoji, content, displayContent, toolEvents, images, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, watcherId, rootWatcherId, spanId, tool, status, ts };
+  const agentKey = chatSessionAgentId(agent);
   // Push into the target coordinator's session cache so the report survives
   // agent-tab switches. Without this, the DOM bubble is the only copy
   // browser-side and it gets wiped on the next renderSession (e.g. when
   // the user switches agents and switches back).
   let addedToSession = false;
-  if (agent) {
-    if (!sessions[agent]) sessions[agent] = [];
+  if (agentKey) {
+    if (!sessions[agentKey]) sessions[agentKey] = [];
     // Use role:'agent_report' so renderSession can route this back through
     // _renderAgentReportEl below. Keep the same shape we just received so
     // the renderer can reconstruct identical DOM.
-    if (!sessionHasEquivalent(sessions[agent], report)) {
-      sessions[agent].push(report);
+    const equivalentIdx = sessions[agentKey].findIndex(m => sameSessionMessage(m, report));
+    if (equivalentIdx < 0) {
+      sessions[agentKey].push(report);
+      addedToSession = true;
+    } else if (Array.isArray(images) && images.length && !Array.isArray(sessions[agentKey][equivalentIdx].images)) {
+      sessions[agentKey][equivalentIdx] = { ...sessions[agentKey][equivalentIdx], images };
       addedToSession = true;
     }
   }
   // Only paint into the visible chat panel when the report's target
   // coordinator is the agent currently being viewed. A report fired while
   // the user is on a different agent's tab should NOT appear there.
-  if (!agent || agent === activeAgent) {
-    if (agent && typeof renderSession === 'function' && !streamEl) {
+  if (!agentKey || agentKey === activeAgent) {
+    if (agentKey && typeof renderSession === 'function' && !streamEl) {
       renderSession();
       return;
     }
-    if (agent && !addedToSession) return;
-    if (isNodeExecTaskReport(report)) appendNodeExecTaskReport(report, null, true);
-    else _renderAgentReportEl(report);
+    if (agentKey && !addedToSession) return;
+    if (isNodeExecTaskReport(report)) {
+      appendNodeExecTaskReport(report, null, true);
+      appendAgentReportImages(report, true);
+    }
+    else if (appendAgentReportTaskChip(report, true)) {
+      appendAgentReportImages(report, true);
+    }
+    else {
+      _renderAgentReportEl(report);
+      appendAgentReportImages(report, true);
+    }
   }
 }
 

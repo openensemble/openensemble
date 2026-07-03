@@ -3,7 +3,7 @@
  * Fires ask_agent calls without blocking the coordinator's turn.
  * Live progress surfaces via the task_proxy watcher chip in chat; on
  * completion a notification is injected into the coordinator's session
- * and an agent_report card is broadcast to the UI.
+ * and a task-backed agent_report is broadcast so the UI can update the chip.
  */
 
 import fs from 'fs';
@@ -13,7 +13,7 @@ import { runInTaskContext } from './lib/task-proxy-context.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
 import { learnToolPlanFromToolEvents, matchToolPlan } from './lib/tool-plan-memory.mjs';
 import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-child-barrier.mjs';
-import { BASE_DIR } from './lib/paths.mjs';
+import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 
 let _broadcast = null;
 export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
@@ -57,6 +57,7 @@ function _journalAdd(taskId) {
     agentEmoji: rec.agentEmoji || '🤖',
     summary: rec.summary || '',
     watcherId: rec.watcherId || null,
+    rootWatcherId: rec.rootWatcherId || null,
     rootTaskId: rec.rootTaskId || taskId,
     ownerKey: rec.ownerKey || null,
     coordinatorAgentId: rec.coordinatorAgentId || null,
@@ -148,7 +149,10 @@ export async function bootRecoverInterruptedTasks() {
           originalTask: e.summary || '',
           taskId,
           rootTaskId: e.rootTaskId || taskId,
+          watcherId: e.watcherId || null,
+          rootWatcherId: e.rootWatcherId || e.watcherId || null,
           spanId: e.spanId || null,
+          status: 'error',
           ts: now,
         });
       } catch (err) {
@@ -170,7 +174,10 @@ export async function bootRecoverInterruptedTasks() {
       originalTask: e.summary || '',
       taskId,
       rootTaskId: e.rootTaskId || taskId,
+      watcherId: e.watcherId || null,
+      rootWatcherId: e.rootWatcherId || e.watcherId || null,
       spanId: e.spanId || null,
+      status: 'error',
       ts: now,
     });
   }
@@ -470,6 +477,76 @@ function trackToolEvent(events, ev, agentId = null) {
   }
 }
 
+function reportImageFromEvent(ev) {
+  if (ev?.type !== 'image' || !ev.filename) return null;
+  const out = {
+    filename: ev.filename,
+    mimeType: ev.mimeType || ev.mediaType || 'image/png',
+  };
+  if (ev.savedPath) out.savedPath = ev.savedPath;
+  if (ev.base64) out.base64 = ev.base64;
+  return out;
+}
+
+function imageMimeFromFilename(filename) {
+  const ext = path.extname(String(filename || '')).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  return 'image/png';
+}
+
+function reportImagesFromText(userId, text) {
+  if (!userId || !text) return [];
+  const userImageDir = path.join(USERS_DIR, userId, 'images');
+  const userImageDirResolved = path.resolve(userImageDir);
+  const out = [];
+  const re = /\[Image:\s*([^\]\r\n]+)\](?:[ \t]*(?:\r?\n|[ \t]+)[ \t]*Saved to:\s*([^\r\n]+))?/gi;
+  for (const match of String(text).matchAll(re)) {
+    const filename = path.basename(String(match[1] || '').trim());
+    if (!filename) continue;
+    const expectedPath = path.join(userImageDir, filename);
+    if (!fs.existsSync(expectedPath)) continue;
+    const savedRaw = String(match[2] || '').trim();
+    let savedPath = expectedPath;
+    if (savedRaw && path.basename(savedRaw) === filename) {
+      const resolved = path.resolve(savedRaw);
+      if (resolved === expectedPath || resolved.startsWith(`${userImageDirResolved}${path.sep}`)) {
+        savedPath = savedRaw;
+      }
+    }
+    out.push({ filename, mimeType: imageMimeFromFilename(filename), savedPath });
+  }
+  return out;
+}
+
+function mergeReportImages(images) {
+  const out = [];
+  const seen = new Set();
+  for (const image of Array.isArray(images) ? images : []) {
+    if (!image) continue;
+    const key = image.filename || image.savedPath || image.base64?.slice?.(0, 64);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(image);
+  }
+  return out;
+}
+
+function persistedReportImage(img) {
+  if (!img?.filename && !img?.base64) return null;
+  const out = {
+    ...(img.filename ? { filename: img.filename } : {}),
+    mimeType: img.mimeType || img.mediaType || 'image/png',
+    ...(img.savedPath ? { savedPath: img.savedPath } : {}),
+  };
+  // Avoid bloating durable session rows when the generated file already has a
+  // stable saved filename/path. For transient image-only payloads, base64 is
+  // the only renderable copy, so keep it.
+  if (img.base64 && !img.savedPath && !img.filename) out.base64 = img.base64;
+  return out;
+}
+
 // Doc ids PRODUCED by a pipeline stage — from doc-PRODUCING tools only.
 // Deliberately NOT a generic id regex over every tool result: list_research /
 // list_profile_files output OLD doc ids, and harvesting those would whitelist
@@ -659,12 +736,16 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         'Access is restricted at this time — delegation refused.');
       return;
     }
+    // Declared out here (not inside the try) so the catch below can read it for
+    // the scheduled-failure email without a ReferenceError. Stays null if the
+    // turn throws before it's assigned.
+    let scheduledNote = null;
     try {
       const { streamChat } = await import('./chat.mjs');
       const { getScheduledNote } = await import('./lib/scheduled-context.mjs');
       // ALS propagates through this detached IIFE because dispatchBackground
       // was called from within scheduledContext.run(...). null in non-scheduled chats.
-      const scheduledNote = getScheduledNote();
+      scheduledNote = getScheduledNote();
       const combinedNote = [scheduledNote, opts?.extraSystemNote].filter(Boolean).join('\n\n') || null;
       let toolsUsed = 0;
       let currentTool = null;
@@ -691,6 +772,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       const runBgStage = async (stageAgent, stageTask, stageName, stageNote, stageRoute, stagePlan) => {
         let text = '';
         const artifacts = [];
+        const images = [];
         const bodyDocIds = [];
         for await (const ev of streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, { toolPlan: stagePlan, routeText: stageRoute, isolatedTaskRun: true, rootTaskId: taskCtx.rootTaskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
           if (ev.type === 'token') text += ev.text;
@@ -750,6 +832,8 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
           if ((ev.type === 'image' || ev.type === 'video' || ev.type === 'audio') && ev.filename) {
             const folder = ev.type === 'image' ? 'images' : ev.type === 'video' ? 'videos' : 'audio';
             artifacts.push(`${folder}:${ev.filename}`);
+            const image = reportImageFromEvent(ev);
+            if (image) images.push(image);
             pushWorkerProgress(taskId, { kind: 'result', tool: ev.type, text: `produced ${ev.filename}` });
             pushTaskProgress(taskId, `${stageName} produced ${ev.filename}`, { currentTool: null, phase: 'result' });
           }
@@ -758,16 +842,18 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         // An abort can end the provider stream without an error event — don't
         // let a cancelled run masquerade as a completed one (or start stage 2).
         if (ac.signal.aborted) throw new Error('cancelled');
-        return { text, artifacts, bodyDocIds: [...new Set(bodyDocIds)] };
+        return { text, artifacts, images, bodyDocIds: [...new Set(bodyDocIds)] };
       };
 
       const routeText = (typeof opts?.routeText === 'string' && opts.routeText.trim()) ? opts.routeText.trim() : task;
       const rememberedPlan = matchToolPlan(userId, { agentId: scopedAgent.id, phrase: routeText });
       pushTaskProgress(taskId, `${agentName} started working`, { phase: 'running' });
       let finalText = '';
+      const reportImages = [];
       await runInTaskContext(taskCtx, async () => {
         const stage1 = await runBgStage(scopedAgent, task, agentName, combinedNote, routeText, rememberedPlan);
         finalText = stage1.text;
+        if (stage1.images?.length) reportImages.push(...stage1.images);
         if (handoff) {
           const stage2Name = handoff.name || handoff.agent.name || 'Agent';
           pushTaskProgress(taskId, `✓ ${agentName} finished — handing off to ${stage2Name}`, { phase: 'handoff', currentTool: null });
@@ -816,9 +902,10 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
           const stage2Note = [scheduledNote, terminalNote].filter(Boolean).join('\n\n');
           const stage2 = await runBgStage(scoped2, stage2Task, stage2Name, stage2Note, handoff.directive || undefined, null);
           finalText = stage2.text;
+          if (stage2.images?.length) reportImages.push(...stage2.images);
         }
       });
-      await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, finalText.trim() || `${pipeName} completed the task.`, null, null, toolEvents, scopedAgent.id, task);
+      await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, finalText.trim() || `${pipeName} completed the task.`, null, null, toolEvents, scopedAgent.id, task, { images: reportImages });
     } catch (err) {
       console.error('[background-tasks] error in task', taskId, err.message);
       const failMsg = ac.signal.aborted ? 'Task cancelled by user.' : err.message;
@@ -884,10 +971,15 @@ async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgen
   }
 }
 
-async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '') {
+async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '', media = null) {
   const rec = activeTasks.get(taskId);
   const status = finalStatus || (errorMsg ? 'error' : 'done');
   const finalReportPreview = String(errorMsg ?? result ?? '').slice(0, 800);
+  const reportImages = mergeReportImages([
+    ...(Array.isArray(media?.images) ? media.images.filter(Boolean) : []),
+    ...reportImagesFromText(userId, result),
+  ]);
+  const persistedImages = reportImages.map(persistedReportImage).filter(Boolean);
   if (rec) {
     rec.status = status;
     rec.phase = status;
@@ -1027,12 +1119,16 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       content: notice,
       displayContent: content,
       toolEvents,
+      ...(persistedImages.length ? { images: persistedImages } : {}),
       targetAgentId: targetAgentId || rec?.agentId || null,
       originalTask: originalTask || rec?.summary || '',
       taskId,
       rootTaskId: rec?.rootTaskId || taskId,
       parentTaskId: rec?.parentTaskId || null,
+      watcherId: rec?.watcherId || null,
+      rootWatcherId: rec?.rootWatcherId || rec?.watcherId || null,
       spanId: rec?.spanId || null,
+      status,
       ts: reportTs,
     });
     // 2. Agent report card: render directly in the user's visible chat as a
@@ -1047,12 +1143,16 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       content:    notice,
       displayContent: content,
       toolEvents,
+      ...(reportImages.length ? { images: reportImages } : {}),
       targetAgentId: targetAgentId || rec?.agentId || null,
       originalTask: originalTask || rec?.summary || '',
       taskId,
       rootTaskId: rec?.rootTaskId || taskId,
       parentTaskId: rec?.parentTaskId || null,
+      watcherId: rec?.watcherId || null,
+      rootWatcherId: rec?.rootWatcherId || rec?.watcherId || null,
       spanId: rec?.spanId || null,
+      status,
       ts: reportTs,
     });
   } catch (e) {
@@ -1433,6 +1533,7 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
       const scheduledNote = getScheduledNote();
       let fullText = '';
       const toolEvents = [];
+      const reportImages = [];
       const rememberedPlan = matchToolPlan(userId, { agentId: workerAgent.id, phrase: task });
       const taskCtx = { taskId, watcherId, userId, agentId: workerAgent.id };
       pushTaskProgress(taskId, `${workerName} started working`, { phase: 'running' });
@@ -1464,11 +1565,17 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
             pushWorkerProgress(taskId, { kind: 'result', tool: ev.name, text: firstLine.slice(0, 160) });
             if (firstLine) pushTaskProgress(taskId, `${ev.name}: ${firstLine.slice(0, 240)}`, { currentTool: null, phase: 'result' });
           }
+          if (ev.type === 'image' && ev.filename) {
+            const image = reportImageFromEvent(ev);
+            if (image) reportImages.push(image);
+            pushWorkerProgress(taskId, { kind: 'result', tool: ev.type, text: `produced ${ev.filename}` });
+            pushTaskProgress(taskId, `${workerName} produced ${ev.filename}`, { currentTool: null, phase: 'result' });
+          }
           if (ev.type === 'error') throw new Error(ev.message);
         }
       });
       _retire(taskId, 'done', fullText.trim());
-      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`, null, null, toolEvents, workerAgent.id, task);
+      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`, null, null, toolEvents, workerAgent.id, task, { images: reportImages });
     } catch (err) {
       const stopped = ac.signal.aborted;
       _retire(taskId, stopped ? 'stopped' : 'error', stopped ? 'Stopped by its manager.' : err.message);

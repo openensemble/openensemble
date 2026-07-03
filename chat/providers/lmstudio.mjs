@@ -10,7 +10,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import { loadSession, getLmsResponseId, setLmsResponseId } from '../../sessions.mjs';
 import {
   getLmstudioNativeUrl, getLmstudioCompatUrl, lmstudioAuthHeaders, readAnthropicSSE,
-  stripThinking, stripReasoningPreamble, getStripThinkingTags,
+  stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -198,6 +198,14 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
     let firstTokenAt = null;
 
     for await (const event of readAnthropicSSE(res.body)) {
+      // Mid-stream error chunk (no `choices`) — surface it instead of silently
+      // skipping via the `!choice` continue below, which would end the turn with
+      // partial/empty text that reads as success downstream.
+      if (event.error) {
+        const em = event.error.message || event.error.type || 'stream error';
+        yield { type: 'error', message: `LM Studio error: ${em}` };
+        return;
+      }
       const choice = event.choices?.[0];
       if (!choice) continue;
       const delta = choice.delta ?? {};
@@ -250,8 +258,8 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
           yield { type: 'tool_call', name: block.name, args: toolArgs };
         }
         const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
-          const { text, _notify, events } = await drainToolWithEvents(block.name, toolArgs, userId, agentId, agent.tools?.map(t => t.function?.name).filter(Boolean));
-          return { block, toolArgs, result: text, _notify, events };
+          const { text, _notify, _images, events } = await drainToolWithEvents(block.name, toolArgs, userId, agentId, agent.tools?.map(t => t.function?.name).filter(Boolean));
+          return { block, toolArgs, result: text, _notify, _images, events };
         }));
         const assistantToolCalls = results.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
         working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
@@ -260,6 +268,11 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
           working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
+        }
+        for (const { block, _images } of results) {
+          if (_images?.length) {
+            working.push(buildImageUserMessage('lmstudio', _images, `[attached: image(s) returned by ${block.name}]`));
+          }
         }
         { const sc = guard.check(results.map(r => ({ name: r.block.name, args: r.block.argsJson })), results.map(r => r.result));
           if (sc.stalled) { console.warn(`[lmstudio] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
@@ -270,24 +283,36 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
       const assistantToolCalls = blocks.map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: b.argsJson } }));
       working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
       const lmSeqResults = [];
+      const _imagesByBlockId = new Map();
       for (const block of blocks) {
         let args = {};
         try { args = JSON.parse(block.argsJson || '{}'); } catch (e) { console.warn('[chat] Failed to parse LM Studio tool args:', e.message); }
         yield { type: 'tool_call', name: block.name, args };
         let lmToolResult = '';
+        let _seqImages = null;
         for await (const chunk of executeToolStreaming(block.name, args, userId, agentId, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              lmToolResult += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
+          if (chunk.type === '__hide_turn')         yield { type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId };
           if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
           if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
           if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
-          if (chunk.type === 'result')             lmToolResult = chunk.text;
+          if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') yield chunk;
+          if (chunk.type === 'result') {
+            lmToolResult = chunk.text;
+            if (Array.isArray(chunk._images)) _seqImages = chunk._images;
+          }
         }
-        const { text: result, _notify } = normalizeToolResult(lmToolResult);
+        const { text: result, _notify, _images } = normalizeToolResult(lmToolResult);
+        const effectiveImages = _seqImages ?? _images;
+        if (effectiveImages?.length) _imagesByBlockId.set(block.id, { name: block.name, images: effectiveImages });
         yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         lmSeqResults.push({ name: block.name, args: block.argsJson, result });
+      }
+      for (const [, payload] of _imagesByBlockId) {
+        working.push(buildImageUserMessage('lmstudio', payload.images, `[attached: image(s) returned by ${payload.name}]`));
       }
       { const sc = guard.check(lmSeqResults.map(r => ({ name: r.name, args: r.args })), lmSeqResults.map(r => r.result));
         if (sc.stalled) { console.warn(`[lmstudio] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }

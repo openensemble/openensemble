@@ -10,7 +10,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags } from './_shared.mjs';
+import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage } from './_shared.mjs';
 import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
@@ -156,6 +156,23 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
       }
     }
 
+    // ── Qwen inline tool calls (emitted as text instead of structured tool_calls) ─
+    // Parse them into the structured shape HERE — before the executor below — so
+    // they run this iteration. If the parse happened after the executor (with a
+    // `continue`), the loop would re-declare `toolCalls = null` and the model
+    // would just re-emit the same <|tool_call|> text every round until
+    // maxToolLoops (500), never actually executing the call.
+    if (!toolCalls && content.includes('<|tool_call|>')) {
+      const matches = [...content.matchAll(/<\|tool_call\|>json\s*(\{[\s\S]*?\})\s*<\|\/tool_call\|>/g)];
+      const parsed = matches.map(m => {
+        try {
+          const obj = JSON.parse(m[1]);
+          return { function: { name: obj.function || obj.name, arguments: obj.arguments ?? obj.parameters ?? {} } };
+        } catch { return null; }
+      }).filter(Boolean);
+      if (parsed.length) toolCalls = parsed;
+    }
+
     // ── Tool calls branch ──────────────────────────────────────────────────────
     if (toolCalls) {
       // Clear any reasoning preamble streamed before the tool call
@@ -181,8 +198,8 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
           toolCallsMade.push(name);
         }
         const batchResults = await Promise.all(batchParsed.map(async ({ name, args }) => {
-          const { text, _notify, events } = await drainToolWithEvents(name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
-          return { name, result: text, _notify, events };
+          const { text, _notify, _images, events } = await drainToolWithEvents(name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
+          return { name, result: text, _notify, _images, events };
         }));
         for (const { name, result, _notify, events } of batchResults) {
           for (const ev of events) yield ev;
@@ -190,11 +207,17 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
           if (_notify) yield { type: '__notify', name, ..._notify };
           ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name });
         }
+        for (const { name, _images } of batchResults) {
+          if (_images?.length) {
+            ollamaMessages.push(buildImageUserMessage('ollama', _images, `[attached: image(s) returned by ${name}]`));
+          }
+        }
         { const sc = guard.check(batchResults.map(r => ({ name: r.name, args: JSON.stringify(batchParsed.find(p => p.name === r.name)?.args ?? {}) })), batchResults.map(r => r.result));
           if (sc.stalled) { console.warn(`[ollama] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
         continue;
       }
 
+      const _imagePayloads = [];
       for (const tc of toolCalls) {
         const name = tc.function?.name ?? tc.name ?? '?';
         toolCallsMade.push(name);
@@ -203,21 +226,32 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
         yield { type: 'tool_call', name, args };
 
         let toolResult = '';
+        let _seqImages = null;
         for await (const chunk of executeToolStreaming(name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              toolResult += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
+          if (chunk.type === '__hide_turn')         yield { type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId };
           if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
           if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
           if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
-          if (chunk.type === 'result')             toolResult = chunk.text;
+          if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') yield chunk;
+          if (chunk.type === 'result') {
+            toolResult = chunk.text;
+            if (Array.isArray(chunk._images)) _seqImages = chunk._images;
+          }
         }
-        const { text: result, _notify } = normalizeToolResult(toolResult);
+        const { text: result, _notify, _images } = normalizeToolResult(toolResult);
+        const effectiveImages = _seqImages ?? _images;
+        if (effectiveImages?.length) _imagePayloads.push({ name, images: effectiveImages });
         yield { type: 'tool_result', name, text: result, preview: summarizeToolResult(name, result) };
         if (_notify) yield { type: '__notify', name, ..._notify };
 
         // Add tool result to working history — truncate large outputs so the model
         // isn't carrying full file contents forward (mirrors Claude Code behavior).
         ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name });
+      }
+      for (const payload of _imagePayloads) {
+        ollamaMessages.push(buildImageUserMessage('ollama', payload.images, `[attached: image(s) returned by ${payload.name}]`));
       }
 
       { const sc = guard.check(
@@ -227,23 +261,6 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
         if (sc.stalled) { console.warn(`[ollama] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
 
       continue; // loop: send tool results back to the model
-    }
-
-    // ── Qwen inline tool calls (emitted as text instead of structured tool_calls) ─
-    if (!toolCalls && content.includes('<|tool_call|>')) {
-      const matches = [...content.matchAll(/<\|tool_call\|>json\s*(\{[\s\S]*?\})\s*<\|\/tool_call\|>/g)];
-      const parsed = matches.map(m => {
-        try {
-          const obj = JSON.parse(m[1]);
-          return { function: { name: obj.function || obj.name, arguments: obj.arguments ?? obj.parameters ?? {} } };
-        } catch { return null; }
-      }).filter(Boolean);
-      if (parsed.length) {
-        toolCalls = parsed;
-        // Replace the streamed text with nothing — tool call output will follow
-        yield { type: 'replace', text: '' };
-        continue;
-      }
     }
 
     // ── Text response complete ─────────────────────────────────────────────────

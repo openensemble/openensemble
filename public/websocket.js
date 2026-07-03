@@ -2,6 +2,13 @@
 let _reconnectDelay = 1000;
 let _pingTimer = null;
 
+function clientSessionAgentId(agent) {
+  if (typeof agent !== 'string' || !agent) return agent;
+  const uid = (typeof _currentUser !== 'undefined' && _currentUser?.id) ? String(_currentUser.id) : '';
+  if (uid && agent.startsWith(`${uid}_`)) return agent.slice(uid.length + 1);
+  return agent.replace(/^user_[^_]+_/, '');
+}
+
 function connect() {
   // Tear down any prior socket first. Signup/login/invite flows can call init()
   // — and thus connect() — multiple times; without this, old sockets keep their
@@ -291,6 +298,9 @@ function handleServerMessage(msg) {
         buildTabs(); buildAgentDrawer();
         break;
       }
+      // Foreground turn completed successfully — forget the in-flight attempt so
+      // a later stray error can't attach a Retry to an already-answered message.
+      lastSentAttempt = null;
       // If response was routed to a widget, save as hidden and clear
       if (typeof getActiveWidgetTarget === 'function' && getActiveWidgetTarget() && msg.agent === activeAgent) {
         const finalBuf = widgetStreamFinish();
@@ -341,7 +351,7 @@ function handleServerMessage(msg) {
         break;
       }
       if (msg.agent && msg.agent !== activeAgent) break;
-      setStreaming(false); appendError(msg.message); break;
+      setStreaming(false); setTyping(false); showTurnError(msg.message); break;
     case 'proposal':
       // Friction-tracker proposal — actionable repeat detected, two-button
       // bubble offering to set up the suggested automation. Persisted to
@@ -392,18 +402,17 @@ function handleServerMessage(msg) {
       // while activeAgent is the raw id ("coordinator"). Compare both forms so
       // live updates land in the right tab regardless of which side scoped.
       {
-        const stripped = typeof msg.agent === 'string' ? msg.agent.replace(/^.*?_/, '') : msg.agent;
-        const matches = !msg.agent || msg.agent === activeAgent
-          || stripped === activeAgent
-          || (`${_currentUser?.id}_${activeAgent}`) === msg.agent;
+        const agentKey = clientSessionAgentId(msg.agent);
+        const matches = !msg.agent || msg.agent === activeAgent || agentKey === activeAgent;
         if (matches) {
           appendStatusBubble({ text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question, state: msg.state, recentHistory: msg.recentHistory }, msg.ts || Date.now());
         }
       }
       if (msg.agent) {
-        if (!sessions[msg.agent]) sessions[msg.agent] = [];
+        const agentKey = clientSessionAgentId(msg.agent);
+        if (!sessions[agentKey]) sessions[agentKey] = [];
         const statusEntry = { role: 'status', status: { text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question, state: msg.state, recentHistory: msg.recentHistory }, content: `[Status: ${msg.text}]`, ts: msg.ts || Date.now() };
-        const arr = sessions[msg.agent];
+        const arr = sessions[agentKey];
         const existingIdx = msg.watcherId
           ? arr.findIndex(m => m.role === 'status' && m.status?.watcherId === msg.watcherId)
           : -1;

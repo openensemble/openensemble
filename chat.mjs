@@ -517,6 +517,11 @@ const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:ha
 const IN_PROGRESS_REPLY_RE = /\b(?:already\s+(?:in\s+progress|under\s?way|working|running|on\s+it)|still\s+(?:working|running|in\s+progress|going)|(?:is|are|['’]s)\s+(?:currently\s+)?working\s+on\s+(?:it|that|this)|(?:i|we)(?:['’]ll|\s+will)\s+(?:let\s+you\s+know|update\s+you|report\s+back|ping\s+you|follow\s+up)\s+(?:when|once|as\s+soon\s+as)|(?:hasn['’]?t|haven['’]?t)\s+(?:finished|completed)\s+yet|not\s+(?:done|finished)\s+yet)\b/i;
 // Tools whose use this turn makes an in-progress claim legitimate: the model
 // either checked real status or just started/stopped the work it's describing.
+// Short, honest interstitials shown when a recovery fires: the live draft is
+// wiped and replaced with one of these before the corrected reply drops in.
+const MISSING_TOOL_NOTICE = 'Sorry, I misspoke — let me do that now.';
+const IN_PROGRESS_NOTICE  = 'One moment — let me check the actual status.';
+
 const BACKGROUND_STATUS_TOOLS = new Set([
   'check_workers', 'list_active_agents', 'list_watches', 'get_task_log',
   'spawn_worker', 'stop_worker', 'ask_agent', 'report_progress',
@@ -1384,10 +1389,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   let { providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, working);
 
   const _llmStart = Date.now();
-  const shouldBufferForRecovery = Boolean(_routerStore);
-  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: shouldBufferForRecovery });
+  // Stream the first draft live (previously buffered until end-of-turn). If a
+  // recovery fires below, the live draft is wiped with a short honest notice and
+  // replaced with the corrected reply. `canRecover` only gates whether the
+  // recovery passes run — it no longer suppresses streaming.
+  const canRecover = Boolean(_routerStore);
+  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false });
   let recoveredMissingTools = false;
-  if (!errored && shouldBufferForRecovery && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
+  if (!errored && canRecover && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
     const missingSkills = inferMissingToolSkills({ userText: routeText, assistantText: assistantContent, userId });
     for (const skillId of [...missingSkills]) {
       if (_routerStore.initiallyIncludedSkills.has(skillId) || _routerStore.addedSkills.has(skillId)) missingSkills.delete(skillId);
@@ -1415,6 +1424,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         });
         const retryNote = `\n\n[System note: Your prior draft said you lacked a tool. The server has verified these tools are available for this same user request: ${retryToolNames.join(', ')}. Use the appropriate tool now if needed; do not repeat the missing-tool apology unless the tool call actually fails.]`;
         const recoveryMessages = [...trimmed, withRetryNote(currentUserTurn, retryNote)];
+        // Emit the notice as a TOKEN, not a replace: voice devices TTS only
+        // token/done events (ws-handler.mjs:1021), so a replace would be silent
+        // on voice. As a token it reaches both surfaces — the browser renders it,
+        // the device speaks it — then the corrected reply streams live after it.
+        yield { type: 'token', text: `\n\n${MISSING_TOOL_NOTICE}\n\n` };
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
         ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false }));
       }
@@ -1430,7 +1444,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // isolatedTaskRun — a specialist reporting on its own in-flight work
   // mid-delegation is not making a checkable claim about background tasks.
   let recoveredProgressClaim = false;
-  if (!errored && shouldBufferForRecovery && !recoveredMissingTools && !hideTurn && !isolatedTaskRun
+  if (!errored && canRecover && !recoveredMissingTools && !hideTurn && !isolatedTaskRun
       && IN_PROGRESS_REPLY_RE.test(assistantContent || '')
       && !toolsUsed.some(t => BACKGROUND_STATUS_TOOLS.has(t.name))) {
     try {
@@ -1442,6 +1456,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       });
       const retryNote = `\n\n[System note: Your prior draft claimed background work was in progress (or promised a follow-up), but no status tool was called this turn. The server checked directly. Verified background-work status: ${verified}\nAnswer from ONLY this verified status. If a task is not listed as running, it is NOT running — a server restart cancels in-flight tasks; if that happened, say so plainly and offer to start it again. If your claim was about something other than delegated/background tasks, disregard this note and answer as before.]`;
       const recoveryMessages = [...trimmed, withRetryNote(currentUserTurn, retryNote)];
+      // Token, not replace — voice devices only TTS token/done (see above), so
+      // the notice + corrected reply both stream as tokens to reach voice + text.
+      yield { type: 'token', text: `\n\n${IN_PROGRESS_NOTICE}\n\n` };
       ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
       ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = yield* consumeProvider(providerGen, { suppressText: false }));
       recoveredProgressClaim = true;
@@ -1449,9 +1466,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       log.warn('chat', 'in-progress claim recovery failed', { err: e.message });
     }
   }
-  if (shouldBufferForRecovery && !recoveredMissingTools && !recoveredProgressClaim && assistantContent && !hideTurn && !errored) {
-    yield { type: 'token', text: assistantContent };
-  }
+  // (The first draft already streamed live; recovery paths above emit their own
+  // replace(). Nothing more to flush here.)
   // Turn-trace span for this agent run — metadata only (tool names, counts,
   // timing, token counts), never prompt/message bodies. recordSpan attaches to
   // the dispatcher's per-turn store (or our own lazily-begun one); we flush the
@@ -1632,7 +1648,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     }
   }
   if (assistantContent) {
-  if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true });
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true });
     // Phase-14 chip-replaces-turn: emit __content only when we're NOT
     // hiding the turn. The browser would otherwise render the coordinator's
     // assistant bubble alongside the chip — redundant.
