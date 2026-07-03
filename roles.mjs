@@ -991,6 +991,13 @@ export async function validateSkills() {
 
     const execPath = path.join(wrap.dir, 'execute.mjs');
     if (!existsSync(execPath)) continue;
+    // Sandboxed custom skills never load in-process — not even here. This
+    // loop used to import() every user-authored execute.mjs at boot (its
+    // top-level code ran unjailed, with the server's env and fs) and invoke
+    // each tool with {__validate:true}. The authoring-time smoke test (which
+    // runs in the bwrap jail) covers custom skills; the boot probe keeps its
+    // value for global (repo-shipped, first-party) skills only.
+    if (shouldSandboxSkill(wrap)) continue;
     const exec = await getExecutorByKey(internalKey);
     if (!exec) continue;
     const toolNames = (manifest.tools ?? []).map(t => t.function?.name).filter(Boolean);

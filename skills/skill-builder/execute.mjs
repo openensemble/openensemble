@@ -480,7 +480,7 @@ async function handleCreate(args, userId) {
   // in the manifest are skipped individually (see SKILL_BLUEPRINT).
   {
     const { runSkillSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
-    const report = await runSkillSmoke(skillDir, manifest);
+    const report = await runSkillSmoke(skillDir, manifest, { userId });
     if (report.setupError) {
       rmSync(skillDir, { recursive: true, force: true });
       return `Skill failed to load — files removed. Fix the issue and try again:\n\n${report.setupError}`;
@@ -621,7 +621,7 @@ async function handleUpdateCode(args, userId) {
   let smokeWarnings = '';
   {
     const { runSkillSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
-    const report = await runSkillSmoke(skillDir, onDiskManifest);
+    const report = await runSkillSmoke(skillDir, onDiskManifest, { userId });
     if (report.setupError) {
       writeFileSync(execPath, readFileSync(backupPath));
       rmSync(backupPath, { force: true });
@@ -767,7 +767,7 @@ async function handlePatchCode(args, userId) {
   let smokeWarnings = '';
   {
     const { runSkillSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
-    const report = await runSkillSmoke(skillDir, onDiskManifest);
+    const report = await runSkillSmoke(skillDir, onDiskManifest, { userId });
     if (report.setupError) {
       writeFileSync(execPath, original);
       rmSync(backupPath, { force: true });
