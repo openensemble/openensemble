@@ -29,7 +29,7 @@ import {
   classifyTimerIntent, createVoiceTimer,
   classifyTimerCancelIntent, cancelVoiceTimer,
   classifyTimerExtendIntent, extendVoiceTimer,
-  resolveTimerDisambig,
+  resolveTimerDisambig, hasPendingDisambig, DISAMBIG_TTL_MS,
 } from '../lib/voice-timer.mjs';
 import { sendToDevice } from '../ws-handler.mjs';
 import { updateDevice } from '../lib/voice-devices.mjs';
@@ -339,6 +339,9 @@ export async function tryVoiceTimerIntent({ source, deviceId, rawText, userId, a
       console.log(`[chat] voice-timer extend: +${extend.addSeconds}s target=${extend.targetSeconds ?? '?'} device=${deviceId}`);
       onEvent({ type: 'token', text: confirmation, agent: agentId });
       onEvent({ type: 'done', agent: agentId });
+      // Ambiguous match → the confirmation is really a "which one?" question
+      // with a hard server-side TTL; tell the dispatcher to hold the mic open.
+      if (hasPendingDisambig(deviceId)) return { handled: true, awaitReplyMs: DISAMBIG_TTL_MS };
       return { handled: true };
     } catch (e) {
       console.warn(`[chat] voice-timer extend failed: ${e.message}`);
@@ -352,6 +355,7 @@ export async function tryVoiceTimerIntent({ source, deviceId, rawText, userId, a
       console.log(`[chat] voice-timer cancel: all=${cancel.all} seconds=${cancel.seconds ?? '?'} userId=${userId}`);
       onEvent({ type: 'token', text: confirmation, agent: agentId });
       onEvent({ type: 'done', agent: agentId });
+      if (hasPendingDisambig(deviceId)) return { handled: true, awaitReplyMs: DISAMBIG_TTL_MS };
       return { handled: true };
     } catch (e) {
       console.warn(`[chat] voice-timer cancel failed: ${e.message}`);

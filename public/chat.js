@@ -377,7 +377,9 @@ async function handleChatFileSelect(file) {
 // ── Send ──────────────────────────────────────────────────────────────────────
 async function send() {
   let text = $('input').value.trim();
-  if ((!text && !pendingAttachment) || (streaming && !awaitingPermission) || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!text && !pendingAttachment) return;
+  if (streaming && !awaitingPermission) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
 
   // A fresh send supersedes any failed attempt still showing — the message the
   // user just typed is almost always what they were retrying. Remove its bubble
@@ -454,6 +456,14 @@ function _loadEarlierMessages() {
 
 function renderSession(opts) {
   const keepScroll = Boolean(opts && opts.keepScroll === true);
+  _renderingSession = true;
+  try {
+    renderSessionInner(keepScroll);
+  } finally {
+    _renderingSession = false;
+  }
+}
+function renderSessionInner(keepScroll) {
   const msgs = $('messages');
   [...msgs.children].forEach(el => {
     if (el.id) return;
@@ -517,16 +527,11 @@ function renderSession(opts) {
     }
   });
   if (keepScroll) return;
-  const headers = $('messages').querySelectorAll('.task-header[data-ts]');
-  if (headers.length) {
-    const today = new Date().toDateString();
-    let latest = null;
-    headers.forEach(h => { if (new Date(+h.dataset.ts).toDateString() === today) latest = h; });
-    if (latest) latest.scrollIntoView({ block: 'start' });
-    else scrollToBottom();
-  } else {
-    scrollToBottom();
-  }
+  // Initial load / agent switch always lands at the most recent message —
+  // matching the force path agent-switch already uses (agents.js) — rather
+  // than jumping mid-history to today's last task-header. scrollToBottom(true)
+  // also flips _autoScroll back on so live streaming keeps following.
+  scrollToBottom(true);
 }
 
 function orderSessionForRender(messages) {
@@ -2450,6 +2455,12 @@ function handleAgentReport(msg) {
   if (!agentKey || agentKey === activeAgent) {
     if (agentKey && typeof renderSession === 'function' && !streamEl) {
       renderSession();
+      // renderSession() replays the whole history (insertBefore's own
+      // per-item counting is suppressed during that replay), so when this
+      // call actually added a new report to the session, count it here —
+      // but not when it only patched an existing entry (e.g. images arriving
+      // for a report already rendered).
+      if (addedToSession && !_autoScroll) { _newMessageCount++; _updateJumpPill(); }
       return;
     }
     if (agentKey && !addedToSession) return;
@@ -2517,7 +2528,11 @@ function appendTaskHeader(label, ts = Date.now(), scroll = true) {
   el.dataset.ts = ts;
   el.innerHTML = `<span class="task-header-label">📋 ${escHtml(label)} — ${timeStr}</span>`;
   insertBefore(el);
-  if (scroll) { el.scrollIntoView({ block: 'start' }); }
+  // Guarded scroll (respects _autoScroll) rather than an unguarded
+  // scrollIntoView — a future live caller passing scroll=true can't yank a
+  // scrolled-up reader. The only caller today passes false, so this is a
+  // no-op change in practice.
+  if (scroll) scrollToBottom();
   return el;
 }
 function msgEl(role) {
@@ -2530,7 +2545,16 @@ function addTimestamp(el, ts = Date.now()) {
   const t = el.querySelector('.msg-time');
   if (t) t.textContent = new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
-function insertBefore(el) { $('messages').insertBefore(el, $('typing')); }
+// _renderingSession is true for the duration of a full renderSession() replay
+// (initial load, agent switch, "Load earlier") so insertBefore() below can
+// tell a bulk historical redraw apart from a single freshly-arrived message —
+// otherwise re-rendering old history while scrolled up would inflate the
+// "N new" counter for messages the user has already seen.
+let _renderingSession = false;
+function insertBefore(el) {
+  $('messages').insertBefore(el, $('typing'));
+  if (!_renderingSession && !_autoScroll) { _newMessageCount++; _updateJumpPill(); }
+}
 
 // ── Scroll management ─────────────────────────────────────────────────────────
 // Auto-scroll follows new content only while the user is at (or near) the
@@ -2540,6 +2564,11 @@ function insertBefore(el) { $('messages').insertBefore(el, $('typing')); }
 // scrollback — several times a second during streaming.
 let _autoScroll = true;
 let _jumpPillEl = null;
+// Counts message-level bubbles inserted (via insertBefore) while scrolled up.
+// Streaming tokens mutate an existing bubble's innerHTML rather than calling
+// insertBefore again, so per-token updates never bump this — only genuinely
+// new user/assistant/tool-report/etc. items do.
+let _newMessageCount = 0;
 
 function _isNearBottom() {
   const m = $('messages');
@@ -2550,7 +2579,6 @@ function _updateJumpPill() {
   if (!_jumpPillEl) {
     _jumpPillEl = document.createElement('button');
     _jumpPillEl.type = 'button';
-    _jumpPillEl.textContent = '↓ Jump to latest';
     // z-index must beat .workspace (a stacking context at 60, styles.css) or
     // the pill shows through the transparent chat background but hit-testing
     // sends every click to .messages — visible yet unclickable. Stay below
@@ -2559,7 +2587,14 @@ function _updateJumpPill() {
     _jumpPillEl.addEventListener('click', () => scrollToBottom(true));
     document.body.appendChild(_jumpPillEl);
   }
-  if (_autoScroll) { _jumpPillEl.style.display = 'none'; return; }
+  if (_autoScroll) {
+    // Reached bottom (scroll, pill click, or a forced scrollToBottom) —
+    // clear the tally so the next time the pill appears it starts fresh.
+    _newMessageCount = 0;
+    _jumpPillEl.style.display = 'none';
+    return;
+  }
+  _jumpPillEl.textContent = _newMessageCount > 0 ? `↓ ${_newMessageCount} new` : '↓ Jump to latest';
   const r = $('messages').getBoundingClientRect();
   _jumpPillEl.style.left = `${r.left + r.width / 2}px`;
   _jumpPillEl.style.bottom = `${Math.max(0, window.innerHeight - r.bottom) + 12}px`;

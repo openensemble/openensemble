@@ -296,6 +296,12 @@ export async function runSpecialistRoute({
         onEvent({ type: 'error', message: e.message, agent: agentId });
       }
     } finally {
+      // Specialist-routed turns are LLM turns that happen to be routed — they
+      // get the SAME follow-up re-arm semantics as runLlmTurn's finally (see
+      // armFollowupForReply). Without this, every routed voice turn silently
+      // ended the conversation even with conversation_mode:true, because
+      // runLlmTurn's finally never runs for interceptor-handled turns.
+      armFollowupForReply({ source, deviceId, conversationMode, reply: routerBuf, ac });
       recordActivity(userId, agentId, { apiCall: true });
     }
     return { handled: true };
@@ -336,7 +342,54 @@ export async function buildSchedulerNote({ userId, agentId, userText, skipInterc
 }
 
 // ── Retriable error patterns for provider failover ──────────────────────
-const RETRIABLE_RE = /\b(5\d{2}|timeout|timed out|rate limit|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed)\b/i;
+const RETRIABLE_RE = /\b(5\d{2}|timeout|timed out|rate limit|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|overloaded(?:_error)?)\b/i;
+
+// Only arm when the reply actually ENDS by asking the user something — a "?"
+// earlier in the reply is usually rhetorical or embedded and would open a
+// needless listen window (a false-listen vector). The LLM is prompted to end
+// a genuine question with "?"; allow trailing quotes/brackets/emoji-free
+// punctuation after it.
+const ENDS_WITH_QUESTION = /[?？]["'”’)\]]*$/;
+// Patterns: "please say X", "say 'X'", "tell me X", "let me know", "do you
+// mean", "did you mean" — common LLM hedges that ask for user input without a
+// literal "?".
+const ASKS_FOR_REPLY = /\b(please\s+(say|tell|repeat)|say\s+["'“]|tell\s+me|let\s+me\s+know|d(o|id)\s+you\s+mean)\b/i;
+
+/**
+ * Re-arm the voice-device conversation-mode follow-up listening window after
+ * a completed reply. Shared by runLlmTurn's finally (direct/coordinator
+ * turns) and runSpecialistRoute (embed/regex-routed turns) — before this was
+ * extracted, only runLlmTurn armed the window, so ANY specialist-routed voice
+ * turn (e.g. "what's on my calendar" → gcal specialist) silently ended the
+ * conversation even with conversation_mode:true (field: chat-dispatch.mjs's
+ * specialist interceptor is an inline arrow, so the named-fastpath
+ * CONVERSATION_REARM_FASTPATHS set could never match it by reference).
+ *
+ * Conversation mode re-arms unconditionally on every completed reply, question
+ * or not — the exchange continues until the user goes silent (window expiry),
+ * says a stop/that's-all phrase (handled earlier in the fastpath chain, never
+ * reaches here), or a different slot wakes. Outside conversation mode, only
+ * arm when the reply reads as a genuine question or asks the user to respond.
+ *
+ * Never arms for non-voice sources, without a deviceId, or on an aborted turn
+ * — a barged-in/stopped reply must not open a phantom listen window.
+ * armFollowupAfterDrain itself only fires on a clean TTS-drain close, so
+ * calling it after an abort would be harmless anyway; the `ac` check here
+ * just mirrors runLlmTurn's original guard exactly.
+ */
+export function armFollowupForReply({ source, deviceId, conversationMode, reply, ac }) {
+  if (source !== 'voice-device' || !deviceId || ac?.signal?.aborted) return;
+  if (conversationMode) {
+    armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
+    return;
+  }
+  const text = (reply || '').trim();
+  if (ENDS_WITH_QUESTION.test(text) || ASKS_FOR_REPLY.test(text)) {
+    // Armed at reply DRAIN (streamer close), not LLM-done — the old direct
+    // send raced the audio and could expire mid-reply.
+    armFollowupAfterDrain(deviceId, { windowMs: 5000 });
+  }
+}
 
 /**
  * Run the main LLM turn: streamChat with provider failover, voice-device
@@ -459,41 +512,10 @@ export async function runLlmTurn({
       }
     }
   } finally {
-    // Follow-up listening: if the reply contains a question OR an imperative
-    // asking the user to say/tell/respond, open a short listen window so the
-    // user can answer without saying the wake word again. The system prompt
-    // instructs the LLM to use a trailing "?" — these imperatives are a
-    // safety net for when it doesn't. Only sends for voice-device sources.
-    // Never on an aborted turn: this finally also runs after AbortError, and
-    // a barged-in/stopped reply must not arm a phantom listen window.
-    if (source === 'voice-device' && deviceId && !ac?.signal?.aborted) {
-      const reply = (streamBuf || '').trim();
-      if (conversationMode) {
-        // Conversation mode: EVERY completed reply re-arms a listen window,
-        // question or not — the exchange continues until the user goes
-        // silent (window expiry), says a stop/that's-all phrase (fastpath,
-        // which never reaches this code), or a different slot wakes. No
-        // unbounded re-arm risk: each re-arm requires a fresh user utterance
-        // in between, so an unanswered window simply ends the conversation.
-        armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
-      } else {
-        // Only arm when the reply actually ENDS by asking the user something — a
-        // "?" earlier in the reply is usually rhetorical or embedded and would
-        // open a needless listen window (a false-listen vector). The LLM is
-        // prompted to end a genuine question with "?"; allow trailing
-        // quotes/brackets/emoji-free punctuation after it.
-        const ENDS_WITH_QUESTION = /[?？]["'”’)\]]*$/.test(reply);
-        // Patterns: "please say X", "say 'X'", "tell me X", "let me know",
-        // "do you mean", "did you mean" — common LLM hedges that ask for
-        // user input without a literal "?".
-        const ASKS_FOR_REPLY = /\b(please\s+(say|tell|repeat)|say\s+["'“]|tell\s+me|let\s+me\s+know|d(o|id)\s+you\s+mean)\b/i;
-        if (ENDS_WITH_QUESTION || ASKS_FOR_REPLY.test(reply)) {
-          // Armed at reply DRAIN (streamer close), not LLM-done — the old
-          // direct send raced the audio and could expire mid-reply.
-          armFollowupAfterDrain(deviceId, { windowMs: 5000 });
-        }
-      }
-    }
+    // Follow-up listening — see armFollowupForReply for the full comment on
+    // conversation-mode vs. question-heuristic semantics and the guards
+    // (voice-device only, requires deviceId, never on an aborted turn).
+    armFollowupForReply({ source, deviceId, conversationMode, reply: streamBuf, ac });
     recordActivity(userId, agentId, { apiCall: true });
   }
 }

@@ -621,6 +621,14 @@ function renderDevices() {
       d.health?.micDead ? '<span style="color:#e05c5c;font-weight:600" title="Heartbeat reports no microphone capture while the control socket is online">mic stalled</span>' : null,
       d.health?.rebootStorm ? '<span style="color:#e05c5c;font-weight:600" title="Recent boot telemetry indicates repeated restarts">rebooting repeatedly</span>' : null,
       Number.isFinite(d.health?.capSps) ? `<span title="Capture samples per second">mic ${Math.round(d.health.capSps)}/s</span>` : null,
+      Number.isFinite(d.health?.rssi)
+        ? (d.health.rssi < -75
+          ? `<span style="color:#e05c5c;font-weight:600" title="Wi-Fi signal strength (weak)">wifi ${Math.round(d.health.rssi)} dBm</span>`
+          : `<span title="Wi-Fi signal strength">wifi ${Math.round(d.health.rssi)} dBm</span>`)
+        : null,
+      (Number.isFinite(d.health?.pcmDrop) && d.health.pcmDrop > 0)
+        ? `<span title="Audio frames dropped from the capture buffer since last heartbeat">drops ${Math.round(d.health.pcmDrop)}</span>`
+        : null,
     ].filter(Boolean).join(' · ');
     return `
       <div class="cdraw-row" data-device-row="${escHtml(d.id)}" style="display:block;padding:14px 14px;border-bottom:1px solid var(--border);background:transparent;border-radius:0;margin-bottom:0">
@@ -635,6 +643,12 @@ function renderDevices() {
           <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="For headphones or an external amp on the 3.5mm jack: keeps the internal speaker amp off during playback, so the mic stays at full sensitivity and barge-in works at normal voice. With this off, the on-board speaker plays and the echo canceller suppresses the mic while audio is playing.">
             <input type="checkbox" ${d.headphone_mode ? 'checked' : ''} data-change-action="setDeviceHeadphone" data-change-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}'>
             Headphone / line-out mode
+          </label>
+        </div>
+        <div style="text-align:center;font-size:11px;color:var(--muted);margin-top:6px">
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="Say the wake word once, then just keep talking: after every reply the device listens for ~8 more seconds, and you can interrupt a reply mid-sentence by speaking over it. End with &quot;stop&quot;, &quot;that's all&quot;, or &quot;goodbye&quot; — or just go quiet. Requires firmware 0.2.65+ (older firmware ignores the setting).">
+            <input type="checkbox" ${d.conversation_mode ? 'checked' : ''} data-change-action="setDeviceConversation" data-change-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}'>
+            Conversation mode
           </label>
         </div>
         ${d.online ? `<div style="text-align:center;margin-top:6px"><button class="cdraw-btn" data-action="enterApMode" data-args='${JSON.stringify([d.id]).replace(/'/g, '&#39;')}' style="font-size:11px;padding:3px 9px" title="Wipe Wi-Fi/pairing and reboot into the setup AP (oe-voice-XXXX) so you can move this device to a different Wi-Fi network">⟳ Reset Wi-Fi</button></div>` : ''}
@@ -1775,6 +1789,14 @@ window.setDeviceSpeak = function (id, ev) {
 // "headphone mode on/off" (chat-dispatch/voice-preprocess.mjs).
 window.setDeviceHeadphone = function (id, ev) {
   patchDevice(id, { headphone_mode: !!ev.target.checked });
+};
+
+// Conversation mode: PATCH persists server-side and live-pushes
+// set_conversation_mode over the device WS (routes/devices.mjs); the server
+// also re-asserts it on every device reconnect (ws-handler reconcile). Old
+// firmware (< 0.2.65) drops the frame silently, so toggling is safe anywhere.
+window.setDeviceConversation = function (id, ev) {
+  patchDevice(id, { conversation_mode: !!ev.target.checked });
 };
 
 // Clear a wake-slot on someone else's device that's pointing at me.

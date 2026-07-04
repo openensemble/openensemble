@@ -8,6 +8,21 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-04
 
+**Conversations no longer end early on routed answers**
+In conversation mode, replies that were routed to a specialist behind the scenes (calendar, email, weather, and friends) now keep the listen window open just like direct answers — previously any routed reply silently ended the conversation. Timer disambiguation ("the 5 or 10 minute one?") also now holds the mic open for the full 30 seconds it will accept your pick, even with conversation mode off — no wake word needed to answer.
+
+**"What's the weather tomorrow" actually answers for tomorrow**
+Asking about tomorrow now leads with tomorrow's forecast instead of re-reading today's. Weather replies are also cleaner spoken aloud — no more ZIP code or "Source:" footer read to the room.
+
+**Instant phrases can't hijack built-in requests**
+A custom skill's instant phrases can no longer claim requests that belong to a built-in — "set a reminder for tomorrow morning" goes to reminders, never to a weather skill that happens to know the word "tomorrow." When a request sits too close to a built-in domain (reminders, calendar, email, timers, home control, messaging, media), the fast-path steps aside and the normal assistant handles it. Skill authors get warned at build time when their phrasings sit too close to a built-in domain.
+
+**Background work announces when it's actually done**
+When delegated work spawns further sub-tasks, the device used to say "done" and stop its waiting ring while the sub-tasks were still running — then stay silent when everything truly finished. The announcement and the ring now track the whole job.
+
+**Chat & device polish**
+Opening a chat lands you at the latest messages (no more mid-history jumps), the "jump to latest" pill counts how many new messages arrived while you were scrolled up, and sending while disconnected now tells you instead of silently dropping. Voice device cards show Wi-Fi signal strength (flagged when weak) and audio drop counts, so "why does it sound choppy" is answerable at a glance. Provider failover now also catches "overloaded" errors, not just timeouts and 5xx.
+
 **Teach your own instant phrases**
 Tell your assistant "when I say *check the deals*, run my Publix skill" and it's learned on the spot — the phrase now triggers that skill's tool instantly on-device, with no cloud round-trip, in chat or by voice. "Forget that phrase" undoes it. Skills you build also get smarter about this on their own: when a custom skill keeps handling the same kind of simple request the slow way, OpenEnsemble notices and offers to make it instant — one tap to accept. And skill authors get guardrails: the skill-builder now auto-merges redundant fast-path intents and warns when two intents' phrasings overlap enough to shadow each other.
 

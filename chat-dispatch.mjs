@@ -449,11 +449,24 @@ export async function handleChatMessage({
     return;
   }
   if (_vTrace) console.log(`[voice-trace] proposal-reply: miss device=${deviceId}`);
-  if (await tryVoiceTimerIntent({ source, deviceId, rawText, userId, agentId, onEvent })) {
+  const timerResult = await tryVoiceTimerIntent({ source, deviceId, rawText, userId, agentId, onEvent });
+  if (timerResult) {
     if (_vTrace) console.log(`[voice-trace] timer-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
-    // "Set a timer for ten minutes" mid-conversation is an answer, not an
-    // exit — keep listening like any other completed reply.
-    await armConversationFollowup({ source, deviceId, conversationMode });
+    if (timerResult.awaitReplyMs && deviceId) {
+      // Disambiguation question ("the 5 or 10 minute one?") — the pending pick
+      // expires server-side, so the mic must reopen for the full TTL even when
+      // conversation mode is off; a wake word can't be required to answer.
+      try {
+        const { armFollowupAfterDrain } = await import('./ws-handler.mjs');
+        armFollowupAfterDrain(deviceId, { windowMs: timerResult.awaitReplyMs });
+      } catch (e) {
+        console.warn('[chat] timer-disambig follow-up arm failed:', e.message);
+      }
+    } else {
+      // "Set a timer for ten minutes" mid-conversation is an answer, not an
+      // exit — keep listening like any other completed reply.
+      await armConversationFollowup({ source, deviceId, conversationMode });
+    }
     return;
   }
   if (_vTrace) console.log(`[voice-trace] timer-intent: miss device=${deviceId}`);

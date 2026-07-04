@@ -339,6 +339,32 @@ export function deferRootCompletion({ userId, rootTaskId, rootWatcherId = null, 
   return true;
 }
 
+// Fire the voice completion a deferred root stashed on its pendingCompletion
+// (see _onComplete's deferChip branch), exactly once, at TRUE tree completion
+// — i.e. right before the pendingCompletion is consumed/the root graph is
+// torn down below. `_voiceReleased` guards re-entry the same way
+// `_waitHintReleased` guards the non-deferred, immediate path in _onComplete;
+// the two paths are mutually exclusive per task but this keeps the invariant
+// enforced even if this ever runs twice for the same pendingCompletion object
+// (e.g. a duplicate final-child event racing in).
+function _fireDeferredVoiceCompletion(pending) {
+  if (!pending?.voiceDeviceId || pending._voiceReleased) return;
+  pending._voiceReleased = true;
+  const { voiceDeviceId, voiceAgentName, voiceResultText, voiceSummary, status } = pending;
+  const agentLabel = voiceAgentName || 'The agent';
+  import('./lib/voice-announcements.mjs')
+    .then(({ enqueueVoiceAnnouncement, announcementLine }) => {
+      const line = status && status !== 'done'
+        ? `${agentLabel} hit a problem with the background task.`
+        : announcementLine(agentLabel, voiceResultText || '', voiceSummary || '');
+      enqueueVoiceAnnouncement(voiceDeviceId, line, { kind: 'background' });
+    })
+    .catch(() => {});
+  import('./ws-handler.mjs')
+    .then(m => m.noteDeviceBackgroundWork(voiceDeviceId, -1))
+    .catch(() => {});
+}
+
 function _completeRootChild(taskId, rec, status, finalReportPreview) {
   if (!rec?.rootTaskId || rec.rootTaskId === taskId) return;
   const root = rootTaskGraphs.get(rec.rootTaskId);
@@ -352,7 +378,10 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
   }
   root.children.delete(taskId);
   if (!root.rootWatcherId) {
-    if (root.children.size === 0 && root.pendingCompletion) rootTaskGraphs.delete(rec.rootTaskId);
+    if (root.children.size === 0 && root.pendingCompletion) {
+      _fireDeferredVoiceCompletion(root.pendingCompletion);
+      rootTaskGraphs.delete(rec.rootTaskId);
+    }
     return;
   }
   if (root.pendingCompletion && status !== 'done') {
@@ -392,6 +421,7 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
       status: finalStatus,
       finalText,
     });
+    _fireDeferredVoiceCompletion(root.pendingCompletion);
     rootTaskGraphs.delete(rec.rootTaskId);
   }
 }
@@ -997,11 +1027,22 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   const rec = activeTasks.get(taskId);
   const status = finalStatus || (errorMsg ? 'error' : 'done');
   const finalReportPreview = String(errorMsg ?? result ?? '').slice(0, 800);
-  const reportImages = mergeReportImages([
-    ...(Array.isArray(media?.images) ? media.images.filter(Boolean) : []),
-    ...reportImagesFromText(userId, result),
-  ]);
-  const persistedImages = reportImages.map(persistedReportImage).filter(Boolean);
+  // Best-effort — this must never block core finalization below (activeTasks
+  // cleanup, journal removal, watcher completion). A throw here used to leak
+  // the whole task: chip stuck "running", journal entry surviving into the
+  // next boot as a false "interrupted by restart", and (for voice-origin
+  // tasks) the WAITING-ring hold never released.
+  let reportImages = [];
+  let persistedImages = [];
+  try {
+    reportImages = mergeReportImages([
+      ...(Array.isArray(media?.images) ? media.images.filter(Boolean) : []),
+      ...reportImagesFromText(userId, result),
+    ]);
+    persistedImages = reportImages.map(persistedReportImage).filter(Boolean);
+  } catch (e) {
+    console.warn('[background-tasks] report-image extraction failed, continuing with no images:', e.message);
+  }
   if (rec) {
     rec.status = status;
     rec.phase = status;
@@ -1024,6 +1065,25 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       finalText: status === 'done' ? `✓ ${agentName} done` : finalReportPreview,
       finalReportPreview,
     });
+    // Voice-origin root: ITS turn is done but the task tree is still running
+    // (children in flight). Announcing "done" and releasing the WAITING ring
+    // now (below, at ~voice block) would go dark and speak the result while
+    // the tree keeps working, then say nothing when it actually finishes
+    // (07-04 field bug). Hand both off onto the root graph's pendingCompletion
+    // instead — _completeRootChild fires them exactly once, when the whole
+    // tree actually drains. Flip _waitHintReleased here too so a late/duplicate
+    // _onComplete for this same task can never independently announce/release
+    // again (same guard the non-deferred path below uses).
+    if (rec.voiceDeviceId && !rec._waitHintReleased) {
+      rec._waitHintReleased = true;
+      const root = rootTaskGraphs.get(taskId);
+      if (root?.pendingCompletion) {
+        root.pendingCompletion.voiceDeviceId = rec.voiceDeviceId;
+        root.pendingCompletion.voiceAgentName = agentName;
+        root.pendingCompletion.voiceResultText = errorMsg ? '' : (result || '');
+        root.pendingCompletion.voiceSummary = rec.summary || '';
+      }
+    }
   }
   // Retire a finished delegation into the recent ring so check_workers can still
   // show its terminal outcome briefly. (Workers are retired separately via
@@ -1183,8 +1243,10 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
 
   // Speak the completion on the originating voice device (idle-gated queue;
   // ducks any ambient/AirPlay bed on fw >= 0.2.68). Errors announce too —
-  // a silent failure is how work gets "lost".
-  if (rec?.voiceDeviceId) {
+  // a silent failure is how work gets "lost". deferChip roots already handed
+  // this off to the root graph's pendingCompletion above — _completeRootChild
+  // fires it once the whole tree actually drains, not here.
+  if (rec?.voiceDeviceId && !deferChip) {
     try {
       const { enqueueVoiceAnnouncement, announcementLine } = await import('./lib/voice-announcements.mjs');
       const line = errorMsg
