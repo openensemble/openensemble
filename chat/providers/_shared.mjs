@@ -324,3 +324,39 @@ export function buildImageUserMessage(provider, images, text) {
   // know an image WOULD have been here.
   return { role: 'user', content: `${text}\n\n[${safeImages.length} image(s) attached but ${provider} doesn't accept vision input in this code path]` };
 }
+
+// ── Attachment normalization (multi-file chat wire) ──────────────────────────
+// The composer's tray can hold several files, but chat entry points grew up
+// around a single `attachment` object: ws-handler.mjs's incoming WS 'chat'
+// frame, routes/telegram.mjs, scheduler.mjs / background-tasks.mjs / roles.mjs
+// (ask_agent) internal turns, and third-party callers already living in this
+// codebase (public/docs.js's "ask about this doc" send still puts a bare
+// `attachment: {...}` on the wire). The wire now also accepts `attachments:
+// [...]`. This is the ONE normalizer both shapes funnel through: chat-
+// dispatch.mjs calls it once per turn (handleChatMessage) so every downstream
+// consumer works with a plain array, and chat.mjs calls it again defensively
+// inside streamChat, whose attachment-ish argument is still passed as a bare
+// object (or null) by a dozen non-chat-dispatch call sites (background-tasks,
+// skills/delegate, lib/mcp-outbound, lib/run-agent-with-retry). Lives here
+// (not chat.mjs) so chat-dispatch.mjs can import it without pulling in chat.mjs
+// — several guard tests (tests/chat-dispatch.test.mjs, tests/approval-pending-
+// pill.test.mjs) replace chat.mjs's whole module with `{ streamChat }` only.
+//
+// Capped at MAX_CHAT_ATTACHMENTS so a malformed/hostile payload can't balloon
+// a single turn's vision payload — the server-side twin of the composer's own
+// cap in public/chat.js (see feedback_upload_caps_4_places: size/count caps
+// necessarily live in more than one place; this is the count-cap's pair).
+export const MAX_CHAT_ATTACHMENTS = 6;
+
+/**
+ * @param {Array<object>|null|undefined} attachments  new-shape array (wins when non-empty)
+ * @param {object|null|undefined} attachment          legacy singular shape, wrapped when `attachments` is absent/empty
+ * @returns {Array<object>} ordered, capped, plain-object-filtered attachment list — never null
+ */
+export function normalizeAttachments(attachments, attachment) {
+  if (Array.isArray(attachments) && attachments.length) {
+    return attachments.filter(a => a && typeof a === 'object').slice(0, MAX_CHAT_ATTACHMENTS);
+  }
+  if (attachment && typeof attachment === 'object') return [attachment];
+  return [];
+}

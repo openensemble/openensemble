@@ -8,6 +8,15 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-04
 
+**Send several files in one message**
+Attachments now truly travel together: everything in the tray goes with the message you're typing (up to 6 per message), the assistant sees all of them at once, and they're remembered — reloading a chat shows every file that was attached to a message, not just the pictures from this tab session.
+
+**Task drawer shows what happened and what's next**
+Each scheduled task in the drawer now shows its next run time, a warning when it keeps failing, and a History view — every past run with whether it fired on time, fired late (and by how much), failed, or was skipped and why.
+
+**Sessions list names your machines**
+Node sessions now show the machine's actual hostname (like voice devices already did), so you can tell your machines apart at a glance.
+
 **Destructive actions now show an approval card**
 When the assistant stages something destructive (purging a sender's email, deleting transactions, promoting a service to trusted, cancelling another agent's watcher), a card now appears with Approve and Cancel buttons — no more typing "APPROVE PURGE" from memory, no more losing the staged action to a typo. Typing the phrase still works, and the card survives a page reload.
 

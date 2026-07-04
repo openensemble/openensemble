@@ -5,22 +5,21 @@
 // file_id, base64, extractedText }) plus a client-only `_localKey` (tray
 // remove-button identity) and `_uploading` while its upload is in flight.
 //
-// SEND CONTRACT LIMITATION (see send()): the server's chat message wire
-// shape and every downstream consumer (chat.mjs streamChat, the per-provider
-// vision-image branches, chat-dispatch's financePreprocess) still take a
-// single `attachment` object, not an array — extending that thread would
-// touch chat-dispatch/llm-loop.mjs (owned by another agent this session) and
-// ws-handler.mjs (outside this change's file ownership). Rather than half-
-// wire an array the server can't consume, only the FIRST queued attachment
-// is sent with a given message (shiftSentAttachment then drops it from the
-// tray); any remaining files stay queued for the user's next message. The
-// tray note makes this explicit rather than silently dropping files.
+// send() puts the WHOLE tray on the wire as `attachments: [...]` (server-side
+// entry-edge normalization lives in chat-dispatch.mjs's handleChatMessage —
+// see normalizeAttachments in chat/providers/_shared.mjs — and threads through
+// to chat.mjs's per-provider vision-message builder, which now accepts N
+// images). MAX_CHAT_ATTACHMENTS_PER_MESSAGE below caps how many files one tray
+// (and therefore one message) can hold; _uploadAndAddAttachment enforces it
+// with a toast at the point a file would be added, so the cap is felt at
+// upload time, not as a surprise at send time.
+const MAX_CHAT_ATTACHMENTS_PER_MESSAGE = 6; // mirrors MAX_CHAT_ATTACHMENTS in chat/providers/_shared.mjs
 let pendingAttachments = [];
 // Retry-on-error state. A failed turn is never persisted server-side (the LLM
 // never sees it), so recovery is purely client-side: we remember the last
 // outgoing message and, if it errors, keep it on screen with a Retry button
 // until the user retries or types a fresh message.
-let lastSentAttempt = null; // { agent, text, attachment, userBubbleEl, sessionEntry } — in flight
+let lastSentAttempt = null; // { agent, text, attachments, userBubbleEl, sessionEntry } — in flight
 let failedAttempt = null;   // same shape + errorEl — set once a turn has errored
 
 // ── Per-agent draft persistence ──────────────────────────────────────────────
@@ -435,15 +434,6 @@ function removeAttachmentAt(localKey) {
   renderAttachmentTray();
 }
 
-// Removes exactly the attachment that was just sent (the head of the queue)
-// — see the SEND CONTRACT LIMITATION note above pendingAttachments. Any
-// files still queued behind it stay in the tray for the next message.
-function shiftSentAttachment() {
-  pendingAttachments = pendingAttachments.slice(1);
-  if (!pendingAttachments.length) $('chatFileInput').value = '';
-  renderAttachmentTray();
-}
-
 function formatAttachmentSize(bytes) {
   if (!Number.isFinite(bytes)) return '';
   if (bytes < 1024) return `${bytes} B`;
@@ -462,20 +452,12 @@ function renderAttachmentTray() {
   p.style.flexWrap = 'wrap';
   p.style.gap = '6px';
   p.innerHTML = '';
-  // Only the first attachment goes out with the next send (see the SEND
-  // CONTRACT LIMITATION note above pendingAttachments) — flag it so the
-  // note below and the row styling make that unambiguous.
-  if (pendingAttachments.length > 1) {
-    const note = document.createElement('div');
-    note.className = 'attach-preview-note';
-    note.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--muted)';
-    note.textContent = `${pendingAttachments.length} files queued — only "${pendingAttachments[0].name || 'the first'}" sends with this message; the rest stay attached for your next message.`;
-    p.appendChild(note);
-  }
-  pendingAttachments.forEach((a, i) => {
+  // Every tray item goes out together on the next send (see send()) — no
+  // "only the first" caveat anymore, so every row renders identically.
+  pendingAttachments.forEach((a) => {
     const row = document.createElement('span');
     row.className = 'attach-preview-item';
-    row.style.cssText = `display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);font-size:12px;max-width:220px${i === 0 ? ';border-color:var(--accent, #6c8cff)' : ''}`;
+    row.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);font-size:12px;max-width:220px';
     const nameSpan = document.createElement('span');
     nameSpan.className = 'attach-preview-name';
     nameSpan.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px';
@@ -516,6 +498,15 @@ let _attachmentUploadSeq = 0;
 // those existing single-file callers).
 async function _uploadAndAddAttachment(file) {
   if (!file) return;
+  // Count cap, not a size cap — per-file size limits are unchanged (see
+  // CHAT_UPLOAD_MAX_BYTES below). Checked at add-time so the tray never grows
+  // past the limit in the first place, rather than truncating silently at
+  // send() — a friendly toast here is only guaranteed to be seen once, unlike
+  // a note baked into a follow-up send.
+  if (pendingAttachments.length >= MAX_CHAT_ATTACHMENTS_PER_MESSAGE) {
+    showToast(`You can attach up to ${MAX_CHAT_ATTACHMENTS_PER_MESSAGE} files per message.`);
+    return;
+  }
   if (file.size > CHAT_UPLOAD_MAX_BYTES) {
     alert(`"${file.name}" is too large — limit is ${CHAT_UPLOAD_MAX_BYTES / 1024 / 1024} MB.`);
     return;
@@ -570,7 +561,7 @@ async function send() {
   if (!text && !pendingAttachments.length) return;
   if (streaming && !awaitingPermission) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
-  if (pendingAttachments[0]?._uploading) { showToast('Still uploading — one moment'); return; }
+  if (pendingAttachments.some(a => a._uploading)) { showToast('Still uploading — one moment'); return; }
 
   // A fresh send supersedes any failed attempt still showing — the message the
   // user just typed is almost always what they were retrying. Remove its bubble
@@ -599,25 +590,25 @@ async function send() {
   }
 
   const toolPlan = selectedToolPlanForSend(text);
-  // Only the queue's head is sent — see the SEND CONTRACT LIMITATION note
-  // above pendingAttachments. Rebuilt into a clean object so client-only
-  // tray bookkeeping (_localKey, _uploading, size) never rides over the wire.
-  const head = pendingAttachments[0] || null;
-  const attachment = head ? {
-    name: head.name, mimeType: head.mimeType, isImage: head.isImage,
-    isFinanceFile: head.isFinanceFile, file_id: head.file_id,
-    base64: head.base64, extractedText: head.extractedText,
-  } : null;
-  const displayText = text || (attachment ? `[${attachment.name}]` : '');
+  // The WHOLE tray goes out with this message. Rebuilt into clean objects so
+  // client-only tray bookkeeping (_localKey, _uploading, size) never rides
+  // over the wire — server-side shape is chat/providers/_shared.mjs's
+  // normalizeAttachments input.
+  const attachments = pendingAttachments.map(a => ({
+    name: a.name, mimeType: a.mimeType, isImage: a.isImage,
+    isFinanceFile: a.isFinanceFile, file_id: a.file_id,
+    base64: a.base64, extractedText: a.extractedText,
+  }));
+  const displayText = text || (attachments.length ? attachments.map(a => `[${a.name}]`).join(' ') : '');
 
   if (!sessions[activeAgent]) sessions[activeAgent] = [];
-  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachment };
+  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachments };
   sessions[activeAgent].push(sessionEntry);
   updateSessionWarning();
-  const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachment);
+  const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachments);
   scrollToBottom(true); // sending always jumps to the bottom, even from scrollback
   // Remember this attempt so it can be cleared/retried if the turn errors.
-  lastSentAttempt = { agent: activeAgent, text, attachment, userBubbleEl, sessionEntry };
+  lastSentAttempt = { agent: activeAgent, text, attachments, userBubbleEl, sessionEntry };
   $('input').value = '';
   resizeTextarea();
   // Cancel any pending debounced draft-save (see _initDraftPersistence) —
@@ -625,9 +616,10 @@ async function send() {
   // re-populates a "draft" for a message that already went out.
   clearTimeout(_draftSaveTimer);
   clearDraftForAgent(activeAgent);
-  // Drop only the sent attachment — any additional queued files (see the
-  // tray's multi-file note) stay attached for the user's next message.
-  shiftSentAttachment();
+  // Every tray item just went out on this message — clear it, rather than
+  // the old shift-one-off-the-queue behavior (the wire now carries the
+  // whole array in one message, so there's nothing left to queue).
+  clearAttachment();
   resetToolPlanPicker();
   resetToolRun();
   if (awaitingPermission) {
@@ -639,7 +631,7 @@ async function send() {
   }
 
   const payload = { type: 'chat', agent: activeAgent, text };
-  if (attachment) payload.attachment = attachment;
+  if (attachments.length) payload.attachments = attachments;
   if (toolPlan) payload.toolPlan = toolPlan;
   ws.send(JSON.stringify(payload));
 }
@@ -692,7 +684,7 @@ function renderSessionInner(keepScroll) {
   ordered.slice(start).forEach(m => {
     if (m.scheduled)                 appendTaskHeader(m.content, m.ts, false);
     else if (m.role === 'notification') appendNotification({ agent: activeAgent, content: m.content, from: m.from, ts: m.ts });
-    else if (m.role === 'user' && !m.hidden)        appendUserBubble(m.content, m.ts, false, m.attachment ?? null);
+    else if (m.role === 'user' && !m.hidden)        appendUserBubble(m.content, m.ts, false, m.attachments ?? m.attachment ?? null);
     else if (m.role === 'assistant' && m.image) {
       if (m.image.base64) appendImageBubble(m.image, m.ts, false);
       else appendReportImageBubble(m.image, m.ts, false); // saved-file row (no inline base64)
@@ -976,10 +968,19 @@ function isNodeExecTaskReport(m) {
     && m.taskId.startsWith('autobg_');
 }
 
-function appendUserBubble(text, ts = Date.now(), scroll = true, attachment = null) {
+// `attachments` accepts the new array shape, OR a single legacy attachment
+// object (old persisted single-attachment session rows use `m.attachment` —
+// see websocket.js's session_loaded handling in renderSessionInner — and
+// must still render). Each attachment with inline base64 (the live-send
+// case — the tray's own upload response) shows as an image; anything
+// reloaded from a persisted session row never carries base64 (see chat.mjs
+// persist(): no inline data in the session log, only name/mimeType/file_id)
+// so it degrades to the same filename badge non-image attachments already use.
+function appendUserBubble(text, ts = Date.now(), scroll = true, attachments = null) {
+  const list = Array.isArray(attachments) ? attachments.filter(Boolean) : (attachments ? [attachments] : []);
   const el = msgEl('user');
   const bubble = el.querySelector('.msg-bubble');
-  if (attachment) {
+  for (const attachment of list) {
     const div = document.createElement('div');
     div.className = 'msg-attachment';
     if (attachment.isImage && attachment.base64) {
@@ -990,7 +991,11 @@ function appendUserBubble(text, ts = Date.now(), scroll = true, attachment = nul
     }
     bubble.appendChild(div);
   }
-  if (text && text !== `[${attachment?.name}]`) {
+  // Skip the text span when it's exactly the auto-generated "[name] [name2]"
+  // placeholder send() falls back to for an attachments-only message (see
+  // send()'s displayText) — matches both the single- and multi-file join.
+  const placeholderText = list.length ? list.map(a => `[${a.name}]`).join(' ') : null;
+  if (text && text !== placeholderText) {
     const span = document.createElement('span');
     span.textContent = text;
     bubble.appendChild(span);
@@ -2687,25 +2692,26 @@ function clearFailedAttempt() {
   failedAttempt = null;
 }
 
-// Retry button: resend the exact text/attachment that failed, as a fresh turn.
+// Retry button: resend the exact text/attachments that failed, as a fresh turn.
 // Self-contained (doesn't touch the composer, so a half-typed draft survives).
 function retryFailedAttempt() {
   if (!failedAttempt) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
-  const { agent, text, attachment } = failedAttempt;
+  const { agent, text, attachments } = failedAttempt;
   clearFailedAttempt();
   if (agent !== activeAgent) return;
-  const displayText = text || (attachment ? `[${attachment.name}]` : '');
+  const list = attachments || [];
+  const displayText = text || (list.length ? list.map(a => `[${a.name}]`).join(' ') : '');
   if (!sessions[activeAgent]) sessions[activeAgent] = [];
-  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachment };
+  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachments: list };
   sessions[activeAgent].push(sessionEntry);
   updateSessionWarning();
-  const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachment);
+  const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, list);
   scrollToBottom(true);
-  lastSentAttempt = { agent: activeAgent, text, attachment, userBubbleEl, sessionEntry };
+  lastSentAttempt = { agent: activeAgent, text, attachments: list, userBubbleEl, sessionEntry };
   setStreaming(true); setTyping(true);
   const payload = { type: 'chat', agent: activeAgent, text };
-  if (attachment) payload.attachment = attachment;
+  if (list.length) payload.attachments = list;
   ws.send(JSON.stringify(payload));
 }
 function appendNotification(msg) {

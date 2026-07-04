@@ -4,8 +4,10 @@ let watchers = { active: [], recent: [] };
 let expandedTaskId = null;
 let expandedWatcherId = null;
 let expandedNodeHealthId = null;
+let expandedHistoryId = null;
 const watcherDetails = new Map();
 const nodeHealthDetails = new Map();
+const taskHistoryDetails = new Map();
 
 const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function _parseCronDow(spec) {
@@ -257,6 +259,42 @@ function _toLocalInputValue(iso) {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// Shared local-time formatter for the drawer — accepts an ISO string
+// (nextRunAt, datetime) or an epoch-ms number (run-history ts/firedAt) since
+// `new Date(...)` accepts both. Mirrors the {month:'short', day:'numeric',
+// hour:'2-digit', minute:'2-digit'} formatting already used throughout this
+// file for task times so "Next:" and history rows read consistently with
+// the rest of the drawer.
+function _friendlyLocalTime(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// One row of GET /api/tasks/:id/runs — {ts, taskId, taskName, scheduledFor,
+// firedAt, status:'ok'|'error'|'skipped'|'late', lateByMs?, error?, manual?}.
+function _renderRunRow(run) {
+  const when = _friendlyLocalTime(run.firedAt ?? run.ts) || '?';
+  let statusText;
+  if (run.status === 'ok') statusText = '✓ ok';
+  else if (run.status === 'error') statusText = `⚠ error${run.error ? ' — ' + String(run.error).slice(0, 140) : ''}`;
+  else if (run.status === 'skipped') statusText = `⊘ ${String(run.error || 'skipped').slice(0, 140)}`;
+  else if (run.status === 'late') statusText = `⏰ late${run.lateByMs != null ? ' +' + Math.max(1, Math.round(run.lateByMs / 60000)) + 'm' : ''}`;
+  else statusText = String(run.status || '?');
+  const manualTag = run.manual ? ' <span style="opacity:.7">(manual)</span>' : '';
+  return `<div class="task-edit-meta">${escHtml(when)} — ${escHtml(statusText)}${manualTag}</div>`;
+}
+
+function renderTaskHistoryPanel(taskId) {
+  const detail = taskHistoryDetails.get(taskId);
+  if (!detail) return '<div class="task-edit-meta">Loading history…</div>';
+  if (detail.error) return `<div class="task-edit-meta" style="color:var(--red)">Could not load history: ${escHtml(detail.error)}</div>`;
+  const runs = detail.runs || [];
+  if (!runs.length) return '<div class="task-edit-meta">No runs yet.</div>';
+  return `<div style="margin-top:2px">${runs.map(_renderRunRow).join('')}</div>`;
+}
+
 function renderTaskRow(t) {
   const schedStr = t.repeat === 'once'
     ? (t.datetime ? '1× ' + new Date(t.datetime).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '1× (no time set)')
@@ -273,6 +311,24 @@ function renderTaskRow(t) {
     : '';
   const isOpen = expandedTaskId === t.id;
   const expandToggle = isOpen ? '▾' : '▸';
+  // Next-fire time — null-guarded since disabled tasks (and tasks the
+  // scheduler hasn't armed yet) carry nextRunAt: null.
+  const nextText = t.nextRunAt ? _friendlyLocalTime(t.nextRunAt) : null;
+  const nextLine = nextText ? `<div class="task-item-meta">Next: ${escHtml(nextText)}</div>` : '';
+  // Cross-fire failure streak — only worth a warning once it's more than a
+  // single blip (matches MAX_CONSECUTIVE_FAILURES auto-disable semantics in
+  // scheduler.mjs, which also resets this to 0 on any success).
+  const failCount = Number(t.consecutiveFailures) || 0;
+  const failWarn = failCount > 1
+    ? `<div class="task-item-meta" style="color:var(--red)" title="${escHtml(t.lastError || '')}">⚠ ${failCount} failed in a row</div>`
+    : '';
+  // Run-history affordance: lazy-fetched on open, independent of the
+  // edit-expand toggle above so it's reachable without opening the editor.
+  // data-stop-propagation keeps the click off the enclosing toggleTaskExpanded
+  // area (matches the watcher-dot pattern in renderWatcherRow).
+  const isHistOpen = expandedHistoryId === t.id;
+  const historyToggle = `<button data-action="toggleTaskHistory" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' data-stop-propagation style="margin-top:4px;font-size:11px;background:none;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:5px;cursor:pointer">${isHistOpen ? '▾' : '▸'} History</button>`;
+  const historyPanel = isHistOpen ? renderTaskHistoryPanel(t.id) : '';
   // The header row: clicking the info area toggles the expanded view.
   // Edit/toggle/delete buttons remain accessible without expanding first.
   const header = `
@@ -281,6 +337,10 @@ function renderTaskRow(t) {
         <div class="task-item-label">${expandToggle} ${silentBadge}${escHtml(t.label)}</div>
         <div class="task-item-meta">${schedStr} · ${runner}${statusSuffix}</div>
         ${silentTail}
+        ${nextLine}
+        ${failWarn}
+        ${historyToggle}
+        ${historyPanel}
       </div>
       ${t.repeat === 'once' && !t.enabled ? '<span style="font-size:11px;color:var(--green)">✓</span>' : `<input type="checkbox" class="task-toggle" ${t.enabled ? 'checked' : ''} data-change-action="toggleTask" data-change-args='${JSON.stringify([t.id, "$checked"]).replace(/'/g, "&#39;")}'>`}
       <button class="btn-task-del" data-action="deleteTask" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>✕</button>
@@ -381,6 +441,37 @@ function renderTasks() {
 
 function toggleTaskExpanded(id) {
   expandedTaskId = expandedTaskId === id ? null : id;
+  renderTasks();
+}
+
+// Toggle the per-task run-history panel. Refetches every time it's opened
+// (simpler than tracking staleness — history rows accumulate between opens
+// and this endpoint is only hit on an explicit click) by dropping any cached
+// detail first so the panel shows "Loading…" instead of a stale list.
+function toggleTaskHistory(id) {
+  expandedHistoryId = expandedHistoryId === id ? null : id;
+  if (expandedHistoryId === id) {
+    taskHistoryDetails.delete(id);
+    renderTasks();
+    loadTaskHistory(id);
+  } else {
+    renderTasks();
+  }
+}
+
+async function loadTaskHistory(id) {
+  try {
+    const r = await fetch(`/api/tasks/${encodeURIComponent(id)}/runs`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    // GET /api/tasks/:id/runs responds with a bare array of run rows (see
+    // routes/misc.mjs), not {runs:[...]} — guarded here in case that shape
+    // ever changes.
+    const runs = Array.isArray(data) ? data : (Array.isArray(data?.runs) ? data.runs : []);
+    taskHistoryDetails.set(id, { runs });
+  } catch (e) {
+    taskHistoryDetails.set(id, { error: e.message });
+  }
   renderTasks();
 }
 

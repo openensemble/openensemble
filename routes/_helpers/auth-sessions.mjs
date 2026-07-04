@@ -333,6 +333,25 @@ export function getUserSessions(userId) {
   return result;
 }
 
+/**
+ * Internal-only: full tokens (not prefixes) for this user's node-agent
+ * sessions. getUserSessions() deliberately redacts to tokenPrefix for
+ * anything that reaches the client — this exists so a caller that needs to
+ * resolve node identity server-side (GET /api/sessions?includeDevices=1
+ * mapping a session to its node-registry display name via
+ * skills/nodes/node-registry.mjs findNodeByToken) can do the prefix→token
+ * lookup without ever putting a full token in an HTTP response. Do not wire
+ * this into any route response body directly.
+ */
+export function getUserNodeSessionTokens(userId) {
+  const tokens = [];
+  const now = Date.now();
+  for (const [token, s] of sessions) {
+    if (s.userId === userId && s.kind === 'node' && s.expires >= now) tokens.push(token);
+  }
+  return tokens;
+}
+
 export function revokeSessionByPrefix(userId, prefix) {
   for (const [token, s] of sessions) {
     if (s.userId === userId && token.startsWith(prefix)) {

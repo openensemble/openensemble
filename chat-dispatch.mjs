@@ -59,6 +59,7 @@ import { log } from './logger.mjs';
 import { turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTurnAgent } from './lib/turn-trace-context.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
+import { normalizeAttachments } from './chat/providers/_shared.mjs';
 
 // Pending ambient-restore timers, keyed by deviceId. A burst of wakes seconds
 // apart (e.g. a real command immediately followed by a false wake) would each
@@ -246,7 +247,8 @@ function appendSystemStable(agent, note) {
  * @param {string} opts.userId        - OpenEnsemble user ID
  * @param {string} [opts.agentId]     - Target agent ID (defaults to coordinator)
  * @param {string} [opts.text]        - User message text
- * @param {object} [opts.attachment]  - File attachment object
+ * @param {object} [opts.attachment]  - File attachment object (legacy singular; wrapped into an array when opts.attachments is absent)
+ * @param {Array<object>} [opts.attachments] - File attachments (preferred wire shape; normalizeAttachments reduces this + opts.attachment to one ordered array)
  * @param {function} opts.onEvent     - Callback(event) for all chat events
  * @param {function} [opts.onBroadcast] - Called when agent list may have changed (e.g. rename)
  * @param {function} [opts.onNotify]  - Called for __notify cross-user events
@@ -359,7 +361,8 @@ function normalizeToolPlan(plan) {
  * @param {string} opts.userId
  * @param {string} opts.agentId
  * @param {string} opts.text
- * @param {object|null} [opts.attachment]
+ * @param {object|null} [opts.attachment]  legacy singular attachment (see normalizeAttachments)
+ * @param {Array<object>|null} [opts.attachments]  preferred multi-attachment array — ws-handler/telegram/scheduler/background-tasks/ask_agent all funnel through here
  * @param {{mode?: string, selectedTools?: string[], source?: string, phrase?: string}|null} [opts.toolPlan]
  * @param {'voice-device'|'web'|'telegram'|'desktop-app'|null} [opts.source]
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
@@ -381,6 +384,7 @@ export async function handleChatMessage({
   agentId: rawAgentId,
   text: rawText,
   attachment: rawAttachment,
+  attachments: rawAttachments = null,
   toolPlan: rawToolPlan = null,
   source = null,
   deviceId = null,
@@ -439,6 +443,15 @@ export async function handleChatMessage({
 
   const toolPlan = normalizeToolPlan(rawToolPlan);
 
+  // Entry-edge attachment normalization — the ONE place the wire's two
+  // shapes (new `attachments` array from the composer's multi-file tray;
+  // legacy singular `attachment` still sent by ws-handler.mjs pass-through,
+  // routes/telegram.mjs, scheduler.mjs, background-tasks.mjs, roles.mjs
+  // ask_agent, and public/docs.js's "ask about this doc") reduce to one
+  // ordered, capped array. Everything below reads `attachmentList`;
+  // `rawAttachment`/`rawAttachments` are not touched again.
+  const attachmentList = normalizeAttachments(rawAttachments, rawAttachment);
+
   // Turn trace (correlation spine). One record per top-level turn; nested
   // streamChat runs (specialist-router, ask_agent delegation) inherit this store
   // via ALS and push their own spans. Wrapped in turnTraceContext.run() — NOT
@@ -462,14 +475,15 @@ export async function handleChatMessage({
     ? (getAmbientForDevice(deviceId)?.marker || null)
     : null;
 
-  // Snapshot the upload (file_id + display name) BEFORE the interceptor
-  // chain mutates ctx.attachment. financePreprocess clears it; transcribe
-  // fast-path consumes it; the file itself stays on disk regardless. After
-  // the turn lands, ask the user whether to keep or discard it (see the
-  // attachment_decision emit in the finally block below).
-  const _attachmentForDecision = (rawAttachment?.file_id && source !== 'voice-device' && !_isRoutineFollowup)
-    ? { file_id: rawAttachment.file_id, name: rawAttachment.name, mimeType: rawAttachment.mimeType }
-    : null;
+  // Snapshot the upload(s) (file_id + display name) BEFORE the interceptor
+  // chain mutates ctx.attachment/ctx.attachments. financePreprocess clears
+  // the first slot; transcribe fast-path consumes the first slot; the files
+  // themselves stay on disk regardless. After the turn lands, ask the user
+  // whether to keep or discard EACH one (see the attachment_decision emit
+  // in the finally block below — one decision bubble per file_id).
+  const _attachmentsForDecision = (source !== 'voice-device' && !_isRoutineFollowup)
+    ? attachmentList.filter(a => a?.file_id).map(a => ({ file_id: a.file_id, name: a.name, mimeType: a.mimeType }))
+    : [];
 
   // Snapshot staged destructive-op approvals BEFORE the interceptor chain
   // runs — tryApprovalIntercept executes-and-clears or clears-on-any-miss
@@ -638,7 +652,7 @@ export async function handleChatMessage({
     return;
   }
 
-  if (!rawText?.trim() && !rawAttachment) {
+  if (!rawText?.trim() && !attachmentList.length) {
     // Terminal event even for a no-op — a client showing a pending state on
     // send otherwise hangs until its own timeout.
     onEvent({ type: 'done', agent: agentId });
@@ -702,17 +716,49 @@ export async function handleChatMessage({
   }
 
   // Shared interceptor context. Mutable: financePreprocess rewrites
-  // ctx.userText / ctx.attachment in place when the user uploads a finance
-  // file, so every subsequent interceptor (and the LLM turn below) sees
-  // the augmented text.
+  // ctx.userText / ctx.attachment / ctx.attachments in place when the user
+  // uploads a finance file, so every subsequent interceptor (and the LLM
+  // turn below) sees the augmented text.
+  //
+  // ctx.attachment stays the FIRST attachment only — every interceptor that
+  // predates multi-attachment support (tryTranscribeAttachmentFastpath,
+  // tryHaFastpath, etc. — chat-dispatch/fastpaths.mjs and friends) reads only
+  // this singular field and was never touched for this change, so they keep
+  // acting on "the" attachment exactly as before. ctx.attachments carries the
+  // full ordered array through to the specialist router / LLM turn below,
+  // which DO thread every attachment to streamChat (see chat.mjs
+  // buildCurrentUserTurn). See the note-the-rest block below for how a
+  // second+ file is surfaced to a single-attachment interceptor anyway.
   const ctx = {
     userId, agentId, agent, source, deviceId, ac,
     userText: rawText?.trim() ?? '',
-    attachment: rawAttachment ?? null,
+    attachment: attachmentList[0] ?? null,
+    attachments: attachmentList,
     toolPlan,
     _isRoutineFollowup,
     onEvent, onBroadcast, onNotify,
   };
+
+  // "Note the rest": single-attachment interceptors (transcribe fast-path,
+  // finance preprocessor) only ever see ctx.attachment (the first file), so
+  // a second+ upload would otherwise vanish with no trace anywhere in the
+  // turn. Fold their names into ctx.userText up front — before any
+  // interceptor runs — so the note travels with the turn regardless of which
+  // handler (or the default LLM turn) ultimately answers it, and the LLM can
+  // at least narrate "I also see photo2.jpg, photo3.jpg" instead of silently
+  // ignoring them. Full pixel/text access to every attachment still happens
+  // downstream via ctx.attachments (runSpecialistRoute / runLlmTurn → chat.mjs).
+  // Voice-device turns never carry more than zero attachments today (no tray
+  // UI on the firmware) — skipped defensively anyway so a future voice
+  // multi-attachment source can't have this text note corrupt the
+  // anchored control-intent regexes (tryVoiceControlIntent etc. match on the
+  // bare transcript).
+  if (source !== 'voice-device' && attachmentList.length > 1) {
+    const extraNames = attachmentList.slice(1).map(a => a?.name).filter(Boolean);
+    if (extraNames.length) {
+      ctx.userText = `${ctx.userText}\n\n[${extraNames.length} additional file(s) attached: ${extraNames.join(', ')}]`.trim();
+    }
+  }
 
   // Phase-6 router-as-learner: explicit redirects ("@<name>", "use coder",
   // "ask <name>") in the incoming user message are logged against the
@@ -767,7 +813,7 @@ export async function handleChatMessage({
     // confident local-intent match never escalates to the cloud coordinator.
     // Inert unless cfg.localTier.enabled (kill switch). Falls through on miss.
     ...(allowIntentFastpaths ? [tryLocalIntentFastpath] : []),
-    ...(_isBackgroundContinuation ? [] : [c => runSpecialistRoute({ ...c, attachment: c.attachment, conversationMode })]),
+    ...(_isBackgroundContinuation ? [] : [c => runSpecialistRoute({ ...c, attachment: c.attachment, attachments: c.attachments, conversationMode })]),
   ];
 
   for (const handler of INTERCEPTORS) {
@@ -866,7 +912,7 @@ export async function handleChatMessage({
   try {
     await runLlmTurn({
       userId, agentId, scopedAgent, scopedSessionKey,
-      userText: ctx.userText, attachment: ctx.attachment,
+      userText: ctx.userText, attachment: ctx.attachment, attachments: ctx.attachments,
       toolPlan: ctx.toolPlan,
       schedulerNote: resolvedNote, source, deviceId,
       conversationMode,
@@ -941,20 +987,21 @@ export async function handleChatMessage({
     // Post-turn attachment save/discard prompt. Chat-upload always persists
     // to users/<id>/profile-files/{images,videos,audio,documents}/ — the
     // ✕ on the preview pill clears client state but not the on-disk file.
-    // Ask the user once the turn lands whether to keep or discard, so casual
-    // "ask about this image" uploads don't silently accumulate. Skipped for
-    // voice-device (no screen) and routine follow-ups (the original turn
-    // already showed the prompt).
-    if (_attachmentForDecision) {
+    // Ask the user once the turn lands whether to keep or discard EACH
+    // uploaded file, so casual "ask about this image" uploads don't silently
+    // accumulate. One independent decision (own decisionId) per file — a
+    // 3-file turn shows 3 pills. Skipped for voice-device (no screen) and
+    // routine follow-ups (the original turn already showed the prompt).
+    for (const att of _attachmentsForDecision) {
       try {
         const decisionId = 'att_' + randomBytes(6).toString('hex');
         const ts = Date.now();
         const entry = {
           role: 'attachment_decision',
           decisionId,
-          file_id: _attachmentForDecision.file_id,
-          name: _attachmentForDecision.name,
-          mimeType: _attachmentForDecision.mimeType,
+          file_id: att.file_id,
+          name: att.name,
+          mimeType: att.mimeType,
           ts,
         };
         appendToSession(`${userId}_${agentId}`, entry);
@@ -962,9 +1009,9 @@ export async function handleChatMessage({
           type: 'attachment_decision',
           decisionId,
           agent: agentId,
-          file_id: _attachmentForDecision.file_id,
-          name: _attachmentForDecision.name,
-          mimeType: _attachmentForDecision.mimeType,
+          file_id: att.file_id,
+          name: att.name,
+          mimeType: att.mimeType,
           ts,
         });
       } catch (e) {
@@ -1044,6 +1091,14 @@ async function slashAdapter({ userText, userId, agentId, agent, onEvent }) {
  * when the user has uploaded a finance file to the finance-role agent.
  * Extracts transactions, inlines them as XML in the prompt, and nudges the
  * LLM toward saving or summarizing based on user intent words in the message.
+ *
+ * Only ever looks at the FIRST attachment (ctx.attachment) — a finance
+ * statement upload is a single-file feature (multi-statement import isn't
+ * supported), same "singly sensible" rule as the transcribe fast-path. If
+ * it fires, the consumed file is also dropped from ctx.attachments so the
+ * LLM turn downstream doesn't ALSO get it re-attached as a vision image;
+ * any OTHER attachments in the same turn are left in ctx.attachments and
+ * still reach the LLM normally.
  */
 async function financePreprocess(ctx) {
   const financeAgentId = getRoleAssignments(ctx.userId)?.['expenses'];
@@ -1067,5 +1122,6 @@ async function financePreprocess(ctx) {
     ctx.userText = (ctx.userText || '') + `\n\n[File upload: ${ctx.attachment.name} — extraction failed: ${e.message}]`;
   }
   ctx.attachment = null;
+  if (Array.isArray(ctx.attachments) && ctx.attachments.length) ctx.attachments = ctx.attachments.slice(1);
   return null;
 }

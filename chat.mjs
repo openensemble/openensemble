@@ -38,7 +38,7 @@ import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
 
 import {
   OPENAI_COMPAT_PROVIDERS, FIREWORKS_BASE,
-  getGrokKey, getFireworksKey,
+  getGrokKey, getFireworksKey, buildImageUserMessage, normalizeAttachments,
 } from './chat/providers/_shared.mjs';
 import { streamAnthropic }        from './chat/providers/anthropic.mjs';
 import { streamLMStudio }         from './chat/providers/lmstudio.mjs';
@@ -138,7 +138,7 @@ function _modelContextWindow(model) {
   return null;
 }
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [] } = {}) {
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [] } = {}) {
   // Record a compact summary of which tools fired this turn so future loads
   // of this session can show the assistant what it actually did, not just
   // what it said. Without this, short follow-ups ("send", "again", "do that
@@ -226,8 +226,23 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
         ts: Date.now(),
       }))
     : [];
+  // Attachment metadata rides alongside the user turn so a reload (session_
+  // loaded) can re-render the tray without re-embedding inline data — no
+  // base64 here, same reasoning as sessionText itself (see the comment
+  // above sessionText's assembly): a 500 MB upload cap makes storing the
+  // bytes in the JSONL session log a non-starter. isImage-only reload
+  // rendering therefore degrades to a filename badge (public/chat.js
+  // appendUserBubble) once the in-memory base64 from the live send is gone.
+  // Omitted entirely when there were no attachments so every pre-existing
+  // session row (and every test fixture) is byte-for-byte unchanged.
+  const attachmentEntries = attachments.length
+    ? { attachments: attachments.map(a => ({
+        name: a?.name ?? null, mimeType: a?.mimeType ?? null,
+        isImage: Boolean(a?.isImage), file_id: a?.file_id ?? null,
+      })) }
+    : {};
   appendToSession(agent.id,
-    { role: 'user', content: sessionText, ts: Date.now(), ...(hiddenUser ? { hidden: true } : {}) },
+    { role: 'user', content: sessionText, ts: Date.now(), ...(hiddenUser ? { hidden: true } : {}), ...attachmentEntries },
     ...imageEntries,
     assistantEntry);
 
@@ -643,8 +658,47 @@ function applyUserToolPlan(agent, plan) {
   return { mode: 'selected', before, after: agent.tools.length, selected: clean.selectedTools, fullTools };
 }
 
+/**
+ * Build the current-turn user message from an already-normalized attachments
+ * array. Images (base64 present) go through buildImageUserMessage — the same
+ * per-provider vision-content builder that reinjects N tool-produced images
+ * into the NEXT model turn (see chat/providers/_shared.mjs and every
+ * provider's `working.push(buildImageUserMessage(...))` call after a tool
+ * returns `_images`). Reusing it here means a multi-file upload gets the
+ * identical Anthropic / Ollama / OpenAI-compat+Responses / LM Studio content
+ * shapes instead of a second hand-rolled per-provider branch, and any future
+ * provider only needs to teach buildImageUserMessage its shape once.
+ *
+ * No image attachments (none at all, or only audio/video/pdf/csv/etc — see
+ * attachmentNotes above, which fold each one's path/extraction note into
+ * userText/sessionText separately) → a plain text turn.
+ *
+ * Exported for tests (mirrors tests/provider-tool-images.test.mjs style —
+ * asserting N image parts from N attachments rather than driving a full
+ * streamChat turn through a mocked provider).
+ */
+export function buildCurrentUserTurn(agent, userText, attachments) {
+  const imageParts = (attachments || [])
+    .filter(a => a?.base64)
+    .map(a => ({ base64: a.base64, mediaType: a.mimeType }));
+  if (!imageParts.length) return { role: 'user', content: userText };
+  return buildImageUserMessage(agent.provider, imageParts, userText || 'What is in this image?');
+}
+
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
+  // `attachment` is a legacy name kept for the many positional callers that
+  // still pass a single object or null (background-tasks, skills/delegate,
+  // lib/mcp-outbound, lib/run-agent-with-retry) — none of those carry more
+  // than one file today. chat-dispatch/llm-loop.mjs (the composer's tray)
+  // passes the full array here instead. normalizeAttachments (chat/providers/
+  // _shared.mjs — the same normalizer chat-dispatch.mjs uses at the wire
+  // entry point) accepts either shape, so this is a defensive second pass,
+  // not a duplicate of that one. attachment0 is every single-file code path
+  // below (Grok/Fireworks image-edit input, the run-inspector trace summary)
+  // that only ever made sense for one file.
+  const attachments = normalizeAttachments(Array.isArray(attachment) ? attachment : null, Array.isArray(attachment) ? null : attachment);
+  const attachment0 = attachments[0] ?? null;
   const isolatedTaskRun = turnOpts?.isolatedTaskRun === true;
   // Per-turn memory-scope tracker: records which service-role skills' tools run
   // this turn so a fact remembered mid-turn scopes to the skill that produced
@@ -1062,20 +1116,27 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // For audio/video attachments, also surface the on-disk path so the LLM's
   // transcribe_file tool can act on the file without first calling
   // list_profile_files to look up the doc id. Images/PDFs/CSVs continue
-  // through their existing inline-text / inline-vision paths above.
-  let attachmentNote = attachment ? `[Attached: ${attachment.name}]` : '';
-  if (attachment?.file_id && typeof attachment.mimeType === 'string') {
-    const mime = attachment.mimeType.toLowerCase();
-    if (mime.startsWith('audio/') || mime.startsWith('video/')) {
-      const { getProfileFilePath } = await import('./lib/profile-files.mjs');
-      const filePath = getProfileFilePath(userId, attachment.file_id);
-      if (filePath) {
-        const kind = mime.startsWith('audio/') ? 'audio' : 'video';
-        attachmentNote = `[Attached ${kind} "${attachment.name}" saved at ${filePath} — call transcribe_file with that path to read it]`;
+  // through their existing inline-text / inline-vision paths above. One note
+  // per attachment, in upload order — a multi-file turn (e.g. two receipts
+  // and a photo) gets a note for each rather than only the first.
+  let getProfileFilePathForNotes = null;
+  const attachmentNotes = [];
+  for (const a of attachments) {
+    let note = `[Attached: ${a.name}]`;
+    if (a?.file_id && typeof a.mimeType === 'string') {
+      const mime = a.mimeType.toLowerCase();
+      if (mime.startsWith('audio/') || mime.startsWith('video/')) {
+        if (!getProfileFilePathForNotes) ({ getProfileFilePath: getProfileFilePathForNotes } = await import('./lib/profile-files.mjs'));
+        const filePath = getProfileFilePathForNotes(userId, a.file_id);
+        if (filePath) {
+          const kind = mime.startsWith('audio/') ? 'audio' : 'video';
+          note = `[Attached ${kind} "${a.name}" saved at ${filePath} — call transcribe_file with that path to read it]`;
+        }
       }
     }
+    attachmentNotes.push(note);
   }
-  const sessionText = attachment ? `${attachmentNote}\n${userText}`.trim() : userText;
+  const sessionText = attachmentNotes.length ? `${attachmentNotes.join('\n')}\n${userText}`.trim() : userText;
 
   // Working copy for the tool loop (no ts fields).
   // Trim history if it gets too long — rough token estimate: 1 token ≈ 4 chars.
@@ -1126,31 +1187,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     userTextChars: userText.length,
   };
 
-  // Build the current user turn — include image data if attachment present
-  let currentUserTurn;
-  if (attachment?.base64) {
-    if (agent.provider === 'anthropic') {
-      currentUserTurn = { role: 'user', content: [
-        { type: 'image', source: { type: 'base64', media_type: attachment.mimeType, data: attachment.base64 } },
-        { type: 'text', text: userText || 'What is in this image?' },
-      ]};
-    } else if (agent.provider === 'ollama') {
-      currentUserTurn = { role: 'user', content: userText || 'What is in this image?', images: [attachment.base64] };
-    } else if (OPENAI_COMPAT_PROVIDERS[agent.provider === 'grok' ? 'xai' : agent.provider] || agent.provider === 'openrouter' || agent.provider === 'openai-oauth') {
-      // OpenAI vision schema: image_url with base64 data URL.
-      // For openai-oauth (Responses API), toResponsesInput() translates this
-      // shape into { type: 'input_image', image_url: '...' } parts.
-      currentUserTurn = { role: 'user', content: [
-        { type: 'image_url', image_url: { url: `data:${attachment.mimeType};base64,${attachment.base64}` } },
-        { type: 'text', text: userText || 'What is in this image?' },
-      ]};
-    } else {
-      // LM Studio / other: fall back to text description
-      currentUserTurn = { role: 'user', content: userText };
-    }
-  } else {
-    currentUserTurn = { role: 'user', content: userText };
-  }
+  // Build the current user turn — include image data for every attachment
+  // that carries inline base64 (images only; see /api/chat-upload, base64 is
+  // populated exclusively for isImage uploads).
+  const currentUserTurn = buildCurrentUserTurn(agent, userText, attachments);
 
   const working = [...trimmed, currentUserTurn];
 
@@ -1382,9 +1422,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       base64 = Array.isArray(data.base64) ? data.base64[0] : data.base64;
       if (!base64) { yield { type: 'error', message: 'Fireworks returned no image data.' }; return; }
     } else {
-      // Async: flux-kontext-pro / flux-kontext-max
+      // Async: flux-kontext-pro / flux-kontext-max — image-edit takes exactly
+      // one base image, so a multi-attachment turn uses only the first.
       const body = { prompt };
-      if (attachment?.base64) body.input_image = `data:${attachment.mimeType};base64,${attachment.base64}`;
+      if (attachment0?.base64) body.input_image = `data:${attachment0.mimeType};base64,${attachment0.base64}`;
       const r = await fetch(`${FIREWORKS_BASE}/${model}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -1643,11 +1684,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     durationMs: _llmMeta.durationMs,
     input: userText,
     output: assistantContent,
-    attachment: attachment ? {
-      name: attachment.name ?? null,
-      mimeType: attachment.mimeType ?? null,
-      file_id: attachment.file_id ?? null,
-      hasInlineData: Boolean(attachment.base64),
+    // Trace summary stays single-item (run-inspector's shape, read by
+    // public/run-inspector.js — not owned by this change) even on a
+    // multi-attachment turn; it's a debug breadcrumb, not the LLM payload.
+    attachment: attachment0 ? {
+      name: attachment0.name ?? null,
+      mimeType: attachment0.mimeType ?? null,
+      file_id: attachment0.file_id ?? null,
+      hasInlineData: Boolean(attachment0.base64),
     } : null,
     routing: _routerStore ? {
       initialSkills: [...(_routerStore.keptSkills ?? _routerStore.initiallyIncludedSkills)],
@@ -1741,7 +1785,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     }
   }
   if (assistantContent) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true, turnImages });
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments });
     // Phase-14 chip-replaces-turn: emit __content only when we're NOT
     // hiding the turn. The browser would otherwise render the coordinator's
     // assistant bubble alongside the chip — redundant.

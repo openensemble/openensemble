@@ -1386,7 +1386,15 @@ function onConnection(ws, req) {
         // explicit "" from any client should mean "coordinator" too.
         agentId:    msg.agent || undefined,
         text:       msg.text,
-        attachment: msg.attachment,
+        // Both shapes pass straight through raw — chat-dispatch.mjs's
+        // handleChatMessage is the single normalization point (see
+        // normalizeAttachments in chat/providers/_shared.mjs). msg.attachment
+        // (legacy singular) keeps working for older clients / public/docs.js's
+        // "ask about this doc" send; msg.attachments (new array) is what the
+        // composer's multi-file tray sends. Voice-device 'chat' frames never
+        // set either field, so this is a no-op for that path.
+        attachment:  msg.attachment,
+        attachments: msg.attachments,
         toolPlan:   msg.toolPlan,
         // Source hint — voice-device chats get a slim tool subset for low
         // latency (chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST); desktop-app

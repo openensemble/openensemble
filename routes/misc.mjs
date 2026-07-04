@@ -151,16 +151,29 @@ export async function handle(req, res) {
     // deviceId (bound at pair time), so a single listDevices() lookup gets
     // exact names. Node sessions carry no such id on the session record —
     // the node registry (skills/nodes/node-registry.mjs) associates a token
-    // with a node via a hashed-token comparison, not an id on the session —
-    // so node sessions are labeled generically by kind + captured UA instead
-    // of an exact hostname. A future `getNodeByTokenPrefix`-style export
-    // would let this resolve exactly, mirroring the voice-device case.
+    // with a node via a hashed-token comparison instead, so resolving a name
+    // means walking this user's node-session tokens through
+    // findNodeByToken(). getUserSessions() only ever returns redacted
+    // tokenPrefix, so getUserNodeSessionTokens() (auth-sessions.mjs,
+    // internal-only) supplies the full tokens for this lookup — they never
+    // leave this handler or reach the JSON response.
     let deviceNameById = new Map();
+    let nodeNameByPrefix = new Map();
     if (includeDevices) {
       try {
         const { listDevices } = await import('../lib/voice-devices.mjs');
         deviceNameById = new Map(listDevices(authId).map(d => [d.id, d.name || null]));
       } catch (e) { console.warn('[sessions] device name lookup failed:', e.message); }
+      try {
+        const { getUserNodeSessionTokens } = await import('./_helpers/auth-sessions.mjs');
+        const { findNodeByToken } = await import('../skills/nodes/node-registry.mjs');
+        for (const token of getUserNodeSessionTokens(authId)) {
+          const node = findNodeByToken(token);
+          if (node && node.userId === authId) {
+            nodeNameByPrefix.set(token.slice(0, 8) + '…', node.hostname || null);
+          }
+        }
+      } catch (e) { console.warn('[sessions] node name lookup failed:', e.message); }
     }
     // Persistent-device tokens (nodes, voice devices) represent long-lived
     // hardware registrations, normally managed by their own Settings pages —
@@ -174,7 +187,11 @@ export async function handle(req, res) {
       .map(s => ({
         ...s,
         current: currentToken?.startsWith(s.tokenPrefix.replace('…', '')) ?? false,
-        deviceName: s.kind === 'voice-device' && s.deviceId ? (deviceNameById.get(s.deviceId) ?? null) : null,
+        deviceName: s.kind === 'voice-device' && s.deviceId
+          ? (deviceNameById.get(s.deviceId) ?? null)
+          : s.kind === 'node'
+            ? (nodeNameByPrefix.get(s.tokenPrefix) ?? null)
+            : null,
       }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(sessions));

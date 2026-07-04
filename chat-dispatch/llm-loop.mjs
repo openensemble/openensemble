@@ -123,10 +123,19 @@ function classifySpecialistIntent(text, userId, currentAgentId) {
  * @returns {Promise<{ handled: true } | null>}
  */
 export async function runSpecialistRoute({
-  userText, userId, agentId, source, deviceId, attachment, toolPlan, ac, onEvent, onNotify,
+  userText, userId, agentId, source, deviceId, attachment, attachments, toolPlan, ac, onEvent, onNotify,
   conversationMode = false,
 }) {
   if (!userText) return null;
+  // `attachments` (the composer's full multi-file array) is the preferred
+  // shape; `attachment` (singular) is kept for any caller that still only
+  // sends one. Not re-using chat-dispatch.mjs's normalizeAttachments here —
+  // this file is `// @ts-check`'d and imported by heavily-mocked tests that
+  // replace chat.mjs's entire module with `{ streamChat }` only, so pulling
+  // in another shared helper here would be one more thing to keep in sync
+  // with those mocks for no real benefit (chat-dispatch.mjs, the only real
+  // caller, already normalizes once at the top of handleChatMessage).
+  const _attachments = Array.isArray(attachments) ? attachments : (attachment ? [attachment] : []);
   // Compound multi-step requests and explicit delegation language (e.g.
   // "delegate to the email specialist", "have <agent> send …") must go through
   // the coordinator's LLM loop — single-specialist routing drops the steps
@@ -254,7 +263,7 @@ export async function runSpecialistRoute({
       await runWithTurnContext({ signal: ac.signal, deviceId, conversationMode }, async () => {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
         onEvent({ ...e, agent: agentId });
-      }, userId, attachment, null, false, { source, deviceId }, { toolPlan })) {
+      }, userId, _attachments, null, false, { source, deviceId }, { toolPlan })) {
         if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
         if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
         if (event.type === 'token')    routerBuf += event.text;
@@ -399,10 +408,13 @@ export function armFollowupForReply({ source, deviceId, conversationMode, reply,
  */
 export async function runLlmTurn({
   userId, agentId, scopedAgent, scopedSessionKey,
-  userText, attachment, toolPlan, schedulerNote, source, deviceId,
+  userText, attachment, attachments, toolPlan, schedulerNote, source, deviceId,
   conversationMode = false,
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false,
 }) {
+  // See the matching comment in runSpecialistRoute above — same fallback,
+  // no shared import, for the same test-mock reasons.
+  const _attachments = Array.isArray(attachments) ? attachments : (attachment ? [attachment] : []);
   let streamBuf = '';
   // Once a tool has been invoked this attempt, a side effect (email_send, an HA
   // service call, a purchase) may already have executed — so we must NOT re-run
@@ -421,7 +433,7 @@ export async function runLlmTurn({
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       if (e.type === 'tool_call') toolInvoked = true;
       onEvent({ ...e, agent: agentId });
-    }, userId ?? 'default', attachment, schedulerNote, false, { source, deviceId }, { toolPlan, hiddenUser, isolatedTaskRun })) {
+    }, userId ?? 'default', _attachments, schedulerNote, false, { source, deviceId }, { toolPlan, hiddenUser, isolatedTaskRun })) {
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
       if (event.type === 'tool_call') toolInvoked = true;

@@ -282,6 +282,25 @@ export function reviveNodeSessionFromToken(token) {
   return null;
 }
 
+// Read-only lookup for the sessions list (routes/misc.mjs GET /api/sessions):
+// given a node session's full token, resolve which node it belongs to so the
+// UI can show a real hostname instead of a generic "node" label. Reuses the
+// exact same hash-compare as reviveNodeSessionFromToken (tokenHashMatches) —
+// no second hashing scheme — but unlike that function this NEVER mutates
+// revocation/timestamp state; it's a pure read called on every page load.
+// Returns null for no match OR a revoked node (display shouldn't out a
+// revoked node's identity either).
+export function findNodeByToken(token) {
+  if (!token) return null;
+  for (const entry of nodes.values()) {
+    if (!entry.tokenHash) continue;
+    if (!tokenHashMatches(entry.tokenHash, token)) continue;
+    if (isRevoked(entry.userId, entry.nodeId)) return null;
+    return { nodeId: entry.nodeId, hostname: entry.hostname, userId: entry.userId };
+  }
+  return null;
+}
+
 export function reviveLegacyNodeSession(token, info = {}) {
   if (!token || !/^[a-f0-9]{64}$/i.test(String(token))) return null;
   const nodeId = info.nodeId;
