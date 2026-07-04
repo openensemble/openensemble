@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.72-bargesens",
+  "version": "0.2.73-waithint",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
@@ -12,7 +12,7 @@
       "name": "bootloader",
       "offset": "0x0",
       "file": "bootloader.bin",
-      "sha256": "cb7465618800d58ff85b01f9a3069bb2ae4e75f76bdccf6680d4d66c93602411"
+      "sha256": "3674df9a95bcbd919e183518c36d6252a96c8626471b87f09cba6f7a25dc413e"
     },
     {
       "name": "partition-table",
@@ -30,7 +30,7 @@
       "name": "app",
       "offset": "0x20000",
       "file": "oe_voice_device.bin",
-      "sha256": "6faf331238934bedd9a0de968456f4ed8553c921eacaadf6f79ba23155296d74"
+      "sha256": "8ee7f2b6c0a4382c48ee5c57eacc93a2cfe5e6f3c759a6d7fa7e18b1981abde0"
     },
     {
       "name": "wakewords",
