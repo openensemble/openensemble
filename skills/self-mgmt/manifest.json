@@ -178,6 +178,58 @@
           ]
         }
       }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "teach_fastpath_phrase",
+        "description": "Teach a user-specific trigger phrase for a skill's local fast-path: after this, saying the phrase runs the skill's tool instantly on-device with NO cloud-LLM call. Call when the user says things like 'when I say X, run/check Y', 'make \"blitz it\" run the weather skill', 'add a shortcut phrase for my publix skill'. The phrase is stored per-user and takes effect on the next message. If the skill has multiple tools and it's ambiguous which one the phrase should run, pass `tool`.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "skill_id": {
+              "type": "string",
+              "description": "The skill's id (or exact name) that the phrase should trigger"
+            },
+            "phrase": {
+              "type": "string",
+              "description": "The exact phrase the user wants to say (3-200 chars)"
+            },
+            "tool": {
+              "type": "string",
+              "description": "Which of the skill's tools the phrase runs — required only when the skill has several tools and no clear default"
+            }
+          },
+          "required": [
+            "skill_id",
+            "phrase"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "forget_fastpath_phrase",
+        "description": "Remove a previously taught fast-path trigger phrase from a skill, so the phrase routes through the normal assistant flow again. Call when the user says 'forget/remove that phrase', 'stop running the weather skill when I say X'.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "skill_id": {
+              "type": "string",
+              "description": "The skill the phrase was taught for"
+            },
+            "phrase": {
+              "type": "string",
+              "description": "The phrase to forget (as originally taught)"
+            }
+          },
+          "required": [
+            "skill_id",
+            "phrase"
+          ]
+        }
+      }
     }
   ]
 }

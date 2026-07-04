@@ -352,13 +352,60 @@ export function initWs(httpServer) {
   // is genuinely idle: no live streamer and a couple of seconds since the
   // last voice activity, so we never talk over a reply, a capture, or the
   // user's own barge-in verify.
-  const annDrain = setInterval(() => { try { drainVoiceAnnouncements(); } catch {} }, 3000);
+  const annDrain = setInterval(() => {
+    try { drainVoiceAnnouncements(); } catch {}
+    try { reassertWaitHints(); } catch {}
+  }, 1000);
   annDrain.unref?.();
   _wss.on('close', () => clearInterval(annDrain));
 
   // Wire the credential primitive so server-side tools can emit
   // `credential_prompt` frames via the per-user broadcast helper.
   setCredentialEmitter(sendToUser);
+}
+
+/**
+ * Event-driven drain kick — called by enqueueVoiceAnnouncement (lazy import)
+ * so a fresh completion speaks as soon as the idle gates allow instead of
+ * waiting for the next timer tick. The tick remains the retry path for
+ * entries the gates deferred.
+ */
+export function kickVoiceAnnouncementDrain() {
+  try { drainVoiceAnnouncements(); } catch { /* tick retries */ }
+}
+
+// ── Background-work wait hints ────────────────────────────────────────────────
+// While ≥1 voice-origin background task is running for a device, keep its
+// rainbow WAITING ring lit so "I've asked the specialist — I'll tell you when
+// it's back" doesn't look like the device died (field 07-04: LEDs went dark
+// the moment the ack reply finished; user read it as "something went wrong").
+// fw ≥ 0.2.73 handles { type:'ui_wait', on } — LED-only, mic untouched, never
+// stomps an active turn's UI; older firmware drops unknown types silently.
+// Re-asserted every 10s while work is outstanding because any wake/turn on
+// the device clears its wait state locally.
+const _bgWaitHints = new Map(); // deviceId -> { count, lastSentAt }
+
+export function noteDeviceBackgroundWork(deviceId, delta) {
+  if (!deviceId) return;
+  const st = _bgWaitHints.get(deviceId) ?? { count: 0, lastSentAt: 0 };
+  st.count = Math.max(0, st.count + delta);
+  if (st.count === 0) {
+    _bgWaitHints.delete(deviceId);
+    sendToDevice(deviceId, { type: 'ui_wait', on: false });
+  } else {
+    st.lastSentAt = Date.now();
+    _bgWaitHints.set(deviceId, st);
+    sendToDevice(deviceId, { type: 'ui_wait', on: true });
+  }
+}
+
+function reassertWaitHints() {
+  const now = Date.now();
+  for (const [deviceId, st] of _bgWaitHints) {
+    if (now - st.lastSentAt < 10_000) continue;
+    st.lastSentAt = now;
+    sendToDevice(deviceId, { type: 'ui_wait', on: true });
+  }
 }
 
 function drainVoiceAnnouncements() {
@@ -371,7 +418,13 @@ function drainVoiceAnnouncements() {
     if (st && !st.closed && !st.aborted) continue;              // something is (or may be) speaking
     if (ws._sttSession) continue;                               // user is mid-utterance (streaming STT)
     if (Date.now() - (ws._lastVoiceActivityAt ?? 0) < 2500) continue;
-    if (Date.now() < (ws._followupArmedUntil ?? 0)) continue;   // open listen window — the user may answer
+    // NOTE: an armed-but-silent follow-up window does NOT block delivery
+    // (changed 07-04, field decision): after "I've asked the specialist…" the
+    // user is sitting in that window WAITING for exactly this result —
+    // holding it until expiry read as dead air. The _sttSession + quiet gates above
+    // still keep announcements off actual speech, and speakAnnouncement's
+    // onClosed re-arms a fresh window for conversation devices, so the
+    // exchange survives the interjection.
     if (isVoiceOutputSuppressed(ws, null)) continue;            // user recently said stop — hold
     const d = getDevice(ws._userId, ws._deviceId);
     if (!d || d.speak_replies === false) continue;

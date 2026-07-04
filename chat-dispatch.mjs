@@ -38,6 +38,7 @@ import {
   tryHaFastpath,
   tryRoutineFastpath,
   tryTriviaFastpath,
+  tryCalendarFastpath,
   tryVoiceEmptyFastpath,
   tryTranscribeAttachmentFastpath,
 } from './chat-dispatch/fastpaths.mjs';
@@ -102,6 +103,33 @@ function explicitlyWantsServerCoderStorage(text) {
 
 function explicitlyWantsLocalDesktopStorage(text) {
   return /\b(?:local(?:ly)?|my\s+(?:computer|desktop|laptop|pc|machine)|desktop\s+(?:app|folder|sandbox|coder)|local\s+(?:folder|sandbox|file|project)|openensemble\/coder|openensemble\s+coder)\b/i.test(String(text || ''));
+}
+
+/**
+ * Keep the conversation going after a fast-path reply. runLlmTurn's finally
+ * owns the conversation-mode re-arm for LLM turns ("EVERY completed reply"),
+ * but fast-paths return from the interceptor chain before reaching it — so an
+ * instant answer silently ended the conversation (field: calendar fast-path
+ * answered in ~1s and the device stopped listening). Mirrors llm-loop's call
+ * exactly: armFollowupAfterDrain waits for the TTS streamer to drain, so the
+ * window opens when the device finishes speaking, never on an aborted turn.
+ *
+ * Deliberately NOT armed for: control intents (stop / volume / "goodbye" —
+ * conversation_end must end the conversation), the empty-transcript guard
+ * (TV noise → empty STT → re-arm would ping-pong with the room), routines
+ * (ambient/cross-device semantics own their audio flow), and approval/slash
+ * intercepts. Dynamic import: chat-dispatch ↔ ws-handler already cycle via
+ * llm-loop, but keeping this one lazy avoids tightening the module graph.
+ */
+async function armConversationFollowup({ source, deviceId, conversationMode, ac = null }) {
+  if (source !== 'voice-device' || !deviceId || !conversationMode) return;
+  if (ac?.signal?.aborted) return;
+  try {
+    const { armFollowupAfterDrain } = await import('./ws-handler.mjs');
+    armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
+  } catch (e) {
+    console.warn('[chat] fast-path conversation re-arm failed:', e.message);
+  }
 }
 
 function appendSystemStable(agent, note) {
@@ -171,6 +199,13 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   // herself). Writes stay off voice deliberately.
   'gcal_list',
   'gcal_list_calendars',
+  // One-call mirror read for fuzzy calendar questions the fast-path can't
+  // answer ("when am I free 2h next week") — replaces the 7-call gcal loop.
+  'calendar_snapshot',
+  // "When I say X, run skill Y" — users teach fast-path trigger phrases by
+  // voice as naturally as by chat.
+  'teach_fastpath_phrase',
+  'forget_fastpath_phrase',
   // Voice routines — let users bind/edit/delete routines by speaking
   // ("<wake-word>, when I say goodnight, turn off the lights and play
   // thunderstorm sounds"). Fast-path executes matched routines pre-LLM;
@@ -416,6 +451,9 @@ export async function handleChatMessage({
   if (_vTrace) console.log(`[voice-trace] proposal-reply: miss device=${deviceId}`);
   if (await tryVoiceTimerIntent({ source, deviceId, rawText, userId, agentId, onEvent })) {
     if (_vTrace) console.log(`[voice-trace] timer-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
+    // "Set a timer for ten minutes" mid-conversation is an answer, not an
+    // exit — keep listening like any other completed reply.
+    await armConversationFollowup({ source, deviceId, conversationMode });
     return;
   }
   if (_vTrace) console.log(`[voice-trace] timer-intent: miss device=${deviceId}`);
@@ -588,6 +626,12 @@ export async function handleChatMessage({
   // their crack. Anything not handled falls through to runLlmTurn.
   const planConstrained = toolPlan?.mode === 'selected' || toolPlan?.mode === 'none';
   const allowIntentFastpaths = !planConstrained && !_isBackgroundContinuation;
+  // Answer-type fast-paths whose handled reply should keep a conversation-mode
+  // exchange open (see armConversationFollowup). Everything else in the chain
+  // ends or owns its own flow.
+  const CONVERSATION_REARM_FASTPATHS = new Set([
+    tryHaFastpath, tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
+  ]);
   const INTERCEPTORS = [
     // Voice-only: catch empty / 1-char STT transcripts before they reach the
     // LLM and cause the device to hang in THINKING. Must run before every
@@ -605,7 +649,7 @@ export async function handleChatMessage({
     ...((_isBackgroundContinuation || _hiddenUser) ? [] : [tryApprovalIntercept]),
     slashAdapter,
     financePreprocess,
-    ...(allowIntentFastpaths ? [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath] : []),
+    ...(allowIntentFastpaths ? [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath, tryCalendarFastpath] : []),
     // Skill-agnostic local cognition tier (dispatch face). Runs after the
     // bespoke fast-paths and before the embedding specialist router, so a
     // confident local-intent match never escalates to the cloud coordinator.
@@ -626,6 +670,11 @@ export async function handleChatMessage({
       recordRouting({ mode: 'fastpath', fastPath: handler.name || null, localHandler: handler.name || null, llmAvoided: true, cloudCall: false });
     }
     finalizeTurnOnce();
+    // followupPrompt re-enters handleChatMessage and runs an LLM turn, whose
+    // own finally re-arms — arming here too would double-send the window.
+    if (!r.followupPrompt && CONVERSATION_REARM_FASTPATHS.has(handler)) {
+      await armConversationFollowup({ source, deviceId, conversationMode, ac });
+    }
     if (r.followupPrompt) {
       // Routine's run_prompt action: the trigger phrase set the scene (lights
       // dimmed, sound playing), the followup is what the user actually wants

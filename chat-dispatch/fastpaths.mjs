@@ -514,6 +514,81 @@ export async function tryTranscribeAttachmentFastpath(ctx) {
   return { handled: true };
 }
 
+/**
+ * Try the calendar fast-path: closed-form "what's on my calendar today /
+ * tomorrow / <weekday> / this week", "do I have anything <day>", "what's my
+ * next meeting" — answered from the local calendar mirror with a check-on-ask
+ * freshness pull (lib/calendar-mirror.mjs), no LLM round-trip. Field traces
+ * showed these turns taking 54–95s through the LLM+gcal loop; this path is
+ * ~1-2s including the sync-token pull.
+ *
+ * Global like the HA fast-path (any agent): it's the user's own calendar and
+ * a read-only answer. Misses cleanly on: no gcal creds, classifier miss
+ * (fuzzy asks like "am I free at 3pm" fall to the LLM, which has
+ * calendar_snapshot), or mirror sync failure (never answer stale silently).
+ *
+ * @returns {Promise<{ handled: true } | null>}
+ */
+// Contextual follow-up chain: after a calendar fast-path answer, the NEXT
+// turn in the same session may be a bare follow-up ("what about friday?",
+// "and tomorrow?") that no stateless classifier could route — field trace:
+// the tool router trimmed calendar_snapshot off "What about for Wednesday?"
+// and the coordinator burned 9s delegating what the mirror answers in 600ms.
+// Guardrails (hard requirement — calendar context must never hijack
+// unrelated follow-ups like "what's in my email"):
+//   1. The follow-up regex REQUIRES a day/range token — no WHEN, no match.
+//   2. Strictly consecutive: every pass through this fast-path bumps a
+//      per-session sequence; the chain is honored only when the previous
+//      calendar hit was the immediately preceding sequence number. Any
+//      interleaved LLM/topic turn breaks it (control intents and turns
+//      handled EARLIER in the chain never reach here, so a "volume down"
+//      interjection deliberately survives the chain).
+//   3. 2-minute TTL.
+// Misroute recovery: worst case the user hears the wrong day's agenda, and
+// their rephrase won't match the follow-up shape → normal LLM routing.
+const _calendarCtx = new Map();  // sessionKey -> { ts, seq }
+const _calendarSeq = new Map();  // sessionKey -> counter
+const CALENDAR_FOLLOWUP_TTL_MS = 120_000;
+
+export async function tryCalendarFastpath({ source, userText, userId, agentId, onEvent }) {
+  if (!userText) return null;
+  try {
+    const { classifyCalendarIntent, classifyCalendarFollowup, executeCalendarIntent } = await import('../lib/calendar-fastpath.mjs');
+    const sessionKey = `${userId}_${agentId}`;
+    const seq = (_calendarSeq.get(sessionKey) || 0) + 1;
+    _calendarSeq.set(sessionKey, seq);
+    let intent = classifyCalendarIntent(userText);
+    let viaFollowup = false;
+    if (!intent) {
+      const prev = _calendarCtx.get(sessionKey);
+      if (prev && prev.seq === seq - 1 && Date.now() - prev.ts < CALENDAR_FOLLOWUP_TTL_MS) {
+        intent = classifyCalendarFollowup(userText);
+        viaFollowup = !!intent;
+      }
+    }
+    if (!intent) return null;
+    const started = Date.now();
+    const result = await executeCalendarIntent(intent, userId, { voice: source === 'voice-device' });
+    if (!result?.text) {
+      console.log('[chat] calendar-fastpath: intent matched but mirror unavailable — falling through to LLM');
+      return null;
+    }
+    appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: result.text, ts: Date.now() }
+    );
+    onEvent({ type: 'token', text: result.text, agent: agentId });
+    onEvent({ type: 'done', agent: agentId });
+    _calendarCtx.set(sessionKey, { ts: Date.now(), seq });
+    const when = intent.kind === 'agenda' ? ` when="${intent.when}"` : '';
+    console.log(`[chat] calendar-fastpath: kind=${intent.kind}${when}${viaFollowup ? ' (followup)' : ''} in ${Date.now() - started}ms`);
+    return { handled: true };
+  } catch (e) {
+    console.warn('[chat] calendar-fastpath threw, falling through:', e.message);
+    return null;
+  }
+}
+
 export async function tryTriviaFastpath({ source, userText, userId, agentId, onEvent }) {
   if (!userText) return null;
   try {

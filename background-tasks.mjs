@@ -694,6 +694,16 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     originScheduledNote: scheduledCtx?.scheduledNote || null,
     ...(_voiceOrigin()),
   });
+  // Voice-origin work lights the device's WAITING ring for the duration —
+  // paired decrement in _onComplete (every terminal path funnels through it).
+  {
+    const rec = activeTasks.get(taskId);
+    if (rec?.voiceDeviceId) {
+      import('./ws-handler.mjs')
+        .then(m => m.noteDeviceBackgroundWork(rec.voiceDeviceId, +1))
+        .catch(() => {});
+    }
+  }
   if (scheduledCtx?.originTaskId) {
     registerScheduledChild({
       userId,
@@ -1182,6 +1192,15 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
         : announcementLine(agentName, result, rec?.summary || '');
       enqueueVoiceAnnouncement(rec.voiceDeviceId, line, { kind: 'background' });
     } catch (e) { console.warn('[background-tasks] voice announce enqueue failed:', e.message); }
+    // Release this task's WAITING-ring hold (pairs the +1 at dispatch). Flag
+    // guards the rare double-_onComplete so the count can't underflow another
+    // task's hold.
+    if (!rec._waitHintReleased) {
+      rec._waitHintReleased = true;
+      import('./ws-handler.mjs')
+        .then(m => m.noteDeviceBackgroundWork(rec.voiceDeviceId, -1))
+        .catch(() => {});
+    }
   }
 
   // For a scheduled run, record this delegation's completion in the barrier

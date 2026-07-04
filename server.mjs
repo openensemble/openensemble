@@ -26,6 +26,7 @@ import { setProposalBroadcastFn, bootLoadProposals } from './lib/proposals.mjs';
 import { startVoiceUdpLog } from './lib/voice-udplog.mjs';
 import { recordDeviceDiag } from './lib/voice-device-health.mjs';
 import { startVoiceDeviceMonitor, stopVoiceDeviceMonitor } from './lib/voice-device-monitor.mjs';
+import { startCalendarMirrorLoop, stopCalendarMirrorLoop } from './lib/calendar-mirror.mjs';
 import { initAutoLabel, stopAllWatchers } from './gmail-autolabel.mjs';
 import { abortAllChats } from './chat-dispatch.mjs';
 import { getRateLimit } from './rate-limit.mjs';
@@ -458,6 +459,12 @@ startVoiceUdpLog({ onLine: recordDeviceDiag });
 // a recovery note when it returns. Must start after initWs: it reads the live
 // WS client set via isDeviceOnline. See lib/voice-device-monitor.mjs.
 startVoiceDeviceMonitor();
+
+// Calendar mirror refresh loop — 5-min incremental sync-token pulls for every
+// user with gcal creds, so calendar fast-paths and calendar_snapshot answer
+// from local data. See lib/calendar-mirror.mjs; disable via
+// calendarMirrorRefreshMin: 0 in config.json.
+startCalendarMirrorLoop();
 
 setBroadcastFn(broadcastAgentList);
 setBackgroundBroadcastFn(broadcast);
@@ -1082,6 +1089,7 @@ async function shutdown(signal) {
   stopWatcherSupervisor();
   stopAllWatchers();
   stopVoiceDeviceMonitor();
+  stopCalendarMirrorLoop();
   stopTunnelSupervisor().catch(() => {});
   _stopUpdateChecker?.();
 

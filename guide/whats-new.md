@@ -8,6 +8,21 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-04
 
+**Teach your own instant phrases**
+Tell your assistant "when I say *check the deals*, run my Publix skill" and it's learned on the spot — the phrase now triggers that skill's tool instantly on-device, with no cloud round-trip, in chat or by voice. "Forget that phrase" undoes it. Skills you build also get smarter about this on their own: when a custom skill keeps handling the same kind of simple request the slow way, OpenEnsemble notices and offers to make it instant — one tap to accept. And skill authors get guardrails: the skill-builder now auto-merges redundant fast-path intents and warns when two intents' phrasings overlap enough to shadow each other.
+
+**Voice replies speak places and weather naturally**
+"Springfield, IL: 76°F, wind 3 mph" is now spoken as "Springfield, Illinois: 76 degrees, wind 3 miles per hour" — state abbreviations, degree symbols, speeds, and slashed number pairs are naturalized before synthesis, for every skill and every agent.
+
+**Calendar follow-ups without repeating yourself**
+After a calendar answer, a bare follow-up like "what about Wednesday?" or "and next week?" is answered instantly from the same local mirror — no need to say "what's on my calendar" again. Strictly guarded: the follow-up must name a day or range and must come immediately after a calendar answer, so unrelated follow-ups ("what's in my email?") route normally.
+
+**Background work you can see and hear sooner**
+When the assistant hands work to another agent ("I've asked the researcher — I'll tell you when it's back"), the voice device's LED ring now keeps a rotating rainbow going until the result arrives (firmware 0.2.73), so a quiet device no longer looks like something failed. Results are also spoken sooner: completed background work now speaks as soon as the device is quiet — including while it's sitting in a listen window waiting for you — instead of holding for several extra seconds, and the follow-up window re-opens afterwards so you can react.
+
+**Calendar answers in about a second**
+"What's on my calendar today", "do I have anything Friday", "what's my next meeting" — these are now answered instantly from a local mirror of your Google Calendar instead of a slow round-trip through the model (voice turns that used to take a minute or more now speak in a second or two). The mirror covers every calendar you have visible in Google, refreshes itself every few minutes, and double-checks with Google right before answering, so an event you just added or cancelled is always reflected — a stale answer is never spoken. Harder questions ("when am I free for two hours next week?") still go to the assistant, which now reads your whole schedule in a single **calendar_snapshot** call instead of listing each calendar one by one. Requires Google Calendar to be connected; everything falls back to the old path if the mirror is unavailable.
+
 **Voice devices: real back-and-forth conversations**
 New per-device **Conversation mode** (Settings → Voice devices, or PATCH `conversation_mode`): say the wake word once, and after every reply the device keeps listening for about 8 seconds so you can just keep talking — no wake word between turns. The conversation ends when you go quiet, say something like "stop", "that's all", or "goodbye", or someone else's wake word takes over. Requires voice-device firmware 0.2.65.
 

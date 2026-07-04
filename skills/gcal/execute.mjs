@@ -125,7 +125,52 @@ export async function onEnable(userId) {
   }).unref();
 }
 
+// One-call mirror read for scheduling questions. Served from the local
+// calendar mirror (lib/calendar-mirror.mjs) with check-on-ask freshness — a
+// sync-token pull runs before returning when the mirror is >2 min old, so
+// the answer is never stale. Replaces the observed 7-call gcal_list /
+// gcal_list_calendars loop that made calendar voice turns take 54-95s.
+async function calendarSnapshot(args, userId) {
+  const { getFreshMirror } = await import('../../lib/calendar-mirror.mjs');
+  const mirror = await getFreshMirror(userId);
+  if (!mirror?.events) {
+    return 'Calendar mirror unavailable (no Google Calendar authorization, or sync failed). Fall back to gcal_list / gcal_list_calendars.';
+  }
+  const { getUserTz } = await import('../../lib/tutor-stats.mjs');
+  const { addDays, eventDays } = await import('../../lib/calendar-fastpath.mjs');
+  const tz = getUserTz(userId);
+  const days = Math.min(35, Math.max(1, Number(args?.days) || 7));
+  const start = /^\d{4}-\d{2}-\d{2}$/.test(args?.startDate || '')
+    ? args.startDate
+    : new Date().toLocaleDateString('en-CA', { timeZone: tz });
+  const end = addDays(start, days - 1);
+  const events = mirror.events
+    .filter(ev => eventDays(ev, tz).some(d => d >= start && d <= end))
+    .map(ev => ({
+      cal: mirror.calendars?.[ev.calId]?.name || ev.calId,
+      title: ev.summary,
+      start: ev.start?.dateTime || ev.start?.date,
+      end: ev.end?.dateTime || ev.end?.date,
+      ...(ev.start?.date ? { allDay: true } : {}),
+      ...(ev.location ? { location: ev.location } : {}),
+      // Keep ids so follow-ups (gcal_update/gcal_delete) work without a re-list.
+      id: ev.id,
+      calendarId: ev.calId,
+    }));
+  return JSON.stringify({
+    timezone: tz,
+    freshAsOf: new Date(mirror.fetchedAt).toISOString(),
+    range: { start, end },
+    calendars: Object.values(mirror.calendars || {}).map(c => c.name),
+    events,
+  });
+}
+
 export default async function execute(name, args, userId) {
+  if (name === 'calendar_snapshot') {
+    try { return await calendarSnapshot(args, userId); }
+    catch (e) { return `calendar_snapshot failed: ${e.message}. Fall back to gcal_list.`; }
+  }
   const cmdArgs = buildCmdArgs(name, args);
   if (!cmdArgs) return `Unknown or invalid gcal tool: ${name}`;
   return new Promise((resolve) => {

@@ -1775,6 +1775,13 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               captured.voiceDeviceId = _tc?.deviceId ?? null;
               captured.voiceConversation = !!_tc?.conversationMode;
             } catch { captured.voiceDeviceId = null; }
+            // Voice-origin work lights the device's WAITING ring while it
+            // runs (paired −1 in the drain's finally below).
+            if (captured.voiceDeviceId) {
+              import('./ws-handler.mjs')
+                .then(m => m.noteDeviceBackgroundWork(captured.voiceDeviceId, +1))
+                .catch(() => {});
+            }
             _registerScheduledAutoBgChild({
               scheduledCtx: captured.scheduledCtx,
               userId: captured.userId,
@@ -1986,6 +1993,13 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   });
                 }
                 log.warn('tool', 'auto-bg tool threw', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, err: err.message });
+              } finally {
+                // Release the WAITING-ring hold on success AND error paths.
+                if (captured.voiceDeviceId) {
+                  import('./ws-handler.mjs')
+                    .then(m => m.noteDeviceBackgroundWork(captured.voiceDeviceId, -1))
+                    .catch(() => {});
+                }
               }
             })();
             return;   // outer generator ends — LLM sees the deferred result + turn finishes

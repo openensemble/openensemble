@@ -279,6 +279,17 @@ export async function runSpecialistRoute({
         { role: 'system', content: `[routed to ${route.name} (${route.skillId}) — that specialist ran ephemerally and produced the assistant reply above; you (the coordinator) did not run a turn]`, ts: viaTs + 1, routerNote: true }
       );
       console.log(`[chat] specialist-router done: skill=${route.skillId} trim=${trimEnabled ? 'on' : 'off'} tools=${usedToolCount} durationMs=${Date.now() - routerStart} bytes=${routerBuf.length}`);
+      // Local-tier learning also applies to ROUTED turns — they never reach
+      // chat-dispatch's post-LLM learn block (the interceptor chain returns
+      // here first), yet they're exactly where single-tool custom-skill turns
+      // live (field: every localweather ask was specialist-routed, so the
+      // auto-proposer never saw them). Fire-and-forget; never blocks return.
+      (async () => {
+        try {
+          const il = await import('../lib/intent-learner.mjs');
+          await il.captureFromTurn({ userId, agentId, userText, scopedSessionKey: `${userId}_${agentId}` });
+        } catch (e) { console.warn('[chat] specialist post-turn learn failed:', e.message); }
+      })();
     } catch (e) {
       if (e.name !== 'AbortError') {
         console.error('[chat] specialist-router stream failed:', e.message);

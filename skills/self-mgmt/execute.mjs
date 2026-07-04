@@ -206,6 +206,64 @@ function ownershipDenial(manifest, owner) {
 }
 
 export default async function execute(name, args, userId, agentId) {
+  // teach_fastpath_phrase — user-taught local fast-path: "when I say X, run
+  // skill Y". Writes the phrase to users/<id>/learned-intents.json bound to
+  // one of the skill's tools; lib/local-label.mjs materializes it into a
+  // dispatchable intent on the very next turn (no restart), so the phrase
+  // runs on-device with no cloud-LLM call. Additive + revertable via
+  // forget_fastpath_phrase.
+  if (name === 'teach_fastpath_phrase') {
+    const phrase = String(args?.phrase || '').trim();
+    const skillArg = String(args?.skill_id || '').trim();
+    if (phrase.length < 3 || phrase.length > 200) return 'phrase must be 3-200 characters.';
+    if (!skillArg) return 'skill_id is required (use skill_list or the skill name the user said).';
+    if (!userId) return 'userId is required.';
+    const { listRoles } = await import('../../roles.mjs');
+    const skill = listRoles(userId).find(m => m.id === skillArg)
+      || listRoles(userId).find(m => (m.name || '').toLowerCase() === skillArg.toLowerCase());
+    if (!skill) return `Unknown skill "${skillArg}". Ask the user which skill they mean, or list their skills.`;
+    const toolNames = (skill.tools || []).map(t => t.function?.name).filter(Boolean);
+    if (!toolNames.length) return `Skill "${skill.name}" declares no tools — nothing to bind the phrase to.`;
+    let toolName = args?.tool && toolNames.includes(args.tool) ? args.tool : null;
+    if (!toolName && args?.tool) return `Skill "${skill.name}" has no tool "${args.tool}". Its tools: ${toolNames.join(', ')}.`;
+    if (!toolName) {
+      if (toolNames.length === 1) toolName = toolNames[0];
+      else {
+        const intentTools = [...new Set((skill.localIntents || []).map(li => li.tool))];
+        if (intentTools.length === 1) toolName = intentTools[0];
+        else return `Skill "${skill.name}" has ${toolNames.length} tools — pass \`tool\` to say which one the phrase should run: ${toolNames.join(', ')}.`;
+      }
+    }
+    // Reuse an existing intent for this tool when one exists (the phrase joins
+    // its learned utterances); otherwise mint a user_taught intent that
+    // materializes standalone.
+    const existing = (skill.localIntents || []).find(li => li.tool === toolName);
+    const intentId = existing?.id || `user_taught_${toolName}`;
+    const { addLearnedUtterance } = await import('../../lib/learned-intents.mjs');
+    await addLearnedUtterance(userId, { skillId: skill.id, intentId, tool: toolName, utterance: phrase });
+    return `Learned. Saying "${phrase}" now runs ${toolName} (${skill.name}) instantly on-device — no cloud call. It takes effect on the next message. Undo anytime with forget_fastpath_phrase.`;
+  }
+
+  if (name === 'forget_fastpath_phrase') {
+    const phrase = String(args?.phrase || '').trim();
+    const skillArg = String(args?.skill_id || '').trim();
+    if (!phrase) return 'phrase is required.';
+    if (!skillArg) return 'skill_id is required.';
+    const { loadLearnedIntents, removeLearnedUtterance } = await import('../../lib/learned-intents.mjs');
+    const store = loadLearnedIntents(userId) || {};
+    const intents = store[skillArg];
+    if (!intents) return `No taught phrases stored for skill "${skillArg}".`;
+    const normPhrase = phrase.toLowerCase().replace(/\s+/g, ' ');
+    for (const [intentId, entry] of Object.entries(intents)) {
+      const hit = (entry?.utterances || []).find(u => u.toLowerCase().replace(/\s+/g, ' ') === normPhrase);
+      if (hit) {
+        await removeLearnedUtterance(userId, skillArg, intentId, hit);
+        return `Forgotten — "${hit}" no longer triggers ${entry.tool} locally. (It'll route through the normal assistant flow instead.)`;
+      }
+    }
+    return `Couldn't find that exact phrase among the taught ones for "${skillArg}". Stored phrases: ${Object.values(intents).flatMap(e => e.utterances || []).map(u => `"${u}"`).join(', ') || '(none)'}.`;
+  }
+
   // skill_add_rule — generalised from role_add_rule. Works for built-in
   // roles AND user-scoped custom skills, AND enforces strict ownership:
   // only the agent currently holding the skill may write its rules. Any

@@ -432,10 +432,22 @@ async function handleCreate(args, userId) {
   }
   // localIntents: simple operations this skill can fulfil LOCALLY (regex →
   // embeddings → the on-device extract model) with no cloud-LLM round-trip.
-  // See SKILL_BLUEPRINT's "localIntents" section.
+  // See SKILL_BLUEPRINT's "localIntents" section. Same-tool paraphrase splits
+  // are auto-merged and cross-intent ambiguity audited (field lesson: split
+  // intents reject each other's utterances via the dispatch gap rule).
   {
     const cleaned = cleanLocalIntents(localIntents, newNames);
-    if (cleaned) manifest.localIntents = cleaned;
+    if (cleaned) {
+      const { mergeDuplicateToolIntents, auditIntentAmbiguity } = await import('../../lib/local-intent-audit.mjs');
+      const { intents, notes } = mergeDuplicateToolIntents(cleaned);
+      manifest.localIntents = intents;
+      const ambiguity = await auditIntentAmbiguity(intents);
+      const intentNotes = [...notes, ...ambiguity];
+      if (intentNotes.length) {
+        const block = 'localIntents audit:\n- ' + intentNotes.join('\n- ');
+        args._gateWarnings = args._gateWarnings ? args._gateWarnings + '\n\n' + block : block;
+      }
+    }
   }
   if (selectedPlanKeep?.values.length) {
     manifest.selected_plan_keep = selectedPlanKeep.values;
@@ -942,8 +954,21 @@ async function handleUpdateManifest(args, userId) {
     changed.push('description');
   }
   // localIntents — local cognition tier (see SKILL_BLUEPRINT). Pass [] to clear.
+  // Same-tool paraphrase splits are auto-merged and cross-intent ambiguity
+  // audited; audit findings ride back on the success message (never block).
+  let intentAuditTail = '';
   if (Array.isArray(localIntents)) {
-    disk.localIntents = cleanLocalIntents(localIntents, toolNames) ?? [];
+    const cleaned = cleanLocalIntents(localIntents, toolNames) ?? [];
+    let finalIntents = cleaned;
+    if (cleaned.length) {
+      const { mergeDuplicateToolIntents, auditIntentAmbiguity } = await import('../../lib/local-intent-audit.mjs');
+      const { intents, notes } = mergeDuplicateToolIntents(cleaned);
+      finalIntents = intents;
+      const ambiguity = await auditIntentAmbiguity(intents);
+      const intentNotes = [...notes, ...ambiguity];
+      if (intentNotes.length) intentAuditTail = '\n\nlocalIntents audit:\n- ' + intentNotes.join('\n- ');
+    }
+    disk.localIntents = finalIntents;
     if (!disk.localIntents.length) delete disk.localIntents;
     changed.push(`localIntents(${disk.localIntents?.length ?? 0})`);
   }
@@ -1002,7 +1027,7 @@ async function handleUpdateManifest(args, userId) {
     appendEntry(ownerId, skillId, { kind: 'manifest_update', summary: `Manifest fields: ${changed.join(', ')}` });
   } catch (e) { console.debug('[skill-builder] log append (manifest_update) failed:', e.message); }
 
-  return `Skill "${manifest.name}" (${skillId}) manifest updated: ${changed.join(', ')}. Live on the next turn — for voice_device, the next voice turn re-reads the allowlist.`;
+  return `Skill "${manifest.name}" (${skillId}) manifest updated: ${changed.join(', ')}. Live on the next turn — for voice_device, the next voice turn re-reads the allowlist.${intentAuditTail}`;
 }
 
 async function handleDelete(args, userId) {
