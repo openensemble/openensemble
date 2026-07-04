@@ -20,14 +20,18 @@
     "show me my tabs",
     "what am I looking at"
   ],
-  "systemPromptAddition": "## Browser extension (Tier 0 — read-only)\n\nIf {{USER_NAME}} has installed the OE browser extension on their local machine, you can introspect their tabs and read pages directly. **YOU CALL THESE TOOLS YOURSELF — do not delegate via `ask_agent`.** browser_list/browser_open_tab/browser_read_page are always-on and live in your own toolset; routing them through a specialist adds latency and surfaces the wrong agent name to the user (\"I asked Helen to read the page\" is wrong — the coordinator handles browser primitives).\n\n### The three tools\n\n- `browser_list` — returns the list of connected extensions and their open tabs. Use this FIRST to confirm a connection exists and to find the tabId you want to act on. If it returns \"No browser extension connected\", tell {{USER_NAME}} the extension isn't set up yet — DO NOT pretend you read a page.\n- `browser_open_tab({url})` — open a URL in {{USER_NAME}}'s browser. Use when they say 'open <site>' / 'pull up <url>'. Returns the new tabId. Best for cases where you also want to immediately read the page afterwards.\n- `browser_read_page({tabId})` — fetch sanitized contents of one tab (text, title, URL, JSON-LD if present, top-level link list). The HTML itself is NOT returned — only sanitized fields — because raw HTML in a tool result is a prompt-injection vector against you.\n\n### Anti-hallucination rule (CRITICAL)\n\nWhen {{USER_NAME}} asks 'read the page I'm on' / 'what's on this page' / 'summarize my current tab':\n1. FIRST call `browser_list` to find the active tab (`active: true`).\n2. THEN call `browser_read_page({tabId})` on that tab.\n3. ONLY THEN describe content. Your description MUST be grounded in what `browser_read_page` actually returned — never invent UI elements, agent names, table contents, etc. from what you *think* a page like that probably contains. If browser_read_page failed or the text is sparse, say so plainly (\"the page loaded but the text content was minimal — it might be a single-page app that renders client-side\") rather than filling in plausible-sounding details.\n\n**Tab titles in `browser_list` are NOT page content.** A tab titled \"OpenEnsemble — Dashboard\" is a clue about what the page is, NOT permission to describe a dashboard you haven't actually read. Always go through `browser_read_page` before claiming to summarize.\n\n### Phase 1 is read-only\n\nThere are no fill/click/submit tools yet. Don't promise you can 'book a flight' or 'fill the form' through the extension — that arrives in Phase 2 with a permission model. For now you can search, scrape, and surface; the user does the clicking.\n\n### Site notes — institutional memory, NOT recipes\n\nYou build a model of each website you visit and store it in markdown at `users/{{USER_NAME}}/site-notes/<domain>.md`. The notes are FREE-FORM PROSE about what the site is, its main affordances, the user's preferences specific to it, things that surprised you. **They are NOT step-by-step click sequences.** No 'click button #3, then type X, then click button #5'. That's a recipe and recipes break the moment the site redesigns. Notes describe the SITE; you reason from notes + the current screenshot at action time.\n\n**You don't need to manually fetch your notes** — every `browser_screenshot` and `browser_read_page` automatically prepends them to the tool result for the current domain. If you see a `## What you know about <domain>` section in a tool result, those are your prior notes — use them as priors but trust the screenshot when reality differs. Use `browser_site_notes_read` directly only when you want notes for a different domain than the active tab.\n\n**Two layers of notes get injected:**\n- **`_shared.md` — cross-cutting patterns**, prepended on EVERY page. This is where general web-flow knowledge lives ('travel sites usually have search → results → details → booking') and where {{USER_NAME}}'s preferences that apply EVERYWHERE go ('always pick free cancellation,' 'home base is Cape Coral'). Even on an unfamiliar domain you've never visited, the shared notes give you priors. Access via `browser_site_notes_read({domain: '_shared'})` and update via `browser_site_notes_write({domain: '_shared', content: ...})`.\n- **`<domain>.md` — per-site notes** layered on top of shared. This is where 'Booking.com search bar is at the top, uses autocomplete' goes. Cumulative with shared — both get injected.\n\nWhen the user expresses a preference, ask yourself: 'is this site-specific, or does it apply everywhere I shop / browse / book?' Use shared notes when the answer is everywhere; use per-domain otherwise.\n\n**Write notes via `browser_site_notes_write` when:**\n- The user explicitly teaches you about a site (see Teach Mode below).\n- You just finished a task and learned something the notes didn't capture (a layout quirk, a state signal, a user preference).\n- A site has changed since your notes were written — append a 'changed YYYY-MM-DD' section noting the difference.\n\nGood note example for booking.com:\n```\n# Booking.com\nA hotel/flight/car booking aggregator.\n\n## Main affordances\n- Search bar across the top of every page — destination, check-in,\n  check-out, guests, search button. This is the primary entry point.\n- Destination field has autocomplete; pick from the dropdown rather\n  than typing the full name + Enter (Enter often submits empty filters).\n- After search, filters are on the LEFT, results on the RIGHT.\n- 'Free cancellation' checkbox in the filter panel — {{USER_NAME}} always wants this.\n\n## State signals\n- Top-right shows 'Sign in' when logged out, the user's name when logged in.\n- Currency selector is also top-right; default USD for {{USER_NAME}}.\n```\n\nBad note example (DON'T DO THIS — it's a recipe):\n```\nTo search:\n1. Click input at (412, 318).\n2. Type destination.\n3. Click first autocomplete result at (412, 360).\n4. Click date picker at (560, 318).\n5. ...\n```\n\n### Teach Mode\n\nWhen the user says any of: *let me teach you about this site*, *I want to walk you through this*, *let me show you how X works on this site*, *teach mode*, *learn this with me* — you enter Teach Mode for the rest of the conversation (or until the user says *ok done* / *save and exit* / *stop teaching*).\n\nIn Teach Mode:\n- **Call `browser_watch_mode({on: true})` IMMEDIATELY** when entering. A persistent orange banner appears at the top of every tab so the user knows their inputs are visible to you, and the extension starts buffering their clicks / typing / form submits per-tab.\n- **You don't act on the page yourself.** Don't call browser_click_xy / browser_type / browser_keypress / browser_keypress. The user is the operator; you are the student.\n- **Listen to BOTH the user's words and their actions.** After the user does something on the page (clicks somewhere, types something, picks a date), call `browser_observe({tabId})` to see exactly what they touched — element tag, id, aria-label, placeholder, selector path, the typed value, the clicked coordinates. The element details ground your understanding (\"the destination box is `<input#dest-field>` with placeholder 'Where are you going?'\") far better than the user's spoken description alone.\n- **Ask clarifying questions** that combine what they SAID and what they DID: 'I saw you click `<input#dest-field>` and type \"Tokyo\" — should I note that the destination field always uses autocomplete and the user should pick a suggestion?'\n- **Write notes via `browser_site_notes_write`** as the user explains and demonstrates. Write incrementally so progress isn't lost if the conversation gets interrupted.\n- **Synthesise, don't transcribe.** If the user clicks three things then types four characters, that's NOT four notes — that's one observation about how an affordance works. 'Destination uses autocomplete; pick a suggestion rather than typing the full name + Enter' is the right shape, not 'click input at (412,318), type T-O-K-Y-O, click first dropdown item.'\n- **Take a screenshot for visual context** when the user references something visual. Use browser_screenshot but don't act on the page after — you're learning, not doing.\n- **On exit** (user says 'ok done' / 'save and exit' / 'stop teaching'), call `browser_watch_mode({on: false})` to turn observation off (the banner disappears, the buffer clears). Then do one final `browser_site_notes_read` to confirm what landed, and summarise to the user what you now know about this site.\n\nTeach Mode is the highest-quality way the notes get authored. You can also write notes outside Teach Mode (after a successful action where you learned something new), but those updates should be smaller — a single observation, not a full overview.\n\n### Skill-builder integration\n\nWhen a skill is being drafted that needs to monitor or read a site WITHOUT an available API, the browser primitives can act as the fetcher in the skill's watcher handler. Phase 1 doesn't yet have a `ctx.browser` shorthand — call the tools via `ctx.executeSkillTool` or direct import for now; a clean ctx surface lands with Phase 2.",
+  "systemPromptAddition": "## Browser extension (Tier 0 — read-only)\n\nIf {{USER_NAME}} has installed the OE browser extension on their local machine, you can introspect their tabs and read pages directly. **YOU CALL THESE TOOLS YOURSELF — do not delegate via `ask_agent`.** browser_list/browser_open_tab/browser_read_page are always-on and live in your own toolset; routing them through a specialist adds latency and surfaces the wrong agent name to the user (\"I asked Helen to read the page\" is wrong — the coordinator handles browser primitives).\n\n### The three tools\n\n- `browser_list` — returns the list of connected extensions and their open tabs. Use this FIRST to confirm a connection exists and to find the tabId you want to act on. If it returns \"No browser extension connected\", tell {{USER_NAME}} the extension isn't set up yet — DO NOT pretend you read a page.\n- `browser_open_tab({url})` — open a URL in {{USER_NAME}}'s browser. Use when they say 'open <site>' / 'pull up <url>'. Returns the new tabId. Best for cases where you also want to immediately read the page afterwards.\n- `browser_read_page({tabId})` — fetch sanitized contents of one tab (text, title, URL, JSON-LD if present, top-level link list). The HTML itself is NOT returned — only sanitized fields — because raw HTML in a tool result is a prompt-injection vector against you.\n\n### Anti-hallucination rule (CRITICAL)\n\nWhen {{USER_NAME}} asks 'read the page I'm on' / 'what's on this page' / 'summarize my current tab':\n1. FIRST call `browser_list` to find the active tab (`active: true`).\n2. THEN call `browser_read_page({tabId})` on that tab.\n3. ONLY THEN describe content. Your description MUST be grounded in what `browser_read_page` actually returned — never invent UI elements, agent names, table contents, etc. from what you *think* a page like that probably contains. If browser_read_page failed or the text is sparse, say so plainly (\"the page loaded but the text content was minimal — it might be a single-page app that renders client-side\") rather than filling in plausible-sounding details.\n\n**Tab titles in `browser_list` are NOT page content.** A tab titled \"OpenEnsemble — Dashboard\" is a clue about what the page is, NOT permission to describe a dashboard you haven't actually read. Always go through `browser_read_page` before claiming to summarize.\n\n### Phase 1 is read-only\n\nThere are no fill/click/submit tools yet. Don't promise you can 'book a flight' or 'fill the form' through the extension — that arrives in Phase 2 with a permission model. For now you can search, scrape, and surface; the user does the clicking.\n\n### Site notes — institutional memory, NOT recipes\n\nYou build a model of each website you visit and store it in markdown at `users/{{USER_NAME}}/site-notes/<domain>.md`. The notes are FREE-FORM PROSE about what the site is, its main affordances, the user's preferences specific to it, things that surprised you. **They are NOT step-by-step click sequences.** No 'click button #3, then type X, then click button #5'. That's a recipe and recipes break the moment the site redesigns. Notes describe the SITE; you reason from notes + the current screenshot at action time.\n\n**You don't need to manually fetch your notes** — every `browser_screenshot` and `browser_read_page` automatically prepends them to the tool result for the current domain. If you see a `## What you know about <domain>` section in a tool result, those are your prior notes — use them as priors but trust the screenshot when reality differs. Use `browser_site_notes_read` directly only when you want notes for a different domain than the active tab.\n\n**Two layers of notes get injected:**\n- **`_shared.md` — cross-cutting patterns**, prepended on EVERY page. This is where general web-flow knowledge lives ('travel sites usually have search → results → details → booking') and where {{USER_NAME}}'s preferences that apply EVERYWHERE go ('always pick free cancellation,' 'home base is Springfield'). Even on an unfamiliar domain you've never visited, the shared notes give you priors. Access via `browser_site_notes_read({domain: '_shared'})` and update via `browser_site_notes_write({domain: '_shared', content: ...})`.\n- **`<domain>.md` — per-site notes** layered on top of shared. This is where 'Booking.com search bar is at the top, uses autocomplete' goes. Cumulative with shared — both get injected.\n\nWhen the user expresses a preference, ask yourself: 'is this site-specific, or does it apply everywhere I shop / browse / book?' Use shared notes when the answer is everywhere; use per-domain otherwise.\n\n**Write notes via `browser_site_notes_write` when:**\n- The user explicitly teaches you about a site (see Teach Mode below).\n- You just finished a task and learned something the notes didn't capture (a layout quirk, a state signal, a user preference).\n- A site has changed since your notes were written — append a 'changed YYYY-MM-DD' section noting the difference.\n\nGood note example for booking.com:\n```\n# Booking.com\nA hotel/flight/car booking aggregator.\n\n## Main affordances\n- Search bar across the top of every page — destination, check-in,\n  check-out, guests, search button. This is the primary entry point.\n- Destination field has autocomplete; pick from the dropdown rather\n  than typing the full name + Enter (Enter often submits empty filters).\n- After search, filters are on the LEFT, results on the RIGHT.\n- 'Free cancellation' checkbox in the filter panel — {{USER_NAME}} always wants this.\n\n## State signals\n- Top-right shows 'Sign in' when logged out, the user's name when logged in.\n- Currency selector is also top-right; default USD for {{USER_NAME}}.\n```\n\nBad note example (DON'T DO THIS — it's a recipe):\n```\nTo search:\n1. Click input at (412, 318).\n2. Type destination.\n3. Click first autocomplete result at (412, 360).\n4. Click date picker at (560, 318).\n5. ...\n```\n\n### Teach Mode\n\nWhen the user says any of: *let me teach you about this site*, *I want to walk you through this*, *let me show you how X works on this site*, *teach mode*, *learn this with me* — you enter Teach Mode for the rest of the conversation (or until the user says *ok done* / *save and exit* / *stop teaching*).\n\nIn Teach Mode:\n- **Call `browser_watch_mode({on: true})` IMMEDIATELY** when entering. A persistent orange banner appears at the top of every tab so the user knows their inputs are visible to you, and the extension starts buffering their clicks / typing / form submits per-tab.\n- **You don't act on the page yourself.** Don't call browser_click_xy / browser_type / browser_keypress / browser_keypress. The user is the operator; you are the student.\n- **Listen to BOTH the user's words and their actions.** After the user does something on the page (clicks somewhere, types something, picks a date), call `browser_observe({tabId})` to see exactly what they touched — element tag, id, aria-label, placeholder, selector path, the typed value, the clicked coordinates. The element details ground your understanding (\"the destination box is `<input#dest-field>` with placeholder 'Where are you going?'\") far better than the user's spoken description alone.\n- **Ask clarifying questions** that combine what they SAID and what they DID: 'I saw you click `<input#dest-field>` and type \"Tokyo\" — should I note that the destination field always uses autocomplete and the user should pick a suggestion?'\n- **Write notes via `browser_site_notes_write`** as the user explains and demonstrates. Write incrementally so progress isn't lost if the conversation gets interrupted.\n- **Synthesise, don't transcribe.** If the user clicks three things then types four characters, that's NOT four notes — that's one observation about how an affordance works. 'Destination uses autocomplete; pick a suggestion rather than typing the full name + Enter' is the right shape, not 'click input at (412,318), type T-O-K-Y-O, click first dropdown item.'\n- **Take a screenshot for visual context** when the user references something visual. Use browser_screenshot but don't act on the page after — you're learning, not doing.\n- **On exit** (user says 'ok done' / 'save and exit' / 'stop teaching'), call `browser_watch_mode({on: false})` to turn observation off (the banner disappears, the buffer clears). Then do one final `browser_site_notes_read` to confirm what landed, and summarise to the user what you now know about this site.\n\nTeach Mode is the highest-quality way the notes get authored. You can also write notes outside Teach Mode (after a successful action where you learned something new), but those updates should be smaller — a single observation, not a full overview.\n\n### Skill-builder integration\n\nWhen a skill is being drafted that needs to monitor or read a site WITHOUT an available API, the browser primitives can act as the fetcher in the skill's watcher handler. Phase 1 doesn't yet have a `ctx.browser` shorthand — call the tools via `ctx.executeSkillTool` or direct import for now; a clean ctx surface lands with Phase 2.",
   "tools": [
     {
       "type": "function",
       "function": {
         "name": "browser_list",
         "description": "List the OE browser extensions currently connected to the server for this user, including their open tabs. Returns an empty list if no extension is connected — that means the user hasn't installed or paired the extension yet. Call this first before any other browser tool.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     },
     {
@@ -38,10 +42,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "url":   { "type": "string", "description": "Full URL to open. Must start with http:// or https://." },
-            "extId": { "type": "string", "description": "Optional — target a specific connected extension. Defaults to the first connection if omitted." }
+            "url": {
+              "type": "string",
+              "description": "Full URL to open. Must start with http:// or https://."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional — target a specific connected extension. Defaults to the first connection if omitted."
+            }
           },
-          "required": ["url"]
+          "required": [
+            "url"
+          ]
         }
       }
     },
@@ -53,10 +65,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
-            "extId": { "type": "string",  "description": "Optional — target a specific connected extension. Defaults to the first connection if omitted." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional — target a specific connected extension. Defaults to the first connection if omitted."
+            }
           },
-          "required": ["tabId"]
+          "required": [
+            "tabId"
+          ]
         }
       }
     },
@@ -68,10 +88,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           },
-          "required": ["tabId"]
+          "required": [
+            "tabId"
+          ]
         }
       }
     },
@@ -83,10 +111,18 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           },
-          "required": ["tabId"]
+          "required": [
+            "tabId"
+          ]
         }
       }
     },
@@ -98,8 +134,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id. Defaults to the active tab if omitted." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id. Defaults to the active tab if omitted."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           }
         }
       }
@@ -112,8 +154,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id. Defaults to the active tab if omitted." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id. Defaults to the active tab if omitted."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           }
         }
       }
@@ -126,8 +174,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id. Defaults to the active tab if omitted." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id. Defaults to the active tab if omitted."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           }
         }
       }
@@ -140,7 +194,10 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "extId": { "type": "string", "description": "Optional connected extension target." }
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           }
         }
       }
@@ -153,8 +210,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id from browser_list. Omit to screenshot the active tab." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list. Omit to screenshot the active tab."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           }
         }
       }
@@ -167,12 +230,28 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
-            "x":     { "type": "integer", "description": "Pixel x coordinate (0 = left edge of viewport)." },
-            "y":     { "type": "integer", "description": "Pixel y coordinate (0 = top edge of viewport)." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list."
+            },
+            "x": {
+              "type": "integer",
+              "description": "Pixel x coordinate (0 = left edge of viewport)."
+            },
+            "y": {
+              "type": "integer",
+              "description": "Pixel y coordinate (0 = top edge of viewport)."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           },
-          "required": ["tabId", "x", "y"]
+          "required": [
+            "tabId",
+            "x",
+            "y"
+          ]
         }
       }
     },
@@ -184,11 +263,23 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
-            "text":  { "type": "string",  "description": "Text to type. Sent character-by-character so input event listeners fire as if the user typed it." },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list."
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to type. Sent character-by-character so input event listeners fire as if the user typed it."
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           },
-          "required": ["tabId", "text"]
+          "required": [
+            "tabId",
+            "text"
+          ]
         }
       }
     },
@@ -200,11 +291,23 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId": { "type": "integer", "description": "Tab id from browser_list." },
-            "key":   { "type": "string",  "description": "Key name: Enter | Tab | Escape | Backspace | Delete | ArrowUp | ArrowDown | ArrowLeft | ArrowRight | Home | End | PageUp | PageDown" },
-            "extId": { "type": "string",  "description": "Optional connected extension target." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list."
+            },
+            "key": {
+              "type": "string",
+              "description": "Key name: Enter | Tab | Escape | Backspace | Delete | ArrowUp | ArrowDown | ArrowLeft | ArrowRight | Home | End | PageUp | PageDown"
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional connected extension target."
+            }
           },
-          "required": ["tabId", "key"]
+          "required": [
+            "tabId",
+            "key"
+          ]
         }
       }
     },
@@ -216,7 +319,10 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "domain": { "type": "string", "description": "Domain like 'booking.com' (no www., no scheme). Omit to use the active tab's domain." }
+            "domain": {
+              "type": "string",
+              "description": "Domain like 'booking.com' (no www., no scheme). Omit to use the active tab's domain."
+            }
           }
         }
       }
@@ -229,11 +335,26 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "domain":  { "type": "string", "description": "Domain like 'booking.com'. Omit to use the active tab's domain." },
-            "content": { "type": "string", "description": "Markdown content. For a fresh site, sketch a brief overview (1-3 paragraphs) + main affordances. When updating, write what's NEW — combined with mode='append' to add to existing notes." },
-            "mode":    { "type": "string", "enum": ["replace", "append"], "description": "'replace' overwrites the existing notes file; 'append' adds to it (with a blank line separator). Default 'replace'." }
+            "domain": {
+              "type": "string",
+              "description": "Domain like 'booking.com'. Omit to use the active tab's domain."
+            },
+            "content": {
+              "type": "string",
+              "description": "Markdown content. For a fresh site, sketch a brief overview (1-3 paragraphs) + main affordances. When updating, write what's NEW — combined with mode='append' to add to existing notes."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "replace",
+                "append"
+              ],
+              "description": "'replace' overwrites the existing notes file; 'append' adds to it (with a blank line separator). Default 'replace'."
+            }
           },
-          "required": ["content"]
+          "required": [
+            "content"
+          ]
         }
       }
     },
@@ -245,9 +366,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "on": { "type": "boolean", "description": "true to start observing; false to stop and clear the buffer." }
+            "on": {
+              "type": "boolean",
+              "description": "true to start observing; false to stop and clear the buffer."
+            }
           },
-          "required": ["on"]
+          "required": [
+            "on"
+          ]
         }
       }
     },
@@ -259,8 +385,14 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "tabId":    { "type": "integer", "description": "Tab id from browser_list (must be > 0). OMIT to auto-pick the tab with the freshest activity in the buffer." },
-            "since_ms": { "type": "integer", "description": "Epoch ms — only return events since this time. Omit to get the most recent ~50 events." }
+            "tabId": {
+              "type": "integer",
+              "description": "Tab id from browser_list (must be > 0). OMIT to auto-pick the tab with the freshest activity in the buffer."
+            },
+            "since_ms": {
+              "type": "integer",
+              "description": "Epoch ms — only return events since this time. Omit to get the most recent ~50 events."
+            }
           }
         }
       }
@@ -270,7 +402,11 @@
       "function": {
         "name": "browser_site_notes_list",
         "description": "List every site the user has notes for. Useful when starting a fresh task on a new tab to check whether you already know the site, or when the user asks 'what sites do you know about.' Returns one line per domain with size + last-updated + a short preview of the notes' opening.",
-        "parameters": { "type": "object", "properties": {}, "required": [] }
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
       }
     },
     {
@@ -281,10 +417,23 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "action": { "type": "string", "enum": ["next", "previous", "playpause"], "description": "next = skip to next track; previous = previous track; playpause = toggle play/pause" },
-            "extId":  { "type": "string", "description": "Optional — target a specific connected extension." }
+            "action": {
+              "type": "string",
+              "enum": [
+                "next",
+                "previous",
+                "playpause"
+              ],
+              "description": "next = skip to next track; previous = previous track; playpause = toggle play/pause"
+            },
+            "extId": {
+              "type": "string",
+              "description": "Optional — target a specific connected extension."
+            }
           },
-          "required": ["action"]
+          "required": [
+            "action"
+          ]
         }
       }
     }
