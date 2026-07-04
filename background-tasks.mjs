@@ -14,6 +14,7 @@ import { runInTaskContext } from './lib/task-proxy-context.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
 import { learnToolPlanFromToolEvents, matchToolPlan } from './lib/tool-plan-memory.mjs';
 import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-child-barrier.mjs';
+import { appendTaskOutcome, loadTaskOutcomes } from './lib/task-outcomes.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 
 let _broadcast = null;
@@ -1089,6 +1090,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   // show its terminal outcome briefly. (Workers are retired separately via
   // _retire from spawnWorker; this is the delegation analogue.)
   if (rec?.isDelegation) {
+    const delegOutcome = status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error');
     recentDelegations.unshift({
       taskId, userId: rec.userId, agentId: rec.agentId,
       rootTaskId: rec.rootTaskId || taskId,
@@ -1098,12 +1100,23 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
       rootWatcherId: rec.rootWatcherId || null,
       visibleAgentId: rec.visibleAgentId || null,
       name: rec.agentName, summary: rec.summary,
-      outcome: status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error'),
+      outcome: delegOutcome,
       finalText: finalReportPreview.slice(0, 240),
       toolsUsed: rec.toolsUsed || 0,
       startedAt: rec.startedAt, endedAt: Date.now(),
     });
     if (recentDelegations.length > RECENT_CAP) recentDelegations.length = RECENT_CAP;
+    // Durable mirror (7d JSONL) so this terminal outcome survives a restart
+    // and ring eviction by another busy user — fire-and-forget, must never
+    // affect the ring push or anything below it. appendTaskOutcome already
+    // try/catches internally; the .catch() here is belt-and-suspenders.
+    appendTaskOutcome(rec.userId, {
+      taskId, kind: 'delegation', agentId: rec.agentId,
+      agentName: rec.agentName, status: delegOutcome,
+      summary: finalReportPreview || rec.summary,
+      durationMs: Date.now() - (rec.startedAt || Date.now()),
+      error: errorMsg || null,
+    }).catch(e => console.warn('[background-tasks] delegation task-outcome append failed:', e.message));
   }
   _completeRootChild(taskId, rec, status, finalReportPreview);
   activeTasks.delete(taskId);
@@ -1386,9 +1399,11 @@ export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '
   const rec = activeTasks.get(taskId);
   if (!rec || !rec.isSync) return false;
   const status = (outcome === 'stopped' || outcome === 'cancelled') ? 'cancelled' : (outcome === 'error' ? 'error' : 'done');
+  const syncOutcome = status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error');
   rec.status = status;
   rec.phase = status;
   rec.currentTool = null;
+  const syncEndedAt = Date.now();
   recentDelegations.unshift({
     taskId, userId: rec.userId, agentId: rec.agentId,
     rootTaskId: rec.rootTaskId || taskId,
@@ -1398,12 +1413,22 @@ export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '
     rootWatcherId: rec.rootWatcherId || null,
     visibleAgentId: rec.visibleAgentId || null,
     name: rec.agentName, summary: rec.summary,
-    outcome: status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error'),
+    outcome: syncOutcome,
     finalText: String(finalReportPreview || finalText || '').slice(0, 240),
     toolsUsed: rec.toolsUsed || 0,
-    startedAt: rec.startedAt, endedAt: Date.now(),
+    startedAt: rec.startedAt, endedAt: syncEndedAt,
   });
   if (recentDelegations.length > RECENT_CAP) recentDelegations.length = RECENT_CAP;
+  // Durable mirror — sync (in-turn) delegations retire through this function
+  // instead of _onComplete, so this is the other delegation-retire point that
+  // needs the same 7d JSONL durability. Fire-and-forget, never blocks.
+  appendTaskOutcome(rec.userId, {
+    taskId, kind: 'delegation', agentId: rec.agentId,
+    agentName: rec.agentName, status: syncOutcome,
+    summary: String(finalReportPreview || finalText || rec.summary || ''),
+    durationMs: syncEndedAt - (rec.startedAt || syncEndedAt),
+    error: status === 'error' ? String(finalText || finalReportPreview || '') : null,
+  }).catch(e => console.warn('[background-tasks] sync delegation task-outcome append failed:', e.message));
   _completeRootChild(taskId, rec, status, String(finalReportPreview || finalText || '').slice(0, 800));
   activeTasks.delete(taskId);
   _journalRemove(taskId);
@@ -1547,6 +1572,11 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
 // of an agent telling the user "still running" when the worker actually died.
 const recentWorkers = [];
 const RECENT_CAP = 12;
+// Cap for the MERGED read (in-memory ring + durable JSONL tail) returned by
+// listRecentWorkersForOwner / listRecentDelegationsForUser. Larger than
+// RECENT_CAP because the durable tail can surface history the ring already
+// evicted (another user's flurry of tasks, or a restart).
+const RECENT_READ_CAP = 25;
 
 // Same idea for coordinator→specialist DELEGATIONS (dispatchBackground). Lets
 // check_workers report a terminal outcome ("specialist finished - 56 events added")
@@ -1557,15 +1587,27 @@ const recentDelegations = [];
 function _retire(taskId, outcome, finalText) {
   const info = activeTasks.get(taskId);
   if (!info || !info.isWorker) return;
+  const endedAt = Date.now();
   recentWorkers.unshift({
     taskId, ownerKey: info.ownerKey, userId: info.userId,
     name: info.agentName, summary: info.summary,
     outcome,                                   // 'done' | 'error' | 'stopped'
     finalText: (finalText || '').slice(0, 240),
     toolsUsed: info.toolsUsed || 0,
-    startedAt: info.startedAt, endedAt: Date.now(),
+    startedAt: info.startedAt, endedAt,
   });
   if (recentWorkers.length > RECENT_CAP) recentWorkers.length = RECENT_CAP;
+  // Durable mirror (7d JSONL) — same fire-and-forget philosophy as the
+  // delegation retire point in _onComplete: this must never affect the ring
+  // push above or the caller's completion flow (spawnWorker's async IIFE
+  // calls _retire synchronously right before awaiting _onComplete).
+  appendTaskOutcome(info.userId, {
+    taskId, kind: 'worker', ownerKey: info.ownerKey, agentId: info.agentId,
+    agentName: info.agentName, status: outcome,
+    summary: finalText || info.summary,
+    durationMs: endedAt - (info.startedAt || endedAt),
+    error: outcome === 'error' ? finalText : null,
+  }).catch(e => console.warn('[background-tasks] worker task-outcome append failed:', e.message));
 }
 
 // Append an entry to a worker's rolling progress log (cap 20). Tool results carry
@@ -1606,6 +1648,15 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
   const taskId = `wkr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const summary = (task || '').slice(0, 120);
   const ac = new AbortController();
+  // Scheduled-task barrier linkage — read the SAME AsyncLocalStorage signal
+  // dispatchBackground uses (getScheduledContext()). spawn_worker is invoked
+  // synchronously from inside the tool-dispatch loop that runAgentWithRetry
+  // wraps in scheduledContext.run(...) for a scheduled run (scheduler.mjs ->
+  // run-agent-with-retry.mjs -> streamChat -> executeSkillTool -> here), so
+  // this is ambient — no explicit threading through skills/delegate/execute.mjs
+  // is needed. Falls back to null for an interactive (non-scheduled) worker,
+  // which must NOT link to any barrier group.
+  const scheduledCtx = getScheduledContext();
   activeTasks.set(taskId, {
     agentId: workerAgent.id, userId, agentName: workerName, agentEmoji: emoji,
     startedAt: Date.now(), summary, ownerKey, isWorker: true, phase: 'queued',
@@ -1614,7 +1665,24 @@ export function spawnWorker({ workerAgent, task, userId, chipOwnerId, ownerKey, 
     // knows which chat to notify when this worker dies with the process.
     visibleAgentId: chipOwnerId,
     status: 'running', abort: () => ac.abort(),
+    originScheduledTaskId: scheduledCtx?.originTaskId || null,
+    originScheduledTaskOwnerId: scheduledCtx?.originTaskOwnerId || userId || null,
+    originScheduledTaskAgent: scheduledCtx?.originTaskAgent || null,
+    originScheduledRunId: scheduledCtx?.runId || null, // barrier per-fire nonce — must rejoin the SAME fire's group
   });
+  if (scheduledCtx?.originTaskId) {
+    // _onComplete's existing generic completion block (gated on
+    // rec.originScheduledTaskId, shared by both delegations and workers)
+    // reports this child's completion back to the barrier — no separate
+    // completeScheduledChild call is needed here.
+    registerScheduledChild({
+      userId,
+      scheduledCtx,
+      childId: taskId,
+      label: `${workerName}: ${summary}`,
+      kind: 'worker',
+    });
+  }
 
   let watcherId = null;
   try {
@@ -1730,11 +1798,53 @@ export function listWorkersForOwner(userId, ownerKey) {
     });
 }
 
+// Reshape a durable task-outcomes.jsonl row back into the recent-ring shape
+// (taskId/name/summary/outcome/finalText/toolsUsed/startedAt/endedAt) so
+// callers (check_workers, describeBackgroundWorkForSession) can treat a
+// durable-only row exactly like a ring entry. Rows written after a ring
+// eviction or a restart won't have the ring's richer routing fields
+// (watcherId/spanId/rootTaskId — the chip is long gone by then), which is
+// fine: every consumer already treats those as optional.
+function _outcomeRowToRecent(row, userId) {
+  return {
+    taskId: row.taskId,
+    userId,
+    ownerKey: row.ownerKey || null,
+    agentId: row.agentId || null,
+    name: row.agentName || 'Agent',
+    summary: row.summary || '',
+    outcome: row.status,   // already normalized to 'done'|'stopped'|'error' at write time
+    finalText: (row.error || row.summary || '').slice(0, 240),
+    toolsUsed: 0,
+    startedAt: Number.isFinite(row.durationMs) ? row.ts - row.durationMs : row.ts,
+    endedAt: row.ts,
+  };
+}
+
+// Merge the hot in-memory ring with the durable JSONL tail: ring entries win
+// on taskId collisions (they carry the richer live-routing fields), durable
+// rows fill in anything the ring already evicted or lost on restart.
+function _mergeRecentWithDurable(ringItems, durableRows, userId, cap) {
+  const seen = new Set(ringItems.map(r => r.taskId));
+  const merged = ringItems.slice();
+  for (const row of durableRows) {
+    if (seen.has(row.taskId)) continue;
+    seen.add(row.taskId);
+    merged.push(_outcomeRowToRecent(row, userId));
+  }
+  merged.sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
+  return cap ? merged.slice(0, cap) : merged;
+}
+
 /** Recently-finished workers for an owner — so check_workers can report terminal outcomes. */
 export function listRecentWorkersForOwner(userId, ownerKey) {
   const now = Date.now();
-  return recentWorkers
-    .filter(r => r.userId === userId && r.ownerKey === ownerKey)
+  const ring = recentWorkers.filter(r => r.userId === userId && r.ownerKey === ownerKey);
+  let durable = [];
+  try {
+    durable = loadTaskOutcomes(userId, { kind: 'worker' }).filter(r => (r.ownerKey || null) === ownerKey);
+  } catch (e) { console.warn('[background-tasks] durable worker outcomes read failed:', e.message); }
+  return _mergeRecentWithDurable(ring, durable, userId, RECENT_READ_CAP)
     .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
 }
 
@@ -1784,8 +1894,12 @@ export function listActiveDelegationsForUser(userId, excludeAgentId = null) {
 /** Recently-finished delegations for a user — terminal outcomes for check_workers. */
 export function listRecentDelegationsForUser(userId, excludeAgentId = null) {
   const now = Date.now();
-  return recentDelegations
-    .filter(r => r.userId === userId && r.agentId !== excludeAgentId)
+  const ring = recentDelegations.filter(r => r.userId === userId && r.agentId !== excludeAgentId);
+  let durable = [];
+  try {
+    durable = loadTaskOutcomes(userId, { kind: 'delegation' }).filter(r => (r.agentId || null) !== excludeAgentId);
+  } catch (e) { console.warn('[background-tasks] durable delegation outcomes read failed:', e.message); }
+  return _mergeRecentWithDurable(ring, durable, userId, RECENT_READ_CAP)
     .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
 }
 

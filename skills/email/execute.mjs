@@ -675,10 +675,13 @@ export async function executePendingEmail(userId) {
 export default async function execute(name, args, userId) {
   // Stage destructive ops behind a chat-text confirmation
   if (DESTRUCTIVE_TOOLS.has(name) && !args?._userApproved) {
-    _pendingDestructive.set(userId, { name, args });
     const desc = name === 'email_purge_sender'
       ? `purge all email from sender "${args.sender}"`
       : `move ${(args.messageIds || []).length} email(s) to trash`;
+    // desc is stashed alongside {name, args} so chat-dispatch's post-turn
+    // approval-pill check (snapshotPendingApprovals) can read a ready-made
+    // description without duplicating this ternary.
+    _pendingDestructive.set(userId, { name, args, desc });
     return `⚠️ You are about to ${desc}. This is destructive. Type **APPROVE PURGE** in the chat to proceed, or say anything else to cancel.`;
   }
 

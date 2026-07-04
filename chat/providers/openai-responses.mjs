@@ -13,7 +13,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import { writeFileSync } from 'fs';
 import path from 'path';
 import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth.mjs';
-import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS } from './_shared.mjs';
+import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS, capabilityNotice } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
@@ -298,6 +298,13 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           yield { type: 'error', message: REAUTH_MSG };
           return;
         }
+        // Refresh itself succeeded (the FAILED-refresh path above already
+        // yields REAUTH_MSG, a user-visible error — leave that alone). This
+        // silent-success path can legitimately fire often over a long-running
+        // process (access tokens expire hourly), so it's keyed per-account
+        // and fires once ever per process, not once per refresh.
+        { const notice = capabilityNotice('openai-oauth', `token_refresh:${userId}`, 'Refreshed the provider login token automatically.');
+          if (notice) yield notice; }
         headers.Authorization = `Bearer ${auth.access_token}`;
         if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
         try {
@@ -325,6 +332,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       } else if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
         console.warn(`[${tag}] reasoning effort rejected; retrying without reasoning field`);
         reasoningDisabled = true;
+        { const notice = capabilityNotice(tag, 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');
+          if (notice) yield notice; }
         continue;
       } else if ((res.status === 400 || res.status === 422) && useNativeSearch && /web[_ ]?search|unsupported tool|unknown variant/i.test(errText)) {
         // The hosted web_search tool was rejected (e.g. the experimental Codex
@@ -334,6 +343,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         // falls through to the generic error below (no retry loop).
         console.warn(`[${tag}] hosted web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        { const notice = capabilityNotice(tag, 'native_search', 'Provider rejected native web search — continuing with the standard search tool.');
+          if (notice) yield notice; }
         continue;
       } else {
         console.error(`[${tag}] error ${res.status}: ${errText.slice(0, 500)}`);

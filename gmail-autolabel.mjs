@@ -4,12 +4,13 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { BASE_DIR } from './lib/paths.mjs';
 import { getAccessToken as getGoogleAccessToken } from './lib/google-auth.mjs';
+import { emailLabelsEnabled, getPin } from './lib/email-label-memory.mjs';
+import { appendActivityBatch, getLastBatch, markRowsUndone } from './lib/gmail-autolabel-activity.mjs';
 import { log } from './logger.mjs';
 import { atomicWriteSync, withLock } from './routes/_helpers/io-lock.mjs';
 
-const BASE_DIR   = path.dirname(fileURLToPath(import.meta.url));
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const POLL_MS    = 60_000; // poll every 60 seconds
 
@@ -73,8 +74,16 @@ function extractEmailDomain(fromHeader) {
   return email.split('@')[1]?.toLowerCase() ?? '';
 }
 
-function matchRules(rules, from, subject, to) {
-  const labels = [];
+/**
+ * Match a message's headers against a rule list.
+ * @returns {Array<{ruleId: string, label: string, keepInbox: boolean}>} one
+ *   entry per distinct label a matching rule targets (first rule for a given
+ *   label wins, same as before — this just carries ruleId/keepInbox through
+ *   for the activity trail and the keep-inbox decision).
+ */
+export function matchRules(rules, from, subject, to) {
+  const matched = [];
+  const seenLabels = new Set();
   for (const rule of rules) {
     const fieldVal = rule.field === 'from' ? from : rule.field === 'subject' ? subject : to;
     const val = (fieldVal ?? '').toLowerCase();
@@ -88,9 +97,38 @@ function matchRules(rules, from, subject, to) {
     } else {
       match = val.includes(ruleVal); // contains (default)
     }
-    if (match && rule.label && !labels.includes(rule.label)) labels.push(rule.label);
+    if (match && rule.label && !seenLabels.has(rule.label)) {
+      seenLabels.add(rule.label);
+      matched.push({ ruleId: rule.id, label: rule.label, keepInbox: !!rule.keepInbox });
+    }
   }
-  return labels;
+  return matched;
+}
+
+/**
+ * Decide what to do with one rule match, given the learned-memory pin (if
+ * any) for that sender/subject. Pure — no I/O, so this is unit-testable
+ * without touching Gmail or the filesystem.
+ *
+ * Decision table (rule x pin -> action):
+ *   no pin                                  -> apply; archive unless rule.keepInbox
+ *   pin exists, pin.labels doesn't include
+ *     the rule's label (CONFLICT)           -> skip entirely (no label, no archive)
+ *   pin exists, pin.labels includes the
+ *     rule's label, pin.keepInbox=false     -> apply; archive unless rule.keepInbox
+ *   pin exists, pin.labels includes the
+ *     rule's label, pin.keepInbox=true      -> apply; never archive (pin wins)
+ *
+ * @param {{ruleId: string, label: string, keepInbox: boolean}} match
+ * @param {{labels: string[], keepInbox: boolean, source: string}|null} pin
+ * @returns {{action: 'apply', label: string, archive: boolean} | {action: 'skip', skipReason: string}}
+ */
+export function decideAction(match, pin) {
+  if (pin && !pin.labels.includes(match.label)) {
+    return { action: 'skip', skipReason: `learned pin says ${pin.labels.join(', ')}` };
+  }
+  const archive = !match.keepInbox && !(pin && pin.keepInbox);
+  return { action: 'apply', label: match.label, archive };
 }
 
 async function getOrCreateLabel(userId, accountId, labelName) {
@@ -102,6 +140,54 @@ async function getOrCreateLabel(userId, accountId, labelName) {
     body: JSON.stringify({ name: labelName }),
   });
   return created.id;
+}
+
+/**
+ * Reverse the most recent poll-cycle batch for one account: remove the
+ * applied label and, for anything that was archived, re-add INBOX. Skipped
+ * rows (pin conflicts) never touched Gmail, so there's nothing to reverse —
+ * they're ignored here.
+ *
+ * Idempotent: rows are marked `undone` individually only after their Gmail
+ * call succeeds, so a second call (or a retry after a partial failure) only
+ * re-attempts whatever didn't already succeed. Calling this with nothing
+ * left to undo is a no-op ({ undone: 0 }), not an error.
+ * @returns {Promise<{ok: boolean, batchId: string|null, undone: number, attempted?: number, alreadyUndone?: boolean, errors?: Array<{messageId:string, error:string}>}>}
+ */
+export async function undoLastBatch(userId, accountId) {
+  const last = getLastBatch(userId, accountId ?? null);
+  if (!last) return { ok: true, batchId: null, undone: 0 };
+
+  const actionable = last.rows.filter(r => !r.skipped && !r.undone);
+  if (!actionable.length) {
+    return { ok: true, batchId: last.batchId, undone: 0, alreadyUndone: last.rows.some(r => r.undone) };
+  }
+
+  const succeededIds = [];
+  const errors = [];
+  for (const row of actionable) {
+    try {
+      const labelId = await getOrCreateLabel(userId, accountId, row.label);
+      const body = { removeLabelIds: [labelId] };
+      if (row.archived) body.addLabelIds = ['INBOX'];
+      await gmailFetch(userId, accountId, `/messages/${row.messageId}/modify`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      succeededIds.push(row.id);
+    } catch (e) {
+      errors.push({ messageId: row.messageId, error: e.message });
+      log.error('autolabel', 'undo error', { userId, account: accountId, messageId: row.messageId, err: e.message });
+    }
+  }
+  const undone = succeededIds.length ? await markRowsUndone(userId, succeededIds) : 0;
+  return {
+    ok: errors.length === 0,
+    batchId: last.batchId,
+    undone,
+    attempted: actionable.length,
+    ...(errors.length ? { errors } : {}),
+  };
 }
 
 // Locked, targeted update of ONE account's history cursor (+ lastChecked). The
@@ -118,7 +204,7 @@ async function saveCursor(userId, acctKey, historyId) {
   });
 }
 
-async function pollNewMessages(userId, accountId) {
+export async function pollNewMessages(userId, accountId) {
   const cfg = loadConfig(userId);
   if (!cfg.enabled) return;
 
@@ -170,6 +256,11 @@ async function pollNewMessages(userId, accountId) {
       newHistoryId = lastHistoryId; // don't advance — catch the remainder next poll
     }
 
+    // One batchId per poll cycle — lets the UI/undo-endpoint reverse
+    // "everything this poll just did" as a unit (see undoLastBatch below).
+    const batchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const activityRows = [];
+
     for (const record of records) {
       for (const added of record.messagesAdded ?? []) {
         const msgId = added.message.id;
@@ -179,15 +270,36 @@ async function pollNewMessages(userId, accountId) {
           );
           const hdrs = {};
           for (const h of msg.payload?.headers ?? []) hdrs[h.name] = h.value;
-          const labelNames = matchRules(rules, hdrs.From ?? '', hdrs.Subject ?? '', hdrs.To ?? '');
-          for (const labelName of labelNames) {
-            const labelId = await getOrCreateLabel(userId, accountId, labelName);
+          const matches = matchRules(rules, hdrs.From ?? '', hdrs.Subject ?? '', hdrs.To ?? '');
+          if (!matches.length) continue;
+          // Learned-pin awareness: read-only lookup, gated the same way the
+          // email skill gates it. A pin never MUTATES here — it only decides
+          // whether/how a static rule applies to this one message.
+          const pin = emailLabelsEnabled() ? getPin(userId, hdrs.From ?? '', hdrs.Subject ?? '', { accountId }) : null;
+          for (const match of matches) {
+            const decision = decideAction(match, pin);
+            if (decision.action === 'skip') {
+              console.log(`[autolabel] "${hdrs.Subject}" skipped for ${match.label} — ${decision.skipReason}`);
+              log.info('autolabel', 'skipped — pin conflict', { userId, account: accountId, label: match.label, reason: decision.skipReason });
+              activityRows.push({
+                account: accountId ?? null, messageId: msgId, from: hdrs.From ?? '', subject: hdrs.Subject ?? '',
+                ruleId: match.ruleId, label: match.label, archived: false, batchId, skipped: decision.skipReason,
+              });
+              continue;
+            }
+            const labelId = await getOrCreateLabel(userId, accountId, decision.label);
+            const body = { addLabelIds: [labelId] };
+            if (decision.archive) body.removeLabelIds = ['INBOX'];
             await gmailFetch(userId, accountId, `/messages/${msgId}/modify`, {
               method: 'POST',
-              body: JSON.stringify({ addLabelIds: [labelId], removeLabelIds: ['INBOX'] }),
+              body: JSON.stringify(body),
             });
-            console.log(`[autolabel] "${hdrs.Subject}" → ${labelName}`);
-            log.info('autolabel', 'applied label', { userId, account: accountId, label: labelName });
+            console.log(`[autolabel] "${hdrs.Subject}" → ${decision.label}${decision.archive ? '' : ' (kept in inbox)'}`);
+            log.info('autolabel', 'applied label', { userId, account: accountId, label: decision.label, archived: decision.archive });
+            activityRows.push({
+              account: accountId ?? null, messageId: msgId, from: hdrs.From ?? '', subject: hdrs.Subject ?? '',
+              ruleId: match.ruleId, label: decision.label, archived: decision.archive, batchId,
+            });
           }
         } catch (e) {
           console.error(`[autolabel] Error on message ${msgId}:`, e.message);
@@ -195,6 +307,8 @@ async function pollNewMessages(userId, accountId) {
         }
       }
     }
+
+    if (activityRows.length) await appendActivityBatch(userId, activityRows);
 
     await saveCursor(userId, acctKey, newHistoryId);
   } catch (e) {

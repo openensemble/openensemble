@@ -16,7 +16,7 @@
 
 import { randomBytes } from 'crypto';
 import { createSession, readBody, requireAuth } from '../_helpers.mjs';
-import { setSessionDeviceId } from '../_helpers/auth-sessions.mjs';
+import { setSessionDeviceId, uaFromReq } from '../_helpers/auth-sessions.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import {
   getRedeemIp,
@@ -118,7 +118,9 @@ export async function handlePairingRoutes(req, res, pathname) {
       res.end(JSON.stringify(entry.redeemed));
       return true;
     }
-    const token = createSession(entry.userId, { kind: 'voice-device' });
+    // Firmware's HTTP client UA (e.g. esp-idf's default), captured for the
+    // sessions list — not used for any auth decision.
+    const token = createSession(entry.userId, { kind: 'voice-device', ua: uaFromReq(req) });
     // Field-name compat: the XVF3800 firmware (and older clients) send
     // `device_name`; some 3rd-party clients send `name`. Accept either —
     // both map to the same registry slot.

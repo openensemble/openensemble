@@ -1204,12 +1204,77 @@ async function saveReminderVoiceDevice(deviceId) {
 }
 
 // ── Active Sessions ───────────────────────────────────────────────────────────
+// Inserts the "Log out everywhere" controls once, as a sibling BEFORE the
+// sessions list container — loadActiveSessions() below fully replaces
+// el.innerHTML on every refresh, so these can't live inside `el` itself.
+function ensureSessionsRevokeAllControls(sessionsEl) {
+  if ($('sessionsRevokeAllBlock')) return;
+  const block = document.createElement('div');
+  block.id = 'sessionsRevokeAllBlock';
+  block.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:6px';
+  block.innerHTML = `
+    <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--muted);cursor:pointer">
+      <input type="checkbox" id="revokeAllIncludeHardware" style="margin-top:2px">
+      <span>Also sign out voice devices &amp; nodes — they will stop working immediately and must be <b>re-paired</b> afterwards.</span>
+    </label>
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="btnRevokeAllSessions" class="btn-sm" style="background:var(--red,#e05c5c);border:none;color:#fff">Log out everywhere</button>
+      <span id="revokeAllStatus" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+  `;
+  sessionsEl.parentElement.insertBefore(block, sessionsEl);
+  $('btnRevokeAllSessions').onclick = handleRevokeAllSessions;
+}
+
+async function handleRevokeAllSessions() {
+  const includeHardware = $('revokeAllIncludeHardware')?.checked === true;
+  const status = $('revokeAllStatus');
+  // The checkbox is the "first step"; this confirm is the second — together
+  // they keep the destructive hardware wipe from being a single casual click.
+  const msg = includeHardware
+    ? 'This signs out every OTHER browser session AND permanently removes every paired voice device and node from your account.\n\n'
+      + 'Voice devices and nodes will stop responding immediately and must be RE-PAIRED (new pairing code) before they work again. This cannot be undone.\n\nContinue?'
+    : 'Sign out of every OTHER browser session? This device stays signed in.';
+  if (!confirm(msg)) return;
+  const btn = $('btnRevokeAllSessions');
+  btn.disabled = true;
+  if (status) { status.style.color = 'var(--muted)'; status.textContent = 'Working…'; }
+  try {
+    const rr = await fetch('/api/sessions/revoke-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ includeHardware }),
+    });
+    const data = await rr.json();
+    if (!rr.ok) throw new Error(data.error || 'revoke-all failed');
+    if (status) {
+      status.style.color = 'var(--muted)';
+      status.textContent = includeHardware
+        ? `Signed out ${data.browsers || 0} browser session(s), removed ${data.devices || 0} device(s) and ${data.nodes || 0} node(s).`
+        : `Signed out ${data.browsers || 0} browser session(s).`;
+    }
+    const cb = $('revokeAllIncludeHardware'); if (cb) cb.checked = false;
+    loadActiveSessions();
+  } catch (e) {
+    if (status) { status.style.color = 'var(--red,#e05c5c)'; status.textContent = 'Failed: ' + e.message; }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function loadActiveSessions() {
   const el = $('sessionsList');
   if (!el) return;
+  ensureSessionsRevokeAllControls(el);
   el.innerHTML = `<div style="color:var(--muted)">Loading...</div>`;
   try {
-    const r = await fetch('/api/sessions');
+    // includeDevices=1 so this view is a complete picture (browser + node +
+    // voice-device sessions) — see routes/misc.mjs. Hardware-kind rows are
+    // read-only here (no per-row Revoke): a bare session revoke on a node or
+    // voice device is silently undone by the device's own auto-revive on
+    // its next reconnect, so removal for those MUST go through their device
+    // registry (the Devices / Nodes pages, or "Log out everywhere" above).
+    const r = await fetch('/api/sessions?includeDevices=1');
     if (!r.ok) throw new Error('fetch failed');
     const list = await r.json();
     if (!Array.isArray(list) || !list.length) {
@@ -1221,15 +1286,26 @@ async function loadActiveSessions() {
       const d = new Date(iso);
       return isNaN(d) ? '—' : d.toLocaleString();
     };
-    el.innerHTML = list.map(s => `
+    const kindLabel = k => k === 'node' ? '🖥️ Node' : k === 'voice-device' ? '🔊 Voice device' : '💻 Browser';
+    el.innerHTML = list.map(s => {
+      const isHardware = s.kind === 'node' || s.kind === 'voice-device';
+      const descBits = [escHtml(kindLabel(s.kind))];
+      if (s.deviceName) descBits.push(escHtml(s.deviceName));
+      if (s.label) descBits.push(escHtml(s.label));
+      if (s.ua) descBits.push(escHtml(s.ua));
+      return `
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid var(--border);border-radius:6px">
         <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
           <div style="font-family:monospace">${s.tokenPrefix} ${s.current ? '<span style="color:var(--accent)">(this device)</span>' : ''}</div>
+          <div style="color:var(--muted)">${descBits.join(' · ')}</div>
           <div style="color:var(--muted)">last activity: ${fmt(s.lastActivity)} · expires: ${fmt(s.expiresAt)}</div>
         </div>
-        ${s.current ? '' : `<button class="btn-sm" data-revoke="${s.tokenPrefix}">Revoke</button>`}
+        ${s.current ? '' : isHardware
+          ? `<span style="font-size:11px;color:var(--muted);white-space:nowrap">manage on Devices/Nodes page</span>`
+          : `<button class="btn-sm" data-revoke="${s.tokenPrefix}">Revoke</button>`}
       </div>
-    `).join('');
+    `;
+    }).join('');
     el.querySelectorAll('[data-revoke]').forEach(btn => {
       btn.onclick = async () => {
         btn.disabled = true;

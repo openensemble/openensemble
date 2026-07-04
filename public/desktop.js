@@ -476,12 +476,22 @@ function renderTasksWidget(tasks) {
       const lastRun = t.lastRun
         ? new Date(t.lastRun).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
         : null;
+      // nextRunAt is persisted by the scheduler whenever it arms this task's
+      // timer (see scheduler.mjs scheduleTask) — null-guarded since tasks
+      // created/updated before that change won't have it yet.
+      const nextRun = t.nextRunAt && !isNaN(new Date(t.nextRunAt))
+        ? new Date(t.nextRunAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+        : null;
       const agentName = agents.find(a => a.id === t.agent)?.name ?? t.agent ?? '';
+      const failing = Number(t.consecutiveFailures) > 0;
+      const failBadge = failing
+        ? ` <span style="color:var(--red,#e05c5c)" title="${escHtml(t.lastError || '')}">⚠ ${t.consecutiveFailures} failed in a row</span>`
+        : '';
       return `<div class="board-task-card">
         <div class="board-task-icon">📋</div>
         <div class="board-task-info">
           <div class="board-task-label">${escHtml(t.label)}</div>
-          <div class="board-task-meta">🔁 ${escHtml(formatTaskCadenceText(t))} · ${escHtml(agentName)}${lastRun ? ` · Last run: ${lastRun}` : ''}</div>
+          <div class="board-task-meta">🔁 ${escHtml(formatTaskCadenceText(t))} · ${escHtml(agentName)}${lastRun ? ` · Last run: ${lastRun}` : ''}${nextRun ? ` · Next: ${nextRun}` : ''}${failBadge}</div>
         </div>
       </div>`;
     }).join('') + `</div>`;

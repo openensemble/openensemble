@@ -84,6 +84,7 @@ import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn, bootRecoverInterruptedTasks } from './background-tasks.mjs';
 import { setNodesBroadcastFn } from './skills/nodes/execute.mjs';
 import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
+import { setSalienceNotifyBroadcast } from './lib/proposal-salience.mjs';
 import { startUpdateChecker } from './lib/update.mjs';
 import { runBootCheck, aliveResponse, cancelCommitDeadline } from './lib/oe-admin-boot-check.mjs';
 
@@ -943,6 +944,9 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // Friction-as-proposer needs the same per-user push channel as watchers
   // for proposal bubbles + the task_complete broadcast on accept.
   setProposalBroadcastFn((userId, msg) => sendToUser(userId, msg));
+  // Proposal auto-pause notices ride the same per-user push channel — a
+  // one-line toast when a proposal kind pauses, instead of silent console-only.
+  setSalienceNotifyBroadcast((userId, msg) => sendToUser(userId, msg));
   // Reap stranded 'running' proposals from a previous crash + restore the
   // dismiss-cooldown map so a recently-dismissed pattern doesn't immediately
   // re-propose post-restart.

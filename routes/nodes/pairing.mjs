@@ -11,6 +11,9 @@
 
 import { randomBytes } from 'crypto';
 import { createSession, requireAuth, readBody } from '../_helpers.mjs';
+// uaFromReq isn't re-exported by the ._helpers.mjs aggregator yet — import
+// straight from the submodule (see routes/_helpers/auth-sessions.mjs).
+import { uaFromReq } from '../_helpers/auth-sessions.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import {
   getRedeemIp,
@@ -107,7 +110,10 @@ export async function handlePairingRoutes(req, res, pathname) {
       return true;
     }
     clearRedeemFailures(ip);
-    const token = createSession(entry.userId, { kind: 'node' });
+    // The redeeming client here is the node-agent's HTTP client (not a
+    // browser), so this UA is whatever that script sends — still useful as
+    // a session label (e.g. distinguishing curl/install-script runs).
+    const token = createSession(entry.userId, { kind: 'node', ua: uaFromReq(req) });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ token, userId: entry.userId }));
     return true;

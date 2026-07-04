@@ -1,6 +1,7 @@
 // ── Gmail Auto-Label ──────────────────────────────────────────────────────────
 let _autoLabelData = null;  // cached server response { enabled, rulesByAccount, accountId }
 let _autoLabelGmailAccounts = [];
+let _autoLabelActivity = [];  // cached recent activity rows for the selected account
 
 async function loadGmailAutoLabel() {
   const toggle  = document.getElementById('autoLabelToggle');
@@ -20,10 +21,41 @@ async function loadGmailAutoLabel() {
     toggle.checked = data.enabled;
     // Use server's active accountId, fallback to first Gmail account
     const selectedId = data.accountId ?? _autoLabelGmailAccounts[0]?.id ?? null;
+    if (data.enabled) await loadAutoLabelActivity(selectedId);
     renderAutoLabelPanel(panel, data.enabled, selectedId);
   } catch (e) {
     panel.innerHTML = `<div style="font-size:11px;color:var(--red)">${escHtml(e.message)}</div>`;
   }
+}
+
+async function loadAutoLabelActivity(accountId) {
+  try {
+    const params = new URLSearchParams({ accountId: accountId || '', limit: '20' });
+    const res = await fetch(`/api/gmail/autolabel/activity?${params}`).then(r => r.json());
+    _autoLabelActivity = Array.isArray(res.activity) ? res.activity : [];
+  } catch (e) {
+    _autoLabelActivity = [];
+  }
+}
+
+function renderAutoLabelActivity(activity) {
+  if (!activity.length) return '<div style="font-size:11px;color:var(--muted)">No recent activity.</div>';
+  return activity.map(a => {
+    const when = new Date(a.ts).toLocaleString();
+    if (a.skipped) {
+      return `<div style="font-size:11px;padding:5px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--muted)">skipped</span> ${escHtml(a.from)} — "${escHtml(a.subject)}"
+        <div style="font-size:10px;color:var(--muted)">${escHtml(a.skipped)} · ${when}</div>
+      </div>`;
+    }
+    return `<div style="font-size:11px;padding:5px 0;border-bottom:1px solid var(--border)">
+      ${escHtml(a.from)} — "${escHtml(a.subject)}"
+      <span style="color:var(--muted)">→</span> <span style="color:var(--accent)">${escHtml(a.label)}</span>
+      <span style="color:var(--muted)">${a.archived ? '(archived)' : '(kept in inbox)'}</span>
+      ${a.undone ? '<span style="color:var(--red,#e05c5c)"> — undone</span>' : ''}
+      <div style="font-size:10px;color:var(--muted)">${when}</div>
+    </div>`;
+  }).join('');
 }
 
 function renderAutoLabelPanel(panel, enabled, selectedAccountId) {
@@ -52,6 +84,12 @@ function renderAutoLabelPanel(panel, enabled, selectedAccountId) {
             <span style="color:var(--muted)">→</span>
             <span style="color:var(--accent)">${escHtml(r.label)}</span>
           </span>
+          <label style="font-size:10px;color:var(--muted);display:flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer" title="Label the message but leave it in the inbox instead of archiving it">
+            <input type="checkbox" ${r.keepInbox ? 'checked' : ''}
+              data-change-action="toggleAutoLabelKeepInbox"
+              data-change-args='${JSON.stringify([selectedAccountId ?? null, r.id, '$checked']).replace(/'/g, "&#39;")}'>
+            keep in inbox
+          </label>
           <button data-action="deleteAutoLabelRule" data-args='${JSON.stringify([r.id]).replace(/'/g, "&#39;")}'
             style="background:none;border:none;color:var(--red,#e05c5c);cursor:pointer;font-size:16px;line-height:1;padding:0 2px">×</button>
         </div>`).join('')
@@ -73,7 +111,18 @@ function renderAutoLabelPanel(panel, enabled, selectedAccountId) {
       <input id="alValue" placeholder="value" style="font-size:11px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);width:110px">
       <span style="font-size:11px;color:var(--muted)">→</span>
       <input id="alLabel" placeholder="label" style="font-size:11px;padding:3px 6px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);width:90px">
+      <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:3px;cursor:pointer">
+        <input type="checkbox" id="alKeepInbox"> keep in inbox
+      </label>
       <button data-action="addAutoLabelRule" style="font-size:11px;padding:3px 10px;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">Add</button>
+    </div>
+    <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--muted);font-weight:600">Recent activity</span>
+        <button data-action="undoLastAutoLabelBatch" data-args='${JSON.stringify([selectedAccountId ?? null]).replace(/'/g, "&#39;")}'
+          style="font-size:10px;padding:3px 8px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);cursor:pointer">Put the last batch back</button>
+      </div>
+      <div id="autoLabelActivityList" style="max-height:180px;overflow-y:auto">${renderAutoLabelActivity(_autoLabelActivity)}</div>
     </div>`;
 }
 
@@ -91,10 +140,11 @@ async function addAutoLabelRule() {
   const op    = document.getElementById('alOp')?.value;
   const value = document.getElementById('alValue')?.value?.trim();
   const label = document.getElementById('alLabel')?.value?.trim();
+  const keepInbox = !!document.getElementById('alKeepInbox')?.checked;
   if (!value || !label) return;
   const res = await fetch('/api/gmail/autolabel/rules', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ accountId, field, op, value, label }),
+    body: JSON.stringify({ accountId, field, op, value, label, keepInbox }),
   }).then(r => r.json());
   // Update local cache and re-render without a full reload
   const key = accountId ?? '__default__';
@@ -108,7 +158,9 @@ async function addAutoLabelRule() {
 // Wrapper for the event-delegation harness — passing the resolved $value
 // (the chosen accountId) through.
 function _alAccountChanged(accountId) {
-  renderAutoLabelPanel(document.getElementById('autoLabelContent'), _autoLabelData?.enabled ?? false, accountId);
+  loadAutoLabelActivity(accountId).then(() => {
+    renderAutoLabelPanel(document.getElementById('autoLabelContent'), _autoLabelData?.enabled ?? false, accountId);
+  });
 }
 
 async function deleteAutoLabelRule(id) {
@@ -123,5 +175,28 @@ async function deleteAutoLabelRule(id) {
     _autoLabelData.rulesByAccount[key] = res.rules;
   }
   renderAutoLabelPanel(document.getElementById('autoLabelContent'), true, accountId);
+}
+
+async function toggleAutoLabelKeepInbox(accountId, id, keepInbox) {
+  const res = await fetch('/api/gmail/autolabel/rules', {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId, id, keepInbox }),
+  }).then(r => r.json());
+  const key = accountId ?? '__default__';
+  if (_autoLabelData) {
+    _autoLabelData.rulesByAccount = _autoLabelData.rulesByAccount ?? {};
+    _autoLabelData.rulesByAccount[key] = res.rules;
+  }
+  renderAutoLabelPanel(document.getElementById('autoLabelContent'), true, accountId);
+}
+
+async function undoLastAutoLabelBatch(accountId) {
+  const res = await fetch('/api/gmail/autolabel/undo', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  }).then(r => r.json());
+  await loadAutoLabelActivity(accountId);
+  renderAutoLabelPanel(document.getElementById('autoLabelContent'), _autoLabelData?.enabled ?? false, accountId);
+  if (res?.errors?.length) console.warn('[autolabel] undo had errors', res.errors);
 }
 

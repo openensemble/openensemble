@@ -97,6 +97,99 @@ function isDesktopToolName(name) {
   return typeof name === 'string' && name.startsWith('desktop_');
 }
 
+// ── Pending-approval pill (post-turn snapshot) ───────────────────────────────
+// Four skill families stage a destructive/sensitive op behind a typed
+// confirmation phrase and return a *plain-text* warning that the LLM relays
+// as its reply: email purge/batch-trash ("APPROVE PURGE"), expense delete
+// ("CONFIRM DELETION"), profile trust-state promotion ("APPROVE PROVEN"),
+// and cross-agent watcher ops ("APPROVE WATCHER OP") — see tryApprovalIntercept
+// in chat-dispatch/voice-preprocess.mjs for the exact-match execute/clear
+// logic. None of that state was ever surfaced as structured UI, so a typo'd
+// approval silently discarded the staged op with no visual cue.
+//
+// This reads all four in-memory pending maps read-only (never mutates them)
+// so handleChatMessage can diff "pending before this turn" vs "after" and
+// emit approval_pending / approval_resolved uniformly, without each skill
+// needing its own event-emitting code. Dynamic imports avoid adding four new
+// static import edges (and any circular-import risk) to a file already many
+// modules deep; Node caches the module after the first load so the repeat
+// cost per turn is a map lookup, not a re-import.
+const APPROVAL_KIND_ORDER = ['email_purge', 'expense_delete', 'trust_promotion', 'watcher_op'];
+
+/** @returns {Promise<Record<string, {phrase: string, description: string, expiresAt?: number|null}>>} */
+export async function snapshotPendingApprovals(userId) {
+  const out = /** @type {Record<string, {phrase: string, description: string, expiresAt?: number|null}>} */ ({});
+  try {
+    const { getPendingEmail } = await import('./skills/email/execute.mjs');
+    const p = getPendingEmail(userId);
+    if (p) out.email_purge = { phrase: 'APPROVE PURGE', description: p.desc || 'perform a destructive email operation' };
+  } catch (e) { console.warn('[chat-dispatch] approval snapshot (email) failed:', e.message); }
+  try {
+    const { getPendingDelete } = await import('./skills/expenses/execute.mjs');
+    const p = getPendingDelete(userId);
+    if (p) {
+      const desc = p.name === 'expense_delete_all'
+        ? 'delete ALL transactions'
+        : p.name === 'expense_delete_batch'
+          ? `delete ${(p.args?.ids || []).length} transaction(s)`
+          : `delete transaction ${p.args?.id ?? ''}`;
+      out.expense_delete = { phrase: 'CONFIRM DELETION', description: desc };
+    }
+  } catch (e) { console.warn('[chat-dispatch] approval snapshot (expenses) failed:', e.message); }
+  try {
+    const { getPendingProven } = await import('./skills/profiles/execute.mjs');
+    const p = getPendingProven(userId);
+    if (p) out.trust_promotion = { phrase: 'APPROVE PROVEN', description: `promote "${p.service_id}" on "${p.node_id}" to proven` };
+  } catch (e) { console.warn('[chat-dispatch] approval snapshot (profiles) failed:', e.message); }
+  try {
+    const { getPendingWatcherOp } = await import('./skills/tasks/execute.mjs');
+    const p = getPendingWatcherOp(userId);
+    if (p) {
+      out.watcher_op = {
+        phrase: 'APPROVE WATCHER OP',
+        description: p.action === 'cancel'
+          ? `cancel watcher "${p.watcherLabel}"`
+          : `update watcher "${p.watcherLabel}"${p.changes?.length ? ` (${p.changes.join('; ')})` : ''}`,
+        // Mirrors PENDING_WATCHER_TTL_MS (5 min) in skills/tasks/execute.mjs —
+        // that module doesn't export the constant, so it's inlined here too.
+        expiresAt: p.ts + 5 * 60 * 1000,
+      };
+    }
+  } catch (e) { console.warn('[chat-dispatch] approval snapshot (tasks) failed:', e.message); }
+  return out;
+}
+
+/**
+ * Pure diff between two snapshotPendingApprovals() results — no I/O, no
+ * Maps, no side effects, so this is unit-testable without staging a real
+ * destructive op or mocking a WS connection. Exported for tests.
+ *
+ * For each of the four kind families: a family that's pending in `after`
+ * and either wasn't pending in `before` or has a different description
+ * (a fresh re-stage) yields an `approval_pending` entry; a family that was
+ * pending in `before` but is gone in `after` yields `approval_resolved`.
+ * A family pending in both with an unchanged description yields nothing —
+ * this is what keeps a background-task tick (which never touches the
+ * pending maps) from re-announcing an already-shown pill every cycle.
+ *
+ * @param {Record<string, {phrase: string, description: string, expiresAt?: number|null}>} before
+ * @param {Record<string, {phrase: string, description: string, expiresAt?: number|null}>} after
+ * @returns {Array<{type: 'approval_pending'|'approval_resolved', kind: string, phrase?: string, description?: string, expiresAt?: number|null}>}
+ */
+export function diffPendingApprovals(before, after) {
+  const entries = /** @type {Array<{type: 'approval_pending'|'approval_resolved', kind: string, phrase?: string, description?: string, expiresAt?: number|null}>} */ ([]);
+  for (const kind of APPROVAL_KIND_ORDER) {
+    const b = before?.[kind] || null;
+    const a = after?.[kind] || null;
+    if (a && (!b || b.description !== a.description)) {
+      entries.push({ type: 'approval_pending', kind, phrase: a.phrase, description: a.description, expiresAt: a.expiresAt ?? null });
+    } else if (!a && b) {
+      entries.push({ type: 'approval_resolved', kind });
+    }
+  }
+  return entries;
+}
+
 function explicitlyWantsServerCoderStorage(text) {
   return /\b(?:server-side|oe-hosted|openensemble-hosted|inside\s+oe|in\s+oe|oe\s+project|coder\s+project|code\s+projects|\.openensemble|server\s+workspace|server\s+project)\b/i.test(String(text || ''));
 }
@@ -377,6 +470,12 @@ export async function handleChatMessage({
   const _attachmentForDecision = (rawAttachment?.file_id && source !== 'voice-device' && !_isRoutineFollowup)
     ? { file_id: rawAttachment.file_id, name: rawAttachment.name, mimeType: rawAttachment.mimeType }
     : null;
+
+  // Snapshot staged destructive-op approvals BEFORE the interceptor chain
+  // runs — tryApprovalIntercept executes-and-clears or clears-on-any-miss
+  // inside that chain. Diffed against the post-turn state in the finally
+  // below to drive the approval_pending / approval_resolved pill events.
+  const _pendingApprovalsBefore = await snapshotPendingApprovals(userId);
 
   // Hoisted above the outer try so the finally can always release the agent's
   // busy-slot. finalizeTurnOnce() is idempotent and a no-op until busySlot is
@@ -816,6 +915,28 @@ export async function handleChatMessage({
       const trace = finishTurn();
       if (trace) log.info('turn', 'summary', trace);
     } catch { /* never throw from the finalizer */ }
+
+    // Post-turn approval-pill diff (see snapshotPendingApprovals above). A
+    // family that's pending now — and wasn't already announced with this
+    // exact description — gets an approval_pending push; a family that WAS
+    // pending before this turn but is gone now (approved-and-executed, or
+    // cleared by the "say anything else to cancel" rule) gets
+    // approval_resolved so the frontend collapses that pill. Background/
+    // hidden turns skip tryApprovalIntercept entirely (see INTERCEPTORS
+    // above) so before === after for them and this is a silent no-op —
+    // exactly one push per real staging/resolution, never a re-announce on
+    // every background tick. New event types the firmware doesn't recognize
+    // ride through ws-handler unspoken (it only TTS's token/done/error).
+    try {
+      const pendingAfter = await snapshotPendingApprovals(userId);
+      for (const { type, kind, ...fields } of diffPendingApprovals(_pendingApprovalsBefore, pendingAfter)) {
+        const entry = { kind, ts: Date.now(), ...fields };
+        appendToSession(`${userId}_${agentId}`, { role: type, ...entry });
+        onEvent({ type, agent: agentId, ...entry });
+      }
+    } catch (e) {
+      console.warn('[chat-dispatch] approval-pill diff failed:', e.message);
+    }
 
     // Post-turn attachment save/discard prompt. Chat-upload always persists
     // to users/<id>/profile-files/{images,videos,audio,documents}/ — the

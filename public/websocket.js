@@ -204,7 +204,17 @@ function handleServerMessage(msg) {
           });
         }
       }
-      if (msg.agent === activeAgent) renderSession();
+      if (msg.agent === activeAgent) {
+        renderSession();
+        // Page-load / reconnect draft restore. session_loaded is the first
+        // point activeAgent's history is actually known to be settled — but
+        // it also refires on every reconnect, so only populate when the
+        // composer is empty; never clobber text the user is mid-typing
+        // while a reconnect happens to land.
+        if (typeof restoreDraftForAgent === 'function' && !$('input')?.value) {
+          restoreDraftForAgent(activeAgent);
+        }
+      }
       break;
     }
     case 'token':
@@ -430,6 +440,25 @@ function handleServerMessage(msg) {
       // needed. Status flow: pending → running → accepted | failed | dismissed.
       if (!msg.agent || msg.agent === activeAgent) {
         applyProposalOutcome(msg.proposalId, msg.status, msg.outcome);
+      }
+      break;
+    case 'approval_pending':
+      // Post-turn pending-approval pill (see chat-dispatch.mjs
+      // snapshotPendingApprovals). A destructive op staged behind a typed
+      // confirmation phrase (APPROVE PURGE / CONFIRM DELETION / APPROVE
+      // PROVEN / APPROVE WATCHER OP) — renders Approve/Cancel buttons that
+      // send a normal chat message, reusing the existing text intercept
+      // unchanged. Persisted to session jsonl so it survives reload.
+      if (!msg.agent || msg.agent === activeAgent) {
+        appendApprovalPendingBubble(msg);
+      }
+      break;
+    case 'approval_resolved':
+      // Server pushes this once the staged op is gone (approved-and-executed,
+      // or cleared by "say anything else to cancel") — mutates the matching
+      // pill in place rather than a fresh reload-only clear.
+      if (!msg.agent || msg.agent === activeAgent) {
+        applyApprovalResolved(msg.kind);
       }
       break;
     case 'attachment_decision':

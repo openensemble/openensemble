@@ -3,8 +3,12 @@
  * /api/inbox and /api/inbox/:id are handled by routes/email-accounts.mjs
  */
 
+import fs from 'fs';
+import path from 'path';
+import { USERS_DIR } from '../lib/paths.mjs';
 import { requireAuth, readBody, safeError } from './_helpers.mjs';
-import { loadConfig as loadAutoLabelConfig, saveConfig as saveAutoLabelConfig, startWatcher, stopWatcher, isWatcherRunning, startAllAccountWatchers } from '../gmail-autolabel.mjs';
+import { loadConfig as loadAutoLabelConfig, saveConfig as saveAutoLabelConfig, startWatcher, stopWatcher, isWatcherRunning, startAllAccountWatchers, undoLastBatch } from '../gmail-autolabel.mjs';
+import { tailActivity } from '../lib/gmail-autolabel-activity.mjs';
 import { getGmailAuthHeader } from '../lib/google-auth.mjs';
 
 export { getGmailAuthHeader };
@@ -41,8 +45,8 @@ export async function handle(req, res) {
     const cfg = loadAutoLabelConfig(authId);
     // Migrate legacy __default__ rules to the first Gmail account's real ID
     if (cfg.rulesByAccount?.['__default__']?.length) {
-      const accountsPath = path.join(BASE_DIR, `email-accounts-${authId}.json`);
       try {
+        const accountsPath = path.join(USERS_DIR, authId, 'email-accounts.json');
         const accounts = JSON.parse(fs.readFileSync(accountsPath, 'utf8'));
         const firstGmail = accounts.find(a => a.provider === 'gmail');
         if (firstGmail) {
@@ -106,16 +110,40 @@ export async function handle(req, res) {
   if (req.url === '/api/gmail/autolabel/rules' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
     try {
-      const { accountId, field, op, value, label } = JSON.parse(await readBody(req));
+      const { accountId, field, op, value, label, keepInbox } = JSON.parse(await readBody(req));
       if (!field || !op || !value || !label) { res.writeHead(400); res.end('Missing fields'); return true; }
       const cfg = loadAutoLabelConfig(authId);
       const key = accountId ?? '__default__';
       cfg.rulesByAccount = cfg.rulesByAccount ?? {};
       cfg.rulesByAccount[key] = cfg.rulesByAccount[key] ?? [];
-      cfg.rulesByAccount[key].push({ id: Date.now().toString(36), field, op, value, label });
+      // Default false — existing rules (and any client that doesn't send this
+      // field) keep today's archive-on-match behavior unchanged.
+      cfg.rulesByAccount[key].push({ id: Date.now().toString(36), field, op, value, label, keepInbox: !!keepInbox });
       saveAutoLabelConfig(authId, cfg);
       // Start a watcher for this account if auto-label is enabled and not already running
       if (cfg.enabled) startWatcher(authId, accountId ?? null);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ rules: cfg.rulesByAccount[key] }));
+    } catch (e) {
+      safeError(res, e);
+    }
+    return true;
+  }
+
+  // Update a single rule's keepInbox flag — the only field the UI lets you
+  // edit in place; everything else is delete-and-recreate.
+  if (req.url === '/api/gmail/autolabel/rules' && req.method === 'PATCH') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const { accountId, id, keepInbox } = JSON.parse(await readBody(req));
+      if (!id) { res.writeHead(400); res.end('Missing id'); return true; }
+      const cfg = loadAutoLabelConfig(authId);
+      const key = accountId ?? '__default__';
+      cfg.rulesByAccount = cfg.rulesByAccount ?? {};
+      const rule = (cfg.rulesByAccount[key] ?? []).find(r => r.id === id);
+      if (!rule) { res.writeHead(404); res.end('Rule not found'); return true; }
+      rule.keepInbox = !!keepInbox;
+      saveAutoLabelConfig(authId, cfg);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ rules: cfg.rulesByAccount[key] }));
     } catch (e) {
@@ -135,6 +163,41 @@ export async function handle(req, res) {
       saveAutoLabelConfig(authId, cfg);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ rules: cfg.rulesByAccount[key] }));
+    } catch (e) {
+      safeError(res, e);
+    }
+    return true;
+  }
+
+  // Recent activity trail (applied labels + skips) for the account currently
+  // selected in the UI. `accountId` query param is always sent by the UI
+  // (empty string for the default/legacy account) so results are scoped to
+  // one account; omit it entirely to get activity across all accounts.
+  if (req.url.split('?')[0] === '/api/gmail/autolabel/activity' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const params = new URL(req.url, 'http://x').searchParams;
+      const accountId = params.has('accountId') ? (params.get('accountId') || null) : undefined;
+      const limit = Math.min(Math.max(Number(params.get('limit')) || 50, 1), 200);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ activity: tailActivity(authId, { accountId, limit }) }));
+    } catch (e) {
+      safeError(res, e);
+    }
+    return true;
+  }
+
+  // Reverse the most recent poll-cycle batch for one account: re-adds INBOX
+  // where a message was archived and removes the label that was applied.
+  // Idempotent — see undoLastBatch() in gmail-autolabel.mjs.
+  if (req.url === '/api/gmail/autolabel/undo' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const raw = await readBody(req);
+      const { accountId } = raw ? JSON.parse(raw) : {};
+      const result = await undoLastBatch(authId, accountId ?? null);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     } catch (e) {
       safeError(res, e);
     }

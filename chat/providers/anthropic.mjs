@@ -7,7 +7,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry } from './_shared.mjs';
+import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry, capabilityNotice } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
@@ -141,11 +141,15 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       if ((res.status === 400 || res.status === 422) && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type|unknown variant/i.test(err)) {
         console.warn(`[anthropic] hosted web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        const notice = capabilityNotice('anthropic', 'native_search', 'Provider rejected native web search — continuing with the standard search tool.');
+        if (notice) yield notice;
         continue;
       }
       if (!reasoningDisabled && isReasoningUnsupportedError(res.status, err)) {
         console.warn('[anthropic] reasoning effort rejected; retrying without effort field');
         reasoningDisabled = true;
+        const notice = capabilityNotice('anthropic', 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');
+        if (notice) yield notice;
         continue;
       }
       yield { type: 'error', message: `Anthropic error ${res.status}: ${err}` };

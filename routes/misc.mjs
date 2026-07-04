@@ -8,6 +8,7 @@ import {
   requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole, isPrivileged,
   loadUsers, loadNotes, saveNotes, withLock, NOTES_PATH, readBody, safeId, BASE_DIR, getUserDir,
   broadcastToUsers, getUserSessions, revokeSessionByPrefix, getAgentsForUser,
+  clearUserSessionsExcept, clearUserVoiceDeviceSessions, clearUserNodeSessions,
 } from './_helpers.mjs';
 
 const MESSAGES_PATH = path.join(BASE_DIR, 'messages.json');
@@ -140,17 +141,40 @@ export async function handle(req, res) {
   }
 
   // ── Active session management ────────────────────────────────────────────
-  if (req.url === '/api/sessions' && req.method === 'GET') {
+  // Matched on pathname (not exact req.url) so `?includeDevices=1` doesn't
+  // break the match — req.url includes the query string.
+  if ((req.url === '/api/sessions' || req.url.startsWith('/api/sessions?')) && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const currentToken = getAuthToken(req);
+    const includeDevices = new URL(req.url, 'http://x').searchParams.get('includeDevices') === '1';
+    // Cheap display-name resolution for voice-device sessions: they carry
+    // deviceId (bound at pair time), so a single listDevices() lookup gets
+    // exact names. Node sessions carry no such id on the session record —
+    // the node registry (skills/nodes/node-registry.mjs) associates a token
+    // with a node via a hashed-token comparison, not an id on the session —
+    // so node sessions are labeled generically by kind + captured UA instead
+    // of an exact hostname. A future `getNodeByTokenPrefix`-style export
+    // would let this resolve exactly, mirroring the voice-device case.
+    let deviceNameById = new Map();
+    if (includeDevices) {
+      try {
+        const { listDevices } = await import('../lib/voice-devices.mjs');
+        deviceNameById = new Map(listDevices(authId).map(d => [d.id, d.name || null]));
+      } catch (e) { console.warn('[sessions] device name lookup failed:', e.message); }
+    }
     // Persistent-device tokens (nodes, voice devices) represent long-lived
-    // hardware registrations. They're managed by their own Settings pages;
+    // hardware registrations, normally managed by their own Settings pages —
     // revoking one from the Profile page would silently break the device.
+    // ?includeDevices=1 opts into seeing them here too (read-only; see the
+    // settings.js UI, which intentionally does not offer a per-row revoke
+    // for these — that must go through the device/node removal flow so an
+    // auto-revive can't resurrect a bare session revoke).
     const sessions = getUserSessions(authId)
-      .filter(s => s.kind !== 'node' && s.kind !== 'voice-device')
+      .filter(s => includeDevices || (s.kind !== 'node' && s.kind !== 'voice-device'))
       .map(s => ({
         ...s,
         current: currentToken?.startsWith(s.tokenPrefix.replace('…', '')) ?? false,
+        deviceName: s.kind === 'voice-device' && s.deviceId ? (deviceNameById.get(s.deviceId) ?? null) : null,
       }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(sessions));
@@ -170,6 +194,60 @@ export async function handle(req, res) {
       res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(ok ? { ok: true } : { error: 'Session not found' }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    return true;
+  }
+
+  // ── POST /api/sessions/revoke-all { includeHardware } ───────────────────
+  // "Log out everywhere." Always revokes every OTHER browser session (the
+  // caller's own current session is preserved via clearUserSessionsExcept,
+  // same as the self-service password-change flow in routes/users.mjs).
+  //
+  // When includeHardware is true, additionally wipes voice devices + nodes.
+  // ORDERING MATTERS: ws-handler.mjs auto-revives an expired/deleted
+  // voice-device session by matching the presented token's hash against the
+  // device record still sitting in voice-devices.json (see project note
+  // "Voice token auto-recover"). A revoke that only clears the session table
+  // is silently undone the next time the device reconnects. So for each
+  // device/node we remove the REGISTRY ENTRY FIRST (removeDevice / removeNode
+  // — this also revokes the node's/device's own tokenHash-based re-admission
+  // path and, for nodes, records a revocation so re-registration is refused
+  // outright), and only then bulk-clear the session-table entries for that
+  // kind. By the time a reconnect could happen, there is no registry entry
+  // left for auto-revive to match against.
+  if (req.url === '/api/sessions/revoke-all' && req.method === 'POST') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    let includeHardware = false;
+    try {
+      const raw = await readBody(req);
+      if (raw) includeHardware = JSON.parse(raw)?.includeHardware === true;
+    } catch { /* malformed/empty body — treat as includeHardware:false */ }
+
+    const currentToken = getAuthToken(req);
+    const browsers = clearUserSessionsExcept(authId, currentToken);
+
+    let devices = 0, nodes = 0;
+    if (includeHardware) {
+      try {
+        const { listDevices, removeDevice } = await import('../lib/voice-devices.mjs');
+        const deviceList = listDevices(authId);
+        for (const d of deviceList) removeDevice(authId, d.id); // registry entry gone BEFORE session revoke
+        devices = deviceList.length;
+        clearUserVoiceDeviceSessions(authId);
+      } catch (e) { console.warn('[sessions] revoke-all: voice-device cleanup failed:', e.message); }
+      try {
+        const { getNodes, removeNode, pushUninstall } = await import('../skills/nodes/node-registry.mjs');
+        const nodeList = getNodes(authId);
+        for (const n of nodeList) {
+          try { pushUninstall(n.nodeId, authId); } catch { /* best-effort; offline nodes just get revoked */ }
+          removeNode(n.nodeId, authId); // records revocation + closes any live WS BEFORE session revoke
+        }
+        nodes = nodeList.length;
+        clearUserNodeSessions(authId);
+      } catch (e) { console.warn('[sessions] revoke-all: node cleanup failed:', e.message); }
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, browsers, devices, nodes }));
     return true;
   }
 
@@ -728,6 +806,22 @@ export async function handle(req, res) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    return true;
+  }
+
+  // ── GET /api/tasks/:id/runs — per-task fire history (ok/error/skipped/late) ─
+  // Owner-scoped via findTaskById (same fail-closed lookup the other task
+  // routes use) so one user can't read another's run history by id-guessing.
+  const taskRunsMatch = req.url.match(/^\/api\/tasks\/([^/?]+)\/runs$/);
+  if (taskRunsMatch && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const id = decodeURIComponent(taskRunsMatch[1]);
+    const t = findTaskById(id, authId);
+    if (!t) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    const { loadTaskRuns } = await import('../lib/task-runs.mjs');
+    const runs = loadTaskRuns(authId, id).sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)).slice(0, 200);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(runs));
     return true;
   }
 

@@ -625,7 +625,8 @@ async function handleUpdateCode(args, userId) {
   const backupPath = execPath + '.bak';
 
   // Back up current code before overwriting
-  writeFileSync(backupPath, readFileSync(execPath));
+  const priorCode = readFileSync(execPath, 'utf8');
+  writeFileSync(backupPath, priorCode);
   writeFileSync(execPath, code);
 
   // Post-write smoke against the on-disk manifest. On any failure we
@@ -649,6 +650,15 @@ async function handleUpdateCode(args, userId) {
     }
   }
   rmSync(backupPath, { force: true });
+
+  // Versioned history — snapshot the version we just replaced (last
+  // HISTORY_KEEP kept). Independent of the crash-restore `.bak` above: `.bak`
+  // undoes a bad write WITHIN this call; history lets skill_rollback go back
+  // ACROSS calls. Best-effort — never blocks a successful update.
+  try {
+    const { snapshotToHistory } = await import('../../lib/skill-history.mjs');
+    snapshotToHistory(skillDir, 'execute.mjs', priorCode);
+  } catch (e) { console.warn('[skill-builder] history snapshot failed:', e.message); }
 
   clearExecutorCache(skillId, ownerId);
 
@@ -796,6 +806,14 @@ async function handlePatchCode(args, userId) {
   }
   rmSync(backupPath, { force: true });
 
+  // Versioned history — snapshot the version we just replaced (last
+  // HISTORY_KEEP kept). See skill_update_code for why this is separate
+  // from the crash-restore `.bak` above.
+  try {
+    const { snapshotToHistory } = await import('../../lib/skill-history.mjs');
+    snapshotToHistory(skillDir, 'execute.mjs', original);
+  } catch (e) { console.warn('[skill-builder] history snapshot failed:', e.message); }
+
   clearExecutorCache(skillId, ownerId);
 
   const n = edits.length;
@@ -894,6 +912,12 @@ async function handleUpdateToolDef(args, userId) {
   }
   rmSync(backupPath, { force: true });
 
+  // Versioned history — snapshot the manifest version we just replaced.
+  try {
+    const { snapshotToHistory } = await import('../../lib/skill-history.mjs');
+    snapshotToHistory(skillDir, 'manifest.json', original);
+  } catch (e) { console.warn('[skill-builder] history snapshot failed:', e.message); }
+
   try {
     const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
     appendEntry(ownerId, skillId, {
@@ -924,7 +948,8 @@ async function handleUpdateManifest(args, userId) {
   if (!manifest) return `Skill "${skillId}" not found. Use skill_list to see your skills.`;
 
   const ownerId = manifest.createdBy;
-  const manifestPath = path.join(userSkillsDir(ownerId), skillId, 'manifest.json');
+  const skillDir = path.join(userSkillsDir(ownerId), skillId);
+  const manifestPath = path.join(skillDir, 'manifest.json');
   if (!existsSync(manifestPath)) return `Skill "${skillId}" has no manifest.json on disk.`;
 
   let disk;
@@ -1014,6 +1039,12 @@ async function handleUpdateManifest(args, userId) {
   }
   rmSync(backupPath, { force: true });
 
+  // Versioned history — snapshot the manifest version we just replaced.
+  try {
+    const { snapshotToHistory } = await import('../../lib/skill-history.mjs');
+    snapshotToHistory(skillDir, 'manifest.json', original);
+  } catch (e) { console.warn('[skill-builder] history snapshot failed:', e.message); }
+
   if (Array.isArray(intent_examples)) {
     try {
       const { invalidateIntentEmbeddings, loadIntentEmbeddings } = await import('../../lib/specialist-embed-router.mjs');
@@ -1028,6 +1059,258 @@ async function handleUpdateManifest(args, userId) {
   } catch (e) { console.debug('[skill-builder] log append (manifest_update) failed:', e.message); }
 
   return `Skill "${manifest.name}" (${skillId}) manifest updated: ${changed.join(', ')}. Live on the next turn — for voice_device, the next voice turn re-reads the allowlist.${intentAuditTail}`;
+}
+
+// Resolve a custom skill manifest with the same owner/admin visibility rule
+// every skill-builder handler uses. Returns { manifest, ownerId } or a string
+// error message to return verbatim.
+async function _resolveOwnedSkill(skillId, userId) {
+  const { getRoleManifest, listAllRoles } = await import('../../roles.mjs');
+  let manifest = getRoleManifest(skillId, userId);
+  if (manifest && !manifest.custom) return 'Only user-created skills can be used with this tool.';
+  if (!manifest && isPrivileged(userId)) {
+    manifest = listAllRoles().find(m => m.id === skillId && m.custom) ?? null;
+  }
+  if (!manifest) return `Skill "${skillId}" not found. Use skill_list to see your skills.`;
+  return { manifest, ownerId: manifest.createdBy };
+}
+
+// ── skill_rollback ────────────────────────────────────────────────────────────
+//
+// List or restore a previous version of a skill's code or manifest, backed by
+// the `.history/` snapshots lib/skill-history.mjs writes on every accepted
+// skill_update_code / skill_patch_code / skill_update_tool_def /
+// skill_update_manifest call. No `version` → list; a `version` → restore
+// (snapshotting the CURRENT state first so the rollback itself is undoable),
+// then re-run the same post-write checks the update tools use.
+async function handleRollback(args, userId) {
+  const { skill: skillIdRaw, target, version } = args || {};
+  if (!skillIdRaw?.trim()) return 'skill is required.';
+  if (target !== 'code' && target !== 'manifest') return 'target must be "code" or "manifest".';
+  const skillId = skillIdRaw.trim();
+
+  const resolved = await _resolveOwnedSkill(skillId, userId);
+  if (typeof resolved === 'string') return resolved;
+  const { manifest, ownerId } = resolved;
+
+  const skillDir = path.join(userSkillsDir(ownerId), skillId);
+  const fileType = target === 'code' ? 'execute.mjs' : 'manifest.json';
+  const filePath = path.join(skillDir, fileType);
+  if (!existsSync(filePath)) return `Skill "${skillId}" has no ${fileType} on disk.`;
+
+  const { listHistorySnapshots, readHistorySnapshot, snapshotToHistory } = await import('../../lib/skill-history.mjs');
+
+  // No version → list.
+  if (version === undefined || version === null || version === '') {
+    const list = listHistorySnapshots(skillDir, fileType);
+    if (!list.length) {
+      return `No history snapshots yet for "${skillId}"'s ${fileType}. Snapshots are written automatically starting with the next skill_update_code / skill_patch_code / skill_update_tool_def / skill_update_manifest call on this skill.`;
+    }
+    const lines = list.map(s => `${s.index}. ${s.ts} (${s.size}b) — ${s.preview}`);
+    return `${fileType} history for "${skillId}" (newest first). Call skill_rollback({skill:"${skillId}", target:"${target}", version:<index or timestamp>}) to restore one:\n${lines.join('\n')}`;
+  }
+
+  const snap = readHistorySnapshot(skillDir, fileType, version);
+  if (snap === null) {
+    return `No history snapshots yet for "${skillId}"'s ${fileType}.`;
+  }
+  if (snap === undefined) {
+    const list = listHistorySnapshots(skillDir, fileType);
+    return `No snapshot matching version "${version}". Available: ${list.map(s => `${s.index} (${s.ts})`).join(', ')}.`;
+  }
+
+  const currentContent = readFileSync(filePath, 'utf8');
+  if (currentContent === snap.content) {
+    return `Skill "${skillId}"'s ${fileType} already matches snapshot #${snap.index} (${snap.ts}) — nothing to change.`;
+  }
+
+  // Snapshot the CURRENT (pre-rollback) state first — same discipline as
+  // every other write in this file — so the rollback itself is undoable.
+  try {
+    snapshotToHistory(skillDir, fileType, currentContent);
+  } catch (e) {
+    return `Could not snapshot the current state before rolling back — aborted so nothing was lost: ${e.message}`;
+  }
+
+  const backupPath = filePath + '.bak';
+  writeFileSync(backupPath, currentContent);
+
+  if (target === 'code') {
+    const { clearExecutorCache } = await import('../../roles.mjs');
+    let onDiskManifest = manifest;
+    try { onDiskManifest = JSON.parse(readFileSync(path.join(skillDir, 'manifest.json'), 'utf8')); }
+    catch { /* fall back to the in-memory manifest from roles */ }
+
+    // Same pre-write gates skill_update_code runs, against the restored code.
+    const gates = await runPreWriteGates(skillDir, onDiskManifest, snap.content, {
+      opName: `Rollback of "${skillId}" (code → snapshot #${snap.index}, ${snap.ts})`, skillId,
+    });
+    if (gates.block) {
+      rmSync(backupPath, { force: true });
+      return gates.block;
+    }
+
+    writeFileSync(filePath, snap.content);
+
+    // Same post-write smoke discipline as skill_update_code — revert on failure.
+    const { runSkillSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
+    const report = await runSkillSmoke(skillDir, onDiskManifest, { userId });
+    if (report.setupError) {
+      writeFileSync(filePath, currentContent);
+      rmSync(backupPath, { force: true });
+      return `Rollback target failed to load — reverted, nothing changed:\n\n${report.setupError}`;
+    }
+    if (!report.ok) {
+      writeFileSync(filePath, currentContent);
+      rmSync(backupPath, { force: true });
+      return `Smoke-test failures on the rollback target — reverted, nothing changed. The older code may be stale relative to the CURRENT manifest:\n\n${formatSmokeReport(report)}`;
+    }
+    rmSync(backupPath, { force: true });
+    clearExecutorCache(skillId, ownerId);
+
+    // Manifest-sync advisory (non-blocking): rolling back code can leave the
+    // unchanged current manifest describing behavior the restored code no
+    // longer has — same "keep the manifest in sync" rule as a manual patch.
+    let syncNote = '';
+    try {
+      const { validateManifestCode, formatManifestDiagnostics } = await import('../../lib/manifest-validator.mjs');
+      const r = validateManifestCode(onDiskManifest, snap.content);
+      if (!r.ok || r.diagnostics.length) {
+        syncNote = `\n\nManifest-sync check — the manifest may now be stale relative to the restored code:\n${formatManifestDiagnostics(r.diagnostics)}\nIf behavior actually changed, follow up with skill_update_tool_def / skill_update_manifest.`;
+      }
+    } catch { /* advisory only, never blocks */ }
+
+    try {
+      const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+      appendEntry(ownerId, skillId, { kind: 'rollback', summary: `code rolled back to snapshot #${snap.index} (${snap.ts})` });
+    } catch (e) { console.debug('[skill-builder] log append (rollback) failed:', e.message); }
+
+    const smokeNotes = report.results.some(r2 => r2.outcome !== 'pass') ? `\n\nSmoke notes:\n${formatSmokeReport(report)}` : '';
+    return `Skill "${manifest.name}" (${skillId}) code rolled back to snapshot #${snap.index} (${snap.ts}, "${snap.preview}") and hot-reloaded. The version that was live is itself snapshotted, so this is undoable.${smokeNotes}${syncNote}`;
+  }
+
+  // target === 'manifest'
+  let restoredManifest;
+  try { restoredManifest = JSON.parse(snap.content); }
+  catch (e) {
+    rmSync(backupPath, { force: true });
+    return `Snapshot #${snap.index} is not valid JSON — refusing to restore it: ${e.message}`;
+  }
+
+  const { addRoleManifest, clearExecutorCache } = await import('../../roles.mjs');
+  writeFileSync(filePath, snap.content);
+  try {
+    addRoleManifest(restoredManifest, ownerId);
+    clearExecutorCache(skillId, ownerId);
+  } catch (e) {
+    writeFileSync(filePath, currentContent);
+    rmSync(backupPath, { force: true });
+    return `Manifest rollback failed to register — reverted, nothing changed: ${e.message}`;
+  }
+  rmSync(backupPath, { force: true });
+
+  // Manifest-sync advisory against the CURRENT (unchanged) code.
+  let syncNote = '';
+  try {
+    const code = readFileSync(path.join(skillDir, 'execute.mjs'), 'utf8');
+    const { validateManifestCode, formatManifestDiagnostics } = await import('../../lib/manifest-validator.mjs');
+    const r = validateManifestCode(restoredManifest, code);
+    if (!r.ok || r.diagnostics.length) {
+      syncNote = `\n\nManifest-sync check — the restored manifest may not match the current code:\n${formatManifestDiagnostics(r.diagnostics)}`;
+    }
+  } catch { /* advisory only, never blocks */ }
+
+  if (restoredManifest.intent_examples?.length || manifest.intent_examples?.length) {
+    try {
+      const { invalidateIntentEmbeddings, loadIntentEmbeddings } = await import('../../lib/specialist-embed-router.mjs');
+      invalidateIntentEmbeddings();
+      loadIntentEmbeddings().catch(() => {});
+    } catch { /* best-effort */ }
+  }
+
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    appendEntry(ownerId, skillId, { kind: 'rollback', summary: `manifest rolled back to snapshot #${snap.index} (${snap.ts})` });
+  } catch (e) { console.debug('[skill-builder] log append (rollback) failed:', e.message); }
+
+  return `Skill "${manifest.name}" (${skillId}) manifest rolled back to snapshot #${snap.index} (${snap.ts}, "${snap.preview}") and re-registered live. The version that was live is itself snapshotted, so this is undoable.${syncNote}`;
+}
+
+// ── skill_try_tool ────────────────────────────────────────────────────────────
+//
+// Dry-run exactly ONE tool of a skill with the author's REAL args, through the
+// exact same execution path production uses: the bwrap jail + ctx broker (see
+// lib/skill-subprocess.mjs runCustomSkillSandboxed — the same function
+// roles.mjs's production dispatcher calls) for sandboxed skills, or the
+// in-process executor for a skill created with sandbox:false. Deliberately a
+// REAL execution — not a simulation — so a working call here means it will
+// actually work in production with those inputs.
+async function handleTryTool(args, userId) {
+  const { skill: skillIdRaw, tool: toolNameRaw, args: rawToolArgs, allowDestructive } = args || {};
+  if (!skillIdRaw?.trim()) return 'skill is required.';
+  if (!toolNameRaw?.trim()) return 'tool is required.';
+  const skillId = skillIdRaw.trim();
+  const toolName = toolNameRaw.trim();
+  const toolArgs = (rawToolArgs && typeof rawToolArgs === 'object' && !Array.isArray(rawToolArgs)) ? rawToolArgs : {};
+
+  const resolved = await _resolveOwnedSkill(skillId, userId);
+  if (typeof resolved === 'string') return resolved;
+  const { manifest, ownerId } = resolved;
+
+  const skillDir = path.join(userSkillsDir(ownerId), skillId);
+  const execPath = path.join(skillDir, 'execute.mjs');
+  if (!existsSync(execPath)) return `Skill "${skillId}" has no execute.mjs on disk.`;
+
+  let onDiskManifest = manifest;
+  try { onDiskManifest = JSON.parse(readFileSync(path.join(skillDir, 'manifest.json'), 'utf8')); }
+  catch { /* fall back to the in-memory manifest from roles */ }
+
+  const toolDef = (onDiskManifest.tools || []).find(t => t?.function?.name === toolName);
+  if (!toolDef) {
+    const known = (onDiskManifest.tools || []).map(t => t?.function?.name).filter(Boolean).join(', ');
+    return `Tool "${toolName}" not found on skill "${skillId}". Available tools: ${known || '(none)'}.`;
+  }
+  if (toolDef.destructive === true && allowDestructive !== true) {
+    return `⛔ "${toolName}" is marked destructive:true in the manifest — refusing to run it with real args unless allowDestructive:true is explicitly passed. This is a REAL execution against real side effects, not a simulation. Confirm with the user, then re-call with allowDestructive:true.`;
+  }
+
+  const { isSandboxedSkill, executeRoleTool } = await import('../../roles.mjs');
+  const isolated = isSandboxedSkill(skillId, ownerId);
+  const startedAt = Date.now();
+
+  if (isolated) {
+    // Identical call to what roles.mjs's production dispatcher makes for a
+    // sandboxed custom skill (runCustomSkillValue) — same jail, same
+    // ctx-broker allowlist, same net policy read straight off the manifest.
+    const { runCustomSkillSandboxed } = await import('../../lib/skill-subprocess.mjs');
+    const net = onDiskManifest?.sandbox?.network === true;
+    let r;
+    try {
+      r = await runCustomSkillSandboxed({ userId: ownerId, agentId: null, skillId, toolName, args: toolArgs, net });
+    } catch (e) {
+      return `Tool "${toolName}" threw after ${Date.now() - startedAt}ms: ${e.message}`;
+    }
+    const durationMs = Date.now() - startedAt;
+    const consoleText = String(r.stderr || '').trim();
+    const consoleBlock = consoleText
+      ? `\n\nCaptured console/stderr output (also written to this skill's runtime.log — skill_read_logs level:'console'):\n${consoleText.slice(0, 4000)}${consoleText.length > 4000 ? '\n…[truncated]' : ''}`
+      : '\n\n(no console output captured)';
+    if (!r.ok) return `Tool "${toolName}" FAILED after ${durationMs}ms (sandboxed):\n${r.error}${consoleBlock}`;
+    const resultText = typeof r.result === 'string' ? r.result : JSON.stringify(r.result, null, 2);
+    return `Tool "${toolName}" ran in ${durationMs}ms (real sandboxed execution). Result:\n${resultText}${consoleBlock}`;
+  }
+
+  // Trusted (sandbox:false) skill — same in-process path production uses.
+  // Console output from a trusted skill already prints straight into the
+  // main server process (app.log), so there's nothing extra to capture here.
+  try {
+    const result = await executeRoleTool(toolName, toolArgs, ownerId, null);
+    const durationMs = Date.now() - startedAt;
+    const resultText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+    return `Tool "${toolName}" ran in ${durationMs}ms (real in-process execution, untrusted-sandbox opted out). Result:\n${resultText}\n\n(console output from a trusted skill goes to the main app.log, not captured here — sandboxed skills capture it automatically.)`;
+  } catch (e) {
+    return `Tool "${toolName}" THREW after ${Date.now() - startedAt}ms: ${e.message}`;
+  }
 }
 
 async function handleDelete(args, userId) {
@@ -1401,9 +1684,9 @@ export async function executeSkillTool(name, args, userId, agentId) {
   // network privilege. Until validation is sandboxed (worker thread or static
   // analysis), restrict authorship to owner/admin so a prompt-injected child
   // or guest account can't write code-execution into the install.
-  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_update_tool_def', 'skill_delete']);
+  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_update_tool_def', 'skill_delete', 'skill_rollback', 'skill_try_tool']);
   if (CODE_AUTHORING.has(name) && !isPrivileged(userId)) {
-    return 'Permission denied: skill authoring (create/update/patch/delete) is restricted to admin/owner accounts.';
+    return 'Permission denied: skill authoring (create/update/patch/delete/rollback/try) is restricted to admin/owner accounts.';
   }
 
   try {
@@ -1414,6 +1697,8 @@ export async function executeSkillTool(name, args, userId, agentId) {
     if (name === 'skill_patch_code')        return await handlePatchCode(args, userId);
     if (name === 'skill_update_tool_def')   return await handleUpdateToolDef(args, userId);
     if (name === 'skill_update_manifest')   return await handleUpdateManifest(args, userId);
+    if (name === 'skill_rollback')          return await handleRollback(args, userId);
+    if (name === 'skill_try_tool')          return await handleTryTool(args, userId);
     if (name === 'skill_delete')            return await handleDelete(args, userId);
     if (name === 'skill_list')              return await handleList(userId);
     if (name === 'skill_draft_start')       return await handleDraftStart(args, userId);

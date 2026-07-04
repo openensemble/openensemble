@@ -19,6 +19,9 @@ import {
   CFG_PATH, USERS_PATH, ACTIVITY_DIR, NOTES_PATH, EXPENSES_DB, EXPENSE_GROUPS_PATH,
   getAgentsForUser, getUserCoordinatorAgentId, getClientIp,
 } from './_helpers.mjs';
+// uaFromReq isn't re-exported by the ._helpers.mjs aggregator yet — import
+// straight from the submodule (see routes/_helpers/auth-sessions.mjs).
+import { uaFromReq } from './_helpers/auth-sessions.mjs';
 import { getDefaultRoles, listAllRoles } from '../roles.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
 import { listTurnTrees, getTurnDetail } from '../lib/turn-trace-reader.mjs';
@@ -534,7 +537,7 @@ export async function handle(req, res) {
       const agentsDir = path.join(BASE_DIR, 'agents');
       if (!fs.existsSync(agentsDir)) fs.mkdirSync(agentsDir, { recursive: true });
       fs.writeFileSync(path.join(agentsDir, `${id}.json`), '[]');
-      const sessionToken = createSession(id);
+      const sessionToken = createSession(id, { ua: uaFromReq(req) });
       setSessionCookie(req, res, sessionToken);
       const { passwordHash: _ph, pinHash: _pin, ...safeUser } = newUser;
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ token: sessionToken, user: { ...safeUser, hasPin: !!pinHash } }));

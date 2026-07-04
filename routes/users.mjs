@@ -13,6 +13,9 @@ import {
   safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB, getClientIp,
   setSessionCookie,
 } from './_helpers.mjs';
+// uaFromReq isn't re-exported by the ._helpers.mjs aggregator yet — import
+// straight from the submodule (see routes/_helpers/auth-sessions.mjs).
+import { uaFromReq } from './_helpers/auth-sessions.mjs';
 import { migrateSharedCortexToUser } from '../memory.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -461,7 +464,7 @@ export async function handle(req, res) {
       }
       if (targetUser.locked) { res.writeHead(403); res.end(JSON.stringify({ error: 'Account is locked' })); return true; }
       if (isTimeBlocked(targetUser.accessSchedule)) { res.writeHead(403); res.end(JSON.stringify({ error: 'Access is restricted at this time' })); return true; }
-      const token = createSession(targetId);
+      const token = createSession(targetId, { ua: uaFromReq(req) });
       setSessionCookie(req, res, token);
       const safe = sanitizeUserForWire(targetUser);
       res.writeHead(200, { 'Content-Type': 'application/json' });

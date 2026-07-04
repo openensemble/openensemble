@@ -12,6 +12,16 @@ import { withLock, atomicWriteSync, getAgentsForUser, getUser, isUserTimeBlocked
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { log } from './logger.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
+import { appendTaskRun } from './lib/task-runs.mjs';
+
+// Run-history is only meaningful for user-owned tasks — system tasks (owned
+// by the 'system' pseudo-owner) live outside any user's directory and have
+// no per-user drawer to read this back from.
+function recordTaskRun(task, row) {
+  if (!task?.ownerId || !String(task.ownerId).startsWith('user_')) return;
+  appendTaskRun(task.ownerId, { taskId: task.id, taskName: task.label, ...row })
+    .catch(e => console.warn('[scheduler] appendTaskRun failed:', e.message));
+}
 
 const TASKS_DIR      = path.join(BASE_DIR, 'tasks'); // legacy fallback
 const TASKS_LOCK_KEY = path.join(BASE_DIR, 'tasks.lock');
@@ -400,6 +410,7 @@ async function runTask(task, broadcast, opts = {}) {
         const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][day];
         console.log(`[scheduler] Task "${task.label}" skipped — dow="${task.dow}", today is ${dayName}`);
         await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: `Skipped: ${dayName} not in dow=${task.dow}` });
+        recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: `Skipped: ${dayName} not in dow=${task.dow}` });
         return;
       }
       // Legacy boolean fallback for tasks created before the dow field was added.
@@ -407,11 +418,13 @@ async function runTask(task, broadcast, opts = {}) {
         if (task.weekdaysOnly && (day === 0 || day === 6)) {
           console.log(`[scheduler] Task "${task.label}" skipped — weekdaysOnly, today is ${day === 0 ? 'Sunday' : 'Saturday'}`);
           await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: 'Skipped: weekend (weekdaysOnly)' });
+          recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: 'Skipped: weekend (weekdaysOnly)' });
           return;
         }
         if (task.weekendsOnly && day >= 1 && day <= 5) {
           console.log(`[scheduler] Task "${task.label}" skipped — weekendsOnly, today is a weekday`);
           await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: 'Skipped: weekday (weekendsOnly)' });
+          recordTaskRun(task, { scheduledFor: task.time ?? null, status: 'skipped', error: 'Skipped: weekday (weekendsOnly)' });
           return;
         }
       }
@@ -423,6 +436,7 @@ async function runTask(task, broadcast, opts = {}) {
     if (!manual && task.ownerId && isUserTimeBlocked(task.ownerId)) {
       console.log(`[scheduler] Task "${task.label}" skipped — owner ${task.ownerId} is in scheduled blocked hours.`);
       log.info('scheduler', 'task skipped (time-blocked)', { taskId: task.id, label: task.label, ownerId: task.ownerId });
+      recordTaskRun(task, { scheduledFor: task.datetime ?? task.time ?? null, status: 'skipped', error: 'Skipped: access restricted at this time' });
       // One-shot tasks vanish after firing (or being skipped); daily tasks
       // keep their lastRun/lastOutput so the user can see they ran.
       if (task.repeat === 'once') await removeTask(task.id);
@@ -644,6 +658,13 @@ async function finalizeScheduledTask(task, { succeeded, output, lastError, manua
     }
   }
 
+  recordTaskRun(task, {
+    scheduledFor: task.datetime ?? task.time ?? null,
+    status: succeeded ? 'ok' : 'error',
+    ...(succeeded ? {} : { error: lastError || 'unknown' }),
+    ...(manual ? { manual: true } : {}),
+  });
+
   if (manual) {
     // Test fire: never delete or disable. Record the outcome for the drawer
     // but leave the schedule + failure streak exactly as they were.
@@ -724,15 +745,31 @@ function findFreshScheduledTask(task) {
 
 // Schedule a single task (schedules → runs → reschedules daily, or runs once)
 function scheduleTask(task, broadcast) {
-  if (!task.enabled) return;
+  if (!task.enabled) {
+    // A disabled task has no armed timer, so any nextRunAt left over from
+    // before it was disabled is stale — clear it so the drawer doesn't show
+    // a "next run" time that will never happen.
+    if (task.nextRunAt) updateTask(task.id, { nextRunAt: null }).catch(() => {});
+    return;
+  }
 
   // Clear any existing timer for this task before scheduling a new one
   if (_timers.has(task.id)) { clearTimeout(_timers.get(task.id)); _timers.delete(task.id); }
 
   let delay, label;
+  let isLateOnce = false, lateByMs = 0;
   if (task.repeat === 'once') {
     if (!task.datetime) return;
-    delay = msUntilDatetime(task.datetime);
+    // msUntilDatetime clamps a past-due datetime to 0 so the timer fires on
+    // the next tick — correct behavior (a one-shot is never silently
+    // dropped), but pre-this-change nothing recorded that it was late (e.g.
+    // the server was down through the requested time). Capture the raw
+    // (possibly negative) delay here, at arm time, so the fire callback below
+    // can log + record it without changing when it actually fires.
+    const rawDelay = new Date(task.datetime).getTime() - Date.now();
+    delay = Math.max(rawDelay, 0);
+    isLateOnce = rawDelay < 0;
+    lateByMs = isLateOnce ? -rawDelay : 0;
     label = new Date(task.datetime).toLocaleString();
   } else if (task.repeat === 'interval') {
     // Fixed-cadence tasks: anchored to lastRun, not to boot. Arming a full
@@ -768,13 +805,25 @@ function scheduleTask(task, broadcast) {
 
   const eta = new Date(Date.now() + delay);
   console.log(`[scheduler] "${task.label}" scheduled for ${label} (runs at: ${eta.toLocaleString()})`);
+  // Persist so the drawer / API can show "next run" instead of only the
+  // console log. Fire-and-forget: scheduleTask is called synchronously from
+  // hot paths (boot arm loop, every re-arm after a fire, every PATCH), and a
+  // slow write here must not delay arming the next task's timer.
+  updateTask(task.id, { nextRunAt: eta.toISOString() }).catch(e =>
+    console.warn(`[scheduler] Failed to persist nextRunAt for "${task.label}":`, e.message));
 
   scheduleLongTimeout(task.id, delay, async () => {
     _timers.delete(task.id);
     if (!_schedulerRunning) return;
     try {
       const current = findFreshScheduledTask(task);
-      if (current?.enabled) await runTask(current, broadcast);
+      if (current?.enabled) {
+        if (isLateOnce) {
+          log.warn('scheduler', 'one-shot task armed past its due time — firing immediately', { taskId: task.id, label: task.label, lateByMs });
+          recordTaskRun(current, { scheduledFor: current.datetime ?? null, firedAt: Date.now(), status: 'late', lateByMs });
+        }
+        await runTask(current, broadcast);
+      }
     } catch (e) {
       const err = e?.message || String(e);
       console.error(`[scheduler] Task timer for "${task.label}" failed:`, err);

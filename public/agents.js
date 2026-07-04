@@ -112,6 +112,7 @@ function buildAgentDrawer() {
 
 function switchAgent(id) {
   if (id === activeAgent) { closeAllDrawers(); return; }
+  if (typeof saveDraftForAgent === 'function') saveDraftForAgent(activeAgent); // chat.js: per-agent composer draft
   // A reply streaming into a tutor widget must be released before we leave —
   // otherwise _activeWidgetTarget stays armed and the next reply (on any
   // agent) routes into a widget element that no longer exists. If the turn is
@@ -134,6 +135,7 @@ function switchAgent(id) {
     agentStreams[activeAgent] = { buf: widgetBuf || streamBuf, toolNames: savedToolNames, active: true };
   }
   activeAgent = id;
+  if (typeof restoreDraftForAgent === 'function') restoreDraftForAgent(id); // chat.js: per-agent composer draft
   streamEl = null; streamBuf = ''; toolPillsEl = null;
   _historyWindow = HISTORY_RENDER_WINDOW; // new pane starts at the base window
   buildTabs();

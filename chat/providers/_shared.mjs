@@ -162,6 +162,34 @@ export async function fetchWithRetry(url, opts = {}, { tries = 3, label = 'provi
   throw lastErr ?? new Error(`${label}: retries exhausted`);
 }
 
+// ── Self-healing notices ─────────────────────────────────────────────────────
+// A provider adapter silently downgrading a request (dropping native web
+// search, dropping reasoning-effort, renaming a rejected parameter) used to
+// be console.warn-only — the user just felt their agent lose a capability
+// with no explanation. capabilityNotice() turns the FIRST occurrence of a
+// given (provider, capability) rejection into a one-line event; every
+// subsequent occurrence for the same pair returns null (the existing
+// per-turn retry latch already prevents the actual retry loop, this just
+// prevents re-toasting on every future turn for the life of the process).
+//
+// Wire format reuses the existing `cortex_warning` WS event (see
+// lib/runtime-warn.mjs) rather than inventing a new type: the frontend
+// already renders it as an ephemeral showToast() with no persistent
+// notification-center entry, and both of the send paths that can carry it
+// (ws-handler.mjs's per-turn onEvent fan-out, and broadcast/sendToUser)
+// explicitly skip voice-device sockets — so it can never reach a voice
+// device, let alone be spoken (only `token`/`error`/`done` events feed the
+// TTS streamer; anything else — this included — is either dropped for
+// voice-suppressed turns or forwarded as an inert JSON frame the firmware
+// doesn't act on, same as `tool_progress`/`tool_call` already are today).
+const _notifiedCapabilities = new Set();
+export function capabilityNotice(provider, capability, message) {
+  const key = `${provider}:${capability}`;
+  if (_notifiedCapabilities.has(key)) return null;
+  _notifiedCapabilities.add(key);
+  return { type: 'cortex_warning', message };
+}
+
 // ── Stream readers ───────────────────────────────────────────────────────────
 
 // Read an NDJSON (newline-delimited JSON) stream from a Response body

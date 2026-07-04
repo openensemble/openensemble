@@ -70,6 +70,7 @@
     "list_profile_files",
     "read_profile_file",
     "oe_admin_read_blueprint",
+    "admin_diagnose_tool",
     "add_provider",
     "list_user_providers",
     "install_integration",

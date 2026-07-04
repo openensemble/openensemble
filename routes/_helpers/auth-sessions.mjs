@@ -102,14 +102,27 @@ export function isPersistentDeviceKind(kind) {
   return kind === 'node' || kind === 'voice-device';
 }
 
-export function createSession(userId, { kind = 'browser', deviceId = null } = {}) {
+// Truncate a request's User-Agent for storage on the session record. Kept as
+// a shared helper (rather than `.slice(0, 120)` repeated at every call site)
+// so all five createSession callers truncate identically. Not a security
+// boundary — just a display-length cap for the sessions list.
+const UA_MAX_LEN = 120;
+export function uaFromReq(req) {
+  const ua = req?.headers?.['user-agent'];
+  return typeof ua === 'string' && ua.trim() ? ua.trim().slice(0, UA_MAX_LEN) : null;
+}
+
+export function createSession(userId, { kind = 'browser', deviceId = null, ua = null, label = null } = {}) {
   const token = randomBytes(32).toString('hex');
   const now = Date.now();
   const expires = now + 7 * 24 * 60 * 60 * 1000;
   // deviceId is captured for voice-device + node sessions so the WS handler
   // can route per-device behavior (e.g. slot_agent_map lookup on wake events)
   // without re-querying the device registry by token prefix every message.
-  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now, deviceId });
+  // ua/label are display-only metadata for the sessions list (richer than a
+  // bare token prefix) — never used for auth decisions. Sessions created
+  // before this field existed simply read back as null (see getUserSessions).
+  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now, deviceId, ua: ua || null, label: label || null });
   persistSessions();
   return token;
 }
@@ -122,11 +135,11 @@ export function createSession(userId, { kind = 'browser', deviceId = null } = {}
  * using the token already in its NVS — no firmware change, no new token to push.
  * Caller is responsible for verifying the token's owner before calling this.
  */
-export function adoptSession(token, { userId, deviceId = null, kind = 'voice-device' } = {}) {
+export function adoptSession(token, { userId, deviceId = null, kind = 'voice-device', ua = null, label = null } = {}) {
   if (!token || !userId) return false;
   const now = Date.now();
   const expires = now + 7 * 24 * 60 * 60 * 1000;
-  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now, deviceId });
+  sessions.set(token, { userId, expires, lastActivity: now, kind, createdAt: now, deviceId, ua: ua || null, label: label || null });
   persistSessions();
   return true;
 }
@@ -290,10 +303,12 @@ export function deleteSessionByToken(token) {
  * clearUserSessions.
  */
 export function clearUserSessionsExcept(userId, exceptToken) {
+  let removed = 0;
   for (const [token, s] of sessions) {
-    if (s.userId === userId && token !== exceptToken && !isPersistentDeviceKind(s.kind)) sessions.delete(token);
+    if (s.userId === userId && token !== exceptToken && !isPersistentDeviceKind(s.kind)) { sessions.delete(token); removed++; }
   }
   persistSessions();
+  return removed;
 }
 
 export function getUserSessions(userId) {
@@ -304,6 +319,12 @@ export function getUserSessions(userId) {
     result.push({
       tokenPrefix: token.slice(0, 8) + '…',
       kind: s.kind || 'browser',
+      // deviceId/ua/label are null-guarded: sessions persisted before these
+      // fields existed (active-sessions.json survives across deploys) won't
+      // have them, so every reader must tolerate undefined here.
+      deviceId: s.deviceId ?? null,
+      ua: s.ua ?? null,
+      label: s.label ?? null,
       createdAt: new Date(s.expires - 7 * 24 * 60 * 60 * 1000).toISOString(),
       lastActivity: s.lastActivity ? new Date(s.lastActivity).toISOString() : null,
       expiresAt: new Date(s.expires).toISOString(),

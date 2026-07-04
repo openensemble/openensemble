@@ -45,6 +45,7 @@ import {
   start as startTunnel, stop as stopTunnel, setEnabled as setTunnelEnabled,
 } from '../../lib/tunnel.mjs';
 import { log } from '../../logger.mjs';
+import { walkToolGates, formatGateWalkReport } from '../../lib/tool-gate-walker.mjs';
 
 const BLUEPRINT_PATH    = path.join(BASE_DIR, 'skills', 'oe-admin', 'OE_ADMIN_BLUEPRINT.md');
 const INTEGRATIONS_DIR  = path.join(BASE_DIR, 'skills', 'oe-admin', 'integrations');
@@ -699,6 +700,32 @@ async function handleTunnelStop(args, userId) {
   }
 }
 
+// ── Tool: admin_diagnose_tool ────────────────────────────────────────────────
+// Read-only GATE-WALKER diagnostic — see lib/tool-gate-walker.mjs. Diagnoses
+// a DIFFERENT (tool, agent, user) triple than the one calling this tool, so
+// `targetUserId` defaults to the caller's own id but can target any user
+// (this handler is already admin-gated by executeSkillTool's top-level
+// requirePrivilegedTool check).
+
+async function handleDiagnoseTool(args, userId) {
+  const { toolName, agentId, targetUserId, source, sampleText } = args ?? {};
+  if (!toolName || typeof toolName !== 'string') return 'toolName is required.';
+  if (!agentId || typeof agentId !== 'string') return 'agentId is required.';
+  const diagUserId = (typeof targetUserId === 'string' && targetUserId.trim()) ? targetUserId.trim() : userId;
+  const validSources = new Set(['browser', 'voice-device', 'telegram', 'desktop-app']);
+  const diagSource = validSources.has(source) ? source : null;
+  try {
+    const result = await walkToolGates({
+      toolName, agentId, userId: diagUserId,
+      source: diagSource,
+      sampleText: (typeof sampleText === 'string' && sampleText.trim()) ? sampleText.trim() : null,
+    });
+    return formatGateWalkReport(result);
+  } catch (e) {
+    return `admin_diagnose_tool failed: ${e.message}`;
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export async function executeSkillTool(name, args, userId, agentId) {
@@ -726,6 +753,7 @@ export async function executeSkillTool(name, args, userId, agentId) {
     if (name === 'tunnel_configure')        return await handleTunnelConfigure(args, userId);
     if (name === 'tunnel_start')            return await handleTunnelStart(args, userId);
     if (name === 'tunnel_stop')             return await handleTunnelStop(args, userId);
+    if (name === 'admin_diagnose_tool')     return await handleDiagnoseTool(args, userId);
     return null;
   } catch (e) {
     log.error('oe-admin', `${name} failed`, { err: e.message, stack: e.stack?.slice(0, 400) });

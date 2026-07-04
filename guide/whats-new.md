@@ -8,6 +8,33 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-04
 
+**Destructive actions now show an approval card**
+When the assistant stages something destructive (purging a sender's email, deleting transactions, promoting a service to trusted, cancelling another agent's watcher), a card now appears with Approve and Cancel buttons — no more typing "APPROVE PURGE" from memory, no more losing the staged action to a typo. Typing the phrase still works, and the card survives a page reload.
+
+**Drafts follow their agent; attach multiple files**
+A half-typed message now stays with the agent you typed it for — switch away and back, or reload, and it's still there. The attach button accepts multiple files with a tray showing each one (sent one per message for now).
+
+**Scheduled tasks: see what happened and what's next**
+Every task now records a run history — fired on time, fired late (and by how much), failed, or skipped and why — so "why didn't Tuesday's briefing arrive?" finally has an answer. Tasks also expose their next run time, and the desktop widget shows it along with a warning badge when a task keeps failing.
+
+**Background work survives restarts**
+Completed background delegations and workers are now remembered for 7 days — a server restart or a busy day no longer erases what finished and how. Workers spawned during a scheduled task are also now properly waited on, so a scheduled run can't report "done" while its worker is still going.
+
+**Email auto-labeling you can trust**
+Auto-label rules can now keep messages in your inbox (per-rule setting), the poller respects what you've taught the assistant about senders (a learned correction beats a rule; learned keep-inbox is honored), every action is recorded in an activity view, and "put the last batch back" undoes the most recent run.
+
+**Self-healing is no longer silent**
+When a provider rejects a capability (native web search, reasoning effort), a login token refreshes itself, or proposal suggestions pause because they weren't landing, you now get a one-line toast instead of silence.
+
+**Skill authoring: undo button and test bench**
+Skill code and manifest changes now keep the last 10 versions — `skill_rollback` lists and restores them. New `skill_try_tool` runs a single tool with real arguments through the production sandbox before you rely on it. And console output from skill runs is saved to the skill's log even when the run "succeeds," so successful-but-wrong is debuggable.
+
+**"Why didn't my tool get called?"**
+A new admin diagnostic walks all ~12 gates a tool must pass (manifest, bundling, allowlists, per-turn trimming, voice allowlist, intent routing…) and names the first one that dropped it — ask "why isn't my tool being called?" and the assistant can now actually tell you.
+
+**Sessions you can recognize — and revoke everywhere**
+The session list now shows what each session is (browser, node, voice device — with names). One "Log out everywhere" button revokes all other browser sessions, and optionally unpairs voice devices and nodes too (they can't sneak back in — re-pairing is required).
+
 **Conversations no longer end early on routed answers**
 In conversation mode, replies that were routed to a specialist behind the scenes (calendar, email, weather, and friends) now keep the listen window open just like direct answers — previously any routed reply silently ended the conversation. Timer disambiguation ("the 5 or 10 minute one?") also now holds the mic open for the full 30 seconds it will accept your pick, even with conversation mode off — no wake word needed to answer.
 

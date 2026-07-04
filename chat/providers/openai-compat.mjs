@@ -16,6 +16,7 @@ import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '.
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 import { applyOpenAICompatReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
+import { capabilityNotice } from './_shared.mjs';
 
 export async function* streamOpenAICompat(providerKey, agent, systemPrompt, messages, signal, userId = 'default') {
   const cfg = OPENAI_COMPAT_PROVIDERS[providerKey];
@@ -100,6 +101,8 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       if ((res.status === 400 || res.status === 422) && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type|unknown variant/i.test(errText)) {
         console.warn(`[${providerKey}] native web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        const notice = capabilityNotice(providerKey, 'native_search', 'Provider rejected native web search — continuing with the standard search tool.');
+        if (notice) yield notice;
         continue;
       }
       // These two must run BEFORE the reasoning check: their rejection text
@@ -108,16 +111,22 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       if (!useMaxCompletionTokens && body.max_tokens !== undefined && res.status === 400 && /max_completion_tokens/i.test(errText)) {
         console.warn(`[${providerKey}] max_tokens rejected for ${agent.model}; retrying with max_completion_tokens`);
         useMaxCompletionTokens = true;
+        const notice = capabilityNotice(providerKey, 'max_completion_tokens', 'Provider rejected the max_tokens parameter — retrying with its expected name.');
+        if (notice) yield notice;
         continue;
       }
       if (!streamUsageDisabled && (res.status === 400 || res.status === 422) && /stream_options/i.test(errText)) {
         console.warn(`[${providerKey}] stream_options rejected; retrying without usage reporting`);
         streamUsageDisabled = true;
+        const notice = capabilityNotice(providerKey, 'stream_options', 'Provider rejected usage reporting — continuing without token-usage stats for this provider.');
+        if (notice) yield notice;
         continue;
       }
       if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
         console.warn(`[${providerKey}] reasoning effort rejected; retrying without reasoning field`);
         reasoningDisabled = true;
+        const notice = capabilityNotice(providerKey, 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');
+        if (notice) yield notice;
         continue;
       }
       yield { type: 'error', message: `${cfg.displayName} error ${res.status}: ${errText}` };

@@ -7,6 +7,9 @@ import {
   createSession, createMediaToken, deleteSession, verifyPassword, readBody, isTimeBlocked,
   setSessionCookie, clearSessionCookie, getClientIp,
 } from './_helpers.mjs';
+// uaFromReq is imported directly from the submodule (not yet re-exported by
+// the ._helpers.mjs aggregator) — see routes/_helpers/auth-sessions.mjs.
+import { uaFromReq } from './_helpers/auth-sessions.mjs';
 import { log } from '../logger.mjs';
 
 // ── Rate limiting for login ──────────────────────────────────────────────────
@@ -99,7 +102,7 @@ export async function handle(req, res) {
         log.warn('auth', 'login blocked (time-restricted)', { ip, userId });
         res.writeHead(403); res.end(JSON.stringify({ error: 'Access is restricted at this time' })); return true;
       }
-      const token = createSession(userId);
+      const token = createSession(userId, { ua: uaFromReq(req) });
       setSessionCookie(req, res, token);
       const safe = sanitizeUserForWire(user);
       log.info('auth', 'login ok', { ip, userId, role: user.role });

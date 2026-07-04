@@ -1,11 +1,83 @@
 // ── Attachment state ──────────────────────────────────────────────────────────
-let pendingAttachment = null; // { id, name, mimeType, base64, extractedText, isImage, isFinanceFile }
+// Array, not a single slot — index.html's #chatFileInput now has `multiple`,
+// and drag-drop/paste can each add one more on top. Each item is the raw
+// /api/chat-upload response ({ name, mimeType, isImage, isFinanceFile,
+// file_id, base64, extractedText }) plus a client-only `_localKey` (tray
+// remove-button identity) and `_uploading` while its upload is in flight.
+//
+// SEND CONTRACT LIMITATION (see send()): the server's chat message wire
+// shape and every downstream consumer (chat.mjs streamChat, the per-provider
+// vision-image branches, chat-dispatch's financePreprocess) still take a
+// single `attachment` object, not an array — extending that thread would
+// touch chat-dispatch/llm-loop.mjs (owned by another agent this session) and
+// ws-handler.mjs (outside this change's file ownership). Rather than half-
+// wire an array the server can't consume, only the FIRST queued attachment
+// is sent with a given message (shiftSentAttachment then drops it from the
+// tray); any remaining files stay queued for the user's next message. The
+// tray note makes this explicit rather than silently dropping files.
+let pendingAttachments = [];
 // Retry-on-error state. A failed turn is never persisted server-side (the LLM
 // never sees it), so recovery is purely client-side: we remember the last
 // outgoing message and, if it errors, keep it on screen with a Retry button
 // until the user retries or types a fresh message.
 let lastSentAttempt = null; // { agent, text, attachment, userBubbleEl, sessionEntry } — in flight
 let failedAttempt = null;   // same shape + errorEl — set once a turn has errored
+
+// ── Per-agent draft persistence ──────────────────────────────────────────────
+// The composer is one shared <textarea> — without this, a half-typed message
+// silently follows the user across agent tabs and evaporates on reload.
+// Keyed by agent id in localStorage so it survives reload. Saved debounced on
+// every keystroke; switchAgent (public/agents.js) also calls saveDraftForAgent
+// synchronously right before it swaps activeAgent, so a fast switch can't
+// lose the last few keystrokes to a pending debounce timer. Cleared once a
+// message actually sends (see send()); restored on agent switch (same
+// switchAgent hook) and on page load / reconnect (websocket.js session_loaded).
+const DRAFT_STORAGE_KEY = 'oe.composerDrafts.v1';
+const DRAFT_SAVE_DEBOUNCE_MS = 400;
+let _draftSaveTimer = null;
+
+function _loadDrafts() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) || '{}'); } catch { return {}; }
+}
+function _writeDrafts(drafts) {
+  // localStorage can throw (Safari private mode, quota exceeded) — a draft
+  // failing to save must never interrupt typing or sending.
+  try { localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts)); } catch {}
+}
+
+function saveDraftForAgent(agentId) {
+  if (!agentId) return;
+  const text = $('input')?.value ?? '';
+  const drafts = _loadDrafts();
+  if (text) drafts[agentId] = text; else delete drafts[agentId];
+  _writeDrafts(drafts);
+}
+
+function restoreDraftForAgent(agentId) {
+  const input = $('input');
+  if (!input || !agentId) return;
+  input.value = _loadDrafts()[agentId] || '';
+  resizeTextarea();
+}
+
+function clearDraftForAgent(agentId) {
+  if (!agentId) return;
+  const drafts = _loadDrafts();
+  if (agentId in drafts) { delete drafts[agentId]; _writeDrafts(drafts); }
+}
+
+(function _initDraftPersistence() {
+  const attach = () => {
+    const input = $('input');
+    if (!input) return;
+    input.addEventListener('input', () => {
+      clearTimeout(_draftSaveTimer);
+      _draftSaveTimer = setTimeout(() => saveDraftForAgent(activeAgent), DRAFT_SAVE_DEBOUNCE_MS);
+    });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', attach);
+  else attach();
+})();
 
 // ── Pre-send tool planning ───────────────────────────────────────────────────
 const TOOL_PLAN_STORAGE_KEY = 'oe.toolPlanRecipes.v1';
@@ -345,41 +417,160 @@ function resetToolPlanPicker() {
   renderToolPlanPicker();
 }
 
+// Mirrors MAX_UPLOAD in routes/expenses.mjs's /api/chat-upload handler — a
+// client-side pre-check so an oversized file fails instantly with a clear
+// message instead of uploading for a while first. Never raise this without
+// also raising the server-side cap (see feedback_upload_caps_4_places).
+const CHAT_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
+
 function clearAttachment() {
-  pendingAttachment = null;
-  const p = $('attachPreview');
-  p.style.display = 'none';
-  p.innerHTML = '';
+  pendingAttachments = [];
   $('chatFileInput').value = '';
+  renderAttachmentTray();
 }
 
-async function handleChatFileSelect(file) {
+function removeAttachmentAt(localKey) {
+  pendingAttachments = pendingAttachments.filter(a => a._localKey !== localKey);
+  if (!pendingAttachments.length) $('chatFileInput').value = '';
+  renderAttachmentTray();
+}
+
+// Removes exactly the attachment that was just sent (the head of the queue)
+// — see the SEND CONTRACT LIMITATION note above pendingAttachments. Any
+// files still queued behind it stay in the tray for the next message.
+function shiftSentAttachment() {
+  pendingAttachments = pendingAttachments.slice(1);
+  if (!pendingAttachments.length) $('chatFileInput').value = '';
+  renderAttachmentTray();
+}
+
+function formatAttachmentSize(bytes) {
+  if (!Number.isFinite(bytes)) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderAttachmentTray() {
+  const p = $('attachPreview');
+  if (!pendingAttachments.length) {
+    p.style.display = 'none';
+    p.innerHTML = '';
+    return;
+  }
+  p.style.display = 'flex';
+  p.style.flexWrap = 'wrap';
+  p.style.gap = '6px';
+  p.innerHTML = '';
+  // Only the first attachment goes out with the next send (see the SEND
+  // CONTRACT LIMITATION note above pendingAttachments) — flag it so the
+  // note below and the row styling make that unambiguous.
+  if (pendingAttachments.length > 1) {
+    const note = document.createElement('div');
+    note.className = 'attach-preview-note';
+    note.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--muted)';
+    note.textContent = `${pendingAttachments.length} files queued — only "${pendingAttachments[0].name || 'the first'}" sends with this message; the rest stay attached for your next message.`;
+    p.appendChild(note);
+  }
+  pendingAttachments.forEach((a, i) => {
+    const row = document.createElement('span');
+    row.className = 'attach-preview-item';
+    row.style.cssText = `display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);font-size:12px;max-width:220px${i === 0 ? ';border-color:var(--accent, #6c8cff)' : ''}`;
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'attach-preview-name';
+    nameSpan.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px';
+    if (a._uploading) {
+      row.innerHTML = '<span style="font-size:14px">⏳</span>';
+      nameSpan.textContent = a.name || 'uploading…';
+    } else {
+      const thumbWrap = document.createElement('span');
+      thumbWrap.innerHTML = a.isImage && a.base64
+        ? `<img src="data:${a.mimeType};base64,${a.base64}" alt="" style="width:18px;height:18px;object-fit:cover;border-radius:3px;vertical-align:middle">`
+        : `<span style="font-size:14px">${a.mimeType?.includes('pdf') ? icon('file-text', 14) : icon('paperclip', 14)}</span>`;
+      row.appendChild(thumbWrap);
+      nameSpan.textContent = a.name;
+    }
+    row.appendChild(nameSpan);
+    const sizeLabel = formatAttachmentSize(a.size);
+    if (sizeLabel && !a._uploading) {
+      const sizeSpan = document.createElement('span');
+      sizeSpan.style.cssText = 'color:var(--muted)';
+      sizeSpan.textContent = sizeLabel;
+      row.appendChild(sizeSpan);
+    }
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'attach-preview-remove';
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', () => removeAttachmentAt(a._localKey));
+    row.appendChild(removeBtn);
+    p.appendChild(row);
+  });
+}
+
+let _attachmentUploadSeq = 0;
+
+// Upload one file and add it to the tray. Called once per file — see the
+// #chatFileInput 'change' listener below and init.js's paste/drag-drop call
+// sites (handleChatFileSelect stays a thin wrapper for compatibility with
+// those existing single-file callers).
+async function _uploadAndAddAttachment(file) {
   if (!file) return;
+  if (file.size > CHAT_UPLOAD_MAX_BYTES) {
+    alert(`"${file.name}" is too large — limit is ${CHAT_UPLOAD_MAX_BYTES / 1024 / 1024} MB.`);
+    return;
+  }
+  const localKey = `att_${Date.now()}_${_attachmentUploadSeq++}`;
+  pendingAttachments.push({ _localKey: localKey, _uploading: true, name: file.name, size: file.size });
+  renderAttachmentTray();
   const fd = new FormData();
   fd.append('file', file);
   try {
     const r = await fetch('/api/chat-upload', { method: 'POST', body: fd });
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
-    pendingAttachment = data;
-    // Show preview
-    const p = $('attachPreview');
-    p.style.display = 'flex';
-    const thumb = data.isImage && data.base64
-      ? `<img src="data:${data.mimeType};base64,${data.base64}" alt="">`
-      : `<span style="font-size:20px">${data.mimeType.includes('pdf') ? icon('file-text', 20) : icon('bar-chart-2', 20)}</span>`;
-    p.innerHTML = `${thumb}<span class="attach-preview-name">${escHtml(data.name)}</span><button class="attach-preview-remove" data-action="clearAttachment">✕</button>`;
+    const idx = pendingAttachments.findIndex(a => a._localKey === localKey);
+    if (idx === -1) return; // removed from the tray while the upload was in flight
+    pendingAttachments[idx] = { ...data, _localKey: localKey, size: file.size };
+    renderAttachmentTray();
   } catch (e) {
+    pendingAttachments = pendingAttachments.filter(a => a._localKey !== localKey);
+    renderAttachmentTray();
     alert('Upload failed: ' + e.message);
   }
 }
 
+async function handleChatFileSelect(file) {
+  await _uploadAndAddAttachment(file);
+}
+
+// #chatFileInput's 'change' listener (init.js) calls handleChatFileSelect
+// with just `files[0]` for backward compatibility with its existing
+// single-file call signature. index.html now sets `multiple` on that input,
+// so a picker action can select several files at once — this second
+// listener picks up files[1..] so every selection gets uploaded, not just
+// the first. Index-disjoint with init.js's call (0 vs 1+), so registration
+// order between the two listeners doesn't matter.
+(function _initMultiFileAttach() {
+  const attach = () => {
+    const input = $('chatFileInput');
+    if (!input) return;
+    input.addEventListener('change', (e) => {
+      const files = e.target.files;
+      for (let i = 1; i < files.length; i++) _uploadAndAddAttachment(files[i]);
+    });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', attach);
+  else attach();
+})();
+
 // ── Send ──────────────────────────────────────────────────────────────────────
 async function send() {
   let text = $('input').value.trim();
-  if (!text && !pendingAttachment) return;
+  if (!text && !pendingAttachments.length) return;
   if (streaming && !awaitingPermission) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
+  if (pendingAttachments[0]?._uploading) { showToast('Still uploading — one moment'); return; }
 
   // A fresh send supersedes any failed attempt still showing — the message the
   // user just typed is almost always what they were retrying. Remove its bubble
@@ -408,7 +599,15 @@ async function send() {
   }
 
   const toolPlan = selectedToolPlanForSend(text);
-  const attachment = pendingAttachment;
+  // Only the queue's head is sent — see the SEND CONTRACT LIMITATION note
+  // above pendingAttachments. Rebuilt into a clean object so client-only
+  // tray bookkeeping (_localKey, _uploading, size) never rides over the wire.
+  const head = pendingAttachments[0] || null;
+  const attachment = head ? {
+    name: head.name, mimeType: head.mimeType, isImage: head.isImage,
+    isFinanceFile: head.isFinanceFile, file_id: head.file_id,
+    base64: head.base64, extractedText: head.extractedText,
+  } : null;
   const displayText = text || (attachment ? `[${attachment.name}]` : '');
 
   if (!sessions[activeAgent]) sessions[activeAgent] = [];
@@ -421,7 +620,14 @@ async function send() {
   lastSentAttempt = { agent: activeAgent, text, attachment, userBubbleEl, sessionEntry };
   $('input').value = '';
   resizeTextarea();
-  clearAttachment();
+  // Cancel any pending debounced draft-save (see _initDraftPersistence) —
+  // without this, a save queued just before send fires ~400ms later and
+  // re-populates a "draft" for a message that already went out.
+  clearTimeout(_draftSaveTimer);
+  clearDraftForAgent(activeAgent);
+  // Drop only the sent attachment — any additional queued files (see the
+  // tray's multi-file note) stay attached for the user's next message.
+  shiftSentAttachment();
   resetToolPlanPicker();
   resetToolRun();
   if (awaitingPermission) {
@@ -497,6 +703,8 @@ function renderSessionInner(keepScroll) {
     else if (m.role === 'proposal_outcome' && m.proposalId) applyProposalOutcome(m.proposalId, m.status, m.outcome);
     else if (m.role === 'attachment_decision' && m.decisionId) appendAttachmentDecisionBubble(m, false);
     else if (m.role === 'attachment_decision_outcome' && m.decisionId) applyAttachmentDecisionOutcome(m.decisionId, m.decision);
+    else if (m.role === 'approval_pending' && m.kind) appendApprovalPendingBubble(m, false);
+    else if (m.role === 'approval_resolved' && m.kind) applyApprovalResolved(m.kind);
     else if ((m.role === 'agent_report' || m.kind === 'agent_report') && isNodeExecTaskReport(m)) {
       appendNodeExecTaskReport(m, null, false);
       appendAgentReportImages(m, false);
@@ -1701,6 +1909,99 @@ async function respondToAttachmentDecision(el, decisionId, fileId, decision, kee
     keepBtn.style.opacity = '1'; discardBtn.style.opacity = '1';
     alert('Couldn’t save your choice: ' + e.message);
   }
+}
+
+// Pending-approval pill. Emitted by chat-dispatch's post-turn diff (see
+// snapshotPendingApprovals in chat-dispatch.mjs) whenever one of the four
+// staged destructive-op families — email purge/batch-trash, expense delete,
+// profile trust-state promotion, cross-agent watcher op — is pending after a
+// turn. Approve sends the exact confirmation phrase as a normal chat message
+// (the server's existing tryApprovalIntercept text match executes it
+// unchanged, so the keyboard path keeps working too); Cancel sends a benign
+// message, which the same intercept's any-other-message rule clears.
+// Persisted as role:'approval_pending' so a reload still shows it; the
+// resolution arrives as role:'approval_resolved' (applyApprovalResolved).
+function appendApprovalPendingBubble(pending, scroll = true) {
+  const kind = pending.kind;
+  if (!kind) return;
+  // De-dupe by kind — at most one staged op per family. A re-emit for a kind
+  // that's already showing (e.g. persisted-session replay racing a live
+  // push) refreshes the existing pill's text instead of stacking a second.
+  const existing = document.querySelector(`.msg.approval-pending[data-approval-kind="${CSS.escape(kind)}"]`);
+  const el = existing || document.createElement('div');
+  if (!existing) {
+    el.className = 'msg approval-pending';
+    el.dataset.approvalKind = kind;
+  }
+  delete el.dataset.appliedStatus; // re-pending clears any prior resolved marker
+  el.style.cssText = 'padding:10px 12px;margin:6px 0;font-size:13px;border-left:3px solid var(--red, #f44336);background:rgba(244,67,54,0.06);border-radius:4px';
+  el.innerHTML = '';
+
+  const label = document.createElement('div');
+  label.style.cssText = 'margin-bottom:8px';
+  label.innerHTML = `⚠️ <strong>Waiting for approval:</strong> ${escHtml(pending.description || 'a staged action needs your confirmation')}`;
+  el.appendChild(label);
+
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;gap:8px';
+
+  const phrase = pending.phrase || 'APPROVE';
+  const approveBtn = document.createElement('button');
+  approveBtn.textContent = `Approve (${phrase})`;
+  approveBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--red, #f44336);background:var(--red, #f44336);color:#fff;border-radius:4px;cursor:pointer;font-size:12px';
+  approveBtn.addEventListener('click', () => respondToApproval(phrase, approveBtn, cancelBtn));
+  actions.appendChild(approveBtn);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;cursor:pointer;font-size:12px';
+  cancelBtn.addEventListener('click', () => respondToApproval('cancel', approveBtn, cancelBtn));
+  actions.appendChild(cancelBtn);
+
+  el.appendChild(actions);
+  if (!existing) insertBefore(el);
+  if (scroll) scrollToBottom();
+}
+
+// Apply an approval_resolved push (or persisted-session replay of one)
+// against an already-rendered pill — mutates in place, mirroring
+// applyProposalOutcome / applyAttachmentDecisionOutcome. Fires once the
+// staged op is gone: approved-and-executed, or cleared by the "say anything
+// else to cancel" rule (any non-matching message clears it server-side).
+function applyApprovalResolved(kind) {
+  if (!kind) return;
+  const el = document.querySelector(`.msg.approval-pending[data-approval-kind="${CSS.escape(kind)}"]`);
+  if (!el) return;
+  if (el.dataset.appliedStatus === 'resolved') return;
+  el.dataset.appliedStatus = 'resolved';
+  [...el.querySelectorAll('button')].forEach(b => b.remove());
+  el.style.borderLeftColor = 'var(--border)';
+  el.style.opacity = '0.6';
+  const footer = document.createElement('div');
+  footer.style.cssText = 'font-size:12px;color:var(--muted);font-style:italic;margin-top:6px';
+  footer.textContent = '· Resolved';
+  el.appendChild(footer);
+}
+
+// Approve/Cancel click handler: sends the given text through the existing
+// send() pipeline — the same code path as if the user had typed the phrase
+// themselves — so the server's text-match intercept (or, for "cancel", the
+// LLM) handles it exactly as before this feature existed. Mirrors send()'s
+// own guard clauses so a click while offline/mid-stream doesn't leave the
+// buttons permanently disabled with nothing actually sent.
+function respondToApproval(text, approveBtn, cancelBtn) {
+  if (streaming && !awaitingPermission) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
+  approveBtn.disabled = true; cancelBtn.disabled = true;
+  approveBtn.style.opacity = '0.5'; cancelBtn.style.opacity = '0.5';
+  const input = $('input');
+  const prevValue = input.value;
+  input.value = text;
+  send();
+  // send() clears input.value on success; if it bailed on a guard we didn't
+  // already check above, restore whatever the user had been typing rather
+  // than clobbering it.
+  if (input.value === text) input.value = prevValue;
 }
 
 async function toggleWatcherHistory(el, watcherId) {
