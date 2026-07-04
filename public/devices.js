@@ -397,7 +397,7 @@ function renderVoiceHealthPanel() {
     hints.push('TTS is not ready, so a successful chat turn may still produce no spoken reply.');
   }
   if (total && online === 0) hints.push('No paired voice device is online right now.');
-  if (outdated) hints.push('One or more devices can take the current firmware update.');
+  if (outdated) hints.push('One or more devices can be updated.');
 
   return `
     <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
