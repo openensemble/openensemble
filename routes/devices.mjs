@@ -162,7 +162,7 @@ export function getAmbientForDevice(deviceId) {
 
 // Slot wake-word push moved to routes/voice-config.mjs as of 2026-05-13:
 // slot routing is now per-user (voice-config), not per-device. The save
-// path there pushes wake words to every device paired to the user.
+// path there is separate from the explicit wake-word OTA push path.
 
 export async function handle(req, res) {
   const url = new URL(req.url, 'http://x');
@@ -759,9 +759,14 @@ export async function handle(req, res) {
     if (typeof body?.headphone_mode === 'boolean') {
       try { sendToDevice(updated.id, { type: 'set_headphone_mode', enabled: !!body.headphone_mode }); } catch {}
     }
+    if (typeof body?.conversation_mode === 'boolean') {
+      // Firmware flag gates the speech-barge-in VAD during SPEAKING. The
+      // server-side re-arm behavior keys off the device record directly.
+      try { sendToDevice(updated.id, { type: 'set_conversation_mode', enabled: !!body.conversation_mode }); } catch {}
+    }
     // Per-device PATCH no longer mutates slot routing — slot_assignments
     // is per-user (voice-config) since 2026-05-13. push is always empty
-    // here; the voice-config PUT handler is where wake-word OTA fires.
+    // here; wake-word OTA is handled by POST /api/voice-config/push.
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ device: updated, push: { pushed: [], offline: [] } }));
     return true;

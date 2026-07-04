@@ -30,7 +30,6 @@ import { listDevices, markVoiceConfigPushed } from '../lib/voice-devices.mjs';
  * others. Version is marked pushed only when every configured slot acked.
  */
 async function pushToAllDevices(userId) {
-  const cfg = readVoiceConfig(userId);
   const devices = listDevices(userId);
   const perDevice = {};
   await Promise.all(devices.map(async (d) => {
@@ -44,7 +43,7 @@ async function pushToAllDevices(userId) {
       r.failedSlots.length === 0 &&
       r.ackedSlots.length === r.pushedSlots.length;
     if (fullySucceeded) {
-      markVoiceConfigPushed(userId, d.id, cfg.version);
+      markVoiceConfigPushed(userId, d.id, r.version);
     }
   }));
   return perDevice;

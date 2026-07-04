@@ -95,19 +95,11 @@ const WS_PING_INTERVAL = 15000; // 15s — aggressive enough for mobile carriers
 // transient 2.4 GHz Wi-Fi hiccup, causing constant reconnect flapping. 3 misses
 // ≈ 45 s grace — still reaps truly-dead connections, but rides out brief loss.
 const WS_MAX_MISSED_PONGS = 3;
-// Debounce window for re-pushing an UNCHANGED voice-config to a device that
-// reconnects. A same-version push makes the device run esp_spiffs_gc + rewrite
-// ~62 KB/slot + wakeword_load_slot (which tears down + rebuilds the model, and
-// esp_restart()s the device if the reload fails — see main.c apply_ww_upload).
-// Doing that on EVERY reconnect turns a flapping Wi-Fi link into an all-night
-// reboot/reconnect storm (observed 2026-06-22: ambient streaming → WS drop →
-// reconnect → re-push → reload-fail → reboot → repeat, leaving the device deaf
-// to the wake phrase. A real config change (version bump) is never debounced —
-// only identical re-pushes whose sole purpose is "in case NVS was reset" are.
-const VOICE_CONFIG_REPUSH_DEBOUNCE_MS = 10 * 60 * 1000; // 10 min
-// key `${userId}:${deviceId}` -> { at, version } of the last actual push.
-const _lastVoiceConfigPush = new Map();
 const VOICE_CONFIG_PUSH_CONNECT_DELAY_MS = 1500;
+// key `${userId}:${deviceId}` -> { version, promise } for the currently running
+// stale-version voice-config push. pushConfigToDevice serializes per device, but
+// this avoids queuing duplicate full slot rewrites for the same target version.
+const _voiceConfigPushInFlight = new Map();
 // Per-user concurrent WebSocket cap. A compromised account (or a buggy
 // reconnect loop) shouldn't be able to hoard server sockets — each open
 // connection costs a heartbeat timer slot and keepalive memory.
@@ -181,8 +173,21 @@ function reconcileVoiceDeviceState(ws) {
   const d = getDevice(ws._userId, ws._deviceId);
   if (!d) return;
   try {
+    // Capability handshake FIRST: the firmware gates its newer message types
+    // (tts_pause/resume, streaming STT) on what this server declares, and
+    // resets the flags on every disconnect. turn_ids has no firmware gate
+    // (turn_id fields are harmless to old servers) but is declared anyway.
+    const _capsCfg = loadConfig();
+    sendToDevice(ws._deviceId, {
+      type: 'server_caps',
+      turn_ids: true,
+      tts_pause: true,
+      // Streaming STT needs a working transcription backend server-side.
+      stt_stream: _capsCfg.sttMode === 'local' || !!(_capsCfg.sttApiKey && _capsCfg.sttApiUrl),
+    });
     if (d.name) sendToDevice(ws._deviceId, { type: 'set_device_name', name: d.name });
     sendToDevice(ws._deviceId, { type: 'set_headphone_mode', enabled: !!d.headphone_mode });
+    sendToDevice(ws._deviceId, { type: 'set_conversation_mode', enabled: !!d.conversation_mode });
   } catch (e) {
     console.warn(`[ws] device-state reconcile failed for ${ws._deviceId}: ${e.message}`);
   }
@@ -199,12 +204,55 @@ function scheduleVoiceConfigPush(ws) {
   ws._voiceConfigPushTimer.unref?.();
 }
 
+// ── Streaming STT (fw ≥ 0.2.65, gated on server_caps.stt_stream) ────────────
+// The device streams 16 kHz mono s16le PCM as binary WS frames during capture
+// instead of buffering the whole utterance for one HTTP POST — upload overlaps
+// speech, and the drive task never blocks on a 30 s HTTP call. Frame layout:
+// 'OEA1' magic + u32(LE) seq + PCM payload. stt_begin opens a per-socket
+// session; stt_end transcribes + dispatches through the normal chat path;
+// stt_abort (no-speech capture) drops it. Sessions are size-capped and TTL'd
+// so a device that dies mid-utterance can't leak buffers.
+const STT_SESSION_MAX_BYTES = 512 * 1024;   // 16 s @ 16 kHz mono s16 = fw capture ceiling
+const STT_SESSION_TTL_MS = 25_000;
+const STT_FRAME_MAGIC = Buffer.from('OEA1');
+
+function dropSttSession(ws, reason) {
+  const s = ws._sttSession;
+  if (!s) return;
+  clearTimeout(s.ttl);
+  ws._sttSession = null;
+  if (reason) {
+    log.info('voice', 'stt session dropped', {
+      deviceId: ws._deviceId ?? null, turnId: s.turnId, reason, bytes: s.bytes,
+    });
+  }
+}
+
+function handleSttBinaryFrame(ws, raw) {
+  if (!ws._authenticated || !ws._deviceId) return;
+  const s = ws._sttSession;
+  if (!s) return; // no open session (late frames after abort/ttl) — drop
+  const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  if (buf.length <= 8 || !buf.subarray(0, 4).equals(STT_FRAME_MAGIC)) return;
+  const seq = buf.readUInt32LE(4);
+  // Frames ride ordered TCP; a seq gap means the device's send failed mid-
+  // utterance (it flips to its HTTP fallback and this session just TTLs out).
+  if (s.nextSeq !== null && seq !== s.nextSeq) s.gaps++;
+  s.nextSeq = seq + 1;
+  s.chunks.push(buf.subarray(8));
+  s.bytes += buf.length - 8;
+  if (s.bytes > STT_SESSION_MAX_BYTES) dropSttSession(ws, 'overflow');
+}
+
 const sessionKey = (userId, agentId) => `${userId}_${agentId}`;
 
-function makeVoiceTurn({ ws, effectiveUserId, agentId, wakeSlot }) {
+function makeVoiceTurn({ ws, effectiveUserId, agentId, wakeSlot, turnId }) {
   if (!ws?._deviceId) return null;
   return {
-    id: randomBytes(4).toString('hex'),
+    // Adopt the device-minted turn_id when present (fw ≥ 0.2.65 sends one in
+    // `chat`) so both sides share the same correlation id and the firmware
+    // can drop events from aborted turns. Server-minted fallback for old fw.
+    id: turnId || randomBytes(4).toString('hex'),
     deviceId: ws._deviceId,
     authUserId: ws._userId,
     effectiveUserId,
@@ -236,7 +284,10 @@ function suppressVoiceOutput(ws, reason, { sendDone = false } = {}) {
   }
 
   if (sendDone && !hadStreamer && ws.readyState === ws.OPEN) {
-    try { ws.send(JSON.stringify({ type: 'done', agent: active?.agentId ?? 'system' })); } catch {}
+    // Carry the STOPPED turn's id: a device that already moved on to a new
+    // turn (or is mid-utterance) drops this instead of treating it as the
+    // new turn's terminal (the airplay-resume-mid-dictation bug).
+    try { ws.send(JSON.stringify({ type: 'done', agent: active?.agentId ?? 'system', ...(active?.id ? { turn_id: active.id } : {}) })); } catch {}
   }
 
   log.info('voice', 'voice output suppressed', {
@@ -640,12 +691,18 @@ function onConnection(ws, req) {
     }
   }
 
-  ws.on('message', async (raw) => {
+  // Named (not inline) so the streaming-STT path can re-enter it with a
+  // synthesized `chat` frame — the transcript then takes the EXACT same road
+  // a device-side transcription would (interceptors, fastpaths, streamer).
+  const onWsMessage = async (raw, isBinary = false) => {
    // Hoisted above the try so the catch below can tell chat failures apart
    // from other frame types when picking the device-spoken fallback.
    let msg;
    let messageVoiceTurn = null;
    try {
+    // Binary frames are streaming-STT PCM from a voice device; everything
+    // else on this socket is JSON text.
+    if (isBinary) { handleSttBinaryFrame(ws, raw); return; }
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg !== 'object') return;
 
@@ -726,6 +783,72 @@ function onConnection(ws, req) {
 
     if (msg.type === 'ping') {
       ws.send(JSON.stringify({ type: 'pong', boot_id: BOOT_ID }));
+      return;
+    }
+
+    // ── Streaming STT session control (fw ≥ 0.2.65) ─────────────────────
+    if (msg.type === 'stt_begin') {
+      if (!ws._deviceId) return;
+      dropSttSession(ws, ws._sttSession ? 'superseded' : null);
+      const ttl = setTimeout(() => dropSttSession(ws, 'ttl'), STT_SESSION_TTL_MS);
+      ttl.unref?.();
+      ws._sttSession = {
+        turnId: (typeof msg.turn_id === 'string' && msg.turn_id.length > 0 && msg.turn_id.length <= 24) ? msg.turn_id : null,
+        wakeSlot: Number.isInteger(msg.wake_slot) ? msg.wake_slot : null,
+        wakeAvgProb: Number.isInteger(msg.wake_avg_prob) ? msg.wake_avg_prob : null,
+        agent: typeof msg.agent === 'string' && msg.agent ? msg.agent.slice(0, 64) : null,
+        chunks: [], bytes: 0, gaps: 0, nextSeq: null, startedAt: Date.now(), ttl,
+      };
+      return;
+    }
+    if (msg.type === 'stt_abort') {
+      // Device VAD saw no speech after the wake — nothing to transcribe.
+      if (ws._deviceId) dropSttSession(ws, 'device abort (no speech)');
+      return;
+    }
+    if (msg.type === 'stt_end') {
+      if (!ws._deviceId) return;
+      const s = ws._sttSession;
+      if (!s) return;
+      if (typeof msg.turn_id === 'string' && msg.turn_id && s.turnId && msg.turn_id !== s.turnId) {
+        dropSttSession(ws, 'turn mismatch at end');
+        return;
+      }
+      clearTimeout(s.ttl);
+      ws._sttSession = null;
+      const pcm = Buffer.concat(s.chunks);
+      log.info('voice', 'stt stream complete', {
+        deviceId: ws._deviceId, turnId: s.turnId, bytes: s.bytes, gaps: s.gaps,
+        ms: Date.now() - s.startedAt,
+      });
+      let transcript = '';
+      try {
+        const { transcribeAudio, wavWrapPcm16kMono } = await import('./lib/stt.mjs');
+        ({ transcript } = await transcribeAudio(wavWrapPcm16kMono(pcm), {}));
+      } catch (e) {
+        log.warn('voice', 'stream stt failed', { deviceId: ws._deviceId, turnId: s.turnId, error: e.message });
+        // The device is in THINKING awaiting this turn — unblock it with the
+        // same spoken fallback + terminal the chat error path uses.
+        try {
+          const turnTag = s.turnId ? { turn_id: s.turnId } : {};
+          ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: 'system', ...turnTag }));
+          ws.send(JSON.stringify({ type: 'done', agent: 'system', ...turnTag }));
+        } catch {}
+        return;
+      }
+      // Re-enter this handler as a synthesized chat frame: the transcript
+      // takes the exact same path as a device-side transcription — empty-
+      // transcript apology fastpath, control intents, streamer, turn wiring.
+      await onWsMessage(JSON.stringify({
+        type: 'chat',
+        text: transcript,
+        source: 'voice-device',
+        tts_stream: true,
+        ...(s.agent ? { agent: s.agent } : {}),
+        ...(s.wakeSlot !== null ? { wake_slot: s.wakeSlot } : {}),
+        ...(s.wakeAvgProb !== null ? { wake_avg_prob: s.wakeAvgProb } : {}),
+        ...(s.turnId ? { turn_id: s.turnId } : {}),
+      }), false);
       return;
     }
 
@@ -839,14 +962,51 @@ function onConnection(ws, req) {
       return;
     }
 
+    // Speech-barge flow control (fw ≥ 0.2.65, conversation mode): the device
+    // paused its local playback to verify a barge-in candidate; stall the
+    // pacer so its ring doesn't overflow, and resume on the all-clear. Turn-id
+    // checked so a stale pause can't stall a newer turn's stream. A pause
+    // with no resume self-aborts in the streamer (PAUSE_ABORT_MS).
+    if (msg.type === 'tts_pause' || msg.type === 'tts_resume') {
+      if (!ws._deviceId) return;
+      const st = ws._ttsStreamer;
+      if (!st) return;
+      if (typeof msg.turn_id === 'string' && msg.turn_id &&
+          ws._activeVoiceTurn?.id && msg.turn_id !== ws._activeVoiceTurn.id) {
+        log.info('voice', 'stale tts flow-control ignored', {
+          deviceId: ws._deviceId, type: msg.type, turnId: msg.turn_id, activeTurnId: ws._activeVoiceTurn.id,
+        });
+        return;
+      }
+      if (msg.type === 'tts_pause') { try { st.pause?.(); } catch {} }
+      else { try { st.resume?.(); } catch {} }
+      return;
+    }
+
     if (msg.type === 'stop') {
       // Barge-in / mute: halt any in-flight server-side TTS push immediately so
       // the device stops getting audio frames, then abort the LLM turn.
       if (ws._deviceId) {
+        // Stale stop: the device names the turn it is stopping (fw ≥ 0.2.65).
+        // If a newer turn is already active on this socket, the stop raced it
+        // — honoring it would kill the wrong (new) turn.
+        if (typeof msg.turn_id === 'string' && msg.turn_id &&
+            ws._activeVoiceTurn?.id && msg.turn_id !== ws._activeVoiceTurn.id) {
+          log.info('voice', 'stale stop ignored', {
+            deviceId: ws._deviceId, stopTurnId: msg.turn_id, activeTurnId: ws._activeVoiceTurn.id,
+          });
+          return;
+        }
         const stoppedTurn = suppressVoiceOutput(ws, 'stop', { sendDone: true });
         if (!stoppedTurn) {
-          const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
-          if (stopAgent) abortChat(ws._userId, stopAgent);
+          // No active turn — fall back to the last voice turn this socket
+          // ran. Aborting ws._userId's coordinator here was wrong for
+          // slot-routed turns: the LLM turn runs as the slot's OWNER user.
+          const last = ws._lastVoiceTurn;
+          const stopAgent = typeof msg.agent === 'string' ? msg.agent
+            : (last?.agentId ?? getUserCoordinatorAgentId(ws._userId));
+          const stopUser = last?.effectiveUserId ?? ws._userId;
+          if (stopAgent) abortChat(stopUser, stopAgent);
         }
       } else {
         const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
@@ -900,6 +1060,10 @@ function onConnection(ws, req) {
       const textPreview = typeof msg.text === 'string' ? msg.text.slice(0, 50) : '(no text)';
       console.log('[chat] received, agent:', msg.agent, 'user:', ws._userId, 'text:', textPreview);
       const wakeSlot = Number.isInteger(msg.wake_slot) ? msg.wake_slot : null;
+      // Device-minted turn correlation id (fw ≥ 0.2.65). Bounded; echoed on
+      // every event of this turn so the firmware can drop stale-turn events.
+      const deviceTurnId = (typeof msg.turn_id === 'string' && msg.turn_id.length > 0 && msg.turn_id.length <= 24)
+        ? msg.turn_id : null;
       // wake_avg_prob is uint8 (0..255), 255 = ~1.0. Logged so app.log can be
       // grep'd for marginal-vs-confident wake fires when tuning per-slot cutoffs.
       if (ws._deviceId && wakeSlot !== null && Number.isInteger(msg.wake_avg_prob)) {
@@ -968,17 +1132,21 @@ function onConnection(ws, req) {
           });
           // Send a done event back so the device unblocks its chat UI even
           // though no LLM turn ran. agent name isn't critical — use 'system'.
-          try { ws.send(JSON.stringify({ type: 'done', agent: 'system' })); } catch {}
+          try { ws.send(JSON.stringify({ type: 'done', agent: 'system', ...(deviceTurnId ? { turn_id: deviceTurnId } : {}) })); } catch {}
           return;
         }
       }
       const routedAgentId = slotAssignment
         ? (slotAssignment.agentId || getUserCoordinatorAgentId(effectiveUserId))
         : (msg.agent || devicePrefs?.default_agent_id || getUserCoordinatorAgentId(effectiveUserId));
-      const voiceTurn = makeVoiceTurn({ ws, effectiveUserId, agentId: routedAgentId, wakeSlot });
+      const voiceTurn = makeVoiceTurn({ ws, effectiveUserId, agentId: routedAgentId, wakeSlot, turnId: deviceTurnId });
       if (voiceTurn) {
         messageVoiceTurn = voiceTurn;
         ws._activeVoiceTurn = voiceTurn;
+        // Retained past turn end (never nulled) so a later `stop` with no
+        // active turn can abort the RIGHT user's agent — the slot-routed
+        // effective user, not the device-auth user's coordinator.
+        ws._lastVoiceTurn = voiceTurn;
         // A new wake = a fresh turn whose output must play. Clear any stale
         // suppression from a prior stop/barge-in — otherwise a suppression
         // recorded with a null turnId (stop on a socket with no active turn,
@@ -1029,7 +1197,9 @@ function onConnection(ws, req) {
           ttsStreamer = createVoiceTtsStreamer({
             send: (m) => { if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(m)); } catch {} } },
             isOpen: () => ws.readyState === ws.OPEN,
+            bufferedAmount: () => ws.bufferedAmount ?? 0,
             cfg: _cfg, refPath, voice: presetVoice, log,
+            turnId: voiceTurn?.id ?? null,
           });
           ws._ttsStreamer = ttsStreamer;
         }
@@ -1061,6 +1231,7 @@ function onConnection(ws, req) {
         // as the slot's owner user (running their cortex memory + agents).
         deviceId:   ws._deviceId,
         wakeSlot:   wakeSlot,
+        conversationMode: !!(ws._deviceId && devicePrefs?.conversation_mode),
         // Chat events fan out two ways:
         //   (1) Back to the originating ws — the device gets TTS chunks,
         //       status updates, etc. regardless of whose user is "acting."
@@ -1091,18 +1262,21 @@ function onConnection(ws, req) {
             else if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(e)); } catch {} }
           } else if (ws.readyState === ws.OPEN) {
             try {
+              // Legacy (non-streamer) voice path: tag device-bound events
+              // with this turn's id so fw ≥ 0.2.65 can drop stale-turn ones.
+              const turnTag = isVoiceOrigin && voiceTurn?.id ? { turn_id: voiceTurn.id } : {};
               if (isVoiceOrigin && (voiceSuppressed || staleVoiceTurn)) {
                 // Stop/mute already sent `done`; old-turn events must not
                 // leak into the device after a new wake has started.
               } else if (voiceSilent) {
                 if (e?.type === 'done' || e?.type === 'error') {
-                  ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system' }));
+                  ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
                 }
               } else if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
-                ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: e.agent ?? 'system' }));
-                ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system' }));
+                ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: e.agent ?? 'system', ...turnTag }));
+                ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
               } else {
-                ws.send(JSON.stringify(e));
+                ws.send(JSON.stringify(isVoiceOrigin && voiceTurn?.id ? { ...e, ...turnTag } : e));
               }
             } catch {}
           }
@@ -1126,6 +1300,21 @@ function onConnection(ws, req) {
           if (ws.readyState === ws.OPEN) emitAgentNotification(fromUserId, agentId, notify);
         },
       });
+      // Terminal-event guarantee: handleChatMessage has returned, so the LLM
+      // turn is over — but an abort that didn't come from THIS device's own
+      // `stop` (browser-tab stop, shutdown, cross-agent abort) emits neither
+      // `done` nor an error event (llm-loop swallows AbortError), leaving the
+      // streamer open and the device in THINKING until its 90 s watchdog.
+      // If the streamer was neither finished nor aborted by now, no terminal
+      // is coming from anywhere else — close it out ourselves.
+      if (ttsStreamer && ws._ttsStreamer === ttsStreamer &&
+          !ttsStreamer.finished && !ttsStreamer.aborted) {
+        log.info('voice', 'turn ended without terminal — closing streamer', {
+          deviceId: ws._deviceId, turnId: voiceTurn?.id ?? null,
+        });
+        try { ttsStreamer.abort({ close: true, sendDone: true }); } catch {}
+        ws._ttsStreamer = null;
+      }
       return;
     }
    } catch (e) {
@@ -1145,15 +1334,17 @@ function onConnection(ws, req) {
             try { streamer?.abort?.(); } catch {}
           }
           ws._ttsStreamer = null;
-          if (!streamer && !suppressed) ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: 'system' }));
-          if (!streamer) ws.send(JSON.stringify({ type: 'done', agent: 'system' }));
+          const turnTag = messageVoiceTurn?.id ? { turn_id: messageVoiceTurn.id } : {};
+          if (!streamer && !suppressed) ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: 'system', ...turnTag }));
+          if (!streamer) ws.send(JSON.stringify({ type: 'done', agent: 'system', ...turnTag }));
         }
       } else {
         ws.send(JSON.stringify({ type: 'error', message: 'Server error processing message', agent: 'system' }));
       }
     } catch {}
    }
-  });
+  };
+  ws.on('message', onWsMessage);
 
   ws.on('close', (code, reason) => {
     if (ws._voiceConfigPushTimer) {
@@ -1164,6 +1355,14 @@ function onConnection(ws, req) {
     // code 1006 = abnormal (no close frame: network drop / TCP RST); 1000/1001 = clean.
     console.log(`[ws] client disconnected device=${ws._deviceId ?? '-'} user=${ws._userId} code=${code ?? '?'}${r ? ' reason=' + r : ''}`);
     log.info('ws', 'client disconnected', { userId: ws._userId, deviceId: ws._deviceId ?? null, code: code ?? null, reason: r || null });
+    // Kill any in-flight TTS streamer: frames were only droppable (isOpen()
+    // guards), but the active Pocket fetch + ffmpeg kept running for up to
+    // the 60 s synth timeout per orphaned sentence.
+    if (ws._ttsStreamer) {
+      try { ws._ttsStreamer.abort(); } catch {}
+      ws._ttsStreamer = null;
+    }
+    dropSttSession(ws, ws._sttSession ? 'socket closed' : null);
     // A device socket dropping mid-turn used to orphan the LLM turn — tokens
     // streamed to nobody while tools kept executing. Abort it; the device
     // starts a fresh turn on its next wake after reconnecting. abortChat is
@@ -1255,6 +1454,44 @@ export function sendToDevice(deviceId, msg) {
 }
 
 /**
+ * Arm a follow-up listen window on a device AFTER its current reply has
+ * actually finished playing out. The old call site (llm-loop's finally)
+ * fired at LLM-done — i.e. before tts_audio_begin for short replies — so the
+ * window burned down during synth + playback and could expire before the
+ * user was even asked the question. Here:
+ *   - live streamer → registered on its onClosed(clean); sent only for a
+ *     clean close (an aborted/failed reply must not open a phantom window).
+ *   - no streamer (legacy token/done path or no-audio turn) → sent now; the
+ *     firmware's own deferral (reply_in_flight check) handles in-flight
+ *     legacy audio.
+ * Returns true if the window was sent or scheduled.
+ */
+export function armFollowupAfterDrain(deviceId, { windowMs = 5000, conversation = false } = {}) {
+  if (!_wss || !deviceId) return false;
+  for (const client of _wss.clients) {
+    if (client.readyState !== client.OPEN || client._deviceId !== deviceId) continue;
+    // Tag with the turn the window belongs to (resolved at SEND time — the
+    // firmware drops a window whose turn it has already moved past).
+    const payload = () => ({
+      type: 'await_followup', windowMs,
+      ...(conversation ? { conversation: true } : {}),
+      ...(client._activeVoiceTurn?.id ? { turn_id: client._activeVoiceTurn.id } : {}),
+    });
+    const streamer = client._ttsStreamer;
+    if (streamer && !streamer.closed && !streamer.aborted) {
+      streamer.onClosed((clean) => {
+        if (!clean) return;
+        if (client.readyState === client.OPEN) sendToDevice(deviceId, payload());
+      });
+      return true;
+    }
+    sendToDevice(deviceId, payload());
+    return true;
+  }
+  return false;
+}
+
+/**
  * True if this voice-device id has at least one OPEN WS client right now.
  * Source of truth for the live "connected" indicator in the Voice Devices UI.
  * Cheap — iterates the WS client set, no per-call DB read.
@@ -1302,49 +1539,51 @@ async function maybePushVoiceConfig(ws) {
   try {
     const cfg = readVoiceConfig(ws._userId);
     const lastPushed = getDeviceVoiceConfigVersion(ws._userId, ws._deviceId);
-    // A version bump means real config change → always push (handled below).
-    // A version MATCH means we're only re-pushing "in case NVS was reset".
-    // That re-push is expensive on the device (SPIFFS GC + ~62 KB/slot rewrite
-    // + model rebuild, and esp_restart() on reload failure), so debounce it:
-    // doing it on every reconnect drives a flapping device into a reboot loop
-    // (see VOICE_CONFIG_REPUSH_DEBOUNCE_MS). The first reconnect still pushes
-    // (recovers a genuinely-wiped device); rapid follow-on reconnects skip.
-    const isSameVersion = lastPushed === cfg.version;
+    // Without device-reported slot inventory, the server only has one safe cheap
+    // signal: the config version it last pushed successfully. If it matches, do
+    // not rewrite wake-word slots on reconnect; explicit Push remains the repair
+    // path for a device whose local storage was wiped.
+    if (lastPushed === cfg.version) return;
+
     const pushKey = `${ws._userId}:${ws._deviceId}`;
-    if (isSameVersion) {
-      const prev = _lastVoiceConfigPush.get(pushKey);
-      if (prev && prev.version === cfg.version &&
-          (Date.now() - prev.at) < VOICE_CONFIG_REPUSH_DEBOUNCE_MS) {
-        const agoS = Math.round((Date.now() - prev.at) / 1000);
-        console.log(`[ws] voice-config re-push to ${ws._deviceId} debounced (v${cfg.version}, last push ${agoS}s ago) — flapping guard`);
-        return;
-      }
-      console.log(`[ws] voice-config push to ${ws._deviceId}: version unchanged (v${cfg.version}) but pushing anyway in case device NVS was reset`);
+    const existing = _voiceConfigPushInFlight.get(pushKey);
+    if (existing?.version === cfg.version) {
+      console.log(`[ws] voice-config v${cfg.version} sync to ${ws._deviceId} already in progress`);
+      return;
     }
-    // Record the attempt now so a storm of reconnects during the (awaited)
-    // push below collapses to one in-flight push, not N stacked ones.
-    _lastVoiceConfigPush.set(pushKey, { at: Date.now(), version: cfg.version });
-    // Read the device's last-reported firmware version so the clear pass only
-    // runs on firmware that knows ww_clear (>= 0.2.48). The auth handler stores
-    // the freshly-reported version before calling us, so this is current.
-    const fwVersion = getDevice(ws._userId, ws._deviceId)?.fw_version ?? null;
-    const r = await pushConfigToDevice(ws._deviceId, ws._userId, { fwVersion });
-    // Device is in sync when every push acked and nothing dropped/failed —
-    // across BOTH the wake-word push pass and the clear pass for unassigned
-    // slots. No pushedSlots>0 gate: a config with only clears (e.g. every user
-    // removed) is still a valid in-sync state to mark.
-    const fullySucceeded =
-      r.offlineSlots.length === 0 &&
-      r.failedSlots.length === 0 &&
-      r.ackedSlots.length === r.pushedSlots.length;
-    if (fullySucceeded) {
-      markVoiceConfigPushed(ws._userId, ws._deviceId, cfg.version);
-      console.log(`[ws] voice-config v${cfg.version} synced by ${ws._deviceId} (pushed ${r.ackedSlots.join(',') || '-'}, cleared ${r.clearedSlots.join(',') || '-'})`);
-    } else {
-      console.warn(`[ws] voice-config v${cfg.version} partial sync to ${ws._deviceId}: acked=${r.ackedSlots.join(',') || '-'} cleared=${r.clearedSlots.join(',') || '-'} failed=${r.failedSlots.map(f=>f.slot+':'+f.err).join(',') || '-'} offline=${r.offlineSlots.join(',') || '-'}`);
+
+    const syncPromise = pushVoiceConfigVersion(ws);
+    _voiceConfigPushInFlight.set(pushKey, { version: cfg.version, promise: syncPromise });
+    try {
+      await syncPromise;
+    } finally {
+      const current = _voiceConfigPushInFlight.get(pushKey);
+      if (current?.promise === syncPromise) _voiceConfigPushInFlight.delete(pushKey);
     }
   } catch (e) {
     console.warn(`[ws] voice-config push to ${ws._deviceId} failed: ${e.message}`);
+  }
+}
+
+async function pushVoiceConfigVersion(ws) {
+  // Read the device's last-reported firmware version so the clear pass only
+  // runs on firmware that knows ww_clear (>= 0.2.48). The auth handler stores
+  // the freshly-reported version before calling us, so this is current.
+  const fwVersion = getDevice(ws._userId, ws._deviceId)?.fw_version ?? null;
+  const r = await pushConfigToDevice(ws._deviceId, ws._userId, { fwVersion });
+  // Device is in sync when every push acked and nothing dropped/failed —
+  // across BOTH the wake-word push pass and the clear pass for unassigned
+  // slots. No pushedSlots>0 gate: a config with only clears (e.g. every user
+  // removed) is still a valid in-sync state to mark.
+  const fullySucceeded =
+    r.offlineSlots.length === 0 &&
+    r.failedSlots.length === 0 &&
+    r.ackedSlots.length === r.pushedSlots.length;
+  if (fullySucceeded) {
+    markVoiceConfigPushed(ws._userId, ws._deviceId, r.version);
+    console.log(`[ws] voice-config v${r.version} synced by ${ws._deviceId} (pushed ${r.ackedSlots.join(',') || '-'}, cleared ${r.clearedSlots.join(',') || '-'})`);
+  } else {
+    console.warn(`[ws] voice-config v${r.version} partial sync to ${ws._deviceId}: acked=${r.ackedSlots.join(',') || '-'} cleared=${r.clearedSlots.join(',') || '-'} failed=${r.failedSlots.map(f=>f.slot+':'+f.err).join(',') || '-'} offline=${r.offlineSlots.join(',') || '-'}`);
   }
 }
 

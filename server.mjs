@@ -335,7 +335,11 @@ const httpServer = http.createServer(async (req, res) => {
         // No-cache: this tree is being actively iterated on (flash wizard
         // bring-up). Browsers were holding stale webdfu.js + manifests
         // across reloads. Revisit once the wizard stabilises.
-        res.writeHead(200, { 'Content-Type': NESTED_TYPES[ext], 'Cache-Control': 'no-cache' });
+        res.writeHead(200, {
+          'Content-Type': NESTED_TYPES[ext],
+          'Content-Length': data.length,
+          'Cache-Control': 'no-cache',
+        });
         res.end(data);
         return;
       }

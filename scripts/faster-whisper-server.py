@@ -81,7 +81,11 @@ async def transcribe(
     # offline segmentation (training-data builds, subtitle generation,
     # search-within-audio). word_timestamps=True is a per-call enable on
     # faster-whisper; it's not a separate model. The plain `text` /
-    # `json` paths skip it to keep latency low.
+    # `json` paths skip word timestamps to keep latency low.
+    #
+    # Keep VAD on for every response format. Voice-device wake captures can be
+    # pure silence; without VAD Whisper often hallucinates short phrases like
+    # "Thank you.", which then look like real commands to OE.
     want_words = (
         response_format == "verbose_json"
         and (not timestamp_granularities or "word" in timestamp_granularities)
@@ -93,7 +97,7 @@ async def transcribe(
         initial_prompt=prompt,
         beam_size=5,
         word_timestamps=want_words,
-        vad_filter=True if response_format == "verbose_json" else False,
+        vad_filter=True,
     )
     # Materialise the generator once — it can only be iterated once.
     segments = list(segments_iter)

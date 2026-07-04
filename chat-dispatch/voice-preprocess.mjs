@@ -85,10 +85,19 @@ import {
  * become a real problem, layer a tiny LLM classifier on top, don't
  * inflate the regex set into something unreadable.
  */
-function classifyVoiceIntent(text, { ambientActive = false } = {}) {
+function classifyVoiceIntent(text, { ambientActive = false, conversationEnabled = false } = {}) {
   if (typeof text !== 'string') return null;
   const t = text.toLowerCase().trim().replace(/[.,!?]+$/, '');
   if (!t) return null;
+
+  // Conversation-mode closers. Only classified when the device is in
+  // conversation mode — in normal mode "goodbye" should still reach the LLM
+  // for a proper farewell instead of being swallowed by a canned ack. Bare
+  // forms only; "that's all the milk we have" must not end anything.
+  if (conversationEnabled &&
+      /^(that('s| is| will be|'ll be)?\s+all(\s+for\s+now)?|(i('m| am)\s+)?(all\s+)?done|we('re| are)\s+done|no\s+than(ks|k you)(,?\s+that('s|s| is)\s+(all|it))?|than(ks|k you),?\s+that('s|s| is)\s+(all|it)|good\s*bye|bye(\s+bye)?|good\s*night)$/.test(t)) {
+    return { type: 'conversation_end' };
+  }
 
   // Loose stop during ambient: STT often picks up the user's "stop" surrounded
   // by TV / room noise, so the strict ^-anchored regex below misses (e.g.
@@ -242,6 +251,12 @@ function executeVoiceIntent(intent, deviceId, userId, agentId = null) {
     case 'airplay_prev':
       sendToDevice(deviceId, { type: 'airplay_prev' });
       return { replaces: true };
+    case 'conversation_end':
+      // Nothing to tear down — the reply already finished (the user is
+      // answering inside a follow-up window). Being a fastpath, this never
+      // reaches llm-loop, so no new window is armed: the conversation just
+      // ends. The caller speaks the short ack.
+      return { replaces: true };
   }
   return { replaces: false };
 }
@@ -365,10 +380,10 @@ export async function tryVoiceTimerIntent({ source, deviceId, rawText, userId, a
  * stop/cancel. Regex-matched + executed as a WS message to the originating
  * device with no LLM round-trip.
  */
-export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent }) {
+export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode = false }) {
   if (!(source === 'voice-device' && typeof rawText === 'string')) return null;
   const ambientActive = !!(deviceId && getAmbientForDevice(deviceId));
-  const intent = classifyVoiceIntent(rawText, { ambientActive });
+  const intent = classifyVoiceIntent(rawText, { ambientActive, conversationEnabled: conversationMode });
   if (!intent) return null;
   const { replaces } = executeVoiceIntent(intent, deviceId, userId, agentId);
   console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);

@@ -6,6 +6,22 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-07-04
+
+**Voice devices: real back-and-forth conversations**
+New per-device **Conversation mode** (Settings → Voice devices, or PATCH `conversation_mode`): say the wake word once, and after every reply the device keeps listening for about 8 seconds so you can just keep talking — no wake word between turns. The conversation ends when you go quiet, say something like "stop", "that's all", or "goodbye", or someone else's wake word takes over. Requires voice-device firmware 0.2.65.
+
+**Interrupt a reply just by speaking**
+In conversation mode, start talking while the assistant is mid-reply and it pauses to listen. If you were actually saying something, the reply is cancelled and your interjection becomes the next turn; if it was a cough, the TV, or an "um", the reply picks back up right where it paused. Wake-word interruptions still work everywhere, as before.
+
+**Voice replies are harder to break**
+A deep reliability pass on the whole voice turn path. Every message between the device and server now carries a turn ID, so leftovers from a cancelled reply can't confuse the next one (this fixes music resuming over you mid-command after a barge-in). The device now recovers within seconds — instead of up to 90, or sometimes never — when the server drops mid-reply, a reply never starts, or an error ends a turn. Follow-up listening windows ("Which one did you mean?") now open when the device *finishes speaking* the question instead of expiring while it's still talking, and soft-spoken answers no longer lose their first syllable.
+
+**Faster voice turns**
+With firmware 0.2.65 the device streams your words to the server *while you're speaking* instead of uploading the whole recording afterwards, so transcription starts the moment you stop. The server also stops re-reading device config files on every single turn.
+
+---
+
 ## 2026-07-03
 
 **Replies start faster, and voice replies stop pausing mid-thought**

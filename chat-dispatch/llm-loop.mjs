@@ -26,7 +26,7 @@ import {
   loadConfig, getAgentsForUser, recordActivity, recordTokenUsage,
 } from '../routes/_helpers.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
-import { sendToDevice } from '../ws-handler.mjs';
+import { armFollowupAfterDrain } from '../ws-handler.mjs';
 import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
 import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
@@ -328,6 +328,7 @@ const RETRIABLE_RE = /\b(5\d{2}|timeout|timed out|rate limit|ECONNREFUSED|ECONNR
 export async function runLlmTurn({
   userId, agentId, scopedAgent, scopedSessionKey,
   userText, attachment, toolPlan, schedulerNote, source, deviceId,
+  conversationMode = false,
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false,
 }) {
   let streamBuf = '';
@@ -436,20 +437,34 @@ export async function runLlmTurn({
     // user can answer without saying the wake word again. The system prompt
     // instructs the LLM to use a trailing "?" — these imperatives are a
     // safety net for when it doesn't. Only sends for voice-device sources.
-    if (source === 'voice-device' && deviceId) {
+    // Never on an aborted turn: this finally also runs after AbortError, and
+    // a barged-in/stopped reply must not arm a phantom listen window.
+    if (source === 'voice-device' && deviceId && !ac?.signal?.aborted) {
       const reply = (streamBuf || '').trim();
-      // Only arm when the reply actually ENDS by asking the user something — a
-      // "?" earlier in the reply is usually rhetorical or embedded and would
-      // open a needless listen window (a false-listen vector). The LLM is
-      // prompted to end a genuine question with "?"; allow trailing
-      // quotes/brackets/emoji-free punctuation after it.
-      const ENDS_WITH_QUESTION = /[?？]["'”’)\]]*$/.test(reply);
-      // Patterns: "please say X", "say 'X'", "tell me X", "let me know",
-      // "do you mean", "did you mean" — common LLM hedges that ask for
-      // user input without a literal "?".
-      const ASKS_FOR_REPLY = /\b(please\s+(say|tell|repeat)|say\s+["'“]|tell\s+me|let\s+me\s+know|d(o|id)\s+you\s+mean)\b/i;
-      if (ENDS_WITH_QUESTION || ASKS_FOR_REPLY.test(reply)) {
-        sendToDevice(deviceId, { type: 'await_followup', windowMs: 5000 });
+      if (conversationMode) {
+        // Conversation mode: EVERY completed reply re-arms a listen window,
+        // question or not — the exchange continues until the user goes
+        // silent (window expiry), says a stop/that's-all phrase (fastpath,
+        // which never reaches this code), or a different slot wakes. No
+        // unbounded re-arm risk: each re-arm requires a fresh user utterance
+        // in between, so an unanswered window simply ends the conversation.
+        armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
+      } else {
+        // Only arm when the reply actually ENDS by asking the user something — a
+        // "?" earlier in the reply is usually rhetorical or embedded and would
+        // open a needless listen window (a false-listen vector). The LLM is
+        // prompted to end a genuine question with "?"; allow trailing
+        // quotes/brackets/emoji-free punctuation after it.
+        const ENDS_WITH_QUESTION = /[?？]["'”’)\]]*$/.test(reply);
+        // Patterns: "please say X", "say 'X'", "tell me X", "let me know",
+        // "do you mean", "did you mean" — common LLM hedges that ask for
+        // user input without a literal "?".
+        const ASKS_FOR_REPLY = /\b(please\s+(say|tell|repeat)|say\s+["'“]|tell\s+me|let\s+me\s+know|d(o|id)\s+you\s+mean)\b/i;
+        if (ENDS_WITH_QUESTION || ASKS_FOR_REPLY.test(reply)) {
+          // Armed at reply DRAIN (streamer close), not LLM-done — the old
+          // direct send raced the audio and could expire mid-reply.
+          armFollowupAfterDrain(deviceId, { windowMs: 5000 });
+        }
       }
     }
     recordActivity(userId, agentId, { apiCall: true });

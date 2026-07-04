@@ -2129,42 +2129,13 @@ export async function handle(req, res) {
         } catch (e) { console.warn('[stt] dump failed:', e.message); }
       }
 
-      // Send to configured STT provider (OpenAI-compatible multipart).
-      // sttMode=local routes to the Faster-Whisper service regardless of the
-      // configured remote URL/key, so users can keep their Groq/OpenAI
-      // credentials saved while flipping between local and remote.
-      const form = new FormData();
-      form.append('file', new Blob([audioBuf], { type: audioMime }), audioName);
-      form.append('model', cfg.sttModel || 'whisper-1');
-      // Always pin a language. With none, multilingual Whisper auto-detects and,
-      // on the silence/noise that follows a FALSE wake, hallucinates whatever is
-      // statistically common in its training data — YouTube end-cards in Japanese/
-      // Korean/Russian ("ご視聴ありがとうございました" etc.). Device-sent lang wins;
-      // else the config default; else English. Override via cfg.sttLanguage.
-      form.append('language', lang || cfg.sttLanguage || 'en');
-      const sttUrl = isLocal
-        ? 'http://127.0.0.1:5154/v1/audio/transcriptions'
-        : cfg.sttApiUrl;
-      const sttKey = isLocal ? 'local' : cfg.sttApiKey;
-      const sttRes = await fetch(sttUrl, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${sttKey}` },
-        body: form,
-        signal: AbortSignal.timeout(30000),
+      // Provider call shared with the streaming-STT WS path — see lib/stt.mjs.
+      const { transcribeAudio } = await import('../lib/stt.mjs');
+      const { transcript, raw: sttRaw } = await transcribeAudio(audioBuf, {
+        mime: audioMime, name: audioName, lang,
       });
-      if (!sttRes.ok) throw new Error(`STT API returned ${sttRes.status}: ${await sttRes.text()}`);
-      const data = await sttRes.json();
-      let transcript = data.text ?? data.transcript ?? '';
-      // Whisper renders times like "11:02 AM" as "11.02 AM" or just "11.22"
-      // — period instead of colon. Normalize any HH.MM in valid time range
-      // (00-23 hours, 00-59 minutes) to HH:MM. The bounds keep prices
-      // ("$1.99") and version numbers ("v1.2") from getting rewritten.
-      transcript = transcript.replace(
-        /\b([0-1]?\d|2[0-3])\.([0-5]\d)\b/g,
-        '$1:$2',
-      );
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ transcript, raw: data }));
+      res.end(JSON.stringify({ transcript, raw: sttRaw }));
     } catch (e) { safeError(res, e); }
     return true;
   }

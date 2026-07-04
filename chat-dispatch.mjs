@@ -229,6 +229,7 @@ function normalizeToolPlan(plan) {
  * @param {'voice-device'|'web'|'telegram'|'desktop-app'|null} [opts.source]
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
  * @param {number|null} [opts.wakeSlot]              voice-device slot index (0–5)
+ * @param {boolean} [opts.conversationMode]          voice-device conversation mode (re-arm follow-up windows after every reply)
  * @param {(ev: {type: string, [k: string]: any}) => void} opts.onEvent
  * @param {() => void} [opts.onBroadcast]
  * @param {(fromUserId: string, agentId: string, notify: object) => void} [opts.onNotify]
@@ -247,6 +248,11 @@ export async function handleChatMessage({
   source = null,
   deviceId = null,
   wakeSlot = null,
+  // Device-level conversation mode (voice devices): after each spoken reply
+  // the server re-arms a follow-up listen window unconditionally, so the
+  // exchange continues without repeated wake words. Resolved by ws-handler
+  // from the device record and threaded to runLlmTurn's follow-up emitter.
+  conversationMode = false,
   onEvent,
   onBroadcast = () => {},
   onNotify    = () => {},
@@ -397,7 +403,7 @@ export async function handleChatMessage({
     return;
   }
   if (_vTrace) console.log(`[voice-trace] timer-intent: miss device=${deviceId}`);
-  if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent })) {
+  if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode })) {
     if (_vTrace) console.log(`[voice-trace] control-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
     return;
   }
@@ -686,6 +692,7 @@ export async function handleChatMessage({
       userText: ctx.userText, attachment: ctx.attachment,
       toolPlan: ctx.toolPlan,
       schedulerNote: resolvedNote, source, deviceId,
+      conversationMode,
       ac, onEvent: wrappedOnEvent, onNotify,
       hiddenUser: _hiddenUser,
       isolatedTaskRun: _isolatedTaskRun,
