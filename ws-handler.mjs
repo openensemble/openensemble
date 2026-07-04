@@ -45,6 +45,7 @@ import { getSlotAssignment, findDeviceByTokenPrefix, findDeviceByTokenAnyUser, r
 import { getAmbientForDevice, dropAmbientForDevice } from './routes/devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
 import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
+import { hasVoiceAnnouncements, nextVoiceAnnouncement } from './lib/voice-announcements.mjs';
 
 // Backfill ws._deviceId for voice-device sessions that were created before
 // the deviceId was stored on the session record (pre-2026-05-12). Looks up
@@ -267,6 +268,10 @@ function suppressVoiceOutput(ws, reason, { sendDone = false } = {}) {
   const active = ws._activeVoiceTurn ?? null;
   const streamer = ws._ttsStreamer ?? null;
   const hadStreamer = !!streamer;
+  // A stop that killed a live reply: the user's NEXT utterance ("that's
+  // enough", "stop") almost certainly targets that reply, not whatever
+  // ambient/AirPlay bed is underneath — the stop intent spares the bed then.
+  if (hadStreamer && !streamer.closed && !streamer.aborted) ws._replyStoppedAt = Date.now();
   try { streamer?.abort?.({ close: true, sendDone }); } catch {
     try { streamer?.abort?.(); } catch {}
   }
@@ -341,9 +346,91 @@ export function initWs(httpServer) {
 
   _wss.on('connection', onConnection);
 
+  // Voice announcement drain: every few seconds, look for devices with
+  // queued completions (background/delegated work that finished after its
+  // originating turn ended) and speak ONE entry — but only when the device
+  // is genuinely idle: no live streamer and a couple of seconds since the
+  // last voice activity, so we never talk over a reply, a capture, or the
+  // user's own barge-in verify.
+  const annDrain = setInterval(() => { try { drainVoiceAnnouncements(); } catch {} }, 3000);
+  annDrain.unref?.();
+  _wss.on('close', () => clearInterval(annDrain));
+
   // Wire the credential primitive so server-side tools can emit
   // `credential_prompt` frames via the per-user broadcast helper.
   setCredentialEmitter(sendToUser);
+}
+
+function drainVoiceAnnouncements() {
+  if (!_wss) return;
+  for (const ws of _wss.clients) {
+    if (ws.readyState !== ws.OPEN || !ws._deviceId || !ws._authenticated) continue;
+    if (!hasVoiceAnnouncements(ws._deviceId)) continue;
+    // Idle gate.
+    const st = ws._ttsStreamer;
+    if (st && !st.closed && !st.aborted) continue;              // something is (or may be) speaking
+    if (ws._sttSession) continue;                               // user is mid-utterance (streaming STT)
+    if (Date.now() - (ws._lastVoiceActivityAt ?? 0) < 2500) continue;
+    if (Date.now() < (ws._followupArmedUntil ?? 0)) continue;   // open listen window — the user may answer
+    if (isVoiceOutputSuppressed(ws, null)) continue;            // user recently said stop — hold
+    const d = getDevice(ws._userId, ws._deviceId);
+    if (!d || d.speak_replies === false) continue;
+    const entry = nextVoiceAnnouncement(ws._deviceId);
+    if (!entry) continue;
+    speakAnnouncement(ws, d, entry);
+  }
+}
+
+function speakAnnouncement(ws, devicePrefs, entry) {
+  try {
+    const cfg = loadConfig();
+    ws._lastVoiceActivityAt = Date.now();
+    if (cfg.ttsProvider !== 'pocket-tts') {
+      // Legacy path: device accumulates the token and pulls /api/tts itself.
+      sendToDevice(ws._deviceId, { type: 'token', text: entry.text, agent: 'system' });
+      sendToDevice(ws._deviceId, { type: 'done', agent: 'system' });
+      return;
+    }
+    // Same voice resolution as a turn, minus the wake-slot override.
+    const deviceVoice = devicePrefs?.tts_voice && devicePrefs.tts_voice !== 'alloy' ? devicePrefs.tts_voice : null;
+    const v = deviceVoice || cfg.ttsVoice || '';
+    let refPath = null, presetVoice = null;
+    if (typeof v === 'string' && v.startsWith('ref_')) {
+      const ref = getVoiceRef(ws._userId, v);
+      if (ref) refPath = ref.wavPath;
+    }
+    if (!refPath && (!v || v === 'default-en' || v === 'default')) {
+      if (fs.existsSync(OE_DEFAULT_VOICE_STATE)) refPath = OE_DEFAULT_VOICE_STATE;
+    }
+    if (!refPath && !presetVoice) {
+      if (v && !v.startsWith('ref_')) presetVoice = v;
+      else if (fs.existsSync(OE_DEFAULT_VOICE_STATE)) refPath = OE_DEFAULT_VOICE_STATE;
+      else presetVoice = 'george';
+    }
+    const streamer = createVoiceTtsStreamer({
+      send: (m) => { if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(m)); } catch {} } },
+      isOpen: () => ws.readyState === ws.OPEN,
+      bufferedAmount: () => ws.bufferedAmount ?? 0,
+      cfg, refPath, voice: presetVoice, log,
+      turnId: null,   // announcements belong to no turn; fw accepts untagged
+    });
+    // Own the slot while speaking so a wake/stop during the announcement
+    // interacts with it exactly like a reply (new chat aborts it, etc.).
+    ws._ttsStreamer = streamer;
+    streamer.onClosed((clean) => {
+      ws._lastVoiceActivityAt = Date.now();
+      if (clean && devicePrefs?.conversation_mode) {
+        // Conversation devices get a short window after an announcement —
+        // "make another one" / "show it on the TV" flows naturally.
+        armFollowupAfterDrain(ws._deviceId, { windowMs: 8000, conversation: true });
+      }
+    });
+    log.info('voice', 'speaking announcement', { deviceId: ws._deviceId, kind: entry.kind, chars: entry.text.length });
+    streamer.pushText(entry.text.endsWith('.') || entry.text.endsWith('!') || entry.text.endsWith('?') ? `${entry.text} ` : `${entry.text}. `);
+    streamer.finish();
+  } catch (e) {
+    log.warn('voice', 'announcement speak failed', { deviceId: ws._deviceId, error: e.message });
+  }
 }
 
 /**
@@ -792,6 +879,7 @@ function onConnection(ws, req) {
       dropSttSession(ws, ws._sttSession ? 'superseded' : null);
       const ttl = setTimeout(() => dropSttSession(ws, 'ttl'), STT_SESSION_TTL_MS);
       ttl.unref?.();
+      ws._lastVoiceActivityAt = Date.now();
       ws._sttSession = {
         turnId: (typeof msg.turn_id === 'string' && msg.turn_id.length > 0 && msg.turn_id.length <= 24) ? msg.turn_id : null,
         wakeSlot: Number.isInteger(msg.wake_slot) ? msg.wake_slot : null,
@@ -1064,6 +1152,10 @@ function onConnection(ws, req) {
       // every event of this turn so the firmware can drop stale-turn events.
       const deviceTurnId = (typeof msg.turn_id === 'string' && msg.turn_id.length > 0 && msg.turn_id.length <= 24)
         ? msg.turn_id : null;
+      // Speech-barge turn (fw ≥ 0.2.66): the barge pre-roll may prefix the
+      // transcript with a sliver of the interrupted reply's audio, so intent
+      // matchers relax their bare-word anchors ("…Paris. Stop." still stops).
+      const bargeIn = msg.barge === true;
       // wake_avg_prob is uint8 (0..255), 255 = ~1.0. Logged so app.log can be
       // grep'd for marginal-vs-confident wake fires when tuning per-slot cutoffs.
       if (ws._deviceId && wakeSlot !== null && Number.isInteger(msg.wake_avg_prob)) {
@@ -1143,6 +1235,7 @@ function onConnection(ws, req) {
       if (voiceTurn) {
         messageVoiceTurn = voiceTurn;
         ws._activeVoiceTurn = voiceTurn;
+        ws._lastVoiceActivityAt = Date.now();
         // Retained past turn end (never nulled) so a later `stop` with no
         // active turn can abort the RIGHT user's agent — the slot-routed
         // effective user, not the device-auth user's coordinator.
@@ -1168,6 +1261,8 @@ function onConnection(ws, req) {
       // on-device sentence accumulation / per-sentence pull / drain race. Old
       // firmware omits msg.tts_stream and keeps the legacy `token` path.
       let ttsStreamer = null;
+      // Once-per-turn guard for the spoken delegation ack (see onEvent).
+      let voiceDelegationAckSpoken = false;
       // A device plays exactly one reply at a time. If a previous turn's
       // streamer is still pumping (a barge-in chat that raced the stop
       // frame, or an overlapping announcement), kill it before wiring a
@@ -1202,8 +1297,33 @@ function onConnection(ws, req) {
             turnId: voiceTurn?.id ?? null,
           });
           ws._ttsStreamer = ttsStreamer;
+          ttsStreamer.onClosed(() => { ws._lastVoiceActivityAt = Date.now(); });
         }
       } catch (e) { log.warn('voice-tts', 'streamer setup failed', { error: e.message }); ttsStreamer = null; }
+
+      // Silent-turn ack: if NOTHING speakable has materialized shortly after
+      // dispatch, say so — otherwise the device sits in THINKING with
+      // flashing LEDs and a gated mic for however long the silence lasts
+      // (field data: a 53 s provider-hosted image generation inside the
+      // model's own span, zero local events to hook). Time-based on purpose:
+      // event-based triggers (ask_agent etc.) miss hosted tools and pure
+      // reasoning burns. Once the ack plays, the idle burst-close drops the
+      // device back to listening for the remainder of the wait.
+      let silentAckTimer = null;
+      if (ttsStreamer) {
+        const ackStreamer = ttsStreamer;
+        silentAckTimer = setTimeout(() => {
+          try {
+            if (ws._ttsStreamer !== ackStreamer) return;      // superseded turn
+            if (ackStreamer.aborted || ackStreamer.finished || ackStreamer.hasContent) return;
+            if (isVoiceOutputSuppressed(ws, voiceTurn)) return;
+            voiceDelegationAckSpoken = true;                   // no double-ack
+            log.info('voice', 'silent-turn ack spoken', { deviceId: ws._deviceId, turnId: voiceTurn?.id ?? null });
+            ackStreamer.pushText('On it — give me a moment. ');
+          } catch { /* ack is best-effort */ }
+        }, 3000);
+        silentAckTimer.unref?.();
+      }
 
       await handleChatMessage({
         userId:     ws._userId,
@@ -1232,6 +1352,11 @@ function onConnection(ws, req) {
         deviceId:   ws._deviceId,
         wakeSlot:   wakeSlot,
         conversationMode: !!(ws._deviceId && devicePrefs?.conversation_mode),
+        bargeIn,
+        // "stop"/"that's enough" arriving as a speech barge OR shortly after
+        // a reply was cut by a wake-barge is aimed at the REPLY — the stop
+        // intent must not also kill the ambient/AirPlay bed underneath.
+        recentReplyStop: bargeIn || (Date.now() - (ws._replyStoppedAt ?? 0) < 8000),
         // Chat events fan out two ways:
         //   (1) Back to the originating ws — the device gets TTS chunks,
         //       status updates, etc. regardless of whose user is "acting."
@@ -1259,6 +1384,15 @@ function onConnection(ws, req) {
             } else if (e?.type === 'token' && typeof e.text === 'string') ttsStreamer.pushText(e.text);
             else if (e?.type === 'done') ttsStreamer.finish();
             else if (e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) { ttsStreamer.pushText(VOICE_ERROR_FALLBACK); ttsStreamer.finish(); }
+            else if (e?.type === 'tool_call' && e.name === 'ask_agent' && !voiceDelegationAckSpoken) {
+              // Sync delegation starting — could grind for a minute with zero
+              // tokens. Speak a short ack so the user isn't staring at
+              // flashing LEDs wondering if anything is happening; the
+              // streamer's idle burst-close then re-opens the mic for the
+              // wait. Once per turn.
+              voiceDelegationAckSpoken = true;
+              ttsStreamer.pushText('On it — give me a moment. ');
+            }
             else if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(e)); } catch {} }
           } else if (ws.readyState === ws.OPEN) {
             try {
@@ -1300,6 +1434,7 @@ function onConnection(ws, req) {
           if (ws.readyState === ws.OPEN) emitAgentNotification(fromUserId, agentId, notify);
         },
       });
+      if (silentAckTimer) clearTimeout(silentAckTimer);
       // Terminal-event guarantee: handleChatMessage has returned, so the LLM
       // turn is over — but an abort that didn't come from THIS device's own
       // `stop` (browser-tab stop, shutdown, cross-agent abort) emits neither
@@ -1481,10 +1616,14 @@ export function armFollowupAfterDrain(deviceId, { windowMs = 5000, conversation 
     if (streamer && !streamer.closed && !streamer.aborted) {
       streamer.onClosed((clean) => {
         if (!clean) return;
-        if (client.readyState === client.OPEN) sendToDevice(deviceId, payload());
+        if (client.readyState === client.OPEN) {
+          client._followupArmedUntil = Date.now() + windowMs + 1000;
+          sendToDevice(deviceId, payload());
+        }
       });
       return true;
     }
+    client._followupArmedUntil = Date.now() + windowMs + 1000;
     sendToDevice(deviceId, payload());
     return true;
   }

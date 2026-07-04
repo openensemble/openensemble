@@ -1765,6 +1765,16 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               rootWatcherId: watcherId,
             };
             captured.visibleAgentId = captured.agentId;
+            // Voice origin (from the turn's ALS context, live at capture
+            // time): lets the completion below announce itself on the
+            // originating device's speaker instead of silently posting to
+            // chat that nobody is looking at.
+            try {
+              const { getTurnContext } = await import('./lib/turn-abort-context.mjs');
+              const _tc = getTurnContext();
+              captured.voiceDeviceId = _tc?.deviceId ?? null;
+              captured.voiceConversation = !!_tc?.conversationMode;
+            } catch { captured.voiceDeviceId = null; }
             _registerScheduledAutoBgChild({
               scheduledCtx: captured.scheduledCtx,
               userId: captured.userId,
@@ -1900,6 +1910,19 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     ts: Date.now(),
                   });
                 } catch (_) { /* best-effort */ }
+                // Speak the completion on the originating voice device —
+                // idle-gated queue; with fw >= 0.2.68 it ducks any ambient
+                // or AirPlay bed instead of pausing it.
+                if (captured.voiceDeviceId) {
+                  try {
+                    const { enqueueVoiceAnnouncement, announcementLine } = await import('./lib/voice-announcements.mjs');
+                    enqueueVoiceAnnouncement(
+                      captured.voiceDeviceId,
+                      announcementLine(captured.displayName || captured.name, finalText, captured.args?.task || ''),
+                      { kind: 'auto-bg' }
+                    );
+                  } catch (e) { console.warn('[auto-bg] voice announce enqueue failed:', e.message); }
+                }
                 await _emitAutoBgNotify(captured.userId, captured.agentId, finalNotify);
                 _completeScheduledAutoBgChild({
                   scheduledCtx: captured.scheduledCtx,

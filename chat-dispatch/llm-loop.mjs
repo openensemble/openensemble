@@ -27,6 +27,7 @@ import {
 } from '../routes/_helpers.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { armFollowupAfterDrain } from '../ws-handler.mjs';
+import { runWithTurnContext } from '../lib/turn-abort-context.mjs';
 import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
 import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
@@ -123,6 +124,7 @@ function classifySpecialistIntent(text, userId, currentAgentId) {
  */
 export async function runSpecialistRoute({
   userText, userId, agentId, source, deviceId, attachment, toolPlan, ac, onEvent, onNotify,
+  conversationMode = false,
 }) {
   if (!userText) return null;
   // Compound multi-step requests and explicit delegation language (e.g.
@@ -245,6 +247,11 @@ export async function runSpecialistRoute({
     recordRouting({ mode: 'specialist', specialist: route.skillId ?? null, redirectedTo: route.agentId ?? null, strategy: route.strategy ?? 'regex', llmAvoided: false });
     let routerBuf = '';
     try {
+      // runWithTurnContext: tools executed inside this stream (incl. ask_agent
+      // sync delegations) link their own AbortControllers to this turn's
+      // signal, so a user stop unwinds the whole delegation chain; the voice
+      // origin lets backgrounded work announce its completion on the device.
+      await runWithTurnContext({ signal: ac.signal, deviceId, conversationMode }, async () => {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
         onEvent({ ...e, agent: agentId });
       }, userId, attachment, null, false, { source, deviceId }, { toolPlan })) {
@@ -254,6 +261,7 @@ export async function runSpecialistRoute({
         if (event.type === 'replace')  routerBuf = event.text;
         onEvent({ ...event, agent: agentId });
       }
+      });
       // Persist the turn under the coordinator's session so the user sees it
       // in the chat they actually typed into. The specialist ran ephemerally,
       // so this is the only durable record.
@@ -339,6 +347,13 @@ export async function runLlmTurn({
   let toolInvoked = false;
 
   async function runStream(agentObj) {
+    // runWithTurnContext: skill executors reached from this stream's tool loop
+    // (notably ask_agent's sync delegations) link their own AbortControllers
+    // to this turn's signal via getTurnSignal() — without it, a user stop
+    // killed the coordinator but a delegated specialist ran to completion.
+    // deviceId/conversationMode ride along so auto-backgrounded work can
+    // announce its completion on the originating voice device.
+    return runWithTurnContext({ signal: ac.signal, deviceId, conversationMode }, async () => {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       if (e.type === 'tool_call') toolInvoked = true;
       onEvent({ ...e, agent: agentId });
@@ -357,6 +372,7 @@ export async function runLlmTurn({
       onEvent({ ...event, agent: agentId });
     }
     return null; // success
+    });
   }
 
   try {

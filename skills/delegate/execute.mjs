@@ -531,6 +531,21 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // activeTasks registry via its watcherId and fires this controller, which
   // kills the in-flight streamChat for whichever stage is running.
   const syncAbort = new AbortController();
+  // ALSO linked to the calling TURN's abort signal (voice/browser "stop",
+  // device disconnect, shutdown — anything that fires the turn's controller
+  // via abortChat). Field bug: "stop" during a coordinator→specialist
+  // delegation killed the coordinator but the specialist ran to completion.
+  // The signal rides AsyncLocalStorage from the llm-loop (see
+  // lib/turn-abort-context.mjs); absent for background/scheduled callers,
+  // whose delegations deliberately outlive any single turn.
+  try {
+    const { getTurnSignal } = await import('../../lib/turn-abort-context.mjs');
+    const parentSignal = getTurnSignal();
+    if (parentSignal) {
+      if (parentSignal.aborted) syncAbort.abort();
+      else parentSignal.addEventListener('abort', () => syncAbort.abort(), { once: true });
+    }
+  } catch { /* best-effort — delegation still chip-stoppable */ }
   const syncWatcherTaskId = `deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   let syncWatcherId = null;
   let syncWatchers = null;

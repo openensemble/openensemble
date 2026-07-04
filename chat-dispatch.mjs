@@ -164,6 +164,13 @@ const VOICE_DEVICE_TOOL_ALLOWLIST = new Set([
   'ha_call_service',
   'ha_list_areas',
   'ha_list_services',
+  // Calendar READS — "what's on my calendar" is a top voice query, and
+  // without these the router leaves only web_search+ask_agent, forcing a
+  // pointless delegation detour through whichever agent holds the calendar
+  // role (field: the coordinator asked the specialist to read a calendar she could have read
+  // herself). Writes stay off voice deliberately.
+  'gcal_list',
+  'gcal_list_calendars',
   // Voice routines — let users bind/edit/delete routines by speaking
   // ("<wake-word>, when I say goodnight, turn off the lights and play
   // thunderstorm sounds"). Fast-path executes matched routines pre-LLM;
@@ -230,6 +237,8 @@ function normalizeToolPlan(plan) {
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
  * @param {number|null} [opts.wakeSlot]              voice-device slot index (0–5)
  * @param {boolean} [opts.conversationMode]          voice-device conversation mode (re-arm follow-up windows after every reply)
+ * @param {boolean} [opts.bargeIn]                   voice-device speech-barge turn (transcript may carry reply-bleed prefix)
+ * @param {boolean} [opts.recentReplyStop]           a reply was just stopped — stop intents spare the ambient/AirPlay bed
  * @param {(ev: {type: string, [k: string]: any}) => void} opts.onEvent
  * @param {() => void} [opts.onBroadcast]
  * @param {(fromUserId: string, agentId: string, notify: object) => void} [opts.onNotify]
@@ -253,6 +262,13 @@ export async function handleChatMessage({
   // exchange continues without repeated wake words. Resolved by ws-handler
   // from the device record and threaded to runLlmTurn's follow-up emitter.
   conversationMode = false,
+  // True when the utterance interrupted the device's own reply (speech barge,
+  // fw ≥ 0.2.66). The transcript may be prefixed with reply bleed, so the
+  // control-intent matcher relaxes its bare-word anchors for this turn.
+  bargeIn = false,
+  // True when this utterance arrived as/just after a reply was stopped — a
+  // "stop" intent then targets the reply and SPARES the ambient/AirPlay bed.
+  recentReplyStop = false,
   onEvent,
   onBroadcast = () => {},
   onNotify    = () => {},
@@ -403,7 +419,7 @@ export async function handleChatMessage({
     return;
   }
   if (_vTrace) console.log(`[voice-trace] timer-intent: miss device=${deviceId}`);
-  if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode })) {
+  if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode, bargeIn, recentReplyStop })) {
     if (_vTrace) console.log(`[voice-trace] control-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
     return;
   }
@@ -595,7 +611,7 @@ export async function handleChatMessage({
     // confident local-intent match never escalates to the cloud coordinator.
     // Inert unless cfg.localTier.enabled (kill switch). Falls through on miss.
     ...(allowIntentFastpaths ? [tryLocalIntentFastpath] : []),
-    ...(_isBackgroundContinuation ? [] : [c => runSpecialistRoute({ ...c, attachment: c.attachment })]),
+    ...(_isBackgroundContinuation ? [] : [c => runSpecialistRoute({ ...c, attachment: c.attachment, conversationMode })]),
   ];
 
   for (const handler of INTERCEPTORS) {

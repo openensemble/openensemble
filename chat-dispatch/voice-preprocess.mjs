@@ -85,7 +85,7 @@ import {
  * become a real problem, layer a tiny LLM classifier on top, don't
  * inflate the regex set into something unreadable.
  */
-function classifyVoiceIntent(text, { ambientActive = false, conversationEnabled = false } = {}) {
+function classifyVoiceIntent(text, { ambientActive = false, conversationEnabled = false, bargeIn = false } = {}) {
   if (typeof text !== 'string') return null;
   const t = text.toLowerCase().trim().replace(/[.,!?]+$/, '');
   if (!t) return null;
@@ -99,15 +99,15 @@ function classifyVoiceIntent(text, { ambientActive = false, conversationEnabled 
     return { type: 'conversation_end' };
   }
 
-  // Loose stop during ambient: STT often picks up the user's "stop" surrounded
-  // by TV / room noise, so the strict ^-anchored regex below misses (e.g.
-  // "you can travel with the ... stop"). When ambient is actively playing on
-  // this device, "stop" anywhere in the transcript almost certainly means
-  // "stop the music" — the cost of a false positive ("don't stop") is bounded
-  // (user just says "play" again) and far smaller than the cost of a missed
-  // stop (the noise blocks the user from stopping the noise). Guarded against
+  // Loose stop during ambient OR on a speech-barge turn: STT often picks up
+  // the user's "stop" surrounded by other audio — TV/room noise under
+  // ambient, or (barge) a prefix of the interrupted reply bled into the
+  // pre-roll ("…the capital is Paris. Stop."). The strict ^-anchored regex
+  // below would miss those. In both situations "stop" anywhere in the
+  // transcript almost certainly means stop — the cost of a false positive
+  // is bounded, a missed stop is the worst UX in the system. Guarded against
   // explicit negation ("don't stop", "do not stop", "didn't stop").
-  if (ambientActive && /\b(stop|shut\s+up|enough)\b/.test(t)
+  if ((ambientActive || bargeIn) && /\b(stop|shut\s+up|enough)\b/.test(t)
       && !/\b(do\s*n[o']?t|did\s*n[o']?t|never)\s+(stop|shut)/.test(t)) {
     return { type: 'stop' };
   }
@@ -175,7 +175,7 @@ function classifyVoiceIntent(text, { ambientActive = false, conversationEnabled 
  * the side effect but the caller can continue if desired (in practice
  * we still short-circuit for all of these because they're terminal).
  */
-function executeVoiceIntent(intent, deviceId, userId, agentId = null) {
+function executeVoiceIntent(intent, deviceId, userId, agentId = null, { spareBed = false } = {}) {
   if (!deviceId) return { replaces: false };
   switch (intent.type) {
     case 'volume_up':
@@ -211,12 +211,13 @@ function executeVoiceIntent(intent, deviceId, userId, agentId = null) {
       sendToDevice(deviceId, { type: 'resume_playback' });
       return { replaces: true };
     case 'stop':
-      // Mark stop-intent FIRST so any auto-restore setTimeout that fires in
-      // the next 15s (queued by prior LLM turns when TV interference made
-      // their stop attempt look like normal chat) sees the recent stop and
-      // skips. Without this, a stop after several TV-driven wakes would be
-      // immediately undone by 3-second-delayed resumes already in flight.
-      if (deviceId) markStopIntent(deviceId);
+      // spareBed: the stop arrived as (or right after) a reply interruption —
+      // the user is stopping the ASSISTANT, not the rain/music underneath.
+      // Field bug 2026-07-04: "that's enough" during a WW2 answer over
+      // ambient killed both the reply AND the thunderstorm. When sparing,
+      // also skip markStopIntent — it exists to suppress ambient auto-
+      // restores, which is exactly what we don't want here.
+      if (deviceId && !spareBed) markStopIntent(deviceId);
       // Abort the in-flight LLM turn too. This fast-path runs before
       // openTurn(), so "stop" during THINKING used to only silence audio —
       // the prior turn's tool calls (an email send, an HA action) kept
@@ -235,15 +236,13 @@ function executeVoiceIntent(intent, deviceId, userId, agentId = null) {
         const n = broadcastAlarmStop(userId);
         console.log(`[chat] voice-stop broadcasted alarm_stop to ${n} device(s) for ${userId}`);
       }
-      // Also cancel any looped ambient playback on the originating device.
-      // The firmware's wake-during-ambient path stops the loop locally, but
-      // a typed/UI "stop" goes through here without that signal — so we
-      // mirror it server-side.
-      if (deviceId) stopAmbientOnDevice(deviceId);
-      // Stop any AirPlay session. The device's airplay_stop is a no-op when
-      // nothing is streaming, so sending unconditionally is safe and avoids
-      // tracking session state server-side.
-      if (deviceId) sendToDevice(deviceId, { type: 'airplay_stop' });
+      // Also cancel any looped ambient playback on the originating device —
+      // UNLESS this stop targets a just-interrupted reply (spareBed): then
+      // the bed survives and the device's own idle logic resumes it.
+      if (deviceId && !spareBed) stopAmbientOnDevice(deviceId);
+      // Stop any AirPlay session, same spareBed rule. The device's
+      // airplay_stop is a no-op when nothing is streaming.
+      if (deviceId && !spareBed) sendToDevice(deviceId, { type: 'airplay_stop' });
       return { replaces: true };
     case 'airplay_next':
       sendToDevice(deviceId, { type: 'airplay_next' });
@@ -380,12 +379,12 @@ export async function tryVoiceTimerIntent({ source, deviceId, rawText, userId, a
  * stop/cancel. Regex-matched + executed as a WS message to the originating
  * device with no LLM round-trip.
  */
-export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode = false }) {
+export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode = false, bargeIn = false, recentReplyStop = false }) {
   if (!(source === 'voice-device' && typeof rawText === 'string')) return null;
   const ambientActive = !!(deviceId && getAmbientForDevice(deviceId));
-  const intent = classifyVoiceIntent(rawText, { ambientActive, conversationEnabled: conversationMode });
+  const intent = classifyVoiceIntent(rawText, { ambientActive, conversationEnabled: conversationMode, bargeIn });
   if (!intent) return null;
-  const { replaces } = executeVoiceIntent(intent, deviceId, userId, agentId);
+  const { replaces } = executeVoiceIntent(intent, deviceId, userId, agentId, { spareBed: bargeIn || recentReplyStop });
   console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);
   if (!replaces) return null;
   // Short audible confirmation so the user hears that the device got it.

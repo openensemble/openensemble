@@ -20,6 +20,15 @@ A deep reliability pass on the whole voice turn path. Every message between the 
 **Faster voice turns**
 With firmware 0.2.65 the device streams your words to the server *while you're speaking* instead of uploading the whole recording afterwards, so transcription starts the moment you stop. The server also stops re-reading device config files on every single turn.
 
+**Music ducks under the assistant's voice instead of stopping**
+The device firmware (0.2.68+) gained a real audio mixer: when the assistant speaks over ambient sound or AirPlay, the music now dips smoothly to about 10% volume, the voice speaks on top, and the music swells back — no more abrupt pause and restart. Saying "stop" or "that's enough" during a reply now stops *the reply* and leaves your rain sounds or music playing; a bare "stop" with only music playing still stops the music.
+
+**Background work announces itself when it's done**
+If you ask for something slow — an image, a delegated task — the assistant says "On it, give me a moment," the LED ring switches to a rotating rainbow so you can see work is happening, and the microphone comes back to you during the wait. When the work finishes, the result is spoken as a one-line announcement the next time the device is quiet (ducking over any music), even if you've asked other questions in between. Saying "stop" mid-task now cancels the whole chain, including the specialist doing the work.
+
+**Voice replies sound like a person, not a screen reader**
+Spoken replies no longer read out URLs, calendar event IDs, or emoji — those are stripped before synthesis (the full text stays in your chat). Dates and times are spoken naturally: "Saturday, July 4th, 2026, 5 AM to 8 AM" instead of "Sat, Jul 4 · 5:00 AM–8:00 AM". List-style content gets natural pauses between items instead of running together. Voice turns can also read your calendar directly now, and always know today's actual date.
+
 ---
 
 ## 2026-07-03

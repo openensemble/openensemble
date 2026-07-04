@@ -6,6 +6,7 @@
  * and a task-backed agent_report is broadcast so the UI can update the chip.
  */
 
+import { getTurnContext } from './lib/turn-abort-context.mjs';
 import fs from 'fs';
 import path from 'path';
 import { registerWatcher, pushWatcherStatus, completeWatcher } from './scheduler/watchers.mjs';
@@ -17,6 +18,15 @@ import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 
 let _broadcast = null;
 export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
+
+// Voice-device origin of the CURRENT turn (ALS), stamped onto task records at
+// registration so completions can announce themselves on the device speaker.
+function _voiceOrigin() {
+  try {
+    const tc = getTurnContext();
+    return { voiceDeviceId: tc?.deviceId ?? null, voiceConversation: !!tc?.conversationMode };
+  } catch { return { voiceDeviceId: null, voiceConversation: false }; }
+}
 
 // in-flight task registry: taskId -> { agentId, userId, agentName, startedAt }
 const activeTasks = new Map();
@@ -682,6 +692,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     originScheduledTaskAgent: opts?.originScheduledTaskAgent || scheduledCtx?.originTaskAgent || null,
     originScheduledRunId: scheduledCtx?.runId || null, // barrier per-fire nonce — completion must rejoin the SAME fire's group
     originScheduledNote: scheduledCtx?.scheduledNote || null,
+    ...(_voiceOrigin()),
   });
   if (scheduledCtx?.originTaskId) {
     registerScheduledChild({
@@ -1158,6 +1169,19 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
     });
   } catch (e) {
     console.error('[background-tasks] failed to inject session notice:', e.message);
+  }
+
+  // Speak the completion on the originating voice device (idle-gated queue;
+  // ducks any ambient/AirPlay bed on fw >= 0.2.68). Errors announce too —
+  // a silent failure is how work gets "lost".
+  if (rec?.voiceDeviceId) {
+    try {
+      const { enqueueVoiceAnnouncement, announcementLine } = await import('./lib/voice-announcements.mjs');
+      const line = errorMsg
+        ? `${agentName} hit a problem with the background task.`
+        : announcementLine(agentName, result, rec?.summary || '');
+      enqueueVoiceAnnouncement(rec.voiceDeviceId, line, { kind: 'background' });
+    } catch (e) { console.warn('[background-tasks] voice announce enqueue failed:', e.message); }
   }
 
   // For a scheduled run, record this delegation's completion in the barrier
