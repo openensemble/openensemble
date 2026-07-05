@@ -5,6 +5,11 @@ let _nodesList = [];
 let _termWindows = {};  // nodeId → Window reference
 const NODE_WALKTHROUGH_DISMISSED_KEY = 'oe.nodes.walkthrough.dismissed.v1';
 
+// ── Join requests (device admission queue) ─────────────────────────────────
+let _admissionList = [];         // pending requests, privileged users only
+let _admissionOwnerChoices = null; // cached GET /api/users result for the owner picker
+let _admissionOwnerSel = {};      // requestId -> chosen ownerUserId, survives re-render
+
 const PKG_COMMANDS = {
   apt:    { update: 'sudo apt update && sudo apt upgrade -y', install: 'sudo apt install -y' },
   pacman: { update: 'sudo pacman -Syu --noconfirm',          install: 'sudo pacman -S --noconfirm' },
@@ -105,6 +110,10 @@ function promptChar(platform) {
 }
 
 // ── Load & render ────────────────────────────────────────────────────────────
+function isPrivilegedUser() {
+  return _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+}
+
 async function loadNodes() {
   const body = $('drawerNodesBody');
   if (!body) return;
@@ -118,6 +127,10 @@ async function loadNodes() {
     stopNodesRefresh();
     return;
   }
+
+  await loadAdmissionQueue();
+  if (_admissionList.length) await ensureAdmissionOwnerChoices();
+  const admissionHtml = renderAdmissionQueue();
 
   const offlineCount = _nodesList.filter(n => n.health === 'disconnected').length;
   const onlineCount = _nodesList.length - offlineCount;
@@ -144,17 +157,18 @@ async function loadNodes() {
   </div>`;
 
   if (!_nodesList.length) {
-    body.innerHTML = `${pairBtnHtml}<div class="cdraw-empty" style="padding:32px 16px">
+    body.innerHTML = `${admissionHtml}${pairBtnHtml}<div class="cdraw-empty" style="padding:32px 16px">
       <div style="font-size:32px;margin-bottom:12px">&#x1F5A5;</div>
       <div style="font-weight:600;margin-bottom:6px">No nodes connected</div>
-      <div style="font-size:12px;color:var(--muted)">Install <code>oe-node-agent</code> on a remote machine, then click "Pair New Node" to connect it.</div>
+      <div style="font-size:12px;color:var(--muted)">Install <code>oe-node-agent</code> on a remote machine, then click "Pair New Node" to connect it. New installs default to requesting approval right here — no code needed.</div>
     </div>`;
     lucide.createIcons();
     startNodesRefresh();
+    refreshNodesAlertBadge();
     return;
   }
 
-  let html = pairBtnHtml + renderNodesActionQueue(_nodesList) + '<div style="padding:10px">';
+  let html = admissionHtml + pairBtnHtml + renderNodesActionQueue(_nodesList) + '<div style="padding:10px">';
   for (const node of _nodesList) {
     html += renderNodeCard(node);
   }
@@ -164,6 +178,146 @@ async function loadNodes() {
   startNodesRefresh();
   refreshNodesAlertBadge();
 }
+
+// Fetch the pending admission queue (owner/admin only — regular users get a
+// 403 from the endpoint, so skip the round trip client-side too).
+async function loadAdmissionQueue() {
+  if (!isPrivilegedUser()) { _admissionList = []; return; }
+  try {
+    const res = await fetch('/api/admission/pending');
+    _admissionList = res.ok ? await res.json() : [];
+  } catch {
+    _admissionList = [];
+  }
+}
+
+// Cached user roster for the owner-picker <select> on each request card —
+// only fetched once per drawer session (invalidated on full page reload).
+async function ensureAdmissionOwnerChoices() {
+  if (_admissionOwnerChoices) return _admissionOwnerChoices;
+  try {
+    const res = await fetch('/api/users');
+    const all = res.ok ? await res.json() : [];
+    // Child accounts can't own a node — the approve endpoint rejects them with
+    // a 400 — so keep them out of the picker rather than let the admin pick
+    // one and get a confusing failure.
+    _admissionOwnerChoices = all.filter(u => u.role !== 'child');
+  } catch {
+    _admissionOwnerChoices = [];
+  }
+  return _admissionOwnerChoices;
+}
+
+function renderAdmissionQueue() {
+  if (!isPrivilegedUser() || !_admissionList.length) return '';
+  const choices = _admissionOwnerChoices || [];
+  const cards = _admissionList.map(r => renderAdmissionCard(r, choices)).join('');
+  return `<div class="node-admission-queue">
+    <div class="node-admission-queue-head">
+      <span><i data-lucide="door-open" style="width:14px;height:14px"></i> Join requests</span>
+      <small>${_admissionList.length} waiting</small>
+    </div>
+    ${cards}
+  </div>`;
+}
+
+function renderAdmissionCard(r, choices) {
+  const meta = r.metadata || {};
+  const hostname = meta.hostname || r.name || 'Unnamed device';
+  const platform = meta.platform || 'unknown';
+  // A persisted in-progress pick (see admissionOwnerSelected) wins over the
+  // default so the 15s auto-refresh / WS-triggered re-render doesn't silently
+  // reset the admin's choice back to themselves.
+  const defaultOwner = _admissionOwnerSel[r.requestId] ?? (_currentUser?.id || '');
+  const options = choices.length
+    ? choices.map(u => `<option value="${escHtml(u.id)}" ${u.id === defaultOwner ? 'selected' : ''}>${escHtml(u.name || u.id)}</option>`).join('')
+    : `<option value="${escHtml(defaultOwner)}">${escHtml(_currentUser?.name || 'Me')}</option>`;
+  return `<div class="node-admission-card" id="admissionCard_${escHtml(r.requestId)}">
+    <div class="node-admission-card-head">
+      <span class="node-admission-host">${escHtml(hostname)}</span>
+      <span class="cdraw-badge">${escHtml(platform)}</span>
+    </div>
+    <div class="node-admission-meta">${escHtml(r.ip || 'unknown')} &middot; requested ${timeAgo(r.requestedAt)}${meta.agentVersion ? ` &middot; agent v${escHtml(meta.agentVersion)}` : ''}</div>
+    <div class="node-admission-sas" title="Shown on the device too — confirm they match before approving">Verification code: <b>${escHtml(r.sas)}</b></div>
+    <div class="node-admission-actions">
+      <select id="admissionOwner_${escHtml(r.requestId)}" title="Which account should own this node"
+        data-change-action="admissionOwnerSelected" data-change-args='${JSON.stringify([r.requestId, "$value"]).replace(/'/g, "&#39;")}'
+        style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-size:11px">
+        ${options}
+      </select>
+      <button class="cdraw-btn cdraw-btn-primary" data-action="approveAdmission" data-args='${JSON.stringify([r.requestId]).replace(/'/g, "&#39;")}'>
+        <i data-lucide="check" style="width:12px;height:12px;margin-right:4px"></i> Approve
+      </button>
+      <button class="cdraw-btn" data-action="denyAdmission" data-args='${JSON.stringify([r.requestId]).replace(/'/g, "&#39;")}'>
+        <i data-lucide="x" style="width:12px;height:12px;margin-right:4px"></i> Deny
+      </button>
+    </div>
+  </div>`;
+}
+
+// Change handler for the per-card owner <select> (data-change-action). Stores
+// the pick in module state so it survives the 15s auto-refresh / WS-triggered
+// loadNodes() re-render, which otherwise rebuilds the card via innerHTML and
+// resets the select back to the default owner.
+function admissionOwnerSelected(requestId, ownerUserId) {
+  _admissionOwnerSel[requestId] = ownerUserId;
+}
+
+async function approveAdmission(requestId) {
+  const sel = document.getElementById(`admissionOwner_${requestId}`);
+  // The persisted pick is authoritative — a re-render could be mid-flight
+  // when Approve is clicked, in which case `sel` reflects the just-rebuilt
+  // (default) DOM rather than what the admin actually chose.
+  const ownerUserId = _admissionOwnerSel[requestId] ?? sel?.value ?? undefined;
+  try {
+    const res = await fetch(`/api/admission/${encodeURIComponent(requestId)}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ownerUserId ? { ownerUserId } : {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { showNodeToast(`Approve failed: ${data.error || res.statusText}`, 'error'); return; }
+    showNodeToast('Approved — the device will connect shortly', 'success');
+    _admissionList = _admissionList.filter(r => r.requestId !== requestId);
+    delete _admissionOwnerSel[requestId];
+    await loadNodes();
+  } catch (e) {
+    showNodeToast(`Approve failed: ${e.message}`, 'error');
+  }
+}
+
+async function denyAdmission(requestId) {
+  try {
+    const res = await fetch(`/api/admission/${encodeURIComponent(requestId)}/deny`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { showNodeToast(`Deny failed: ${data.error || res.statusText}`, 'error'); return; }
+    showNodeToast('Request denied', 'success');
+    _admissionList = _admissionList.filter(r => r.requestId !== requestId);
+    delete _admissionOwnerSel[requestId];
+    await loadNodes();
+  } catch (e) {
+    showNodeToast(`Deny failed: ${e.message}`, 'error');
+  }
+}
+
+// Live updates from the WS (see public/websocket.js `admission_request` /
+// `admission_resolved` cases). Keeps the drawer's queue current without
+// waiting for the next 15s poll, and nudges a toast when the drawer is
+// closed so the join request isn't missed entirely.
+function handleAdmissionEvent(msg) {
+  if (!isPrivilegedUser()) return;
+  if (msg.type === 'admission_request') {
+    if (!_admissionList.some(r => r.requestId === msg.requestId)) _admissionList.push({ ...msg });
+    if (activeDrawerId !== 'drawerNodes' && typeof showToast === 'function') {
+      showToast(`New device wants to join: ${msg.metadata?.hostname || msg.name || 'device'} (code ${msg.sas})`, 6000);
+    }
+  } else if (msg.type === 'admission_resolved') {
+    _admissionList = _admissionList.filter(r => r.requestId !== msg.requestId);
+  }
+  if (activeDrawerId === 'drawerNodes') loadNodes();
+  refreshNodesAlertBadge();
+}
+window._nodeAdmissionHandler = handleAdmissionEvent;
 
 function renderNodeWalkthroughCard() {
   if (localStorage.getItem(NODE_WALKTHROUGH_DISMISSED_KEY) === '1') return '';
@@ -275,7 +429,8 @@ function refreshNodesAlertBadge() {
   const anyUnhealthy = _nodesList.some(n =>
     Array.isArray(n.profiles) && n.profiles.some(p => p.overall === 'unhealthy'),
   );
-  dot.style.display = anyUnhealthy ? '' : 'none';
+  const anyJoinRequests = _admissionList.length > 0;
+  dot.style.display = (anyUnhealthy || anyJoinRequests) ? '' : 'none';
 }
 
 function renderNodeCard(node) {

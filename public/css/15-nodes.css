@@ -991,3 +991,92 @@
   box-shadow: 0 0 0 1px var(--red);
   pointer-events: none;
 }
+
+/* ── Join requests (device admission queue) ──────────────────────────────── */
+.node-admission-queue {
+  margin: 10px;
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg3);
+}
+
+.node-admission-queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.node-admission-queue-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.node-admission-queue-head small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.node-admission-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
+.node-admission-card:last-child {
+  margin-bottom: 0;
+}
+
+.node-admission-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.node-admission-host {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.node-admission-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.node-admission-sas {
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.node-admission-sas b {
+  font-family: var(--mono, 'SF Mono', 'Fira Code', monospace);
+  font-size: 14px;
+  letter-spacing: 2px;
+  color: var(--accent);
+}
+
+.node-admission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.node-admission-actions .cdraw-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  font-size: 11px;
+}

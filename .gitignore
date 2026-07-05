@@ -31,6 +31,10 @@ gmail-credentials.json
 /background-task-journal.json
 /mcp-access-tokens.json
 /nodes.json
+/admission-requests.json
+/mdns-instance.json
+/dep-status.json
+/last-dep-install.log
 /invites.json
 /MCP_TODO.md
 

@@ -590,6 +590,11 @@ function handleServerMessage(msg) {
     case 'node_health':
       if (typeof window._nodeHealthHandler === 'function') window._nodeHealthHandler(msg);
       break;
+    case 'admission_request':
+    case 'admission_resolved':
+      // Device join-request queue (owner/admin only — see public/nodes.js).
+      if (typeof window._nodeAdmissionHandler === 'function') window._nodeAdmissionHandler(msg);
+      break;
     case 'session_expired':
       // Server clears the cookie via Set-Cookie on the next API hit; nothing
       // to do client-side beyond returning the user to the login screen.

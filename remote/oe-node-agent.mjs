@@ -49,7 +49,7 @@ const __dirname = path.dirname(__filename);
 // Bump this any time the agent script changes so the server can detect outdated
 // nodes. The server reads this constant from /nodes/agent to know the latest
 // version; the agent sends it in the register message.
-const AGENT_VERSION = '1.6.3';
+const AGENT_VERSION = '1.7.0';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const CONFIG_DIR = process.platform === 'win32'
@@ -142,6 +142,126 @@ function redeemPairingCode(httpUrl, code) {
   });
 }
 
+// ── Admission (join-request) ────────────────────────────────────────────────
+// The default path for a fresh interactive install (see interactiveSetup
+// below): instead of the operator copying a pairing code from the dashboard,
+// the agent asks the server directly and an admin approves the request —
+// approval binds it to a session token exactly like a pairing-code redeem
+// would (server-side: routes/admission.mjs, lib/device-admission.mjs).
+// Pairing codes remain the unattended/fallback path — this never replaces
+// `--code` / OE_PAIRING_CODE.
+function httpJsonRequest(httpUrl, urlPath, { method = 'GET', body = null, headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlPath, httpUrl);
+    const payload = body != null ? JSON.stringify(body) : null;
+    const reqHeaders = { ...headers };
+    if (payload != null) {
+      reqHeaders['Content-Type'] = 'application/json';
+      reqHeaders['Content-Length'] = Buffer.byteLength(payload);
+    }
+    const req = http.request(url, { method, headers: reqHeaders }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        let parsed = {};
+        try { parsed = data ? JSON.parse(data) : {}; } catch { /* leave {} — statusCode still tells the caller something */ }
+        resolve({ statusCode: res.statusCode, body: parsed });
+      });
+    });
+    // Without a timeout, a server that accepts the TCP connection but never
+    // responds leaves this promise pending forever — the admission poll
+    // loop's deadline check (and the "type c to bail" fallback) never gets a
+    // chance to run because it's blocked on this await. Destroying the
+    // request triggers the 'error' handler below, which rejects — the poll
+    // loop's catch/continue already handles that.
+    req.setTimeout(15000, () => req.destroy(new Error('request timed out')));
+    req.on('error', reject);
+    if (payload != null) req.write(payload);
+    req.end();
+  });
+}
+
+function requestAdmission(httpUrl, info) {
+  return httpJsonRequest(httpUrl, '/api/admission/request', {
+    method: 'POST',
+    body: {
+      kind: 'node',
+      name: info.hostname,
+      metadata: { hostname: info.hostname, platform: info.platform, arch: info.arch, agentVersion: AGENT_VERSION },
+    },
+  });
+}
+
+function pollAdmissionStatus(httpUrl, requestId, claimSecret) {
+  return httpJsonRequest(httpUrl, `/api/admission/${encodeURIComponent(requestId)}/status`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${claimSecret}` },
+  });
+}
+
+/**
+ * Run the admission flow interactively: request approval, print the
+ * verification code, poll until approved/denied/expired, or bail early if
+ * the operator types "c" (fall back to a pairing code). Returns the session
+ * token on success, or null to signal "fall back to code entry" — never
+ * throws, since every failure here has a fallback.
+ */
+async function requestAdmissionInteractive(httpUrl, rl, info) {
+  let admission;
+  try {
+    const { statusCode, body } = await requestAdmission(httpUrl, info);
+    if (statusCode !== 200 || !body.requestId) throw new Error(body.error || `HTTP ${statusCode}`);
+    admission = body;
+  } catch (e) {
+    console.log(`(Could not request approval: ${e.message} — falling back to a pairing code.)`);
+    return null;
+  }
+
+  const { requestId, claimSecret, sas, pollInterval, expiresIn } = admission;
+  console.log(`\nRequested approval from the OpenEnsemble dashboard.`);
+  console.log(`Verification code: ${sas}  (confirm this matches what the dashboard shows before approving)`);
+  console.log(`Waiting for an admin to approve… (type "c" then Enter to use a pairing code instead)\n`);
+
+  let bail = false;
+  const onLine = (line) => { if (String(line).trim().toLowerCase() === 'c') bail = true; };
+  rl.on('line', onLine);
+
+  const intervalMs = Math.max(1000, (pollInterval || 3) * 1000);
+  const deadline = Date.now() + (expiresIn ? expiresIn * 1000 : 15 * 60 * 1000);
+
+  try {
+    while (Date.now() < deadline) {
+      if (bail) { console.log('\nSwitching to pairing-code entry.'); return null; }
+      await new Promise(r => setTimeout(r, intervalMs));
+      if (bail) { console.log('\nSwitching to pairing-code entry.'); return null; }
+
+      let poll;
+      try { poll = await pollAdmissionStatus(httpUrl, requestId, claimSecret); }
+      catch { continue; } // transient network error — keep polling until the deadline
+
+      const { statusCode, body } = poll;
+      if (statusCode === 200 && body.status === 'approved' && body.token) {
+        console.log('\nApproved!');
+        return body.token;
+      }
+      if (body.status === 'denied') {
+        console.log('\nRequest was denied by an admin.');
+        return null;
+      }
+      if (statusCode === 404 || body.status === 'expired') {
+        console.log('\nRequest expired.');
+        return null;
+      }
+      // status === 'pending' (or an unrecognized shape from an older/newer
+      // server) — keep polling.
+    }
+    console.log('\nApproval request timed out.');
+    return null;
+  } finally {
+    rl.removeListener('line', onLine);
+  }
+}
+
 // ── Interactive Setup ────────────────────────────────────────────────────────
 async function interactiveSetup() {
   // Unattended mode: OE_PAIRING_CODE preseed means skip all prompts. Used by
@@ -222,33 +342,47 @@ async function interactiveSetup() {
     }
   }
 
-  // Step 2: Authenticate via pairing code
-  let code;
+  // Step 2: Authenticate. Unattended installs always use a pairing code
+  // (OE_PAIRING_CODE) — untouched, still the automation/remote path.
+  // Interactive installs default to requesting approval from the dashboard
+  // (admission) instead of asking the operator to go copy a code; pairing-
+  // code entry is one keystroke away ("c") and is the automatic fallback if
+  // admission isn't reachable, gets denied, or expires.
+  let token;
   if (unattended) {
     console.log(`Step 2: Pairing with code from OE_PAIRING_CODE`);
-    code = unattendedCode;
-  } else {
-    console.log('\nStep 2: Pair with server');
-    console.log('  In the OpenEnsemble web UI, open the Nodes drawer and click "Pair New Node".');
-    console.log('  Enter the 8-character code shown.\n');
-    code = await ask('Pairing code: ');
-  }
-
-  let token;
-  try {
-    const result = await redeemPairingCode(serverInfo.httpUrl, code.trim());
-    token = result.token;
-    console.log('\nPaired successfully!');
-  } catch (e) {
-    console.error(`\nPairing failed: ${e.message}`);
-    if (unattended) { process.exit(1); }
-    console.log('You can also enter a session token manually.');
-    token = await ask('Session token (or leave empty to abort): ');
-    if (!token.trim()) {
-      rl.close();
+    try {
+      const result = await redeemPairingCode(serverInfo.httpUrl, unattendedCode.trim());
+      token = result.token;
+      console.log('\nPaired successfully!');
+    } catch (e) {
+      console.error(`\nPairing failed: ${e.message}`);
       process.exit(1);
     }
-    token = token.trim();
+  } else {
+    console.log('\nStep 2: Request approval');
+    token = await requestAdmissionInteractive(serverInfo.httpUrl, rl, detectPlatform());
+
+    if (!token) {
+      console.log('\nStep 2b: Pair with a code instead');
+      console.log('  In the OpenEnsemble web UI, open the Nodes drawer and click "Pair New Node".');
+      console.log('  Enter the 8-character code shown.\n');
+      const code = await ask('Pairing code: ');
+      try {
+        const result = await redeemPairingCode(serverInfo.httpUrl, code.trim());
+        token = result.token;
+        console.log('\nPaired successfully!');
+      } catch (e) {
+        console.error(`\nPairing failed: ${e.message}`);
+        console.log('You can also enter a session token manually.');
+        const manual = await ask('Session token (or leave empty to abort): ');
+        if (!manual.trim()) {
+          rl.close();
+          process.exit(1);
+        }
+        token = manual.trim();
+      }
+    }
   }
 
   // Step 3: Node ID

@@ -62,6 +62,7 @@ import { handle as handleReasonRuntime } from './routes/reason-runtime.mjs';
 import { handle as handlePlanRuntime }   from './routes/plan-runtime.mjs';
 import { handle as handleSharing }      from './routes/sharing.mjs';
 import { handle as handleNodes }        from './routes/nodes.mjs';
+import { handle as handleAdmission }    from './routes/admission.mjs';
 import { handle as handleDevices }      from './routes/devices.mjs';
 import { handle as handleWakewords }    from './routes/wakewords.mjs';
 import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
@@ -79,7 +80,7 @@ import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks
 import { speakReminder, pickReminderDevices } from './lib/voice-reminder.mjs';
 import { registerAlarm, getCachedAlarmTts, sendAlarmArm } from './lib/alarms.mjs';
 import { formatDurationAdj } from './lib/voice-timer.mjs';
-import { startDiscoveryBeacon, stopDiscoveryBeacon } from './discovery.mjs';
+import { startDiscoveryBeacon, stopDiscoveryBeacon, startMdnsAdvertiser, stopMdnsAdvertiser } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
 import { setBackgroundBroadcastFn, bootRecoverInterruptedTasks } from './background-tasks.mjs';
 import { setNodesBroadcastFn } from './skills/nodes/execute.mjs';
@@ -207,6 +208,7 @@ const routeHandlers = [
   handleResearch,
   handleDesktop,
   handleNodes,
+  handleAdmission,
   handleDevices,
   handleWakewords,
   handleVoiceRefs,
@@ -965,7 +967,20 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   }).catch(e => log.warn('tunnel', 'Supervisor boot failed', { err: e.message }));
   initAutoLabel(loadUsers());
   startDiscoveryBeacon(PORT);
+  startMdnsAdvertiser(PORT); // no-op if discovery.mdns is false; never blocks/throws on failure
   cortexHealthCheck();
+
+  // Self-heal a stale systemd unit so the boot-safety scripts (ensure-deps +
+  // launch) actually run on the NEXT restart. Best-effort, never restarts now,
+  // never throws into boot. (Same "re-render versioned artifact at boot" idea
+  // the oe CLI wrapper already uses — closes the gap for installs whose unit
+  // predates this wiring.)
+  import('./scripts/heal-service-unit.mjs')
+    .then(({ healServiceUnit }) => {
+      const r = healServiceUnit({ installDir: BASE_DIR });
+      if (r.changed) log.info('boot', 'systemd unit self-healed (boot-safety wiring added; effective next restart)', { unit: r.unitPath });
+    })
+    .catch(e => log.warn('boot', 'service-unit self-heal skipped', { err: e.message }));
 
   // ── Auto-update checker ───────────────────────────────────────────────────
   // Polls origin for new commits and broadcasts to admin browsers when a new
@@ -1095,6 +1110,7 @@ async function shutdown(signal) {
   stopVoiceDeviceMonitor();
   stopCalendarMirrorLoop();
   stopTunnelSupervisor().catch(() => {});
+  stopMdnsAdvertiser().catch(() => {});
   _stopUpdateChecker?.();
 
   // 3. Abort all in-flight chat streams
