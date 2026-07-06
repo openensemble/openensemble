@@ -150,5 +150,6 @@ MIGRATION_per-user-encryption.md
 
 # voice-device wake-capture audio (per-device personal recordings)
 wake-captures/
+wake-captures-manual/
 # dated firmware/source backups (foo.bak-0.2.xx)
 *.bak-*
