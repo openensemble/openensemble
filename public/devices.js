@@ -1343,8 +1343,8 @@ async function saveVoiceConfig() {
 // current slot order. The firmware loads wake words by slot index, so a
 // device's slots ARE the user list in order: removing a middle user must
 // shift everyone after them down a slot, not leave a hole. Without this,
-// deleting "test" (slot 1) from [shawn:0, test:1, lauren:2] would strand
-// lauren at slot 2 with an empty slot 1; with it, lauren moves to slot 1 and
+// deleting "test" (slot 1) from [alex:0, test:1, jordan:2] would strand
+// jordan at slot 2 with an empty slot 1; with it, jordan moves to slot 1 and
 // the now-unassigned slot 2 gets cleared off the device by the push pass.
 // Returns a fresh assignments object (does not mutate the input).
 function repackSlotAssignments(assignments) {
@@ -1703,11 +1703,11 @@ window.openWakewordUpload = function () {
 };
 
 // Open a small modal to upload a voice reference for Pocket TTS zero-shot
-// cloning. Two inputs: a label ("Shawn", "Test") and a WAV file (a clean
+// cloning. Two inputs: a label ("Alex", "Test") and a WAV file (a clean
 // ~15-20s clip of a single speaker). No transcript needed — Pocket TTS is
 // fully zero-shot. By uploading you confirm you have consent to clone the voice.
 window.openVoiceRefUpload = function () {
-  const label = prompt('Voice label (e.g. "Shawn", "Test"):');
+  const label = prompt('Voice label (e.g. "Alex", "Test"):');
   if (!label || !label.trim()) return;
   if (!confirm('Confirm you have the explicit, lawful consent of the person whose voice this clip contains. Cloning a voice without permission is prohibited.')) return;
   const transcript = '';

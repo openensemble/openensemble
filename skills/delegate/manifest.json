@@ -33,7 +33,7 @@
             },
             "directive": {
               "type": "string",
-              "description": "One short line stating WHAT the specialist must DO — the action, not the content. E.g. 'Send an email to scmurray1@gmail.com', 'Summarize these documents', 'Create a calendar event'. This is what selects the specialist's tools, so keep large content (the briefing text, the doc body, the list) in `task`, not here. STRONGLY recommended whenever `task` carries a big payload to act on (sending a long briefing, processing pasted content): it ensures the specialist gets its action tool (e.g. compose/send) instead of having it crowded out by the payload."
+              "description": "One short line stating WHAT the specialist must DO — the action, not the content. E.g. 'Send an email to alex@example.com', 'Summarize these documents', 'Create a calendar event'. This is what selects the specialist's tools, so keep large content (the briefing text, the doc body, the list) in `task`, not here. STRONGLY recommended whenever `task` carries a big payload to act on (sending a long briefing, processing pasted content): it ensures the specialist gets its action tool (e.g. compose/send) instead of having it crowded out by the payload."
             },
             "background": {
               "type": "boolean",

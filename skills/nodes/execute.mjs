@@ -574,7 +574,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       const folders = node.readableFolders || [];
       yield { type: 'result', text: folders.length
         ? `Error: "${filePath}" is not in the readable-folders allowlist for ${node.hostname}.\nAllowed folders: ${folders.join(', ')}\nUse node_set_readable_folders to expand the list.`
-        : `Error: ${node.hostname} has no readable folders configured. Use node_set_readable_folders first to whitelist a path prefix (e.g. "/home/${node.hostname === 'localhost' ? 'shawn' : 'user'}/Documents").`
+        : `Error: ${node.hostname} has no readable folders configured. Use node_set_readable_folders first to whitelist a path prefix (e.g. "/home/user/Documents").`
       };
       return;
     }

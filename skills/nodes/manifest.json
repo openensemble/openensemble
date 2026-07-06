@@ -193,7 +193,7 @@
           "type": "object",
           "properties": {
             "node_id": { "type": "string", "description": "Node ID or hostname from node_list." },
-            "paths":   { "type": "array", "items": { "type": "string" }, "description": "Absolute path prefixes to allow reading from. Example: ['/home/shawn/Documents', '/home/shawn/Downloads']." }
+            "paths":   { "type": "array", "items": { "type": "string" }, "description": "Absolute path prefixes to allow reading from. Example: ['/home/alex/Documents', '/home/alex/Downloads']." }
           },
           "required": ["node_id", "paths"]
         }

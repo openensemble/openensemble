@@ -564,7 +564,7 @@ async function installReasonRuntime(runtime) {
 // Disk size = on-disk q8_0 GGUF; RAM ≈ disk size + KV cache + activation overhead
 // (measured loaded size at idle from OE startup). cpuLatency is the average
 // per-parse round-trip through node-llama-cpp on the builtin runtime,
-// measured 2026-04-29 on Shawn's dev box; YMMV depending on CPU. Through LM
+// measured 2026-04-29 on a dev box; YMMV depending on CPU. Through LM
 // Studio (GPU) or Ollama, latency is roughly half.
 const PLAN_TIER_LABELS = {
   accurate: { name: 'Accurate', base: 'SmolLM2-360M', sizeMb: 370, ramMb: 700, cpuLatencyS: 5,  accNote: '95.6% smoke / 87.5% holdout', desc: 'best accuracy' },

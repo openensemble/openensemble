@@ -114,7 +114,7 @@ future global-enable would need an opt-*out* list.
 - Real egress proof: `node` in the live jail sees the host interface and reaches the OE
   server with `net:true`; zero non-loopback interfaces and unreachable with `net:false`.
 - Migrated skills read their config jailed; runpod round-trips its API key in-process and
-  jailed; youtube-download downloaded 2160p/1080p videos through the jail (live, by Shawn).
+  jailed; youtube-download downloaded 2160p/1080p videos through the jail (verified live).
 - Regression suite: 7 tests green; full local suite 717 green.
 
 ## Open (Phase 5, defense-in-depth — not gaps)

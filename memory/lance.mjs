@@ -332,7 +332,7 @@ export async function remember({
 
   // Dedup check for non-episodes. Threshold trade-off:
   //   < 0.05 = essentially exact match — misses paraphrases like
-  //     "Shawn prefers plain English" vs "I prefer plain English, never markdown".
+  //     "Alex prefers plain English" vs "I prefer plain English, never markdown".
   //   < 0.12 = same semantic meaning with different wording — catches the
   //     paraphrase case without merging genuinely distinct facts.
   // If the existing match was forgotten, we'd already have skipped it via

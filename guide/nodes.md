@@ -60,7 +60,7 @@ Each node command is scoped to the user who paired it. A user can't reach into a
 
 ## Reading files from a node
 
-`node_read_file` is a separate, lower-privilege path from `node_exec`. Each node has a `readableFolders` list — an allowlist of absolute path prefixes the OE server will let agents read from. Configure it via your agent: *"set the readable folders on `homenode` to `/home/shawn/Documents` and `/home/shawn/Downloads`"* triggers the `node_set_readable_folders` tool. After that, *"summarise `/home/shawn/Documents/lease.pdf` from `homenode`"* just works.
+`node_read_file` is a separate, lower-privilege path from `node_exec`. Each node has a `readableFolders` list — an allowlist of absolute path prefixes the OE server will let agents read from. Configure it via your agent: *"set the readable folders on `homenode` to `/home/alex/Documents` and `/home/alex/Downloads`"* triggers the `node_set_readable_folders` tool. After that, *"summarise `/home/alex/Documents/lease.pdf` from `homenode`"* just works.
 
 How it's gated:
 
@@ -68,7 +68,7 @@ How it's gated:
 - `node_exec` does **not** respect this allowlist by design. Exec is a higher-privilege tool meant for system administration; it can read anything the agent on that node can read. The split lets you give an agent file-read access to a specific folder without giving it general shell access.
 - The allowlist persists across reconnects (lives in `nodes.json`, not in the agent's local state) — re-pair a machine and your existing folder allowlist is preserved.
 
-Use case: emailing yourself a doc that lives on a different machine. Pair the machine, allowlist the folder, then ask any agent: *"email me /home/shawn/Documents/foo.pdf from homenode."* The Read flow fetches the file under the allowlist, the email skill attaches it.
+Use case: emailing yourself a doc that lives on a different machine. Pair the machine, allowlist the folder, then ask any agent: *"email me /home/alex/Documents/foo.pdf from homenode."* The Read flow fetches the file under the allowlist, the email skill attaches it.
 
 For a server install (OE running on a Pi or NAS away from your daily-driver machines), this is the only way agents can reach files on those machines. There's no shared filesystem assumption.
 
