@@ -30,7 +30,8 @@
         { "slug": "tasks",      "title": "Tasks & scheduler" },
         { "slug": "documents",  "title": "Documents & sharing" },
         { "slug": "expenses",   "title": "Expenses" },
-        { "slug": "cortex",     "title": "Cortex (local models)" }
+        { "slug": "cortex",     "title": "Cortex (local models)" },
+        { "slug": "personalization", "title": "Personalization" }
       ]
     },
     {

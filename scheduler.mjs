@@ -510,6 +510,19 @@ async function runTask(task, broadcast, opts = {}) {
     const userEmailLine = ownerProfile?.email
       ? `\nThe user's own email address is ${ownerProfile.email} — if the request says "send me an email" / "email myself", that is the recipient.`
       : '';
+    // Personalization: append compact insights + pending-offer summary for
+    // briefing-shaped tasks (ADDENDUM D — a briefing IS just a scheduled task
+    // whose label/prompt says so; no bespoke "briefing assembler" exists).
+    let briefingNote = '';
+    if (/brief/i.test(task.label || '') || /brief/i.test(task.prompt || '')) {
+      try {
+        const { getBriefingSection } = await import('./lib/personalization/reflect.mjs');
+        const section = await getBriefingSection(userId);
+        if (section?.text) briefingNote = `\n\n[PERSONALIZATION]\n${section.text}`;
+      } catch (e) {
+        console.warn('[scheduler] personalization briefing section failed:', e.message);
+      }
+    }
     const scheduledNote =
       `[SCHEDULED RUN] You are executing a previously-scheduled task right now. ` +
       `The user is NOT present and cannot answer follow-up questions. ` +
@@ -517,7 +530,7 @@ async function runTask(task, broadcast, opts = {}) {
       `The user's original scheduling message IS the confirmation: execute every action directly and do NOT show drafts, ask "are you sure?", or wait for "send it"/"confirm" — there is no one here to answer. ` +
       `This overrides any "show draft and wait for approval" rule from skill prompts (email, finance, etc) for this run. ` +
       `Use reasonable defaults for anything unspecified, complete the task, and report in your final message what you did (including a Message ID if a tool returned one).` +
-      userEmailLine;
+      userEmailLine + briefingNote;
 
     // Run with shared retry helper. Failure shapes handled there:
     //   1. streamChat yields {type:'error', message}

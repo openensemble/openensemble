@@ -61,6 +61,7 @@
     },
     {
       "type": "function",
+      "readOnly": true,
       "function": {
         "name": "research_search",
         "description": "Perform a multi-step web research search on a topic. Runs multiple search queries to build comprehensive findings. Returns structured results with sources and suggested follow-up queries. Use 'quick' for overviews, 'standard' for solid coverage, 'deep' for exhaustive research with page fetches. Optionally include specific URLs to fetch and incorporate as primary sources.",
@@ -127,6 +128,7 @@
     },
     {
       "type": "function",
+      "readOnly": true,
       "function": {
         "name": "list_research",
         "description": "List the user's saved research documents. Optionally filter by a search query that matches against titles and tags.",
@@ -143,6 +145,7 @@
     },
     {
       "type": "function",
+      "readOnly": true,
       "function": {
         "name": "get_research",
         "description": "Retrieve the full content of a saved research document by its ID.",

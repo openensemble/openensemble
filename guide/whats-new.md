@@ -6,6 +6,17 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-07-05
+
+**Personalization you control**
+OpenEnsemble can now learn quietly from your activity — the questions you ask, your calendar, patterns in what the coordinator does for you — and turn that into small, useful nudges in your daily briefing or a reminder before something you have coming up. It only ever suggests; nothing runs without your say-so, and accepting the same kind of suggestion twice in a row offers to make it automatic from then on.
+
+**You pick what does the learning**
+New Settings → Personalization panel: choose "Off," "Same as coordinator" (the default), or any other configured provider — local providers stay fully on this machine, cloud providers get one-line activity summaries, never raw email or calendar content. Every fact it's learned about you shows up in a ledger you can confirm, delete, or wipe clean with one "Start fresh" button.
+
+**It follows up so you don't have to**
+When the coordinator can't answer something right away — "is this back in stock," "did the price drop" — it can now say so once and check back on its own, announcing what it finds instead of making you ask again.
+
 ## 2026-07-04
 
 **Send several files in one message**

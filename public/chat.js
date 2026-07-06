@@ -1674,6 +1674,8 @@ function appendProposalBubble(proposal, scroll = true) {
     skill_deprecation:  'This skill keeps getting corrected — delete it?',
     routine_proposal:   'Save this as a voice routine?',
     alias_proposal:     'Remember this phrase shortcut?',
+    personalization_offer:    'A suggestion based on what I\'ve noticed',
+    personalization_graduate: 'Always do this from now on?',
   };
   label.textContent = HEADER_BY_KIND[proposal.kind] || 'Proposal';
   header.appendChild(label);
@@ -1799,6 +1801,12 @@ function applyProposalOutcome(proposalId, status, outcome) {
       const header = el.querySelector('div');   // first <div> = bubble header row
       if (header) header.appendChild(chip);
     }
+  } else if (status === 'done') {
+    // Terminal status used by the personalization kinds (offer/graduate) —
+    // render like 'accepted' and keep the receipt text ('Done — Reminder ...').
+    el.style.borderLeftColor = 'var(--green, #4caf50)';
+    el.style.background = 'rgba(76,175,80,0.06)';
+    outcomeEl.textContent = outcome ? `✓ ${outcome}` : '✓ Done';
   } else if (status === 'dismissed') {
     el.style.opacity = '0.6';
     outcomeEl.textContent = '✕ Dismissed';

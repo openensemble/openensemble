@@ -835,3 +835,30 @@
 .tutor-today-actions { display: flex; gap: 8px; margin-top: 20px; }
 .tutor-prefs-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .tutor-prefs-row select, .tutor-prefs-row input[type="time"] { background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+
+/* ── Personalization ────────────────────────────────────────────────────── */
+.pz-hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; min-height: 14px; }
+.pz-notice { font-size: 11px; color: #f0b84d; background: rgba(249,199,79,.12); border: 1px solid rgba(249,199,79,.3);
+  border-radius: 6px; padding: 6px 9px; margin-top: 6px; line-height: 1.4; }
+.pz-list { display: flex; flex-direction: column; gap: 8px; }
+.pz-empty { font-size: 12px; color: var(--muted); background: var(--bg3); border: 1px dashed var(--border);
+  border-radius: 8px; padding: 14px; text-align: center; }
+.pz-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.pz-row-main { flex: 1; min-width: 0; }
+.pz-row-text { font-size: 13px; color: var(--text); line-height: 1.4; overflow-wrap: anywhere; }
+.pz-row-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.pz-row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.pz-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px;
+  font-size: 10px; font-weight: 650; background: var(--bg2); border: 1px solid var(--border); color: var(--muted); }
+.pz-chip-inferred { background: rgba(94,160,255,.14); color: var(--accent); border-color: transparent; }
+.pz-chip-confirmed { background: rgba(67,184,156,.16); color: var(--green,#43b89c); border-color: transparent; }
+.pz-chip-flag { background: rgba(224,92,92,.16); color: var(--red,#e05c5c); border-color: transparent; }
+.pz-btn { background: var(--bg2); border: 1px solid var(--border); color: var(--text); border-radius: 7px;
+  padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.pz-btn:hover { border-color: var(--accent); }
+.pz-btn-small { padding: 4px 9px; font-size: 11px; }
+.pz-btn-accent { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.pz-btn-accent:hover { opacity: .9; }
+.pz-btn-danger { color: var(--red,#e05c5c); }
+.pz-btn-danger:hover { border-color: var(--red,#e05c5c); }

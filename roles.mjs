@@ -26,6 +26,8 @@ import { buildDeviceHelpers, _registerVoiceContextResolver } from './lib/device-
 import { buildSkillLogger } from './lib/skill-logger.mjs';
 import { recordDomainSkill } from './lib/memory-scope-context.mjs';
 import { recordToolExecution } from './lib/tool-exec-log.mjs';
+import { recordToolObservation } from './lib/personalization/recorder.mjs';
+import { buildRegisterLead } from './lib/personalization/lead-helper.mjs';
 import { getVoiceContext } from './lib/voice-context.mjs';
 import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
@@ -1174,6 +1176,11 @@ async function buildCtx(userId, agentId, skillId = null) {
   // to re-learn registerWatcher's arg layout.
   ctx.proposeMonitor = buildProposeMonitor({ userId, agentId: wsAgentId });
 
+  // ctx.registerLead — personalization "open lead" registration: stores a
+  // tool+args re-run for later (silent) follow-up when an answer isn't
+  // available yet ("is this back in stock"). See lib/personalization/lead-helper.mjs.
+  ctx.registerLead = buildRegisterLead({ userId, agentId: wsAgentId });
+
   // ctx.collection — group many similar items under ONE watcher record with
   // per-item cadence. Use when a skill needs to monitor N peers (channels,
   // retailers, stores, products) that share the same handler logic. Each
@@ -1578,6 +1585,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // through the failure path at the bottom of this function.
   let _resultWasError = false;
   let _lastErrText = '';
+  let _lastResultText = ''; // personalization: last post-processed result text, read at the completion site below
   const _postProcessResult = async (value) => {
     // Tool-error tagging — runs for ALL agents (not just ephemeral). Tag the
     // result so the trace reads ok:false and the bottom counts a failure.
@@ -1589,6 +1597,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         value = { ...value, text: norm.text, isError: true };
       }
     }
+    if (value?.type === 'result' && typeof value.text === 'string') _lastResultText = value.text;
     if (!_isEphem(agentId)) return value;
     if (value?.type !== 'result' || typeof value.text !== 'string') return value;
     let outText = value.text;
@@ -1835,6 +1844,15 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 });
                 const bg = await import('./background-tasks.mjs');
                 const finalReportImages = Array.isArray(finalImages) ? finalImages : null;
+                // Personalization mirror: this result lands after the turn
+                // ends, so the primary hook (executeToolStreaming's common
+                // completion path) never sees it — record it here instead.
+                try {
+                  recordToolObservation({
+                    userId: captured.userId, agentId: captured.agentId, toolName: captured.name,
+                    skillId: captured.owningSkillId, args: captured.args, resultText: finalText, ok: true,
+                  });
+                } catch { /* never block auto-bg finalization */ }
                 if (captured.adopted) {
                   // Chip + root-graph finalization belong to the delegate
                   // skill's sync-delegation handle (children-aware, already ran
@@ -2089,6 +2107,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           const text   = normalizeToolResult(structured ? val.text : String(val ?? '')).text;
           const images = structured && Array.isArray(val._images) ? val._images : null;
           const notify = structured && val._notify ? val._notify : null;
+          // Personalization mirror: single-promise auto-bg result also lands
+          // after the turn ends — same rationale as the streaming-path mirror.
+          try {
+            recordToolObservation({
+              userId, agentId: attribAgentId, toolName: name, skillId: owningSkillId,
+              args: mergedArgs, resultText: text, ok: true,
+            });
+          } catch { /* never block auto-bg finalization */ }
           const key = agentId
             ? (agentId.startsWith(`${userId}_`) ? agentId : `${userId}_${agentId}`)
             : null;
@@ -2219,6 +2245,16 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     if (!_resultWasError) {
       try { recordToolExecution(userId, name); } catch { /* never block tool dispatch */ }
     }
+
+    // Personalization: fire-and-forget observation of this tool result (the
+    // recorder itself applies config/skip-list gating — this call is
+    // unconditional so it also captures failures for the digest).
+    try {
+      recordToolObservation({
+        userId, agentId, toolName: name, skillId: owningSkillId,
+        args: mergedArgs, resultText: _resultWasError ? _lastErrText : _lastResultText, ok: !_resultWasError,
+      });
+    } catch { /* never block tool dispatch */ }
 
     // Alias-framework cascade: any registered manifest can declare
     // cascade_on_tools — when one of those tools succeeds, drop user-stored

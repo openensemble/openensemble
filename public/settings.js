@@ -871,6 +871,7 @@ function switchSettingsTab(name) {
   }
   if (name === 'mcp' && typeof loadMcpServers === 'function') { loadMcpServers(); loadMcpTokens(); }
   if (name === 'browser' && typeof loadBrowserBridge === 'function') loadBrowserBridge();
+  if (name === 'personalization' && typeof renderPersonalizationPanel === 'function') renderPersonalizationPanel();
 }
 
 // ── Browser Bridge tab ───────────────────────────────────────────────────────

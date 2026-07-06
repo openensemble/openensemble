@@ -274,6 +274,38 @@ upload) rather than a schedule — that's a watcher, not a cron.
 
 ---
 
+## 12. Automatic follow-up on a miss (open leads)
+
+**Trigger:** the skill's lookups can come back empty-handed in a way
+that might change later — "is X in stock", "is it on sale", "any news
+yet", "has it shipped". The coordinator can then answer "not yet — I'll
+check again and let you know" and quietly re-run the SAME lookup later,
+without the user asking twice.
+
+**User pitch:** "When the answer is 'not yet', I can keep an eye on it
+and follow up on my own — I'll re-check {when the data refreshes} and
+ping you if it changes."
+
+**To wire it up (both in the manifest):**
+- Mark each pure-lookup tool with `"readOnly": true` on the tool entry
+  (sibling of `"function"`). Without it, the background sweep refuses to
+  re-run the tool unattended and the follow-up is declined at
+  registration. Only for true no-side-effect fetches — never on a tool
+  that sends, saves, posts, or changes anything.
+- Declare `"refreshCadence"` (e.g. `"weekly:thursday"`, `"daily"`) if
+  the underlying data updates on a known schedule, so re-checks land
+  right after fresh data instead of at a guessed time.
+See SKILL_BLUEPRINT.md → "readOnly" and "refreshCadence" for details.
+
+**Decisions to surface:**
+- Which tools are safe to auto-re-run (readOnly), and when the source
+  refreshes (cadence)
+
+**Skip when:** every tool takes an action, or a miss can't plausibly
+become a hit later (final answers, one-shot calculations).
+
+---
+
 ## How to apply this menu
 
 1. Listen to the full user ask. Don't propose anything yet.

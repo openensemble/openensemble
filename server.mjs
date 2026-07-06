@@ -13,6 +13,8 @@ import { listAgents } from './agents.mjs';
 import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
 import { loadDrawerManifests } from './plugins.mjs';
 import { startScheduler, stopScheduler, loadTasksForOwner, addTask, removeTask, registerBuiltin } from './scheduler.mjs';
+import { initPersonalization } from './lib/personalization/scheduler-init.mjs';
+import { setNotifyFn } from './lib/personalization/notify.mjs';
 import { startWatcherSupervisor, stopWatcherSupervisor } from './scheduler/watchers.mjs';
 import { startBackgroundRefresh as startHaCacheRefresh } from './lib/ha-cache.mjs';
 import { loadIntentEmbeddings } from './lib/specialist-embed-router.mjs';
@@ -68,6 +70,7 @@ import { handle as handleWakewords }    from './routes/wakewords.mjs';
 import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
 import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
 import { handle as handleRoutines }     from './routes/routines.mjs';
+import { handle as handlePersonalization } from './routes/personalization.mjs';
 import { handle as handleTutor }          from './routes/tutor.mjs';
 import { handle as handleCoder }          from './routes/coder.mjs';
 import { handle as handleGuide }          from './routes/guide.mjs';
@@ -214,6 +217,7 @@ const routeHandlers = [
   handleVoiceRefs,
   handleVoiceConfig,
   handleRoutines,
+  handlePersonalization,
   handleMisc,
   handleTelegram,
   handleTunnel,
@@ -885,8 +889,13 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log('Press Ctrl+C to stop\n');
   log.info('startup', 'Server listening', { port: PORT, agents: listAgents().length });
 
-  seedSystemTasks();
-  startScheduler(broadcast);
+  // Seeds must complete before the arm loop reads the task files, or a
+  // freshly seeded builtin task stays unarmed until the next restart.
+  (async () => {
+    try { await seedSystemTasks(); } catch (e) { log.warn('startup', 'seedSystemTasks failed', { err: e.message }); }
+    try { await initPersonalization(); } catch (e) { console.error('[personalization] initPersonalization failed:', e.message); }
+    startScheduler(broadcast);
+  })();
 
   // HA entity-name cache: powers the chat-dispatch fast-path so "turn on X"
   // skips the LLM. Lazy load on first use, plus a periodic refresh so newly
@@ -908,6 +917,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     showImage:        (userId, msg) => sendToUser(userId, { type: 'image', ...msg }),
     showVideo:        (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
   });
+  setNotifyFn((userId, msg) => sendToUser(userId, msg));
 
   // Restart recovery for in-flight background delegations/workers: anything
   // still in the on-disk journal was killed by this restart — mark it

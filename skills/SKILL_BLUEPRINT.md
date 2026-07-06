@@ -133,6 +133,47 @@ The coordinator's per-turn tool list is trimmed by an embedding classifier — o
   - `"auto"` — only loaded when intent matches (preferred for most user skills — keeps the coordinator's prompt small on unrelated turns)
   - `"exclude"` — never available to the coordinator. Use for heavyweight skills that belong on a specialist agent (GPU-pod managers, finance ingestion, batch ML training). The skill stays usable on other agents via direct chat or `ask_agent`.
 
+### refreshCadence (optional — for skills whose results go stale predictably)
+
+Personalization can open a **lead**: a stored tool+args re-run silently later when the answer to something wasn't available yet ("is this back in stock", "did the price drop"). If your skill's data has a natural refresh rhythm, declare it at the top level of `manifest.json`:
+
+```jsonc
+{
+  "id": "usr_myskill",
+  "refreshCadence": "weekly:thursday",
+  ...
+}
+```
+
+Accepted values:
+- `"daily"` — re-check once a day.
+- `"hourly"` — re-check once an hour.
+- `"weekly:<day>"` — re-check once a week on the named day (e.g. `"weekly:thursday"` for a skill whose weekly ad refreshes on Thursdays).
+
+When a lead is registered against a tool from your skill, this declared cadence wins over the model's own guess at how often to re-check. Declare it whenever your skill's underlying data updates on a known schedule; skills without one (arbitrary one-off lookups) can omit the field and fall back to the model's estimate.
+
+### readOnly (optional — opts a tool into automatic personalization lead re-checks)
+
+The 15-minute lead sweep re-invokes a stored tool+args completely unattended — no human in the loop, no confirmation. That's only safe for a tool that does nothing but look something up, so a tool is only eligible to be auto-re-checked if you say so explicitly, on the tool itself:
+
+```json
+{
+  "type": "function",
+  "readOnly": true,
+  "function": {
+    "name": "myskill_check_price",
+    "description": "Check the current price for a saved item",
+    "parameters": {...}
+  }
+}
+```
+
+Only set `readOnly: true` on a tool that is a pure data-fetch: no side effects, nothing sent, nothing changed, safe to call again and again with no one watching. Leave it off (the default) for everything else — including a tool you'd mark `destructive: false` above. "Not destructive" and "safe to auto-re-invoke unattended on a schedule" are different bars; most tools clear the first without clearing the second.
+
+A tool without `readOnly: true` still works normally in live turns — the flag has no effect on ordinary use. It only means no follow-up lead can be registered against it: `ctx.registerLead` is rejected at registration and reports that honestly back to the calling skill (it never claims it'll check back and then silently drop the follow-up).
+
+---
+
 ### localIntents — handle simple requests locally (no cloud LLM)
 
 `intent_examples` decides whether your tools get *loaded* for the cloud coordinator. **`localIntents` goes one step further: it fulfils a request entirely on-device, with no cloud-LLM call at all.** When a user's message matches a local intent, OpenEnsemble runs your tool directly and streams the result back — faster, cheaper, private. This is the local cognition tier; lean on it for any **deterministic** operation (a lookup, a list/search, a delete-by-sender, a toggle).
