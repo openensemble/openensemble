@@ -12,13 +12,13 @@ import { execSync, spawn } from 'child_process';
 import WebSocket from 'ws';
 
 // ── Config ──────────────────────────────────────────────────────────────────
-const USER_ID = process.env.OE_TEST_USER ?? 'user_39ce139e';
+const USER_ID = process.env.OE_TEST_USER ?? 'user_00000000';
 const HOST    = process.env.OE_TEST_HOST ?? 'localhost';
 const PORT    = process.env.OE_TEST_PORT ?? '3737';
 const TOKEN   = process.env.OE_TEST_TOKEN ?? '1efb330eefc9b96f125971210487ce074024d22d8cadace77bd97d00394ed4bb';
 const BASE    = `http://${HOST}:${PORT}`;
 const COOKIE  = `oe_session=${TOKEN}`;
-const USER_DIR = `/home/shawn/.openensemble/users/${USER_ID}`;
+const USER_DIR = `users/${USER_ID}`;
 const TAG = `smoke_${Date.now()}`;
 
 const day = 24 * 60 * 60 * 1000;
@@ -215,12 +215,12 @@ async function testPhase1(baseline) {
 async function testPhase2() {
   section('Phase 2: default_arg retirement');
 
-  const td = await import('/home/shawn/.openensemble/lib/tool-defaults.mjs');
-  const policy = await import('/home/shawn/.openensemble/lib/learning-policy.mjs');
+  const td = await import('../lib/tool-defaults.mjs');
+  const policy = await import('../lib/learning-policy.mjs');
 
   // The mining path is retired outright: no counter export, no proposer export.
   assert(td.recordToolCall === undefined, 'recordToolCall no longer exported (mining retired)', 'still exported');
-  const prop = await import('/home/shawn/.openensemble/lib/proposals.mjs');
+  const prop = await import('../lib/proposals.mjs');
   assert(prop.proposeDefaultArg === undefined, 'proposeDefaultArg no longer exported (proposer retired)', 'still exported');
 
   // Policy hard-denies the kind, so any stale pending card fails at boot sweep.
@@ -250,7 +250,7 @@ async function testPhase2() {
 async function testPhase3() {
   section('Phase 3: tool-failure');
 
-  const tf = await import('/home/shawn/.openensemble/lib/tool-failures.mjs');
+  const tf = await import('../lib/tool-failures.mjs');
   const failTool = `phase3_${TAG}_failtool`;
 
   let signal;
@@ -278,7 +278,7 @@ async function testPhase3() {
   assert(dupEntry?.uniqueErrorCount === 1, 'listRecentFailures reports 1 unique for dupTool', JSON.stringify(dupEntry));
 
   // Tool-failure proposal: built-in branch
-  const prop = await import('/home/shawn/.openensemble/lib/proposals.mjs');
+  const prop = await import('../lib/proposals.mjs');
   const builtIn = await prop.proposeToolFailure({
     userId: USER_ID, agentId: 'test',
     tool: failTool, skillId: 'tasks',     // built-in skill id
@@ -287,7 +287,7 @@ async function testPhase3() {
   assert(builtIn?.isUserSkill === false && /diagnostic/i.test(builtIn?.accept_label || ''),
     'built-in tool gets "Write diagnostic" path', `isUserSkill=${builtIn?.isUserSkill}`);
 
-  // User-skill branch (localweather is a user skill in Shawn's install)
+  // User-skill branch (localweather is a user skill in this install)
   const userSkill = await prop.proposeToolFailure({
     userId: USER_ID, agentId: 'test',
     tool: 'localweather_smoke', skillId: 'localweather',
@@ -547,8 +547,8 @@ async function testPhase4() {
 async function testPhase6() {
   section('Phase 6: routing overrides + redirect detection');
 
-  const rovr = await import('/home/shawn/.openensemble/lib/routing-overrides.mjs');
-  const rmis = await import('/home/shawn/.openensemble/lib/router-mistakes.mjs');
+  const rovr = await import('../lib/routing-overrides.mjs');
+  const rmis = await import('../lib/router-mistakes.mjs');
 
   // --- Override match ---
   const fakeAgent = `agent_smoke_${TAG}_phase6`;
@@ -597,7 +597,7 @@ async function testPhase6() {
     'maybePropose trips at 2+ similar mistakes', JSON.stringify(signal));
 
   // --- Proposal emission ---
-  const prop = await import('/home/shawn/.openensemble/lib/proposals.mjs');
+  const prop = await import('../lib/proposals.mjs');
   const proposal = await prop.proposeRoutingOverride({
     userId: USER_ID, agentId: 'sydney',
     correctedAgent: signal.correctedAgent,
@@ -615,7 +615,7 @@ async function testPhase6() {
   for (let i = 1; i <= 3; i++) {
     await rovr.logFire(USER_ID, ovrId, `phase6 ${TAG} message ${i}`);
   }
-  const meas = await import('/home/shawn/.openensemble/lib/proposal-outcome-measurers.mjs');
+  const meas = await import('../lib/proposal-outcome-measurers.mjs');
   const r = meas.measureProposalOutcome(USER_ID, {
     kind: 'routing_override',
     acceptedAt: now - 1*day,    // accepted yesterday; fires after that
@@ -659,7 +659,7 @@ async function testPhase6() {
 async function testPhase7() {
   section('Phase 7: salience feedback');
 
-  const sal = await import('/home/shawn/.openensemble/lib/proposal-salience.mjs');
+  const sal = await import('../lib/proposal-salience.mjs');
   const fs2 = fs;
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
@@ -746,7 +746,7 @@ async function testPhase8() {
   const failPath = `${USER_DIR}/tool-failures.json`;
   const mistakesPath = `${USER_DIR}/router-mistakes.jsonl`;
 
-  // Save current state so we can restore. Shawn's user dir is months old, so
+  // Save current state so we can restore. The user dir may be months old, so
   // his sweep status is initialized as late-init/skipped — we need to clear
   // it for the test.
   const savedStatus = readJson(sweepStatusPath);
@@ -855,8 +855,8 @@ async function testPhase8() {
 async function testPhase10() {
   section('Phase 10: per-user skill overrides');
 
-  const so = await import('/home/shawn/.openensemble/lib/skill-overrides.mjs');
-  const roles = await import('/home/shawn/.openensemble/roles.mjs');
+  const so = await import('../lib/skill-overrides.mjs');
+  const roles = await import('../roles.mjs');
 
   // We're a separate node process from the server — _manifests is empty
   // until we boot-load it ourselves. listRoles in OUR process returns []
@@ -958,7 +958,7 @@ async function testPhase13() {
   // assert against the normalized form, not the raw input.
   const aliasPhraseRaw = `phase13_${TAG}_alias_phrase`;
   const aliasEntity = 'light.test_entity_phase13';
-  const { setAlias, loadAliases, normalizeAliasPhrase } = await import('/home/shawn/.openensemble/lib/ha-aliases.mjs');
+  const { setAlias, loadAliases, normalizeAliasPhrase } = await import('../lib/ha-aliases.mjs');
   const aliasPhrase = normalizeAliasPhrase(aliasPhraseRaw);
   setAlias(USER_ID, aliasPhraseRaw, aliasEntity);
   assert(loadAliases(USER_ID)[aliasPhrase] === aliasEntity,
@@ -1142,8 +1142,8 @@ async function testPhase12Comprehensive() {
   // ── Phase 10: skill-disable rejects dispatch ────────────────────────
   // Pick a non-always_on user-created skill that has tools. Disable it.
   // Send a message that would target it. Verify Sydney can't dispatch.
-  const so = await import('/home/shawn/.openensemble/lib/skill-overrides.mjs');
-  // localweather is a user-created skill in Shawn's setup with one tool.
+  const so = await import('../lib/skill-overrides.mjs');
+  // localweather is a user-created skill in this setup with one tool.
   // Disable it, then exercise a chat that would normally try to use it.
   const targetSkill = 'localweather';
   await so.setSkillOverride(USER_ID, targetSkill, { disabled: true });
@@ -1162,7 +1162,7 @@ async function testPhase12Comprehensive() {
   // Direct test (cheap) — verify the tracker increments without firing the
   // proposal yet (need 10 samples). Real chat-driven verbosity would cost
   // 10+ LLM turns; we cover the data path here.
-  const vt = await import('/home/shawn/.openensemble/lib/verbosity-tracker.mjs');
+  const vt = await import('../lib/verbosity-tracker.mjs');
   let s;
   for (let i = 1; i <= 9; i++) {
     s = await vt.recordUserMessageLength(USER_ID, `phase12_${TAG}_agent`, 5);   // 5-char "messages"
@@ -1173,7 +1173,7 @@ async function testPhase12Comprehensive() {
     '10th short message trips verbosity threshold', JSON.stringify(s));
 
   // ── Phase 11c: node-exec path log accepts a record ──────────────────
-  const nep = await import('/home/shawn/.openensemble/lib/node-exec-paths.mjs');
+  const nep = await import('../lib/node-exec-paths.mjs');
   await nep.appendNodeExec(USER_ID, { nodeId: `phase12_${TAG}_node`, command: `ls /nonexistent/${TAG}/path` });
   const events = nep.loadNodeExecPaths(USER_ID);
   const ours = events.filter(e => e.nodeId === `phase12_${TAG}_node`);
@@ -1183,7 +1183,7 @@ async function testPhase12Comprehensive() {
   // location_fact measurer end-to-end with synthetic data
   const now = Date.now();
   const day = 86_400_000;
-  const meas = await import('/home/shawn/.openensemble/lib/proposal-outcome-measurers.mjs');
+  const meas = await import('../lib/proposal-outcome-measurers.mjs');
   // Seed 2 probe events at "post-accept" time
   for (let i = 0; i < 2; i++) {
     await nep.appendNodeExec(USER_ID, { nodeId: `phase12_${TAG}_node`, command: `cat /dead/${TAG}/path/file${i}` });

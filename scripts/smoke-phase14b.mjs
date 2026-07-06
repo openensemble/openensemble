@@ -15,7 +15,7 @@
  */
 import WebSocket from 'ws';
 
-const USER_ID = process.env.OE_TEST_USER ?? 'user_39ce139e';
+const USER_ID = process.env.OE_TEST_USER ?? 'user_00000000';
 const HOST    = process.env.OE_TEST_HOST ?? 'localhost';
 const PORT    = process.env.OE_TEST_PORT ?? '3737';
 const TOKEN   = process.env.OE_TEST_TOKEN ?? '1efb330eefc9b96f125971210487ce074024d22d8cadace77bd97d00394ed4bb';
@@ -47,7 +47,7 @@ async function main() {
   //      no — there's no direct tool-call HTTP endpoint. Instead verify via
   //      the in-process module: import currentTaskContext outside any
   //      runInTaskContext and confirm it returns null. ─────────────────────
-  const ctx = await import('/home/shawn/.openensemble/lib/task-proxy-context.mjs');
+  const ctx = await import('../lib/task-proxy-context.mjs');
   const outsideCtx = ctx.currentTaskContext();
   assert(outsideCtx === null, 'currentTaskContext returns null outside a task scope', `got ${JSON.stringify(outsideCtx)}`);
 

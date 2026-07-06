@@ -13,7 +13,7 @@
  */
 import WebSocket from 'ws';
 
-const USER_ID = process.env.OE_TEST_USER ?? 'user_39ce139e';
+const USER_ID = process.env.OE_TEST_USER ?? 'user_00000000';
 const HOST    = process.env.OE_TEST_HOST ?? 'localhost';
 const PORT    = process.env.OE_TEST_PORT ?? '3737';
 const TOKEN   = process.env.OE_TEST_TOKEN ?? '1efb330eefc9b96f125971210487ce074024d22d8cadace77bd97d00394ed4bb';

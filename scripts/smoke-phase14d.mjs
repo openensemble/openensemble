@@ -10,7 +10,7 @@
 import fs from 'fs';
 import { execSync } from 'child_process';
 
-const USER_ID = process.env.OE_TEST_USER ?? 'user_39ce139e';
+const USER_ID = process.env.OE_TEST_USER ?? 'user_00000000';
 const HOST    = process.env.OE_TEST_HOST ?? 'localhost';
 const PORT    = process.env.OE_TEST_PORT ?? '3737';
 const TOKEN   = process.env.OE_TEST_TOKEN ?? '1efb330eefc9b96f125971210487ce074024d22d8cadace77bd97d00394ed4bb';
@@ -41,7 +41,7 @@ async function main() {
   console.log(`Phase 14d smoke — tag ${TAG}`);
 
   // Boot manifests in MY process so we can spot-check the new tool exists
-  const roles = await import('/home/shawn/.openensemble/roles.mjs');
+  const roles = await import('../roles.mjs');
   roles.loadRoleManifests();
   const aaTools = roles.getRoleTools('active-agents', USER_ID);
   const toolNames = aaTools.map(t => t.function?.name);
@@ -59,7 +59,7 @@ async function main() {
 
   // Seed a task_proxy with stale lastNudgeAt → restart → tick will fire
   // (cadence is 30s, so we wait up to 60s for one tick). Verify nudge fires.
-  const watchersFile = `/home/shawn/.openensemble/users/${USER_ID}/watchers.json`;
+  const watchersFile = `users/${USER_ID}/watchers.json`;
   const data = JSON.parse(fs.readFileSync(watchersFile, 'utf8'));
   const nudgeId = `wnudge_${TAG}`;
   const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
@@ -132,7 +132,7 @@ async function main() {
   // one in-process, query getWatcher, hand off to execute.
   // But the watcher is in MY process not the server's. So just verify the
   // tool's handler shape directly.
-  const ag = await import('/home/shawn/.openensemble/skills/active-agents/execute.mjs');
+  const ag = await import('../skills/active-agents/execute.mjs');
   // Bad watcherId path
   const noW = await ag.executeSkillTool('get_task_log', { watcherId: 'bogus' }, USER_ID);
   assert(typeof noW === 'string' && /no watcher found/i.test(noW),

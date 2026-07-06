@@ -13,7 +13,7 @@ import { BASE_DIR } from '../lib/paths.mjs';
 function pickToken() {
   const all = JSON.parse(fs.readFileSync(path.join(BASE_DIR, 'active-sessions.json'), 'utf8'));
   const cands = Object.entries(all).filter(([k, v]) =>
-    v?.kind === 'browser' && v?.userId === 'user_39ce139e' && (!v?.expiresAt || v.expiresAt > Date.now())
+    v?.kind === 'browser' && v?.userId === (process.env.OE_TEST_USER || 'user_00000000') && (!v?.expiresAt || v.expiresAt > Date.now())
   ).sort((a, b) => (b[1].lastSeenAt || 0) - (a[1].lastSeenAt || 0));
   if (!cands.length) throw new Error('no browser token');
   return cands[0][0];

@@ -35,9 +35,9 @@ const TARGET_AGENT = process.env.OE_AGENT_ID || 'sydney';
 function pickToken() {
   const all = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf8'));
   const candidates = Object.entries(all).filter(([k, v]) =>
-    v?.kind === 'browser' && v?.userId === 'user_39ce139e' && (!v?.expiresAt || v.expiresAt > Date.now())
+    v?.kind === 'browser' && v?.userId === (process.env.OE_TEST_USER || 'user_00000000') && (!v?.expiresAt || v.expiresAt > Date.now())
   ).sort((a, b) => (b[1].lastSeenAt || 0) - (a[1].lastSeenAt || 0));
-  if (!candidates.length) throw new Error('no non-expired browser session for user_39ce139e');
+  if (!candidates.length) throw new Error('no non-expired browser session for the test user');
   return { token: candidates[0][0], userId: candidates[0][1].userId };
 }
 

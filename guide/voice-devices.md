@@ -10,7 +10,7 @@ Once paired, the device acts like any other OE client: it logs into a user accou
 2. **Power it on.** A freshly-flashed (or factory-reset) device boots into provisioning mode and broadcasts a Wi-Fi network named `oe-voice-XXXX`.
 3. **Generate a pairing code.** Open *Settings → Voice devices* and click **+ Add device**. The code is good for ~10 minutes.
 4. **Join the device's Wi-Fi** from your phone or laptop. The captive portal opens automatically; if not, browse to `http://192.168.4.1`.
-5. **Fill in the form** — your home Wi-Fi SSID + password, the OE server URL (e.g. `http://192.168.1.81:3737`), the pairing code, and a friendly device name.
+5. **Fill in the form** — your home Wi-Fi SSID + password, the OE server URL (e.g. `http://192.168.4.20:3737`), the pairing code, and a friendly device name.
 6. The device leaves AP mode, joins your Wi-Fi, redeems the pairing code, and shows up in *Settings → Voice devices* a few seconds later.
 
 Pairing codes are held in memory and die when the OE server restarts. If you restart mid-pair, generate a new code.

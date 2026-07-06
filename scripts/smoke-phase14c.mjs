@@ -13,7 +13,7 @@ import fs from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 
-const USER_ID = process.env.OE_TEST_USER ?? 'user_39ce139e';
+const USER_ID = process.env.OE_TEST_USER ?? 'user_00000000';
 const HOST    = process.env.OE_TEST_HOST ?? 'localhost';
 const PORT    = process.env.OE_TEST_PORT ?? '3737';
 const TOKEN   = process.env.OE_TEST_TOKEN ?? '1efb330eefc9b96f125971210487ce074024d22d8cadace77bd97d00394ed4bb';
@@ -56,7 +56,7 @@ async function main() {
   // watchers.mjs and constructing a synthetic state.
   // (The handler is internal; we test the BEHAVIOR by checking _systemHandlers
   // post-import. If unavailable, we skip with a note.)
-  const watchersMod = await import('/home/shawn/.openensemble/scheduler/watchers.mjs');
+  const watchersMod = await import('../scheduler/watchers.mjs');
   // The handler is a closure over module-private maps; we can't get a direct
   // reference. Instead, test the public surface: register a real task_proxy
   // with stale lastActivityAt, then trigger a tick via the supervisor loop.
@@ -69,7 +69,7 @@ async function main() {
   // 1. Write a stale task_proxy directly to disk
   // 2. Restart the server
   // 3. Verify it landed in recent with status='error'
-  const watchersFile = `/home/shawn/.openensemble/users/${USER_ID}/watchers.json`;
+  const watchersFile = `users/${USER_ID}/watchers.json`;
   const before = JSON.parse(fs.readFileSync(watchersFile, 'utf8'));
   const staleId = `wstale_${TAG}`;
   const staleEntry = {
