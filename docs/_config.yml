@@ -1,0 +1,36 @@
+title: OpenEnsemble
+description: >-
+  Self-hosted, multi-user AI assistant platform — specialist agents, your choice of
+  LLM providers, and open-hardware ESP32 voice satellites, all on your own server.
+url: "https://openensemble.github.io"
+baseurl: "/openensemble"
+
+remote_theme: just-the-docs/just-the-docs
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /assets/social-card.png
+
+# just-the-docs settings
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+aux_links:
+  "GitHub":
+    - "https://github.com/openensemble/openensemble"
+  "Discussions":
+    - "https://github.com/openensemble/openensemble/discussions"
+nav_external_links:
+  - title: OpenEnsemble on GitHub
+    url: https://github.com/openensemble/openensemble
+  - title: Voice-device firmware
+    url: https://github.com/openensemble/voice-device-firmware
+
+exclude:
+  - demo.gif

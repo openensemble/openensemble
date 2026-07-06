@@ -1,3 +1,11 @@
+---
+title: "Design: per-user sandboxing"
+nav_order: 5
+description: >-
+  Design document for OpenEnsemble's v2 tenant boundary — generalizing the
+  shipped per-skill sandbox to full per-user isolation.
+---
+
 # Per-User Sandboxing — Plan
 
 Status: **design / not built.** The "v2 tenant boundary." Companion to `SKILL_SANDBOX.md`

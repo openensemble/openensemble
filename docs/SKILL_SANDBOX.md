@@ -1,3 +1,11 @@
+---
+title: "Security: skill sandbox"
+nav_order: 4
+description: >-
+  How OpenEnsemble isolates untrusted user-authored skills — a broker
+  process, bubblewrap jails, and a real trust boundary around custom code.
+---
+
 # Custom-Skill Sandbox — What Was Built
 
 Multi-tenant isolation for **custom (user-authored) skills**. OE is one Node process

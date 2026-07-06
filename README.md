@@ -3,6 +3,8 @@
 
 Self-hosted, multi-user AI assistant platform. Run a team of specialist agents, choose the LLM providers they use, and keep each user's data isolated on your own server.
 
+**Build your own private voice assistant.** OpenEnsemble pairs with an open-hardware, open-firmware **ESP32-S3 voice satellite** — say "Hey Ensemble" and talk to your agents hands-free, Alexa-style, except the audio, transcripts, and history never leave your server. Flash it from the browser, no toolchain needed. See [Voice devices](#voice-devices-beta) below and the [voice-device-firmware](https://github.com/openensemble/voice-device-firmware) repo.
+
 ![demo](docs/demo.gif)
 
 <img width="378" height="315" alt="welcome" src="https://github.com/user-attachments/assets/8cfb9a9a-70cc-467f-95e6-0e9cef88b3d5" />
@@ -81,9 +83,13 @@ Use the built-in skill builder to add new capabilities at runtime. A blueprint s
 
 **MCP servers.** Connect local or remote Model Context Protocol servers and assign their tools to specific agents. Each user manages their own MCP servers and credentials.
 
-### Beta and optional hardware
+### Voice devices (beta)
 
-**Voice devices (beta).** Pair a physical wake-word device — say "hey ensemble" (or any of the bundled wake words) and talk to your agents hands-free; the reply gets spoken back through the device's speaker or 3.5 mm jack. Includes a browser-based flash wizard (WebUSB + Web Serial — no `dfu-util` or `esptool` needed), per-slot voice and wake-word routing, household sharing (one device can route "hey roommate" to a different user's account), and a fast-path voice-control router for "volume up / pause / stop" without an LLM round-trip. Currently the only supported hardware is the **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. See the in-app Guide -> Voice devices section for pairing and flashing. The device firmware is open source at [openensemble/voice-device-firmware](https://github.com/openensemble/voice-device-firmware); prebuilt binaries ship with OE, so you only need that repo to hack on the firmware itself.
+Pair a physical wake-word device — say "hey ensemble" (or any of the bundled wake words) and talk to your agents hands-free; the reply gets spoken back through the device's speaker or 3.5 mm jack. It's a fully open, self-hosted alternative to an Alexa- or Google-Home-style smart speaker: on-device wake words, far-field capture with hardware echo cancellation, barge-in during playback, AirPlay, and device-side alarms that fire even if the server is down.
+
+Includes a browser-based flash wizard (WebUSB + Web Serial — no `dfu-util` or `esptool` needed), per-slot voice and wake-word routing, household sharing (one device can route "hey roommate" to a different user's account), and a fast-path voice-control router for "volume up / pause / stop" without an LLM round-trip.
+
+Currently the only supported hardware is the **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. See the in-app Guide -> Voice devices section for pairing and flashing. The device firmware is open source at [openensemble/voice-device-firmware](https://github.com/openensemble/voice-device-firmware); prebuilt binaries ship with OE, so you only need that repo to hack on the firmware itself.
 
 ## Requirements
 
