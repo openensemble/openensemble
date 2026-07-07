@@ -163,8 +163,11 @@ export async function handle(req, res) {
       if (existing >= MAX_AGENTS_PER_USER) {
         res.writeHead(429); res.end(JSON.stringify({ error: `Agent limit reached (${MAX_AGENTS_PER_USER}). Delete some before creating more.` })); return true;
       }
-      let { name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, maxTokens, contextSize, reasoningEffort } = JSON.parse(await readBody(req));
+      let { name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, personality, maxTokens, contextSize, reasoningEffort } = JSON.parse(await readBody(req));
       reasoningEffort = normalizeReasoningEffort(reasoningEffort, 'auto');
+      if (personality != null && (typeof personality !== 'string' || personality.length > 2000)) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'personality must be a string of 2000 characters or fewer' })); return true;
+      }
       if (contextSize != null) {
         contextSize = parseInt(contextSize, 10);
         if (!Number.isFinite(contextSize) || contextSize < 1024 || contextSize > 2_000_000) {
@@ -180,10 +183,13 @@ export async function handle(req, res) {
         if (!CHILD_SAFE_TOOLSETS.includes(toolSet)) toolSet = 'web';
         if (skillCategory && !CHILD_SAFE_SKILL_CATEGORIES.includes(skillCategory)) skillCategory = null;
         // Child can't set a custom system prompt — it must use buildSystemPrompt
-        // so the safety prefix and identity template apply cleanly.
+        // so the safety prefix and identity template apply cleanly. Personality
+        // is prompt text too (same jailbreak-suffix vector), so it's clamped
+        // under the same invariant: a child can't author prompt text.
         systemPrompt = undefined;
+        personality = undefined;
       }
-      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, maxTokens, contextSize, ownerId: authId });
+      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, personality, maxTokens, contextSize, ownerId: authId });
       // reasoningEffort is account-specific: persist the creator's choice as a
       // per-user override rather than on the shared agent record.
       if (reasoningEffort !== 'auto') {
@@ -229,6 +235,14 @@ export async function handle(req, res) {
       // text landed in the stored prompt).
       if ('systemPrompt' in changes && getUser(authId)?.role !== 'child') {
         uiChanges.systemPrompt = changes.systemPrompt;
+      }
+      // Personality: same child clamp as systemPrompt (it's prompt text).
+      // `in` detection so an empty string explicitly clears it.
+      if ('personality' in changes && getUser(authId)?.role !== 'child') {
+        if (changes.personality != null && (typeof changes.personality !== 'string' || changes.personality.length > 2000)) {
+          res.writeHead(400); res.end(JSON.stringify({ error: 'personality must be a string of 2000 characters or fewer' })); return true;
+        }
+        uiChanges.personality = (changes.personality ?? '').trim();
       }
       if (changes.model)     globalChanges.model     = changes.model;
       if (changes.provider)  globalChanges.provider  = changes.provider;

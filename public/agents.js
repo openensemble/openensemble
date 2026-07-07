@@ -280,6 +280,7 @@ async function openNewAgentModal(agent = null) {
   $('aName').value   = agent?.name    ?? '';
   $('aEmoji').value  = agent?.emoji   ?? '🤖';
   $('aDesc').value   = agent?.description ?? '';
+  $('aPersonality').value = agent?.personality ?? '';
   $('aToolSet').value = agent?.toolSet ?? 'web';
 
   // Populate role picker (creation only). Includes both built-in roles
@@ -357,6 +358,8 @@ $('btnCreateAgent').addEventListener('click', async () => {
   const contextSizeRaw = parseInt($('aContextSize').value, 10);
   const contextSize = contextSizeRaw >= 1024 ? contextSizeRaw : null;
   const payload = { name, emoji: $('aEmoji').value.trim() || '🤖', description: desc, model, provider, toolSet: $('aToolSet').value };
+  // Always send — PATCH uses 'in changes' so an emptied field clears the stored value.
+  payload.personality = $('aPersonality').value.trim();
   if (selectedRole) payload.skillCategory = selectedRole;
   // Always send — PATCH uses 'in changes' to detect clears. For POST, null is harmless.
   payload.maxTokens = maxTokens;

@@ -311,6 +311,16 @@ export function getAgentsForUser(userId) {
       // user has created after the coordinator was first saved.
       expandedPrompt = `${basePrompt}\n\n${rosterBlock}`;
     }
+    // Personality — user-authored "how this agent talks" text from the agent
+    // editor. Injected as its own block rather than baked into the stored
+    // systemPrompt so edits apply on the next turn, renames/role swaps can't
+    // wipe it, and the child-safety prefix + role SPAs stay intact. Children
+    // can't author it (clamped in routes/agents.mjs), so any value here came
+    // from an adult account.
+    const personalityText = String(withOverrides.personality ?? '').trim();
+    const personalityBlock = personalityText
+      ? `## Personality\n\n${expandTemplates(personalityText)}\n\nLet this personality shape the tone and style of every reply, spoken (voice) replies included. Where it conflicts with default style guidance like "be concise and direct", the personality wins. It never overrides tool-use rules, role instructions, or safety guidance.`
+      : '';
     // Universal parallel-tools guidance — applies to any agent with 2+ tools.
     // The provider layer auto-parallelizes tool calls emitted together in one
     // assistant turn; this teaches every agent (not just the coordinator) to
@@ -359,7 +369,7 @@ export function getAgentsForUser(userId) {
     // systemPrompt below is the legacy flat concatenation for callers that
     // haven't migrated to the tier-aware path yet (every non-Anthropic
     // provider — the bytes still match what we used to send).
-    const _stableShellParts = [expandedPrompt, modelCapabilityGuidance, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p);
+    const _stableShellParts = [expandedPrompt, personalityBlock, modelCapabilityGuidance, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p);
     const _promptTiers = {
       stable: _stableShellParts.join('\n\n'),
       context: skillPromptAdditions || '',
@@ -370,7 +380,7 @@ export function getAgentsForUser(userId) {
     // SPA section after per-turn tool trimming. Kept for back-compat with
     // the legacy single-string path; new code reads _promptTiers.context
     // directly.
-    const _systemPromptShell = [expandedPrompt, modelCapabilityGuidance, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '').join('\n\n');
+    const _systemPromptShell = [expandedPrompt, personalityBlock, modelCapabilityGuidance, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '').join('\n\n');
 
     // Patch ask_agent's agent_id description per-agent. Coordinators see the
     // full delegatable-specialist roster; specialists see only the literal

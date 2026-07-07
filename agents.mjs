@@ -129,7 +129,7 @@ function pickAgentId(name, ownerId) {
   return slug;
 }
 
-export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, maxTokens, contextSize, ownerId = null }) {
+export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, personality, maxTokens, contextSize, ownerId = null }) {
   const id = pickAgentId(name, ownerId);
   const agent = {
     id, name, emoji,
@@ -138,6 +138,10 @@ export function createCustomAgent({ name, emoji = '🤖', description, model, pr
     toolSet,
     description,
     systemPrompt: systemPrompt ?? buildSystemPrompt(name, emoji, description),
+    // Personality is stored separately from systemPrompt and injected as its
+    // own block at resolve time (see routes/_helpers/agent-resolver.mjs), so
+    // renames/role swaps that rebuild the template never wipe it.
+    ...(typeof personality === 'string' && personality.trim() ? { personality: personality.trim() } : {}),
     custom: true,
     ...(ownerId    ? { ownerId }    : {}),
     ...(maxTokens  ? { maxTokens }  : {}),

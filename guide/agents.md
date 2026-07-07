@@ -8,7 +8,7 @@ An agent is one configurable participant in your ensemble. They're cheap to make
 - **Role** — the persona and workflow rules they follow (see **Roles**). Determines which built-in skills they're allowed to use.
 - **Model** — one model from one enabled provider. Can be changed any time.
 - **Description** — a short hint of what this agent is for; the Coordinator uses it when deciding who to delegate to.
-- **System prompt** — extra instructions on top of the role's prompt. Use this for personal preferences ("always answer in metric", "I'm a senior Go engineer").
+- **Personality** — optional; how the agent talks. "Warm and playful, loves a good pun", "dry and blunt, zero fluff", "explains like a patient teacher". It shapes tone and style in every reply (voice included) without changing what the agent can do — capabilities stay with the role and tools.
 - **Tools** — the specific skill tools this agent has unlocked. Roles set sensible defaults; you can adjust per-agent.
 
 ## Creating an agent
@@ -29,7 +29,7 @@ That distinction matters: when you ask the Coordinator to "have the researcher l
 
 ## Editing an agent later
 
-In the agent list, hover the agent and click the edit icon (or right-click → Edit). You can change name, emoji, model, system prompt, role, and tool selection without losing chat history. Switching role swaps the persona without rebuilding the agent.
+In the agent list, hover the agent and click the edit icon (or right-click → Edit). You can change name, emoji, model, description, personality, and tool selection without losing chat history. Personality edits apply from your next message — no restart or new conversation needed. Switching role (via role assignment) swaps the workflow rules without rebuilding the agent.
 
 Scheduled tasks owned by an agent always use that agent's **current** model — the model isn't snapshotted at schedule time. So if you swap an agent from gpt-5.5 to claude-sonnet-4.6 today, every future fire of every scheduled task that agent owns runs on the new model. Same for watch on-fire actions.
 

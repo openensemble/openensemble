@@ -437,6 +437,7 @@ export function agentToWire(a) {
   return { id: a.id, name: a.name, emoji: a.emoji, model: a.model,
            provider: a.provider ?? 'ollama', custom: !!a.custom,
            toolSet: a.toolSet ?? 'web', description: a.description ?? '',
+           personality: a.personality ?? '',
            scope: a.scope ?? 'private', skillCategory: a.skillCategory ?? null,
            maxTokens: a.maxTokens ?? null,
            contextSize: a.contextSize ?? 32768,

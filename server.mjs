@@ -8,6 +8,7 @@ import https      from 'https';
 import fs         from 'fs';
 import path       from 'path';
 import os         from 'os';
+import crypto     from 'crypto';
 import { fileURLToPath } from 'url';
 import { listAgents } from './agents.mjs';
 import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
@@ -201,6 +202,72 @@ function buildCSS() {
   console.log(`[css] Built styles.css from ${files.length} source files`);
 }
 
+// ── UI build id + asset caching ──────────────────────────────────────────────
+// One hash over the UI shell (top-level html/js/css + vendor libs), computed
+// at boot. index.html is served with every local js/css URL stamped
+// ?v=<buildId>, and an asset request whose ?v matches gets a far-future
+// immutable cache; anything else revalidates via ETag. This makes one page
+// load an atomic bundle — the old `max-age=3600` with no validators let a
+// phone run mixed old/new files for up to an hour after every update.
+// Note: assets edited without a server restart keep the old build id, so
+// stamped URLs may pin stale copies until the next restart recomputes the id
+// (production updates always restart; dev already restarts for CSS concat).
+let UI_BUILD_ID = 'dev';
+function computeUiBuildId() {
+  const entries = [];
+  const addDir = (dir, prefix) => {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return; }
+    for (const name of names.sort()) {
+      let st;
+      try { st = fs.statSync(path.join(dir, name)); } catch { continue; }
+      if (!st.isFile()) continue;
+      entries.push(`${prefix}${name}:${st.size}:${Math.round(st.mtimeMs)}`);
+    }
+  };
+  addDir(UI_DIR, '');
+  addDir(path.join(UI_DIR, 'vendor'), 'vendor/');
+  UI_BUILD_ID = crypto.createHash('sha1').update(entries.join('\n')).digest('hex').slice(0, 12);
+  console.log(`[ui] Build id ${UI_BUILD_ID}`);
+}
+
+function fileEtag(st) {
+  return `"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
+}
+
+// Answers with 304 (and returns true) when the client already has this ETag.
+function notModified(req, res, etag, cacheControl) {
+  if (req.headers['if-none-match'] !== etag) return false;
+  res.writeHead(304, { ETag: etag, 'Cache-Control': cacheControl });
+  res.end();
+  return true;
+}
+
+function requestedBuildId(reqUrl) {
+  return (reqUrl.match(/[?&]v=([0-9a-f]+)/) || [])[1];
+}
+
+// index.html with build-id-stamped asset URLs, memoized on (mtime, build id).
+let _indexCache = null;
+function versionedIndexHtml() {
+  const indexPath = path.join(UI_DIR, 'index.html');
+  const st = fs.statSync(indexPath);
+  if (!_indexCache || _indexCache.mtimeMs !== st.mtimeMs || _indexCache.buildId !== UI_BUILD_ID) {
+    const raw = fs.readFileSync(indexPath, 'utf8');
+    const html = raw.replace(
+      /(src|href)="(\/(?:vendor\/)?[^"?]+\.(?:js|css))"/g,
+      `$1="$2?v=${UI_BUILD_ID}"`,
+    );
+    _indexCache = {
+      mtimeMs: st.mtimeMs,
+      buildId: UI_BUILD_ID,
+      html: Buffer.from(html),
+      etag: `"idx-${UI_BUILD_ID}-${Math.round(st.mtimeMs).toString(16)}"`,
+    };
+  }
+  return _indexCache;
+}
+
 // ── Route dispatch order ─────────────────────────────────────────────────────
 const routeHandlers = [
   handleHealth,    // /health (public) + /api/admin/health (authed)
@@ -318,25 +385,41 @@ const httpServer = http.createServer(async (req, res) => {
   // and any shared link with tracking params.
   const _pathname = req.url.split('?', 1)[0];
   if (_pathname.startsWith('/invite/') || _pathname === '/' || _pathname === '/index.html') {
-    const html = fs.readFileSync(path.join(UI_DIR, 'index.html'));
-    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' }); res.end(html); return;
+    const idx = versionedIndexHtml();
+    if (notModified(req, res, idx.etag, 'no-cache')) return;
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache', ETag: idx.etag });
+    res.end(idx.html); return;
   }
 
 
-  if (req.url === '/manifest.json') {
-    const manifest = fs.readFileSync(path.join(UI_DIR, 'manifest.json'));
-    res.writeHead(200, { 'Content-Type': 'application/manifest+json' }); res.end(manifest); return;
+  if (_pathname === '/manifest.json') {
+    const mfPath = path.join(UI_DIR, 'manifest.json');
+    const mfEtag = fileEtag(fs.statSync(mfPath));
+    if (notModified(req, res, mfEtag, 'no-cache')) return;
+    const manifest = fs.readFileSync(mfPath);
+    res.writeHead(200, { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-cache', ETag: mfEtag });
+    res.end(manifest); return;
   }
 
-  // Serve static assets from public/ (css, js)
+  // Serve static assets from public/ (css, js). A ?v matching the current
+  // build id caches forever (index.html stamps those URLs); anything else
+  // revalidates every load via ETag.
   const STATIC_TYPES = { '.css': 'text/css', '.js': 'text/javascript' };
   const ext = path.extname(_pathname);
   if (STATIC_TYPES[ext]) {
     const safeName = path.basename(_pathname);
     const filePath = path.join(UI_DIR, safeName);
-    if (fs.existsSync(filePath)) {
+    let stat = null;
+    try { stat = fs.statSync(filePath); } catch {}
+    if (stat?.isFile()) {
+      const etag = fileEtag(stat);
+      const cache = requestedBuildId(req.url) === UI_BUILD_ID
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache';
+      if (notModified(req, res, etag, cache)) return;
       const data = fs.readFileSync(filePath);
-      res.writeHead(200, { 'Content-Type': STATIC_TYPES[ext], 'Cache-Control': 'public, max-age=3600' }); res.end(data); return;
+      res.writeHead(200, { 'Content-Type': STATIC_TYPES[ext], 'Cache-Control': cache, ETag: etag });
+      res.end(data); return;
     }
   }
 
@@ -362,15 +445,23 @@ const httpServer = http.createServer(async (req, res) => {
       try { decoded = decodeURIComponent(url).replace(/^\/+/, ''); }
       catch { res.writeHead(400, { 'Content-Type': 'text/plain' }); res.end('Bad request'); return; }
       const filePath = path.resolve(UI_DIR, decoded);
-      if (filePath.startsWith(UI_DIR + path.sep) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      let stat = null;
+      try { stat = fs.statSync(filePath); } catch {}
+      if (filePath.startsWith(UI_DIR + path.sep) && stat?.isFile()) {
+        const etag = fileEtag(stat);
+        // vendor/ libs are part of the versioned UI bundle. firmware/ stays
+        // no-cache (flash wizard + device OTA iterate on it) but ETag now
+        // gives 304s instead of re-sending multi-MB bins.
+        const cache = url.startsWith('/vendor/') && requestedBuildId(req.url) === UI_BUILD_ID
+          ? 'public, max-age=31536000, immutable'
+          : 'no-cache';
+        if (notModified(req, res, etag, cache)) return;
         const data = fs.readFileSync(filePath);
-        // No-cache: this tree is being actively iterated on (flash wizard
-        // bring-up). Browsers were holding stale webdfu.js + manifests
-        // across reloads. Revisit once the wizard stabilises.
         res.writeHead(200, {
           'Content-Type': NESTED_TYPES[ext],
           'Content-Length': data.length,
-          'Cache-Control': 'no-cache',
+          'Cache-Control': cache,
+          ETag: etag,
         });
         res.end(data);
         return;
@@ -788,6 +879,7 @@ async function seedSystemTasks() {
 // ── Start ────────────────────────────────────────────────────────────────────
 migrateUserDirs();
 buildCSS();
+computeUiBuildId(); // after buildCSS so styles.css is part of the hash
 loadRoleManifests();
 validateSkills().catch(() => {});
 loadDrawerManifests();

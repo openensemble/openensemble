@@ -1853,7 +1853,12 @@ function mountCustomDrawers() {
       btn.className = 'strip-btn';
       btn.id = btnId;
       btn.title = p.name;
-      btn.setAttribute('onclick', `toggleDrawer('${drawerId}','${btnId}')`);
+      // data-action, not an inline onclick attribute: CSP (script-src 'self',
+      // no unsafe-inline) blocks inline handlers, which left custom drawer
+      // buttons dead on desktop. Delegation matches the built-in strip buttons
+      // and the mobile menu reads the same attributes.
+      btn.dataset.action = 'toggleDrawer';
+      btn.dataset.args = JSON.stringify([drawerId, btnId]);
       btn.innerHTML = `${iconMarkup}<span class="strip-tooltip">${escHtml(p.name)}</span>`;
       // Insert before the strip spacer so it sits with the other feature buttons.
       const spacer = strip.querySelector('.strip-spacer');
