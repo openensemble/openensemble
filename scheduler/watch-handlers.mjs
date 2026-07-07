@@ -20,8 +20,10 @@
 import { exec as cpExec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
+import path from 'path';
 import { registerSystemWatcherHandler } from './watchers.mjs';
 import { isUrlSafe } from '../lib/url-guard.mjs';
+import { USERS_DIR } from '../lib/paths.mjs';
 import { log } from '../logger.mjs';
 
 const execAsync = promisify(cpExec);
@@ -161,10 +163,36 @@ async function execHandler(state) {
 }
 
 // ── file_stat ────────────────────────────────────────────────────────────────
-async function fileStatHandler(state) {
-  const { path: filePath, attribute = 'exists', comparator, target } = state || {};
+// Confine a file_stat path to the requesting owner's user dir UNLESS the
+// watcher is trusted: either a human explicitly confirmed it (_userConfirmed —
+// the flag the exec handler requires) or a privileged (owner/admin) user
+// created it (_privilegedOrigin, stamped at create time in skills/tasks —
+// the oe-admin case: system-level OE repair / installs need to watch paths
+// outside users/). Without a bound, a NON-privileged file_stat watcher leaked
+// metadata (size/mtime/existence) of arbitrary server paths into the
+// requester's chat; exec is confirmation-gated and http is SSRF-guarded, so
+// this closes the same hole for non-privileged file_stat. path.resolve
+// normalizes any '..' traversal before the prefix check.
+function fileStatPathAllowed(filePath, userId, trusted) {
+  if (trusted) return { ok: true };
+  if (!userId) return { ok: false, reason: 'no owner scope' };
+  const resolved = path.resolve(String(filePath));
+  const userDir = path.resolve(USERS_DIR, String(userId));
+  if (resolved === userDir || resolved.startsWith(userDir + path.sep)) return { ok: true };
+  return { ok: false, reason: 'path is outside your user directory' };
+}
+
+async function fileStatHandler(state, helpers = {}) {
+  const { path: filePath, attribute = 'exists', comparator, target, _userConfirmed, _privilegedOrigin } = state || {};
   if (!filePath) {
-    return { done: true, textUpdate: '❌ file_stat watcher misconfigured (path required)' };
+    // failed:true so it finalizes as an error chip, not a green "✓ done".
+    return { done: true, failed: true, textUpdate: '❌ file_stat watcher misconfigured (path required)' };
+  }
+
+  const allowed = fileStatPathAllowed(filePath, helpers.userId, _userConfirmed === true || _privilegedOrigin === true);
+  if (!allowed.ok) {
+    log.warn('watchers', 'Refusing out-of-bounds file_stat watcher', { path: String(filePath).slice(0, 120), reason: allowed.reason });
+    return { done: true, failed: true, textUpdate: `❌ file_stat watcher blocked: ${allowed.reason}` };
   }
 
   // Read the requested attribute. ENOENT for `exists` resolves to false; for

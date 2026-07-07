@@ -667,7 +667,10 @@ function detectOneShotTime(request, now) {
     const [y, mo, d] = m[1].split('-').map(Number);
     const hh = m[2] ? parseInt(m[2], 10) : 9;
     const mm = m[3] ? parseInt(m[3], 10) : 0;
-    const pref = new Date(Date.UTC(y, mo - 1, d, hh, mm, 0));
+    // Local wall time (multi-arg Date ctor), matching atClock — "9am" means 9am
+    // in the user's tz. Date.UTC here planted 9 in the UTC slot, so the task
+    // fired at 9am UTC instead of 9am local.
+    const pref = new Date(y, mo - 1, d, hh, mm, 0);
     return { earliest: null, latest: null, preferred: toIso(pref) };
   }
 
@@ -690,10 +693,12 @@ function detectOneShotTime(request, now) {
     const hh = clk?.hour ?? 9;
     const mm_ = clk?.minute ?? 0;
     let year = now.getUTCFullYear();
-    let candidate = new Date(Date.UTC(year, mon - 1, day, hh, mm_, 0));
+    // Local wall time (matching atClock) so "January 1st at 9am" fires at 9am
+    // local, not 9am UTC. Roll-forward logic unchanged.
+    let candidate = new Date(year, mon - 1, day, hh, mm_, 0);
     if (candidate <= now) {
       year += 1;
-      candidate = new Date(Date.UTC(year, mon - 1, day, hh, mm_, 0));
+      candidate = new Date(year, mon - 1, day, hh, mm_, 0);
     }
     return { earliest: null, latest: null, preferred: toIso(candidate) };
   }
@@ -859,9 +864,11 @@ function detectOneShotTime(request, now) {
   let mm;
   if ((mm = r.match(/\bnext\s+month\s+on\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b/))) {
     const day = parseInt(mm[1], 10);
-    const target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, day, 9, 0, 0));
-    const dayStart = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), day, 0, 0, 0));
-    const dayEnd = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), day, 23, 59, 59));
+    // Local wall time (matching atClock) so the 9am preferred fire and the
+    // day-window brackets land on the user's local day, not the UTC day.
+    const target = new Date(now.getFullYear(), now.getMonth() + 1, day, 9, 0, 0);
+    const dayStart = new Date(target.getFullYear(), target.getMonth(), day, 0, 0, 0);
+    const dayEnd = new Date(target.getFullYear(), target.getMonth(), day, 23, 59, 59);
     return { earliest: toIso(dayStart), latest: toIso(dayEnd), preferred: toIso(target) };
   }
   // "end of the month" → last 3 days of current month

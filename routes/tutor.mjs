@@ -17,7 +17,7 @@ import {
   loadTutorStats, recordSessionActivity, getWeeklyRecap, setUserTz, setWeeklyGoal,
   masteryBand, levelProgress,
 } from '../lib/tutor-stats.mjs';
-import { loadTasksForOwner, addTask, removeTask } from '../scheduler.mjs';
+import { loadTasksForOwner, addTask, removeTask, scheduleNewTask } from '../scheduler.mjs';
 
 const DEFAULT_REMINDER_PREFS = {
   enabled: false,
@@ -101,8 +101,14 @@ async function rebuildTutorTasks(userId) {
     meta: { tutor: true, kind: 'week_wrap' },
   }));
   removePrior();
-  // Avoid dragging the scheduler import surface into this module; a dynamic
-  // reload is triggered elsewhere via scheduleNewTask (addTask) already.
+  // addTask only PERSISTS a task — it does not arm a timer (arming is a separate
+  // step). removePrior() just deleted the previously-armed tutor tasks, so
+  // without arming these we'd leave zero live tutor timers until the next boot.
+  // Arm each new task, mirroring skills/tasks and personalization/scheduler-init.
+  for (const t of added) {
+    try { scheduleNewTask(t); }
+    catch (e) { console.warn('[tutor] failed to arm task', t?.id, e?.message); }
+  }
   return { added: added.length };
 }
 

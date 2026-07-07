@@ -659,11 +659,24 @@ async function sendScheduledFailureEmail({ userId, taskId, originScheduledTaskId
 // would stay in activeTasks forever. Sweep every hour, reap anything older
 // than 24h so /health + UI don't accumulate ghosts.
 const TASK_TTL_MS = 24 * 60 * 60 * 1000;
-setInterval(() => {
+setInterval(async () => {
   const now = Date.now();
+  // Snapshot first: _onComplete mutates activeTasks (and may cascade-retire
+  // children), so iterating while calling it would be unsafe.
+  const stale = [];
   for (const [taskId, info] of activeTasks) {
-    if (info.startedAt && (now - info.startedAt) > TASK_TTL_MS) {
-      console.warn('[background-tasks] Reaping stale task:', taskId, 'agent:', info.agentName);
+    if (info.startedAt && (now - info.startedAt) > TASK_TTL_MS) stale.push([taskId, info]);
+  }
+  for (const [taskId, info] of stale) {
+    if (!activeTasks.has(taskId)) continue; // a cascade already retired it
+    console.warn('[background-tasks] Reaping stale task:', taskId, 'agent:', info.agentName);
+    try {
+      // Route through the normal completion path so the child barrier, the
+      // root-graph child, and any voice WAITING-ring hold are released. A bare
+      // activeTasks.delete leaked rootTaskGraphs and left a device ring lit.
+      await _onComplete(taskId, info.userId, info.coordinatorAgentId, info.agentName || 'Task', info.agentEmoji || '🤖', null, 'reaped: no activity in 24h', 'error');
+    } catch (e) {
+      console.warn('[background-tasks] reap via _onComplete failed, hard-removing:', e?.message || e);
       activeTasks.delete(taskId);
       _journalRemove(taskId);
     }

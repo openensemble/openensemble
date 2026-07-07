@@ -199,6 +199,11 @@ async function saveCursor(userId, acctKey, historyId) {
     const cfg = loadConfig(userId);
     cfg.lastHistoryIdByAccount = cfg.lastHistoryIdByAccount ?? {};
     cfg.lastHistoryIdByAccount[acctKey] = historyId;
+    // Purge the legacy flat cursor now that per-account cursors are in use.
+    // Leaving it caused the 404-reset loop: a reset set the per-account cursor
+    // to null, and the next poll's migration re-copied this never-deleted
+    // (expired) flat value, 404-ing forever and silently stopping labeling.
+    if (cfg.lastHistoryId !== undefined) delete cfg.lastHistoryId;
     cfg.lastChecked = Date.now();
     atomicWriteSync(configPath(userId), JSON.stringify(cfg, null, 2));
   });

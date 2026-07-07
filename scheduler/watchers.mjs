@@ -648,7 +648,13 @@ export function emitEvent(userId, eventName, payload = {}) {
   for (const wid of watcherIds) {
     const w = data.active.find(x => x.id === wid);
     if (!w) continue;
-    w.state = { ...w.state, lastEventPayload: payload, lastEventAt: Date.now() };
+    // Queue every payload. A single lastEventPayload slot silently lost one of
+    // two events landing in the same ~5s window (or one arriving mid-tick); the
+    // subscription handler drains the whole queue. lastEventPayload is kept as
+    // "most recent" only for back-compat with any in-flight persisted state.
+    const queue = Array.isArray(w.state?.pendingEvents) ? w.state.pendingEvents.slice() : [];
+    queue.push(payload);
+    w.state = { ...w.state, pendingEvents: queue, lastEventPayload: payload, lastEventAt: Date.now() };
     w.nextTickAt = Date.now(); // tick on next supervisor sweep
     matched++;
   }
@@ -663,15 +669,25 @@ export function emitEvent(userId, eventName, payload = {}) {
 async function eventSubscriptionHandler(state) {
   const { event, predicate } = state || {};
   if (!event) return { done: true, textUpdate: '❌ event watcher missing event name' };
-  if (state.lastEventAt === undefined) {
+  // Drain every event queued since the last tick — two events arriving in the
+  // same ~5s window both get evaluated, so a matching one can't be lost.
+  let queue = Array.isArray(state.pendingEvents) ? state.pendingEvents : [];
+  // Back-compat: a watcher persisted before the queue existed carries only
+  // lastEventPayload — treat it as a one-element queue.
+  if (!queue.length && state.lastEventAt !== undefined && state.lastEventPayload !== undefined) {
+    queue = [state.lastEventPayload];
+  }
+  if (state.lastEventAt === undefined && !queue.length) {
     return {}; // waiting for first event
   }
-  // Each event fires the handler once. Mark consumed by clearing lastEventAt
-  // so a subsequent supervisor sweep doesn't re-evaluate the same payload.
-  const payload = state.lastEventPayload;
-  const consumedState = { ...state, lastEventAt: undefined, lastEventPayload: undefined };
+  // Consuming clears the queue + event markers so a later sweep doesn't
+  // re-evaluate the same payloads.
+  const consumedState = { ...state, lastEventAt: undefined, lastEventPayload: undefined, pendingEvents: [] };
 
-  if (predicate) {
+  if (!predicate) {
+    return { done: true, textUpdate: `🔔 event "${event}" fired` }; // any event fires
+  }
+  for (const payload of queue) {
     let val;
     try {
       // Reuse the dotted-path logic from watch-handlers via a tiny inline
@@ -682,11 +698,9 @@ async function eventSubscriptionHandler(state) {
     let hit = false;
     try { hit = comparePayload(val, predicate.comparator, predicate.target); }
     catch (e) { return { done: true, textUpdate: `❌ ${e.message}` }; }
-    if (!hit) {
-      return { newState: consumedState }; // event came but didn't match
-    }
+    if (hit) return { done: true, textUpdate: `🔔 event "${event}" fired` };
   }
-  return { done: true, textUpdate: `🔔 event "${event}" fired` };
+  return { newState: consumedState }; // events came but none matched
 }
 
 // Tiny duplicates of compare/jsonGet from scheduler/watch-handlers.mjs — kept
