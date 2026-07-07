@@ -33,6 +33,8 @@ import { handleChatMessage, abortChat, getActiveStreams } from './chat-dispatch.
 import { getActiveTasks as getActiveBgTasks } from './background-tasks.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer } from './sessions.mjs';
 import { markAlarmFired, markAlarmAcked } from './lib/alarms.mjs';
+import { handleTvCommandResult, handleTvState } from './lib/tv-commands.mjs';
+import { buildDashboardData } from './lib/tv-dashboard.mjs';
 import { initNodeWss, initTerminalWss } from './routes/nodes.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
@@ -246,6 +248,14 @@ function handleSttBinaryFrame(ws, raw) {
 }
 
 const sessionKey = (userId, agentId) => `${userId}_${agentId}`;
+
+// Most-recently-started voice turn id per `${effectiveUserId}_${agentId}`
+// scope. abortChat() is keyed on user+agent ALONE (no turn id), so a device
+// socket that drops after its turn already ended (or was superseded by a newer
+// turn on a reconnected socket) must NOT blanket-abort whatever is now running
+// under that key. The close handler consults this to abort only the turn the
+// closing socket actually still owns.
+const _activeVoiceTurnByKey = new Map();
 
 function makeVoiceTurn({ ws, effectiveUserId, agentId, wakeSlot, turnId }) {
   if (!ws?._deviceId) return null;
@@ -901,9 +911,23 @@ function onConnection(ws, req) {
             ? msg.firmware_version.slice(0, 64) : null;
         const muteReported = typeof msg.mute_state === 'boolean' ? msg.mute_state : undefined;
         if (typeof muteReported === 'boolean') ws._voiceMuteState = muteReported;
+        // Android TV client (2026-07): auth optionally reports platform +
+        // a capability list so the server can route tv_command/tv_state
+        // traffic to this socket and the tv-control tool can find a TV
+        // target. Absent for every existing ESP32 device and browser tab —
+        // strictly additive, same shape as the fw_version handling above.
+        const platformReported = typeof msg.platform === 'string' && msg.platform.length > 0
+            ? msg.platform.slice(0, 32) : null;
+        const capsReported = Array.isArray(msg.caps)
+            ? msg.caps.filter(c => typeof c === 'string' && c).slice(0, 20).map(c => c.slice(0, 32))
+            : null;
+        if (platformReported) ws._platform = platformReported;
+        if (capsReported) ws._caps = capsReported;
         touchDevice(ws._userId, ws._deviceId, {
           ...(fwReported ? { fw_version: fwReported } : {}),
           ...(typeof muteReported === 'boolean' ? { mute_state: muteReported } : {}),
+          ...(platformReported ? { platform: platformReported } : {}),
+          ...(capsReported ? { caps: capsReported } : {}),
         });
         // Backfill the token's sha256 so a future expiry can be auto-recovered by
         // strong hash match. Idempotent — only writes when the token changes.
@@ -950,9 +974,25 @@ function onConnection(ws, req) {
     if (msg.type === 'stt_end') {
       if (!ws._deviceId) return;
       const s = ws._sttSession;
-      if (!s) return;
+      // Terminal keyed to whatever turn the DEVICE thinks it's ending — it's
+      // sitting in THINKING waiting on this turn_id and hangs ~90s if we send
+      // nothing. Same spoken fallback + `done` the stt-failure path below uses.
+      const endTurnTag = (typeof msg.turn_id === 'string' && msg.turn_id) ? { turn_id: msg.turn_id } : {};
+      const unblockMic = () => {
+        try {
+          ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: 'system', ...endTurnTag }));
+          ws.send(JSON.stringify({ type: 'done', agent: 'system', ...endTurnTag }));
+        } catch {}
+      };
+      if (!s) {
+        // Session already gone before the end frame (25s TTL / 512KB overflow /
+        // superseded). Un-gate the device's mic instead of leaving it stuck.
+        unblockMic();
+        return;
+      }
       if (typeof msg.turn_id === 'string' && msg.turn_id && s.turnId && msg.turn_id !== s.turnId) {
         dropSttSession(ws, 'turn mismatch at end');
+        unblockMic();
         return;
       }
       clearTimeout(s.ttl);
@@ -962,6 +1002,42 @@ function onConnection(ws, req) {
         deviceId: ws._deviceId, turnId: s.turnId, bytes: s.bytes, gaps: s.gaps,
         ms: Date.now() - s.startedAt,
       });
+      // TODO(remove, added 2026-07-05): manual wake-phrase capture —
+      // temporary tooling for the v9 wake-word data harvest; delete this
+      // block once that collection round is done. While
+      // wake-captures-manual/ENABLE exists, save the raw turn audio for
+      // wake-word training data and end the turn with a short spoken ack
+      // instead of dispatching to the assistant — NOTE: that means every
+      // voice turn on every device answers "Saved." while the flag file
+      // exists. Recording protocol and harvest pipeline:
+      // wakeword-train/V9_PLAN.md §6.3.
+      try {
+        const { BASE_DIR } = await import('./lib/paths.mjs');
+        const capRoot = path.join(BASE_DIR, 'wake-captures-manual');
+        if (fs.existsSync(path.join(capRoot, 'ENABLE'))) {
+          const { wavWrapPcm16kMono } = await import('./lib/stt.mjs');
+          const dir = path.join(capRoot, ws._deviceId);
+          await fs.promises.mkdir(dir, { recursive: true });
+          const file = path.join(dir, `turn_${Date.now()}_${s.turnId || 'noid'}.wav`);
+          // async write — a multi-hundred-KB sync write here would block the
+          // event loop under every other socket's traffic
+          await fs.promises.writeFile(file, wavWrapPcm16kMono(pcm));
+          log.info('voice', 'manual wake capture saved', {
+            deviceId: ws._deviceId, file, bytes: s.bytes,
+          });
+          const turnTag = s.turnId ? { turn_id: s.turnId } : {};
+          ws.send(JSON.stringify({ type: 'token', text: 'Saved.', agent: 'system', ...turnTag }));
+          ws.send(JSON.stringify({ type: 'done', agent: 'system', ...turnTag }));
+          // Continuous-capture loop: re-open the mic with a no-wake follow-up
+          // window so the speaker can keep dictating phrases hands-free. The
+          // loop ends after 15s of silence (or when the ENABLE flag is
+          // deleted); each pause-separated utterance lands as its own file.
+          armFollowupAfterDrain(ws._deviceId, { windowMs: 15000, conversation: true });
+          return;
+        }
+      } catch (e) {
+        log.warn('voice', 'manual wake capture failed', { error: e.message });
+      }
       let transcript = '';
       try {
         const { transcribeAudio, wavWrapPcm16kMono } = await import('./lib/stt.mjs');
@@ -1051,6 +1127,21 @@ function onConnection(ws, req) {
         if (client._deviceId) continue;
         try { client.send(wire); } catch {}
       }
+      return;
+    }
+
+    // Browser-only control frames. A voice-device (ESP32) / TV token must not
+    // be able to dump chat history, wipe sessions, or inject credentials — its
+    // legit vocabulary is auth/ping/stt_*/chat/stop/acks/tts-flow-control + the
+    // tv_* frames handled above. Gate the whole browser-widget family on the
+    // absence of a device id (browser tabs auth with a user session, no
+    // _deviceId). MUST sit before the individual handlers below — clear_session,
+    // submit_credential, cancel_credential, and tool_plan_remember each return
+    // on their own, so a gate placed after them would never run for those four.
+    if (ws._deviceId && (
+      msg.type === 'load_session' || msg.type === 'clear_session' ||
+      msg.type === 'submit_credential' || msg.type === 'cancel_credential' ||
+      msg.type === 'tool_plan_remember')) {
       return;
     }
 
@@ -1178,6 +1269,49 @@ function onConnection(ws, req) {
       return;
     }
 
+    // Android TV protocol (2026-07): device → server result/state frames for
+    // the tv_command channel (lib/tv-commands.mjs). Only meaningful for authed
+    // device sockets — a browser tab or non-TV voice device would never send
+    // these, but the ws._deviceId guard keeps it strictly a no-op if one did.
+    if (msg.type === 'tv_command_result') {
+      // Sender's own deviceId goes along so tv-commands can verify the
+      // result came from the device the command was actually addressed to.
+      if (ws._deviceId) handleTvCommandResult(ws._deviceId, msg);
+      return;
+    }
+
+    if (msg.type === 'tv_state') {
+      if (ws._deviceId) handleTvState(ws._deviceId, msg);
+      return;
+    }
+
+    // Android TV dashboard (2026-07): idle-screen/screensaver data pull —
+    // see lib/tv-dashboard.mjs and PROTOCOL-TV.md "Dashboard". Reply on the
+    // SAME socket. buildDashboardData() already isolates each section in
+    // its own try/catch, but this local try/catch is a second net so a
+    // dashboard failure (HA down, disk hiccup) can never bubble into the
+    // outer handler's generic `error` frame — the device just gets an
+    // all-null/empty payload it can render nothing from.
+    if (msg.type === 'dashboard_get') {
+      if (ws._deviceId && ws._userId) {
+        try {
+          const payload = await buildDashboardData(ws._userId, ws._deviceId);
+          if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'dashboard_data', ...payload }));
+        } catch (e) {
+          log.warn('voice', 'dashboard_get failed', { deviceId: ws._deviceId, error: e?.message });
+          try {
+            if (ws.readyState === ws.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'dashboard_data',
+                greeting: null, alarms: [], announcements: [], now_playing: null, weather: null,
+              }));
+            }
+          } catch {}
+        }
+      }
+      return;
+    }
+
     if (msg.type === 'load_session') {
       const agentId = msg.agent;
       if (agentId) {
@@ -1288,6 +1422,9 @@ function onConnection(ws, req) {
       if (voiceTurn) {
         messageVoiceTurn = voiceTurn;
         ws._activeVoiceTurn = voiceTurn;
+        // Claim the abort key for this turn so a later close on a stale socket
+        // (or a superseded turn) can't abort whatever runs here next.
+        _activeVoiceTurnByKey.set(`${voiceTurn.effectiveUserId}_${voiceTurn.agentId}`, voiceTurn.id);
         ws._lastVoiceActivityAt = Date.now();
         // Retained past turn end (never nulled) so a later `stop` with no
         // active turn can abort the RIGHT user's agent — the slot-routed
@@ -1496,6 +1633,15 @@ function onConnection(ws, req) {
         },
       });
       if (silentAckTimer) clearTimeout(silentAckTimer);
+      // Release this turn's abort-key claim now that it's over, so a later
+      // socket close can't abort a NEWER turn started under the same
+      // user+agent key after this one finished (the reason the claim was
+      // scoped in the first place). Only clear if it's still ours — a
+      // superseding turn may have already re-claimed the key.
+      if (messageVoiceTurn) {
+        const _vk = `${messageVoiceTurn.effectiveUserId}_${messageVoiceTurn.agentId}`;
+        if (_activeVoiceTurnByKey.get(_vk) === messageVoiceTurn.id) _activeVoiceTurnByKey.delete(_vk);
+      }
       // Terminal-event guarantee: handleChatMessage has returned, so the LLM
       // turn is over — but an abort that didn't come from THIS device's own
       // `stop` (browser-tab stop, shutdown, cross-agent abort) emits neither
@@ -1565,10 +1711,21 @@ function onConnection(ws, req) {
     // a no-op when the turn already finished.
     const turn = ws._activeVoiceTurn;
     if (turn?.effectiveUserId && turn?.agentId) {
-      try {
-        abortChat(turn.effectiveUserId, turn.agentId);
-        log.info('voice', 'aborted turn on device disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });
-      } catch { /* best-effort */ }
+      const key = `${turn.effectiveUserId}_${turn.agentId}`;
+      // Only abort if THIS socket's turn is still the active one for this
+      // user+agent. A reconnected device or a barge-in on another socket may
+      // have started a newer turn under the same key; abortChat is keyed on
+      // user+agent alone, so an unconditional abort here would kill that
+      // newer turn's stream.
+      if (_activeVoiceTurnByKey.get(key) === turn.id) {
+        try {
+          abortChat(turn.effectiveUserId, turn.agentId);
+          _activeVoiceTurnByKey.delete(key);
+          log.info('voice', 'aborted turn on device disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });
+        } catch { /* best-effort */ }
+      } else {
+        log.info('voice', 'skipped stale turn abort on disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });
+      }
       ws._activeVoiceTurn = null;
     }
   });
@@ -1647,6 +1804,26 @@ export function sendToDevice(deviceId, msg) {
   const tail = sendError ? ` error=${sendError}` : '';
   console.log(`[ws-send] device=${deviceId} type=${type} delivered=${delivered} bytes=${data.length}${tail}`);
   return delivered;
+}
+
+/**
+ * Force-close every live WebSocket belonging to `deviceId`. Called after a
+ * device is revoked/unpaired so a stolen or revoked device token can't keep
+ * an already-established socket alive (chat, STT, TTS) until it happens to
+ * disconnect on its own — deleting the registry entry + session token alone
+ * doesn't touch an open connection. 4001 = the same policy-violation close
+ * code the auth path uses. Returns the number of sockets closed.
+ */
+export function closeDeviceSockets(deviceId) {
+  if (!_wss || !deviceId) return 0;
+  let closed = 0;
+  for (const client of _wss.clients) {
+    if (client._deviceId !== deviceId) continue;
+    try { client.close(4001, 'revoked'); closed++; }
+    catch { try { client.terminate(); closed++; } catch {} }
+  }
+  if (closed) console.log(`[ws] closed ${closed} socket(s) for revoked device=${deviceId}`);
+  return closed;
 }
 
 /**
@@ -1780,7 +1957,7 @@ async function pushVoiceConfigVersion(ws) {
     r.failedSlots.length === 0 &&
     r.ackedSlots.length === r.pushedSlots.length;
   if (fullySucceeded) {
-    markVoiceConfigPushed(ws._userId, ws._deviceId, r.version);
+    markVoiceConfigPushed(ws._userId, ws._deviceId, r.version, r.assignments);
     console.log(`[ws] voice-config v${r.version} synced by ${ws._deviceId} (pushed ${r.ackedSlots.join(',') || '-'}, cleared ${r.clearedSlots.join(',') || '-'})`);
   } else {
     console.warn(`[ws] voice-config v${r.version} partial sync to ${ws._deviceId}: acked=${r.ackedSlots.join(',') || '-'} cleared=${r.clearedSlots.join(',') || '-'} failed=${r.failedSlots.map(f=>f.slot+':'+f.err).join(',') || '-'} offline=${r.offlineSlots.join(',') || '-'}`);

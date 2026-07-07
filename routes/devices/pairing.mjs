@@ -132,6 +132,11 @@ export async function handlePairingRoutes(req, res, pathname) {
       info: {
         name: submittedName,
         fw_version: typeof body.fw_version === 'string' ? body.fw_version : undefined,
+        // Android TV client (2026-07): reports platform:"android-tv" at
+        // redeem time so the device shows up as a TV target immediately,
+        // even before its first WS auth. Optional — absent for every
+        // existing ESP32 client.
+        platform: typeof body.platform === 'string' ? body.platform : undefined,
       },
     });
     // Bind deviceId back into the session so the WS handler can resolve

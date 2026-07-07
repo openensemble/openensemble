@@ -10,7 +10,7 @@
 import { requireAuth, readBody, revokeSessionByPrefix, clearUserVoiceDeviceSessions, isChildRequest } from './_helpers.mjs';
 import { listDevices, getDevice, updateDevice, removeDevice, findIncomingSlots, clearSlotAssignment, recordDeviceOtaProgress } from '../lib/voice-devices.mjs';
 import { handlePairingRoutes } from './devices/pairing.mjs';
-import { sendToDevice, isDeviceOnline } from '../ws-handler.mjs';
+import { sendToDevice, isDeviceOnline, closeDeviceSockets } from '../ws-handler.mjs';
 import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -705,7 +705,11 @@ export async function handle(req, res) {
     // them. Without this, anyone with a valid session could wipe any slot
     // on any device on the install.
     const incoming = findIncomingSlots(authUserId);
-    const match = incoming.find(s => s.ownerUserId === ownerUserId && s.deviceId === deviceId && s.slot === slot);
+    // findIncomingSlots entries are {ownerUserId, slot, agentId, devices:[{id,name}]}
+    // — there is no top-level deviceId, so the old `s.deviceId === deviceId`
+    // never matched and every opt-out 403'd. Match the device inside devices[].
+    const match = incoming.find(s =>
+      s.ownerUserId === ownerUserId && s.slot === slot && s.devices.some(d => d.id === deviceId));
     if (!match) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not your slot to clear' }));
@@ -723,7 +727,13 @@ export async function handle(req, res) {
     const userId = requireAuth(req, res);
     if (!userId) return true;
     const devices = listDevices(userId);
-    for (const d of devices) removeDevice(userId, d.id);
+    for (const d of devices) {
+      removeDevice(userId, d.id);
+      // Kill any live socket too — dropping the registry entry + session token
+      // doesn't close an already-connected device, so a revoked/stolen device
+      // would keep chat access until it disconnected on its own.
+      closeDeviceSockets(d.id);
+    }
     const sessionsRevoked = clearUserVoiceDeviceSessions(userId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ removed: devices.length, sessionsRevoked, total: devices.length }));
@@ -843,6 +853,10 @@ export async function handle(req, res) {
     removeDevice(userId, id);
     let sessionRevoked = false;
     if (device.token_prefix) sessionRevoked = revokeSessionByPrefix(userId, device.token_prefix);
+    // The enter_ap_mode frame was already queued above; closing after it flushes
+    // the buffer, then severs the socket so the now-revoked token can't be reused
+    // if the device ignores the reboot command.
+    closeDeviceSockets(id);
     res.writeHead(sent ? 202 : 502, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ nudged: !!sent, removed: true, sessionRevoked }));
     return true;
@@ -866,6 +880,10 @@ export async function handle(req, res) {
     if (existing.token_prefix) {
       sessionRevoked = revokeSessionByPrefix(userId, existing.token_prefix);
     }
+    // Cut any live socket now — deleting the registry entry + token doesn't
+    // close an already-established connection, so without this a revoked/stolen
+    // device keeps chat/STT/TTS access until it disconnects on its own.
+    closeDeviceSockets(id);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ removed: true, sessionRevoked }));
     return true;

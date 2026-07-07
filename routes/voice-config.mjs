@@ -43,7 +43,7 @@ async function pushToAllDevices(userId) {
       r.failedSlots.length === 0 &&
       r.ackedSlots.length === r.pushedSlots.length;
     if (fullySucceeded) {
-      markVoiceConfigPushed(userId, d.id, r.version);
+      markVoiceConfigPushed(userId, d.id, r.version, r.assignments);
     }
   }));
   return perDevice;
