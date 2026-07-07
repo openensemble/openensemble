@@ -1,6 +1,6 @@
 {
   "type": "micro",
-  "wake_word": "Assistant",
+  "wake_word": "Assistant (deprecated)",
   "author": "OpenEnsemble",
   "website": "https://openensemble.dev/",
   "model": "assistant.tflite",

@@ -1,6 +1,6 @@
 {
   "type": "micro",
-  "wake_word": "Ensemble",
+  "wake_word": "Ensemble (deprecated)",
   "author": "OpenEnsemble",
   "website": "https://openensemble.dev/",
   "model": "ensemble.tflite",

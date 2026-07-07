@@ -1,6 +1,6 @@
 {
   "type": "micro",
-  "wake_word": "Jarvis",
+  "wake_word": "Jarvis (deprecated)",
   "author": "OpenEnsemble",
   "website": "https://openensemble.dev/",
   "model": "jarvis.tflite",

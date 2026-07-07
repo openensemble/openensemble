@@ -1,6 +1,6 @@
 {
   "type": "micro",
-  "wake_word": "Sydney",
+  "wake_word": "Sydney (deprecated)",
   "author": "OpenEnsemble",
   "website": "https://openensemble.dev/",
   "model": "sydney.tflite",
