@@ -67,6 +67,7 @@ import { handle as handleNodes }        from './routes/nodes.mjs';
 import { handle as handleAdmission }    from './routes/admission.mjs';
 import { handle as handleDevices }      from './routes/devices.mjs';
 import { handle as handleWakewords }    from './routes/wakewords.mjs';
+import { handle as handleTv }           from './routes/tv.mjs';
 import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
 import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
 import { handle as handleRoutines }     from './routes/routines.mjs';
@@ -104,6 +105,18 @@ try {
   const _cfg = loadConfig();
   if (_cfg?.logs) configureLogger(_cfg.logs);
 } catch {}
+
+// Process-wide backstop: an unhandled promise rejection (e.g. a throw inside
+// an async request/WS handler that no local try/catch caught) would, under
+// Node's default policy, terminate the process — turning any single malformed
+// request into a crash-loop that wipes all in-memory state. Registering this
+// listener overrides that default: log it loudly and stay up. This is the
+// safety net; individual handlers still guard their own failure paths.
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+  try { log.error('process', 'unhandledRejection (kept alive)', { err }); }
+  catch { console.error('[process] unhandledRejection (kept alive):', err); }
+});
 
 const PORT     = 3737;
 const HTTPS_PORT = 3739;  // adjacent to 3737; 3738 reserved for the node-agent UDP discovery broadcast
@@ -214,6 +227,10 @@ const routeHandlers = [
   handleAdmission,
   handleDevices,
   handleWakewords,
+  handleTv,        // /api/tv/* + /api/tv-app/* + /api/wakewords/stock/:id.tflite
+                   // (after handleWakewords, which only matches /api/wakewords
+                   // exactly and single-segment /api/wakewords/:id, so it falls
+                   // through for the stock-alias GET)
   handleVoiceRefs,
   handleVoiceConfig,
   handleRoutines,
@@ -336,7 +353,14 @@ const httpServer = http.createServer(async (req, res) => {
     };
     const url = _pathname;
     if (NESTED_TYPES[ext] && (url.startsWith('/firmware/') || url.startsWith('/vendor/'))) {
-      const decoded = decodeURIComponent(url).replace(/^\/+/, '');
+      // decodeURIComponent throws URIError on a malformed escape (e.g.
+      // `/firmware/%.js`). This block runs before the request-dispatch
+      // try/catch, so an uncaught throw here would reject the request
+      // handler's promise — a pre-auth remote crash vector. Guard it and
+      // 400 instead.
+      let decoded;
+      try { decoded = decodeURIComponent(url).replace(/^\/+/, ''); }
+      catch { res.writeHead(400, { 'Content-Type': 'text/plain' }); res.end('Bad request'); return; }
       const filePath = path.resolve(UI_DIR, decoded);
       if (filePath.startsWith(UI_DIR + path.sep) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         const data = fs.readFileSync(filePath);
@@ -953,6 +977,23 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     try { pruneAllSnapshots(); }
     catch (e) { log.warn('snapshot-pruner', 'daily prune failed', { err: e.message }); }
   }, 24 * 60 * 60 * 1000).unref?.();
+
+  // OpenAI ChatGPT (Codex) OAuth token keep-alive: the provider only refreshes
+  // a user's token when THAT user makes a call, so an account nobody chats as
+  // would let its token (and eventually its refresh_token) lapse and get
+  // revoked for inactivity — forcing a manual reconnect. Roll any near-expiry
+  // token at boot and daily, regardless of activity.
+  (async () => {
+    const keepAlive = async (when) => {
+      try {
+        const { refreshExpiringCodexTokens } = await import('./lib/openai-codex-auth.mjs');
+        const r = await refreshExpiringCodexTokens();
+        if (r.refreshed || r.failed) log.info('openai-oauth', `${when} codex token keep-alive`, r);
+      } catch (e) { log.warn('openai-oauth', `${when} codex keep-alive failed`, { err: e.message }); }
+    };
+    await keepAlive('boot');
+    setInterval(() => { keepAlive('daily'); }, 24 * 60 * 60 * 1000).unref?.();
+  })();
   // Friction-as-proposer needs the same per-user push channel as watchers
   // for proposal bubbles + the task_complete broadcast on accept.
   setProposalBroadcastFn((userId, msg) => sendToUser(userId, msg));

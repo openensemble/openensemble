@@ -196,6 +196,14 @@ export async function handle(req, res) {
       if (changes.skills !== undefined && !isPriv) {
         if (authId !== targetId) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true; }
         if (snap[snapIdx].skillsLocked) { res.writeHead(403); res.end(JSON.stringify({ error: 'Your tools are managed by an administrator' })); return true; }
+        // Enforce the admin-set allowlist: a self-service skills PATCH must not
+        // widen beyond allowedSkills (mirrors routes/agents.mjs roles/toggle).
+        // null = no restriction. Prune disallowed entries rather than reject so
+        // a stale client list simply drops what it isn't permitted to enable.
+        const allowed = snap[snapIdx].allowedSkills;
+        if (Array.isArray(allowed) && Array.isArray(changes.skills)) {
+          changes.skills = changes.skills.filter(s => allowed.includes(s));
+        }
       }
       if (changes.newPassword) {
         const ip = getClientIp(req);
@@ -214,8 +222,12 @@ export async function handle(req, res) {
           res.writeHead(403); res.end(JSON.stringify({ error: 'Only admins can reset passwords' })); return true;
         }
         changes.passwordHash = await hashPassword(changes.newPassword);
-        delete changes.currentPassword; delete changes.newPassword;
       }
+      // Credentials are transient request inputs, never profile fields. Strip
+      // them on EVERY path — a PATCH carrying currentPassword with a falsy
+      // newPassword would otherwise persist the plaintext password to
+      // profile.json (and echo it back in the response).
+      delete changes.currentPassword; delete changes.newPassword;
       if ('pin' in changes) {
         if (changes.pin === null) {
           changes._clearPin = true;

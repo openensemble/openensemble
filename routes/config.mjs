@@ -1366,8 +1366,17 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     if (req.method === 'GET') {
       const cfg = loadConfig();
+      const cortex = cfg.cortex ?? {};
+      // Never echo decrypted secrets. Mask any *ApiKey field to a boolean
+      // *KeySet flag (mirrors /api/provider-config); the POST path below treats
+      // an absent/empty key as "unchanged" so the mask can't wipe a stored key.
+      const out = {};
+      for (const [k, v] of Object.entries(cortex)) {
+        if (/ApiKey$/.test(k)) out[k.replace(/ApiKey$/, 'KeySet')] = !!v;
+        else out[k] = v;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(cfg.cortex ?? {}));
+      res.end(JSON.stringify(out));
       return true;
     }
     if (req.method === 'POST') {
@@ -1376,6 +1385,15 @@ export async function handle(req, res) {
         await modifyConfig(cfg => {
           cfg.cortex = cfg.cortex ?? {};
           for (const [k, v] of Object.entries(update)) {
+            // Never persist the masked read-back flags the GET emits.
+            if (/KeySet$/.test(k)) continue;
+            // Secrets: null explicitly clears; empty/missing means "unchanged"
+            // (the GET masks these, so a re-save must not wipe a stored key).
+            if (/ApiKey$/.test(k)) {
+              if (v === null) delete cfg.cortex[k];
+              else if (v) cfg.cortex[k] = v;
+              continue;
+            }
             if (v === null) delete cfg.cortex[k]; // null = delete (used to clear stale URL overrides)
             else cfg.cortex[k] = v;
           }

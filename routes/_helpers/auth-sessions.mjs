@@ -94,6 +94,15 @@ function persistSessions() {
 // Capping at 90 days from initial mint forces re-pairing periodically.
 const NODE_SESSION_HARD_CAP_MS = 90 * 24 * 60 * 60 * 1000;
 
+// getSessionUserId runs on EVERY request and, for persistent-device kinds,
+// slides the 7-day expiry forward each call. Persisting the whole session map
+// (JSON.stringify + atomicWriteSync) on every one of those blocks the event
+// loop — twice per /api/tts for a voice device. The slide only needs coarse
+// durability: skip the write unless the expiry advanced by at least this much
+// since the last persisted value. A crash loses at most this window of slide,
+// which the very next request re-applies — harmless.
+const SESSION_PERSIST_MIN_ADVANCE_MS = 10 * 60 * 1000;
+
 // Long-lived device kinds that get sliding-expiry renewal, survive password
 // changes, and aren't shown on the user's active-sessions list. Each has its
 // own UI surface (Nodes page, Voice Devices page) where the user revokes
@@ -191,8 +200,12 @@ export function getSessionUserId(token) {
       return null;
     }
     s.lastActivity = now;
+    const prevExpires = s.expires;
     s.expires = Math.min(now + 7 * 24 * 60 * 60 * 1000, hardCap);
-    persistSessions();
+    // Only persist when the sliding expiry actually moved a meaningful amount;
+    // otherwise the in-memory update is enough and we avoid a per-request write
+    // of the whole session map (see SESSION_PERSIST_MIN_ADVANCE_MS).
+    if (s.expires - prevExpires >= SESSION_PERSIST_MIN_ADVANCE_MS) persistSessions();
     return s.userId;
   }
   if (s.expires < now) { sessions.delete(token); persistSessions(); return null; }
@@ -325,7 +338,7 @@ export function getUserSessions(userId) {
       deviceId: s.deviceId ?? null,
       ua: s.ua ?? null,
       label: s.label ?? null,
-      createdAt: new Date(s.expires - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      createdAt: new Date(sessionCreatedAt(s)).toISOString(),
       lastActivity: s.lastActivity ? new Date(s.lastActivity).toISOString() : null,
       expiresAt: new Date(s.expires).toISOString(),
     });
@@ -509,14 +522,17 @@ export function consumeTicket(token, scope) {
   return { userId: entry.userId, meta: entry.meta };
 }
 
-export function requireAuth(req, res) {
+export function requireAuth(req, res, { allowMediaToken = true } = {}) {
   // Primary path: cookie / Authorization: Bearer <session-token>
   let userId = getSessionUserId(getAuthToken(req));
   // Fallback for browser-native media: ?token=<short-lived-media-token>.
   // Only honored for safe methods — accepting it on POST/PUT/DELETE turns
   // any leaked media URL into a CSRF write vector. Media tokens exist for
   // <img>/<video>/<iframe> which never need anything beyond GET/HEAD.
-  if (!userId && (req.method === 'GET' || req.method === 'HEAD')) {
+  // Suppressed entirely for privileged endpoints (allowMediaToken=false, see
+  // requirePrivileged): a leaked media URL must never reach admin surfaces
+  // like backup/export/logs.
+  if (!userId && allowMediaToken && (req.method === 'GET' || req.method === 'HEAD')) {
     userId = consumeMediaToken(getUrlToken(req));
   }
   if (!userId) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Unauthorized' })); return null; }
@@ -524,7 +540,7 @@ export function requireAuth(req, res) {
 }
 
 export function requirePrivileged(req, res) {
-  const userId = requireAuth(req, res);
+  const userId = requireAuth(req, res, { allowMediaToken: false });
   if (!userId) return null;
   if (!isPrivileged(userId)) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
