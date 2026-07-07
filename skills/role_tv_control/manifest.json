@@ -1,0 +1,220 @@
+{
+  "id": "role_tv_control",
+  "name": "TV Control",
+  "icon": "📺",
+  "description": "Control Android TVs paired to OpenEnsemble — launch apps, control playback and volume, search, show a message or photo on screen, view Home Assistant cameras, and check what's playing.",
+  "category": "utility",
+  "service": false,
+  "enabled_by_default": true,
+  "voice_device": true,
+  "intent_patterns_note": "Only consumed by the specialist router (chat-dispatch/llm-loop.mjs) for manifests with service:true — dormant while this skill is service:false. Every pattern must require an explicit TV mention: a bare volume/playback phrase here would hijack speaker-volume commands the moment service is flipped on.",
+  "intent_patterns": [
+    "^(?:open|launch|start|put\\s+on|watch)\\s+(?:netflix|youtube|hulu|disney(?:\\+|\\s*plus)?|plex|prime(?:\\s*video)?|hbo|max|spotify|apple\\s*tv)\\b",
+    "^(?:pause|play|resume|stop|skip|rewind)\\s+(?:the\\s+)?(?:tv|show|movie)\\b",
+    "^turn\\s+(?:the\\s+)?tv(?:'s)?\\s+volume\\s+(?:up|down)\\b",
+    "^turn\\s+(?:the\\s+)?volume\\s+(?:up|down)\\s+on\\s+(?:the\\s+)?tv\\b",
+    "^mute\\s+(?:the\\s+)?tv\\b",
+    "^show\\s+me\\s+(?:the\\s+)?.+\\s+camera\\b",
+    "^what(?:'s| is)\\s+(?:playing|on)\\s+(?:the\\s+)?tv\\b"
+  ],
+  "intent_examples": [
+    "put on netflix",
+    "launch youtube on the tv",
+    "open hulu",
+    "watch disney plus",
+    "start plex",
+    "pause the tv",
+    "play the movie",
+    "resume what I was watching",
+    "skip to the next episode",
+    "go back to the previous scene",
+    "rewind a little",
+    "fast forward",
+    "turn the tv volume up",
+    "turn the volume down on the tv",
+    "mute the tv",
+    "unmute the tv",
+    "set the tv volume to 20",
+    "search for the office on netflix",
+    "find alien on youtube",
+    "show a message on the tv",
+    "put this photo on the tv screen",
+    "show me the front door camera",
+    "show me who's at the door on the tv",
+    "display the driveway camera",
+    "what's playing on the tv right now",
+    "what's on the living room tv",
+    "what app is the tv on"
+  ],
+  "systemPromptAddition": "## TV Control\n\nUse the `tv_*` tools to control Android TVs paired to OpenEnsemble — launching apps, media playback, volume, search, showing text or photos on screen, viewing Home Assistant cameras, and checking what's playing. If {{USER_NAME}} is speaking through a TV itself, that TV is used automatically; only pass `device` when they name a specific TV (\"the bedroom TV\") or a tool tells you multiple TVs are online and asks you to pick one. Call the tool directly for clear commands (\"pause the TV\", \"put on Netflix\", \"show me the front door\") — don't ask for confirmation first. If a tool reports an error (TV offline, app not found, ambiguous camera name), relay it in one short sentence, and when it lists options (installed apps, camera names, TV names) read those back so {{USER_NAME}} can pick.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_launch_app",
+        "description": "Launch an app on an Android TV (e.g. Netflix, YouTube, Hulu, Disney+, Plex, Prime Video). The device resolves the spoken app name to an installed app.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "app": {
+              "type": "string",
+              "description": "Spoken/display name of the app to launch, e.g. 'Netflix' or 'YouTube'."
+            },
+            "device": {
+              "type": "string",
+              "description": "Optional TV name to target when more than one TV is online (case-insensitive substring match, e.g. 'living room'). Not needed if the user is speaking to the TV directly."
+            }
+          },
+          "required": ["app"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_media_control",
+        "description": "Send a media transport command (play/pause/stop/skip/seek) to whatever is currently playing on an Android TV.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "enum": ["play_pause", "play", "pause", "stop", "next", "previous", "rewind", "fast_forward"],
+              "description": "The media transport action to perform."
+            },
+            "device": {
+              "type": "string",
+              "description": "Optional TV name to target when more than one TV is online (case-insensitive substring match). Not needed if the user is speaking to the TV directly."
+            }
+          },
+          "required": ["key"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_set_volume",
+        "description": "Change the volume on an Android TV. Provide exactly ONE of pct, delta, or mute.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pct": {
+              "type": "number",
+              "description": "Set volume to an absolute percentage, 0-100."
+            },
+            "delta": {
+              "type": "number",
+              "description": "Adjust volume relative to its current level, e.g. 10 for up, -10 for down."
+            },
+            "mute": {
+              "type": "boolean",
+              "description": "true to mute, false to unmute."
+            },
+            "device": {
+              "type": "string",
+              "description": "Optional TV name to target when more than one TV is online (case-insensitive substring match). Not needed if the user is speaking to the TV directly."
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_search",
+        "description": "Search for content on an Android TV, optionally scoped to a specific app.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "What to search for, e.g. 'alien' or 'the office'."
+            },
+            "app": {
+              "type": "string",
+              "description": "Optional app to search within, e.g. 'YouTube' or 'Netflix'. Leave unset to let the device pick."
+            },
+            "device": {
+              "type": "string",
+              "description": "Optional TV name to target when more than one TV is online (case-insensitive substring match). Not needed if the user is speaking to the TV directly."
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_show_on_tv",
+        "description": "Show a short text message and/or a photo on an Android TV screen for a few seconds (wakes the screen first if needed). Provide at least one of title, body, or image_url.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Short headline text."
+            },
+            "body": {
+              "type": "string",
+              "description": "Longer body text, shown under the title."
+            },
+            "image_url": {
+              "type": "string",
+              "description": "URL (may be OE-server-relative, e.g. '/api/...') of an image to display. When set, the card renders as an image with title/body as caption."
+            },
+            "duration_seconds": {
+              "type": "number",
+              "description": "How long to keep it on screen, in seconds. Defaults to 15; clamped to 3-120."
+            },
+            "device": {
+              "type": "string",
+              "description": "Optional TV name to target when more than one TV is online (case-insensitive substring match). Not needed if the user is speaking to the TV directly."
+            }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_show_camera",
+        "description": "Show a Home Assistant camera's live snapshot on an Android TV — e.g. 'show me the front door'. Resolves the camera by entity_id (e.g. 'camera.front_door') or by fuzzy match on its friendly name.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "camera": {
+              "type": "string",
+              "description": "Camera entity_id (e.g. 'camera.front_door') or a friendly-name phrase (e.g. 'front door', 'driveway', 'garage')."
+            },
+            "device": {
+              "type": "string",
+              "description": "Optional TV name to target when more than one TV is online (case-insensitive substring match). Not needed if the user is speaking to the TV directly."
+            }
+          },
+          "required": ["camera"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_now_playing",
+        "description": "Check what's currently on an Android TV — the foreground app and any now-playing media.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "device": {
+              "type": "string",
+              "description": "Optional TV name to target when more than one TV is online (case-insensitive substring match). Not needed if the user is speaking to the TV directly."
+            }
+          },
+          "required": []
+        }
+      }
+    }
+  ]
+}

@@ -151,5 +151,8 @@ MIGRATION_per-user-encryption.md
 # voice-device wake-capture audio (per-device personal recordings)
 wake-captures/
 wake-captures-manual/
+# Android TV app self-update publish target (APK + manifest placed at
+# publish time, served by routes/tv.mjs) — runtime artifacts, never source
+tv-app/
 # dated firmware/source backups (foo.bak-0.2.xx)
 *.bak-*
