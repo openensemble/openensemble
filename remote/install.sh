@@ -293,9 +293,9 @@ printf "${BOLD}Install complete.${NC} The agent is running as a systemd service.
 echo
 echo "  • Status:            oe                  (or 'oe status')"
 echo "  • Logs:              oe logs -f"
-echo "  • Restart:           sudo oe restart"
-echo "  • Re-pair:           sudo oe repair <code>"
-echo "  • Change access:     sudo oe change-access"
-echo "  • Update:            sudo oe update"
-echo "  • Uninstall:         sudo oe uninstall"
+echo "  • Restart:           sudo oenode restart"
+echo "  • Re-pair:           sudo oenode repair <code>"
+echo "  • Change access:     sudo oenode change-access"
+echo "  • Update:            sudo oenode update"
+echo "  • Uninstall:         sudo oenode uninstall"
 echo

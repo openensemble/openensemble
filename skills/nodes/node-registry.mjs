@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { BASE_DIR } from '../../lib/paths.mjs';
-import { signManifestString, supportsSecureUpdates } from '../../lib/node-update-signing.mjs';
+import { signManifestString, supportsSecureUpdates, getUpdatePublicKeyPem } from '../../lib/node-update-signing.mjs';
 
 // ── State ────────────────────────────────────────────────────────────────────
 // Connected AND disconnected nodes both live in `nodes`. Disconnected entries
@@ -318,14 +318,26 @@ export function findNodeByToken(token) {
 export function registerNode(ws, userId, info) {
   const nodeId = info.nodeId || `node_${info.hostname}_${randomBytes(3).toString('hex')}`;
 
-  // Refuse registration if this nodeId was explicitly removed by the user
+  // Refuse registration if this nodeId was explicitly removed by the user —
+  // UNLESS the agent authenticated with a session minted AFTER the
+  // revocation. Pairing codes and admission approvals are admin-issued, so a
+  // post-revocation token proves the user deliberately re-added this machine
+  // ("re-pair intentionally" is the documented way back in); the removed
+  // agent's own token predates its revocation and stays refused.
   if (isRevoked(userId, nodeId)) {
-    console.log(`[nodes] Refusing registration of revoked node ${nodeId} for user ${userId}`);
-    try {
-      ws.send(JSON.stringify({ type: 'revoked', message: 'This node was removed by the user. Uninstall the agent to stop reconnect attempts.' }));
-      ws.close(4003, 'Revoked');
-    } catch {}
-    return null;
+    const revokedAt = revokedNodes.get(revocationKey(userId, nodeId)) || 0;
+    if (info.sessionCreatedAt && info.sessionCreatedAt > revokedAt) {
+      revokedNodes.delete(revocationKey(userId, nodeId));
+      persistNodes();
+      console.log(`[nodes] Revocation cleared for ${nodeId}: re-paired with a session minted after removal`);
+    } else {
+      console.log(`[nodes] Refusing registration of revoked node ${nodeId} for user ${userId}`);
+      try {
+        ws.send(JSON.stringify({ type: 'revoked', message: 'This node was removed by the user. Uninstall the agent to stop reconnect attempts.' }));
+        ws.close(4003, 'Revoked');
+      } catch {}
+      return null;
+    }
   }
 
   // Check if this is a reconnect (entry still in `nodes`, possibly marked disconnected)
@@ -890,6 +902,11 @@ export function handleNodeMessage(nodeId, msg) {
       break;
     }
 
+    case 'uninstall_ack': {
+      console.log(`[nodes] ${nodeId} acknowledged uninstall`);
+      break;
+    }
+
     case 'update_result': {
       const status = msg.ok ? `OK (${msg.size} bytes)` : `FAILED: ${msg.error}`;
       console.log(`[nodes] Update on ${nodeId}: ${status}`);
@@ -897,6 +914,15 @@ export function handleNodeMessage(nodeId, msg) {
         type: 'node_update_result', nodeId,
         ok: !!msg.ok, size: msg.size || null, error: msg.error || null,
       });
+      // Self-heal the keyless-v2 migration gap: an agent that got v2 code via
+      // `oe update` (which historically didn't pin the signing key) rejects
+      // every signed push with this exact error. The exec channel already
+      // carries arbitrary root commands, so delivering the PUBLIC key over it
+      // adds no new trust — pin it, restart the agent, re-push once.
+      if (!msg.ok && /no pinned update-signing key/i.test(msg.error || '')) {
+        remediateMissingUpdateKey(entry).catch(e =>
+          console.warn(`[nodes] ${nodeId} update-key self-heal failed: ${e.message}`));
+      }
       break;
     }
 
@@ -1001,6 +1027,57 @@ export function pushUninstall(nodeId, userId) {
     }
   } catch {}
   return { ok: true };
+}
+
+// ── Missing-update-key self-heal ────────────────────────────────────────────
+// A v2 agent with no pinned signing key (upgraded via `oe update` before that
+// path learned to pin) rejects every dashboard push. Fix it in place over the
+// exec channel: write the public key into the agent's config file(s), restart
+// the service, and re-push the update once it reconnects. Cooldown-gated so a
+// node that still fails after remediation can't loop (its second rejection
+// lands inside the cooldown and is dropped).
+const KEY_FIX_COOLDOWN_MS = 10 * 60 * 1000;
+
+async function remediateMissingUpdateKey(entry) {
+  const { nodeId, userId } = entry;
+  const now = Date.now();
+  if ((entry._keyFixAt || 0) > now - KEY_FIX_COOLDOWN_MS) return;
+  entry._keyFixAt = now;
+  if (entry.accessLevel !== 'full') {
+    console.log(`[nodes] ${nodeId} rejected update (no pinned key) but accessLevel=${entry.accessLevel} — cannot self-heal over exec; re-pair it manually`);
+    return;
+  }
+  const pem = getUpdatePublicKeyPem();
+  const b64 = Buffer.from(pem, 'utf8').toString('base64');
+  // The key rides as argv[1] (node -e makes extra args argv[1..]) so the
+  // script itself stays double-quotes-only and survives the single-quoted
+  // shell wrapping. Both candidate config locations are patched — the root
+  // CLI and the service user can have separate ~/.oe-node dirs. The restart
+  // is detached so cmd_result gets flushed before systemd tears the agent down.
+  const js = 'const fs=require("fs");const pem=Buffer.from(process.argv[1],"base64").toString("utf8");'
+    + 'const cands=[...new Set([(process.env.HOME||"/root")+"/.oe-node/config.json","/opt/oe-node-agent/.oe-node/config.json","/root/.oe-node/config.json"])];'
+    + 'let touched=0,had=0;'
+    + 'for(const p of cands){let c;try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){continue}'
+    + 'if(c.updatePublicKey){had++;continue}c.updatePublicKey=pem;fs.writeFileSync(p,JSON.stringify(c,null,2));touched++;console.log("pinned "+p)}'
+    + 'if(!touched&&!had){console.error("no agent config found");process.exit(1)}';
+  // Restart chain: plain systemctl for root installs, `sudo -n` for the
+  // default oe-agent service user (the installer's sudoers rule grants
+  // exactly this command NOPASSWD). setsid detaches into a new session so
+  // the restart survives the agent's own process teardown.
+  const command = `node -e '${js}' ${b64} && setsid -f sh -c "sleep 1; systemctl restart oe-node-agent 2>/dev/null || sudo -n systemctl restart oe-node-agent 2>/dev/null || service oe-node-agent restart" </dev/null >/dev/null 2>&1`;
+  console.log(`[nodes] ${nodeId} has no pinned signing key — pinning over exec channel and retrying the update`);
+  const res = await sendCommand(nodeId, userId, { type: 'exec', command, timeout: 30 });
+  if (res.exitCode !== 0) {
+    console.warn(`[nodes] ${nodeId} key pinning failed (exit ${res.exitCode}): ${(res.stderr || res.stdout || '').slice(0, 300)}`);
+    return;
+  }
+  const back = await waitForNodeReconnect(nodeId, userId, 90_000);
+  if (!back.ok) {
+    console.warn(`[nodes] ${nodeId} did not reconnect after key pinning: ${back.reason}`);
+    return;
+  }
+  const pushed = pushUpdate(nodeId, userId);
+  console.log(`[nodes] ${nodeId} re-pushed update after key pinning: ${pushed.ok ? 'sent' : pushed.error}`);
 }
 
 // ── Push update ─────────────────────────────────────────────────────────────

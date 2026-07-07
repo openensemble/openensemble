@@ -793,7 +793,7 @@ function changeNodeAccess(nodeId) {
   if (node.accessLocked) {
     showNodeConfirmModal({
       title: `Access Level Locked — ${node.hostname}`,
-      message: `Current level: ${currentInfo.label} (LOCKED)\n\nThis node was installed with self-management disabled. Access level changes from the web UI are refused for security.\n\nTo change it, SSH into the machine as a real admin and run:\n\n  sudo oe change-access --force`,
+      message: `Current level: ${currentInfo.label} (LOCKED)\n\nThis node was installed with self-management disabled. Access level changes from the web UI are refused for security.\n\nTo change it, SSH into the machine as a real admin and run:\n\n  sudo oenode change-access --force`,
       confirmLabel: 'OK',
       confirmClass: 'cdraw-btn-primary',
       onConfirm: () => {},
@@ -807,7 +807,7 @@ function changeNodeAccess(nodeId) {
     confirmLabel: 'Open Terminal',
     confirmClass: 'cdraw-btn-primary',
     onConfirm: () => {
-      const cmd = 'sudo oe change-access';
+      const cmd = 'sudo oenode change-access';
       openNodeTerminal(nodeId, cmd);
     },
   });
@@ -1221,7 +1221,7 @@ function _showNodePairModal({ code, expiresIn, installUrl }, { title = 'Pair New
   const curlUrl = installUrl || `${location.protocol}//${location.host}/nodes/install.sh`;
   const serverUrl = curlUrl.replace(/\/nodes\/install\.sh(?:\?.*)?$/, '');
   const installCmd = `curl -fsSL ${curlUrl} | sh -s -- --server ${serverUrl} --code ${code}`;
-  const repairCmd = `sudo oe repair ${code}`;
+  const repairCmd = `sudo oenode repair ${code}`;
 
   const modal = document.createElement('div');
   modal.className = 'node-pair-modal';

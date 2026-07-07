@@ -911,7 +911,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
         text:
           `Cannot grant permission: node "${node.hostname}" is running at access_level=${node.accessLevel ?? 'unknown'}. ` +
           `Privilege changes need access_level=full (oe-agent runs as root). ` +
-          `Have ${'{{USER_NAME}}'} run \`sudo oe change-access full\` on the node, then try again.`,
+          `Have ${'{{USER_NAME}}'} run \`sudo oenode change-access full\` on the node, then try again.`,
       };
       return;
     }
@@ -1037,7 +1037,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       // the agent runs as root and this is no-prompt.
       sendCommand(node_id, userId, {
         type: 'exec',
-        command: `oe change-access ${permName}`,
+        command: `$(command -v oenode || command -v oe) change-access ${permName}`,
         timeout: 30,
       }).catch(() => {});
       const recon = await waitForNodeReconnect(node_id, userId, 60_000);

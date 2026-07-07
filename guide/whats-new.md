@@ -8,6 +8,27 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-07
 
+**Give your agents a personality**
+New Agent and Edit Agent now have a Personality field — describe how the agent should talk ("warm and encouraging, keeps things light", "dry, blunt, zero fluff") and it sticks across every reply, voice included. It's separate from the description (which tells the Coordinator what the agent is *for*), it survives renames and role changes, and edits apply from your very next message. Personality shapes tone only — it never changes what tools or skills the agent can use.
+
+**Updates reach your browser immediately**
+Static files used to be cached for an hour with no way to check for changes, so after an update a phone or laptop could keep running a stale — or worse, mixed old-and-new — copy of the interface. The page now pins every script and stylesheet to a build id: repeat visits load instantly from cache, and the moment the server updates, the next page load atomically picks up the whole new version. Voice-device firmware downloads also got lighter (unchanged files answer "not modified" instead of re-sending).
+
+**Custom skill panels open from the sidebar again**
+Buttons for skill-built panels were wired in a way the browser's security policy silently blocks, so clicking them did nothing on desktop. They now use the same mechanism as the built-in sidebar buttons and work everywhere, including the phone menu.
+
+**Node agents can pair through a reverse proxy**
+Installing a node agent with `--server https://your-domain` now works: the agent keeps the https scheme and port instead of forcing plain http on :3737, pairs over TLS, connects over wss, and self-updates over https. Plain LAN installs (`10.0.0.10:3737`) behave exactly as before.
+
+**Node CLI renamed: `oe` → `oenode`**
+The node agent's command collided with the OE server's own `oe` command — on a machine running both, the node agent shadowed the server CLI and (worse) node uninstall deleted it. The node command is now `oenode` everywhere (`sudo oenode update`, `sudo oenode uninstall`, …); updating an agent migrates the wrapper automatically, and cleanup only ever touches `oe` when it's provably the old node wrapper, never the server's.
+
+**Removing a node actually uninstalls it now**
+Clicking Remove told the agent to self-destruct, but the cleanup script was killed a fraction of a second later as part of the agent's own shutdown — so the service resurrected itself every 5 seconds forever (one field machine hit 7,700 restarts). The self-destruct now re-launches itself outside the agent's service before doing anything, and the agent gives it time to get clear — Remove reliably stops the service, removes the files, and stays gone.
+
+**Dashboard updates un-brick themselves**
+A v2 node that was missing the server's update-signing key (upgraded via `oe update` before it learned to pin the key) used to refuse every dashboard push. Now the server notices the refusal, delivers the key over the node's already-trusted command channel, restarts the agent, and retries the update automatically — one click on Update and the node heals itself. `oe update` also pins the key itself now, so fresh upgrades can't get into this state.
+
 **Switch agents from the bottom bar**
 The bottom bar now shows which agent you're talking to; tap it (or the Agents button beside it) to slide up an agent picker — the same sheet style as the ⋮ menu — with your current agent highlighted and a pulsing dot on any agent that's still working in the background. Sheets also dismiss the way you'd expect now: swipe down on the handle, tap the handle, or tap anywhere outside.
 

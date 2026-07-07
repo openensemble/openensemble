@@ -12,7 +12,7 @@ import {
   rememberNodeSessionToken, reviveNodeSessionFromToken,
 } from '../../skills/nodes/node-registry.mjs';
 import {
-  adoptSession, getSessionUserId, broadcastToUsers, getUserCoordinatorAgentId, getUser, getClientIp,
+  adoptSession, getSessionUserId, getSessionMeta, broadcastToUsers, getUserCoordinatorAgentId, getUser, getClientIp,
 } from '../_helpers.mjs';
 import { appendToSession } from '../../sessions.mjs';
 
@@ -121,6 +121,10 @@ export function initNodeWss() {
           accessLocked: !!msg.accessLocked,
           version: msg.version || 'unknown',
           ip,
+          // Lets registerNode honor a deliberate re-pair of a revoked nodeId:
+          // a session minted AFTER the revocation proves the admin issued a
+          // fresh pairing; the removed agent's old token predates it.
+          sessionCreatedAt: getSessionMeta(token)?.createdAt ?? null,
         });
 
         ws._nodeId = nodeId;

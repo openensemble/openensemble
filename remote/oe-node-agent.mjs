@@ -11,9 +11,9 @@
  *     oe start|stop|restart # service control
  *     oe logs [-f]          # tail service logs
  *     oe repair <code>      # re-pair with the server
- *     oe update             # download and install the latest agent
- *     oe change-access      # change the agent's sudo access level
- *     oe menu               # interactive config menu
+ *     oenode update         # download and install the latest agent
+ *     oenode change-access  # change the agent's sudo access level
+ *     oenode menu           # interactive config menu
  *     oe help               # full command list
  *
  *   Direct invocation (used by systemd/launchd and the installer, not end users):
@@ -55,7 +55,7 @@ const __dirname = path.dirname(__filename);
 // at install/pair time and refuses any update whose signed manifest doesn't
 // verify (see handleUpdateMessage). Must match SECURE_MIN_VERSION in
 // lib/node-update-signing.mjs — the server gates auto-updates on version >= it.
-const AGENT_VERSION = '2.0.0';
+const AGENT_VERSION = '2.0.3';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const CONFIG_DIR = process.platform === 'win32'
@@ -158,7 +158,7 @@ function redeemPairingCode(httpUrl, code) {
     const body = JSON.stringify({ code });
     const url = new URL('/api/nodes/redeem', httpUrl);
 
-    const req = http.request(url, {
+    const req = (url.protocol === 'https:' ? https : http).request(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
     }, (res) => {
@@ -198,7 +198,7 @@ function httpJsonRequest(httpUrl, urlPath, { method = 'GET', body = null, header
       reqHeaders['Content-Type'] = 'application/json';
       reqHeaders['Content-Length'] = Buffer.byteLength(payload);
     }
-    const req = http.request(url, { method, headers: reqHeaders }, (res) => {
+    const req = (url.protocol === 'https:' ? https : http).request(url, { method, headers: reqHeaders }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
@@ -301,6 +301,37 @@ async function requestAdmissionInteractive(httpUrl, rl, info) {
   }
 }
 
+// Parse a server address into canonical URLs, honoring the scheme when one is
+// given. "https://oe.example.com" behind a reverse proxy must pair over
+// https/wss on the URL's own port (443 implicit) — the old code stripped the
+// scheme and forced :3737, so any TLS-proxied install died with ECONNREFUSED
+// against the proxy host (field failure 2026-07-07). Scheme-less input
+// ("10.0.0.10" / "10.0.0.10:3737") keeps the historical OE-direct default of
+// plain http/ws on 3737.
+function parseServerAddress(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const m = s.match(/^(https?|wss?):\/\/([^/:]+)(?::(\d+))?/i);
+  if (m) {
+    const secure = /^(https|wss)$/i.test(m[1]);
+    const host = m[2];
+    const port = parseInt(m[3], 10) || (secure ? 443 : 80);
+    return {
+      host, port, secure,
+      wsUrl: `${secure ? 'wss' : 'ws'}://${host}:${port}/ws/nodes`,
+      httpUrl: `${secure ? 'https' : 'http'}://${host}:${port}`,
+    };
+  }
+  const host = s.split(':')[0];
+  if (!host) return null;
+  const port = parseInt(s.split(':')[1], 10) || 3737;
+  return {
+    host, port, secure: false,
+    wsUrl: `ws://${host}:${port}/ws/nodes`,
+    httpUrl: `http://${host}:${port}`,
+  };
+}
+
 // ── Interactive Setup ────────────────────────────────────────────────────────
 async function interactiveSetup() {
   // Unattended mode: OE_PAIRING_CODE preseed means skip all prompts. Used by
@@ -324,27 +355,15 @@ async function interactiveSetup() {
   const preseed = process.env.OE_AGENT_DEFAULT_SERVER;
 
   if (preseed) {
-    const m = preseed.match(/^(?:https?|wss?):\/\/([^/:]+)(?::(\d+))?/);
-    if (m) {
-      const host = m[1];
-      const port = parseInt(m[2], 10) || 3737;
-      console.log(`Step 1: Using server from installer: ${host}:${port}`);
+    const parsed = parseServerAddress(preseed);
+    if (parsed) {
+      console.log(`Step 1: Using server from installer: ${parsed.httpUrl}`);
       if (unattended) {
-        serverInfo = {
-          host, port,
-          wsUrl: `ws://${host}:${port}/ws/nodes`,
-          httpUrl: `http://${host}:${port}`,
-        };
+        serverInfo = parsed;
       } else {
         console.log('  (set OE_AGENT_DEFAULT_SERVER= to override)\n');
         const confirm = (await ask('Use this server? [Y/n]: ')).trim().toLowerCase();
-        if (confirm !== 'n' && confirm !== 'no') {
-          serverInfo = {
-            host, port,
-            wsUrl: `ws://${host}:${port}/ws/nodes`,
-            httpUrl: `http://${host}:${port}`,
-          };
-        }
+        if (confirm !== 'n' && confirm !== 'no') serverInfo = parsed;
       }
     }
   }
@@ -370,14 +389,8 @@ async function interactiveSetup() {
     }
 
     if (!serverInfo) {
-      const addr = await ask('Server address (e.g. 10.0.0.10:3737): ');
-      const [host, port] = addr.trim().split(':');
-      serverInfo = {
-        host: host || 'localhost',
-        port: parseInt(port, 10) || 3737,
-        wsUrl: `ws://${host || 'localhost'}:${port || 3737}/ws/nodes`,
-        httpUrl: `http://${host || 'localhost'}:${port || 3737}`,
-      };
+      const addr = await ask('Server address (e.g. 10.0.0.10:3737, or https://oe.example.com behind a proxy): ');
+      serverInfo = parseServerAddress(addr) || parseServerAddress('localhost');
     }
   }
 
@@ -464,7 +477,7 @@ async function interactiveSetup() {
 async function repairPairing(rawCode) {
   const code = (rawCode || '').trim();
   if (!code) {
-    console.error('Usage: sudo oe repair <CODE>');
+    console.error('Usage: sudo oenode repair <CODE>');
     console.error('  Generate a fresh code in the web UI (Nodes drawer → Pair New Node)');
     console.error('  or via the node_pair_code agent tool.');
     process.exit(1);
@@ -1039,7 +1052,7 @@ function runAgent(config) {
 
         case 'revoked':
           log(`Server revoked this node: ${msg.message || 'removed by user'}`);
-          log('Exiting. Run "sudo oe uninstall" to clean up, or "sudo oe setup" to re-pair.');
+          log('Exiting. Run "sudo oenode uninstall" to clean up, or "sudo oenode setup" to re-pair.');
           try { ws.close(1000, 'Revoked'); } catch {}
           process.exit(0);
           break;
@@ -1055,22 +1068,33 @@ function runAgent(config) {
           log(`Server requested uninstall: ${msg.message || ''}`);
           try { ws.send(JSON.stringify({ type: 'uninstall_ack' })); } catch {}
           try { ws.close(1000, 'Uninstalling'); } catch {}
-          // Fire off the self-destruct script (installed by installService, root-owned,
-          // runnable via NOPASSWD sudo). It stops the service, removes the user,
-          // wipes /opt/oe-node-agent, and deletes itself — all after we exit.
+          // Fire off the self-destruct script (root-owned, NOPASSWD sudo). It
+          // re-execs itself OUTSIDE this unit's cgroup (writeSelfDestructScript),
+          // then stops the service, removes the user, and wipes the install.
           try {
-            const self = '/opt/oe-node-agent/self-destruct.sh';
+            const self = `${OE_INSTALL_DIR}/self-destruct.sh`;
+            // Root installs refresh the on-disk script first, so agents whose
+            // script predates the stage-2 cgroup-escape fix still uninstall
+            // cleanly. Non-root agents can't rewrite the root-owned file —
+            // they run whatever pair time installed.
+            try { if (process.getuid?.() === 0) writeSelfDestructScript(); } catch { /* best-effort */ }
             if (fs.existsSync(self)) {
               const child = spawn('sudo', ['-n', self], { detached: true, stdio: 'ignore' });
               child.unref();
-              log('Self-destruct launched. Exiting.');
+              log('Self-destruct launched.');
             } else {
               log(`Self-destruct script not found at ${self}. Cannot auto-uninstall.`);
             }
           } catch (e) {
             log(`[uninstall] spawn failed: ${e.message}`);
           }
-          setTimeout(() => process.exit(0), 300);
+          // Exit LATE, not at +300ms: our exit tears down the unit's cgroup,
+          // which used to kill the just-launched script during its `sleep 2` —
+          // the uninstall-never-happens bug. 15s lets a legacy (pre-stage2)
+          // script reach its own `systemctl stop` (a deliberate stop, which
+          // Restart=always does NOT resurrect) and lets a stage-2 script escape
+          // the cgroup entirely. If the script is missing, we exit regardless.
+          setTimeout(() => process.exit(0), 15_000);
           break;
 
         case 'exec':
@@ -1141,9 +1165,9 @@ function runAgent(config) {
       killAllPtys();
       log(`Disconnected (${code}${reason ? ': ' + reason : ''})`);
       if (code === 4001) {
-        log('Authentication failed. Generate a fresh pairing code in OpenEnsemble, then run: sudo oe repair <CODE>');
+        log('Authentication failed. Generate a fresh pairing code in OpenEnsemble, then run: sudo oenode repair <CODE>');
       } else if (code === 4003) {
-        log('This node was removed or revoked by the server. Run "sudo oe uninstall" to clean up, or re-pair intentionally.');
+        log('This node was removed or revoked by the server. Run "sudo oenode uninstall" to clean up, or re-pair intentionally.');
       }
       settle();
     });
@@ -1180,6 +1204,49 @@ function notifyWatchdog() {
 // ── Service Installation ─────────────────────────────────────────────────────
 const OE_USER = 'oe-agent';
 const OE_INSTALL_DIR = '/opt/oe-node-agent';
+
+// Self-destruct script, stage-1/stage-2 split. The script is launched as a
+// CHILD of oe-node-agent.service, so it starts inside the unit's cgroup —
+// and the moment the unit goes down (its own `systemctl stop`, or the agent
+// process exiting), systemd kills the entire cgroup, script included, mid-run.
+// That exact race made UI Remove a no-op: the script died during its opening
+// `sleep 2` and Restart=always resurrected the agent every 5s — field failure
+// 2026-07-07, restart counter at 7,737. Stage 1 copies itself to /run and
+// re-execs OUTSIDE the cgroup as a transient systemd unit; stage 2 does the
+// real teardown from safety.
+function writeSelfDestructScript() {
+  const selfDestructPath = `${OE_INSTALL_DIR}/self-destruct.sh`;
+  const selfDestruct = `#!/usr/bin/env bash
+# OpenEnsemble Node Agent — self-destruct (invoked via NOPASSWD sudo)
+set +e
+if [ "$1" != "--stage2" ]; then
+  cp "$0" /run/oe-node-agent-selfdestruct.sh
+  chmod 500 /run/oe-node-agent-selfdestruct.sh
+  if command -v systemd-run >/dev/null 2>&1; then
+    exec systemd-run --collect --unit=oe-node-agent-selfdestruct /bin/bash /run/oe-node-agent-selfdestruct.sh --stage2
+  fi
+  # No systemd (sysvinit etc.): no cgroup teardown to escape — run stage 2 directly.
+  exec /bin/bash /run/oe-node-agent-selfdestruct.sh --stage2
+fi
+sleep 2
+systemctl stop oe-node-agent 2>/dev/null || service oe-node-agent stop 2>/dev/null
+systemctl disable oe-node-agent 2>/dev/null
+rm -f /etc/systemd/system/oe-node-agent.service
+systemctl daemon-reload 2>/dev/null
+rm -f ${OE_SUDOERS_PATH}
+userdel -r ${OE_USER} 2>/dev/null
+rm -f /usr/local/bin/oenode /usr/local/bin/openensemble
+# /usr/local/bin/oe may be the OE SERVER's CLI on a shared box — remove only our old node wrapper
+grep -q "OpenEnsemble Node Agent" /usr/local/bin/oe 2>/dev/null && rm -f /usr/local/bin/oe
+rm -rf ${OE_INSTALL_DIR}
+rm -f /run/oe-node-agent-selfdestruct.sh
+logger -t oe-node-agent "Self-destruct complete"
+`;
+  fs.writeFileSync(selfDestructPath, selfDestruct);
+  execSync(`chown root:root ${selfDestructPath}`);
+  execSync(`chmod 500 ${selfDestructPath}`);
+  return selfDestructPath;
+}
 const OE_SUDOERS_PATH = `/etc/sudoers.d/${OE_USER}`;
 
 const ACCESS_LEVELS = {
@@ -1321,7 +1388,7 @@ async function installService() {
 
   // Root check (Linux/macOS)
   if (platform !== 'win32' && process.getuid() !== 0) {
-    console.error('This command must be run with sudo:\n  sudo oe install-service');
+    console.error('This command must be run with sudo:\n  sudo oenode install-service');
     process.exit(1);
   }
 
@@ -1443,7 +1510,7 @@ async function installService() {
     try { fs.chmodSync(path.join(oeConfigDir, 'config.json'), 0o600); } catch {}
     log(`Config copied to ${oeConfigDir}/config.json`);
   } else {
-    console.warn('Warning: No config.json found. Run "sudo oe setup" first, then "sudo oe install-service".');
+    console.warn('Warning: No config.json found. Run "sudo oenode setup" first, then "sudo oenode install-service".');
   }
 
   // Set ownership
@@ -1452,26 +1519,10 @@ async function installService() {
   // Step 4: Write sudoers
   const sudoersLine = buildSudoersLine(accessLevel);
   // Write the self-destruct script (root-owned, chmod 500) so the agent can
+  // (see writeSelfDestructScript below for the stage-2 cgroup-escape design)
   // uninstall itself when the user clicks Remove in the UI. Always present
   // regardless of access lock — remote uninstall is a core admin action.
-  const selfDestructPath = `${OE_INSTALL_DIR}/self-destruct.sh`;
-  const selfDestruct = `#!/usr/bin/env bash
-# OpenEnsemble Node Agent — self-destruct (invoked via NOPASSWD sudo)
-set +e
-sleep 2
-systemctl stop oe-node-agent
-systemctl disable oe-node-agent
-rm -f /etc/systemd/system/oe-node-agent.service
-systemctl daemon-reload
-rm -f ${OE_SUDOERS_PATH}
-userdel -r ${OE_USER} 2>/dev/null
-rm -f /usr/local/bin/oe /usr/local/bin/openensemble
-rm -rf ${OE_INSTALL_DIR}
-logger -t oe-node-agent "Self-destruct complete"
-`;
-  fs.writeFileSync(selfDestructPath, selfDestruct);
-  execSync(`chown root:root ${selfDestructPath}`);
-  execSync(`chmod 500 ${selfDestructPath}`);
+  const selfDestructPath = writeSelfDestructScript();
 
   const header = `# OpenEnsemble Node Agent — access level: ${accessLevel}${accessLocked ? ' (LOCKED)' : ''}\n`;
   // Always allow the agent to run the self-destruct script — needed for UI-driven remove
@@ -1481,7 +1532,7 @@ logger -t oe-node-agent "Self-destruct complete"
     const selfLines = buildSelfSudoersLines();
     selfBlock += `\n# Self-management: allows oe-agent to change its own access level from the UI\n${selfLines.join('\n')}\n`;
   } else {
-    selfBlock += `\n# Access level LOCKED — self-management disabled. To change: SSH in and edit this file + re-run "sudo oe install-service"\n`;
+    selfBlock += `\n# Access level LOCKED — self-management disabled. To change: SSH in and edit this file + re-run "sudo oenode install-service"\n`;
   }
   const sudoersContent = header + (sudoersLine ? sudoersLine + '\n' : '') + selfBlock;
   fs.writeFileSync(OE_SUDOERS_PATH, sudoersContent);
@@ -1517,15 +1568,25 @@ logger -t oe-node-agent "Self-destruct complete"
   if (rl) rl.close();
 }
 
-// Install /usr/local/bin/oe and remove the legacy /usr/local/bin/openensemble.
+// Install /usr/local/bin/oenode and remove the legacy wrapper names.
 // Called from installService() at install time and from updateAgent() to migrate
 // already-paired nodes onto the new wrapper name.
+//
+// Renamed oe → oenode 2026-07-07: the OE SERVER's own CLI is `oe`
+// (~/.local/bin/oe, written by the server repo's install.sh), so a node
+// installed on the same box as a server shadowed — and on uninstall,
+// DELETED — the server's command. The node CLI is `oenode` everywhere now;
+// `oe` is only ever touched when it's provably our old wrapper.
+const NODE_WRAPPER_MARKER = 'OpenEnsemble Node Agent';
+function isOurWrapper(p) {
+  try { return fs.readFileSync(p, 'utf8').includes(NODE_WRAPPER_MARKER); }
+  catch { return false; }
+}
 function installCliWrapper() {
   const platform = os.platform();
   if (platform !== 'linux' && platform !== 'darwin') return;
   const nodePath = process.execPath || whichOrNull('node') || '/usr/bin/node';
-  const wrapperPath = '/usr/local/bin/oe';
-  const legacyWrapperPath = '/usr/local/bin/openensemble';
+  const wrapperPath = '/usr/local/bin/oenode';
   const wrapper = `#!/usr/bin/env bash
 # OpenEnsemble Node Agent — admin CLI
 # Read-only commands run as the current user; everything else auto-elevates.
@@ -1534,12 +1595,12 @@ case "\${1:-}" in
   status|logs|help|--help|-h|discover|version|--version|-v)
     ;;
   *)
-    # Bare "oe" lands here too — menu needs root, so elevate.
+    # Bare "oenode" lands here too — menu needs root, so elevate.
     if [ "$(id -u)" -ne 0 ]; then exec sudo "$0" "$@"; fi
     ;;
 esac
 
-# Bare "oe" → interactive config menu
+# Bare "oenode" → interactive config menu
 if [ $# -eq 0 ]; then set -- menu; fi
 
 exec ${nodePath} ${OE_INSTALL_DIR}/oe-node-agent.mjs "$@"
@@ -1552,16 +1613,17 @@ exec ${nodePath} ${OE_INSTALL_DIR}/oe-node-agent.mjs "$@"
     console.warn(`Warning: could not install ${wrapperPath}: ${e.message}`);
     return;
   }
-  if (fs.existsSync(legacyWrapperPath)) {
-    try { fs.unlinkSync(legacyWrapperPath); log(`Removed legacy ${legacyWrapperPath}`); } catch {}
-  }
+  // Migrate legacy names. /usr/local/bin/openensemble was always ours;
+  // /usr/local/bin/oe may be the SERVER's CLI — delete only our own wrapper.
+  try { if (fs.existsSync('/usr/local/bin/openensemble')) { fs.unlinkSync('/usr/local/bin/openensemble'); log('Removed legacy /usr/local/bin/openensemble'); } } catch {}
+  try { if (isOurWrapper('/usr/local/bin/oe')) { fs.unlinkSync('/usr/local/bin/oe'); log('Removed legacy /usr/local/bin/oe (node CLI is now "oenode")'); } } catch {}
 }
 
 function uninstallService() {
   const platform = process.platform;
 
   if (platform !== 'win32' && process.getuid() !== 0) {
-    console.error('This command must be run with sudo:\n  sudo oe uninstall');
+    console.error('This command must be run with sudo:\n  sudo oenode uninstall');
     process.exit(1);
   }
 
@@ -1573,7 +1635,10 @@ function uninstallService() {
     try { fs.unlinkSync(OE_SUDOERS_PATH); log(`Removed ${OE_SUDOERS_PATH}`); } catch {}
     try { execSync(`userdel -r ${OE_USER} 2>/dev/null`, { stdio: 'ignore' }); log(`Removed user ${OE_USER}`); } catch {}
     try { execSync(`rm -rf ${OE_INSTALL_DIR}`, { stdio: 'ignore' }); log(`Removed ${OE_INSTALL_DIR}`); } catch {}
-    try { fs.unlinkSync('/usr/local/bin/oe'); log('Removed /usr/local/bin/oe'); } catch {}
+    try { fs.unlinkSync('/usr/local/bin/oenode'); log('Removed /usr/local/bin/oenode'); } catch {}
+    // '/usr/local/bin/oe' may be the OE SERVER's CLI on a shared box — only
+    // delete it when it's provably our old node wrapper.
+    try { if (isOurWrapper('/usr/local/bin/oe')) { fs.unlinkSync('/usr/local/bin/oe'); log('Removed legacy /usr/local/bin/oe'); } } catch {}
     try { fs.unlinkSync('/usr/local/bin/openensemble'); log('Removed legacy /usr/local/bin/openensemble'); } catch {}
     log('Service fully removed.');
   } else if (platform === 'darwin') {
@@ -1583,7 +1648,8 @@ function uninstallService() {
     try { fs.unlinkSync(OE_SUDOERS_PATH); } catch {}
     try { execSync(`dscl . -delete /Users/${OE_USER}`); } catch {}
     try { execSync(`rm -rf ${OE_INSTALL_DIR}`, { stdio: 'ignore' }); } catch {}
-    try { fs.unlinkSync('/usr/local/bin/oe'); } catch {}
+    try { fs.unlinkSync('/usr/local/bin/oenode'); } catch {}
+    try { if (isOurWrapper('/usr/local/bin/oe')) fs.unlinkSync('/usr/local/bin/oe'); } catch {}
     try { fs.unlinkSync('/usr/local/bin/openensemble'); } catch {}
     log('Service fully removed.');
   } else if (platform === 'win32') {
@@ -1701,12 +1767,15 @@ async function handlePushTar(msg, ws) {
 async function handleUpdateMessage(msg, ws, config) {
   log('[update] Server requested update — downloading...');
 
-  // Build http URL from ws:// server
-  const m = (config?.server || '').match(/^wss?:\/\/([^/:]+)(?::(\d+))?/);
+  // Build http URL from the ws(s):// server, preserving the scheme — a
+  // wss:// (TLS-proxied) pairing must update over https on the proxy's
+  // port, never plain http on :3737.
+  const m = (config?.server || '').match(/^(wss?):\/\/([^/:]+)(?::(\d+))?/);
   if (!m) throw new Error(`Cannot parse server URL: ${config?.server}`);
-  const expectedHost = m[1];
-  const expectedPort = m[2] || '3737';
-  let httpUrl = `http://${expectedHost}:${expectedPort}/nodes/agent`;
+  const secure = m[1] === 'wss';
+  const expectedHost = m[2];
+  const expectedPort = m[3] || (secure ? '443' : '3737');
+  let httpUrl = `${secure ? 'https' : 'http'}://${expectedHost}:${expectedPort}/nodes/agent`;
   // msg.url is server-supplied; only honor it when it points back at the
   // same host:port we're already paired with. Otherwise a poisoned/MITM'd
   // message could redirect the agent to fetch arbitrary code.
@@ -1842,10 +1911,12 @@ async function updateAgent() {
     return;
   }
 
-  // ws://host:port/ws/nodes → http://host:port/nodes/agent
-  const m = config.server.match(/^wss?:\/\/([^/:]+)(?::(\d+))?/);
+  // ws(s)://host:port/ws/nodes → http(s)://host:port/nodes/agent —
+  // scheme-preserving so TLS-proxied installs update over https.
+  const m = config.server.match(/^(wss?):\/\/([^/:]+)(?::(\d+))?/);
   if (!m) { console.error(`Could not parse server URL: ${config.server}`); return; }
-  const httpUrl = `http://${m[1]}:${m[2] || '3737'}/nodes/agent`;
+  const secure = m[1] === 'wss';
+  const httpUrl = `${secure ? 'https' : 'http'}://${m[2]}:${m[3] || (secure ? '443' : '3737')}/nodes/agent`;
 
   const dest = path.join(OE_INSTALL_DIR, 'oe-node-agent.mjs');
   const tmp = `${dest}.new`;
@@ -1866,6 +1937,31 @@ async function updateAgent() {
   // Refresh the CLI wrapper so pre-rename installs (that have
   // /usr/local/bin/openensemble) migrate to /usr/local/bin/oe on update.
   installCliWrapper();
+
+  // v2 agents refuse unsigned dashboard pushes, and only the installer's
+  // PAIR step pins the server's signing key — so `oe update` used to strand
+  // nodes on v2 code with keyless configs that reject every push (field
+  // failure 2026-07-07). Pin the key now if it's missing, into every config
+  // this install actually has (the root CLI and the service user can have
+  // separate ~/.oe-node dirs). The key travels over the same channel as the
+  // code we just installed, so this adds no new trust assumption.
+  try {
+    const base = httpUrl.replace(/\/nodes\/agent$/, '');
+    const cfgPaths = [...new Set([CONFIG_PATH, path.join(OE_INSTALL_DIR, '.oe-node', 'config.json')])];
+    let key = null;
+    for (const p of cfgPaths) {
+      let cfg;
+      try { cfg = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { continue; }
+      if (cfg.updatePublicKey) continue;
+      key = key || await fetchUpdatePublicKey(base);
+      if (!key) { console.log('Warning: could not fetch the update-signing key — dashboard pushes stay disabled until this node re-pairs.'); break; }
+      cfg.updatePublicKey = key;
+      fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+      console.log(`Pinned update-signing key into ${p} (dashboard updates enabled).`);
+    }
+  } catch (e) {
+    console.log(`Key pinning skipped: ${e.message}`);
+  }
   console.log('Restarting service...');
   try { execSync('systemctl restart oe-node-agent', { stdio: 'inherit' }); }
   catch { console.error('Service restart failed. Check: systemctl status oe-node-agent'); return; }
@@ -1948,7 +2044,7 @@ async function changeAccess() {
   }
 
   if (process.getuid() !== 0) {
-    console.error('This command must be run with sudo:\n  sudo oe change-access');
+    console.error('This command must be run with sudo:\n  sudo oenode change-access');
     process.exit(1);
   }
 
@@ -1965,7 +2061,7 @@ async function changeAccess() {
     console.error('\n✗ Access level is LOCKED on this node.');
     console.error('  Self-management via the web UI is disabled.');
     console.error('  To unlock: SSH in as a real admin and run:');
-    console.error(`    sudo oe change-access --force\n`);
+    console.error(`    sudo oenode change-access --force\n`);
     process.exit(1);
   }
 
@@ -2061,7 +2157,7 @@ async function changeAccess() {
       console.log('  Service unit rewritten and restarted. New access level will be reported on reconnect.');
     } catch (e) {
       console.log(`  Note: Could not rewrite service unit: ${e.message}`);
-      console.log('  Run manually:  sudo oe install-service');
+      console.log('  Run manually:  sudo oenode install-service');
     }
   } else {
     // Same user binding — just kick the service to pick up the new sudoers.
@@ -2146,7 +2242,7 @@ function showStatus() {
       console.log(`  Access:  ${config.accessLevel}${config.accessLocked ? ' (locked)' : ''}`);
     }
   } else {
-    console.log('\n  No pairing config found. Run "sudo oe setup" to pair with a server.');
+    console.log('\n  No pairing config found. Run "sudo oenode setup" to pair with a server.');
   }
 }
 
@@ -2251,7 +2347,7 @@ async function runCli() {
   switch (cmd) {
     case 'menu': {
       if (process.platform !== 'win32' && process.getuid() !== 0) {
-        console.error('The config menu must be run with sudo:\n  sudo oe menu');
+        console.error('The config menu must be run with sudo:\n  sudo oenode menu');
         process.exit(1);
       }
       await configMenu();
@@ -2267,7 +2363,7 @@ async function runCli() {
       // --pair-only: used by remote/install.sh so setup chains into install-service
       // without leaving the agent running in the foreground.
       if (PAIR_ONLY) {
-        console.log('Config saved. Next: run "sudo oe install-service".');
+        console.log('Config saved. Next: run "sudo oenode install-service".');
         return;
       }
       startMainLoop(config);

@@ -179,7 +179,10 @@ export function getSessionMeta(token) {
   if (!s) return null;
   const userId = getSessionUserId(token);  // also bumps lastActivity + handles expiry
   if (!userId) return null;
-  return { userId, kind: s.kind || 'browser', deviceId: s.deviceId || null };
+  // createdAt lets the node-register path distinguish a deliberately
+  // re-paired agent (token minted after its revocation) from a zombie agent
+  // reconnecting with its pre-revocation token. Pre-field sessions read null.
+  return { userId, kind: s.kind || 'browser', deviceId: s.deviceId || null, createdAt: s.createdAt || null };
 }
 
 export function getSessionUserId(token) {
