@@ -179,6 +179,14 @@ export async function rememberFast({ agentId = 'main', type = 'episodes', text,
   const tableName = type === 'user_facts' ? 'user_facts' : `${agentId}_${type}`;
   const table = await getTable(tableName, userId);
   const vector = await embed(text);
+  // Never persist a zero vector: the row would be permanently unsearchable and
+  // would collide at distance=0 with every future write's dedup check. Mirrors
+  // remember()'s inline guard (which throws); here we return null so the
+  // fire-and-forget episode/session callers just skip this write.
+  if (vector.length && vector.every(v => v === 0)) {
+    console.warn('[cortex] rememberFast: skipping write — embed() returned a zero vector. Check cortex embed model configuration.');
+    return null;
+  }
   const defaultSalience = immortal ? 1.0 : 0.5;
 
   const record = {
@@ -216,6 +224,7 @@ const ENRICH_MAX     = 500;
 let   _enrichRunning = false;
 
 export function queueEnrich(record, tableName, userId = 'default') {
+  if (!record) return; // nothing was persisted (blank/junk or zero-vector skip)
   if (_enrichQueue.length >= ENRICH_MAX) {
     console.warn('[cortex] Enrichment queue full — dropping oldest entry');
     _enrichQueue.shift();
@@ -305,7 +314,8 @@ export async function remember({
   // Episodes: write immediately, score in background
   if (type === 'episodes' && !immortal) {
     const record = await rememberFast({ agentId, type, text, immortal, source, confidence, metadata, userId });
-    if (jailbreak && record) {
+    if (!record) return null; // rememberFast skipped it (blank/junk or zero-vector)
+    if (jailbreak) {
       // Skip enrichment — don't let the background scorer re-promote this.
       return record;
     }
@@ -369,6 +379,17 @@ export async function remember({
   };
 
   await queuedWrite(tableName, () => table.add([record]));
+
+  // NOTE: inline contradiction detection was trialed here (stamp an old
+  // conflicting fact's superseded_by so recall hides it) but reverted
+  // 2026-07-06 — auto-superseding from the 135M contradiction head is not
+  // safe enough: a false positive silently hides a legitimate (or pinned)
+  // fact with no audit trail, the dedup path (above) would drop a later
+  // re-affirmation of a superseded fact instead of resurrecting it, and it
+  // added blocking LLM latency to every pin. Contradictions currently
+  // coexist (the pre-existing minor behavior). A proper redesign needs: a
+  // reliable contradiction signal, resurrection on re-affirmation, an audit
+  // trail, exclusion of immortal pins, and a non-blocking (detached) write.
   return record;
 }
 

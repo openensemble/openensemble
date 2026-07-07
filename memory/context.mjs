@@ -104,11 +104,28 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
     } };
 }
 
+// Neutralize stored-memory text before it lands inside the <cortex-memory>
+// system-prompt block. A stored fact is user/model-supplied and must never be
+// able to (a) close the delimiter early with a literal </cortex-memory> tag or
+// any other angle-bracket sequence, or (b) forge a trusted "## ..." section
+// header to smuggle instructions. We swap angle brackets for lookalikes so no
+// tag can form, and strip leading markdown-header markers per line. The genuine
+// "## ..." headers below are added AFTER sanitizing, so they're unaffected.
+function sanitizeMemoryText(s) {
+  if (!s) return s;
+  return String(s)
+    .replace(/</g, '‹').replace(/>/g, '›')
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '');
+}
+
 export function formatContext(ctx) {
   const parts = [];
-  if (ctx.systemInstructions?.trim()) parts.push('## Remembered preferences & rules\n' + ctx.systemInstructions);
-  if (ctx.userContext?.trim())        parts.push('## About you\n' + ctx.userContext);
-  if (ctx.episodeHistory?.trim())     parts.push('## Relevant past conversations\n' + ctx.episodeHistory);
+  const systemInstructions = sanitizeMemoryText(ctx.systemInstructions);
+  const userContext        = sanitizeMemoryText(ctx.userContext);
+  const episodeHistory     = sanitizeMemoryText(ctx.episodeHistory);
+  if (systemInstructions?.trim()) parts.push('## Remembered preferences & rules\n' + systemInstructions);
+  if (userContext?.trim())        parts.push('## About you\n' + userContext);
+  if (episodeHistory?.trim())     parts.push('## Relevant past conversations\n' + episodeHistory);
   if (!parts.length) return '';
   return `<cortex-memory>\n${parts.join('\n\n')}\n</cortex-memory>`;
 }

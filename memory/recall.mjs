@@ -5,7 +5,7 @@
 
 import {
   UUID_RE, assertId, safeLanceVal, queuedWrite,
-  calcRetention, recencyScore,
+  calcRetention, recencyScore, TOKEN_BUDGET,
 } from './shared.mjs';
 import { embed } from './embedding.mjs';
 import { getTable } from './lance.mjs';
@@ -49,9 +49,38 @@ function scopeClause(myRoles) {
   return ` AND (role_scope = '' OR role_scope IN (${list}))`;
 }
 
+// Immortal user_facts bypass the vector top-K (they're always injected), so a
+// user who pins many facts inflates every prompt with no bound. Cap the set to
+// a token budget, keeping the most salient (then most recently recalled) — the
+// same way episodeHistory is trimmed in context.mjs.
+function capImmortalFacts(rows, tokenBudget) {
+  if (!Array.isArray(rows) || rows.length <= 1) return rows;
+  const sorted = rows.slice().sort((a, b) => {
+    const sa = a.salience_composite ?? 0.5, sb = b.salience_composite ?? 0.5;
+    if (sb !== sa) return sb - sa;
+    return new Date(b.last_recalled_at || b.created_at || 0) - new Date(a.last_recalled_at || a.created_at || 0);
+  });
+  const budgetChars = Math.max(0, tokenBudget) * 4; // ~4 chars/token
+  const kept = [];
+  let used = 0;
+  for (const m of sorted) {
+    const cost = (m.text?.length || 0) + 1;
+    if (kept.length && used + cost > budgetChars) break;
+    kept.push(m);
+    used += cost;
+  }
+  return kept;
+}
+
 // ── recall — vector search with Ebbinghaus reranking ─────────────────────────
 export async function recall({ agentId = 'main', type = 'episodes', query, queryVec: precomputedVec = undefined, topK = 5, includeShared = true, recencyBoost = false, timeAnchor = null, userId = 'default', myRoles = null }) {
   const queryVec = precomputedVec ?? await embed(query);
+  // A zero/empty query vector means embed() failed (usually a misconfigured
+  // embed model). vectorSearch with a zero vector returns arbitrary "nearest"
+  // rows by distance — injecting unrelated high-salience facts AND strengthening
+  // them via the recall-stat update below. Detect it and skip semantic recall;
+  // immortals (which don't need the query vector) still return normally.
+  const queryVecBad = !queryVec?.length || queryVec.every(v => v === 0);
   const tableName = type === 'user_facts' ? 'user_facts' : `${agentId}_${type}`;
   const table = await getTable(tableName, userId);
 
@@ -63,21 +92,33 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
   // Role-scope filter only applies to user_facts (cross-agent shared table).
   // Other tables are agent-scoped by table name already.
   const scopeFilter = type === 'user_facts' ? scopeClause(myRoles) : '';
+  // Empty: inline contradiction/supersede was reverted (see memory/lance.mjs)
+  // because auto-superseding from the small contradiction head could silently
+  // hide legitimate/pinned facts. Nothing sets superseded_by on the fact path
+  // anymore, so recall does not filter on it. Kept as a spliced-in clause so a
+  // future, safe supersede design can re-enable it in one place.
+  const notSuperseded = "";
 
-  const [immortals, semantic] = await Promise.all([
-    table.query().where(`immortal = true AND forgotten = false${scopeFilter}`).toArray().catch(() => []),
-    table.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${dateFilter}${scopeFilter}`).limit(searchLimit).toArray().catch(() => []),
+  let [immortals, semantic] = await Promise.all([
+    table.query().where(`immortal = true AND forgotten = false${notSuperseded}${scopeFilter}`).toArray().catch(() => []),
+    queryVecBad
+      ? Promise.resolve([])
+      : table.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${notSuperseded}${dateFilter}${scopeFilter}`).limit(searchLimit).toArray().catch(() => []),
   ]);
+  // Cap pinned facts so a heavily-pinned user doesn't blow up every prompt.
+  if (type === 'user_facts') immortals = capImmortalFacts(immortals, TOKEN_BUDGET.userContext);
 
   let sharedFacts = [];
   if (includeShared && type !== 'user_facts') {
     const sharedTable = await getTable('user_facts', userId);
     const sharedScope = scopeClause(myRoles);
     const [si, ss] = await Promise.all([
-      sharedTable.query().where(`immortal = true AND forgotten = false${sharedScope}`).toArray().catch(() => []),
-      sharedTable.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${sharedScope}`).limit(3).toArray().catch(() => []),
+      sharedTable.query().where(`immortal = true AND forgotten = false${notSuperseded}${sharedScope}`).toArray().catch(() => []),
+      queryVecBad
+        ? Promise.resolve([])
+        : sharedTable.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${notSuperseded}${sharedScope}`).limit(3).toArray().catch(() => []),
     ]);
-    sharedFacts = [...si, ...ss.slice(0, 3)];
+    sharedFacts = [...capImmortalFacts(si, TOKEN_BUDGET.userContext), ...ss.slice(0, 3)];
   }
 
   const reranked = [...semantic, ...sharedFacts]
@@ -204,12 +245,20 @@ export async function forgetByText({ agentId = 'main', text, userId = 'default',
   const whereClause = includeImmortal
     ? 'forgotten = false'
     : 'forgotten = false AND immortal = false';
+  // Embed once, up front, and refuse to forget on a zero/empty vector. Without
+  // this, a down/misconfigured embed model returns a zero vector whose
+  // vectorSearch yields arbitrary "nearest" rows — and since includeImmortal
+  // now deletes pinned facts, a bad embed could soft-delete unrelated pins.
+  const vec = await embed(text);
+  if (!vec?.length || vec.every(v => v === 0)) {
+    console.warn('[cortex] forgetByText skipped — embed returned a zero vector (embed model unavailable?)');
+    return { forgotten: 0, texts: [] };
+  }
   let totalForgotten = 0;
   const forgottenTexts = [];
   for (const tableName of tableNames) {
     try {
       const table = await getTable(tableName, userId);
-      const vec = await embed(text);
       const hits = await table.vectorSearch(vec).where(whereClause).limit(5).toArray().catch(() => []);
       for (const hit of hits) {
         // Only forget if the memory is semantically close (distance < 0.35)

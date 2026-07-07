@@ -9,6 +9,7 @@ import {
 } from './shared.mjs';
 import { getTable, remember, pin, searchSimilar } from './lance.mjs';
 import { forgetByText } from './recall.mjs';
+import { embed } from './embedding.mjs';
 
 // Cortex was trained on the bare `User: "..." Agent: "..."` wrapper (per
 // training/train.py format_record('signals')) — sending a verbose schema
@@ -217,14 +218,47 @@ function pruneFrictionCounters(agentId) {
   }
 }
 
+// Friction-head cost control. The head is one serialized reason-LLM call per
+// live counter, and there can be up to FRICTION_MAX_PER_AGENT (50) of them.
+// A cosine prefilter over the (LRU-cached) embeddings is orders of magnitude
+// cheaper, so we only pay for LLM confirmation on the closest few candidates.
+const FRICTION_PREFILTER_MIN  = 0.5; // loose cosine gate — the head decides
+const FRICTION_LLM_CANDIDATES = 3;   // hard cap on LLM calls per turn
+
+function _cosineSim(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+
 export async function trackFriction({ agentId, userMessage, userId = 'default' }) {
   if (!await providerHealthy()) return { promoted: false };
   pruneFrictionCounters(agentId);
   const safeMsg = userMessage.slice(0, 150).replace(/"/g, "'");
   const agentKeys = Object.keys(_frictionCounters).filter(k => k.startsWith(agentId + '_'));
 
-  for (const key of agentKeys) {
+  // Prefilter with cosine similarity so the friction head only runs on the
+  // top few candidates above a loose threshold instead of once per counter.
+  // Falls back to all keys if embedding is unavailable (preserves old behavior).
+  let candidates = agentKeys;
+  if (agentKeys.length > 1) {
+    const msgVec = await embed(safeMsg).catch(() => null);
+    if (msgVec?.length && !msgVec.every(v => v === 0)) {
+      const scored = [];
+      for (const key of agentKeys) {
+        const vec = await embed(_frictionCounters[key].text.slice(0, 150)).catch(() => null);
+        const sim = _cosineSim(msgVec, vec);
+        if (sim >= FRICTION_PREFILTER_MIN) scored.push([key, sim]);
+      }
+      scored.sort((a, b) => b[1] - a[1]);
+      candidates = scored.slice(0, FRICTION_LLM_CANDIDATES).map(([k]) => k);
+    }
+  }
+
+  for (const key of candidates) {
     const stored = _frictionCounters[key];
+    if (!stored) continue;
     const safeStored = stored.text.slice(0, 150).replace(/"/g, "'");
     // Bare `First: "..." Second: "..."` matches training/train.py
     // format_record('friction'). Production previously used A/B field names
@@ -414,8 +448,14 @@ export async function processSignals({ agentId, userMessage, agentLastResponse =
   // Check for explicit forget request first
   const forgetSubject = detectForgetRequest(userMessage);
   if (forgetSubject) {
-    forgetByText({ agentId, text: forgetSubject, userId }).catch(e => console.warn('[cortex] Forget request failed:', e.message));
-    return { correction: false, preference: false, forgot: true };
+    // Explicit user forget request: honor pinned/immortal facts too — those are
+    // exactly the ones a user asking "forget that I…" most wants gone. Await the
+    // result so the "forgotten" badge (chat.mjs emits memory_forgotten on
+    // forgot:true) is truthful — set only when something was actually removed,
+    // instead of unconditionally claiming success while pinned facts survive.
+    const res = await forgetByText({ agentId, text: forgetSubject, userId, includeImmortal: true })
+      .catch(e => { console.warn('[cortex] Forget request failed:', e.message); return { forgotten: 0 }; });
+    return { correction: false, preference: false, forgot: (res?.forgotten ?? 0) > 0 };
   }
 
   // Explicit remember/fact — deterministic fast-path, no LLM required
