@@ -160,6 +160,11 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     let textContent  = '';
     const toolUseBlocks = new Map(); // index -> { id, name, inputJson }
     let stopReason   = null;
+    // Terminal-marker latch: a well-formed turn ends with a `message_stop`
+    // event. If the reader completes without one, the stream was truncated and
+    // the text so far is partial — surfaced as a warning below, not persisted
+    // silently as a complete reply.
+    let sawTerminal  = false;
 
     let cacheCreated = 0, cacheRead = 0;
     for await (const event of readAnthropicSSE(res.body)) {
@@ -205,7 +210,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         stopReason = event.delta?.stop_reason;
         if (event.usage) totalOutputTokens += event.usage.output_tokens ?? 0;
       }
-      if (event.type === 'message_stop') break;
+      if (event.type === 'message_stop') { sawTerminal = true; break; }
     }
 
     {
@@ -323,6 +328,15 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       continue;
     }
 
+    // The turn is complete if we saw the `message_stop` envelope OR a
+    // `message_delta` carrying a real `stop_reason` (the actual completion
+    // signal — message_stop is just the closing envelope, and a stream can end
+    // right after stop_reason). Only warn when NEITHER arrived, i.e. the SSE
+    // stream truly ended mid-turn, so the truncated text isn't silently treated
+    // as a complete reply.
+    if (!sawTerminal && !stopReason) {
+      yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
+    }
     assistantContent = textContent;
     break;
   }

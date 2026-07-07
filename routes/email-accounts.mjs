@@ -199,9 +199,14 @@ export async function handle(req, res) {
       const idx = accounts.findIndex(a => a.id === acctId);
       if (idx !== -1) { accounts.splice(idx, 1); removed = true; }
     });
-    // Clean up Microsoft token file if present
+    // Clean up per-account OAuth token files if present. Both are tried
+    // unconditionally (only one exists for a given provider); without the
+    // Gmail unlink the per-account gmail-token-<acctId>.json — the file the
+    // connect flow actually writes — was orphaned on disk and stayed usable.
     const tp = msTokenPath(userId, acctId);
     if (fs.existsSync(tp)) fs.unlinkSync(tp);
+    const gtp = path.join(getUserDir(userId), `gmail-token-${acctId}.json`);
+    if (fs.existsSync(gtp)) fs.unlinkSync(gtp);
     // Cascade-delete the user's email-account aliases. routes/* deletions
     // don't go through tool dispatch, so the framework's manifest
     // cascade_on_tools doesn't fire — call the public helper directly.

@@ -7,10 +7,11 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { loadSession, getLmsResponseId, setLmsResponseId } from '../../sessions.mjs';
+import { getLmsResponseId, setLmsResponseId } from '../../sessions.mjs';
 import {
   getLmstudioNativeUrl, getLmstudioCompatUrl, lmstudioAuthHeaders, readAnthropicSSE,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
+  fetchWithRetry,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -21,11 +22,23 @@ import { effectiveReasoningEffort, isReasoningUnsupportedError } from '../../lib
 // Uses previous_response_id so LM Studio maintains context server-side.
 // NOTE: The native endpoint does NOT support tools/tool_choice — those calls
 // fall through to streamLMStudioCompat which uses /v1/chat/completions (SSE).
-export async function* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId = 'default', reasoningDisabled = false) {
-  if (agent.tools?.length) {
-    yield* streamLMStudioCompat(agent, systemPrompt, userText, agentId, signal, userId);
+export async function* streamLMStudio(agent, systemPrompt, messages, signal, userId = 'default', reasoningDisabled = false) {
+  const agentId = agent.id;
+  // The native /api/v1/chat endpoint is stateful (server-side history via
+  // previous_response_id) and supports NEITHER tools NOR image input. Route to
+  // the OpenAI-compat endpoint whenever the turn needs tools OR carries an
+  // attachment (a current user turn whose content is a parts array — e.g. an
+  // image_url block), passing the fully-prepared `messages` (trimmed history +
+  // the vision turn) so a picture sent to a vision model isn't answered blind.
+  const lastUser = [...messages].reverse().find(m => m.role === 'user');
+  const hasAttachment = Array.isArray(lastUser?.content);
+  if (agent.tools?.length || hasAttachment) {
+    yield* streamLMStudioCompat(agent, systemPrompt, messages, signal, userId);
     return;
   }
+  // No tools, no attachment → cheap stateful path. The current user turn's
+  // content is a plain string here.
+  const userText = typeof lastUser?.content === 'string' ? lastUser.content : '';
 
   const prevId = getLmsResponseId(agentId);
 
@@ -43,22 +56,22 @@ export async function* streamLMStudio(agent, systemPrompt, userText, agentId, si
   }
   if (prevId) body.previous_response_id = prevId;
 
-  const res = await fetch(getLmstudioNativeUrl(), {
+  const res = await fetchWithRetry(getLmstudioNativeUrl(), {
     method: 'POST', signal,
     headers: { 'Content-Type': 'application/json', ...lmstudioAuthHeaders() },
     body: JSON.stringify(body),
-  });
+  }, { label: 'lmstudio' });
 
   if (!res.ok) {
     const err = await res.text();
     if (!reasoningDisabled && body.reasoning !== undefined && isReasoningUnsupportedError(res.status, err)) {
       console.warn(`[lmstudio] reasoning rejected (${res.status}); retrying without reasoning`);
-      yield* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId, true);
+      yield* streamLMStudio(agent, systemPrompt, messages, signal, userId, true);
       return;
     }
     if (prevId && (res.status === 400 || res.status === 404)) {
       setLmsResponseId(agentId, '');
-      yield* streamLMStudio(agent, systemPrompt, userText, agentId, signal, userId, reasoningDisabled);
+      yield* streamLMStudio(agent, systemPrompt, messages, signal, userId, reasoningDisabled);
       return;
     }
     yield { type: 'error', message: `LM Studio error ${res.status}: ${err}` };
@@ -143,14 +156,28 @@ export async function* streamLMStudio(agent, systemPrompt, userText, agentId, si
 }
 
 // ── LM Studio — OpenAI-compat /v1/chat/completions (used when tools needed) ───
-export async function* streamLMStudioCompat(agent, systemPrompt, userText, agentId, signal, userId = 'default') {
-  // Need full history for tool-using requests since compat endpoint is stateless
-  const history = (await loadSession(agentId)).map(({ role, content }) => ({ role, content }));
+export async function* streamLMStudioCompat(agent, systemPrompt, messages, signal, userId = 'default') {
+  const agentId = agent.id;
+  // `messages` arrives prepared from chat.mjs: trimmed history + the current
+  // user turn (which may carry image_url parts for vision models). We just
+  // prepend the system prompt. A bare userText string is also accepted for
+  // legacy callers / tests. Previously this rebuilt history from loadSession —
+  // untrimmed AND missing the attachment turn, so images were answered blind.
+  const turnMessages = typeof messages === 'string'
+    ? [{ role: 'user', content: messages }]
+    : (Array.isArray(messages) ? messages : []);
   const working = [
     { role: 'system', content: systemPrompt },
-    ...history,
-    { role: 'user', content: userText },
+    ...turnMessages,
   ];
+  // Plain text of the current user turn — only for the fallback token estimate
+  // at the end when the server doesn't report real usage.
+  const _lastUser = [...turnMessages].reverse().find(m => m.role === 'user');
+  const userText = typeof _lastUser?.content === 'string'
+    ? _lastUser.content
+    : Array.isArray(_lastUser?.content)
+      ? _lastUser.content.filter(p => p?.type === 'text').map(p => p.text || '').join(' ')
+      : '';
   let assistantContent = '';
   let totalCompatTokens = 0;
   let lmInputTokens = 0, lmOutputTokens = 0;
@@ -180,11 +207,11 @@ export async function* streamLMStudioCompat(agent, systemPrompt, userText, agent
       if (effort === 'high') body.reasoning = 'on';
     }
 
-    const res = await fetch(getLmstudioCompatUrl(), {
+    const res = await fetchWithRetry(getLmstudioCompatUrl(), {
       method: 'POST', signal,
       headers: { 'Content-Type': 'application/json', ...lmstudioAuthHeaders() },
       body: JSON.stringify(body),
-    });
+    }, { label: 'lmstudio' });
     if (!res.ok) {
       const errText = await res.text();
       // Checked before the reasoning latch — a stream_options rejection text

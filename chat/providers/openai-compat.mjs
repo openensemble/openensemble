@@ -272,6 +272,12 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       continue;
     }
 
+    // No tool calls and no finish_reason: the SSE stream ended before its
+    // terminal chunk, so the text is truncated. Warn so it isn't silently
+    // persisted as a complete reply.
+    if (!finishReason) {
+      yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
+    }
     assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);
     if (assistantContent !== textContent) yield { type: 'replace', text: assistantContent };
     if (firstTokenAt && tokenCount > 0) {

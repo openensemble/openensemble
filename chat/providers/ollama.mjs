@@ -10,7 +10,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage } from './_shared.mjs';
+import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage, fetchWithRetry } from './_shared.mjs';
 import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
@@ -67,34 +67,26 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     }
     // ──────────────────────────────────────────────────────────────────────
 
-    // Retry on transient cloud 500s (Ollama cloud backend occasionally fails)
+    // Retry transient statuses (5xx/429/…) AND network-level failures via the
+    // shared wrapper. The old hand-rolled loop only retried 500/503 and let a
+    // dropped connection throw straight out of the generator with no retry.
+    const ollamaUrl = getOllamaUrl();
+    const ollamaKey = getOllamaKey();
+    const ollamaHeaders = { 'Content-Type': 'application/json' };
+    if (ollamaKey) ollamaHeaders['Authorization'] = `Bearer ${ollamaKey}`;
     let res;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const ollamaUrl = getOllamaUrl();
-      const ollamaKey = getOllamaKey();
-      const ollamaHeaders = { 'Content-Type': 'application/json' };
-      if (ollamaKey) ollamaHeaders['Authorization'] = `Bearer ${ollamaKey}`;
-      res = await fetch(ollamaUrl, {
+    try {
+      res = await fetchWithRetry(ollamaUrl, {
         method:  'POST',
         headers: ollamaHeaders,
         signal,
         body:    bodyJson,
-      });
-      if (res.ok || (res.status !== 500 && res.status !== 503)) break;
-      const errText = await res.text();
-      console.warn(`[ollama] ${res.status} on attempt ${attempt}/3 — retrying in ${attempt}s. ref: ${errText}`);
-      if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 1000));
-      else {
-        console.error(`[ollama] ERROR ${res.status} agent=${agent.id} model=${agent.model} body=${bodyJson.length}b (~${approxTokens} tokens)`);
-        console.error(`[ollama] ERROR response: ${errText}`);
-        console.error(`[ollama] ERROR messages dump:`);
-        ollamaMessages.forEach((m, i) => {
-          const tc = m.tool_calls ? JSON.stringify(m.tool_calls).slice(0, 300) : '';
-          console.error(`[ollama]   [${i}] ${m.role}: content=${m.content?.slice(0,200)} ${tc}`);
-        });
-        yield { type: 'error', message: `Ollama error ${res.status}: ${errText}` };
-        return;
-      }
+      }, { label: 'ollama' });
+    } catch (e) {
+      if (e.name === 'AbortError' || signal?.aborted) throw e;
+      console.error(`[ollama] request failed agent=${agent.id} model=${agent.model}: ${e.message}`);
+      yield { type: 'error', message: `Ollama request failed: ${e.message}` };
+      return;
     }
 
     if (!res.ok) {

@@ -600,7 +600,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       };
     }
     if (!finalized) {
-      // Stream ended without response.completed — still emit what we have.
+      // Stream ended without a `response.completed` terminal event — the text
+      // is truncated. Emit what we have, but warn so it isn't silently treated
+      // as a complete reply.
+      yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
     }
     break;
   }

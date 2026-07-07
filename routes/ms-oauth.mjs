@@ -10,7 +10,7 @@ import fs   from 'fs';
 import path from 'path';
 import { randomBytes, createHash } from 'crypto';
 import { fileURLToPath } from 'url';
-import { requireAuth, loadConfig, safeError } from './_helpers.mjs';
+import { requireAuth, loadConfig, safeError, getSessionUserId, getAuthToken } from './_helpers.mjs';
 import { msTokenPath } from '../lib/ms-graph.mjs';
 import { writeEncryptedJsonFile } from '../lib/encrypted-file.mjs';
 
@@ -159,6 +159,26 @@ export async function handle(req, res) {
       return true;
     }
 
+    // Account-linking CSRF guard: the browser completing this callback must be
+    // the SAME logged-in user that started the flow. Without it, an attacker
+    // could start an OAuth flow bound to their own OE account and trick a victim
+    // into completing it (or vice-versa), cross-linking mailboxes. Mirrors
+    // mcp.mjs's `pending.ownerUserId !== userId` check. A callback with no
+    // session cookie is rejected outright.
+    const sessionUserId = getSessionUserId(getAuthToken(req));
+    if (!sessionUserId) {
+      pendingStates.delete(nonce);
+      res.writeHead(302, { Location: '/?oauth=error&reason=no_session' });
+      res.end();
+      return true;
+    }
+    if (sessionUserId !== entry.userId) {
+      pendingStates.delete(nonce);
+      res.writeHead(302, { Location: '/?oauth=error&reason=session_mismatch' });
+      res.end();
+      return true;
+    }
+
     pendingStates.delete(nonce);
     const { userId, accountId, redirectUri, clientId, builtin, tenant, codeVerifier } = entry;
 
@@ -194,7 +214,11 @@ export async function handle(req, res) {
       tokens.tenant    = tenant;
       tokens.builtin   = !!builtin;
       const _msTp = msTokenPath(userId, accountId);
-      fs.writeFileSync(_msTp, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+      // Encrypt at rest (incl. refresh_token) to match the Google flow and the
+      // ms-graph refresh path, which both use writeEncryptedJsonFile. The read
+      // side (oauth status route, ms-graph) already expects the encrypted shape
+      // and passes legacy plaintext through, so this is a safe forward-migration.
+      writeEncryptedJsonFile(_msTp, tokens, { mode: 0o600 });
       try { fs.chmodSync(_msTp, 0o600); } catch {}
       res.writeHead(302, { Location: '/?oauth=success&service=microsoft' });
     } catch (e) {

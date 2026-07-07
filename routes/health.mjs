@@ -220,15 +220,40 @@ async function buildFullHealth() {
     const { isBuiltinReasonReady } = await import('../memory/builtin-reason.mjs');
     builtinReasonOk = isBuiltinReasonReady();
   } catch { /* builtin unavailable on this platform */ }
-  const embedOk  = embedProvider === 'builtin' ? true
-    : embedProvider === 'lmstudio' ? !!lmstudioOk
-    : !!ollamaOk;
+  let builtinEmbedOk = false;
+  try {
+    const { isBuiltinReady } = await import('../memory/builtin-embed.mjs');
+    builtinEmbedOk = isBuiltinReady();
+  } catch { /* builtin embed unavailable on this platform */ }
+
+  // Mirror routes/config.mjs's /api/cortex-health verdict so the dashboard and
+  // /api/cortex-health don't disagree. The OLD matrix collapsed EVERY non-
+  // builtin/lmstudio embed provider to !!ollamaOk, so embedProvider:'openai'
+  // with no local Ollama read as embed-down on a perfectly healthy install; and
+  // builtin embed read hard-true even before the model finished loading. This
+  // providerOk() replicates cortex-health's logic (cloud = key configured,
+  // local = probed) instead. (Replicated here rather than shared because
+  // config.mjs is owned elsewhere; keep the two in sync.)
+  const { getProviderSpec } = await import('../memory/shared.mjs');
+  const cloudReady = (prov) => {
+    const spec = getProviderSpec(prov);
+    return !!(spec && (spec.headers?.Authorization || spec.headers?.['x-api-key']));
+  };
+  const providerOk = (prov, needEmbed) => {
+    if (prov === 'builtin')  return false;            // per-subsystem, handled below
+    if (prov === 'ollama')   return !!ollamaOk;
+    if (prov === 'lmstudio') return !!lmstudioOk;
+    if (prov === 'llamacpp') return !!llamacppReasonOk;
+    if (prov === 'auto')     return !!ollamaOk || !!lmstudioOk;
+    const spec = getProviderSpec(prov);
+    if (!spec) return false;
+    if (needEmbed && !spec.supportsEmbed) return false;
+    return cloudReady(prov);
+  };
+  const embedOk  = embedProvider === 'builtin' ? builtinEmbedOk : providerOk(embedProvider, true);
   const reasonOk = reasonProvider === 'builtin' ? builtinReasonOk
-    : reasonProvider === 'lmstudio' ? !!lmstudioOk
-    : reasonProvider === 'ollama' ? !!ollamaOk
-    : reasonProvider === 'llamacpp' ? !!llamacppReasonOk
-    // 'auto' resolves to builtin when ready, else tries external runtimes.
-    : (builtinReasonOk || !!ollamaOk || !!lmstudioOk);
+    : reasonProvider === 'auto' ? (builtinReasonOk || !!ollamaOk || !!lmstudioOk)
+    : providerOk(reasonProvider, false);
 
   // Gmail status per user with gmail enabled
   const gmailUsers = users.filter(u => u.emailProvider === 'gmail');
@@ -314,10 +339,25 @@ export async function handle(req, res) {
   // are reconnaissance gifts to an unauthenticated caller; admin dashboard
   // gets the full picture via /api/admin/health below.
   if (req.url === '/health' && req.method === 'GET') {
-    const health = await buildFullHealthCached();
-    const status = health.ok ? 200 : 503;
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: health.ok }));
+    // Pure LOCAL liveness — deliberately does NOT probe cloud/LAN providers.
+    // This endpoint is unauthenticated and outside the /api rate limiter, and
+    // uptime monitors hit it constantly: it must page only when THIS box is
+    // down, not when a remote LLM API blips (the old build fanned out ~13
+    // upstream calls per cache miss and 503'd on ANY cloud-provider outage).
+    // Full provider health lives at the authed /api/admin/health below. The one
+    // in-process subsystem worth gating on is the built-in embedder — and only
+    // when it's the configured embed provider (an external-embed install would
+    // otherwise 503 forever while the unused builtin model never loads).
+    let ok = true;
+    const embedProvider = loadConfig().cortex?.embedProvider ?? 'builtin';
+    if (embedProvider === 'builtin') {
+      try {
+        const { isBuiltinReady } = await import('../memory/builtin-embed.mjs');
+        ok = isBuiltinReady();
+      } catch { ok = true; /* builtin embed unavailable on this platform — don't fail liveness on it */ }
+    }
+    res.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok }));
     return true;
   }
 

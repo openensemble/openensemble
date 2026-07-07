@@ -10,8 +10,6 @@ import { loadConfig } from '../../routes/_helpers.mjs';
 
 // ── Provider endpoints ───────────────────────────────────────────────────────
 export const ANTHROPIC_URL    = 'https://api.anthropic.com/v1/messages';
-export const LMSTUDIO_NATIVE  = 'http://127.0.0.1:1234/api/v1/chat';         // stateful, no history overhead
-export const LMSTUDIO_COMPAT  = 'http://127.0.0.1:1234/v1/chat/completions'; // OpenAI compat, used for tool calls
 export const FIREWORKS_BASE   = 'https://api.fireworks.ai/inference/v1/workflows/accounts/fireworks/models';
 export const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
 export const OPENAI_OAUTH_BASE = 'https://chatgpt.com/backend-api/codex';

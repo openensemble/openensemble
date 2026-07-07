@@ -29,6 +29,19 @@ import { getServerStatus } from '../lib/mcp-client.mjs';
 import { getCatalog } from '../lib/mcp-catalog.mjs';
 import { OeOAuthProvider, registerPendingState, consumePendingState } from '../lib/mcp-oauth.mjs';
 import { auth as runOAuth } from '@modelcontextprotocol/sdk/client/auth.js';
+import { isUrlSafe } from '../lib/url-guard.mjs';
+
+// SSRF guard for user-supplied http-transport MCP server URLs. The URL is
+// connected to server-side, so an unguarded value lets any (non-child) user
+// coerce OE into hitting cloud-metadata endpoints, LAN admin pages, or the OE
+// host itself. Resolves DNS and rejects any private/loopback/link-local target.
+async function rejectUnsafeMcpUrl(res, url) {
+  const guard = await isUrlSafe(url);
+  if (guard.ok) return false;
+  res.writeHead(400, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: `Refusing to connect to that URL (${guard.reason}). MCP server URLs must be public hosts — not private, loopback, link-local, or metadata addresses.` }));
+  return true;
+}
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c]));
@@ -124,6 +137,7 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'http transport requires `url`' }));
       return true;
     }
+    if (transport === 'http' && await rejectUnsafeMcpUrl(res, body.url)) return true;
     try {
       addServer(userId, {
         id: body.id,
@@ -168,6 +182,8 @@ export async function handle(req, res) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid JSON' })); return true;
     }
+    // If the edit sets/changes an http url, validate it before persist+reconnect.
+    if (typeof body?.url === 'string' && body.url && await rejectUnsafeMcpUrl(res, body.url)) return true;
     try {
       updateServer(userId, serverId, body ?? {});
     } catch (e) {

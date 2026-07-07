@@ -329,6 +329,14 @@ export async function handle(req, res) {
       // bookId may be passed as a query param (?bookId=xxx)
       const uploadUrl = new URL(req.url, 'http://x');
       const bookId = uploadUrl.searchParams.get('bookId') || null;
+      // Book boundary: stamping a bookId the caller can't access would let them
+      // write transactions into someone else's book. Every other book path
+      // enforces canAccessBook (list/summary/patch/delete) — so must this one.
+      if (bookId && !canAccessBook(authId, bookId)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'You do not have access to that book' }));
+        return true;
+      }
 
       const cfg = loadConfig();
       const extracted = await extractTransactions(cfg, { isImage, mimeType, base64: isImage ? fileData.toString('base64') : null, extractedText });

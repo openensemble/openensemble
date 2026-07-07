@@ -6,6 +6,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import {
   OPENROUTER_URL, readAnthropicSSE, getOpenRouterKey, fetchWithRetry,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
+  capabilityNotice,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -117,11 +118,15 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       if ((res.status === 400 || res.status === 422) && useNative && nativeTool && /web[_ ]?search|unsupported tool|tool type|unknown variant/i.test(errText)) {
         console.warn(`[openrouter] native web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
+        const notice = capabilityNotice('openrouter', 'native_search', 'Provider rejected native web search — continuing with the standard search tool.');
+        if (notice) yield notice;
         continue;
       }
       if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
         console.warn('[openrouter] reasoning effort rejected; retrying without reasoning field');
         reasoningDisabled = true;
+        const notice = capabilityNotice('openrouter', 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');
+        if (notice) yield notice;
         continue;
       }
       yield { type: 'error', message: `OpenRouter error ${res.status}: ${errText}` };

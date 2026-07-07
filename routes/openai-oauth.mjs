@@ -17,7 +17,7 @@ import http from 'http';
 import { requireAuth, readBody, getUser, isPrivileged } from './_helpers.mjs';
 import {
   generatePkce, generateState, buildAuthorizeUrl, exchangeCode,
-  writeToken, readToken, deleteToken, isConnected,
+  writeToken, readToken, deleteToken, isConnected, forceRefreshToken,
   CALLBACK_PORT, CALLBACK_PATH,
 } from '../lib/openai-codex-auth.mjs';
 
@@ -31,6 +31,18 @@ function isOAuthAllowed(userId, providerId) {
 }
 
 const MAIN_APP_URL = 'http://localhost:3737';
+
+// The OE origin the browser used to reach /connect (its own session's origin),
+// derived from the Host header so the callback can redirect back to it. Strict
+// host validation keeps a forged/CRLF Host out of the redirect Location.
+// Returns null (→ MAIN_APP_URL fallback) if the host looks unusable.
+function originFromRequest(req) {
+  const host = req.headers?.host;
+  if (!host || host.length > 255 || !/^[A-Za-z0-9.:\[\]-]+$/.test(host)) return null;
+  const xfp = String(req.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const proto = xfp === 'https' || req.socket?.encrypted ? 'https' : 'http';
+  return `${proto}://${host}`;
+}
 const STATE_TTL_MS = 10 * 60 * 1000;
 
 // Pending state: state → { userId, verifier, expires }
@@ -97,14 +109,17 @@ async function handleCallbackRequest(req, res) {
   const state = url.searchParams.get('state');
   const error = url.searchParams.get('error');
 
+  // Redirect back to the origin the user STARTED from (captured at connect),
+  // falling back to localhost only if we don't have it — see originFromRequest.
+  const entry = state ? pendingStates.get(state) : null;
+  const appBase = entry?.origin || MAIN_APP_URL;
+
   if (error) {
-    redirectResponse(res, `${MAIN_APP_URL}/?oauth=error&reason=${encodeURIComponent(error)}`);
+    redirectResponse(res, `${appBase}/?oauth=error&reason=${encodeURIComponent(error)}`);
     return;
   }
-
-  const entry = state && pendingStates.get(state);
   if (!entry || entry.expires < Date.now()) {
-    redirectResponse(res, `${MAIN_APP_URL}/?oauth=error&reason=expired`);
+    redirectResponse(res, `${appBase}/?oauth=error&reason=expired`);
     return;
   }
   pendingStates.delete(state);
@@ -113,10 +128,10 @@ async function handleCallbackRequest(req, res) {
     const token = await exchangeCode({ code, verifier: entry.verifier });
     writeToken(entry.userId, token);
     console.log(`[openai-oauth] stored token for user=${entry.userId} account=${token.account_id} plan=${token.plan_type}`);
-    redirectResponse(res, `${MAIN_APP_URL}/?oauth=success&service=openai-codex`);
+    redirectResponse(res, `${appBase}/?oauth=success&service=openai-codex`);
   } catch (e) {
     console.error('[openai-oauth] callback error:', e.message);
-    redirectResponse(res, `${MAIN_APP_URL}/?oauth=error&reason=token_exchange_failed`);
+    redirectResponse(res, `${appBase}/?oauth=error&reason=token_exchange_failed`);
   }
 }
 
@@ -141,7 +156,13 @@ export async function handle(req, res) {
     }
     const state = generateState();
     const { verifier, challenge } = generatePkce();
-    pendingStates.set(state, { userId, verifier, expires: Date.now() + STATE_TTL_MS });
+    // Capture the origin the browser STARTED from so the :1455 callback can
+    // redirect back to it (not a hardcoded localhost). Without this, a user who
+    // reached OE via a LAN IP / tunnel / 127.0.0.1 gets bounced to `localhost`,
+    // a DIFFERENT origin whose session may belong to another OE user — landing
+    // them in the wrong account's view (the token itself is still stored for
+    // the correct initiating user; only the redirect lands wrong).
+    pendingStates.set(state, { userId, verifier, origin: originFromRequest(req), expires: Date.now() + STATE_TTL_MS });
     const authUrl = buildAuthorizeUrl({ state, challenge });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ url: authUrl }));
@@ -158,6 +179,31 @@ export async function handle(req, res) {
       plan:      token?.plan_type ?? null,
       expiresAt: token?.expires_at ?? null,
     }));
+    return true;
+  }
+
+  // ── Manual token refresh ───────────────────────────────────────────────────
+  // Force a refresh using the stored refresh_token without the disconnect +
+  // re-login dance. Succeeds silently for an active account; if the
+  // refresh_token itself is dead (e.g. an account left idle so long ChatGPT
+  // revoked it), returns needsReconnect so the UI can prompt a reconnect.
+  if (url.pathname === '/api/oauth/openai/refresh' && req.method === 'POST') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    if (!isConnected(userId)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not connected — nothing to refresh.' }));
+      return true;
+    }
+    try {
+      const refreshed = await forceRefreshToken(userId);
+      const token = readToken(userId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, accountId: refreshed.account_id ?? null, expiresAt: token?.expires_at ?? null, plan: token?.plan_type ?? null }));
+    } catch (e) {
+      console.warn(`[openai-oauth] manual refresh failed for user=${userId}: ${e.message}`);
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Could not refresh the login — it may have been revoked. Please reconnect.', needsReconnect: true }));
+    }
     return true;
   }
 

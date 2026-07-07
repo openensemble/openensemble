@@ -13,7 +13,7 @@ import fs   from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
-import { requireAuth, readBody, getUserDir, loadConfig, safeId } from './_helpers.mjs';
+import { requireAuth, readBody, getUserDir, loadConfig, safeId, getSessionUserId, getAuthToken } from './_helpers.mjs';
 import { seedGmailAccount } from './email-accounts.mjs';
 import { ensureFreshToken, resolveTokenPath, getClientCredentials, CREDS_PATH, GOOGLE_AUTH_BASE_DIR as BASE_DIR } from '../lib/google-auth.mjs';
 import { readEncryptedJsonFile, writeEncryptedJsonFile } from '../lib/encrypted-file.mjs';
@@ -165,6 +165,26 @@ export async function handle(req, res) {
       return true;
     }
 
+    // Account-linking CSRF guard: the browser completing this callback must be
+    // the SAME logged-in user that started the flow. Without it, an attacker
+    // could start an OAuth flow bound to their own OE account and trick a victim
+    // into completing it (or vice-versa), cross-linking mailboxes. Mirrors
+    // mcp.mjs's `pending.ownerUserId !== userId` check. A callback with no
+    // session cookie is rejected outright.
+    const sessionUserId = getSessionUserId(getAuthToken(req));
+    if (!sessionUserId) {
+      pendingStates.delete(nonce);
+      res.writeHead(302, { Location: '/?oauth=error&reason=no_session' });
+      res.end();
+      return true;
+    }
+    if (sessionUserId !== entry.userId) {
+      pendingStates.delete(nonce);
+      res.writeHead(302, { Location: '/?oauth=error&reason=session_mismatch' });
+      res.end();
+      return true;
+    }
+
     pendingStates.delete(nonce);
     const { userId, service, accountId, redirectUri } = entry;
 
@@ -257,10 +277,16 @@ export async function handle(req, res) {
     const userId = requireAuth(req, res); if (!userId) return true;
     const service = url.searchParams.get('service');
     if (!SCOPES[service]) { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid service' })); return true; }
-    const tp = tokenPath(userId, service);
+    // accountId targets the per-account token file that `connect` writes
+    // (gmail-token-<acctId>.json). Without it we'd only ever unlink the legacy
+    // base token — the per-account token stays on disk and remains usable.
+    // Sanitized (part of a filename) exactly as the connect path does.
+    const rawAccountId = url.searchParams.get('accountId');
+    const accountId = rawAccountId ? safeId(rawAccountId) : null;
+    const tp = tokenPath(userId, service, accountId);
     if (fs.existsSync(tp)) fs.unlinkSync(tp);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ disconnected: true, service }));
+    res.end(JSON.stringify({ disconnected: true, service, accountId }));
     return true;
   }
 
