@@ -237,6 +237,7 @@ export async function addTask(task) {
 }
 
 export function removeTask(id, ownerId = null) {
+  _lastIntervalFireAt.delete(id); // drop the interval fire-history entry (bounded leak fix)
   return modifyTaskById(id, tasks => { const i = tasks.findIndex(t => t.id === id); if (i !== -1) tasks.splice(i, 1); }, ownerId);
 }
 

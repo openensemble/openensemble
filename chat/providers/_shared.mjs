@@ -228,7 +228,11 @@ export async function* readAnthropicSSE(body) {
     for (const line of lines) {
       if (line.startsWith('data: ')) {
         const data = line.slice(6).trim();
-        if (data === '[DONE]') return;
+        // `[DONE]` = a clean OpenAI-style stream terminator. Signal it (a
+        // sentinel with no type/choices/usage that every consumer's field
+        // checks harmlessly skip) so a provider that ends via [DONE] without a
+        // per-chunk finish_reason isn't mistaken for a truncated stream.
+        if (data === '[DONE]') { yield { __sseDone: true }; return; }
         try { yield JSON.parse(data); } catch { /* skip malformed SSE event */ }
       }
     }

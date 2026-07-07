@@ -675,6 +675,11 @@ setInterval(async () => {
       // root-graph child, and any voice WAITING-ring hold are released. A bare
       // activeTasks.delete leaked rootTaskGraphs and left a device ring lit.
       await _onComplete(taskId, info.userId, info.coordinatorAgentId, info.agentName || 'Task', info.agentEmoji || '🤖', null, 'reaped: no activity in 24h', 'error');
+      // A stale ROOT with (also-stale) children takes _onComplete's deferChip
+      // branch and is left in activeTasks — which would re-reap it every hour.
+      // The reap is terminal by definition (24h idle); its children are in this
+      // same stale sweep and get reaped on their own, so hard-remove the root.
+      if (activeTasks.has(taskId)) { activeTasks.delete(taskId); _journalRemove(taskId); }
     } catch (e) {
       console.warn('[background-tasks] reap via _onComplete failed, hard-removing:', e?.message || e);
       activeTasks.delete(taskId);

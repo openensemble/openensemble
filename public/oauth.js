@@ -220,8 +220,12 @@ async function _doMicrosoftOAuth() {
   if (acct.error) { alert(`Error: ${acct.error}`); return; }
   const res = await fetch(`/api/oauth/microsoft/connect?accountId=${encodeURIComponent(acct.id)}`).then(r => r.json());
   if (res.error) { alert(`Error: ${res.error}`); return; }
-  // Opened without noopener so the poll can observe popup.closed for orphan
-  // cleanup of the pre-created Microsoft shell account.
+  // Deliberately WITHOUT noopener: _watchOAuthAccount needs popup.closed to
+  // tell "consent in progress" from "abandoned" so it only reaps the pre-created
+  // shell account on a real cancel (with noopener the handle is null → it would
+  // reap mid-consent). Safe: this popup only ever loads first-party/Microsoft
+  // consent pages, never attacker content, so the reverse-tabnabbing surface
+  // noopener guards against isn't reachable here.
   const popup = window.open(res.url, '_blank');
   _watchOAuthAccount(acct.id, 'microsoft', popup);
 }
@@ -439,8 +443,12 @@ async function connectGoogle(service) {
     const res = await fetch(`/api/oauth/google/connect?${qs}`, {});
     if (!res.ok) { alert('Failed to start authorization. Check server logs.'); return; }
     const { url } = await res.json();
-    // Opened without noopener so the poll can observe popup.closed for orphan
-    // cleanup of the pre-created Gmail shell account.
+    // Deliberately WITHOUT noopener: _watchOAuthAccount needs popup.closed to
+    // tell "consent in progress" from "abandoned" so it only reaps the
+    // pre-created shell account on a real cancel (with noopener the handle is
+    // null → it would reap mid-consent). Safe: this popup only ever loads
+    // first-party/Google consent pages, never attacker content, so the
+    // reverse-tabnabbing surface noopener guards against isn't reachable here.
     const popup = window.open(url, '_blank');
     if (service === 'gmail') _watchOAuthAccount(acctId, 'gmail', popup);
     else _pollOAuthStatus();

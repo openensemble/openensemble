@@ -200,12 +200,19 @@ export function getSessionUserId(token) {
       return null;
     }
     s.lastActivity = now;
-    const prevExpires = s.expires;
     s.expires = Math.min(now + 7 * 24 * 60 * 60 * 1000, hardCap);
-    // Only persist when the sliding expiry actually moved a meaningful amount;
-    // otherwise the in-memory update is enough and we avoid a per-request write
-    // of the whole session map (see SESSION_PERSIST_MIN_ADVANCE_MS).
-    if (s.expires - prevExpires >= SESSION_PERSIST_MIN_ADVANCE_MS) persistSessions();
+    // Persist only when the expiry has advanced meaningfully SINCE WE LAST
+    // PERSISTED it — not since the previous call. Comparing against the previous
+    // call meant a high-frequency device (auth < the threshold apart, e.g. a
+    // voice device on every /api/tts) never crossed the bar and never persisted
+    // its slide at all; comparing against the last-persisted value bounds the
+    // write rate while still writing at least every SESSION_PERSIST_MIN_ADVANCE_MS
+    // of accumulated advance.
+    const lastPersisted = s.persistedExpires ?? 0;
+    if (s.expires - lastPersisted >= SESSION_PERSIST_MIN_ADVANCE_MS) {
+      s.persistedExpires = s.expires;
+      persistSessions();
+    }
     return s.userId;
   }
   if (s.expires < now) { sessions.delete(token); persistSessions(); return null; }

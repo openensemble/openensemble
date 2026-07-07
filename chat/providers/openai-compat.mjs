@@ -136,12 +136,14 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     let textContent  = '';
     const toolCalls  = new Map();
     let finishReason = null;
+    let sawDone = false; // saw the [DONE] terminator → stream ended cleanly even without a finish_reason
     let tokenCount   = 0;
     const startedAt  = Date.now();
     let firstTokenAt = null;
     let iterUsage    = null;
 
     for await (const event of readAnthropicSSE(res.body)) {
+      if (event.__sseDone) { sawDone = true; continue; }
       // Keep the LAST usage seen this completion, accumulate after the loop.
       // Most providers send usage once on the final chunk; Perplexity sends a
       // CUMULATIVE usage on every chunk, so `+=` per event would overcount.
@@ -272,10 +274,11 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       continue;
     }
 
-    // No tool calls and no finish_reason: the SSE stream ended before its
-    // terminal chunk, so the text is truncated. Warn so it isn't silently
-    // persisted as a complete reply.
-    if (!finishReason) {
+    // No tool calls, no finish_reason, AND no [DONE]: the SSE stream ended
+    // before any terminal marker, so the text is likely truncated. Warn. A
+    // provider that ends cleanly via [DONE] without per-chunk finish_reason
+    // (some custom compat endpoints) sets sawDone and is NOT flagged.
+    if (!finishReason && !sawDone) {
       yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
     }
     assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);

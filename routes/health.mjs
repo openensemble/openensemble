@@ -173,8 +173,12 @@ async function buildFullHealth() {
   const cortexUsesOllama   = embedProvider === 'ollama'   || reasonProvider === 'ollama';
   const cortexUsesLmstudio = embedProvider === 'lmstudio' || reasonProvider === 'lmstudio';
   const anthropicConfigured = !!cfg.anthropicApiKey                                   && isEnabled('anthropic');
-  const ollamaConfigured    = (!!ollamaKey || enabled.ollama === true || cortexUsesOllama) && isEnabled('ollama');
-  const lmstudioConfigured  = (enabled.lmstudio === true || cortexUsesLmstudio)        && isEnabled('lmstudio');
+  // cortexUsesOllama/Lmstudio force a probe even when the provider is disabled
+  // for chat: it's still needed for embeddings/reasoning, and cortex-health
+  // probes it unconditionally — gating it on isEnabled here made /health and
+  // /api/cortex-health disagree for that (odd but valid) config.
+  const ollamaConfigured    = ((!!ollamaKey || enabled.ollama === true) && isEnabled('ollama')) || cortexUsesOllama;
+  const lmstudioConfigured  = (enabled.lmstudio === true && isEnabled('lmstudio')) || cortexUsesLmstudio;
 
   // Probe only what's configured
   const ollamaAuthHeaders = ollamaKey ? { Authorization: `Bearer ${ollamaKey}` } : {};

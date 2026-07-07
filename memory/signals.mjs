@@ -222,7 +222,11 @@ function pruneFrictionCounters(agentId) {
 // live counter, and there can be up to FRICTION_MAX_PER_AGENT (50) of them.
 // A cosine prefilter over the (LRU-cached) embeddings is orders of magnitude
 // cheaper, so we only pay for LLM confirmation on the closest few candidates.
-const FRICTION_PREFILTER_MIN  = 0.5; // loose cosine gate — the head decides
+const FRICTION_PREFILTER_MIN  = 0.35; // loose cosine gate — the head decides. Low
+                                      // enough to admit paraphrase-repeats ("turn
+                                      // off the lights" vs "the lights are still
+                                      // on"); the FRICTION_LLM_CANDIDATES cap still
+                                      // bounds LLM calls regardless of how many pass.
 const FRICTION_LLM_CANDIDATES = 3;   // hard cap on LLM calls per turn
 
 function _cosineSim(a, b) {
