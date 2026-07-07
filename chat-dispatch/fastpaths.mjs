@@ -44,6 +44,47 @@ const HA_VERB_RE      = /^(turn\s+on|turn\s+off|toggle|activate|run|lock|unlock|
 const HA_SET_PCT_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:%|percent)\s*$/i;
 const HA_SET_DEG_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:degrees?|deg)\s*$/i;
 
+// The HA skill + its service-call tool. Used to mirror the exact gates
+// executeRoleTool (roles.mjs) enforces for ha_call_service, so this pre-LLM
+// fast-path can't bypass the child-account / disabled-skill / hidden-tool
+// overrides — "unlock the front door" from a child, or from a user who
+// disabled or hid Home Assistant, must NOT go straight through to haRequest.
+const HA_SKILL_ID     = 'role_home_assistant';
+const HA_SERVICE_TOOL = 'ha_call_service';
+
+/**
+ * True when this user is barred from the HA service-call tool by the same
+ * overrides executeRoleTool applies (child-account, disabled-skill, hidden-
+ * tool). Reuses the skill-overrides helpers roles.mjs itself uses, so the
+ * "what counts as disabled/hidden" logic stays single-sourced. On a hit the
+ * caller falls through to the LLM, whose coordinator re-gates identically (a
+ * gated user's coordinator simply lacks the tool) — the service call is never
+ * made from the fast-path.
+ *
+ * @param {string} userId
+ * @param {{ role?: string, allowedSkills?: string[] } | null | undefined} chatUser  profile threaded from chat-dispatch (undefined only if a caller omitted it)
+ * @returns {Promise<boolean>}
+ */
+async function haFastpathGated(userId, chatUser) {
+  if (!userId) return false;
+  const { isSkillDisabled, getHiddenTools } = await import('../lib/skill-overrides.mjs');
+  // Service roles are never always_on, so the always_on safety-net arg is false.
+  if (isSkillDisabled(userId, HA_SKILL_ID, false)) return true;
+  if (getHiddenTools(userId, HA_SKILL_ID).includes(HA_SERVICE_TOOL)) return true;
+  // Child accounts must have HA explicitly granted (mirrors the profile.role ===
+  // 'child' + allowedSkills check in roles.mjs executeRoleTool). Read the
+  // profile only if the caller didn't already thread it.
+  let profile = chatUser;
+  if (profile === undefined) {
+    try { const { getUser } = await import('../routes/_helpers.mjs'); profile = getUser(userId); }
+    catch { profile = null; }
+  }
+  if (profile?.role === 'child'
+      && Array.isArray(profile.allowedSkills)
+      && !profile.allowedSkills.includes(HA_SKILL_ID)) return true;
+  return false;
+}
+
 async function resolvePhrase(phrase, userId) {
   const { resolveAlias } = await import('../lib/ha-aliases.mjs');
   const aliased = resolveAlias(userId, phrase);
@@ -189,7 +230,7 @@ async function executeHaIntent(intent) {
  *
  * @returns {Promise<{ handled: true } | null>}
  */
-export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
+export async function tryHaFastpath({ userText, userId, agentId, chatUser, onEvent }) {
   if (!userText) return null;
   // HA control stays GLOBAL (any agent fast-paths it): a light/lock command is
   // harmless and universal, and short-circuiting it to ~200ms from whatever
@@ -199,6 +240,14 @@ export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
   try {
     const haIntent = await classifyHaIntent(userText, userId);
     if (!haIntent) return null;
+    // Enforce the SAME gates executeRoleTool applies to ha_call_service before
+    // touching HA — otherwise a child (or a user who disabled/hid the HA skill)
+    // would drive locks/lights straight through this shortcut. On a hit, fall
+    // through so the (identically-gated) LLM path handles the refusal.
+    if (await haFastpathGated(userId, chatUser)) {
+      console.log('[chat] ha-fastpath: gated by skill overrides — falling through to LLM');
+      return null;
+    }
     const result = await executeHaIntent(haIntent);
     if (result.error) {
       console.log(`[chat] ha-fastpath miss-then-error: ${result.error} — falling through to LLM`);

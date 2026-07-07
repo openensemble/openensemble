@@ -114,8 +114,31 @@ async function handleAddProvider(args, userId, agentId) {
   }
   const { name, baseUrl, keyField, displayName, modelsEndpoint, sampleModelId } = args ?? {};
   if (!name || !baseUrl || !keyField) return 'name, baseUrl, and keyField are required.';
-  if (!/^[a-z][a-z0-9_-]*$/.test(name)) return 'name must be lowercase letters/numbers/hyphens, starting with a letter.';
+  // name charset is kept in sync with keyField's (letters+digits only, no
+  // -/_) because keyField must equal `${name}ApiKey` below; allowing hyphens
+  // in name would make that binding unsatisfiable (keyField forbids them).
+  if (!/^[a-z][a-z0-9]*$/.test(name)) return 'name must be lowercase letters/numbers, starting with a letter (no hyphens or underscores).';
   if (!/^[a-z][a-zA-Z0-9]*ApiKey$/.test(keyField)) return 'keyField must look like "<provider>ApiKey" (e.g. cerebrasApiKey).';
+  // Bind keyField to the provider name and reject collisions with any existing
+  // provider key. Without this an overlay could set keyField:"openaiApiKey"
+  // (its own `name` passes the built-in check below) and then, via env-first
+  // getCompatKey, exfil the real OpenAI key to an attacker-chosen baseUrl — or
+  // clobber the stored key outright (modifyConfig writes cfg[keyField] = apiKey).
+  if (keyField !== `${name}ApiKey`) {
+    return `keyField must be exactly "${name}ApiKey" — it is derived from the provider name so an added provider can't point at a built-in provider's key.`;
+  }
+  {
+    const cfgNow = loadConfig();
+    if (Object.prototype.hasOwnProperty.call(cfgNow, keyField) && cfgNow[keyField]) {
+      return `keyField "${keyField}" already holds a value in config — refusing to overwrite an existing provider key. Pick a different provider name.`;
+    }
+    const registryKeyFields = new Set(
+      Object.values(OPENAI_COMPAT_PROVIDERS).map(p => p?.keyField).filter(Boolean)
+    );
+    if (registryKeyFields.has(keyField)) {
+      return `keyField "${keyField}" is already used by a built-in or previously-added provider — pick a provider name whose "<name>ApiKey" doesn't collide.`;
+    }
+  }
 
   // Validate URL via the existing helper. Use the same gate routes/config.mjs uses.
   let validatedUrl;

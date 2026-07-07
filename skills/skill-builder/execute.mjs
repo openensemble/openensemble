@@ -577,7 +577,13 @@ async function handleCreate(args, userId) {
   const sandboxLine = isolate
     ? `\n🔒 Runs sandboxed — isolated to its own data${manifest.sandbox.network ? ', with network access' : ', no network access'}.${caps.usesCredentials ? ' Secrets go in its encrypted per-skill credential store.' : ''}`
     : `\n⚠️ Created WITHOUT a sandbox — it runs in-process with full access to your data. Only appropriate for trusted admin skills.`;
-  return `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}.${manifest.intent_examples?.length ? ` Tool-router classifier picked up ${manifest.intent_examples.length} intent example(s).` : ''} The skill persists across server restarts.${drawerNote}${sandboxLine}${warningTail}`;
+  // Structured success sentinel. Every error path above returns a plain string;
+  // ONLY this path returns an object with ok:true. Callers (handleDraftBuild,
+  // the skill_create dispatch) branch on that instead of regex-matching the
+  // prose — a skill whose name/tool contains "failed"/"rejected" no longer
+  // gets misclassified as an error (which used to strand the draft and make
+  // the retry fail "already exists").
+  return { ok: true, message: `Skill "${manifest.name}" (${skillId}) created and loaded. Tools available in your next message: ${newNames.join(', ')}.${manifest.intent_examples?.length ? ` Tool-router classifier picked up ${manifest.intent_examples.length} intent example(s).` : ''} The skill persists across server restarts.${drawerNote}${sandboxLine}${warningTail}` };
 }
 
 async function handleUpdateCode(args, userId) {
@@ -1656,15 +1662,16 @@ async function handleDraftBuild(args, userId) {
   };
   const result = await handleCreate(createArgs, userId);
 
-  // Only delete the draft on a clean success — handleCreate returns a
-  // sentence-style message; "successfully" / "created" in the response
-  // signals the write landed. On failure the draft persists so the LLM
-  // can patch and retry without re-collecting the user's decisions.
-  if (typeof result === 'string' && /created|added|registered/i.test(result) && !/error|failed|rejected/i.test(result)) {
+  // Only delete the draft on a clean success. handleCreate returns a structured
+  // { ok:true, message } object on success and a plain error string on any
+  // failure — branch on that, never on the prose (a skill named "…rejected"
+  // would otherwise be misreported and orphan the draft).
+  if (result && typeof result === 'object' && result.ok) {
     deleteDraft(userId, draftId);
-    return `${result}\n\n_Draft \`${draftId}\` finalised and removed._`;
+    return `${result.message}\n\n_Draft \`${draftId}\` finalised and removed._`;
   }
-  return `Build attempt returned a problem — draft \`${draftId}\` kept so you can patch and retry:\n\n${result}`;
+  const errText = typeof result === 'string' ? result : (result?.message ?? String(result));
+  return `Build attempt returned a problem — draft \`${draftId}\` kept so you can patch and retry:\n\n${errText}`;
 }
 
 async function handleDraftDiscard(args, userId) {
@@ -1684,14 +1691,19 @@ export async function executeSkillTool(name, args, userId, agentId) {
   // network privilege. Until validation is sandboxed (worker thread or static
   // analysis), restrict authorship to owner/admin so a prompt-injected child
   // or guest account can't write code-execution into the install.
-  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_update_tool_def', 'skill_delete', 'skill_rollback', 'skill_try_tool']);
+  // skill_draft_build collapses a draft into a skill_create (code-execution at
+  // validate time); skill_update_manifest injects systemPromptAddition / grants
+  // sandbox+network. Both reach skill creation / prompt injection, so they are
+  // gated alongside the direct code-authoring tools. draft start/update/show/
+  // discard stay open — they only mutate an in-progress spec, no code runs.
+  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_update_tool_def', 'skill_update_manifest', 'skill_draft_build', 'skill_delete', 'skill_rollback', 'skill_try_tool']);
   if (CODE_AUTHORING.has(name) && !isPrivileged(userId)) {
     return 'Permission denied: skill authoring (create/update/patch/delete/rollback/try) is restricted to admin/owner accounts.';
   }
 
   try {
     if (name === 'skill_read_blueprint')    return handleReadBlueprint();
-    if (name === 'skill_create')            return await handleCreate(args, userId);
+    if (name === 'skill_create')            { const r = await handleCreate(args, userId); return typeof r === 'string' ? r : r.message; }
     if (name === 'skill_update_code')       return await handleUpdateCode(args, userId);
     if (name === 'skill_read_code')         return await handleReadCode(args, userId);
     if (name === 'skill_patch_code')        return await handlePatchCode(args, userId);

@@ -360,6 +360,21 @@ async function execCreateWatch(args, userId, agentId, ctx) {
   if (source === 'file_stat'          && !state.path)    return 'Error: params.path is required for file_stat.';
   if (source === 'event_subscription' && !state.event)   return 'Error: params.event is required for event_subscription.';
 
+  // Privileged (owner/admin) creators may target server-host paths OUTSIDE
+  // their profile dir with file_stat — this is the oe-admin case (system-level
+  // OE repair / installs like Tailscale, e.g. "watch for /etc/… to appear").
+  // A read-only file_stat is strictly weaker than the shell/package/file
+  // capabilities such a user already has. Stamp a creation-time trust flag the
+  // watcher handler honors; NON-privileged creators stay confined to their own
+  // user dir. Lazy import so this can't form an eval-time cycle; best-effort —
+  // any failure leaves the watcher confined (the safe default).
+  if (source === 'file_stat') {
+    try {
+      const { isPrivileged } = await import('../../routes/_helpers.mjs');
+      if (isPrivileged(userId)) state._privilegedOrigin = true;
+    } catch { /* default to confined */ }
+  }
+
   let resolvedExpires = null;
   if (expires_at) {
     const t = new Date(expires_at).getTime();

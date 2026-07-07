@@ -565,17 +565,10 @@ const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:ha
 // fabricated-status failure — the coordinator re-asserting its own stale
 // "I'll let you know when it's done" promise after a restart killed the run.
 const IN_PROGRESS_REPLY_RE = /\b(?:already\s+(?:in\s+progress|under\s?way|working|running|on\s+it)|still\s+(?:working|running|in\s+progress|going)|(?:is|are|['’]s)\s+(?:currently\s+)?working\s+on\s+(?:it|that|this)|(?:i|we)(?:['’]ll|\s+will)\s+(?:let\s+you\s+know|update\s+you|report\s+back|ping\s+you|follow\s+up)\s+(?:when|once|as\s+soon\s+as)|(?:hasn['’]?t|haven['’]?t)\s+(?:finished|completed)\s+yet|not\s+(?:done|finished)\s+yet)\b/i;
-// Tools whose use this turn makes an in-progress claim legitimate: the model
-// either checked real status or just started/stopped the work it's describing.
 // Short, honest interstitials shown when a recovery fires: the live draft is
 // wiped and replaced with one of these before the corrected reply drops in.
 const MISSING_TOOL_NOTICE = 'Sorry, I misspoke — let me do that now.';
 const IN_PROGRESS_NOTICE  = 'One moment — let me check the actual status.';
-
-const BACKGROUND_STATUS_TOOLS = new Set([
-  'check_workers', 'list_active_agents', 'list_watches', 'get_task_log',
-  'spawn_worker', 'stop_worker', 'ask_agent', 'report_progress',
-]);
 
 // Append a [System note: …] to the (possibly multi-part) user turn — used by
 // the buffered-recovery retries to re-run the turn with server guidance.
@@ -1216,7 +1209,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       return { providerGen: streamOpenAICompat(compatProviderKey, agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
     if (agentObj.provider === 'lmstudio') {
-      return { providerGen: streamLMStudio(agentObj, prompt, userText, agentObj.id, signal, userId), withSignalWordsGate: false };
+      // Same (messages) signature as the other providers so the prepared vision
+      // turn + trimmed history reach LM Studio; the adapter keeps the stateful
+      // native path only for the no-tools/no-attachment case.
+      return { providerGen: streamLMStudio(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
     return { providerGen: streamOllama(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
   };
@@ -1573,9 +1569,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // isolatedTaskRun — a specialist reporting on its own in-flight work
   // mid-delegation is not making a checkable claim about background tasks.
   let recoveredProgressClaim = false;
+  // Gate on toolsUsed.length === 0 (mirroring the missing-tool recovery above):
+  // re-running the turn re-executes any tool the first draft already called, so
+  // a "Sent — I'll let you know" reply after email_send would re-send the email.
+  // Zero tools on the first attempt means the claim came purely from memory and
+  // a re-run is side-effect-free. (This also subsumes the old background-status
+  // exemption: any status tool would make length > 0 and skip the recovery.)
   if (!errored && canRecover && !recoveredMissingTools && !hideTurn && !isolatedTaskRun
       && IN_PROGRESS_REPLY_RE.test(assistantContent || '')
-      && !toolsUsed.some(t => BACKGROUND_STATUS_TOOLS.has(t.name))) {
+      && toolsUsed.length === 0) {
     try {
       const { describeBackgroundWorkForSession } = await import('./background-tasks.mjs');
       const verified = describeBackgroundWorkForSession(userId, agent.id);
@@ -1589,7 +1591,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // the notice + corrected reply both stream as tokens to reach voice + text.
       yield { type: 'token', text: `\n\n${IN_PROGRESS_NOTICE}\n\n` };
       ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-      { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = _r); turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
+      // Preserve the first attempt's tool events/uses so persist() records them
+      // (the destructure would otherwise replace them with the recovery run's).
+      const _priorToolsUsed = toolsUsed, _priorToolEvents = toolEvents;
+      { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = _r); turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])]; toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])]; }
       recoveredProgressClaim = true;
     } catch (e) {
       log.warn('chat', 'in-progress claim recovery failed', { err: e.message });

@@ -92,7 +92,7 @@ async function gmailComposeWithAttachments(args, userId, accountId) {
         `Content-Transfer-Encoding: base64`,
         `Content-Disposition: attachment; filename="${att.filename}"`,
         ``,
-        b64.match(/.{1,76}/g).join('\r\n'),
+        (b64.match(/.{1,76}/g) || []).join('\r\n'),
         ``,
       );
     }

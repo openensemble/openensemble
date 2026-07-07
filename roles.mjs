@@ -1535,6 +1535,28 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // Use resolvedName for actual execution
   name = resolvedName;
 
+  // SECURITY: strip internal underscore-prefixed keys from model-supplied args
+  // before they reach any skill executor. Several skills implement confirmation
+  // gates keyed off a server-set flag (email purge/trash → `_userApproved`,
+  // profile trust-state → `_userApproved`); without this, a model (or a
+  // prompt-injected turn) could forge approval by emitting `_userApproved:true`
+  // in its tool call. The INTERNAL approval re-dispatch does NOT go through this
+  // function — skills call their own execute()/handler directly (e.g.
+  // executePendingEmail, executePendingProven from chat-dispatch), so stripping
+  // here only blocks the model-provided path and leaves real approval working.
+  // Underscore keys are never part of a tool's public schema, so this is inert
+  // for every legitimate call.
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    let _stripped = null;
+    for (const k of Object.keys(args)) {
+      if (k.charCodeAt(0) === 0x5f /* '_' */) {
+        if (!_stripped) _stripped = { ...args };
+        delete _stripped[k];
+      }
+    }
+    if (_stripped) args = _stripped;
+  }
+
   // Phase-2: merge accepted default-arg pins before invocation. User-provided
   // args win over pins — mergeDefaults only fills keys absent from `args`.
   // Sync read (small JSON, cached at OS level) so we don't add an await before

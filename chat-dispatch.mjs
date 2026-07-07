@@ -590,7 +590,6 @@ export async function handleChatMessage({
   if (_vTrace) console.log(`[voice-trace] control-intent: miss device=${deviceId} text="${(rawText || '').slice(0, 60)}" — falling through to LLM`);
 
   const chatUser = getUser(userId);
-  const isChild = chatUser?.role === 'child';
 
   // Honor accessSchedule on every incoming message — a session opened during
   // allowed hours cannot keep chatting past curfew.
@@ -736,6 +735,10 @@ export async function handleChatMessage({
     attachments: attachmentList,
     toolPlan,
     _isRoutineFollowup,
+    // Profile is threaded through so the HA fast-path can enforce the same
+    // child-account gate executeRoleTool applies (mirrors the disabled/hidden
+    // checks it also runs) — without a redundant profile read on the hot path.
+    chatUser,
     onEvent, onBroadcast, onNotify,
   };
 

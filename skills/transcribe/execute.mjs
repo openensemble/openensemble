@@ -12,8 +12,10 @@
  *
  * Notes:
  *   - Path access is gated to user file dirs (~/.openensemble/users/<id>/files/...)
- *     and well-known temp scratch dirs (/tmp). Absolute paths outside those
- *     are rejected so an LLM hallucination can't read /etc/shadow.
+ *     and the caller's own per-user scratch dir (os.tmpdir()/oe-<userId>/).
+ *     Absolute paths outside those — including another user's /tmp staging —
+ *     are rejected so an LLM hallucination can't read /etc/shadow or a peer's
+ *     upload.
  *   - Files over 500 MB are rejected before upload — at that size, you want
  *     to split the file manually anyway (long videos induce Whisper hallucination).
  */
@@ -33,8 +35,14 @@ export const VIDEO_EXTS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4
 export function isAllowedPath(absPath, userId) {
   if (!absPath || typeof absPath !== 'string') return false;
   const resolved = path.resolve(absPath);
-  // /tmp scratch is allowed (where attachment-uploads would land).
-  if (resolved.startsWith('/tmp/')) return true;
+  // Per-user scratch under the OS temp dir (oe-<userId>/…). A bare /tmp
+  // allowlist let transcribe_file read ANOTHER user's staged upload — scope it
+  // to this caller's own subdir. (Real attachment transcriptions resolve to the
+  // user-files dir below, not /tmp, so this doesn't affect the normal flow.)
+  if (userId) {
+    const scratchRoot = path.join(os.tmpdir(), `oe-${userId}`);
+    if (resolved === scratchRoot || resolved.startsWith(scratchRoot + path.sep)) return true;
+  }
   // Any of the user's own file kinds.
   for (const kind of USER_FILE_KINDS) {
     const root = getUserFilesDir(userId, kind);
@@ -96,7 +104,7 @@ export async function executeSkillTool(name, args, userId) {
 
   const abs = path.resolve(rawPath);
   if (!isAllowedPath(abs, userId)) {
-    return `Refused: path is outside your user-files directories and /tmp. Got: ${abs}`;
+    return `Refused: path is outside your user-files directories and your per-user scratch dir. Got: ${abs}`;
   }
   if (!fs.existsSync(abs)) return `File not found: ${abs}`;
   const stat = fs.statSync(abs);
