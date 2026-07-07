@@ -11,7 +11,6 @@
 // break the panel. All calls are raw fetch (no wrapper exists in this repo).
 
 let _pzConfig  = null;   // last-fetched config.json (defaults merged, per lib/personalization/config.mjs)
-let _pzLedger  = [];     // ledger rows: {id, statement, tier, evidence, flag?, createdAt}
 let _pzLeads   = [];     // open leads: {id, query, nextCheckAt, ...}
 let _pzLoading = false;  // guards overlapping renderPersonalizationPanel() calls
 
@@ -142,35 +141,6 @@ function _pzLastRunHtml(lastRun) {
   return line + notice;
 }
 
-// ── ledger ("What I've learned about you") ──────────────────────────────────
-function _pzLedgerHtml() {
-  if (!_pzLedger.length) {
-    return `<div class="pz-empty">Nothing learned yet — check back after the coordinator's next reflection.</div>`;
-  }
-  return _pzLedger.map(row => {
-    const tier = row.tier === 'confirmed' ? 'confirmed' : 'inferred';
-    const evCount = Array.isArray(row.evidence) ? row.evidence.length : (row.evidence ? 1 : 0);
-    const flagChip = row.flag ? `<span class="pz-chip pz-chip-flag" title="May contradict something learned earlier">flagged</span>` : '';
-    const idArg = JSON.stringify([row.id]).replace(/'/g, '&#39;');
-    const confirmBtn = tier === 'confirmed' ? '' :
-      `<button class="pz-btn pz-btn-small" data-action="confirmPersonalizationFact" data-args='${idArg}'>Confirm</button>`;
-    return `<div class="pz-row">
-      <div class="pz-row-main">
-        <div class="pz-row-text">${escHtml(row.statement ?? '')}</div>
-        <div class="pz-row-meta">
-          <span class="pz-chip pz-chip-${tier}">${tier}</span>
-          <span class="pz-chip" title="Observations behind this">${evCount} evidence</span>
-          ${flagChip}
-        </div>
-      </div>
-      <div class="pz-row-actions">
-        ${confirmBtn}
-        <button class="pz-btn pz-btn-small pz-btn-danger" data-action="deletePersonalizationFact" data-args='${idArg}'>Delete</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
 // ── leads ("Keeping an eye on") ──────────────────────────────────────────────
 function _pzLeadsHtml() {
   if (!_pzLeads.length) {
@@ -224,8 +194,7 @@ function _pzRenderPanelHtml() {
       <button class="pz-btn pz-btn-danger" data-action="startFreshPersonalization">Start fresh</button>
     </div>
 
-    <div class="settings-section-title" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:8px">What I've learned about you</div>
-    <div class="pz-list">${_pzLedgerHtml()}</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Everything it has learned about you lives in the <b>Learn</b> drawer — see "What I've learned about you" there to review, confirm, or forget individual facts.</div>
 
     <div class="settings-section-title" style="border-top:1px solid var(--border);padding-top:14px;margin-top:16px;margin-bottom:8px">Keeping an eye on</div>
     <div class="pz-list">${_pzLeadsHtml()}</div>
@@ -240,13 +209,11 @@ async function renderPersonalizationPanel() {
   _pzLoading = true;
   if (!_pzConfig) root.innerHTML = '<div style="font-size:12px;color:var(--muted)">Loading…</div>';
   try {
-    const [configData, ledgerData, leadsData] = await Promise.all([
+    const [configData, leadsData] = await Promise.all([
       _pzGetJson('/api/personalization/config'),
-      _pzGetJson('/api/personalization/ledger'),
       _pzGetJson('/api/personalization/leads'),
     ]);
     _pzConfig = _pzExtractConfig(configData);
-    _pzLedger = _pzExtractArray(ledgerData, ['ledger', 'rows', 'items']);
     _pzLeads  = _pzExtractArray(leadsData, ['leads', 'rows', 'items']);
     root.innerHTML = _pzRenderPanelHtml();
   } catch (e) {
@@ -284,23 +251,8 @@ async function setPersonalizationModel(val) {
   await renderPersonalizationPanel();
 }
 
-async function confirmPersonalizationFact(id) {
-  try {
-    await _pzMutate(`/api/personalization/ledger/${encodeURIComponent(id)}/confirm`, 'POST');
-  } catch (e) {
-    showToast(`Failed to confirm: ${e.message}`);
-  }
-  await renderPersonalizationPanel();
-}
-
-async function deletePersonalizationFact(id) {
-  try {
-    await _pzMutate(`/api/personalization/ledger/${encodeURIComponent(id)}`, 'DELETE');
-  } catch (e) {
-    showToast(`Failed to delete: ${e.message}`);
-  }
-  await renderPersonalizationPanel();
-}
+// Ledger row actions (confirm/forget) live in learn.js — the ledger renders
+// in the Learn drawer as of 2026-07-07, not in this panel.
 
 async function dismissPersonalizationLead(id) {
   try {

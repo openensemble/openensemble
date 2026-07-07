@@ -9,7 +9,7 @@
 //   DELETE /api/learnings/aliases/:phrase
 //   DELETE /api/learnings/routines/:id
 
-let _learnState = { pending: [], learnings: null, busy: new Set(), policyBusy: false };
+let _learnState = { pending: [], learnings: null, ledger: null, busy: new Set(), policyBusy: false };
 
 function _learnAgo(ms) {
   if (!ms) return '';
@@ -25,12 +25,17 @@ async function loadLearnDrawer() {
   if (!body) return;
   body.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Loading…</div>`;
   try {
-    const [propsRes, learnRes] = await Promise.all([
+    // Ledger fetch is failure-isolated: personalization being unavailable
+    // (feature off, route error) must not blank the whole drawer.
+    const [propsRes, learnRes, ledgerRes] = await Promise.all([
       fetch('/api/proposals', { cache: 'no-store' }).then(r => r.json()),
       fetch('/api/learnings', { cache: 'no-store' }).then(r => r.json()),
+      fetch('/api/personalization/ledger', { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
     _learnState.pending = propsRes.pending ?? [];
     _learnState.learnings = learnRes ?? null;
+    _learnState.ledger = Array.isArray(ledgerRes?.ledger) ? ledgerRes.ledger : null;
     _renderLearnDrawer();
     _updateLearnBadge();
   } catch (e) {
@@ -57,6 +62,7 @@ function _renderLearnDrawer() {
   body.innerHTML = [
     _renderLearningSettingsSection(L.learningPolicy || {}),
     _renderPendingSection(_learnState.pending),
+    _renderLedgerSection(_learnState.ledger),
     _renderRulesSection(L.rules || []),
     _renderDefaultsSection(L.defaults || []),
     _renderRoutingOverridesSection(L.routingOverrides || []),
@@ -239,6 +245,75 @@ function learnAcceptProposal(id)  { return _proposalAction(id, 'accept'); }
 function learnDismissProposal(id) { return _proposalAction(id, 'dismiss'); }
 function learnSnoozeProposal(id)  { return _proposalAction(id, 'snooze'); }
 function learnNeverProposal(id)   { return _proposalAction(id, 'never'); }
+
+// ── "What I've learned about you" (personalization ledger) ─────────────────
+// Moved here from Settings → Personalization 2026-07-07: settings is a
+// first-setup surface; the ledger is an ongoing view and belongs with the
+// rest of the learning audit. Settings keeps the config (on/off, model,
+// Run now / Start fresh); rows are managed here.
+// Endpoints: routes/personalization.mjs (confirm = POST, forget = DELETE).
+
+function _renderLedgerSection(rows) {
+  let body = '';
+  if (rows === null) {
+    body = _renderEmptyHint("Couldn't load learned facts — reopen the drawer to retry.");
+  } else if (!rows.length) {
+    body = _renderEmptyHint('Nothing yet. The coordinator reflects on your activity every 6 hours; facts it infers about you land here for review.');
+  } else {
+    body = rows.map(row => {
+      const tier = row.tier === 'confirmed' ? 'confirmed' : 'inferred';
+      const evCount = Array.isArray(row.evidence) ? row.evidence.length : (row.evidence ? 1 : 0);
+      const args = JSON.stringify([row.id]).replace(/"/g, '&quot;');
+      const tierBadge = tier === 'confirmed'
+        ? `<span style="font-size:10px;background:var(--green,#3a7);color:#fff;padding:1px 6px;border-radius:3px">confirmed</span>`
+        : `<span style="font-size:10px;background:var(--bg1);border:1px solid var(--border);color:var(--muted);padding:1px 6px;border-radius:3px">inferred</span>`;
+      const flagBadge = row.flag
+        ? `<span style="font-size:10px;background:var(--orange,#c80);color:#fff;padding:1px 6px;border-radius:3px" title="May contradict something learned earlier">flagged</span>`
+        : '';
+      const confirmBtn = tier === 'confirmed' ? '' :
+        `<button class="btn-small" data-action="learnConfirmFact" data-args='${args}' title="Mark as correct — confirmed facts are kept by Start fresh" style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer">Confirm</button>`;
+      return `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px">
+        <div style="flex:1">
+          <div style="line-height:1.4">${escHtml(row.statement ?? '')}</div>
+          <div style="display:flex;gap:6px;margin-top:3px;align-items:center">
+            ${tierBadge}${flagBadge}
+            <span style="color:var(--muted);font-size:11px" title="Observations behind this">${evCount} evidence</span>
+          </div>
+        </div>
+        ${confirmBtn}
+        <button class="btn-small" data-action="learnDeleteFact" data-args='${args}' style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer">Forget</button>
+      </div>`;
+    }).join('');
+  }
+  return _renderSectionHdr("What I've learned about you", Array.isArray(rows) ? rows.length : 0) + body;
+}
+
+async function learnConfirmFact(id) {
+  try {
+    const r = await fetch(`/api/personalization/ledger/${encodeURIComponent(id)}/confirm`, { method: 'POST' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(`Failed: ${err.error || r.statusText}`);
+    }
+  } catch (e) {
+    alert(`Failed: ${e.message}`);
+  }
+  loadLearnDrawer();
+}
+
+async function learnDeleteFact(id) {
+  if (!confirm('Forget this fact about you?')) return;
+  try {
+    const r = await fetch(`/api/personalization/ledger/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(`Failed: ${err.error || r.statusText}`);
+    }
+  } catch (e) {
+    alert(`Failed: ${e.message}`);
+  }
+  loadLearnDrawer();
+}
 
 // ── Rules (per-role standing instructions) ──────────────────────────────────
 

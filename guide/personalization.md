@@ -6,7 +6,7 @@ OpenEnsemble can quietly learn from how you use it — the questions you ask, wh
 
 It's entirely ask-first. Learning happens passively in the background; anything it wants to *act* on shows up as a suggestion you accept or dismiss, never something that just happens.
 
-Manage all of it in **Settings → Personalization**.
+Set it up in **Settings → Personalization** (on/off, which model reflects, run/reset controls). Review what it has actually learned in the **Learn** drawer, under **"What I've learned about you."**
 
 ## What it learns from
 
@@ -44,7 +44,7 @@ If you pick a local provider and it happens to be unreachable when a scheduled r
 
 ## What I've learned about you
 
-Every fact Personalization infers shows up in a ledger — plain one-line statements ("usually free Tuesday mornings," "prefers the earlier of two options") each tagged with how sure it is:
+Every fact Personalization infers shows up in a ledger in the **Learn drawer** — plain one-line statements ("usually free Tuesday mornings," "prefers the earlier of two options") each tagged with how sure it is:
 
 - **Inferred** — the model noticed a pattern and made a guess. You haven't said whether it's right.
 - **Confirmed** — you told it "yes, that's accurate."
@@ -52,8 +52,8 @@ Every fact Personalization infers shows up in a ledger — plain one-line statem
 Each row also shows how many observations it's based on. From there:
 
 - **Confirm** — mark it as accurate.
-- **Delete** — forget that one fact, immediately.
-- **Start fresh** — clear every *inferred* fact in one go (this one asks you to confirm, since it's a bigger reset). Anything you've explicitly confirmed is left alone — starting fresh clears guesses, not things you've vouched for.
+- **Forget** — forget that one fact, immediately.
+- **Start fresh** (in **Settings → Personalization**) — clear every *inferred* fact in one go (this one asks you to confirm, since it's a bigger reset). Anything you've explicitly confirmed is left alone — starting fresh clears guesses, not things you've vouched for.
 
 Nothing here is ever permanent. Even a confirmed fact is still one click from gone.
 
