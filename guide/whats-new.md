@@ -6,6 +6,11 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-07-07
+
+**Voice devices say decimals and prices properly**
+Numbers with a decimal point are now spoken the way you'd say them — "1.609 kilometers" comes out "one point six zero nine kilometers" instead of "one six-oh-nine." Dollar amounts read as money ("$5.99" is "five dollars and ninety-nine cents"), and distances in "km" are spoken as kilometers.
+
 ## 2026-07-05
 
 **Personalization you control**
