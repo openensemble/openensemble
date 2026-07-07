@@ -37,6 +37,8 @@ import fs from 'fs';
 import path from 'path';
 import dgram from 'dgram';
 import http from 'http';
+import https from 'https';
+import crypto from 'crypto';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
@@ -49,7 +51,11 @@ const __dirname = path.dirname(__filename);
 // Bump this any time the agent script changes so the server can detect outdated
 // nodes. The server reads this constant from /nodes/agent to know the latest
 // version; the agent sends it in the register message.
-const AGENT_VERSION = '1.7.0';
+// 2.0.0: signed self-updates. This agent pins the server's Ed25519 public key
+// at install/pair time and refuses any update whose signed manifest doesn't
+// verify (see handleUpdateMessage). Must match SECURE_MIN_VERSION in
+// lib/node-update-signing.mjs — the server gates auto-updates on version >= it.
+const AGENT_VERSION = '2.0.0';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const CONFIG_DIR = process.platform === 'win32'
@@ -110,6 +116,39 @@ function discoverServer(timeoutMs = 30000) {
     sock.bind(DISCOVERY_PORT, () => {
       log('Scanning LAN for OpenEnsemble server...');
     });
+  });
+}
+
+// ── Signed-update helpers ────────────────────────────────────────────────────
+// Local dotted-version compare (the agent is standalone — can't import the
+// server's lib/node-update-signing.mjs). Mirrors versionGte there.
+function agentVersionGte(a, b) {
+  const parse = (v) => {
+    const core = String(v ?? '').trim().split('-')[0].split('+')[0].split('.');
+    return [parseInt(core[0], 10) || 0, parseInt(core[1], 10) || 0, parseInt(core[2], 10) || 0];
+  };
+  const A = parse(a), B = parse(b);
+  for (let i = 0; i < 3; i++) { if (A[i] > B[i]) return true; if (A[i] < B[i]) return false; }
+  return true;
+}
+
+// Fetch the server's update-signing public key (PEM) to pin at setup time.
+// Trusted at this moment because the operator just initiated pairing against
+// this server. Resolves to the PEM string, or null on any failure.
+function fetchUpdatePublicKey(httpUrl) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL('/nodes/agent-pubkey', httpUrl); }
+    catch { return resolve(null); }
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.get(u, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve(data.includes('BEGIN PUBLIC KEY') ? data.trim() : null));
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(10000, () => req.destroy());
   });
 }
 
@@ -398,6 +437,19 @@ async function interactiveSetup() {
     nodeId,
     capabilities: [],
   };
+
+  // Pin the server's update-signing public key so future self-updates can be
+  // verified (see handleUpdateMessage). Fetched over the same channel the
+  // operator just used to pair — trusted at this moment. If it can't be
+  // fetched, the agent still runs, but it will refuse to self-update until a
+  // key is pinned (fail closed) — re-running setup fixes it.
+  const updateKey = await fetchUpdatePublicKey(serverInfo.httpUrl);
+  if (updateKey) {
+    config.updatePublicKey = updateKey;
+    console.log('Pinned server update-signing key (self-updates will be verified).');
+  } else {
+    console.warn('Warning: could not fetch update-signing key — self-updates will be refused until you re-run setup.');
+  }
 
   saveConfig(config);
   console.log(`\nConfig saved to ${CONFIG_PATH}`);
@@ -702,6 +754,10 @@ function gatherFullStatus() {
 // ── Command Execution ────────────────────────────────────────────────────────
 const _activeProcs = new Map(); // cmdId → child process
 const EXEC_OUTPUT_CAP = 10 * 1024 * 1024;
+// Max bytes streamed live over the WS per command (see streamChunk). Smaller
+// than EXEC_OUTPUT_CAP: the live feed is a preview, the full (capped) buffers
+// arrive in cmd_result.
+const EXEC_STREAM_CAP = 2 * 1024 * 1024;
 
 function appendCapped(current, chunk, max = EXEC_OUTPUT_CAP) {
   const next = current + chunk;
@@ -744,21 +800,38 @@ function executeCommand(cmdId, command, timeout, ws) {
   let stdout = '', stderr = '';
   let finished = false;
 
+  // Cap the bytes we *stream live* over the WS. spawn's maxBuffer doesn't apply
+  // to our own 'data' handlers, so without this a noisy command (journalctl -f,
+  // cat /dev/urandom) would ws.send() every chunk forever and flood the socket.
+  // The final cmd_result still carries the (separately capped) full buffers.
+  let streamedBytes = 0;
+  let streamCapped = false;
+  const streamChunk = (stream, data) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (streamCapped) return;
+    streamedBytes += data.length;
+    if (streamedBytes > EXEC_STREAM_CAP) {
+      streamCapped = true;
+      ws.send(JSON.stringify({
+        type: 'cmd_stream', cmdId, stream: 'stderr',
+        data: `\n[live output truncated after ${EXEC_STREAM_CAP} bytes — full result delivered on completion]\n`,
+      }));
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'cmd_stream', cmdId, stream, data }));
+  };
+
   // Stream partial output
   proc.stdout.on('data', (chunk) => {
     const data = chunk.toString();
     stdout = appendCapped(stdout, data);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'cmd_stream', cmdId, stream: 'stdout', data }));
-    }
+    streamChunk('stdout', data);
   });
 
   proc.stderr.on('data', (chunk) => {
     const data = chunk.toString();
     stderr = appendCapped(stderr, data);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'cmd_stream', cmdId, stream: 'stderr', data }));
-    }
+    streamChunk('stderr', data);
   });
 
   // Hard kill if process doesn't exit after timeout + grace period
@@ -1538,11 +1611,6 @@ async function handlePushTar(msg, ws) {
   if (!buf.length) throw new Error('decoded payload is empty');
 
   fs.mkdirSync(destPath, { recursive: true });
-  if (clean) {
-    for (const entry of fs.readdirSync(destPath)) {
-      try { fs.rmSync(path.join(destPath, entry), { recursive: true, force: true }); } catch {}
-    }
-  }
 
   const tmpDir = os.tmpdir();
   const tmpFile = path.join(tmpDir, `oe-push-${cmdId}.tar.gz`);
@@ -1571,6 +1639,16 @@ async function handlePushTar(msg, ws) {
     if (entry.split('/').some(seg => seg === '..')) {
       try { fs.unlinkSync(tmpFile); } catch {}
       throw new Error(`refusing tar with path-traversal entry: ${raw}`);
+    }
+  }
+
+  // Only NOW that the tarball has been listed and every entry validated do we
+  // perform the destructive clean wipe. Doing it earlier meant a malformed or
+  // hostile tar (rejected above) left destPath wiped with nothing extracted —
+  // and this runs as root for service installs.
+  if (clean) {
+    for (const entry of fs.readdirSync(destPath)) {
+      try { fs.rmSync(path.join(destPath, entry), { recursive: true, force: true }); } catch {}
     }
   }
 
@@ -1676,11 +1754,46 @@ async function handleUpdateMessage(msg, ws, config) {
     throw new Error(`downloaded file looks wrong (${size} bytes)`);
   }
 
-  // Basic sanity check — must be a JS file starting with a shebang or /**
-  const head = fs.readFileSync(tmp, 'utf8').slice(0, 200);
-  if (!head.includes('OpenEnsemble') && !head.includes('import')) {
+  // ── Verify the signed manifest before installing (fail CLOSED) ─────────────
+  // The download came over plain HTTP, which a LAN on-path attacker can tamper
+  // with. Trust comes from the server's Ed25519 signature over a manifest of
+  // the bytes, verified against the public key pinned in config at setup time
+  // — not from the transport. Any failure here refuses the update and keeps
+  // the current (working) agent running.
+  const bytes = fs.readFileSync(tmp);
+  const rejectUpdate = (why) => {
     try { fs.unlinkSync(tmp); } catch {}
-    throw new Error('downloaded file does not look like the agent');
+    throw new Error(why);
+  };
+
+  const pinnedPem = config.updatePublicKey;
+  if (!pinnedPem) {
+    rejectUpdate('no pinned update-signing key — re-run the installer to enable verified self-updates');
+  }
+  if (typeof msg.manifest !== 'string' || typeof msg.signature !== 'string') {
+    rejectUpdate('update is unsigned (server does not sign updates?) — refusing');
+  }
+  let sigOk = false;
+  try {
+    sigOk = crypto.verify(null, Buffer.from(msg.manifest, 'utf8'),
+      crypto.createPublicKey(pinnedPem), Buffer.from(msg.signature, 'base64'));
+  } catch { sigOk = false; }
+  if (!sigOk) rejectUpdate('update signature does not verify against the pinned key — refusing');
+
+  let manifest;
+  try { manifest = JSON.parse(msg.manifest); } catch { manifest = null; }
+  if (!manifest || typeof manifest.sha256 !== 'string') rejectUpdate('update manifest malformed — refusing');
+
+  const gotSha = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (gotSha !== manifest.sha256) rejectUpdate('downloaded bytes do not match the signed hash (tampered?) — refusing');
+
+  if (manifest.nodeId && config.nodeId && manifest.nodeId !== config.nodeId) {
+    rejectUpdate('update manifest was signed for a different node — refusing');
+  }
+  // Anti-rollback: never install a version older than what we're running (an
+  // attacker could replay a validly-signed but vulnerable old build).
+  if (!agentVersionGte(manifest.version, AGENT_VERSION)) {
+    rejectUpdate(`rollback blocked: signed version ${manifest.version} < running ${AGENT_VERSION}`);
   }
 
   fs.renameSync(tmp, dest);

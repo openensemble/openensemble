@@ -9,10 +9,10 @@ import { WebSocketServer } from 'ws';
 import {
   registerNode, unregisterNode, handleNodeMessage,
   injectDeps, startHeartbeat, stopHeartbeat, loadPersistedNodes,
-  rememberNodeSessionToken, reviveLegacyNodeSession, reviveNodeSessionFromToken,
+  rememberNodeSessionToken, reviveNodeSessionFromToken,
 } from '../../skills/nodes/node-registry.mjs';
 import {
-  adoptSession, getSessionUserId, broadcastToUsers, getUserCoordinatorAgentId, getUser,
+  adoptSession, getSessionUserId, broadcastToUsers, getUserCoordinatorAgentId, getUser, getClientIp,
 } from '../_helpers.mjs';
 import { appendToSession } from '../../sessions.mjs';
 
@@ -54,8 +54,9 @@ export function initNodeWss() {
     }
 
     const rejectUnauthorized = () => {
-      const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-        || req.socket.remoteAddress || 'unknown';
+      // X-Forwarded-For is only honoured from a trusted proxy; otherwise the
+      // socket peer is used (see getClientIp) — never trust the raw header.
+      const ip = getClientIp(req);
       const tokenPrefix = token ? `${token.slice(0, 8)}…` : '(missing)';
       console.warn(
         `[nodes] WS rejected 4001 Unauthorized (ip=${ip}, token=${tokenPrefix}). ` +
@@ -87,21 +88,23 @@ export function initNodeWss() {
       // First message must be register
       if (msg.type === 'register' && !ws._authenticated) {
         if (!ws._userId) {
-          const legacy = reviveLegacyNodeSession(token, msg);
-          if (!legacy?.userId) {
-            rejectUnauthorized();
-            return;
-          }
-          adoptSession(token, { userId: legacy.userId, deviceId: legacy.nodeId, kind: 'node' });
-          ws._userId = legacy.userId;
-          revivedNodeId = legacy.nodeId;
-          console.log(`[nodes] revived legacy node session for ${legacy.nodeId} (${legacy.userId})`);
+          // The token neither resolved to a live session (getSessionUserId,
+          // above) nor cryptographically matched a stored node tokenHash
+          // (reviveNodeSessionFromToken, above). We deliberately do NOT fall
+          // back to hostname-only "legacy revival" here: that trusted a
+          // LAN-forgeable hostname as the sole identity proof and let any
+          // caller adopt an arbitrary token as the node owner's full session
+          // (account takeover). A pre-tokenHash node must re-pair to obtain a
+          // fresh, verifiable token — after which registerNode +
+          // rememberNodeSessionToken (below) stores its tokenHash and every
+          // later reconnect goes through the secure revival path.
+          rejectUnauthorized();
+          return;
         }
 
         if (getUser(ws._userId)?.role === 'child') { ws.close(4005, 'Not permitted'); return; }
 
-        const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-          || req.socket.remoteAddress || null;
+        const ip = getClientIp(req);
 
         console.log(`[nodes] register from ${msg.hostname}: version=${msg.version || 'MISSING'} accessLevel=${msg.accessLevel || 'MISSING'}`);
 

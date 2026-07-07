@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { BASE_DIR } from '../../lib/paths.mjs';
+import { signManifestString, supportsSecureUpdates } from '../../lib/node-update-signing.mjs';
 
 // ── State ────────────────────────────────────────────────────────────────────
 // Connected AND disconnected nodes both live in `nodes`. Disconnected entries
@@ -20,6 +21,11 @@ const nodes = new Map();           // nodeId → node entry
 const pendingCommands = new Map(); // cmdId → { resolve, reject, timer, chunks }
 const ptyCallbacks = new Map();    // ptyId → (msg) => void — browser WS relay
 const revokedNodes = new Map();    // `${userId}:${nodeId}` → revokedAt ts — prevents re-registration after remove
+
+// Upper bound on live stream bytes we retain per command in cmd.chunks. The
+// agent also caps what it streams; this is server-side defense so a noisy
+// command can't grow memory unbounded.
+const MAX_STREAM_CHUNK_BYTES = 2 * 1024 * 1024;
 
 const NODES_PATH = path.join(BASE_DIR, 'nodes.json');
 
@@ -301,22 +307,12 @@ export function findNodeByToken(token) {
   return null;
 }
 
-export function reviveLegacyNodeSession(token, info = {}) {
-  if (!token || !/^[a-f0-9]{64}$/i.test(String(token))) return null;
-  const nodeId = info.nodeId;
-  if (!nodeId) return null;
-  const entry = nodes.get(nodeId);
-  if (!entry || entry.tokenHash || entry.ws) return null;
-  if (isRevoked(entry.userId, entry.nodeId)) return null;
-  const incomingHost = String(info.hostname || '').toLowerCase();
-  const existingHost = String(entry.hostname || '').toLowerCase();
-  if (!incomingHost || incomingHost !== existingHost) return null;
-
-  entry.tokenHash = hashToken(token);
-  entry.tokenPrefix = token.slice(0, 8);
-  persistNodes();
-  return { userId: entry.userId, nodeId: entry.nodeId };
-}
+// NOTE: reviveLegacyNodeSession() was removed (2026-07-06). It adopted a
+// caller-supplied token as the node owner's full session using a LAN-forgeable
+// hostname as the only identity proof — an account-takeover vector. Legacy
+// (pre-tokenHash) nodes now re-pair instead; see routes/nodes/websocket.mjs's
+// register handler. reviveNodeSessionFromToken() (below) remains the sole,
+// tokenHash-verified revival path.
 
 // ── Registration ─────────────────────────────────────────────────────────────
 export function registerNode(ws, userId, info) {
@@ -457,6 +453,17 @@ export function unregisterNode(nodeId) {
   // Clean up pending commands
   rejectPendingForNode(nodeId);
 
+  // Tear down any live terminal (PTY) sessions bound to this node so the
+  // browser xterm gets a real error/close instead of sitting "Connected" but
+  // dead until the user notices.
+  for (const [ptyId, cb] of ptyCallbacks) {
+    if (cb.nodeId !== nodeId) continue;
+    try {
+      cb.callback({ type: 'pty_error', ptyId, message: `${entry.hostname} disconnected` });
+    } catch {}
+    ptyCallbacks.delete(ptyId);
+  }
+
   // Notify
   broadcastNodeEvent(entry.userId, {
     type: 'node_health', nodeId,
@@ -552,6 +559,10 @@ function nodeToWire(entry) {
     autoFixEnabled: !!entry.autoFixEnabled,
     onboarding: entry.onboarding || null,
     version: entry.version || 'unknown',
+    // false = legacy agent that can't verify signed updates; the UI shows a
+    // "re-run the installer" prompt instead of an Update button (the server
+    // also refuses to push auto-updates to it — see pushUpdate).
+    secureUpdates: supportsSecureUpdates(entry.version),
     registeredAt: entry.registeredAt,
     lastHeartbeat: entry.lastHeartbeat,
     health: entry.health,
@@ -789,7 +800,10 @@ export function handleNodeMessage(nodeId, msg) {
   switch (msg.type) {
     case 'cmd_result': {
       const cmd = pendingCommands.get(msg.cmdId);
-      if (!cmd) return;
+      // Ownership check: a paired node must only resolve its OWN pending
+      // commands. Without this, any node could forge a cmd_result for another
+      // node's cmdId and inject fabricated output.
+      if (!cmd || cmd.nodeId !== nodeId) return;
       clearTimeout(cmd.timer);
       pendingCommands.delete(msg.cmdId);
       cmd.resolve({
@@ -803,8 +817,17 @@ export function handleNodeMessage(nodeId, msg) {
 
     case 'cmd_stream': {
       const cmd = pendingCommands.get(msg.cmdId);
-      if (!cmd) return;
-      cmd.chunks.push(msg.data);
+      // Ownership check (see cmd_result) — reject forged streams from other nodes.
+      if (!cmd || cmd.nodeId !== nodeId) return;
+      // Bound the accumulated chunk buffer so a noisy command (journalctl -f,
+      // cat /dev/urandom) can't grow server memory without limit.
+      cmd._chunkBytes = (cmd._chunkBytes || 0) + (msg.data?.length || 0);
+      if (cmd._chunkBytes <= MAX_STREAM_CHUNK_BYTES) {
+        cmd.chunks.push(msg.data);
+      } else if (!cmd._chunksTruncated) {
+        cmd._chunksTruncated = true;
+        cmd.chunks.push('\n[output truncated: stream cap reached]\n');
+      }
       if (cmd.onChunk) cmd.onChunk(msg.stream, msg.data);
 
       // Detect interactive-input prompts that would otherwise hang for the
@@ -837,7 +860,8 @@ export function handleNodeMessage(nodeId, msg) {
 
     case 'status_result': {
       const cmd = pendingCommands.get(msg.cmdId);
-      if (!cmd) return;
+      // Ownership check (see cmd_result) — reject forged status from other nodes.
+      if (!cmd || cmd.nodeId !== nodeId) return;
       clearTimeout(cmd.timer);
       pendingCommands.delete(msg.cmdId);
       // Resolve with the full status object (not stdout/stderr)
@@ -881,7 +905,7 @@ export function handleNodeMessage(nodeId, msg) {
     case 'pty_started':
     case 'pty_error': {
       const cb = ptyCallbacks.get(msg.ptyId);
-      if (cb) cb(msg);
+      if (cb) cb.callback(msg);
       break;
     }
 
@@ -939,12 +963,30 @@ export function sendPtyMessage(nodeId, userId, msg) {
   catch { return false; }
 }
 
-export function registerPtyCallback(ptyId, callback) {
-  ptyCallbacks.set(ptyId, callback);
+export function registerPtyCallback(ptyId, nodeId, callback) {
+  ptyCallbacks.set(ptyId, { nodeId, callback });
 }
 
 export function unregisterPtyCallback(ptyId) {
   ptyCallbacks.delete(ptyId);
+}
+
+// Return whether a node currently has a live (OPEN) WebSocket. getNode returns
+// disconnected entries too (kept for UI display), so callers that need to
+// actually reach the agent — e.g. opening a PTY — must check this.
+export function isNodeConnected(nodeId, userId) {
+  const entry = nodes.get(nodeId);
+  if (!entry || entry.userId !== userId) {
+    // Allow hostname-form ids (getNode does the same fallback).
+    const needle = String(nodeId).toLowerCase();
+    for (const e of nodes.values()) {
+      if (e.userId === userId && e.hostname?.toLowerCase() === needle) {
+        return !!e.ws && e.ws.readyState === e.ws.OPEN;
+      }
+    }
+    return false;
+  }
+  return !!entry.ws && entry.ws.readyState === entry.ws.OPEN;
 }
 
 // ── Push uninstall ──────────────────────────────────────────────────────────
@@ -968,8 +1010,33 @@ export function pushUpdate(nodeId, userId, url = null) {
   const entry = nodes.get(nodeId);
   if (!entry || entry.userId !== userId) return { ok: false, error: 'node not found' };
   if (!entry.ws || entry.ws.readyState !== entry.ws.OPEN) return { ok: false, error: 'node not connected' };
+
+  // GATE: a legacy agent (pre-signing, no pinned public key) can't verify an
+  // update's authenticity, so we refuse to auto-update it over the tamperable
+  // plain-HTTP channel — it must re-run the installer to re-pair and pin the
+  // signing key. The UI surfaces this via node.secureUpdates === false and
+  // shows the re-provision command instead of an Update button.
+  if (!supportsSecureUpdates(entry.version)) {
+    return { ok: false, error: 'legacy-agent', needsReprovision: true };
+  }
+
+  // Sign a versioned manifest of the exact bytes /nodes/agent will serve, so
+  // the agent verifies content hash + version against its pinned key before
+  // installing. Manifest is sent as the literal signed string to avoid any
+  // canonicalization mismatch. See remote/oe-node-agent.mjs handleUpdateMessage.
+  let signed;
   try {
-    entry.ws.send(JSON.stringify({ type: 'update', url }));
+    const agentBytes = fs.readFileSync(path.join(BASE_DIR, 'remote', 'oe-node-agent.mjs'));
+    const sha256 = createHash('sha256').update(agentBytes).digest('hex');
+    const version = (agentBytes.toString('utf8').match(/const AGENT_VERSION\s*=\s*['"]([^'"]+)['"]/) || [])[1] || 'unknown';
+    const manifest = JSON.stringify({ v: 1, sha256, version, nodeId, signedAt: Date.now() });
+    signed = { manifest, signature: signManifestString(manifest), alg: 'ed25519' };
+  } catch (e) {
+    return { ok: false, error: `failed to sign update: ${e.message}` };
+  }
+
+  try {
+    entry.ws.send(JSON.stringify({ type: 'update', url, ...signed }));
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };

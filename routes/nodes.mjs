@@ -19,6 +19,7 @@ import {
   removeNode, pushUpdate, pushUninstall, getNodes, getNode, setNodeAutoFix, setNodeOnboardingState,
   sendCommand, sendCommandStreaming,
 } from '../skills/nodes/node-registry.mjs';
+import { getUpdatePublicKeyPem } from '../lib/node-update-signing.mjs';
 import { requireAuth, readBody, getUser, getSessionUserId, getAuthToken, clearUserNodeSessions } from './_helpers.mjs';
 import { getLanAddress } from '../discovery.mjs';
 import { getNodeProfilesSummary } from '../lib/node-profile-summary.mjs';
@@ -102,6 +103,20 @@ export async function handle(req, res) {
       res.end(script);
     } catch (e) {
       res.writeHead(500); res.end('Failed to load install script');
+    }
+    return true;
+  }
+
+  // GET /nodes/agent-pubkey — Ed25519 public key the agent pins at install/pair
+  // time to verify signed self-updates (unauthenticated, like /nodes/agent —
+  // the key is public by design; only the server holds the private half).
+  if (p === '/nodes/agent-pubkey' && req.method === 'GET') {
+    try {
+      const pem = getUpdatePublicKeyPem();
+      res.writeHead(200, { 'Content-Type': 'application/x-pem-file', 'Cache-Control': 'no-cache' });
+      res.end(pem);
+    } catch (e) {
+      res.writeHead(500); res.end('update signing key unavailable');
     }
     return true;
   }
@@ -329,7 +344,7 @@ export async function handle(req, res) {
     const result = pushUpdate(nodeId, userId);
     if (!result.ok) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: result.error }));
+      res.end(JSON.stringify({ error: result.error, needsReprovision: !!result.needsReprovision }));
       return true;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });

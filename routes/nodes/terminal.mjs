@@ -17,7 +17,7 @@
 import { WebSocketServer } from 'ws';
 import { randomBytes } from 'crypto';
 import {
-  getNode, sendPtyMessage, registerPtyCallback, unregisterPtyCallback,
+  getNode, isNodeConnected, sendPtyMessage, registerPtyCallback, unregisterPtyCallback,
 } from '../../skills/nodes/node-registry.mjs';
 import { consumeTicket, createTicket, getUser, requireAuth, readBody } from '../_helpers.mjs';
 
@@ -49,6 +49,11 @@ export function initTerminalWss() {
     const node = getNode(nodeId, userId);
     if (!node) { ws.close(4003, 'Node not found'); return; }
 
+    // getNode returns disconnected entries too (kept for UI display). Opening a
+    // PTY to an offline node would send pty_start into the void and leave the
+    // xterm hanging at "starting shell…" with no error. Reject up front.
+    if (!isNodeConnected(nodeId, userId)) { ws.close(4006, 'Node is offline'); return; }
+
     // Generate a unique PTY id
     const ptyId = `pty_${Date.now()}_${randomBytes(3).toString('hex')}`;
     ws._ptyId = ptyId;
@@ -56,7 +61,7 @@ export function initTerminalWss() {
     ws._userId = userId;
 
     // Register callback to relay PTY output from node agent → browser
-    registerPtyCallback(ptyId, (msg) => {
+    registerPtyCallback(ptyId, nodeId, (msg) => {
       if (ws.readyState !== ws.OPEN) return;
       if (msg.type === 'pty_output') {
         ws.send(msg.data); // send raw terminal data to xterm.js
@@ -266,10 +271,11 @@ ws.onmessage = (evt) => {
   term.write(evt.data);
 };
 
-ws.onclose = () => {
-  statusBar.textContent = 'Disconnected';
+ws.onclose = (evt) => {
+  const reason = evt && evt.reason ? (': ' + evt.reason) : '';
+  statusBar.textContent = 'Disconnected' + reason;
   statusDot.className = 'dot off';
-  term.write('\\r\\n\\x1b[90m[Connection closed]\\x1b[0m\\r\\n');
+  term.write('\\r\\n\\x1b[90m[Connection closed' + reason + ']\\x1b[0m\\r\\n');
 };
 
 ws.onerror = () => {

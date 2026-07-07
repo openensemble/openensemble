@@ -81,6 +81,14 @@ const BACKUP_DATA_FILES = [
   'shared-notes.json',
   'invites.json',
   'expenses/transactions.json', 'expenses/groups.json',
+  // Node registry (paired remote machines + their token hashes + revocation
+  // list). Without this, a restore onto a fresh box loses every node pairing,
+  // so nodes can't reconnect and must be re-installed. With it, a node
+  // reconnects automatically via the tokenHash revival path (it still holds
+  // its token; the restored hash matches). Only hashes are stored, no raw
+  // tokens. active-sessions.json is deliberately NOT backed up (its keys are
+  // live bearer tokens) — the tokenHash here is sufficient for secure revival.
+  'nodes.json',
 ];
 const BACKUP_MEDIA_DIRS = ['memory-db', 'shared-docs'];
 

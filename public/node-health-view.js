@@ -118,6 +118,12 @@
       return `<button class="cdraw-btn cdraw-btn-warning" data-action="applyNodeIncidentFix" data-args='${args([d.nodeId, d.incidentId])}'><i data-lucide="wrench" style="width:11px;height:11px"></i> Apply</button>`;
     }
     if (item.kind === 'outdated') {
+      // Legacy agent (can't verify signed updates): don't offer a one-click
+      // "Upgrade" that the server refuses — send the user to the re-provision
+      // flow (re-run the installer on the device) instead.
+      if (d.secureUpdates === false) {
+        return `<button class="cdraw-btn cdraw-btn-warning" data-action="reprovisionNode" data-args='${args([d.nodeId])}'><i data-lucide="shield-alert" style="width:11px;height:11px"></i> Enable Secure Updates</button>`;
+      }
       return `<button class="cdraw-btn" data-action="pushAgentUpdate" data-args='${args([d.nodeId])}'><i data-lucide="refresh-cw" style="width:11px;height:11px"></i> Upgrade</button>`;
     }
     if (item.kind === 'profile_draft') {
