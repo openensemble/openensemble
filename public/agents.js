@@ -71,7 +71,7 @@ function buildTabs() {
     const btn = document.createElement('button');
     btn.className = 'nav-tab' + (a.id === activeAgent ? ' active' : '');
     const busy = agentStreams[a.id]?.active ? '<span class="busy-dot"></span>' : '';
-    btn.innerHTML = `<span class="nav-emoji">${a.emoji}</span><span class="nav-name">${escHtml(a.name)}</span>${busy}`;
+    btn.innerHTML = `<span class="nav-emoji">${escHtml(a.emoji ?? '')}</span><span class="nav-name">${escHtml(a.name)}</span>${busy}`;
     btn.onclick = () => switchAgent(a.id);
     inner.appendChild(btn);
   });
@@ -94,7 +94,7 @@ function buildAgentDrawer() {
     const roleMap = { coordinator: 'Coordinator', email: 'Email', finance: 'Finance', expenses: 'Finance', web: 'Assistant', coding: 'Coder', code: 'Coder', coder: 'Coder', image_generator: 'Image Generator', role_video_generator: 'Video Generator', role_tutor: 'Tutor', deep_research: 'Deep Research', delegate: 'Delegate', gcal: 'Calendar', tasks: 'Tasks', 'self-mgmt': 'Self Management', 'user-admin': 'User Admin' };
     const agRole = (a.skillCategory && a.skillCategory !== 'general') ? (roleMap[a.skillCategory] ?? a.skillCategory) : (a.description ? a.description.slice(0, 40) : '');
     item.innerHTML = `
-      <span class="ag-emoji">${a.emoji ?? ''}</span>
+      <span class="ag-emoji">${escHtml(a.emoji ?? '')}</span>
       <div class="ag-info">
         <div class="ag-name">${escHtml(a.name)}</div>
         <div class="ag-model">${agRole ? escHtml(agRole) + ' · ' : ''}${escHtml(a.model ?? '')}</div>
@@ -128,7 +128,7 @@ function switchAgent(id) {
     const savedToolNames = [];
     if (toolPillsEl) {
       toolPillsEl.querySelectorAll('.tool-pill').forEach(p => {
-        const name = p.dataset.toolName || p.textContent.replace(/^⚙\s*/, '').trim();
+        const name = p.textContent.replace(/^⚙\s*/, '').trim();
         if (name) savedToolNames.push(name);
       });
     }
@@ -137,11 +137,17 @@ function switchAgent(id) {
   activeAgent = id;
   if (typeof restoreDraftForAgent === 'function') restoreDraftForAgent(id); // chat.js: per-agent composer draft
   streamEl = null; streamBuf = ''; toolPillsEl = null;
+  // Clear the in-flight tool run too — otherwise a turn already streaming on the
+  // NEW agent commits the previous agent's tool events onto it.
+  resetToolRun();
   _historyWindow = HISTORY_RENDER_WINDOW; // new pane starts at the base window
   buildTabs();
   buildAgentDrawer();
-  if (!(id in sessions)) {
-    sessions[id] = [];
+  // Fetch real history unless it's been genuinely loaded. `id in sessions` isn't
+  // enough: a status / agent_report push may have seeded an empty array, which
+  // would otherwise leave the agent showing only the stray push with no history.
+  if (!sessionsLoaded.has(id)) {
+    if (!(id in sessions)) sessions[id] = [];
     ws?.send(JSON.stringify({ type: 'load_session', agent: id }));
   }
 

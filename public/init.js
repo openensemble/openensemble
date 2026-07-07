@@ -212,8 +212,9 @@ async function init() {
       e.preventDefault();
       _dropDepth = 0;
       if (_dropOverlay) _dropOverlay.style.display = 'none';
-      const file = e.dataTransfer.files?.[0];
-      if (file) handleChatFileSelect(file);
+      // Attach every dropped file, not just the first — the picker path allows
+      // up to 6, and handleChatFileSelect's per-file cap toast handles overflow.
+      for (const file of e.dataTransfer.files ?? []) handleChatFileSelect(file);
     });
 
     // Paste an image (or any file) directly into the chat input.

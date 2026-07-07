@@ -1,4 +1,23 @@
 // ── OAuth / Connected Accounts ────────────────────────────────────────────────
+// Shared POST/PATCH helper. fetch() only rejects on network failure, so a
+// bare `await fetch()` treats a 400/403/500 as success — save handlers would
+// report "saved" and clear the pasted key even when the server refused it.
+// postJson throws on !r.ok with the server's {error} message so callers only
+// commit success (clear inputs, toast) inside the try after this resolves.
+async function postJson(url, body, opts = {}) {
+  const r = await fetch(url, {
+    method: opts.method || 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new Error(d?.error || `Request failed (${r.status})`);
+  }
+  return r.json().catch(() => ({}));
+}
+window.postJson = postJson;
+
 // Single retry timer so back-to-back calls (settings tab re-open, polling)
 // don't stack.
 let _oauthRetryTimer = null;
@@ -171,10 +190,7 @@ async function submitMicrosoftCreds() {
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   try {
-    await fetch('/api/provider-config', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ msClientId: clientId, msClientSecret: clientSecret, msTenant: tenant }),
-    });
+    await postJson('/api/provider-config', { msClientId: clientId, msClientSecret: clientSecret, msTenant: tenant });
     $('msCredsModal')?.remove();
     await _doMicrosoftOAuth();
   } catch (e) {
@@ -204,7 +220,10 @@ async function _doMicrosoftOAuth() {
   if (acct.error) { alert(`Error: ${acct.error}`); return; }
   const res = await fetch(`/api/oauth/microsoft/connect?accountId=${encodeURIComponent(acct.id)}`).then(r => r.json());
   if (res.error) { alert(`Error: ${res.error}`); return; }
-  window.open(res.url, '_blank', 'noopener');
+  // Opened without noopener so the poll can observe popup.closed for orphan
+  // cleanup of the pre-created Microsoft shell account.
+  const popup = window.open(res.url, '_blank');
+  _watchOAuthAccount(acct.id, 'microsoft', popup);
 }
 
 async function renameEmailAccount(id, currentLabel) {
@@ -356,9 +375,56 @@ async function reconnectGmail(accountId) {
   } catch (e) { alert(`Error: ${e.message}`); }
 }
 
+// Light poll to flip the Connected Accounts panel to "Connected" once a popup
+// OAuth consent finishes (the callback lands on the server, not this page, so
+// nothing refreshes on its own). Mirrors the ChatGPT flow's poll.
+function _pollOAuthStatus(times = 12, everyMs = 5000) {
+  let n = 0;
+  const t = () => { loadOAuthStatus(); if (++n < times) setTimeout(t, everyMs); };
+  setTimeout(t, everyMs);
+}
+
+// Gmail/Microsoft create a shell email account *before* OAuth. If the user
+// closes the popup without consenting, that shell row lingers as an orphan.
+// Poll the account's health to (a) refresh the panel on completion, and (b)
+// delete the orphan once the popup is closed and no token was ever stored.
+// Requires a popup handle (opened without noopener) to observe `.closed`.
+function _watchOAuthAccount(accountId, provider, popup) {
+  if (!accountId) { _pollOAuthStatus(); return; }
+  let ticks = 0, orphanStreak = 0;
+  const MAX = 20; // ~1 min at 3s
+  const tick = async () => {
+    ticks++;
+    let st = {};
+    try { st = await fetch('/api/oauth/status').then(r => r.json()); } catch {}
+    const map = provider === 'microsoft' ? (st.msHealth || {}) : (st.gmailHealth || {});
+    const h = map[accountId];
+    await loadOAuthStatus(); // refresh the panel every tick
+    if (h === 'ok') return;  // consent completed — done
+    // Hard-failure health means no token is on disk. If the popup is gone and
+    // we see this twice in a row (~6s, so a token written as the popup closed
+    // isn't wiped by a stale probe), the shell row is an abandoned orphan.
+    const failed = h === 'missing' || h === 'no_refresh' || h === 'expired' || h === 'error';
+    if ((!popup || popup.closed) && failed) {
+      if (++orphanStreak >= 2) {
+        try { await fetch(`/api/email-accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' }); } catch {}
+        _inboxAccounts = [];
+        await loadOAuthStatus();
+        return;
+      }
+    } else {
+      orphanStreak = 0;
+    }
+    if (ticks >= MAX) return; // give up; leave any still-in-progress account
+    setTimeout(tick, 3000);
+  };
+  setTimeout(tick, 3000);
+}
+
 async function connectGoogle(service) {
   try {
     let qs = `service=${service}`;
+    let acctId = null;
     // For Gmail, create a shell account first so each connection gets its own token file
     if (service === 'gmail') {
       const acct = await fetch('/api/email-accounts', {
@@ -367,12 +433,17 @@ async function connectGoogle(service) {
         body: JSON.stringify({ provider: 'gmail', label: 'Gmail' }),
       }).then(r => r.json());
       if (acct.error) { alert(`Error: ${acct.error}`); return; }
+      acctId = acct.id;
       qs += `&accountId=${encodeURIComponent(acct.id)}`;
     }
     const res = await fetch(`/api/oauth/google/connect?${qs}`, {});
     if (!res.ok) { alert('Failed to start authorization. Check server logs.'); return; }
     const { url } = await res.json();
-    window.open(url, '_blank', 'noopener');
+    // Opened without noopener so the poll can observe popup.closed for orphan
+    // cleanup of the pre-created Gmail shell account.
+    const popup = window.open(url, '_blank');
+    if (service === 'gmail') _watchOAuthAccount(acctId, 'gmail', popup);
+    else _pollOAuthStatus();
   } catch (e) { alert(`Error: ${e.message}`); }
 }
 
@@ -490,6 +561,9 @@ function loadAiProviderLogins() {
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button id="oauthConnect_${p.id}" data-action="connectOpenAIOAuth"
           style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Connect ChatGPT account</button>
+        <button id="oauthRefresh_${p.id}" data-action="refreshOpenAIOAuthToken"
+          title="Renew the login token without reconnecting"
+          style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Refresh token</button>
         <button id="oauthDisconnect_${p.id}" data-action="disconnectOpenAIOAuth"
           style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Disconnect</button>
         <button data-action="refreshOpenAIOAuthStatus"
@@ -528,26 +602,57 @@ async function refreshOpenAIOAuthStatus() {
   if (!box) return;
   const connectBtn    = document.getElementById('oauthConnect_openai-oauth');
   const disconnectBtn = document.getElementById('oauthDisconnect_openai-oauth');
+  const refreshBtn    = document.getElementById('oauthRefresh_openai-oauth');
   box.textContent = 'Checking…';
   try {
     const s = await fetch('/api/oauth/openai/status').then(r => r.json());
     if (s.connected) {
       const plan = s.plan ? ` (${s.plan})` : '';
       const acct = s.accountId ? ` · account ${s.accountId.slice(0, 8)}…` : '';
-      box.textContent = `Connected${plan}${acct}.`;
+      const exp  = s.expiresAt ? ` · token valid until ${new Date(s.expiresAt).toLocaleDateString()}` : '';
+      box.textContent = `Connected${plan}${acct}${exp}.`;
       if (connectBtn)    connectBtn.style.display    = 'none';
       if (disconnectBtn) disconnectBtn.style.display = '';
+      if (refreshBtn)    refreshBtn.style.display    = '';
       // Load the static model list so the agent model picker shows Codex models
       loadCompatProviderModels('openai-oauth').catch(() => {});
     } else {
       box.textContent = 'Not connected.';
       if (connectBtn)    connectBtn.style.display    = '';
       if (disconnectBtn) disconnectBtn.style.display = 'none';
+      if (refreshBtn)    refreshBtn.style.display    = 'none';
     }
   } catch {
     box.textContent = 'Status check failed.';
     if (connectBtn)    connectBtn.style.display    = '';
     if (disconnectBtn) disconnectBtn.style.display = 'none';
+    if (refreshBtn)    refreshBtn.style.display    = 'none';
+  }
+}
+
+// Renew the ChatGPT login token in place (no disconnect/reconnect). If the
+// refresh_token itself is dead (account left idle too long), the server returns
+// needsReconnect and we prompt a reconnect.
+async function refreshOpenAIOAuthToken() {
+  const box = document.getElementById('providerStatus_openai-oauth');
+  const btn = document.getElementById('oauthRefresh_openai-oauth');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  if (box) box.textContent = 'Refreshing login token…';
+  try {
+    const res = await fetch('/api/oauth/openai/refresh', { method: 'POST' });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok) {
+      if (typeof showToast === 'function') showToast('ChatGPT login token refreshed', 'success');
+    } else if (d.needsReconnect) {
+      if (typeof showToast === 'function') showToast(d.error || 'Refresh failed — please reconnect.', 'error');
+    } else {
+      if (typeof showToast === 'function') showToast(d.error || 'Refresh failed.', 'error');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') showToast(`Refresh failed: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh token'; }
+    refreshOpenAIOAuthStatus().catch(() => {});
   }
 }
 
@@ -835,17 +940,13 @@ async function saveCompatProviderKey(providerId, keyField) {
   const key = $(`providerKey_${providerId}`)?.value.trim();
   if (!key) { showToast('Enter an API key'); return; }
   try {
-    await fetch('/api/provider-config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [keyField]: key, enabledProviders: { [providerId]: true } }),
-    });
+    await postJson('/api/provider-config', { [keyField]: key, enabledProviders: { [providerId]: true } });
     $(`providerKey_${providerId}`).value = '';
     $(`providerStatus_${providerId}`).textContent = 'API key is set.';
     showToast(`${providerId} key saved`);
     loadCompatProviderModels(providerId).catch(() => {});
     _enableAndSync(providerId);
-  } catch { showToast('Failed to save key'); }
+  } catch (e) { showToast(e.message || 'Failed to save key'); }
 }
 
 async function loadCompatProviderModels(providerId, refresh = false) {
@@ -867,7 +968,7 @@ async function loadCompatProviderModels(providerId, refresh = false) {
             ...(m.contextLen ? [`${m.contextLen.toLocaleString()} ctx`] : []),
             ...caps,
           ];
-          return `<div style="font-family:monospace;color:var(--text)">${m.id}${meta.length ? ` <span style="color:var(--muted)">(${meta.join(', ')})</span>` : ''}</div>`;
+          return `<div style="font-family:monospace;color:var(--text)">${escHtml(m.id)}${meta.length ? ` <span style="color:var(--muted)">(${escHtml(meta.join(', '))})</span>` : ''}</div>`;
         }).join('')
         + (models.length > 50 ? `<div style="color:var(--muted);margin-top:4px">…and ${models.length - 50} more</div>` : '');
     }
@@ -1175,13 +1276,12 @@ async function saveProviderFireworksKey() {
   const key = $('providerFireworksKey').value.trim();
   if (!key) { showToast('Enter an API key'); return; }
   try {
-    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fireworksApiKey: key, enabledProviders: { fireworks: true } }) });
+    await postJson('/api/provider-config', { fireworksApiKey: key, enabledProviders: { fireworks: true } });
     $('providerFireworksKey').value = '';
     $('providerFireworksStatus').textContent = 'API key is set.';
     showToast('Fireworks key saved');
     _enableAndSync('fireworks');
-  } catch { showToast('Failed to save key'); }
+  } catch (e) { showToast(e.message || 'Failed to save key'); }
 }
 
 
@@ -1189,8 +1289,7 @@ async function saveProviderGrokKey() {
   const key = $('providerGrokKey').value.trim();
   if (!key) { showToast('Enter an API key'); return; }
   try {
-    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ grokApiKey: key, enabledProviders: { grok: true } }) });
+    await postJson('/api/provider-config', { grokApiKey: key, enabledProviders: { grok: true } });
     $('providerGrokKey').value = '';
     $('providerGrokStatus').textContent = 'Inference key is set.';
     showToast('Grok key saved');
@@ -1199,7 +1298,7 @@ async function saveProviderGrokKey() {
     // hardcoded fallback the moment a new key lands. Best-effort; the manual
     // "Fetch models" button next to Save is the user-visible way to retry.
     refreshGrokModels().catch(() => {});
-  } catch { showToast('Failed to save key'); }
+  } catch (e) { showToast(e.message || 'Failed to save key'); }
 }
 
 // Manual model refresh — same shape as loadCompatProviderModels but routes
@@ -1218,7 +1317,7 @@ async function refreshGrokModels() {
     }
     if (box) {
       box.innerHTML = `<div style="color:var(--muted);margin-bottom:4px">${models.length} model${models.length === 1 ? '' : 's'} available:</div>`
-        + models.slice(0, 50).map(m => `<div style="font-family:monospace;color:var(--text)">${m.name}${m.displayName && m.displayName !== m.name ? ` <span style="color:var(--muted)">(${m.displayName})</span>` : ''}</div>`).join('')
+        + models.slice(0, 50).map(m => `<div style="font-family:monospace;color:var(--text)">${escHtml(m.name)}${m.displayName && m.displayName !== m.name ? ` <span style="color:var(--muted)">(${escHtml(m.displayName)})</span>` : ''}</div>`).join('')
         + (models.length > 50 ? `<div style="color:var(--muted);margin-top:4px">…and ${models.length - 50} more</div>` : '');
     }
     renderModelBrowser?.(); renderAgentModelRows?.();
@@ -1232,8 +1331,7 @@ async function saveProviderOpenRouterKey() {
   const key = $('providerOpenrouterKey').value.trim();
   if (!key) { showToast('Enter an API key'); return; }
   try {
-    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ openrouterApiKey: key, enabledProviders: { openrouter: true } }) });
+    await postJson('/api/provider-config', { openrouterApiKey: key, enabledProviders: { openrouter: true } });
     $('providerOpenrouterKey').value = '';
     $('providerOpenrouterStatus').textContent = 'API key is set.';
     showToast('OpenRouter key saved');
@@ -1241,20 +1339,19 @@ async function saveProviderOpenRouterKey() {
     renderModelBrowser?.();
     renderAgentModelRows?.();
     _enableAndSync('openrouter');
-  } catch { showToast('Failed to save key'); }
+  } catch (e) { showToast(e.message || 'Failed to save key'); }
 }
 
 async function saveProviderAnthropicKey() {
   const key = $('providerAnthropicKey').value.trim();
   if (!key) { showToast('Enter an API key'); return; }
   try {
-    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anthropicApiKey: key, enabledProviders: { anthropic: true } }) });
+    await postJson('/api/provider-config', { anthropicApiKey: key, enabledProviders: { anthropic: true } });
     $('providerAnthropicKey').value = '';
     $('providerAnthropicStatus').textContent = 'API key is set.';
     showToast('Anthropic key saved');
     _enableAndSync('anthropic');
-  } catch { showToast('Failed to save key'); }
+  } catch (e) { showToast(e.message || 'Failed to save key'); }
 }
 
 async function saveProvider(provider) {
@@ -1299,15 +1396,12 @@ async function saveProviderMicrosoftCreds() {
   const tenant       = $('providerMsTenant')?.value.trim() || 'common';
   if (!clientId || !clientSecret) { showToast('Client ID and Secret are required'); return; }
   try {
-    await fetch('/api/provider-config', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ msClientId: clientId, msClientSecret: clientSecret, msTenant: tenant }),
-    });
+    await postJson('/api/provider-config', { msClientId: clientId, msClientSecret: clientSecret, msTenant: tenant });
     $('providerMsClientId').value = '';
     $('providerMsClientSecret').value = '';
     $('providerMicrosoftStatus').textContent = 'Credentials saved. Use "+ Connect Microsoft" in Profile to link accounts.';
     showToast('Microsoft credentials saved');
-  } catch { showToast('Failed to save credentials'); }
+  } catch (e) { showToast(e.message || 'Failed to save credentials'); }
 }
 
 // Show the input block for the currently-selected TTS provider, hide the
@@ -1436,6 +1530,10 @@ async function installPiper() {
   const decoder = new TextDecoder();
   let buf = '';
   let success = false;
+  // A mid-stream drop (server crash, network blip) rejects reader.read().
+  // Without this guard the rejection is unhandled and the button stays stuck on
+  // "Installing…"; catch it and fall through to the failure branch below.
+  try {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1461,6 +1559,9 @@ async function installPiper() {
         log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`;
       }
     }
+  }
+  } catch (e) {
+    log.textContent += `\n[error] stream interrupted: ${e.message}\n`;
   }
 
   if (success) {
@@ -1666,6 +1767,9 @@ async function installKittentts() {
   const decoder = new TextDecoder();
   let buf = '';
   let success = false;
+  // Guard against a mid-stream drop rejecting reader.read() (would otherwise
+  // leave the button stuck on "Installing…"); fall through to the failure branch.
+  try {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1690,6 +1794,9 @@ async function installKittentts() {
         log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`;
       }
     }
+  }
+  } catch (e) {
+    log.textContent += `\n[error] stream interrupted: ${e.message}\n`;
   }
 
   if (success) {
@@ -1736,6 +1843,9 @@ async function installPocketTts() {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '', success = false;
+  // Guard against a mid-stream drop rejecting reader.read() (would otherwise
+  // leave the button stuck on "Installing…"); fall through to the failure branch.
+  try {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1755,6 +1865,9 @@ async function installPocketTts() {
       if (evName === 'log') { log.textContent += data.line + '\n'; log.scrollTop = log.scrollHeight; }
       else if (evName === 'done') { success = !!data.ok; log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`; }
     }
+  }
+  } catch (e) {
+    log.textContent += `\n[error] stream interrupted: ${e.message}\n`;
   }
   if (success) {
     if (status) { status.textContent = 'Pocket TTS installed. Click Save to start it.'; status.style.color = 'var(--muted)'; }
@@ -1940,6 +2053,9 @@ async function installFasterWhisper(profile /* 'cpu' | 'cuda' */) {
   const decoder = new TextDecoder();
   let buf = '';
   let success = false;
+  // Guard against a mid-stream drop rejecting reader.read() (would otherwise
+  // leave the button stuck on "Installing…"); fall through to the failure branch.
+  try {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1964,6 +2080,9 @@ async function installFasterWhisper(profile /* 'cpu' | 'cuda' */) {
         log.textContent += `\n[exit ${data.code ?? '?'}]${data.error ? ' ' + data.error : ''}\n`;
       }
     }
+  }
+  } catch (e) {
+    log.textContent += `\n[error] stream interrupted: ${e.message}\n`;
   }
 
   if (success) {
@@ -2084,7 +2203,7 @@ window._populateFwGpuPin = async function (cfg) {
   const fmtFree = g => (g.memFreeMiB != null ? ` — ${(g.memFreeMiB / 1024).toFixed(1)} GB free` : '');
   sel.innerHTML =
     `<option value="">Auto (CUDA default — usually GPU 0)</option>` +
-    gpus.map(g => `<option value="${g.index}">GPU ${g.index}: ${g.name}${fmtFree(g)}</option>`).join('');
+    gpus.map(g => `<option value="${escHtml(g.index)}">GPU ${escHtml(g.index)}: ${escHtml(g.name)}${fmtFree(g)}</option>`).join('');
   sel.value = current === '' ? '' : String(current);
   wrap.style.display = 'flex';
 };
@@ -2128,15 +2247,14 @@ async function saveProviderTts() {
     ...(elModel && { elevenlabsModel: elModel }),
   };
   try {
-    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body) });
+    await postJson('/api/provider-config', body);
     if (key) { $('providerTtsKey').value = ''; }
     if (elKey && $('providerElevenlabsKey')) { $('providerElevenlabsKey').value = ''; }
     $('providerTtsStatus').textContent = `Saved (provider: ${provider}).`;
     if (elKey && $('providerElevenlabsStatus')) $('providerElevenlabsStatus').textContent = 'ElevenLabs key is set.';
     _ttsConfigured = !!(key || url || elKey);
     showToast('TTS settings saved');
-  } catch { showToast('Failed to save TTS settings'); }
+  } catch (e) { showToast(e.message || 'Failed to save TTS settings'); }
 }
 
 async function loadProviderHa() {
@@ -2237,11 +2355,10 @@ async function saveProviderStt() {
     sttModel: model,
   };
   try {
-    await fetch('/api/provider-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body) });
+    await postJson('/api/provider-config', body);
     if (key) { $('providerSttKey').value = ''; }
     $('providerSttStatus').textContent = key ? 'STT configured.' : (url ? 'Settings saved.' : '');
     showToast('STT settings saved');
-  } catch { showToast('Failed to save STT settings'); }
+  } catch (e) { showToast(e.message || 'Failed to save STT settings'); }
 }
 window.saveProviderStt = saveProviderStt;

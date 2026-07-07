@@ -273,6 +273,18 @@ async function loadDevices() {
       try { const j = await rRoutines.json(); _routines = Array.isArray(j.routines) ? j.routines : []; }
       catch { _routines = []; }
     } else { _routines = []; }
+    // Preserve an in-progress "new routine" editor across the reload. The
+    // server list has no synthetic '_new' row, so without re-splicing it the
+    // editor collapses mid-create and the user loses what they typed.
+    // _readEditorIntoBuffer() grabs the latest field values from the still-live
+    // DOM (renderDevices() below hasn't torn it down yet).
+    if (_editingRoutineId === '_new') {
+      _readEditorIntoBuffer();
+      if (_routineEditBuffer) {
+        _routines = _routines.filter(r => r.id !== '_new');
+        _routines.push({ ..._routineEditBuffer, id: '_new' });
+      }
+    }
     if (rAmbient && rAmbient.ok) {
       try { const j = await rAmbient.json(); _ambientFiles = Array.isArray(j.files) ? j.files : []; }
       catch { _ambientFiles = []; }
@@ -1311,12 +1323,6 @@ window.renameDevice = function (id, ev) {
   const v = (ev?.target?.value || '').trim();
   if (v) patchDevice(id, { name: v });
 };
-window.setDeviceAgent = function (id, ev) {
-  patchDevice(id, { default_agent_id: ev.target.value || null });
-};
-window.setDeviceVoice = function (id, ev) {
-  patchDevice(id, { tts_voice: ev.target.value });
-};
 // Save the current _voiceConfig.slot_assignments back to the server.
 // PUT /api/voice-config fans out wake-word OTA pushes to every device
 // paired to the user. Returns the new server-side config (with bumped
@@ -1632,7 +1638,13 @@ window.revertChime = async function () {
       throw new Error(error || `HTTP ${r.status}`);
     }
     showDeviceToast('Chime reset to default.');
-    loadDevices();
+    // Micro-action: patch local state + re-render rather than a full
+    // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
+    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    _chimeInfo = { hasCustom: false, sizeBytes: 0 };
+    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    renderDevices();
+    populateCoordinatorLabels();
   } catch (e) {
     showDeviceToast(`Reset failed: ${e.message}`, { variant: 'error' });
   }
@@ -1758,7 +1770,13 @@ window.deleteVoiceRef = async function (id) {
   try {
     const resp = await fetch(`/api/voice-refs/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    loadDevices();
+    // Micro-action: patch local state + re-render rather than a full
+    // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
+    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    _voiceRefs = _voiceRefs.filter(x => x.id !== id);
+    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    renderDevices();
+    populateCoordinatorLabels();
   } catch (e) {
     showDeviceToast(`Delete failed: ${e.message}`, { variant: 'error' });
   }
@@ -1774,15 +1792,17 @@ window.deleteWakeword = async function (id) {
   try {
     const r = await fetch(`/api/wakewords/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    loadDevices();
+    // Micro-action: patch local state + re-render rather than a full
+    // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
+    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    _wakewordLibrary = _wakewordLibrary.filter(x => x.id !== id);
+    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    renderDevices();
+    populateCoordinatorLabels();
   } catch (e) {
     alert(`Delete failed: ${e.message}`);
   }
 };
-window.setDeviceSpeak = function (id, ev) {
-  patchDevice(id, { speak_replies: !!ev.target.checked });
-};
-
 // Headphone / line-out mode: PATCH persists server-side and live-pushes
 // set_headphone_mode over the device WS (routes/devices.mjs); the firmware
 // stores it in NVS so it survives reboots. Voice fast-path equivalent:
@@ -2259,6 +2279,10 @@ async function _uploadAmbientFile(file) {
     showDeviceToast('Only MP3 files are supported.', { variant: 'error' });
     return;
   }
+  // Preserve an in-progress routine editor across the progress + result
+  // re-renders (renderDevices renders the editor from _routines, not the buffer).
+  _readEditorIntoBuffer();
+  _flushBufferToRoutines();
   _ambientUploadProgress = { name: file.name, pct: 0 };
   renderDevices();
   populateCoordinatorLabels();
@@ -2288,13 +2312,23 @@ window.deleteAmbient = async function (name) {
   try {
     const r = await fetch(`/api/devices/ambient-library/${encodeURIComponent(name)}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    loadDevices();
+    // Micro-action: patch local state + re-render rather than a full
+    // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
+    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    _ambientFiles = _ambientFiles.filter(f => f.name !== name);
+    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    renderDevices();
+    populateCoordinatorLabels();
   } catch (e) {
     showDeviceToast(`Delete failed: ${e.message}`, { variant: 'error' });
   }
 };
 
 window.previewAmbient = function (name) {
+  // Preserve an in-progress routine editor across the re-renders below
+  // (renderDevices renders the editor from _routines, not the buffer).
+  _readEditorIntoBuffer();
+  _flushBufferToRoutines();
   // Toggle: clicking the play button while THIS file is already playing
   // stops it; otherwise stop any other preview and start this one. The
   // button's icon (▶ vs ■) is driven by window._ambientPreviewName so a

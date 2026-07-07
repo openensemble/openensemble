@@ -246,11 +246,23 @@ function buildClozeWidget(data) {
   const wid = newWidgetId();
   const reviewBadge = data.memoryId ? `<div class="tutor-widget-review-badge">Spaced Review</div>` : '';
   const blanks = [];
-  const template = (data.template || data.text || '').replace(/\[\[([^\]]+)\]\]/g, (_, answer) => {
+  // The template text is LLM-supplied and gets spliced into innerHTML AFTER
+  // DOMPurify has already run on the surrounding markdown — so escape every
+  // non-blank segment here or it's a stored-XSS sink. The [[answer]] captures
+  // stay raw (they feed correctness comparison, not the DOM).
+  const rawTemplate = data.template || data.text || '';
+  const clozeRe = /\[\[([^\]]+)\]\]/g;
+  let template = '';
+  let lastIdx = 0;
+  let m;
+  while ((m = clozeRe.exec(rawTemplate)) !== null) {
+    template += esc(rawTemplate.slice(lastIdx, m.index));
     const i = blanks.length;
-    blanks.push(answer);
-    return `<input type="text" class="tutor-widget-cloze-input" id="${wid}_b${i}" data-wid="${wid}" placeholder="…" />`;
-  });
+    blanks.push(m[1]);
+    template += `<input type="text" class="tutor-widget-cloze-input" id="${wid}_b${i}" data-wid="${wid}" placeholder="…" />`;
+    lastIdx = m.index + m[0].length;
+  }
+  template += esc(rawTemplate.slice(lastIdx));
   const blanksJson = JSON.stringify(blanks).replace(/"/g, '&quot;');
   return `<div class="tutor-widget" id="${wid}" data-kind="cloze" data-blanks="${blanksJson}">
     ${reviewBadge}
@@ -749,8 +761,8 @@ function showCelebration(msg) {
   overlay.className = 'tutor-celebration';
   overlay.innerHTML = `
     <div class="tutor-celebration-card">
-      <div class="tutor-celebration-icon">${icon}</div>
-      <div class="tutor-celebration-kind">${String(kind).replace(/_/g, ' ')}</div>
+      <div class="tutor-celebration-icon">${esc(icon)}</div>
+      <div class="tutor-celebration-kind">${esc(String(kind).replace(/_/g, ' '))}</div>
       <div class="tutor-celebration-label">${esc(label)}</div>
     </div>`;
   document.body.appendChild(overlay);

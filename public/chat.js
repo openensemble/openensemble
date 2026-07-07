@@ -574,6 +574,7 @@ async function send() {
   // that agent's chat panel. The server's chat-dispatch also handles the
   // prefix (strip + redirect) as defense for clients that don't pre-switch.
   const mention = text.match(/^@(\S+)\s+([\s\S]+)$/);
+  let redirectedViaMention = false;
   if (mention) {
     const handle = mention[1].toLowerCase();
     const target = agents.find(a => {
@@ -582,7 +583,21 @@ async function send() {
       return nameKey === handle || idSuffix === handle;
     });
     if (target && target.id !== activeAgent) {
+      // This composer text is being SENT (to the mention target), not parked
+      // as a draft — empty the input and drop this agent's stored draft
+      // BEFORE switching. switchAgent's save-on-switch would otherwise
+      // persist "@helen …" as the ORIGINATING agent's draft and resurrect it
+      // in that composer on every switch back. Emptying first also lets
+      // restoreDraftForAgent(target) inside switchAgent behave normally, so
+      // anything the user had parked on the TARGET agent's composer survives
+      // (the post-send cleanup below is skipped for this redirect case —
+      // the just-sent text was already cleared here, and what's in the input
+      // now is the target's own untouched draft).
+      clearTimeout(_draftSaveTimer);
+      $('input').value = '';
+      clearDraftForAgent(activeAgent);
       switchAgent(target.id);
+      redirectedViaMention = true;
       text = mention[2];  // stripped body; server will see no @-prefix
     } else if (target) {
       text = mention[2];  // same agent, just strip the prefix
@@ -609,13 +624,19 @@ async function send() {
   scrollToBottom(true); // sending always jumps to the bottom, even from scrollback
   // Remember this attempt so it can be cleared/retried if the turn errors.
   lastSentAttempt = { agent: activeAgent, text, attachments, userBubbleEl, sessionEntry };
-  $('input').value = '';
-  resizeTextarea();
-  // Cancel any pending debounced draft-save (see _initDraftPersistence) —
-  // without this, a save queued just before send fires ~400ms later and
-  // re-populates a "draft" for a message that already went out.
-  clearTimeout(_draftSaveTimer);
-  clearDraftForAgent(activeAgent);
+  // Composer/draft cleanup — skipped when an @-mention redirect already did
+  // it for the ORIGINATING agent pre-switch: at this point activeAgent is
+  // the mention TARGET, whose input holds their own restored draft (not the
+  // just-sent text), and clearing it here would destroy a parked draft.
+  if (!redirectedViaMention) {
+    $('input').value = '';
+    resizeTextarea();
+    // Cancel any pending debounced draft-save (see _initDraftPersistence) —
+    // without this, a save queued just before send fires ~400ms later and
+    // re-populates a "draft" for a message that already went out.
+    clearTimeout(_draftSaveTimer);
+    clearDraftForAgent(activeAgent);
+  }
   // Every tray item just went out on this message — clear it, rather than
   // the old shift-one-off-the-queue behavior (the wire now carries the
   // whole array in one message, so there's nothing left to queue).
@@ -2518,7 +2539,10 @@ function appendToolPillProgress(name, text) {
   if (!toolPillsEl || !text) return;
   const pending = _findLatestPendingPill(name);
   if (!pending) return; // nothing to attach progress to (already finished)
-  pending.progressPreview = (pending.progressPreview || '') + text;
+  // Cap the accumulated preview the same way the display buffer is capped —
+  // it's copied verbatim into every session commit via currentLiveToolEvents,
+  // so an unbounded chatty tool would bloat the session indefinitely.
+  pending.progressPreview = ((pending.progressPreview || '') + text).slice(-PROGRESS_BUF_CAP);
   pending.updatedAt = Date.now();
   const argSub = toolPillSubtitle(name, pending.args);
   const bubble = _ensureStreamBubble(name, argSub, toolDisplayLabel(name, pending.args));
@@ -2555,19 +2579,6 @@ function updateToolPill(name, summary, fullText) {
     });
   }
   updateToolRunHeader(liveToolRun, liveToolRun?.events?.every(e => e.status === 'done'));
-}
-
-function onToolPillClick(e) {
-  const pill = e.target.closest('.tool-pill.clickable');
-  if (!pill || !pill._toolFullText) return;
-  openToolModal(pill.dataset.tool, pill._toolFullText);
-}
-function onToolPillKey(e) {
-  if (e.key !== 'Enter' && e.key !== ' ') return;
-  const pill = e.target.closest('.tool-pill.clickable');
-  if (!pill || !pill._toolFullText) return;
-  e.preventDefault();
-  openToolModal(pill.dataset.tool, pill._toolFullText);
 }
 
 let _toolModalEls = null;

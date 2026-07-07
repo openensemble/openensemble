@@ -518,13 +518,14 @@ async function selectReasonRuntime(runtime) {
   } else if (runtime === 'lmstudio') {
     update.reasonModel = status?.lmstudio?.modelId ?? 'openensemble/reason-v1';
   }
-  await fetch('/api/cortex-config', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(update),
-  });
-  cortexCfg = { ...cortexCfg, ...update };
-  renderCortexModelRows();
+  try {
+    await postJson('/api/cortex-config', update);
+    cortexCfg = { ...cortexCfg, ...update };
+    renderCortexModelRows();
+  } catch (e) {
+    showToast(e.message || 'Failed to switch reason runtime');
+    renderCortexModelRows(); // re-render from unchanged cortexCfg to revert the pick
+  }
 }
 
 async function installReasonRuntime(runtime) {
@@ -859,7 +860,7 @@ function switchSettingsTab(name) {
   if (name === 'skills') loadSkillsList();
   if (name === 'plugins') renderDrawersSettings();
   if (name === 'tasks') {
-    $('stAgent').innerHTML = agents.map(a => `<option value="${a.id}">${a.emoji} ${a.name}</option>`).join('');
+    $('stAgent').innerHTML = agents.map(a => `<option value="${escHtml(a.id)}">${escHtml(a.emoji)} ${escHtml(a.name)}</option>`).join('');
     loadTaskList();
     loadGmailAutoLabel();
     loadReminderChannel();
@@ -916,8 +917,8 @@ async function loadBrowserBridge() {
         <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
             <div>
-              <div style="font-weight:600;font-size:13px">${b.name || '(unnamed)'}${b.version ? ` <span style="color:var(--muted);font-weight:400;font-size:11px">v${b.version}</span>` : ''}</div>
-              <div style="font-size:11px;color:var(--muted);font-family:monospace;margin-top:2px">extId: ${b.extId}</div>
+              <div style="font-weight:600;font-size:13px">${escHtml(b.name || '(unnamed)')}${b.version ? ` <span style="color:var(--muted);font-weight:400;font-size:11px">v${escHtml(b.version)}</span>` : ''}</div>
+              <div style="font-size:11px;color:var(--muted);font-family:monospace;margin-top:2px">extId: ${escHtml(b.extId)}</div>
               <div style="font-size:11px;color:var(--muted);margin-top:2px">Connected: ${fmtTime(b.registeredAt)} · ${b.tabCount} tab(s)</div>
             </div>
           </div>
@@ -1013,12 +1014,9 @@ async function saveVisionProvider() {
   if (!val) return;
   const [model, provider] = val.split('||');
   try {
-    await fetch('/api/config', {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ visionProvider: provider, visionModel: model || undefined }),
-    });
+    await postJson('/api/config', { visionProvider: provider, visionModel: model || undefined }, { method: 'PATCH' });
     showToast('Vision model saved', 2000);
-  } catch { showToast('Failed to save'); }
+  } catch (e) { showToast(e.message || 'Failed to save'); }
 }
 
 // ── Strip thinking tags setting ───────────────────────────────────────────────
@@ -1029,12 +1027,9 @@ function setStripThinkingTrack(checked) {
 async function saveStripThinkingTags(checked) {
   setStripThinkingTrack(checked);
   try {
-    await fetch('/api/config', {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stripThinkingTags: checked }),
-    });
+    await postJson('/api/config', { stripThinkingTags: checked }, { method: 'PATCH' });
     showToast(checked ? 'Thinking output will be hidden' : 'Thinking output will be shown', 2000);
-  } catch { showToast('Failed to save setting'); }
+  } catch (e) { setStripThinkingTrack(!checked); showToast(e.message || 'Failed to save setting'); }
 }
 
 // ── Reminder delivery channel (per-user) ──────────────────────────────────────
@@ -1382,12 +1377,9 @@ async function restartServer() {
 async function saveSessionExpiry() {
   const hours = parseInt($('sessionExpiryInput')?.value ?? '0');
   try {
-    await fetch('/api/config', {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionExpiryHours: hours }),
-    });
+    await postJson('/api/config', { sessionExpiryHours: hours }, { method: 'PATCH' });
     showToast('Session expiry saved!', 2000);
-  } catch { showToast('Failed to save setting'); }
+  } catch (e) { showToast(e.message || 'Failed to save setting'); }
 }
 
 // ── Brave Search API key (admin/owner only) ──────────────────────────────────
@@ -1998,15 +1990,15 @@ function _saveNewsTopicPrefInt(value) { saveNewsTopicPref(parseInt(value, 10)); 
 
 async function toggleDrawerPlugin(drawerId, enabled) {
   try {
-    await fetch('/api/drawers/toggle', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pluginId: drawerId, enabled }),
-    });
+    await postJson('/api/drawers/toggle', { pluginId: drawerId, enabled });
     const idx = drawers.findIndex(p => p.id === drawerId);
     if (idx !== -1) drawers[idx].enabled = enabled;
     applyDrawerVisibility();
     renderDrawersSettings();
-  } catch {}
+  } catch (e) {
+    showToast(e.message || 'Failed to update plugin');
+    renderDrawersSettings(); // revert the checkbox to the persisted state
+  }
 }
 
 async function saveDrawerSetting(drawerId, key, value) {

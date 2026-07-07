@@ -1,6 +1,15 @@
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let _reconnectDelay = 1000;
 let _pingTimer = null;
+// Timestamp of the last pong we actually received. Used by the visibilitychange
+// liveness probe: readyState===OPEN can lie after an iOS resume, so we require a
+// fresh pong to prove the socket is really alive.
+let _lastPongAt = 0;
+// Agents whose history has been genuinely loaded from the server (via
+// session_loaded). Distinct from `agent in sessions`, which is also true when a
+// push (status / agent_report) merely seeded an empty array — those still need a
+// real load_session so switching to them doesn't show only the stray push.
+let sessionsLoaded = new Set();
 
 function clientSessionAgentId(agent) {
   if (typeof agent !== 'string' || !agent) return agent;
@@ -123,8 +132,15 @@ document.addEventListener('visibilitychange', () => {
     // reconnect if it's actually dead.  Send a ping to verify; if it fails
     // or the socket is already closed, then force-reconnect.
     if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: 'ping' })); } catch { forceReconnect(); }
+      const before = _lastPongAt;
+      try { ws.send(JSON.stringify({ type: 'ping' })); } catch { forceReconnect(); return; }
       schedulePing();                   // reset the keep-alive timer
+      // readyState lies after an iOS resume (green dot, no traffic). Require a
+      // fresh pong within ~2s; if none arrives, the socket is half-dead — force
+      // a clean reconnect instead of trusting readyState.
+      setTimeout(() => {
+        if (document.visibilityState === 'visible' && _lastPongAt <= before) forceReconnect();
+      }, 2000);
     } else {
       forceReconnect();
     }
@@ -162,9 +178,10 @@ function flushStreamRender() {
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
   switch (msg.type) {
-    case 'pong': break;
+    case 'pong': _lastPongAt = Date.now(); break;
     case 'session_loaded': {
       const serverMsgs = msg.messages ?? [];
+      sessionsLoaded.add(msg.agent); // genuine history load — see switchAgent gate
       const clientMsgs = sessions[msg.agent] ?? [];
       // Merge: use server data as the authoritative base, but preserve any
       // client-only messages that haven't been persisted yet (e.g. a user
@@ -414,6 +431,10 @@ function handleServerMessage(msg) {
       // attempt.
       if (msg.message === 'Unauthorized') {
         setToken(null);
+        // Null the user so ws.onclose stops reconnecting — otherwise each
+        // reconnect re-auths, gets Unauthorized, and re-shows the login screen
+        // (re-fetching users + wiping any half-typed password) every 1–15s.
+        _currentUser = null;
         showLoginScreen();
         break;
       }
@@ -598,6 +619,9 @@ function handleServerMessage(msg) {
     case 'session_expired':
       // Server clears the cookie via Set-Cookie on the next API hit; nothing
       // to do client-side beyond returning the user to the login screen.
+      // Null the user first so ws.onclose stops the reconnect loop (which would
+      // otherwise re-show the login screen and reset the selection every 1–15s).
+      _currentUser = null;
       showToast('Your session has expired. Please sign in again.');
       showLoginScreen();
       break;

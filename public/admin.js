@@ -1,4 +1,10 @@
 // ── User Management (owner/admin) ─────────────────────────────────────────────
+// Client-side password floor. Must match the server's MIN_PASSWORD_LENGTH
+// (routes/_helpers/auth-sessions.mjs) — otherwise create/change accept a
+// password the server rejects, and an admin could create an account that the
+// (stricter) reset flow then can't set a new password for.
+const MIN_PASSWORD_LEN = 8;
+
 async function loadUserManagement() {
   const el = $('manageUsersList');
   if (!el) return;
@@ -305,9 +311,9 @@ async function adminSaveUser(userId) {
 }
 
 async function adminResetPassword(userId, name) {
-  const pw = prompt(`Set new password for "${name}" (min 8 chars):`);
+  const pw = prompt(`Set new password for "${name}" (min ${MIN_PASSWORD_LEN} chars):`);
   if (pw === null) return;
-  if (!pw || pw.length < 8) { showToast('Password must be at least 8 characters'); return; }
+  if (!pw || pw.length < MIN_PASSWORD_LEN) { showToast(`Password must be at least ${MIN_PASSWORD_LEN} characters`); return; }
   try {
     const r = await fetch(`/api/users/${userId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -351,20 +357,22 @@ async function adminToggleSkill(userId, skillId, enabled) {
 
 async function adminSetRole(userId, role) {
   try {
-    await fetch(`/api/users/${userId}`, {
+    const r = await fetch(`/api/users/${userId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role }),
     });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); showToast(d.error ?? 'Failed to change role'); return; }
     loadUserManagement();
-  } catch {}
+  } catch { showToast('Failed to change role'); }
 }
 
 async function adminDeleteUser(userId, name) {
   if (!confirm(`Delete user "${name}"? This cannot be undone.`)) return;
   try {
-    await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+    const r = await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); showToast(d.error ?? 'Failed to delete user'); return; }
     loadUserManagement();
-  } catch {}
+  } catch { showToast('Failed to delete user'); }
 }
 
 function updateAddUserRoleHint() {
@@ -448,7 +456,7 @@ async function submitAddUser() {
   const role = $('addUserRole')?.value ?? 'user';
   const errEl = $('addUserError');
   if (!name) { errEl.textContent = 'Name required'; return; }
-  if (!password || password.length < 4) { errEl.textContent = 'Password must be at least 4 characters'; return; }
+  if (!password || password.length < MIN_PASSWORD_LEN) { errEl.textContent = `Password must be at least ${MIN_PASSWORD_LEN} characters`; return; }
   errEl.textContent = '';
   try {
     const r = await fetch('/api/users', {
@@ -472,7 +480,7 @@ async function changePassword() {
   const newPw2 = $('pwNew2').value;
   const errEl = $('pwChangeError');
   if (!current) { errEl.textContent = 'Current password required'; return; }
-  if (!newPw || newPw.length < 4) { errEl.textContent = 'New password must be at least 4 characters'; return; }
+  if (!newPw || newPw.length < MIN_PASSWORD_LEN) { errEl.textContent = `New password must be at least ${MIN_PASSWORD_LEN} characters`; return; }
   if (newPw !== newPw2) { errEl.textContent = 'Passwords do not match'; return; }
   errEl.textContent = '';
   const id = getCurrentUserId();
