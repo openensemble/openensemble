@@ -8,6 +8,12 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-07
 
+**Learning now knows your automations aren't you**
+Personalization observations now carry provenance: activity fired by your scheduled tasks and watchers is tagged as automated, and reflection weighs each automation once as a deliberate choice you made ("keeps a watch on X") instead of reading its every firing as you actively doing something. Routine-heavy users still get full learning — it's just honest about what's a habit and what's a heartbeat.
+
+**"What I've learned about you" moved to the Learn drawer**
+The ledger of facts the coordinator has inferred about you now lives in the Learn drawer alongside pending suggestions, standing rules, and the rest of the learning audit — no more digging into Settings to review it. Confirm or forget individual facts right there; Settings → Personalization keeps the setup controls (on/off, model choice, Run now, Start fresh).
+
 **Voice devices say decimals and prices properly**
 Numbers with a decimal point are now spoken the way you'd say them — "1.609 kilometers" comes out "one point six zero nine kilometers" instead of "one six-oh-nine." Dollar amounts read as money ("$5.99" is "five dollars and ninety-nine cents"), and distances in "km" are spoken as kilometers.
 

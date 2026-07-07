@@ -1873,6 +1873,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   recordToolObservation({
                     userId: captured.userId, agentId: captured.agentId, toolName: captured.name,
                     skillId: captured.owningSkillId, args: captured.args, resultText: finalText, ok: true,
+                    // Drain runs after the turn's async context is gone — derive
+                    // origin from the scheduledContext captured at dispatch time.
+                    origin: captured.scheduledCtx?.originTaskId ? 'automation' : 'interactive',
                   });
                 } catch { /* never block auto-bg finalization */ }
                 if (captured.adopted) {
@@ -2135,6 +2138,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             recordToolObservation({
               userId, agentId: attribAgentId, toolName: name, skillId: owningSkillId,
               args: mergedArgs, resultText: text, ok: true,
+              // Drain runs after the turn's async context is gone — derive
+              // origin from the scheduledContext captured at dispatch time.
+              origin: scheduledCtx?.originTaskId ? 'automation' : 'interactive',
             });
           } catch { /* never block auto-bg finalization */ }
           const key = agentId
