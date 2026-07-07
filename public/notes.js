@@ -327,11 +327,11 @@ async function updateNotesBadgeCount() {
 
 function setNotesBadge(count) {
   const label = count > 99 ? '99+' : count;
-  [$('notesBadge'), $('notesBadgeMobile')].forEach(b => {
-    if (!b) return;
-    if (count > 0) { b.textContent = label; b.style.display = ''; }
-    else b.style.display = 'none';
-  });
+  const nb = $('notesBadge');
+  if (nb) {
+    if (count > 0) { nb.textContent = label; nb.style.display = ''; }
+    else nb.style.display = 'none';
+  }
   const tb = $('notesMsgBadge');
   if (tb) {
     if (count > 0) { tb.textContent = label; tb.style.display = ''; }

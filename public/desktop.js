@@ -8,6 +8,12 @@ function switchView(mode) {
   const inputArea = document.querySelector('.input-area');
   const desktopView = $('desktopView');
 
+  // Mobile header hosts its own copy of the toggle (the floating one is
+  // hidden ≤640px) — keep both in sync.
+  const mChat = $('mViewChat'), mDesk = $('mViewDesktop');
+  if (mChat) mChat.classList.toggle('active', mode !== 'desktop');
+  if (mDesk) mDesk.classList.toggle('active', mode === 'desktop');
+
   if (mode === 'desktop') {
     chatArea.style.display = 'none';
     inputArea.style.display = 'none';

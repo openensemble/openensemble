@@ -64,22 +64,18 @@ function _hasAnyProviderConfigured() {
 }
 
 function buildTabs() {
-  // Mobile bottom nav
-  const inner = $('bottomNavInner');
-  inner.innerHTML = '';
-  agents.forEach(a => {
-    const btn = document.createElement('button');
-    btn.className = 'nav-tab' + (a.id === activeAgent ? ' active' : '');
-    const busy = agentStreams[a.id]?.active ? '<span class="busy-dot"></span>' : '';
-    btn.innerHTML = `<span class="nav-emoji">${escHtml(a.emoji ?? '')}</span><span class="nav-name">${escHtml(a.name)}</span>${busy}`;
-    btn.onclick = () => switchAgent(a.id);
-    inner.appendChild(btn);
-  });
-  // Keep the active tab in view when the bar overflows horizontally
-  const activeBtn = inner.querySelector('.nav-tab.active');
-  if (activeBtn && inner.scrollWidth > inner.clientWidth) {
-    activeBtn.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
-  }
+  // Mobile bottom bar: current-agent chip + busy signals. The full agent list
+  // lives in the bottom-sheet switcher (drawers.js buildAgentSheet).
+  const a = agents.find(x => x.id === activeAgent);
+  const em = $('bnAgentEmoji'), nm = $('bnAgentName');
+  if (em) em.textContent = a?.emoji ?? '🤖';
+  if (nm) nm.textContent = a?.name ?? 'Agent';
+  const selfBusy = $('bnAgentBusy');
+  if (selfBusy) selfBusy.style.display = agentStreams[activeAgent]?.active ? '' : 'none';
+  const othersBusy = $('bnOthersBusy');
+  if (othersBusy) othersBusy.style.display =
+    agents.some(x => x.id !== activeAgent && agentStreams[x.id]?.active) ? '' : 'none';
+  if (typeof refreshAgentSheetIfOpen === 'function') refreshAgentSheetIfOpen();
   updateAgentPill();
   checkEmptyState();
 }
@@ -186,10 +182,10 @@ function updateSessionWarning() {
   const kCtx = Math.round(ctxWindow / 1000) + 'k';
   const tip = pct >= 0.50 ? `Session is very long (~${kTok} / ${kCtx} tokens) — older turns will start dropping soon`
             : pct >= 0.40 ? `Session is getting long (~${kTok} / ${kCtx} tokens) — consider clearing` : '';
-  for (const id of ['sessionDot', 'sessionDotMobile']) {
-    const el = $(id); if (!el) continue;
-    el.className = 'session-dot' + (cls ? ' ' + cls : '');
-    el.title = tip;
+  const sdot = $('sessionDot');
+  if (sdot) {
+    sdot.className = 'session-dot' + (cls ? ' ' + cls : '');
+    sdot.title = tip;
   }
   $('sbtnClear').title = tip || 'Clear session';
 }

@@ -29,12 +29,6 @@
 }
 .session-dot.warn  { display: block; background: var(--yellow); }
 .session-dot.alert { display: block; background: var(--red); }
-.drawer-item .session-dot {
-  position: static; display: none; width: 8px; height: 8px;
-  border-radius: 50%; flex-shrink: 0; margin-left: auto;
-}
-.drawer-item .session-dot.warn  { display: block; background: var(--yellow); }
-.drawer-item .session-dot.alert { display: block; background: var(--red); }
 .strip-spacer { flex: 1; }
 .strip-sep { width: 32px; height: 1px; background: var(--border); margin: 4px 0; }
 /* User avatar button */

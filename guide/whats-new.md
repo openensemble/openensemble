@@ -8,6 +8,12 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-07-07
 
+**Switch agents from the bottom bar**
+The bottom bar now shows which agent you're talking to; tap it (or the Agents button beside it) to slide up an agent picker — the same sheet style as the ⋮ menu — with your current agent highlighted and a pulsing dot on any agent that's still working in the background. Sheets also dismiss the way you'd expect now: swipe down on the handle, tap the handle, or tap anywhere outside.
+
+**Mobile now has everything desktop has**
+The phone layout got a full refresh. Tapping ⋮ opens a bottom sheet with every feature as an icon tile — including ones mobile was missing before (Learn, Today · Tutor, Nodes, Voice devices, custom skill panels, and the advanced tools when they're enabled) — plus quick actions for search, switching profiles, signing out, and clearing the session. The menu builds itself from the same list desktop uses, so anything added later shows up on your phone automatically. A Chat/Desktop switch now lives in the top bar, unread and alert badges carry over to the menu tiles, and a small dot on ⋮ tells you when something needs attention (new mail, a node alert, or an available update).
+
 **Learning now knows your automations aren't you**
 Personalization observations now carry provenance: activity fired by your scheduled tasks and watchers is tagged as automated, and reflection weighs each automation once as a deliberate choice you made ("keeps a watch on X") instead of reading its every firing as you actively doing something. Routine-heavy users still get full learning — it's just honest about what's a habit and what's a heartbeat.
 

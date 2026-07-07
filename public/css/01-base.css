@@ -24,7 +24,6 @@ body {
 .icon, [data-lucide] { width: 18px; height: 18px; stroke-width: 1.75; vertical-align: middle; flex-shrink: 0; }
 .strip-btn .icon { width: 20px; height: 20px; }
 .drawer-icon .icon { width: 18px; height: 18px; }
-.di-icon .icon { width: 20px; height: 20px; }
 .exp-nav-icon .icon { width: 16px; height: 16px; }
 
 /* ── Scrollbar ── */

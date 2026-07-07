@@ -556,9 +556,6 @@ function updateTasksBadge() {
   } else {
     badge.style.display = 'none';
   }
-  // Also update mobile drawer label
-  const lbl = $('drawerTasksLabel');
-  if (lbl) lbl.innerHTML = `Tasks${count ? ` <span class="task-badge">${count}</span>` : ''}`;
 }
 
 async function toggleTask(id, enabled) {
