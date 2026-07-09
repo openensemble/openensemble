@@ -2,7 +2,7 @@
   "id": "role_tv_control",
   "name": "TV Control",
   "icon": "📺",
-  "description": "Control Android TVs paired to OpenEnsemble — launch apps, control playback and volume, search, show a message or photo on screen, view Home Assistant cameras, and check what's playing.",
+  "description": "Control Android TVs paired to OpenEnsemble — launch apps, control playback and volume, search, show a message or photo on screen, view Home Assistant cameras, check what's playing, and manage the TV video library's sources (local folders and SMB network shares).",
   "category": "utility",
   "service": false,
   "enabled_by_default": true,
@@ -15,7 +15,10 @@
     "^turn\\s+(?:the\\s+)?volume\\s+(?:up|down)\\s+on\\s+(?:the\\s+)?tv\\b",
     "^mute\\s+(?:the\\s+)?tv\\b",
     "^show\\s+me\\s+(?:the\\s+)?.+\\s+camera\\b",
-    "^what(?:'s| is)\\s+(?:playing|on)\\s+(?:the\\s+)?tv\\b"
+    "^what(?:'s| is)\\s+(?:playing|on)\\s+(?:the\\s+)?tv\\b",
+    "\\bvideo\\s+(?:source|folder|library|share)s?\\b",
+    "\\b(?:network|smb|nas)\\s+share\\b",
+    "^save\\s+.+\\s+to\\s+(?:the\\s+)?(?:videos?|video\\s+library|nas)\\b"
   ],
   "intent_examples": [
     "put on netflix",
@@ -44,9 +47,17 @@
     "display the driveway camera",
     "what's playing on the tv right now",
     "what's on the living room tv",
-    "what app is the tv on"
+    "what app is the tv on",
+    "list the tv video sources",
+    "what video folders can the tv see",
+    "add a video source for the tv",
+    "add the nas share to the tv videos",
+    "add //nas/media as a video source",
+    "remove the nas video source",
+    "save this file to the videos folder",
+    "put that movie on the nas share"
   ],
-  "systemPromptAddition": "## TV Control\n\nUse the `tv_*` tools to control Android TVs paired to OpenEnsemble — launching apps, media playback, volume, search, showing text or photos on screen, viewing Home Assistant cameras, and checking what's playing. If {{USER_NAME}} is speaking through a TV itself, that TV is used automatically; only pass `device` when they name a specific TV (\"the bedroom TV\") or a tool tells you multiple TVs are online and asks you to pick one. Call the tool directly for clear commands (\"pause the TV\", \"put on Netflix\", \"show me the front door\") — don't ask for confirmation first. If a tool reports an error (TV offline, app not found, ambiguous camera name), relay it in one short sentence, and when it lists options (installed apps, camera names, TV names) read those back so {{USER_NAME}} can pick.",
+  "systemPromptAddition": "## TV Control\n\nUse the `tv_*` tools to control Android TVs paired to OpenEnsemble — launching apps, media playback, volume, search, showing text or photos on screen, viewing Home Assistant cameras, and checking what's playing. If {{USER_NAME}} is speaking through a TV itself, that TV is used automatically; only pass `device` when they name a specific TV (\"the bedroom TV\") or a tool tells you multiple TVs are online and asks you to pick one. Call the tool directly for clear commands (\"pause the TV\", \"put on Netflix\", \"show me the front door\") — don't ask for confirmation first. If a tool reports an error (TV offline, app not found, ambiguous camera name), relay it in one short sentence, and when it lists options (installed apps, camera names, TV names) read those back so {{USER_NAME}} can pick.\n\nThe TV's video library is served from named video sources (local folders on the OE server, or SMB network shares like //nas/media). Anyone can list them with `tv_video_sources_list`. Adding or removing sources (`tv_video_source_add` / `tv_video_source_remove`) and saving a server-local file into one (`tv_videos_save`) are admin-only — the tools check this themselves. If a video-source tool refuses or reports an error, relay its message verbatim: it often includes the exact fix (e.g. an install command).",
   "tools": [
     {
       "type": "function",
@@ -213,6 +224,89 @@
             }
           },
           "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_video_sources_list",
+        "description": "List the TV video library's sources — each source's name, type (local folder or SMB network share), and whether it's currently available (with the reason when it isn't).",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_video_source_add",
+        "description": "Add a source to the TV video library (admin only). Accepts either a local folder path on the OE server (e.g. '/srv/media/Movies') or a guest-accessible SMB network share (e.g. '//nas/media').",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Display name for the source (1-32 characters: letters, digits, spaces, underscores, hyphens), e.g. 'Movies' or 'NAS'."
+            },
+            "share_or_path": {
+              "type": "string",
+              "description": "Absolute folder path on the OE server (e.g. '/srv/media/Movies') or an SMB share written as //host/share (e.g. '//nas/media')."
+            },
+            "subfolder": {
+              "type": "string",
+              "description": "Optional subfolder inside the path/share to use as the source's root, e.g. 'movies/kids'."
+            },
+            "port": {
+              "type": "number",
+              "description": "Optional SMB port when the share isn't on the default 445."
+            }
+          },
+          "required": ["name", "share_or_path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_video_source_remove",
+        "description": "Remove a source from the TV video library by name (admin only). The folder or share's files themselves are not deleted.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Name of the video source to remove, as shown by tv_video_sources_list."
+            }
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "tv_videos_save",
+        "description": "Save a file that is already on the OE server into a TV video-library source (admin only) — e.g. copy a downloaded or generated video into the Videos folder or onto a NAS share so it shows up on the TV.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Absolute path of the file on the OE server, e.g. '/srv/media/incoming/clip.mp4'."
+            },
+            "source": {
+              "type": "string",
+              "description": "Name of the video source to save into, as shown by tv_video_sources_list."
+            },
+            "subfolder": {
+              "type": "string",
+              "description": "Optional subfolder inside the source to place the file in (created if missing), e.g. 'home-movies'."
+            }
+          },
+          "required": ["file", "source"]
         }
       }
     }

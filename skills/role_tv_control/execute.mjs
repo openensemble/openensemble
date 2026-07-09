@@ -2,7 +2,8 @@
  * skills/role_tv_control/execute.mjs — voice/chat tool surface over the
  * Android TV command channel (see oe-tv-assistant/PROTOCOL-TV.md
  * and lib/tv-commands.mjs for the underlying tv_command / tv_command_result
- * wire protocol).
+ * wire protocol), plus admin tools for the TV video library's sources
+ * (tv_video_* / tv_videos_save → the video sidecar's loopback admin API).
  *
  * Target resolution: every tool accepts an optional `device` name. If the
  * turn didn't specify one, we use the TV the user is speaking through
@@ -19,6 +20,8 @@
  * net for anything unexpected.
  */
 
+import fs from 'fs';
+import path from 'path';
 import { sendTvCommand, getTvState } from '../../lib/tv-commands.mjs';
 import { listTvDevices } from '../../lib/voice-devices.mjs';
 import { isDeviceOnline } from '../../ws-handler.mjs';
@@ -26,6 +29,7 @@ import { getVoiceContext } from '../../lib/voice-context.mjs';
 import { getTurnContext } from '../../lib/turn-abort-context.mjs';
 import { getHaConfig } from '../../lib/ha-client.mjs';
 import { normalize, listCameras } from '../../lib/ha-cache.mjs';
+import { isPrivileged } from '../../routes/_helpers.mjs';
 
 const MEDIA_KEYS = new Set(['play_pause', 'play', 'pause', 'stop', 'next', 'previous', 'rewind', 'fast_forward']);
 const DEFAULT_SHOW_SECONDS = 15;
@@ -33,6 +37,55 @@ const MIN_SHOW_SECONDS = 3;
 const MAX_SHOW_SECONDS = 120;
 const STATE_FRESH_MS = 60_000;
 const WAKE_TIMEOUT_MS = 3000;
+
+// Video-library source admin (tv_video_* / tv_videos_save) — talks to the
+// standalone video sidecar's loopback-only admin API (see oe-tv-assistant/
+// PROTOCOL-TV.md, "Video library v2"). Household-level config, so mutations
+// are admin-gated here (this skill is per-user for TV targeting, but sources
+// are shared by every TV).
+const VIDEO_SIDECAR_ADMIN = 'http://localhost:3747/admin';
+const VIDEO_ADMIN_TIMEOUT_MS = 5000;
+// Adding an SMB source blocks on the sidecar's rclone mount attempt, so the
+// add call alone gets a longer leash than the ~5s the other calls use.
+const VIDEO_ADMIN_ADD_TIMEOUT_MS = 20_000;
+const VIDEO_SIDECAR_DOWN = "The TV video server isn't running on the OE machine.";
+const VIDEO_SOURCES_ADMIN_ONLY = 'Sorry — managing TV video sources is limited to household admins. Ask an admin to make this change.';
+const VIDEO_EXTS = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.3gp']);
+
+// One request to the sidecar admin API. Never throws: unreachable/timeout
+// collapses to {down:true}; otherwise {status, ok, data} with data the parsed
+// JSON body (null if none). Sidecar error bodies carry human-readable `error`
+// strings that include remedies (e.g. the rclone install command) — relay
+// them verbatim via videoAdminError().
+async function videoAdminRequest(method, apiPath, body, timeoutMs = VIDEO_ADMIN_TIMEOUT_MS) {
+  let res;
+  try {
+    res = await fetch(`${VIDEO_SIDECAR_ADMIN}${apiPath}`, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    return { down: true, status: 0, ok: false, data: null };
+  }
+  let data = null;
+  try { data = await res.json(); } catch { /* non-JSON body */ }
+  return { down: false, status: res.status, ok: res.ok, data };
+}
+
+function videoAdminError(r, fallback) {
+  if (r.down) return VIDEO_SIDECAR_DOWN;
+  return r.data?.error || fallback;
+}
+
+function describeVideoSource(s, includeLocation = true) {
+  const kind = s.type === 'smb'
+    ? `network share${includeLocation ? ` ${s.share}` : ''}`
+    : `local folder${includeLocation ? ` ${s.path}` : ''}`;
+  const health = s.status === 'ok' ? 'available' : `UNAVAILABLE${s.error ? ` — ${s.error}` : ''}`;
+  return `${s.name} (${kind}) — ${health}`;
+}
 
 // The originating device for this turn, whether or not it's a TV. Checks
 // getVoiceContext() (set for voice-device-origin turns) first, then
@@ -292,6 +345,111 @@ export async function executeSkillTool(name, args, userId) {
       });
       if (!res.ok) return tvErrorMessage(res, target.deviceName, 'show that camera');
       return `Showing ${friendly} on ${target.deviceName}.`;
+    }
+
+    if (name === 'tv_video_sources_list') {
+      const r = await videoAdminRequest('GET', '/sources');
+      if (!r.ok) return videoAdminError(r, "Couldn't list the video sources.");
+      const sources = Array.isArray(r.data?.sources) ? r.data.sources : [];
+      if (!sources.length) return 'No video sources are configured yet. An admin can add one with tv_video_source_add.';
+      const includeLocation = isPrivileged(userId);
+      return `Video sources:\n${sources.map(s => `- ${describeVideoSource(s, includeLocation)}`).join('\n')}`;
+    }
+
+    if (name === 'tv_video_source_add') {
+      if (!isPrivileged(userId)) return VIDEO_SOURCES_ADMIN_ONLY;
+      const srcName = typeof args?.name === 'string' ? args.name.trim() : '';
+      if (!srcName) return 'Error: name is required.';
+      let loc = typeof args?.share_or_path === 'string' ? args.share_or_path.trim() : '';
+      if (!loc) return 'Error: share_or_path is required.';
+      // Accept the Windows spelling of a share (\\host\share) too — normalize
+      // before the type sniff below.
+      if (loc.startsWith('\\\\')) loc = loc.replace(/\\/g, '/');
+      const payload = { name: srcName };
+      if (loc.startsWith('//')) {
+        payload.type = 'smb';
+        payload.share = loc;
+      } else if (path.isAbsolute(loc)) {
+        payload.type = 'local';
+        payload.path = loc;
+      } else {
+        return 'Error: share_or_path must be an absolute folder path on the OE server (e.g. /srv/media/Movies) or an SMB share like //host/share.';
+      }
+      if (args.subfolder) payload.subpath = String(args.subfolder);
+      if (args.port !== undefined && args.port !== null) {
+        const port = Number(args.port);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) return 'Error: port must be an integer between 1 and 65535.';
+        payload.port = port;
+      }
+      const r = await videoAdminRequest('POST', '/sources', payload, VIDEO_ADMIN_ADD_TIMEOUT_MS);
+      if (!r.ok) return videoAdminError(r, `Couldn't add video source "${srcName}".`);
+      const added = r.data?.source;
+      return `Added video source ${added ? describeVideoSource(added) : `"${srcName}"`}.`;
+    }
+
+    if (name === 'tv_video_source_remove') {
+      if (!isPrivileged(userId)) return VIDEO_SOURCES_ADMIN_ONLY;
+      const srcName = typeof args?.name === 'string' ? args.name.trim() : '';
+      if (!srcName) return 'Error: name is required.';
+      const r = await videoAdminRequest('DELETE', `/sources/${encodeURIComponent(srcName)}`);
+      if (!r.ok) return videoAdminError(r, `Couldn't remove video source "${srcName}".`);
+      return `Removed video source "${r.data?.removed || srcName}". The folder's files themselves were not deleted.`;
+    }
+
+    if (name === 'tv_videos_save') {
+      if (!isPrivileged(userId)) return VIDEO_SOURCES_ADMIN_ONLY;
+      const file = typeof args?.file === 'string' ? args.file.trim() : '';
+      if (!file) return 'Error: file is required.';
+      if (!args?.source || typeof args.source !== 'string') return 'Error: source is required.';
+      if (!path.isAbsolute(file)) return 'Error: file must be an absolute path on the OE server.';
+      const basename = path.basename(file);
+      if (basename.startsWith('.') || !VIDEO_EXTS.has(path.extname(basename).toLowerCase())) {
+        return `Error: file must be a visible TV video (${[...VIDEO_EXTS].join(', ')}).`;
+      }
+      let stat = null;
+      try { stat = await fs.promises.stat(file); } catch { /* missing */ }
+      if (!stat?.isFile()) return `Error: no file exists at ${file} on the OE server.`;
+
+      const r = await videoAdminRequest('GET', '/sources');
+      if (!r.ok) return videoAdminError(r, "Couldn't look up the video sources.");
+      const sources = Array.isArray(r.data?.sources) ? r.data.sources : [];
+      const want = args.source.trim().toLowerCase();
+      const src = sources.find(s => s.name.toLowerCase() === want);
+      if (!src) {
+        return sources.length
+          ? `No video source named "${args.source}". Sources: ${sources.map(s => s.name).join(', ')}.`
+          : 'No video sources are configured yet. An admin can add one with tv_video_source_add.';
+      }
+      if (src.status !== 'ok' || !src.contentPath) {
+        return `Video source "${src.name}" isn't available right now${src.error ? `: ${src.error}` : ''}.`;
+      }
+
+      // The write contract (PROTOCOL-TV.md): every source exposes contentPath
+      // as a plain local directory (the local path or the sidecar's FUSE
+      // mount), so "save into a share" is an ordinary file copy.
+      let destDir = src.contentPath;
+      let subNote = '';
+      if (args.subfolder) {
+        const sub = String(args.subfolder).trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        // Stay inside contentPath: no '..'; no hidden segments (the sidecar's
+        // device API hides dot-entries, so a save into one would be invisible
+        // on the TV).
+        if (!sub || sub.split('/').some(seg => !seg || seg === '..' || seg.startsWith('.'))) {
+          return 'Error: subfolder must be a relative folder name inside the source (no ".." or hidden segments).';
+        }
+        destDir = path.join(destDir, sub);
+        subNote = `/${sub}`;
+      }
+      const dest = path.join(destDir, basename);
+      try {
+        await fs.promises.mkdir(destDir, { recursive: true });
+        // COPYFILE_EXCL: never silently overwrite existing media.
+        await fs.promises.copyFile(file, dest, fs.constants.COPYFILE_EXCL);
+      } catch (e) {
+        if (e?.code === 'EEXIST') return `A file named ${basename} already exists in ${src.name}${subNote}.`;
+        return `Couldn't save the file into "${src.name}": ${e?.message || 'copy failed'}.`;
+      }
+      return `Saved ${basename} into ${src.name}${subNote}.`;
     }
 
     if (name === 'tv_now_playing') {

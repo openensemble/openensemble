@@ -755,14 +755,15 @@ async function openSettingsDrawer(openIt = true) {
       if (tog) { tog.checked = fullCfg.stripThinkingTags !== false; setStripThinkingTrack(tog.checked); }
     }).catch(() => {});
     // Show admin-only system sections
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow','homeAssistantRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow','homeAssistantRow','tvVideoSourcesRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = '';
     });
     if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus();
     if (typeof loadUpdateStatus === 'function') loadUpdateStatus();
+    if (typeof loadTvVideoSources === 'function') loadTvVideoSources();
   } else {
     // Hide admin-only sections for regular users
-    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow','homeAssistantRow'].forEach(id => {
+    ['visionProviderRow','sessionExpiryRow','stripThinkingRow','stab-backup','braveApiKeyRow','homeAssistantRow','tvVideoSourcesRow'].forEach(id => {
       const el = $(id); if (el) el.style.display = 'none';
     });
   }

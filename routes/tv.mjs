@@ -11,6 +11,9 @@
  *   GET /api/wakewords/stock/:id.tflite — documented alias of the above
  *                                    (PROTOCOL-TV.md's canonical path /
  *                                    the Android client's fallback URL)
+ *   GET    /api/tv/video-sources        — list video-library sources (admin)
+ *   POST   /api/tv/video-sources        — add a source (admin)
+ *   DELETE /api/tv/video-sources/:name  — remove a source (admin)
  *
  * Auth: every route uses requireAuth() — the same helper /api/stt and
  * /api/tts (routes/config.mjs) use. It accepts either the browser session
@@ -24,7 +27,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { requireAuth, getSessionMeta, getAuthToken, isPrivileged, BASE_DIR } from './_helpers.mjs';
+import { requireAuth, getSessionMeta, getAuthToken, isPrivileged, readBody, BASE_DIR } from './_helpers.mjs';
 import { getHaConfig, haRequestBinary } from '../lib/ha-client.mjs';
 import { log } from '../logger.mjs';
 
@@ -34,6 +37,15 @@ const CAMERA_TIMEOUT_MS = 10_000;
 
 const TV_APP_DIR = path.join(BASE_DIR, 'tv-app');
 const WAKEWORD_STOCK_DIR = path.join(BASE_DIR, 'wakewords', 'stock');
+
+// TV video sidecar's loopback-only admin API (oe-tv-assistant/PROTOCOL-TV.md,
+// "Video library v2"). The sidecar rejects non-loopback peers, so the
+// settings UI reaches it through the admin-gated proxy routes below.
+const VIDEO_SIDECAR_ADMIN = 'http://localhost:3747/admin';
+const VIDEO_SOURCES_TIMEOUT_MS = 5_000;
+// Adding an SMB source blocks on the sidecar's rclone mount attempt, so the
+// add call gets a longer leash.
+const VIDEO_SOURCES_ADD_TIMEOUT_MS = 20_000;
 
 export async function handle(req, res) {
   const url = req.url.split('?')[0];
@@ -173,7 +185,73 @@ export async function handle(req, res) {
     return true;
   }
 
+  // /api/tv/video-sources[/:name] — admin-gated proxy to the video sidecar's
+  // admin API. Sources are household-wide config (they decide what every TV
+  // can browse and where OE may write files), so plain requireAuth() isn't
+  // enough — gate to privileged users, same as the camera route above.
+  const videoSourcesMatch = url.match(/^\/api\/tv\/video-sources(?:\/([^/]+))?$/);
+  if (videoSourcesMatch && ['GET', 'POST', 'DELETE'].includes(req.method)) {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    if (!isPrivileged(userId)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'video source administration is limited to admins' }));
+      return true;
+    }
+    let name = null;
+    if (videoSourcesMatch[1]) {
+      try { name = decodeURIComponent(videoSourcesMatch[1]); }
+      catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid source name encoding' }));
+        return true;
+      }
+    }
+    let proxied;
+    if (req.method === 'GET' && !name) {
+      proxied = await proxyVideoAdmin('GET', '/sources');
+    } else if (req.method === 'POST' && !name) {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid JSON body' }));
+        return true;
+      }
+      proxied = await proxyVideoAdmin('POST', '/sources', body, VIDEO_SOURCES_ADD_TIMEOUT_MS);
+    } else if (req.method === 'DELETE' && name) {
+      proxied = await proxyVideoAdmin('DELETE', `/sources/${encodeURIComponent(name)}`);
+    } else {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+      return true;
+    }
+    res.writeHead(proxied.status, { 'Content-Type': 'application/json' });
+    res.end(proxied.body);
+    return true;
+  }
+
   return false;
+}
+
+// Forward one request to the video sidecar's admin API, passing its status +
+// JSON body through untouched — the sidecar's error strings are
+// human-readable and include remedies (e.g. the rclone install command).
+// Never throws: sidecar down/timeout collapses to a 502 with the same
+// phrasing the role_tv_control chat tools use.
+async function proxyVideoAdmin(method, apiPath, body, timeoutMs = VIDEO_SOURCES_TIMEOUT_MS) {
+  try {
+    const upstream = await fetch(`${VIDEO_SIDECAR_ADMIN}${apiPath}`, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await upstream.text();
+    return { status: upstream.status, body: text || JSON.stringify({ error: 'empty response from the video server' }) };
+  } catch (e) {
+    log.warn('tv', 'video sidecar proxy failed', { method, path: apiPath, error: e?.message });
+    return { status: 502, body: JSON.stringify({ error: "The TV video server isn't running on the OE machine." }) };
+  }
 }
 
 // Shared by /api/tv/wakeword/:id and its documented alias
