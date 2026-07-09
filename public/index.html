@@ -506,36 +506,52 @@
       </div>
     </div>
 
-    <!-- Document viewer modal -->
-    <div id="docViewModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:600;align-items:center;justify-content:center">
-      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;width:min(820px,96vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden">
-        <div style="display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
-          <span id="docViewTitle" style="flex:1;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-          <button id="docViewDownloadBtn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 13px;font-size:12px;cursor:pointer;flex-shrink:0">⬇ Download</button>
-          <button data-action="closeDocViewer" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:2px 4px;line-height:1;flex-shrink:0">✕</button>
+    <!-- Document review workspace -->
+    <div id="docViewModal" class="doc-workspace-backdrop" data-action="_backdropClick" data-args='["closeDocViewer"]' role="dialog" aria-modal="true" aria-labelledby="docViewTitle">
+      <section class="doc-workspace-shell">
+        <header class="doc-workspace-header">
+          <span class="doc-workspace-title-icon"><i data-lucide="file-text"></i></span>
+          <div class="doc-workspace-title-wrap">
+            <span id="docViewTitle" class="doc-workspace-title"></span>
+            <span id="docViewVersionLabel" class="doc-workspace-version"></span>
+          </div>
+          <button id="docViewCompareBtn" class="doc-workspace-command" data-action="compareLatestDocVersions" style="display:none" title="Compare the latest change">
+            <i data-lucide="columns-2"></i><span>Compare</span>
+          </button>
+          <button id="docViewHistoryBtn" class="doc-workspace-icon-btn" data-action="toggleDocHistory" style="display:none" aria-label="Toggle document history" aria-controls="docViewHistory" aria-expanded="true" title="Toggle history">
+            <i data-lucide="history"></i>
+          </button>
+          <button id="docViewDownloadBtn" class="doc-workspace-command">
+            <i data-lucide="download"></i><span>Download</span>
+          </button>
+          <button id="docViewCloseBtn" class="doc-workspace-icon-btn" data-action="closeDocViewer" aria-label="Close document viewer" title="Close">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="doc-workspace-body">
+          <main class="doc-workspace-stage">
+            <div id="docViewContent" class="doc-workspace-content"></div>
+          </main>
+          <aside id="docViewHistory" class="doc-history-rail" aria-label="Document history"></aside>
         </div>
-        <div id="docViewContent" style="flex:1;overflow:auto;min-height:0;display:flex;align-items:center;justify-content:center;padding:16px"></div>
-      </div>
-    </div>
-
-    <!-- Ask Agent modal -->
-    <div id="docAskModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:500;align-items:center;justify-content:center">
-      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:20px;width:320px;max-width:90vw;display:flex;flex-direction:column;gap:12px">
-        <div style="font-size:15px;font-weight:700">Ask your agent</div>
-        <div id="docAskFilename" style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
-        <div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;font-weight:500;letter-spacing:.04em">AGENT</div>
-          <select id="docAskAgent" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:6px 9px;font-size:13px;font-family:inherit;outline:none"></select>
+        <!-- Review bar: appears after an agent edit lands — keep is a no-op (the
+             version is already saved), revert restores the previous version -->
+        <div id="docViewReviewBar" class="doc-review-bar" style="display:none">
+          <span id="docViewReviewLabel"></span>
+          <button data-action="docReviewDiff"><i data-lucide="columns-2"></i><span>Compare</span></button>
+          <button data-action="docReviewRevert" class="danger"><i data-lucide="undo-2"></i><span>Revert</span></button>
+          <button data-action="docReviewKeep" class="primary"><i data-lucide="check"></i><span>Keep</span></button>
         </div>
-        <div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;font-weight:500;letter-spacing:.04em">PROMPT</div>
-          <textarea id="docAskPrompt" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 9px;font-size:13px;font-family:inherit;resize:vertical;min-height:72px;outline:none"></textarea>
+        <!-- Ask bar: chat with an agent about the open doc without leaving the viewer -->
+        <div id="docViewAskBar" class="doc-ask-bar" style="display:none">
+          <div class="doc-ask-controls">
+            <select id="docViewAskAgent" aria-label="Agent"></select>
+            <input id="docViewAskInput" placeholder="Tell the agent what to change..." data-keydown-action="_actionIf" data-keydown-args='[{"key":"Enter","action":"submitDocViewerAsk"}]'>
+            <button id="docViewAskSubmit" data-action="submitDocViewerAsk" class="doc-ask-send"><i data-lucide="send"></i><span>Send</span></button>
+          </div>
+          <div id="docViewAskStatus" role="status" aria-live="polite"></div>
         </div>
-        <div style="display:flex;gap:8px">
-          <button data-action="closeDocAskModal" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;font-size:13px;cursor:pointer">Cancel</button>
-          <button data-action="submitDocAsk" style="flex:2;background:var(--accent);border:none;color:#fff;border-radius:8px;padding:9px;font-size:13px;font-weight:600;cursor:pointer">Send to Agent</button>
-        </div>
-      </div>
+      </section>
     </div>
 
     <!-- Share modal -->
@@ -1417,6 +1433,11 @@
                 style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer">Disconnect</button>
               <div id="providerHaStatus" style="font-size:11px;color:var(--muted);flex:1"></div>
             </div>
+          </div>
+          <div id="tvVideoSourcesRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px;display:none">
+            <div class="settings-section-title"><i data-lucide="film" style="width:14px;height:14px"></i> TV Video Sources</div>
+            <div class="settings-section-desc" style="margin-bottom:10px">Folders the TV video library serves — local folders on this server or guest-accessible SMB network shares (//host/share). Shared by every TV in the household.</div>
+            <div id="tvVideoSourcesBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
           </div>
           <div id="sessionExpiryRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
             <div class="settings-section-title"><i data-lucide="timer" style="width:14px;height:14px"></i> Session Expiry</div>

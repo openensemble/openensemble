@@ -48,6 +48,7 @@ import { getAmbientForDevice, dropAmbientForDevice } from './routes/devices.mjs'
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
 import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
 import { hasVoiceAnnouncements, nextVoiceAnnouncement } from './lib/voice-announcements.mjs';
+import { normalizeDocumentRequest } from './lib/document-artifacts.mjs';
 
 // Backfill ws._deviceId for voice-device sessions that were created before
 // the deviceId was stored on the session record (pre-2026-05-12). Looks up
@@ -827,9 +828,7 @@ function onConnection(ws, req) {
     // Tell the client which agents are actively streaming and which background tasks are running
     const active = getActiveStreams(ws._userId);
     const tasks = getActiveBgTasks().filter(t => t.userId === ws._userId);
-    if (active.length || tasks.length) {
-      ws.send(JSON.stringify({ type: 'active_streams', agents: active, tasks }));
-    }
+    ws.send(JSON.stringify({ type: 'active_streams', agents: active, tasks }));
   }
 
   if (ws._authenticated) {
@@ -849,6 +848,7 @@ function onConnection(ws, req) {
    // from other frame types when picking the device-spoken fallback.
    let msg;
    let messageVoiceTurn = null;
+   let messageDocumentRequest = null;
    try {
     // Binary frames are streaming-STT PCM from a voice device; everything
     // else on this socket is JSON text.
@@ -1333,6 +1333,8 @@ function onConnection(ws, req) {
         return;
       }
       const textPreview = typeof msg.text === 'string' ? msg.text.slice(0, 50) : '(no text)';
+      const incomingDocumentRequest = normalizeDocumentRequest(msg.documentRequest);
+      messageDocumentRequest = incomingDocumentRequest;
       console.log('[chat] received, agent:', msg.agent, 'user:', ws._userId, 'text:', textPreview);
       const wakeSlot = Number.isInteger(msg.wake_slot) ? msg.wake_slot : null;
       // Device-minted turn correlation id (fw ≥ 0.2.65). Bounded; echoed on
@@ -1533,6 +1535,7 @@ function onConnection(ws, req) {
         attachment:  msg.attachment,
         attachments: msg.attachments,
         toolPlan:   msg.toolPlan,
+        documentRequest: incomingDocumentRequest,
         // Source hint — voice-device chats get a slim tool subset for low
         // latency (chat-dispatch.mjs VOICE_DEVICE_TOOL_ALLOWLIST); desktop-app
         // origin keeps the desktop_* tools past the router. The desktop app's
@@ -1563,6 +1566,9 @@ function onConnection(ws, req) {
         // When effectiveUserId == ws._userId (single-user case), step (2)
         // delivers to admin's other browser tabs the same way as before.
         onEvent: (e) => {
+          if (incomingDocumentRequest && e && typeof e === 'object' && !e.documentRequest) {
+            e = { ...e, documentRequest: incomingDocumentRequest, documentTurn: true };
+          }
           // Voice-device fan-out: the firmware only TTS's `token` events
           // (oe_ws.c emits OE_WS_EVT_CHAT_TOKEN → speak). Plain `error`
           // events arrive but are silently dropped. Keep voice errors short
@@ -1681,7 +1687,12 @@ function onConnection(ws, req) {
           if (!streamer) ws.send(JSON.stringify({ type: 'done', agent: 'system', ...turnTag }));
         }
       } else {
-        ws.send(JSON.stringify({ type: 'error', message: 'Server error processing message', agent: 'system' }));
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: 'Server error processing message',
+          agent: typeof msg?.agent === 'string' ? msg.agent : 'system',
+          ...(messageDocumentRequest ? { documentRequest: messageDocumentRequest, documentTurn: true } : {}),
+        }));
       }
     } catch {}
    }

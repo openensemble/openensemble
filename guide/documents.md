@@ -35,6 +35,21 @@ Agents can also *add* to your Docs drawer:
 - Researcher → Research tab
 - Coder → Code Projects tab
 
+## Editing documents with your agent
+
+Text documents (markdown, txt, csv, code files) **and research documents** can be edited by asking your agent — there's no manual editor; chat is the interface:
+
+1. Open the doc in the Docs drawer and hit the **🤖 Ask Agent** button (or just mention the doc in chat).
+2. Tell the agent what to change: *"fix the grammar"*, *"make it more formal"*, *"add a section about pricing"*.
+3. Chat shows a compact document preview while the agent works, then a clickable preview of the saved result. The document body is not dumped into the conversation.
+4. Click the result to open the document workspace. The current document, version history, and review controls update live.
+
+**Nothing is ever lost.** Every edit is saved as a new version — the original upload becomes v1 the first time a doc is edited, and every iteration after that is kept. The workspace keeps the full trail in the right-side **History** rail: who changed what and when, a side-by-side comparison with the preceding version, and one-click **Restore** (which itself adds a new version, so restores are undoable).
+
+Agents can also create brand-new documents (*"make me a packing list for the camping trip"*) — they land in the Documents tab.
+
+Only the document's **owner** can edit or restore; docs shared with you are read-only (ask your agent for an edited copy instead). PDFs, Word files, and media can't be edited — only viewed. Research documents get the same version trail whether you edit them from the viewer or the Researcher updates them itself.
+
 ## Storage
 
 Files live under `users/{userId}/`:

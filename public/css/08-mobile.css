@@ -206,4 +206,28 @@
 
   /* btn-menu visible on mobile */
   .btn-menu { display: block; }
+
+  /* Document workspace uses the full viewport; history becomes a lower rail. */
+  .doc-workspace-backdrop { padding: 0; align-items: stretch; }
+  .doc-workspace-shell { width: 100%; height: 100dvh; min-height: 0; border: 0; border-radius: 0; }
+  .doc-workspace-header { min-height: calc(50px + var(--safe-top)); padding: var(--safe-top) 8px 7px; }
+  .doc-workspace-title-icon { display: none; }
+  .doc-workspace-command { width: 34px; padding: 0; }
+  .doc-workspace-command span { display: none; }
+  .doc-workspace-body { display: flex; flex-direction: column; }
+  .doc-workspace-stage { flex: 1; }
+  .doc-workspace-content { padding: 12px; }
+  .doc-current-page, .doc-version-page { min-height: 100%; padding: 24px 18px; }
+  .doc-history-rail { max-height: 38%; padding: 0 10px 10px; border-top: 1px solid var(--border); border-left: 0; }
+  .doc-compare-scroll { max-height: 48dvh; }
+  .doc-compare-aligned { grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
+  .doc-compare-line { padding-inline: 6px; font-size: 10px; }
+  .doc-review-bar { flex-wrap: wrap; }
+  .doc-review-bar > span { flex-basis: 100%; }
+  .doc-ask-controls { flex-wrap: wrap; }
+  .doc-ask-controls select { width: 120px; }
+  .doc-ask-controls input { min-width: calc(100% - 172px); }
+  .doc-ask-send { width: 38px; padding: 0; }
+  .doc-ask-send span { display: none; }
+  .msg.document-artifact-message { max-width: min(390px, 100%); }
 }

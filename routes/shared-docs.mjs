@@ -13,6 +13,8 @@ import busboy from 'busboy';
 import {
   requireAuth, isPrivileged, loadUsers, readBody, parseMultipart, withLock, atomicWriteSync, BASE_DIR, safeError, getUserDir,
 } from './_helpers.mjs';
+import { listVersions, readVersion, restoreVersion, isTextEditable, docAudience } from '../lib/doc-store.mjs';
+import { broadcastToUsers } from './_helpers/broadcast.mjs';
 
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
 
@@ -107,8 +109,13 @@ function canAccess(doc, userId) {
 
 async function extractText(fileData, ext) {
   const lower = ext.toLowerCase();
-  if (['.txt', '.md', '.csv'].includes(lower))
-    return fileData.toString('utf8').slice(0, 50000);
+  if ([
+    '.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm', '.xml',
+    '.yml', '.yaml', '.toml', '.ini', '.log', '.js', '.mjs', '.cjs', '.ts',
+    '.tsx', '.jsx', '.py', '.sh', '.css', '.sql', '.rb', '.go', '.rs',
+    '.java', '.c', '.h', '.cpp',
+  ].includes(lower))
+    return fileData.toString('utf8').slice(0, 1_000_000);
   if (lower === '.pdf') {
     try {
       const { spawn } = await import('child_process');
@@ -536,9 +543,73 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ isImage: true, base64: fileData.toString('base64'), mimeType: doc.mimeType, name: doc.filename }));
       return true;
     }
-    const text = await extractText(fileData, doc.ext);
+    let text = await extractText(fileData, doc.ext);
+    if (url.searchParams.get('preview') === '1') text = text.slice(0, 6000);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ isImage: false, text, name: doc.filename, mimeType: doc.mimeType }));
+    return true;
+  }
+
+  // ── GET /api/shared-docs/:id/versions/:n — one version's text ─────────────
+  const versionMatch = pathname.match(/^\/api\/shared-docs\/([^/]+)\/versions\/(\d+)$/);
+  if (versionMatch && req.method === 'GET') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    const doc = findDoc(versionMatch[1], userId);
+    if (!doc) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    // A share grants access to the current document, not to prior revisions
+    // that may contain information the owner later removed.
+    if (doc.uploadedBy !== userId && !isPrivileged(userId)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Only the owner can view version history' })); return true;
+    }
+    const version = readVersion(doc.uploadedBy ?? userId, doc.id, Number(versionMatch[2]));
+    if (!version) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Version not found' })); return true; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(version));
+    return true;
+  }
+
+  // ── GET /api/shared-docs/:id/versions — version history metadata ──────────
+  const versionsMatch = pathname.match(/^\/api\/shared-docs\/([^/]+)\/versions$/);
+  if (versionsMatch && req.method === 'GET') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    const doc = findDoc(versionsMatch[1], userId);
+    if (!doc) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    if (doc.uploadedBy !== userId && !isPrivileged(userId)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Only the owner can view version history' })); return true;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      versions: listVersions(doc.uploadedBy ?? userId, doc.id),
+      editable: isTextEditable(doc),
+      isOwn: doc.uploadedBy === userId,
+    }));
+    return true;
+  }
+
+  // ── POST /api/shared-docs/:id/restore/:n — restore an old version ─────────
+  const restoreMatch = pathname.match(/^\/api\/shared-docs\/([^/]+)\/restore\/(\d+)$/);
+  if (restoreMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res); if (!userId) return true;
+    const doc = findDoc(restoreMatch[1], userId);
+    if (!doc) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    if (doc.uploadedBy !== userId && !isPrivileged(userId)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Only the owner can restore versions' })); return true;
+    }
+    const users  = loadUsers();
+    const byName = users.find(u => u.id === userId)?.name ?? 'User';
+    const result = await restoreVersion({
+      ownerId: doc.uploadedBy ?? userId, docId: doc.id,
+      n: Number(restoreMatch[2]), by: userId, byName,
+    });
+    if (result.error) { safeError(res, new Error(result.error), 400); return true; }
+    try {
+      broadcastToUsers(docAudience(result.doc, userId), {
+        type: 'doc_changed', docId: doc.id, filename: doc.filename,
+        action: 'restored', version: result.n, byName,
+      });
+    } catch {}
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, version: result.n }));
     return true;
   }
 
@@ -618,6 +689,11 @@ export async function handle(req, res) {
     // Clean up thumbnail
     const thumbPath = path.join(getUserDocsDir(doc.uploadedBy), 'thumbs', doc.id + '.jpg');
     try { fs.unlinkSync(thumbPath); } catch {}
+    // Version bodies are append-only sidecars and are not covered by deleting
+    // the live file. Cleanup is best-effort so a permissions drift cannot make
+    // an otherwise valid document deletion fail.
+    const versionsPath = path.join(getUserDocsDir(doc.uploadedBy), 'versions', doc.id);
+    try { fs.rmSync(versionsPath, { recursive: true, force: true }); } catch {}
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));

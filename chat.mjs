@@ -35,6 +35,15 @@ import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
 import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
+import {
+  compactDocumentToolArgs,
+  compactDocumentFallback,
+  compactDocumentToolPreview,
+  compactDocumentToolResult,
+  findDocumentMutation,
+  normalizeDocumentRequest,
+  sanitizeDocumentToolEvent,
+} from './lib/document-artifacts.mjs';
 
 import {
   OPENAI_COMPAT_PROVIDERS, FIREWORKS_BASE,
@@ -138,7 +147,22 @@ function _modelContextWindow(model) {
   return null;
 }
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [] } = {}) {
+function documentArtifactContent(request, artifact, fallback = '') {
+  if (!artifact) return request ? compactDocumentFallback(fallback) : fallback;
+  return `[Document ${artifact.action}: ${artifact.filename || request?.filename || 'document'}${artifact.version ? ` (v${artifact.version})` : ''}]`;
+}
+
+function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null } = {}) {
+  const safeDocumentRequest = normalizeDocumentRequest(documentRequest);
+  const documentArtifact = safeDocumentRequest ? findDocumentMutation(toolsUsed) : null;
+  const persistedAssistantContent = documentArtifactContent(safeDocumentRequest, documentArtifact, assistantContent);
+  // From here on, tool data is headed to durable/observational stores. The raw
+  // document body stays only inside the provider's current tool loop.
+  toolsUsed = toolsUsed.map(t => ({
+    ...t,
+    args: compactDocumentToolArgs(t.name, t.args),
+    text: compactDocumentToolResult(t.name, t.text),
+  }));
   // Record a compact summary of which tools fired this turn so future loads
   // of this session can show the assistant what it actually did, not just
   // what it said. Without this, short follow-ups ("send", "again", "do that
@@ -148,7 +172,10 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
   // session log to keep file size bounded.
   const toolsSummary = toolsUsed.length
     ? toolsUsed.map(t => {
-        const args = t.args ? JSON.stringify(t.args).slice(0, 120) : '';
+        const safeArgs = t.args
+          ? compactDocumentToolArgs(t.name, redactArgsForTrace(t.args))
+          : null;
+        const args = safeArgs ? JSON.stringify(safeArgs).slice(0, 120) : '';
         return args ? `${t.name}(${args})` : t.name;
       })
     : null;
@@ -161,7 +188,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
   // mapper below as `[prior-turn tool results]` appended to the assistant
   // body. Doesn't render in the chat UI (only the assistant content does).
   const toolResults = toolsUsed.length
-    ? toolsUsed.map(t => ({ name: t.name, text: String(t.text ?? '').slice(0, 10000) }))
+    ? toolsUsed.map(t => ({ name: t.name, text: compactDocumentToolResult(t.name, t.text) }))
         .filter(r => r.text.length > 0)
     : null;
   const resultCursorByName = new Map();
@@ -181,12 +208,12 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
         const resultIndex = t.text ? nextToolResultIndex(t.name) : null;
         return {
           name: t.name,
-          args: t.args ? redactArgsForTrace(t.args) : null,
+          args: t.args ? compactDocumentToolArgs(t.name, redactArgsForTrace(t.args)) : null,
           status: t.status ?? 'done',
           startedAt: t.startedAt ?? null,
           endedAt: t.endedAt ?? null,
           durationMs: t.durationMs ?? null,
-          preview: String(t.preview ?? '').slice(0, 500),
+          preview: compactDocumentToolPreview(t.name, t.preview),
           progressPreview: String(t.progressPreview ?? '').slice(-1200),
           delegated: t.delegated === true,
           agentName: t.agentName || null,
@@ -201,14 +228,19 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
   // entry (status role) remains visible.
   const assistantEntry = toolsSummary
     ? {
-        role: 'assistant', content: assistantContent, ts: Date.now(),
+        role: 'assistant', content: persistedAssistantContent, ts: Date.now(),
         toolsUsed: toolsSummary,
         ...(toolResults && toolResults.length ? { toolResults } : {}),
         ...(compactToolEvents && compactToolEvents.length ? { toolEvents: compactToolEvents } : {}),
       }
-    : { role: 'assistant', content: assistantContent, ts: Date.now() };
+    : { role: 'assistant', content: persistedAssistantContent, ts: Date.now() };
   if (hideTurn) assistantEntry.hidden = true;
   if (hideTaskId) assistantEntry.hideTaskId = hideTaskId;
+  if (safeDocumentRequest?.requestId) assistantEntry.documentRequestId = safeDocumentRequest.requestId;
+  if (documentArtifact) {
+    assistantEntry.documentArtifact = documentArtifact;
+    assistantEntry.documentRequest = safeDocumentRequest;
+  }
   // Tool-produced images persist as their own rows on VISIBLE turns so they
   // survive a reload (base64 stripped when a saved file exists — same policy
   // as persistedReportImage). Hidden turns skip: the chip/agent_report owns
@@ -242,7 +274,12 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
       })) }
     : {};
   appendToSession(agent.id,
-    { role: 'user', content: sessionText, ts: Date.now(), ...(hiddenUser ? { hidden: true } : {}), ...attachmentEntries },
+    {
+      role: 'user', content: sessionText, ts: Date.now(),
+      ...(hiddenUser ? { hidden: true } : {}),
+      ...(safeDocumentRequest ? { documentRequest: safeDocumentRequest } : {}),
+      ...attachmentEntries,
+    },
     ...imageEntries,
     assistantEntry);
 
@@ -264,7 +301,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     import('./lib/skill-proposer.mjs')
       .then(m => m.maybeProposeSkill({
         userId, agentId: agent.id, agentName: agent.name,
-        userMessage: sessionText, assistantContent, toolsUsed,
+        userMessage: sessionText, assistantContent: persistedAssistantContent, toolsUsed,
       }))
       .catch(e => console.warn('[skill-proposer] failed:', e.message));
   }
@@ -383,7 +420,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
 
   if (!skipEpisodes) {
     addToSessionBuffer(agent.id, 'user', sessionText, userId);
-    addToSessionBuffer(agent.id, 'assistant', assistantContent, userId);
+    addToSessionBuffer(agent.id, 'assistant', persistedAssistantContent, userId);
   }
   // (trackFriction is called at the top of persist, before any skipSignals
   // or toolsUsed gate — see comment block at the top of this function.)
@@ -398,7 +435,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
     ? (!skipEpisodes || SIGNAL_WORDS_RE.test(sessionText))
     : true;
   if (runSignals) {
-    processSignals({ agentId: agent.id, userMessage: sessionText, agentLastResponse: assistantContent, userId })
+    processSignals({ agentId: agent.id, userMessage: sessionText, agentLastResponse: persistedAssistantContent, userId })
       .then(r => {
         if (!emit) return;
         if (r.forgot) emit({ type: 'memory_forgotten' });
@@ -548,7 +585,7 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
     // answer after seeing the synthetic background result; suppress those
     // tokens so the completed task report remains the final user-facing update.
     if (!(isVisibleText && (suppressText || hideTurn))) {
-      yield event;
+      yield sanitizeDocumentToolEvent(event);
     }
     if (event.type === 'error') { errored = true; break; }
   }
@@ -1655,6 +1692,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       }
     } catch { /* a trace bug must never break a chat turn */ }
   };
+  const _documentArtifact = turnOpts?.documentRequest ? findDocumentMutation(toolsUsed) : null;
+  const _observableAssistantContent = documentArtifactContent(
+    normalizeDocumentRequest(turnOpts?.documentRequest),
+    _documentArtifact,
+    assistantContent,
+  );
   const _llmMeta = {
     userId,
     agentId: agent.id,
@@ -1688,7 +1731,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     source: voiceCtx?.source ?? 'web',
     durationMs: _llmMeta.durationMs,
     input: userText,
-    output: assistantContent,
+    output: _observableAssistantContent,
     // Trace summary stays single-item (run-inspector's shape, read by
     // public/run-inspector.js — not owned by this change) even on a
     // multi-attachment turn; it's a debug breadcrumb, not the LLM payload.
@@ -1719,14 +1762,16 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       usedNames: toolsUsed.map(t => t.name),
       used: toolsUsed.map(t => ({
         name: t.name,
-        argsPreview: t.args ? JSON.stringify(redactArgsForTrace(t.args)).slice(0, 500) : '',
-        resultPreview: String(t.text ?? '').slice(0, 500),
+        argsPreview: t.args
+          ? JSON.stringify(compactDocumentToolArgs(t.name, redactArgsForTrace(t.args))).slice(0, 500)
+          : '',
+        resultPreview: compactDocumentToolResult(t.name, t.text).slice(0, 500),
       })),
       events: toolEvents.map(t => ({
         name: t.name,
         status: t.status,
         durationMs: t.durationMs ?? null,
-        preview: String(t.preview ?? t.progressPreview ?? '').slice(0, 500),
+        preview: compactDocumentToolPreview(t.name, t.preview ?? t.progressPreview),
       })),
     },
     meta: {
@@ -1741,8 +1786,20 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   };
   if (errored) {
     log.error('chat', 'llm turn errored', _llmMeta);
-    recordRunTrace(userId, { ..._traceBase, status: 'error', error: assistantContent || 'Provider turn errored' });
-    _emitTurnTrace(assistantContent || 'Provider turn errored');
+    const traceError = turnOpts?.documentRequest
+      ? (compactDocumentFallback(assistantContent) || 'Provider turn errored')
+      : (assistantContent || 'Provider turn errored');
+    recordRunTrace(userId, { ..._traceBase, status: 'error', error: traceError });
+    _emitTurnTrace(traceError);
+    // A provider can fail after update_document already committed. Preserve the
+    // successful artifact even though there is no final narration to persist.
+    if (!silent && turnOpts?.documentRequest && findDocumentMutation(toolsUsed)) {
+      persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
+        withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
+        hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+        documentRequest: turnOpts.documentRequest,
+      });
+    }
     return;
   }
   log.info('chat', 'llm turn complete', _llmMeta);
@@ -1772,7 +1829,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           // an inability/handoff message in the reply means it couldn't finish.
           // For a coordinator, ask_agent is normal delegation, so it's not a punt.
           escalated: agent.skillCategory !== 'coordinator' && toolsUsed.some(t => t.name === 'ask_agent'),
-          outcomeText: assistantContent,
+          outcomeText: _observableAssistantContent,
           source: silent ? 'auto-scheduled-turn' : 'auto-turn',
         });
         if (learned?.learned) {
@@ -1789,13 +1846,17 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       }
     }
   }
-  if (assistantContent) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId, hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments });
+  if (assistantContent || turnOpts?.documentRequest) {
+    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
+      withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
+      hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+      documentRequest: turnOpts?.documentRequest ?? null,
+    });
     // Phase-14 chip-replaces-turn: emit __content only when we're NOT
     // hiding the turn. The browser would otherwise render the coordinator's
     // assistant bubble alongside the chip — redundant.
     if (!hideTurn) {
-      yield { type: '__content', content: assistantContent };
+      yield { type: '__content', content: _observableAssistantContent };
     } else {
       yield { type: 'hide_turn', taskId: hideTaskId };
     }

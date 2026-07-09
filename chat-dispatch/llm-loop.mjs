@@ -408,7 +408,7 @@ export function armFollowupForReply({ source, deviceId, conversationMode, reply,
  */
 export async function runLlmTurn({
   userId, agentId, scopedAgent, scopedSessionKey,
-  userText, attachment, attachments, toolPlan, schedulerNote, source, deviceId,
+  userText, attachment, attachments, toolPlan, documentRequest, schedulerNote, source, deviceId,
   conversationMode = false,
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false,
 }) {
@@ -433,7 +433,9 @@ export async function runLlmTurn({
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       if (e.type === 'tool_call') toolInvoked = true;
       onEvent({ ...e, agent: agentId });
-    }, userId ?? 'default', _attachments, schedulerNote, false, { source, deviceId }, { toolPlan, hiddenUser, isolatedTaskRun })) {
+    }, userId ?? 'default', _attachments, schedulerNote, false, { source, deviceId }, {
+      toolPlan, documentRequest, hiddenUser, isolatedTaskRun,
+    })) {
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
       if (event.type === 'tool_call') toolInvoked = true;
@@ -444,7 +446,9 @@ export async function runLlmTurn({
       // Accumulate stream content for persistence buffer
       if (event.type === 'token')   streamBuf += event.text;
       if (event.type === 'replace') streamBuf = event.text;
-      if (streamBuf) writeStreamBuffer(scopedSessionKey, streamBuf);
+      // Document-drawer turns have their own artifact surface. Never expose a
+      // body-sized narration through reconnect's generic pendingStream path.
+      if (streamBuf && !documentRequest) writeStreamBuffer(scopedSessionKey, streamBuf);
       onEvent({ ...event, agent: agentId });
     }
     return null; // success

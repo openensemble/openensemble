@@ -39,6 +39,44 @@
 .msg.user .msg-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
 .msg.assistant .msg-bubble { background: var(--bg3); border-bottom-left-radius: 4px; }
 
+/* Document-edit turns replace body-sized chat output with one durable artifact. */
+.msg.document-artifact-message { align-self: flex-start; max-width: 390px; }
+.document-artifact-card {
+  overflow: hidden; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg2); box-shadow: 0 8px 24px rgba(0,0,0,.16);
+}
+.document-artifact-preview {
+  appearance: none; display: block; position: relative; width: 100%;
+  aspect-ratio: 31 / 18; overflow: hidden; padding: 0; border: 0;
+  border-bottom: 1px solid var(--border); background: #f7f8fa; cursor: pointer;
+}
+.document-artifact-preview canvas { display: block; width: 100%; height: 100%; }
+.document-artifact-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.document-artifact-preview:disabled { cursor: default; }
+.document-artifact-processing {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center; gap: 10px;
+  color: #374151; background: rgba(247,248,250,.38);
+}
+.document-artifact-message.processing .document-artifact-processing { display: flex; }
+.document-artifact-file-icon {
+  display: inline-flex; align-items: center; justify-content: center; width: 46px; height: 46px;
+  border: 1px solid #cfd5df; border-radius: 8px; background: rgba(255,255,255,.92);
+  box-shadow: 0 4px 14px rgba(31,41,55,.14);
+}
+.document-artifact-meta { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 11px 5px; }
+.document-artifact-kind { display: inline-flex; color: var(--muted); flex: 0 0 auto; }
+.document-artifact-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.document-artifact-state { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.document-artifact-message.complete .document-artifact-state { color: var(--green); }
+.document-artifact-message.failed .document-artifact-state { color: var(--red); }
+.document-artifact-instruction {
+  padding: 0 11px 10px; overflow: hidden; color: var(--muted); font-size: 11px;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .document-artifact-message .pill-spinner { animation: none; }
+}
+
 /* ── Markdown ── */
 .msg-bubble p  { margin-bottom: 8px; }
 .msg-bubble p:last-child { margin-bottom: 0; }

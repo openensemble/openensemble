@@ -175,6 +175,24 @@ function flushStreamRender() {
   if (streamEl) streamEl.innerHTML = renderMarkdown(streamBuf);
 }
 
+function finishDocumentStreamUi(agentId) {
+  if (agentId !== activeAgent) return;
+  lastSentAttempt = null;
+  flushStreamRender();
+  if (streamEl) streamEl.closest('.msg')?.remove();
+  streamEl = null;
+  streamBuf = '';
+  resetToolRun(true);
+  setStreaming(false);
+  setTyping(false);
+}
+
+function reloadDocumentSession(agentId) {
+  if (agentId && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'load_session', agent: agentId }));
+  }
+}
+
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
   switch (msg.type) {
@@ -235,6 +253,10 @@ function handleServerMessage(msg) {
       break;
     }
     case 'token':
+      if (typeof handleDocumentChatToken === 'function' && handleDocumentChatToken(msg.agent, msg.text, msg.documentRequest)) {
+        setTyping(false);
+        break;
+      }
       if (msg.agent !== activeAgent) {
         // Buffer tokens for background agents
         const isNew = !agentStreams[msg.agent];
@@ -275,6 +297,9 @@ function handleServerMessage(msg) {
       scrollToBottom();
       break;
     case 'tool_call':
+      if (typeof handleDocumentChatToolCall === 'function' && handleDocumentChatToolCall(msg.agent, msg.name, msg.args, msg.documentRequest)) break;
+      if (msg.documentTurn && typeof handleRemoteDocumentToolCall === 'function'
+          && handleRemoteDocumentToolCall(msg.agent, msg.documentRequest, msg.name)) break;
       if (msg.agent !== activeAgent) {
         const isNew = !agentStreams[msg.agent];
         if (isNew) agentStreams[msg.agent] = { buf: '', toolNames: [], active: true };
@@ -287,11 +312,17 @@ function handleServerMessage(msg) {
       showToolPill(msg.name, msg.args);
       break;
     case 'tool_progress':
+      if (typeof handleDocumentChatToolProgress === 'function' && handleDocumentChatToolProgress(msg.agent, msg.name, msg.text, msg.documentRequest)) break;
+      if (msg.documentTurn && typeof handleRemoteDocumentToolProgress === 'function'
+          && handleRemoteDocumentToolProgress(msg.agent, msg.documentRequest)) break;
       if (msg.agent !== activeAgent) break;
       if (getActiveWidgetTarget?.()) break;
       appendToolPillProgress(msg.name, msg.text);
       break;
     case 'tool_result':
+      if (typeof handleDocumentChatToolResult === 'function' && handleDocumentChatToolResult(msg.agent, msg.name, msg.text, msg.documentRequest)) break;
+      if (msg.documentTurn && typeof handleRemoteDocumentToolResult === 'function'
+          && handleRemoteDocumentToolResult(msg.agent, msg.documentRequest, msg.documentArtifact)) break;
       if (msg.agent !== activeAgent) break;
       updateToolPill(msg.name, msg.preview, msg.text);
       break;
@@ -311,6 +342,7 @@ function handleServerMessage(msg) {
       }
       break;
     case 'replace':
+      if (typeof handleDocumentChatReplace === 'function' && handleDocumentChatReplace(msg.agent, msg.text, msg.documentRequest)) break;
       if (msg.agent !== activeAgent) {
         if (agentStreams[msg.agent]) agentStreams[msg.agent].buf = msg.text;
         break;
@@ -332,6 +364,12 @@ function handleServerMessage(msg) {
           scrollToBottom();
         }
       }
+      break;
+    case 'document_response':
+      if (typeof handleDocumentChatReplace === 'function' && handleDocumentChatReplace(msg.agent, msg.text, msg.documentRequest)) break;
+      if (msg.documentTurn && typeof handleRemoteDocumentResponse === 'function'
+          && handleRemoteDocumentResponse(msg.agent, msg.text, msg.documentRequest)) break;
+      if (msg.agent === activeAgent && msg.text) appendAssistantBubble(msg.text, Date.now(), true);
       break;
     case 'perf':
       if (msg.agent !== activeAgent) break;
@@ -360,6 +398,30 @@ function handleServerMessage(msg) {
       setTyping(false);
       break;
     case 'done':
+      if (typeof finishDocumentChatTurn === 'function' && finishDocumentChatTurn(msg.agent, msg.documentRequest)) {
+        finishDocumentStreamUi(msg.agent);
+        delete agentStreams[msg.agent];
+        buildTabs(); buildAgentDrawer();
+        break;
+      }
+      if (msg.documentTurn && typeof finishRemoteDocumentTurns === 'function'
+          && finishRemoteDocumentTurns(msg.agent, msg.documentRequest)) {
+        finishDocumentStreamUi(msg.agent);
+        delete agentStreams[msg.agent];
+        reloadDocumentSession(msg.agent);
+        buildTabs(); buildAgentDrawer();
+        break;
+      }
+      if (msg.documentTurn && msg.documentRequest?.requestId) {
+        // A reconnect can miss the mutation result but receive the terminal.
+        // Persistence happens before done, so an authoritative reload restores
+        // the artifact rather than leaving the completed edit invisible.
+        finishDocumentStreamUi(msg.agent);
+        delete agentStreams[msg.agent];
+        reloadDocumentSession(msg.agent);
+        buildTabs(); buildAgentDrawer();
+        break;
+      }
       if (msg.agent !== activeAgent) {
         // If this agent's reply was streaming into a tutor widget when the user
         // switched away, finalize that buffer here — otherwise the target stays
@@ -436,6 +498,21 @@ function handleServerMessage(msg) {
         // (re-fetching users + wiping any half-typed password) every 1–15s.
         _currentUser = null;
         showLoginScreen();
+        break;
+      }
+      if (typeof failDocumentChatTurn === 'function' && failDocumentChatTurn(msg.agent || activeAgent, msg.message, msg.documentRequest)) {
+        if (!msg.agent || msg.agent === activeAgent) {
+          flushStreamRender();
+          if (streamEl) streamEl.closest('.msg')?.remove();
+          streamEl = null; streamBuf = '';
+          resetToolRun(true);
+          setStreaming(false); setTyping(false);
+        }
+        break;
+      }
+      if (msg.documentTurn && typeof failRemoteDocumentTurns === 'function'
+          && failRemoteDocumentTurns(msg.agent || activeAgent, msg.documentRequest)) {
+        finishDocumentStreamUi(msg.agent || activeAgent);
         break;
       }
       if (msg.agent && msg.agent !== activeAgent) break;
@@ -577,6 +654,9 @@ function handleServerMessage(msg) {
     case 'task_created':
       if (typeof loadTaskList === 'function') loadTaskList();
       break;
+    case 'doc_changed':
+      if (typeof handleDocChanged === 'function') handleDocChanged(msg);
+      break;
     case 'news_pref_saved':
       if (typeof msg.topic === 'number') {
         newsTopic = msg.topic;
@@ -659,6 +739,7 @@ function handleServerMessage(msg) {
     case 'active_streams': {
       // Restore streaming state for agents that are still working
       const activeIds = new Set((msg.agents ?? []).map(a => a.agentId));
+      if (typeof reconcileDocumentChatTurns === 'function') reconcileDocumentChatTurns(activeIds);
       for (const { agentId } of (msg.agents ?? [])) {
         if (agentId === activeAgent) {
           setStreaming(true);

@@ -6,10 +6,11 @@
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from 'fs';
 import { randomBytes } from 'crypto';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { isUrlSafe as _isUrlSafe } from '../../lib/url-guard.mjs';
+import { saveResearchVersion, researchAudience } from '../../lib/doc-store.mjs';
+import { BASE_DIR } from '../../lib/paths.mjs';
+import { broadcastToUsers } from '../../routes/_helpers/broadcast.mjs';
 
-const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CFG_PATH = path.join(BASE_DIR, 'config.json');
 const USERS_DIR = path.join(BASE_DIR, 'users');
 
@@ -355,39 +356,48 @@ function execGetResearch(documentId, userId) {
   const filePath = path.join(getUserResearchDir(userId), doc.filename);
   try {
     const content = readFileSync(filePath, 'utf8');
-    return `# ${doc.title}\n\n_Saved: ${doc.createdAt}_\n\n${content}`;
+    const version = doc.versions?.at(-1)?.n ?? 1;
+    return `[Research Document: ${doc.title} | id: ${doc.id} | v${version}]\n\n_Saved: ${doc.createdAt}_\n\n${content}`;
   } catch {
     return `Error: Document file not found for "${doc.title}".`;
   }
 }
 
 // ── update_research ──────────────────────────────────────────────────────────
-function execUpdateResearch(documentId, content, tags, userId) {
+async function execUpdateResearch(documentId, content, tags, expectedVersion, userId) {
   const index = loadIndex(userId);
   const idx = index.findIndex(d => d.id === documentId);
   if (idx === -1) return { error: `Document "${documentId}" not found.` };
 
   const doc = index[idx];
-  const dir = getUserResearchDir(userId);
-  const filePath = path.join(dir, doc.filename);
-
-  // Read existing content to return alongside the update
-  let existingContent = '';
-  try { existingContent = readFileSync(filePath, 'utf8'); } catch {}
-
-  // If content is provided, write the updated document
-  if (content) {
-    writeFileSync(filePath, content);
-    doc.updatedAt = new Date().toISOString();
-    if (tags) doc.tags = tags;
-    saveIndex(userId, index);
-    // id included so pipeline handoffs can whitelist the updated doc as a
-    // produced artifact (extractProducedBodyDocIds) — same shape as save_research.
-    return { success: true, id: doc.id, message: `Document "${doc.title}" updated successfully.` };
+  if (!Number.isInteger(Number(expectedVersion)) || Number(expectedVersion) < 1) {
+    return { error: 'expected_version is required. Call get_research immediately before updating and pass its version.' };
   }
 
-  // If no content yet, return existing content for merging
-  return { existingContent, title: doc.title, id: doc.id };
+  if (typeof content !== 'string' || !content) {
+    return { error: 'content is required. Merge the current get_research content with the new findings before updating.' };
+  }
+
+  const saved = await saveResearchVersion({
+    userId, docId: documentId, content,
+    source: 'ai', by: userId, byName: 'Deep Research', note: 'update_research',
+    expectedVersion,
+  });
+  if (saved.error) return { error: saved.error };
+  if (tags) {
+    const fresh = loadIndex(userId);
+    const d2 = fresh.find(d => d.id === documentId);
+    if (d2) { d2.tags = tags; saveIndex(userId, fresh); }
+  }
+  try {
+    broadcastToUsers(researchAudience(userId, documentId, userId), {
+      type: 'doc_changed', docId: documentId, filename: doc.title ?? documentId,
+      source: 'research', action: 'updated', version: saved.n, byName: 'Deep Research',
+    });
+  } catch {}
+  // id included so pipeline handoffs can whitelist the updated doc as a
+  // produced artifact (extractProducedBodyDocIds) — same shape as save_research.
+  return { success: true, id: doc.id, version: saved.n, message: `Document "${doc.title}" updated successfully (v${saved.n}; earlier versions kept).` };
 }
 
 // ── delete_research ──────────────────────────────────────────────────────────
@@ -682,16 +692,17 @@ export default async function* execute(name, args, userId = 'default', agentId =
       const filePath = path.join(getUserResearchDir(userId), doc.filename);
       try {
         const content = readFileSync(filePath, 'utf8');
-        const full = `\n\n📄 **${doc.title}**\n_Saved: ${doc.createdAt}_\n\n${content}\n`;
+        const version = doc.versions?.at(-1)?.n ?? 1;
+        const full = `\n\n📄 **${doc.title}** · v${version}\n_Saved: ${doc.createdAt}_\n\n${content}\n`;
         yield { type: 'token', text: full };
-        yield { type: 'result', text: `[Document "${doc.title}" displayed above]` };
+        yield { type: 'result', text: JSON.stringify({ success: true, id: doc.id, title: doc.title, version, message: `Document "${doc.title}" displayed above.` }) };
       } catch {
         yield { type: 'result', text: `Error: Document file not found for "${doc.title}".` };
       }
       return;
     }
     case 'update_research': {
-      const result = execUpdateResearch(args.documentId, args.content, args.tags, userId);
+      const result = await execUpdateResearch(args.documentId, args.content, args.tags, args.expected_version, userId);
       yield { type: 'result', text: JSON.stringify(result) };
       return;
     }

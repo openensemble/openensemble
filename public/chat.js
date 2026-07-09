@@ -702,10 +702,63 @@ function renderSessionInner(keepScroll) {
     btn.addEventListener('click', _loadEarlierMessages);
     insertBefore(btn);
   }
-  ordered.slice(start).forEach(m => {
+  const visibleMessages = ordered.slice(start);
+  const documentAssistantByUser = new Map();
+  const hiddenDocumentAssistants = new Set();
+  const pairedDocumentAssistants = new Set();
+  const documentAssistantsByRequestId = new Map(
+    visibleMessages
+      .filter(m => m?.role === 'assistant' && m.documentRequestId)
+      .map(m => [m.documentRequestId, m]),
+  );
+  for (let i = 0; i < visibleMessages.length; i++) {
+    const userMessage = visibleMessages[i];
+    if (userMessage?.role !== 'user' || !userMessage.documentRequest) continue;
+    const requestId = userMessage.documentRequest.requestId;
+    const correlated = requestId ? documentAssistantsByRequestId.get(requestId) : null;
+    if (correlated) {
+      documentAssistantByUser.set(i, correlated);
+      pairedDocumentAssistants.add(correlated);
+      const persistedOutcome = typeof documentOutcomeFromAssistant === 'function'
+        ? documentOutcomeFromAssistant(correlated)
+        : null;
+      if (persistedOutcome?.success || userMessage.documentRequest.outcome?.success) {
+        hiddenDocumentAssistants.add(correlated);
+      }
+      continue;
+    }
+    for (let j = i + 1; j < visibleMessages.length; j++) {
+      const candidate = visibleMessages[j];
+      if (candidate?.role === 'user') break;
+      if (candidate?.role !== 'assistant') continue;
+      if (candidate.documentRequestId && requestId && candidate.documentRequestId !== requestId) continue;
+      documentAssistantByUser.set(i, candidate);
+      pairedDocumentAssistants.add(candidate);
+      const persistedOutcome = typeof documentOutcomeFromAssistant === 'function'
+        ? documentOutcomeFromAssistant(candidate)
+        : null;
+      if (persistedOutcome?.success || userMessage.documentRequest.outcome?.success) {
+        hiddenDocumentAssistants.add(candidate);
+      }
+      break;
+    }
+  }
+
+  visibleMessages.forEach((m, index) => {
     if (m.scheduled)                 appendTaskHeader(m.content, m.ts, false);
     else if (m.role === 'notification') appendNotification({ agent: activeAgent, content: m.content, from: m.from, ts: m.ts });
+    else if (m.role === 'user' && !m.hidden && m.documentRequest && typeof renderDocumentSessionRequest === 'function') {
+      const assistant = documentAssistantByUser.get(index) ?? null;
+      const result = renderDocumentSessionRequest(m, assistant, false);
+      if (assistant && !assistant.hidden && !result.hideAssistant && assistant.content) {
+        appendAssistantBubble(assistant.content, assistant.ts, false);
+      }
+    }
     else if (m.role === 'user' && !m.hidden)        appendUserBubble(m.content, m.ts, false, m.attachments ?? m.attachment ?? null);
+    else if (m.role === 'assistant' && m.documentArtifact && !pairedDocumentAssistants.has(m)
+             && typeof renderStandaloneDocumentArtifact === 'function') {
+      renderStandaloneDocumentArtifact(m, false);
+    }
     else if (m.role === 'assistant' && m.image) {
       if (m.image.base64) appendImageBubble(m.image, m.ts, false);
       else appendReportImageBubble(m.image, m.ts, false); // saved-file row (no inline base64)
@@ -740,6 +793,7 @@ function renderSessionInner(keepScroll) {
       _renderAgentReportEl({ agentName, agentEmoji: '⏵', content: body, ts: m.ts });
     }
     else if (m.role === 'assistant' && !m.hidden) {
+      if (pairedDocumentAssistants.has(m) || hiddenDocumentAssistants.has(m)) return;
       if (Array.isArray(m.toolEvents) && m.toolEvents.length) appendToolRun(m.toolEvents, m.ts, false, { persisted: true, toolResults: m.toolResults });
       if (Array.isArray(m._nodeExecTaskReports)) {
         for (const report of m._nodeExecTaskReports) appendNodeExecTaskReport(report, m, false);

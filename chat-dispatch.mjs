@@ -60,6 +60,7 @@ import { turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTur
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { normalizeAttachments } from './chat/providers/_shared.mjs';
+import { compactDocumentFallback, normalizeDocumentRequest, parseDocumentMutationResult } from './lib/document-artifacts.mjs';
 
 // Pending ambient-restore timers, keyed by deviceId. A burst of wakes seconds
 // apart (e.g. a real command immediately followed by a false wake) would each
@@ -364,7 +365,8 @@ function normalizeToolPlan(plan) {
  * @param {object|null} [opts.attachment]  legacy singular attachment (see normalizeAttachments)
  * @param {Array<object>|null} [opts.attachments]  preferred multi-attachment array — ws-handler/telegram/scheduler/background-tasks/ask_agent all funnel through here
  * @param {{mode?: string, selectedTools?: string[], source?: string, phrase?: string}|null} [opts.toolPlan]
- * @param {'voice-device'|'web'|'telegram'|'desktop-app'|null} [opts.source]
+ * @param {{id?: string, filename?: string, mimeType?: string, source?: string, requestId?: string}|null} [opts.documentRequest]
+ * @param {'voice-device'|'web'|'telegram'|'desktop-app'|'document-drawer'|null} [opts.source]
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
  * @param {number|null} [opts.wakeSlot]              voice-device slot index (0–5)
  * @param {boolean} [opts.conversationMode]          voice-device conversation mode (re-arm follow-up windows after every reply)
@@ -386,6 +388,7 @@ export async function handleChatMessage({
   attachment: rawAttachment,
   attachments: rawAttachments = null,
   toolPlan: rawToolPlan = null,
+  documentRequest: rawDocumentRequest = null,
   source = null,
   deviceId = null,
   wakeSlot = null,
@@ -442,6 +445,8 @@ export async function handleChatMessage({
   agentId = agentId ?? getUserCoordinatorAgentId(userId);
 
   const toolPlan = normalizeToolPlan(rawToolPlan);
+  const documentRequest = normalizeDocumentRequest(rawDocumentRequest);
+  const documentEventMeta = documentRequest ? { documentRequest, documentTurn: true } : {};
 
   // Entry-edge attachment normalization — the ONE place the wire's two
   // shapes (new `attachments` array from the composer's multi-file tray;
@@ -594,7 +599,7 @@ export async function handleChatMessage({
   // Honor accessSchedule on every incoming message — a session opened during
   // allowed hours cannot keep chatting past curfew.
   if (isUserTimeBlocked(userId)) {
-    onEvent({ type: 'error', message: 'Access is restricted at this time. Please try again later.', agent: agentId ?? 'system' });
+    onEvent({ type: 'error', message: 'Access is restricted at this time. Please try again later.', agent: agentId ?? 'system', ...documentEventMeta });
     return;
   }
 
@@ -604,7 +609,7 @@ export async function handleChatMessage({
   // owner's API credits. getAgentsForUser is the canonical visibility list.
   let agent = getAgentsForUser(userId).find(a => a.id === agentId);
   if (!agent) {
-    onEvent({ type: 'error', message: `Unknown agent: ${agentId}`, agent: agentId });
+    onEvent({ type: 'error', message: `Unknown agent: ${agentId}`, agent: agentId, ...documentEventMeta });
     return;
   }
 
@@ -647,22 +652,24 @@ export async function handleChatMessage({
 
   // Model restriction check
   if (chatUser?.allowedModels != null && agent.model && !chatUser.allowedModels.includes(agent.model)) {
-    onEvent({ type: 'error', message: `Model "${agent.model}" is not available for your account. Ask your admin to grant access.`, agent: agentId });
+    onEvent({ type: 'error', message: `Model "${agent.model}" is not available for your account. Ask your admin to grant access.`, agent: agentId, ...documentEventMeta });
     return;
   }
 
   if (!rawText?.trim() && !attachmentList.length) {
     // Terminal event even for a no-op — a client showing a pending state on
     // send otherwise hangs until its own timeout.
-    onEvent({ type: 'done', agent: agentId });
+    onEvent({ type: 'done', agent: agentId, ...documentEventMeta });
     return;
   }
   recordActivity(userId, agentId, { message: true });
 
   // Profile intercepts: news-topic preference (side-effect; pipeline continues)
   // and agent rename / re-emoji (short-circuits with a spoken confirmation).
-  tryNewsPrefIntercept({ rawText, userId, onEvent });
-  if (tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
+  if (!documentRequest) {
+    tryNewsPrefIntercept({ rawText, userId, onEvent });
+    if (tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
+  }
 
   const scopedSessionKey = `${userId}_${agentId}`;
   // Register this WS run so concurrent delegate calls queue behind it.
@@ -734,6 +741,7 @@ export async function handleChatMessage({
     attachment: attachmentList[0] ?? null,
     attachments: attachmentList,
     toolPlan,
+    documentRequest,
     _isRoutineFollowup,
     // Profile is threaded through so the HA fast-path can enforce the same
     // child-account gate executeRoleTool applies (mirrors the disabled/hidden
@@ -786,14 +794,14 @@ export async function handleChatMessage({
   // LLM, then the natural-language fast-paths and the specialist router get
   // their crack. Anything not handled falls through to runLlmTurn.
   const planConstrained = toolPlan?.mode === 'selected' || toolPlan?.mode === 'none';
-  const allowIntentFastpaths = !planConstrained && !_isBackgroundContinuation;
+  const allowIntentFastpaths = !planConstrained && !_isBackgroundContinuation && !documentRequest;
   // Answer-type fast-paths whose handled reply should keep a conversation-mode
   // exchange open (see armConversationFollowup). Everything else in the chain
   // ends or owns its own flow.
   const CONVERSATION_REARM_FASTPATHS = new Set([
     tryHaFastpath, tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
   ]);
-  const INTERCEPTORS = [
+  const INTERCEPTORS = documentRequest ? [] : [
     // Voice-only: catch empty / 1-char STT transcripts before they reach the
     // LLM and cause the device to hang in THINKING. Must run before every
     // other interceptor because the others assume a non-empty userText.
@@ -865,7 +873,7 @@ export async function handleChatMessage({
   // would spawn a duplicate of itself. A task must never create a task.
   const _schedulerNotePromise = buildSchedulerNote({
     userId, agentId, userText: ctx.userText,
-    skipIntercept: _isBackgroundContinuation || _isolatedTaskRun,
+    skipIntercept: _isBackgroundContinuation || _isolatedTaskRun || !!documentRequest,
   });
 
   // Pre-LLM alias learning: if the previous turn ended with a "did you mean X?"
@@ -903,9 +911,29 @@ export async function handleChatMessage({
   // Capture the assistant's final reply so the learner can scan it for
   // "did you mean X?" patterns and stash a pending clarification.
   let finalAssistantText = '';
+  let documentMutation = null;
   const wrappedOnEvent = (ev) => {
     if (ev?.type === 'token' && typeof ev.text === 'string') finalAssistantText += ev.text;
-    if (typeof onEvent === 'function') return onEvent(ev);
+    if (ev?.type === 'replace' && typeof ev.text === 'string') finalAssistantText = ev.text;
+    let outwardEvent = documentRequest && ['tool_call', 'tool_progress', 'tool_result', 'done', 'error'].includes(ev?.type)
+      ? { ...ev, documentRequest, documentTurn: true }
+      : ev;
+    if (documentRequest && ev?.type === 'tool_result') {
+      const mutation = parseDocumentMutationResult(ev.name, ev.text);
+      documentMutation = mutation ?? documentMutation;
+      if (mutation) outwardEvent = { ...outwardEvent, documentArtifact: mutation };
+    }
+    if (documentRequest && (ev?.type === 'token' || ev?.type === 'replace')) return;
+    if (documentRequest && ev?.type === 'done' && !documentMutation && finalAssistantText.trim()) {
+      if (typeof onEvent === 'function') {
+        onEvent({
+          type: 'document_response', agent: agentId,
+          text: compactDocumentFallback(finalAssistantText),
+          documentRequest, documentTurn: true,
+        });
+      }
+    }
+    if (typeof onEvent === 'function') return onEvent(outwardEvent);
   };
   // 'direct' = the addressed agent ran its own LLM turn (no fast-path, no
   // specialist reroute, no @-redirect). Applies to ANY agent the user is
@@ -917,6 +945,7 @@ export async function handleChatMessage({
       userId, agentId, scopedAgent, scopedSessionKey,
       userText: ctx.userText, attachment: ctx.attachment, attachments: ctx.attachments,
       toolPlan: ctx.toolPlan,
+      documentRequest: ctx.documentRequest,
       schedulerNote: resolvedNote, source, deviceId,
       conversationMode,
       ac, onEvent: wrappedOnEvent, onNotify,

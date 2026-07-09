@@ -166,6 +166,8 @@ async function init() {
     $('btnStop').addEventListener('click', () => {
       if (ws && ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'stop', agent: activeAgent }));
+      if (typeof cancelDocumentChatTurn === 'function') cancelDocumentChatTurn(activeAgent, 'Stopped');
+      if (typeof cancelRemoteDocumentTurns === 'function') cancelRemoteDocumentTurns(activeAgent, 'Stopped');
       // The server emits no terminal event for an aborted turn — finalize the
       // partial reply here, or the next turn's tokens append onto this bubble.
       // Commit what streamed so far (client-side only; the server never

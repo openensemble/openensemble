@@ -1,0 +1,114 @@
+{
+  "id": "documents",
+  "name": "Document Editing",
+  "description": "Read, edit, and create text documents in the Documents drawer, with full version history",
+  "lucideIcon": "file-pen",
+  "category": "utility",
+  "enabled_by_default": true,
+  "intent_examples": [
+    "edit this document",
+    "fix the grammar in my document",
+    "rewrite this doc to be more formal",
+    "make this document better",
+    "proofread this file and fix the typos",
+    "add a section to the document about pricing",
+    "tighten up the wording in this doc",
+    "update my resume file",
+    "create a new document called meeting notes",
+    "show me the versions of this document",
+    "revert the document to the previous version",
+    "undo the last change to my document"
+  ],
+  "systemPromptAddition": "## Document Editing\n\nYou can read, edit, and create text documents stored in the user's Documents drawer.\n\n- When a chat message contains a header like `[Document: <name> | id: doc_xxxxxxxxxxxx]`, that id is the document to operate on — pass it to the document tools directly. Ids from `list_profile_files` (like `documents:doc_xxx` and `research:doc_xxx`) also work — research documents are editable through these same tools.\n- `read_document` returns the current content and a version number in its header. Always call it immediately before `update_document`, then pass that version as `expected_version`. If an update reports a stale version, reread the current document, reapply the requested change, and retry.\n- `update_document` replaces the ENTIRE document body — always send the complete new content, not just the changed part. Every update is saved as a new version; the original and all iterations are kept forever, so edits are never destructive. Include a short `note` describing what you changed.\n- `create_document` makes a new text document (markdown by default) that appears in the user's Documents drawer.\n- `list_document_versions` shows the history; `restore_document_version` brings back an older version (as a new version — history is never rewritten).\n- Only text-based files (markdown, txt, csv, json, html, code) can be edited. PDFs, Word files, images, and media cannot.\n- Only the document's owner can edit it. Documents shared BY someone else are read-only — offer to create an edited copy with `create_document` instead.\n- After you update a document, the user sees the change immediately in their Documents drawer — tell them what you changed and mention they can view or restore any previous version from the document's History.\n\n### Critical: actually call the tool — never fake it\n- Changing a document ONLY happens by calling `update_document` (or `create_document`). Describing the change in your reply does NOT modify the file. If you don't call the tool, nothing changes.\n- `update_document` replaces the whole body, so you must OUTPUT the complete revised document in the `content` argument — including a find/replace like 'change every X to Y' (rewrite the full text with the replacements applied). Do not summarize or truncate it.\n- NEVER tell the user you edited, changed, replaced, fixed, or updated a document unless `update_document` returned success THIS turn. If you only read it, say you read it.\n- If the document tools aren't visible to you this turn, call `request_tools` to load the `documents` skill, or say you couldn't make the change — do not claim success.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_documents",
+        "description": "List text documents in the user's Documents drawer (own + shared with them). Returns names and ids. Optionally filter by a search term.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "description": "Optional case-insensitive filter on filename or description" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_document",
+        "description": "Read the current content of a text document by id (e.g. doc_a1b2c3d4e5f6).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "document_id": { "type": "string", "description": "The document id, e.g. doc_a1b2c3d4e5f6" }
+          },
+          "required": ["document_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "update_document",
+        "description": "Replace a text document's entire content. Call read_document immediately first, then pass its version as expected_version; stale updates are rejected instead of overwriting newer work. Saved as a new restorable version. Only the document owner can update it.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "document_id": { "type": "string", "description": "The document id, e.g. doc_a1b2c3d4e5f6" },
+            "content": { "type": "string", "description": "The complete new document content (full body, not a fragment)" },
+            "expected_version": { "type": "integer", "minimum": 1, "description": "Current version number returned by the immediately preceding read_document call" },
+            "note": { "type": "string", "description": "Short description of the change, e.g. 'Fixed grammar and tightened intro'" }
+          },
+          "required": ["document_id", "content", "expected_version"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_document",
+        "description": "Create a new text document in the user's Documents drawer. Defaults to markdown (.md) if the filename has no extension.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filename": { "type": "string", "description": "Filename, e.g. 'meeting-notes.md' or 'packing list'" },
+            "content": { "type": "string", "description": "The document content" },
+            "description": { "type": "string", "description": "Optional one-line description shown in the Documents drawer" }
+          },
+          "required": ["filename", "content"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_document_versions",
+        "description": "List the version history of a document: version number, who made it, when, and the change note.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "document_id": { "type": "string", "description": "The document id" }
+          },
+          "required": ["document_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "restore_document_version",
+        "description": "Restore an older version of a document. The restored content is saved as a NEW version, so nothing is lost. Only the document owner can restore.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "document_id": { "type": "string", "description": "The document id" },
+            "version": { "type": "integer", "description": "The version number to restore, from list_document_versions" }
+          },
+          "required": ["document_id", "version"]
+        }
+      }
+    }
+  ]
+}
