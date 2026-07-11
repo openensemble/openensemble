@@ -432,9 +432,13 @@ chmod +x "$INSTALL_DIR/start.sh"
 success "start.sh created"
 
 # ─── Systemd Service (Linux only) ─────────────────────────────────────────────
+HAVE_SERVICE=false
 if [[ "$INSTALL_SERVICE" == "true" ]] && command -v systemctl &>/dev/null; then
   header "Systemd Service"
   if prompt_yn "Install openensemble as a systemd user service (auto-start)?" "y"; then
+    # loginctl accepts a numeric UID, so an unavailable NSS name lookup does
+    # not need to abort an otherwise valid local install.
+    INSTALL_USER="$(id -un 2>/dev/null || printf '%s\n' "$EUID")"
     SERVICE_DIR="$HOME/.config/systemd/user"
     mkdir -p "$SERVICE_DIR"
 
@@ -471,80 +475,82 @@ Environment=NODE_ENV=production
 WantedBy=default.target
 SERVICE
 
-    # systemctl --user needs a running user manager. On a fresh install over
-    # SSH (no graphical login, no active console) $XDG_RUNTIME_DIR isn't set
-    # and the user D-Bus isn't reachable, so the systemctl call dies with
-    # "Failed to connect to user scope bus". Fix: export XDG_RUNTIME_DIR
-    # and, if the directory doesn't exist, enable user lingering so the
-    # manager runs without a login session.
-    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    # A reachable user manager may only be alive for the current SSH session.
+    # Linger=yes is what starts it at boot and keeps it alive after logout, so
+    # verify lingering independently before trusting `systemctl --user`.
+    export XDG_RUNTIME_DIR="/run/user/$EUID"
     # Probe whether `systemctl --user` actually works. On Proxmox / minimal
     # Debian LXCs, lingering keeps the user manager alive but does NOT
     # auto-start dbus.socket, so $XDG_RUNTIME_DIR/bus is missing even when
     # the manager is fine. systemctl talks to systemd's private socket, not
     # dbus — probe that path directly.
     user_manager_ready() { systemctl --user list-units --no-pager >/dev/null 2>&1; }
-    if ! user_manager_ready; then
-      info "User manager unreachable — enabling lingering (allows systemd --user to run without a login)..."
-      # Try direct call first if root (Proxmox LXCs and other minimal images
-      # often ship without sudo; root doesn't need it). Fall back to sudo for
-      # non-root users.
-      LINGER_OK=false
-      if [[ $EUID -eq 0 ]]; then
-        if loginctl enable-linger "$USER" 2>/dev/null; then
-          LINGER_OK=true
-        fi
-      elif command -v sudo &>/dev/null; then
-        if sudo -n loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null; then
-          LINGER_OK=true
-        fi
-      fi
-      if [[ "$LINGER_OK" == "true" ]]; then
-        # Lingering causes logind to spawn the user manager on next probe.
-        # Spawn can take 10-20s on cold/slow boxes, so allow 30s.
+
+    info "Checking systemd user lingering for $INSTALL_USER..."
+    if OE_CAN_ELEVATE="$CAN_ELEVATE" bash "$INSTALL_DIR/scripts/ensure-user-linger.sh" "$INSTALL_USER"; then
+      success "User lingering verified for $INSTALL_USER"
+
+      if ! user_manager_ready; then
+        info "Waiting for the systemd user manager to start..."
+        # Lingering causes logind to spawn the user manager. Spawn can take
+        # 10-20s on cold/slow boxes, so allow 30s.
         for _ in $(seq 1 30); do
           user_manager_ready && break
           sleep 1
         done
-      else
-        warn "Could not enable lingering. Skipping systemd service install."
-        warn "To finish later, run on a logged-in console:"
-        if [[ $EUID -eq 0 ]]; then
-          warn "  loginctl enable-linger root"
-        else
-          warn "  sudo loginctl enable-linger \$USER"
-        fi
-        warn "  systemctl --user daemon-reload"
-        warn "  systemctl --user enable --now openensemble.service"
-        warn "Until then, start manually: $INSTALL_DIR/start.sh"
-        HAVE_SERVICE=false
       fi
-    fi
 
-    if user_manager_ready; then
-      # Wait for the user manager to finish reaching default.target before
-      # calling `enable`. On a freshly-lingered manager, default.target can
-      # take a moment to settle and `enable` run in that window writes the
-      # Install symlink but reports the unit as `disabled` because the
-      # resolve races the target chain.
-      for _ in $(seq 1 15); do
-        [ "$(systemctl --user is-active default.target 2>/dev/null)" = "active" ] && break
-        sleep 1
-      done
-      # Best-effort: bring up dbus.socket so interactive sessions and any
-      # tool that does want dbus (loginctl, gdbus, etc.) finds it without
-      # waiting for pam_systemd. Harmless if already running.
-      systemctl --user start dbus.socket 2>/dev/null || true
-      systemctl --user daemon-reload
-      systemctl --user enable --now openensemble.service
-      HAVE_SERVICE=true
-      success "Systemd service installed and started"
+      if user_manager_ready; then
+        SERVICE_WAS_ENABLED=false
+        SERVICE_WAS_ACTIVE=false
+        if systemctl --user is-enabled --quiet openensemble.service 2>/dev/null; then
+          SERVICE_WAS_ENABLED=true
+        fi
+        if systemctl --user is-active --quiet openensemble.service 2>/dev/null; then
+          SERVICE_WAS_ACTIVE=true
+        fi
+        # Wait for the user manager to finish reaching default.target before
+        # calling `enable`. On a freshly-lingered manager, default.target can
+        # take a moment to settle and `enable` run in that window writes the
+        # Install symlink but reports the unit as `disabled` because the
+        # resolve races the target chain.
+        for _ in $(seq 1 15); do
+          [ "$(systemctl --user is-active default.target 2>/dev/null)" = "active" ] && break
+          sleep 1
+        done
+        # Best-effort: bring up dbus.socket so interactive sessions and any
+        # tool that does want dbus (loginctl, gdbus, etc.) finds it without
+        # waiting for pam_systemd. Harmless if already running.
+        systemctl --user start dbus.socket 2>/dev/null || true
+        if systemctl --user daemon-reload \
+          && systemctl --user enable --now openensemble.service \
+          && systemctl --user is-enabled --quiet openensemble.service \
+          && systemctl --user is-active --quiet openensemble.service; then
+          HAVE_SERVICE=true
+          success "Systemd service installed and started"
+        else
+          if [[ "$SERVICE_WAS_ENABLED" != "true" && "$SERVICE_WAS_ACTIVE" != "true" ]]; then
+            systemctl --user disable --now openensemble.service 2>/dev/null || true
+          fi
+          warn "Systemd service setup did not complete; starting without auto-start."
+        fi
+      else
+        warn "User lingering is enabled, but the systemd user manager did not start."
+        warn "Skipping systemd service install; starting without auto-start."
+      fi
+    else
+      warn "Could not enable and verify user lingering. Skipping systemd service install."
+      warn "To finish later, run:"
+      if [[ $EUID -eq 0 ]]; then
+        warn "  loginctl enable-linger $INSTALL_USER"
+      else
+        warn "  sudo loginctl enable-linger $INSTALL_USER"
+      fi
+      warn "  systemctl --user daemon-reload"
+      warn "  systemctl --user enable --now openensemble.service"
+      warn "Until then, start manually: $INSTALL_DIR/start.sh"
     fi
-  else
-    HAVE_SERVICE=false
   fi
-else
-  HAVE_SERVICE=false
 fi
 
 # ─── Optional: install Piper local TTS ────────────────────────────────────────
