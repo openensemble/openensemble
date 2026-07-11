@@ -87,8 +87,31 @@ async function execFetchUrl(url) {
   }
 }
 
-export default async function execute(name, args) {
-  if (name === 'web_search') return execWebSearch(args.query, args.count);
+async function registerEmptySearchFollowUp(args, ctx) {
+  if (args?.follow_up !== true || typeof ctx?.registerLead !== 'function') return null;
+  const query = String(args.query || '').trim();
+  if (!query) return null;
+  return ctx.registerLead({
+    query: `Find a concrete web result for: ${query}`,
+    toolName: 'web_search',
+    // Do not persist follow_up itself: a lead re-check must not recursively
+    // register another lead when the result is still empty.
+    args: { query, ...(Number.isInteger(args.count) ? { count: args.count } : {}) },
+    skillId: 'web',
+    cadenceHint: 'hourly',
+    dedupKey: `web:${query.toLowerCase()}`,
+  });
+}
+
+export default async function execute(name, args = {}, _userId, _agentId, ctx) {
+  if (name === 'web_search') {
+    const result = await execWebSearch(args.query, args.count);
+    if (result === 'No results found.') {
+      const followUp = await registerEmptySearchFollowUp(args, ctx);
+      if (followUp?.announce) return `${result}\n\n${followUp.announce}`;
+    }
+    return result;
+  }
   if (name === 'fetch_url')  return execFetchUrl(args.url);
   return `Unknown tool: ${name}`;
 }

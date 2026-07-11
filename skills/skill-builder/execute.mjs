@@ -307,6 +307,184 @@ function cleanLocalIntents(localIntents, toolNames) {
   return out.length ? out : null;
 }
 
+// Validate and canonicalize the declarative bridge from confirmed preferences
+// to an ask-first watcher activation. Keeping this in skill-builder means a
+// generated skill cannot persist a recipe the runtime would later ignore.
+const MAX_PREFERENCE_OPPORTUNITIES = 3;
+const MAX_PREFERENCE_KEYWORDS = 32;
+const MAX_PREFERENCE_ARGS_BYTES = 4_000;
+const PREFERENCE_OPPORTUNITY_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const WATCHER_KIND_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$/;
+const DANGEROUS_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const SENSITIVE_ACTIVATION_KEY_RE = /key|token|secret|password|auth|bearer|credential|cookie|private[_.-]?key|client[_.-]?secret|session[_.-]?(?:id|key)|csrf/i;
+const SENSITIVE_ACTIVATION_VALUE_RES = [
+  /\bbearer\s+[A-Za-z0-9._~+/=-]{6,}/i,
+  /\b(?:api[_-]?key|access[_-]?token|authorization|password|secret)=[^\s&]{4,}/i,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /\b(?:sk|gh[pousr]|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b/i,
+  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+];
+
+function normalizePreferenceKeyword(value) {
+  return String(value || '').toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cloneSafeActivationArgs(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { error: 'activationArgs must be a plain JSON object.' };
+  }
+  const seen = new WeakSet();
+  const stack = [{ value, depth: 0 }];
+  while (stack.length) {
+    const current = stack.pop();
+    const item = current.value;
+    if (item === null || typeof item === 'boolean' || typeof item === 'string') {
+      if (typeof item === 'string' && SENSITIVE_ACTIVATION_VALUE_RES.some(re => re.test(item))) {
+        return { error: 'activationArgs must not contain credential-like values.' };
+      }
+      continue;
+    }
+    if (typeof item === 'number') {
+      if (!Number.isFinite(item)) return { error: 'activationArgs must contain only finite JSON numbers.' };
+      continue;
+    }
+    if (typeof item !== 'object' || current.depth > 5 || seen.has(item)) {
+      return { error: 'activationArgs must be acyclic JSON no more than 5 levels deep.' };
+    }
+    seen.add(item);
+    if (Array.isArray(item)) {
+      if (item.length > 20) return { error: 'activationArgs arrays may contain at most 20 items.' };
+      for (const child of item) stack.push({ value: child, depth: current.depth + 1 });
+      continue;
+    }
+    const entries = Object.entries(item);
+    if (entries.length > 32) return { error: 'activationArgs objects may contain at most 32 fields.' };
+    for (const [key, child] of entries) {
+      if (DANGEROUS_JSON_KEYS.has(key)) return { error: `activationArgs contains forbidden key "${key}".` };
+      if (SENSITIVE_ACTIVATION_KEY_RE.test(key)) {
+        return { error: `activationArgs must not contain credential-like field "${key}".` };
+      }
+      stack.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  try {
+    const json = JSON.stringify(value);
+    if (!json || Buffer.byteLength(json, 'utf8') > MAX_PREFERENCE_ARGS_BYTES) {
+      return { error: `activationArgs must be ${MAX_PREFERENCE_ARGS_BYTES} bytes or fewer.` };
+    }
+    return { value: JSON.parse(json) };
+  } catch {
+    return { error: 'activationArgs must be valid JSON.' };
+  }
+}
+
+function cleanPreferenceOpportunities(opportunities, toolDefs, watcherDefs) {
+  if (!Array.isArray(opportunities)) {
+    return { error: 'preferenceOpportunities must be an array. Pass [] to clear it.' };
+  }
+  if (opportunities.length > MAX_PREFERENCE_OPPORTUNITIES) {
+    return { error: `preferenceOpportunities supports at most ${MAX_PREFERENCE_OPPORTUNITIES} recipes per skill.` };
+  }
+  const toolsByName = new Map((toolDefs || [])
+    .map(tool => [tool?.function?.name, tool])
+    .filter(([name]) => typeof name === 'string' && name));
+  const watcherKinds = new Set((watcherDefs || [])
+    .map(watcher => typeof watcher?.kind === 'string' ? watcher.kind.trim() : '')
+    .filter(Boolean));
+  const seenIds = new Set();
+  const values = [];
+
+  for (let index = 0; index < opportunities.length; index++) {
+    const raw = opportunities[index];
+    const label = `preferenceOpportunities[${index}]`;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { error: `${label} must be an object.` };
+    }
+    const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+    if (!PREFERENCE_OPPORTUNITY_ID_RE.test(id) || id.length > 64) {
+      return { error: `${label}.id must be a lowercase kebab slug of 64 characters or fewer.` };
+    }
+    if (seenIds.has(id)) return { error: `${label}.id duplicates "${id}".` };
+    seenIds.add(id);
+
+    if (!Array.isArray(raw.preferenceKeywords) || !raw.preferenceKeywords.length
+      || raw.preferenceKeywords.length > MAX_PREFERENCE_KEYWORDS) {
+      return { error: `${label}.preferenceKeywords must contain 1-${MAX_PREFERENCE_KEYWORDS} domain terms.` };
+    }
+    const keywords = [];
+    const seenKeywords = new Set();
+    for (const keywordValue of raw.preferenceKeywords) {
+      if (typeof keywordValue !== 'string') return { error: `${label}.preferenceKeywords must contain only strings.` };
+      const keyword = normalizePreferenceKeyword(keywordValue);
+      if (keyword.length < 3 || keyword.length > 40) {
+        return { error: `${label}.preferenceKeywords terms must normalize to 3-40 characters.` };
+      }
+      if (!seenKeywords.has(keyword)) {
+        seenKeywords.add(keyword);
+        keywords.push(keyword);
+      }
+    }
+
+    const activationTool = typeof raw.activationTool === 'string' ? raw.activationTool.trim() : '';
+    const toolDef = toolsByName.get(activationTool);
+    if (!toolDef) return { error: `${label}.activationTool must name a tool declared by this skill.` };
+    if (toolDef.destructive !== true) {
+      return { error: `${label}.activationTool "${activationTool}" must be marked destructive:true because it creates durable watcher state.` };
+    }
+
+    const watcherKind = typeof raw.watcherKind === 'string' ? raw.watcherKind.trim() : '';
+    if (!WATCHER_KIND_RE.test(watcherKind) || !watcherKinds.has(watcherKind)) {
+      return { error: `${label}.watcherKind must exactly match a kind declared in this skill's watchers array.` };
+    }
+    const dedupKey = typeof raw.dedupKey === 'string' ? raw.dedupKey.trim() : '';
+    if (!dedupKey || dedupKey.length > 160 || /[\u0000-\u001f\u007f]/.test(dedupKey)) {
+      return { error: `${label}.dedupKey must be a non-control string of 160 characters or fewer.` };
+    }
+
+    const argsResult = cloneSafeActivationArgs(raw.activationArgs == null ? {} : raw.activationArgs);
+    if (argsResult.error) return { error: `${label}.${argsResult.error}` };
+    const declaredArgs = toolDef?.function?.parameters?.properties;
+    const activationArgKeys = Object.keys(argsResult.value);
+    if (activationArgKeys.length) {
+      const unknown = !declaredArgs || typeof declaredArgs !== 'object'
+        ? activationArgKeys
+        : activationArgKeys.filter(key => !Object.hasOwn(declaredArgs, key));
+      if (unknown.length) {
+        return { error: `${label}.activationArgs contains fields not declared by ${activationTool}: ${unknown.join(', ')}.` };
+      }
+    }
+    const autonomy = raw.autonomy == null ? null : raw.autonomy;
+    if (autonomy !== null && autonomy !== 'informational') {
+      return { error: `${label}.autonomy may only be "informational"; omit it for ask-first behavior.` };
+    }
+    if (autonomy === 'informational' && argsResult.value.deliver !== 'notify') {
+      return { error: `${label}.autonomy="informational" requires activationArgs.deliver to be "notify".` };
+    }
+
+    const title = raw.title == null ? '' : (typeof raw.title === 'string' ? raw.title.trim() : null);
+    const body = raw.body == null ? '' : (typeof raw.body === 'string' ? raw.body.trim() : null);
+    if (title === null || title.length > 100) return { error: `${label}.title must be a string of 100 characters or fewer.` };
+    if (body === null || body.length > 400) return { error: `${label}.body must be a string of 400 characters or fewer.` };
+
+    const recipe = {
+      id,
+      preferenceKeywords: keywords,
+      activationTool,
+      activationArgs: argsResult.value,
+      watcherKind,
+      dedupKey,
+    };
+    if (title) recipe.title = title;
+    if (body) recipe.body = body;
+    if (autonomy) recipe.autonomy = autonomy;
+    values.push(recipe);
+  }
+  return { values };
+}
+
 function cleanSelectedPlanKeep(selectedPlanKeep, toolNames) {
   if (!Array.isArray(selectedPlanKeep)) return null;
   const valid = new Set(toolNames);
@@ -333,7 +511,7 @@ function cleanSelectedPlanKeep(selectedPlanKeep, toolNames) {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, selected_plan_keep, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -418,6 +596,11 @@ async function handleCreate(args, userId) {
       kind: String(w.kind || '').trim(),
       description: String(w.description || '').trim(),
     })).filter(w => w.kind);
+  }
+  if (preferenceOpportunities !== undefined) {
+    const cleaned = cleanPreferenceOpportunities(preferenceOpportunities, tools, manifest.watchers || []);
+    if (cleaned.error) return `Invalid preferenceOpportunities: ${cleaned.error}`;
+    if (cleaned.values.length) manifest.preferenceOpportunities = cleaned.values;
   }
   // Per-turn tool router fields. intent_examples drives the embed classifier
   // decision "does this user prompt look like a request for this skill"; when
@@ -940,7 +1123,7 @@ async function handleUpdateToolDef(args, userId) {
 // selected_plan_keep, description. Modeled on handleUpdateToolDef — atomic
 // write + re-register so the change is live without a server restart.
 async function handleUpdateManifest(args, userId) {
-  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, selected_plan_keep, coordinator_scope, description, sandbox, allow_network } = args;
+  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network } = args;
   if (!id?.trim()) return 'id is required.';
 
   const skillId = id.trim();
@@ -1003,6 +1186,16 @@ async function handleUpdateManifest(args, userId) {
     if (!disk.localIntents.length) delete disk.localIntents;
     changed.push(`localIntents(${disk.localIntents?.length ?? 0})`);
   }
+  // preferenceOpportunities — declarative, ask-first activation recipes for
+  // confirmed preferences. Pass [] to clear. Recipes must bind this skill's
+  // own destructive activation tool and an exactly-declared watcher kind.
+  if (preferenceOpportunities !== undefined) {
+    const cleaned = cleanPreferenceOpportunities(preferenceOpportunities, disk.tools || [], disk.watchers || []);
+    if (cleaned.error) return `Invalid preferenceOpportunities: ${cleaned.error}`;
+    if (cleaned.values.length) disk.preferenceOpportunities = cleaned.values;
+    else delete disk.preferenceOpportunities;
+    changed.push(`preferenceOpportunities(${cleaned.values.length})`);
+  }
   // selected_plan_keep — terminal tools that survive selected recipe trimming.
   // Pass [] to clear.
   if (selected_plan_keep !== undefined) {
@@ -1028,7 +1221,7 @@ async function handleUpdateManifest(args, userId) {
     changed.push(`sandbox.network=${allow_network}`);
   }
   if (!changed.length) {
-    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, selected_plan_keep, coordinator_scope, description, sandbox, allow_network.';
+    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network.';
   }
 
   const backupPath = manifestPath + '.bak';
@@ -1654,6 +1847,7 @@ async function handleDraftBuild(args, userId) {
     drawer: s.drawer,
     watchers: s.watchers,
     intent_examples: s.intentExamples,
+    preferenceOpportunities: s.preferenceOpportunities,
     selected_plan_keep: Array.isArray(s.selected_plan_keep) ? s.selected_plan_keep : s.selectedPlanKeep,
     coordinator_scope: s.coordinatorScope,
     voice_device: s.voiceDevice === true || s.voice_device === true,

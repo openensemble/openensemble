@@ -28,6 +28,7 @@ import { recordDomainSkill } from './lib/memory-scope-context.mjs';
 import { recordToolExecution } from './lib/tool-exec-log.mjs';
 import { recordToolObservation } from './lib/personalization/recorder.mjs';
 import { buildRegisterLead } from './lib/personalization/lead-helper.mjs';
+import { buildSkillPersonalizationHelpers } from './lib/personalization/skill-helper.mjs';
 import { getVoiceContext } from './lib/voice-context.mjs';
 import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
@@ -1153,6 +1154,10 @@ async function buildCtx(userId, agentId, skillId = null) {
   };
   ctx.unwatch = async (watcherId) => {
     try {
+      const { getPreferenceSafeAutoContext } = await import('./lib/personalization/safe-auto-context.mjs');
+      if (getPreferenceSafeAutoContext()?.activationNonce) {
+        throw new Error('unwatch is unavailable while committing a preference monitor activation');
+      }
       const watchers = await import('./scheduler/watchers.mjs');
       return watchers.unregisterWatcher(userId, watcherId);
     } catch (e) { console.warn('[ctx.unwatch]', e.message); return false; }
@@ -1163,6 +1168,10 @@ async function buildCtx(userId, agentId, skillId = null) {
   // predicate is a sync function (record) -> bool, evaluated in-process.
   ctx.unwatchMatching = async (predicate) => {
     try {
+      const { getPreferenceSafeAutoContext } = await import('./lib/personalization/safe-auto-context.mjs');
+      if (getPreferenceSafeAutoContext()?.activationNonce) {
+        throw new Error('unwatchMatching is unavailable while committing a preference monitor activation');
+      }
       const watchers = await import('./scheduler/watchers.mjs');
       return watchers.unregisterMatchingWatchers(userId, predicate);
     } catch (e) { console.warn('[ctx.unwatchMatching]', e.message); return 0; }
@@ -1180,6 +1189,10 @@ async function buildCtx(userId, agentId, skillId = null) {
   // tool+args re-run for later (silent) follow-up when an answer isn't
   // available yet ("is this back in stock"). See lib/personalization/lead-helper.mjs.
   ctx.registerLead = buildRegisterLead({ userId, agentId: wsAgentId });
+
+  // Read-only, master-switch-gated confirmed preferences scoped to the
+  // owning skill's declared preferenceOpportunities keywords.
+  ctx.personalization = buildSkillPersonalizationHelpers({ userId, skillId });
 
   // ctx.collection — group many similar items under ONE watcher record with
   // per-item cadence. Use when a skill needs to monitor N peers (channels,
@@ -1342,19 +1355,117 @@ export function isSandboxedSkill(skillId, userId) {
 // the in-process executor contract so both dispatch seams stay unchanged.
 // Streaming yields are folded into result text for now (live streaming through
 // the jail is a follow-up); failures throw so the normal tool-failure path runs.
-async function runCustomSkillValue({ userId, agentId, skillId, name, args }) {
+async function runCustomSkillValue({ userId, agentId, skillId, name, args, execSnapshotPath = null }) {
   const { runCustomSkillSandboxed } = await import('./lib/skill-subprocess.mjs');
   // Default-deny egress: the jail only gets network if the skill's manifest declares
   // `sandbox.network`. An undeclared (or rogue) skill runs with --unshare-net so it
   // can't exfiltrate anything it can read. See lib/skill-net-policy.mjs.
   const net = skillDeclaresNetwork(userId, skillId);
-  const r = await runCustomSkillSandboxed({ userId, agentId, skillId, toolName: name, args, net });
+  const r = await runCustomSkillSandboxed({
+    userId, agentId, skillId, toolName: name, args, net, execSnapshotPath,
+  });
   if (!r.ok) throw new Error(/** @type {any} */ (r).error || `custom skill ${skillId}.${name} failed`);
   if (Array.isArray(r.events) && r.events.length) {
     const text = r.events.filter(e => e?.type === 'token').map(e => e.text).join('');
     if (text) return { type: 'result', text };
   }
   return r.result;
+}
+
+/**
+ * Execute a tool only from one exact owning skill. Safe automation uses this
+ * instead of the global name-first resolver so a legacy/manual manifest with
+ * a colliding tool name cannot intercept another skill's validated contract.
+ */
+async function executeRoleToolForSkillInternal(
+  skillId, name, args, userId = 'default', agentId = null,
+  { execSnapshotPath = null, requireSandbox = false } = {},
+) {
+  const key = resolveKey(skillId, userId);
+  const wrap = key ? _manifests.get(key) : null;
+  if (!wrap || wrap.manifest.id !== skillId
+    || !wrap.manifest.tools?.some(tool => tool.function?.name === name)) {
+    return `Tool "${name}" is not declared by skill "${skillId}".`;
+  }
+  if (userId) {
+    const profile = _readUserProfile(userId);
+    if (profile?.role === 'child' && Array.isArray(profile.allowedSkills)
+      && !profile.allowedSkills.includes(skillId)) {
+      return `Tool "${name}" is not permitted for this account.`;
+    }
+    if (isSkillDisabled(userId, skillId, !!wrap.manifest?.always_on)) {
+      return `Tool "${name}" is from a disabled skill.`;
+    }
+    if (getHiddenTools(userId, skillId).includes(name)) {
+      return `Tool "${name}" is hidden by your settings.`;
+    }
+  }
+  if (execSnapshotPath || requireSandbox) {
+    if (!shouldSandboxSkill(wrap) || !execSnapshotPath) {
+      throw new Error(`reviewed safe-auto execution requires a sandboxed immutable snapshot for "${skillId}"`);
+    }
+    return runCustomSkillValue({ userId, agentId, skillId, name, args, execSnapshotPath });
+  }
+  if (shouldSandboxSkill(wrap)) return runCustomSkillValue({ userId, agentId, skillId, name, args });
+  const exec = await getExecutorByKey(key);
+  if (!exec) return `Tool "${name}" could not load from skill "${skillId}".`;
+  return exec(name, args, userId, agentId, await buildCtx(userId, agentId, skillId));
+}
+
+export async function executeRoleToolForSkill(skillId, name, args, userId = 'default', agentId = null) {
+  return executeRoleToolForSkillInternal(skillId, name, args, userId, agentId);
+}
+
+/**
+ * Safe-auto-only exact dispatcher. It reads and hashes reviewed bytes once,
+ * overlays that private snapshot at the canonical execute.mjs path inside a
+ * mandatory sandbox, and cleans it up only after the child exits. Mutable disk
+ * code and in-process executor caches are never used by this seam.
+ */
+export async function executeReviewedRoleToolForSkill(
+  skillId, name, args, userId = 'default', agentId = null, expectedDigest = '',
+) {
+  const key = resolveKey(skillId, userId);
+  const wrap = key ? _manifests.get(key) : null;
+  if (!wrap || wrap.manifest.id !== skillId || !shouldSandboxSkill(wrap)) {
+    throw new Error(`reviewed safe-auto skill "${skillId}" is unavailable or not sandboxed`);
+  }
+  const { materializeReviewedInformationalSnapshot } = await import('./lib/personalization/reviewed-informational-skills.mjs');
+  const snapshot = materializeReviewedInformationalSnapshot(
+    userId, { ...wrap.manifest, userScope: wrap.userId }, expectedDigest,
+  );
+  if (!snapshot) throw new Error(`reviewed safe-auto snapshot for "${skillId}" could not be verified`);
+  try {
+    return await executeRoleToolForSkillInternal(skillId, name, args, userId, agentId, {
+      execSnapshotPath: snapshot.execPath,
+      requireSandbox: true,
+    });
+  } finally {
+    snapshot.cleanup();
+  }
+}
+
+/** Exact immutable-snapshot dispatcher for a user-approved preference grant. */
+export async function executeGrantedRoleToolForSkill(
+  skillId, name, args, userId = 'default', agentId = null, expectedIdentity = {},
+) {
+  const key = resolveKey(skillId, userId);
+  const wrap = key ? _manifests.get(key) : null;
+  if (!wrap || wrap.manifest.id !== skillId || !shouldSandboxSkill(wrap)) {
+    throw new Error(`approved preference skill "${skillId}" is unavailable or not sandboxed`);
+  }
+  const grants = await import('./lib/personalization/skill-preference-grants.mjs');
+  const manifest = { ...wrap.manifest, userScope: wrap.userId };
+  const snapshot = grants.materializeGrantedSkillSnapshot(userId, manifest, expectedIdentity);
+  if (!snapshot) throw new Error(`approved preference snapshot for "${skillId}" could not be verified`);
+  try {
+    return await executeRoleToolForSkillInternal(skillId, name, args, userId, agentId, {
+      execSnapshotPath: snapshot.execPath,
+      requireSandbox: true,
+    });
+  } finally {
+    snapshot.cleanup();
+  }
 }
 
 // Execute a tool — routes to the skill that owns it, scoped to what `userId` can see.

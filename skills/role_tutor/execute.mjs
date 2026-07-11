@@ -252,7 +252,7 @@ export default async function execute(name, args, userId, agentId) {
     if (!args.roadmap_text?.trim()) return 'Error: roadmap_text is required.';
 
     // Archive old roadmaps by forgetting them (uses non-immortal remember for roadmaps)
-    await forgetByText({ agentId: aid, text: `${tag(subject, 'roadmap')}`, userId });
+    await forgetByText({ agentId: aid, text: `${tag(subject, 'roadmap')}`, userId, types: ['params'] });
 
     // Save new roadmap — use remember (non-immortal, high stability) so it can be replaced later
     const text = `${tag(subject, 'roadmap')} ${args.roadmap_text.trim()}`;

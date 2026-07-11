@@ -17,6 +17,7 @@
     "@lancedb/lancedb": "^0.27.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "busboy": "^1.6.0",
+    "es-module-lexer": "^2.0.0",
     "imapflow": "^1.4.3",
     "node-llama-cpp": "^3.19.0",
     "node-pty": "^1.1.0",

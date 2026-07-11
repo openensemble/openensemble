@@ -16,6 +16,8 @@
 
 import { appendToSession, failPendingTurn } from '../sessions.mjs';
 import { localTierEnabled, dispatch, runIntent } from '../lib/local-label.mjs';
+import { recordToolObservation } from '../lib/personalization/recorder.mjs';
+import { looksLikeToolError } from '../lib/tool-error.mjs';
 
 // executeRoleTool can return a string, an object with `.text`, or an async
 // generator (streaming skills). Normalize all three to a single string.
@@ -49,6 +51,24 @@ export async function tryLocalIntentFastpath({ userText, userId, agentId, onEven
     }
 
     const text = await normalizeResult(await runIntent(match, userId, agentId));
+    // The normal roles.mjs dispatcher mirrors completed tools into the
+    // personalization observation stream, but this no-LLM executor bypasses
+    // that hook. Record only a successful invocation and deliberately omit
+    // result content: recordToolObservation will retain the tool/skill plus a
+    // shape-only view of args, never a grocery result body or query value.
+    if (!looksLikeToolError(text)) {
+      try {
+        recordToolObservation({
+          userId,
+          agentId,
+          toolName: match.tool,
+          skillId: match.skillId,
+          args: match.args || {},
+          resultText: '',
+          ok: true,
+        });
+      } catch { /* personalization must never block the local response */ }
+    }
     try {
       await appendToSession(`${userId}_${agentId}`,
         { role: 'user', content: userText, ts: Date.now() },

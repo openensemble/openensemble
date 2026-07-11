@@ -444,8 +444,28 @@ export async function handle(req, res) {
   // matches the proposal's userId against the auth cookie.
   if (req.url === '/api/proposals' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    let pending = listUserProposals(authId, 'pending');
+    try {
+      const { listLedger } = await import('../lib/personalization/ledger.mjs');
+      const rows = new Map((await listLedger(authId, { includeContradicted: false }))
+        .filter(row => row?.tier === 'confirmed' && row?.status === 'active')
+        .map(row => [row.id, row]));
+      // Resolve explanations only in this authenticated response. Proposal
+      // history retains the opaque id, never a second copy of preference prose.
+      pending = pending.map(proposal => {
+        if (proposal?.actionContract !== 'skill_preference_activation'
+          || typeof proposal.preferenceMemoryId !== 'string') return proposal;
+        const row = rows.get(proposal.preferenceMemoryId);
+        if (!row) return proposal;
+        return {
+          ...proposal,
+          personalizationWhy: `Because you confirmed: ${String(row.statement || '').slice(0, 300)}`,
+          editPreferenceId: row.id,
+        };
+      });
+    } catch { /* fail closed to the ordinary proposal projection */ }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ pending: listUserProposals(authId, 'pending') }));
+    res.end(JSON.stringify({ pending }));
     return true;
   }
   // Bulk endpoints (must match before the single-id regex)

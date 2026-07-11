@@ -34,6 +34,9 @@ import { buildSkillCredentials } from '../lib/credentials.mjs';
 import { buildRuntimeBroker } from '../lib/skill-runtime-broker.mjs';
 import { skillDeclaresNetwork } from '../lib/skill-net-policy.mjs';
 import { log } from '../logger.mjs';
+import { buildSkillPersonalizationHelpers } from '../lib/personalization/skill-helper.mjs';
+import { getPreferenceSafeAutoContext } from '../lib/personalization/safe-auto-context.mjs';
+import { atomicWriteSync } from '../routes/_helpers/io-lock.mjs';
 
 const TICK_MS = 5_000;
 const DEFAULT_CADENCE_SEC = 30;
@@ -50,6 +53,7 @@ const RECENT_KEEP_MS = 60 * 60 * 1000;          // Keep completed/errored watche
 const MAX_HISTORY_ENTRIES = 100;                // Per-watcher progress scrollback cap
 const STUCK_RATIO = 5;                          // No change for 5×cadence → annotate as "stuck"
 const STUCK_BACKOFF_MAX_SEC = 3600;             // Back off noisy stuck polls up to hourly
+const EXTERNAL_DISPATCH_STALE_MS = 5 * 60 * 1000;
 
 let _running = false;
 let _timer = null;
@@ -62,9 +66,46 @@ let _showVideoFn = null;
 //   _byUser: userId -> { active: WatcherRecord[], recent: WatcherRecord[] }
 // Recent is a small ring of completed/errored watchers for the tasks drawer.
 const _byUser = new Map();
+const _watcherLoadErrors = new Map();
 
 // Ticks-in-flight guard so a slow handler doesn't pile up duplicate runs.
 const _inFlight = new Set();
+// One controller per active tick. Sandboxed custom watchers receive the signal;
+// Stop/Undo can therefore terminate code and direct network activity instead of
+// merely discarding a result after the process eventually returns.
+const _inFlightControllers = new Map();
+
+function abortInFlightWatcher(userId, watcherId, reason = 'watcher stopped') {
+  const controller = _inFlightControllers.get(`${userId}:${watcherId}`);
+  if (!controller || controller.signal.aborted) return false;
+  try { controller.abort(new Error(reason)); } catch { controller.abort(); }
+  return true;
+}
+
+function isSafeInformationalWatcher(record) {
+  return record?.personalizationOrigin?.type === 'preference_safe_auto';
+}
+
+function isApprovedPreferenceWatcher(record) {
+  return record?.personalizationOrigin?.type === 'preference_approved';
+}
+
+function isManagedPreferenceWatcher(record) {
+  return isSafeInformationalWatcher(record) || isApprovedPreferenceWatcher(record);
+}
+
+function releaseApprovedPreferenceGrant(record) {
+  if (!isApprovedPreferenceWatcher(record)) return;
+  import('../lib/personalization/skill-preference-grants.mjs')
+    .then(grants => grants.revokeSkillPreferenceGrant(record.userId, {
+      skillId: record.skillId,
+      preferenceMemoryId: record.personalizationOrigin?.preferenceMemoryId,
+      contractFingerprint: record.personalizationOrigin?.contractFingerprint,
+    }))
+    .catch(e => log.warn('watchers', 'terminal approved preference grant cleanup failed', {
+      id: record.id, err: e?.message || String(e),
+    }));
+}
 
 // ── persistence ───────────────────────────────────────────────────────────────
 
@@ -79,12 +120,18 @@ function loadUserWatchers(userId) {
   try {
     if (fs.existsSync(p)) {
       const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || !Array.isArray(parsed.active) || !Array.isArray(parsed.recent)) {
+        throw new Error('invalid watchers envelope');
+      }
       data = {
-        active: Array.isArray(parsed.active) ? parsed.active : [],
-        recent: Array.isArray(parsed.recent) ? parsed.recent : [],
+        active: parsed.active,
+        recent: parsed.recent,
       };
+      _watcherLoadErrors.delete(userId);
     }
   } catch (e) {
+    _watcherLoadErrors.set(userId, e instanceof Error ? e : new Error(String(e)));
     log.warn('watchers', `Failed to load ${userId} watchers`, { err: e.message });
   }
 
@@ -119,15 +166,52 @@ function loadUserWatchers(userId) {
   return data;
 }
 
-function _writeUserNow(userId) {
-  const data = _byUser.get(userId);
-  if (!data) return;
+/** Strict storage health boundary used before unattended watcher lifecycle mutations. */
+export function assertWatcherStoreHealthy(userId) {
+  if (!userId) throw new Error('watcher store user required');
   const p = watchersPath(userId);
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(data, null, 2));
+    if (!fs.existsSync(p)) {
+      // If an unreadable file was removed as an out-of-band repair, discard
+      // the fail-closed cache that was populated while parsing failed. The
+      // next access must observe the repaired (now empty) store, not stale
+      // in-memory rows from before the repair.
+      if (_watcherLoadErrors.has(userId)) _byUser.delete(userId);
+      _watcherLoadErrors.delete(userId);
+      return true;
+    }
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+      || !Array.isArray(parsed.active) || !Array.isArray(parsed.recent)) {
+      throw new Error('invalid watchers envelope');
+    }
+  } catch (e) {
+    _watcherLoadErrors.set(userId, e instanceof Error ? e : new Error(String(e)));
+    throw new Error(`watcher store is unreadable: ${e?.message || e}`);
+  }
+  if (_watcherLoadErrors.has(userId)) {
+    // A valid direct read means an out-of-band repair landed; refresh the
+    // previously fail-closed empty cache on the next access.
+    _watcherLoadErrors.delete(userId);
+    _byUser.delete(userId);
+  }
+  return true;
+}
+
+function _writeUserNow(userId) {
+  const data = _byUser.get(userId);
+  if (!data) return false;
+  const p = watchersPath(userId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(path.dirname(p), 0o700); } catch { /* best effort */ }
+    atomicWriteSync(p, JSON.stringify(data, null, 2), { mode: 0o600 });
+    try { fs.chmodSync(p, 0o600); } catch { /* best effort */ }
+    _watcherLoadErrors.delete(userId);
+    return true;
   } catch (e) {
     log.warn('watchers', `Failed to persist ${userId} watchers`, { err: e.message });
+    return false;
   }
 }
 
@@ -145,8 +229,7 @@ let _flushTimer = null;
 function persistUser(userId, { debounce = false } = {}) {
   if (!debounce) {
     _dirtyUsers.delete(userId);
-    _writeUserNow(userId);
-    return;
+    return _writeUserNow(userId);
   }
   _dirtyUsers.add(userId);
   if (_flushTimer) return;
@@ -156,6 +239,7 @@ function persistUser(userId, { debounce = false } = {}) {
     _dirtyUsers.clear();
   }, FLUSH_DEBOUNCE_MS);
   _flushTimer.unref?.();
+  return true;
 }
 
 // Graceful-shutdown net: flush any pending debounced writes synchronously.
@@ -204,6 +288,8 @@ export function registerWatcher(opts) {
   if (!agentId) throw new Error('registerWatcher: agentId required');
   if (!kind)    throw new Error('registerWatcher: kind required');
 
+  const safeContext = getPreferenceSafeAutoContext();
+  if (safeContext?.activationNonce) assertWatcherStoreHealthy(userId);
   const data = loadUserWatchers(userId);
 
   if (data.active.length >= MAX_PER_USER) {
@@ -263,12 +349,45 @@ export function registerWatcher(opts) {
     onFire: opts.onFire || null, // { type: 'notify' | 'agent', prompt? } — see executeOnFire
   };
 
+  // Stamp every watcher created inside a validated safe-auto tool invocation
+  // with its unguessable async-local nonce. Verification later promotes the
+  // one exact notify-only watcher; failures roll back only nonce-matched rows,
+  // never a concurrent watcher created by another turn.
+  if (safeContext?.activationNonce) {
+    const watcherIdentity = state?.dedupKey || null;
+    const approved = safeContext.mode === 'approved';
+    record.personalizationOrigin = {
+      type: approved ? 'preference_approved_pending' : 'preference_safe_auto_pending',
+      activationNonce: safeContext.activationNonce,
+      offerKind: safeContext.offerKind,
+      contractFingerprint: safeContext.contractFingerprint,
+      receiptEventId: safeContext.receiptEventId,
+      watcherIdentity: safeContext.watcherIdentity,
+      reviewedExecutorDigest: safeContext.reviewedExecutorDigest,
+      ...(approved ? {
+        preferenceMemoryId: safeContext.preferenceMemoryId,
+        utilityContextKey: safeContext.utilityContextKey || 'general',
+        executorDigest: safeContext.executorDigest,
+        manifestDigest: safeContext.manifestDigest,
+        expectedDelivery: safeContext.expectedDelivery,
+      } : {}),
+      contractMatch: skillId === safeContext.skillId
+        && kind === safeContext.watcherKind
+        && watcherIdentity === safeContext.watcherIdentity,
+    };
+  }
+
   data.active.push(record);
   // event_subscription watchers register against the in-process bus so
   // emitEvent() can pull their nextTickAt forward when their event arrives.
   // Polling kinds skip this — the supervisor's regular sweep handles them.
   if (kind === 'event_subscription') subscribeToEvent(record);
-  persistUser(userId);
+  const persisted = persistUser(userId);
+  if (safeContext?.activationNonce && !persisted) {
+    data.active = data.active.filter(watcher => watcher !== record);
+    if (kind === 'event_subscription') unsubscribeFromEvent(record);
+    throw new Error('safe-auto watcher registration could not be persisted');
+  }
   return record.id;
 }
 
@@ -308,7 +427,8 @@ export function updateWatcher(userId, watcherId, patch) {
       w.expiresAt = patch.expiresAt;
     }
   }
-  if (patch.onFire && typeof patch.onFire === 'object' && patch.onFire.type) {
+  if (!isManagedPreferenceWatcher(w)
+    && patch.onFire && typeof patch.onFire === 'object' && patch.onFire.type) {
     w.onFire = patch.onFire;
   }
   persistUser(userId);
@@ -460,16 +580,35 @@ export function listAllCollections(userId, filter = {}) {
 }
 
 export function unregisterWatcher(userId, watcherId, reason = 'cancelled') {
+  assertWatcherStoreHealthy(userId);
   const data = loadUserWatchers(userId);
   const idx = data.active.findIndex(w => w.id === watcherId);
   if (idx < 0) return false;
-  const w = data.active.splice(idx, 1)[0];
+  const w = data.active[idx];
+  // Stop the jailed process before doing any further lifecycle work. Managed
+  // removals still roll their record back if durable persistence fails, but an
+  // in-flight process never retains authority while that failure is handled.
+  abortInFlightWatcher(userId, watcherId, reason);
+  const safeLifecycle = isManagedPreferenceWatcher(w)
+    || ['preference_safe_auto_pending', 'preference_approved_pending']
+      .includes(w?.personalizationOrigin?.type);
+  data.active.splice(idx, 1);
+  const previous = { status: w.status, endedAt: w.endedAt };
   if (w.kind === 'event_subscription') unsubscribeFromEvent(w);
   w.status = reason;
   w.endedAt = Date.now();
   data.recent.unshift(w);
   data.recent = data.recent.slice(0, 20);
-  persistUser(userId);
+  if (!persistUser(userId) && safeLifecycle) {
+    const recentIdx = data.recent.indexOf(w);
+    if (recentIdx >= 0) data.recent.splice(recentIdx, 1);
+    data.active.splice(Math.min(idx, data.active.length), 0, w);
+    w.status = previous.status;
+    w.endedAt = previous.endedAt;
+    if (w.kind === 'event_subscription') subscribeToEvent(w);
+    throw new Error('safe-auto watcher removal could not be persisted');
+  }
+  releaseApprovedPreferenceGrant(w);
   return true;
 }
 
@@ -491,6 +630,15 @@ export function pushWatcherStatus(userId, watcherId, text, extraState = null) {
     record.state = { ...(record.state || {}), ...extraState };
   }
   if (record.state) record.state.lastActivityAt = Date.now();
+  if (isManagedPreferenceWatcher(record)) {
+    if (text) {
+      deliverManagedPreferenceUpdate(record, text)
+        .catch(e => log.warn('watchers', 'managed preference pushed-status delivery failed', { id: record.id, err: e.message }));
+    } else {
+      persistUser(userId, { debounce: true });
+    }
+    return true;
+  }
   if (text && text !== record.lastStatusText) {
     record.lastStatusText = text;
     record.lastChangeAt = Date.now();
@@ -556,6 +704,125 @@ export function patchWatcher(userId, watcherId, patch) {
   if (patch.label !== undefined) w.label = String(patch.label);
   persistUser(userId);
   return true;
+}
+
+/**
+ * Strictly postpone one exact user-owned watcher. This is separate from the
+ * broad patch surface because proactive receipt controls must know the delay
+ * was durably persisted before claiming success.
+ */
+export function snoozeWatcher(userId, watcherId, until) {
+  assertWatcherStoreHealthy(userId);
+  const data = loadUserWatchers(userId);
+  const watcher = data.active.find(record => record.id === watcherId);
+  if (!watcher || (watcher.userId && watcher.userId !== userId)) return null;
+  const untilMs = until instanceof Date ? until.getTime()
+    : (typeof until === 'number' ? until : Date.parse(String(until || '')));
+  const now = Date.now();
+  if (!Number.isFinite(untilMs) || untilMs < now + 5 * 60_000
+    || untilMs > now + 30 * 86_400_000) return null;
+  const previousNextTickAt = watcher.nextTickAt;
+  const previousSnoozedUntil = watcher.snoozedUntil;
+  watcher.nextTickAt = Math.max(Number(watcher.nextTickAt) || 0, untilMs);
+  watcher.snoozedUntil = new Date(untilMs).toISOString();
+  if (!persistUser(userId)) {
+    watcher.nextTickAt = previousNextTickAt;
+    if (previousSnoozedUntil === undefined) delete watcher.snoozedUntil;
+    else watcher.snoozedUntil = previousSnoozedUntil;
+    return null;
+  }
+  return watcher;
+}
+
+/**
+ * Promote one nonce-stamped pending watcher to a durable, notify-only
+ * Personalization informational watcher. Returns the record or null when any
+ * exact contract field differs.
+ */
+export function markWatcherSafeInformational(userId, watcherId, expected = {}) {
+  assertWatcherStoreHealthy(userId);
+  const data = loadUserWatchers(userId);
+  const watcher = data.active.find(record => record.id === watcherId);
+  const origin = watcher?.personalizationOrigin;
+  const identity = watcher?.state?.dedupKey || watcher?.dedupKey;
+  if (!watcher || origin?.type !== 'preference_safe_auto_pending'
+    || origin.activationNonce !== expected.activationNonce
+    || origin.contractMatch !== true
+    || watcher.skillId !== expected.skillId
+    || watcher.kind !== expected.watcherKind
+    || identity !== expected.watcherIdentity
+    || watcher.onFire?.type !== 'notify'
+    || origin.offerKind !== expected.offerKind
+    || origin.contractFingerprint !== expected.contractFingerprint
+    || origin.receiptEventId !== expected.receiptEventId
+    || typeof expected.reviewedExecutorDigest !== 'string'
+    || origin.reviewedExecutorDigest !== expected.reviewedExecutorDigest) return null;
+  const previousOrigin = watcher.personalizationOrigin;
+  const previousOnFire = watcher.onFire;
+  watcher.personalizationOrigin = {
+    type: 'preference_safe_auto',
+    activationNonce: expected.activationNonce,
+    offerKind: expected.offerKind,
+    contractFingerprint: expected.contractFingerprint,
+    watcherIdentity: expected.watcherIdentity,
+    receiptEventId: expected.receiptEventId,
+    reviewedExecutorDigest: expected.reviewedExecutorDigest,
+    ...(typeof expected.preferenceMemoryId === 'string' && expected.preferenceMemoryId.length <= 160
+      ? { preferenceMemoryId: expected.preferenceMemoryId } : {}),
+    ...(typeof expected.utilityContextKey === 'string' && /^[a-z][a-z0-9_-]{0,39}$/.test(expected.utilityContextKey)
+      ? { utilityContextKey: expected.utilityContextKey } : {}),
+    activatedAt: Date.now(),
+  };
+  // Defense in depth against a mutable/persisted registration record.
+  watcher.onFire = { type: 'notify' };
+  if (!persistUser(userId)) {
+    watcher.personalizationOrigin = previousOrigin;
+    watcher.onFire = previousOnFire;
+    return null;
+  }
+  return watcher;
+}
+
+/** Promote one user-approved preference watcher after its receipt commits. */
+export function markWatcherPreferenceApproved(userId, watcherId, expected = {}) {
+  assertWatcherStoreHealthy(userId);
+  const data = loadUserWatchers(userId);
+  const watcher = data.active.find(record => record.id === watcherId);
+  const origin = watcher?.personalizationOrigin;
+  const identity = watcher?.state?.dedupKey || watcher?.dedupKey;
+  if (!watcher || origin?.type !== 'preference_approved_pending'
+    || origin.activationNonce !== expected.activationNonce
+    || origin.contractMatch !== true
+    || watcher.skillId !== expected.skillId
+    || watcher.kind !== expected.watcherKind
+    || identity !== expected.watcherIdentity
+    || origin.offerKind !== expected.offerKind
+    || origin.contractFingerprint !== expected.contractFingerprint
+    || origin.preferenceMemoryId !== expected.preferenceMemoryId
+    || origin.executorDigest !== expected.executorDigest
+    || origin.manifestDigest !== expected.manifestDigest
+    || typeof expected.expectedDelivery !== 'string'
+    || origin.expectedDelivery !== expected.expectedDelivery
+    || watcher.onFire?.type !== expected.expectedDelivery) return null;
+  const previousOrigin = watcher.personalizationOrigin;
+  watcher.personalizationOrigin = {
+    type: 'preference_approved',
+    offerKind: expected.offerKind,
+    contractFingerprint: expected.contractFingerprint,
+    watcherIdentity: expected.watcherIdentity,
+    receiptEventId: expected.receiptEventId,
+    preferenceMemoryId: expected.preferenceMemoryId,
+    utilityContextKey: expected.utilityContextKey || 'general',
+    executorDigest: expected.executorDigest,
+    manifestDigest: expected.manifestDigest,
+    expectedDelivery: expected.expectedDelivery,
+    approvedAt: Date.now(),
+  };
+  if (!persistUser(userId)) {
+    watcher.personalizationOrigin = previousOrigin;
+    return null;
+  }
+  return watcher;
 }
 
 // ── handler resolution ───────────────────────────────────────────────────────
@@ -774,18 +1041,141 @@ async function taskProxyHandler(state, helpers) {
 }
 _systemHandlers.set('task_proxy', taskProxyHandler);
 
+async function stopUnauthorizedPreferenceWatcher(record) {
+  // Prefer the receipt controller so the user-visible audit row, queued
+  // updates, policy, and watcher transition atomically toward ask-first.
+  try {
+    const { controlPreferenceAutomationReceipt } = await import('../lib/personalization/preference-opportunities.mjs');
+    const controlled = await controlPreferenceAutomationReceipt(
+      record.userId, record.personalizationOrigin?.receiptEventId, 'undo',
+    );
+    if (controlled?.ok) {
+      const stillActive = _byUser.get(record.userId)?.active
+        ?.some(watcher => watcher.id === record.id);
+      if (!stillActive) return true;
+    }
+  } catch (e) {
+    log.warn('watchers', 'preference watcher receipt control failed', { id: record.id, err: e?.message || String(e) });
+  }
+
+  // A corrupt/missing receipt cannot authorize execution. Preserve the same
+  // fail-closed ordering manually: block unattended reactivation and cancel
+  // queued updates before the independently-fallible watcher-store mutation.
+  try {
+    const { revokeKindAutoApproval } = await import('../lib/personalization/graduation.mjs');
+    await revokeKindAutoApproval(record.userId, record.personalizationOrigin?.offerKind);
+  } catch (e) {
+    log.warn('watchers', 'preference watcher approval revocation failed', { id: record.id, err: e?.message || String(e) });
+  }
+  try {
+    const { cancelPendingProactiveEventsBySource } = await import('../lib/personalization/proactive-inbox.mjs');
+    await cancelPendingProactiveEventsBySource(
+      record.userId, 'preference_monitor_update', record.id, { reason: 'authorization_revoked' },
+    );
+  } catch (e) {
+    log.warn('watchers', 'preference watcher queued-update cancellation failed', { id: record.id, err: e?.message || String(e) });
+  }
+  if (isApprovedPreferenceWatcher(record)) {
+    try {
+      const grants = await import('../lib/personalization/skill-preference-grants.mjs');
+      await grants.revokeSkillPreferenceGrant(record.userId, {
+        skillId: record.skillId,
+        preferenceMemoryId: record.personalizationOrigin?.preferenceMemoryId,
+        contractFingerprint: record.personalizationOrigin?.contractFingerprint,
+      });
+    } catch (e) {
+      log.warn('watchers', 'approved preference grant revocation failed', { id: record.id, err: e?.message || String(e) });
+    }
+  }
+  try {
+    const current = _byUser.get(record.userId)?.active?.find(watcher => watcher.id === record.id);
+    if (current) unregisterWatcher(record.userId, record.id, 'authorization_revoked');
+    return true;
+  } catch (e) {
+    // Never execute the handler merely because cleanup storage is unhealthy.
+    // Back off the in-memory record to avoid a hot 5-second retry loop; the
+    // periodic receipt reconciler retains independent cleanup authority.
+    record.nextTickAt = Date.now() + Math.max(60_000, Number(record.cadenceSec || 0) * 1000);
+    log.warn('watchers', 'preference watcher removal failed closed', { id: record.id, err: e?.message || String(e) });
+    return false;
+  }
+}
+
 // Fire a CUSTOM skill's watcher handler INSIDE the bwrap jail. The handler's
 // helpers.* calls come back as `helper.<m>` RPCs, which we service with the REAL
 // handlerHelpers(record) bound to this process — so fire/postStatus/notify/etc.
 // keep their full behaviour, but the skill's own handler code (the fetch/compare
 // logic) never runs in-process. Returns { ok, result } where result is the
 // serializable { newState, textUpdate, done, … } the supervisor already expects.
-export async function runCustomWatcherSandboxed(record) {
+export async function runCustomWatcherSandboxed(record, { signal = null } = {}) {
+  const managed = isManagedPreferenceWatcher(record);
+  const executionController = new AbortController();
+  const forwardAbort = () => {
+    try { executionController.abort(signal?.reason); } catch { executionController.abort(); }
+  };
+  if (signal?.aborted) forwardAbort();
+  else signal?.addEventListener('abort', forwardAbort, { once: true });
+
+  const authorizationError = (message = 'preference watcher authorization changed') => {
+    const error = new Error(message);
+    /** @type {any} */ (error).code = 'PREFERENCE_WATCHER_AUTHORIZATION';
+    return error;
+  };
+  const abortExecution = (error) => {
+    if (!executionController.signal.aborted) {
+      try { executionController.abort(error); } catch { executionController.abort(); }
+    }
+    throw error;
+  };
+  const exactManagedWatcherIsActive = () => _byUser.get(record.userId)?.active
+    ?.find(watcher => watcher.id === record.id) === record
+    && record.status === 'active'
+    && isManagedPreferenceWatcher(record);
+  const assertManagedRpcAuthorization = async () => {
+    if (!managed) return;
+    if (executionController.signal.aborted || !exactManagedWatcherIsActive()) {
+      abortExecution(authorizationError('preference watcher execution was cancelled'));
+    }
+    let authorized = false;
+    try {
+      const authorization = await import('../lib/personalization/preference-opportunities.mjs');
+      authorized = isSafeInformationalWatcher(record)
+        ? await authorization.preferenceSafeAutoWatcherIsAuthorized(record.userId, record)
+        : await authorization.preferenceApprovedWatcherIsAuthorized(record.userId, record);
+    } catch { authorized = false; }
+    // Stop/Undo can race the asynchronous receipt/code/preference checks.
+    if (!authorized || executionController.signal.aborted || !exactManagedWatcherIsActive()) {
+      abortExecution(authorizationError());
+    }
+  };
+
   const realHelpers = handlerHelpers(record);
-  // No human is present on a tick, so ensureRuntime resolves-or-throws (no prompt).
-  const runtime = buildRuntimeBroker(record.userId, record.skillId, { allowPrompt: false });
+  // Ordinary custom watchers retain their established runtime capability.
+  // Managed preference ticks deny it even when a mutable binary already exists.
+  const runtime = buildRuntimeBroker(record.userId, record.skillId, {
+    allowPrompt: false,
+    allowExecution: !managed,
+  });
+  const ordinaryAllowedHelperMethods = new Set([
+    'helper.fire', 'helper.fireAgent', 'helper.showVideo', 'helper.showImage',
+    'helper.postStatus', 'helper.notify',
+    'helper.credentials.get', 'helper.credentials.set', 'helper.credentials.list',
+    'helper.credentials.delete',
+    'helper.personalization.confirmedPreferences',
+    'helper.personalization.confirmedPreferenceDetails',
+    'helper.ensureRuntime', 'helper.runSandboxed',
+  ]);
+  const managedAllowedHelperMethods = new Set([
+    'helper.fire', 'helper.fireAgent', 'helper.postStatus', 'helper.notify',
+    'helper.credentials.get', 'helper.credentials.list',
+    'helper.personalization.confirmedPreferences',
+    'helper.personalization.confirmedPreferenceDetails',
+  ]);
   const handleRpc = async (method, args) => {
     if (typeof method !== 'string' || !method.startsWith('helper.')) throw new Error(`watcher rpc not allowed: ${method}`);
+    if (managed) await assertManagedRpcAuthorization();
+    const allowedHelperMethods = managed ? managedAllowedHelperMethods : ordinaryAllowedHelperMethods;
+    if (!allowedHelperMethods.has(method)) throw new Error(`watcher rpc not allowed: ${method}`);
     // Runtime is clamped — route it to the broker, NOT the unclamped in-process helpers.
     if (method === 'helper.ensureRuntime') return runtime.ensureRuntime((Array.isArray(args) ? args[0] : args) || {});
     if (method === 'helper.runSandboxed') { const a = Array.isArray(args) ? args : [args]; return runtime.runSandboxed(a[0], a[1], a[2] || {}); }
@@ -799,15 +1189,63 @@ export async function runCustomWatcherSandboxed(record) {
     if (typeof fn !== 'function') throw new Error(`helper.${method.slice(7)} is not available to sandboxed watchers`);
     return await fn(...(Array.isArray(args) ? args : [args]));
   };
-  const { runSandboxedJob, customSkillBindings } = await import('../lib/skill-subprocess.mjs');
-  const { execPath } = customSkillBindings(record.userId, record.skillId);
-  const jobPayload = {
-    t: 'job', mode: 'watcher', skillExecPath: execPath, kind: record.kind,
-    state: record.state, userId: record.userId, agentId: record.agentId, watcherId: record.id,
-  };
-  // Default-deny egress on ticks too — only skills that declare sandbox.network get it.
-  const net = skillDeclaresNetwork(record.userId, record.skillId);
-  return runSandboxedJob({ userId: record.userId, skillId: record.skillId, jobPayload, handleRpc, net, timeoutMs: 120_000 });
+
+  try {
+    const { runSandboxedJob, customSkillBindings } = await import('../lib/skill-subprocess.mjs');
+    const { execPath } = customSkillBindings(record.userId, record.skillId);
+    const jobPayload = {
+      t: 'job', mode: 'watcher', skillExecPath: execPath, kind: record.kind,
+      state: record.state, userId: record.userId, agentId: record.agentId, watcherId: record.id,
+    };
+    // Default-deny egress on ticks too — only skills that declare sandbox.network get it.
+    const net = skillDeclaresNetwork(record.userId, record.skillId);
+    if (managed) {
+      const roleModule = await import('../roles.mjs');
+      if (!roleModule.isSandboxedSkill(record.skillId, record.userId)) {
+        throw authorizationError('preference watcher execution requires sandbox isolation');
+      }
+      const candidates = roleModule.listRoles(record.userId)
+        .filter(candidate => candidate?.id === record.skillId);
+      const manifest = candidates.find(candidate => candidate?.userScope === record.userId)
+        || candidates.find(candidate => candidate?.userScope == null);
+      let snapshot = null;
+      if (isSafeInformationalWatcher(record)) {
+        const { materializeReviewedInformationalSnapshot } = await import('../lib/personalization/reviewed-informational-skills.mjs');
+        snapshot = materializeReviewedInformationalSnapshot(
+          record.userId, manifest, record.personalizationOrigin?.reviewedExecutorDigest,
+        );
+      } else {
+        const grants = await import('../lib/personalization/skill-preference-grants.mjs');
+        snapshot = grants.materializeGrantedSkillSnapshot(record.userId, manifest, {
+          executorDigest: record.personalizationOrigin?.executorDigest,
+          manifestDigest: record.personalizationOrigin?.manifestDigest,
+        });
+      }
+      if (!snapshot) {
+        throw authorizationError('preference watcher immutable snapshot could not be verified');
+      }
+      try {
+        return await runSandboxedJob({
+          userId: record.userId,
+          skillId: record.skillId,
+          jobPayload,
+          handleRpc,
+          net,
+          timeoutMs: 120_000,
+          execSnapshotPath: snapshot.execPath,
+          signal: executionController.signal,
+        });
+      } finally {
+        snapshot.cleanup();
+      }
+    }
+    return await runSandboxedJob({
+      userId: record.userId, skillId: record.skillId, jobPayload, handleRpc, net,
+      timeoutMs: 120_000, signal: executionController.signal,
+    });
+  } finally {
+    signal?.removeEventListener('abort', forwardAbort);
+  }
 }
 
 // ── supervisor loop ──────────────────────────────────────────────────────────
@@ -816,8 +1254,55 @@ async function tickOne(record) {
   const inFlightKey = `${record.userId}:${record.id}`;
   if (_inFlight.has(inFlightKey)) return; // previous tick still running
   _inFlight.add(inFlightKey);
+  const tickController = new AbortController();
+  _inFlightControllers.set(inFlightKey, tickController);
 
   try {
+    // A crash/interruption between registration and durable receipt commit can
+    // leave a nonce-stamped pending watcher on disk. It is never allowed to
+    // run a handler; the receipt reconciler may also remove it sooner.
+    if (['preference_safe_auto_pending', 'preference_approved_pending']
+      .includes(record?.personalizationOrigin?.type)) {
+      unregisterWatcher(record.userId, record.id, 'auto_activation_orphan');
+      return;
+    }
+
+    // `nextTickAt` is the normal scheduler gate, but event delivery and other
+    // supervisor paths may pull it forward. Snooze is a user control, so
+    // enforce its absolute timestamp again inside the tick boundary before
+    // any authorization imports or custom handler code can run.
+    const snoozedUntilMs = Date.parse(record.snoozedUntil || '');
+    if (Number.isFinite(snoozedUntilMs) && snoozedUntilMs > Date.now()) {
+      if (Number(record.nextTickAt) < snoozedUntilMs) {
+        record.nextTickAt = snoozedUntilMs;
+        persistUser(record.userId);
+      }
+      return;
+    }
+    if (record.snoozedUntil) delete record.snoozedUntil;
+
+    // Recheck the exact receipt, live manifest/recipe, confirmed preference,
+    // settings, overrides, policy, and reviewed executor digest on EVERY safe
+    // tick. Without this boundary, edited custom code could run during the
+    // interval before the periodic receipt reconciler noticed the change.
+    if (isManagedPreferenceWatcher(record)) {
+      let authorized = false;
+      try {
+        const authorization = await import('../lib/personalization/preference-opportunities.mjs');
+        authorized = isSafeInformationalWatcher(record)
+          ? await authorization.preferenceSafeAutoWatcherIsAuthorized(record.userId, record)
+          : await authorization.preferenceApprovedWatcherIsAuthorized(record.userId, record);
+      } catch { authorized = false; }
+      if (!authorized) {
+        await stopUnauthorizedPreferenceWatcher(record);
+        return;
+      }
+      // Stop/Undo may have raced the async revalidation. Confirm that this
+      // exact object is still the active promoted watcher immediately before
+      // any handler resolution or custom-code execution.
+      const current = _byUser.get(record.userId)?.active?.find(watcher => watcher.id === record.id);
+      if (current !== record || record.status !== 'active' || !isManagedPreferenceWatcher(record)) return;
+    }
     // Expiry check — only if not indefinite.
     if (record.expiresAt !== null && Date.now() > record.expiresAt) {
       finalizeWatcher(record, 'expired', `⏰ Monitor expired without completing.`);
@@ -827,6 +1312,8 @@ async function tickOne(record) {
     // Shared failure handling: bump the counter, finalize at the cap, otherwise
     // back off one cadence. `msg` is only surfaced when we actually finalize.
     const failTick = (msg) => {
+      const live = _byUser.get(record.userId)?.active?.find(watcher => watcher.id === record.id);
+      if (live !== record || record.status !== 'active') return;
       record.failures++;
       if (record.failures >= MAX_FAILURES) finalizeWatcher(record, 'error', msg);
       else { record.nextTickAt = Date.now() + record.cadenceSec * 1000; persistUser(record.userId); }
@@ -841,10 +1328,22 @@ async function tickOne(record) {
       try { const { isSandboxedSkill } = await import('../roles.mjs'); sandboxed = isSandboxedSkill(record.skillId, record.userId); }
       catch { sandboxed = false; }
     }
+    if (isManagedPreferenceWatcher(record) && !sandboxed) {
+      await stopUnauthorizedPreferenceWatcher(record);
+      return;
+    }
     if (sandboxed) {
       let sres;
-      try { sres = await runCustomWatcherSandboxed(record); }
-      catch (e) { log.warn('watchers', 'Sandboxed handler error', { kind: record.kind, err: e.message }); failTick(`❌ ${record.label}: sandboxed handler error — ${e.message}`); return; }
+      try { sres = await runCustomWatcherSandboxed(record, { signal: tickController.signal }); }
+      catch (e) {
+        log.warn('watchers', 'Sandboxed handler error', { kind: record.kind, err: e.message });
+        if (isManagedPreferenceWatcher(record) && e?.code === 'PREFERENCE_WATCHER_AUTHORIZATION') {
+          await stopUnauthorizedPreferenceWatcher(record);
+          return;
+        }
+        failTick(`❌ ${record.label}: sandboxed handler error — ${e.message}`);
+        return;
+      }
       if (!sres.ok) { const serr = /** @type {any} */ (sres).error; log.warn('watchers', 'Sandboxed handler failed', { kind: record.kind, err: serr }); failTick(`❌ ${record.label}: sandboxed handler failed ${MAX_FAILURES}× — ${serr}`); return; }
       result = sres.result;
     } else {
@@ -861,6 +1360,33 @@ async function tickOne(record) {
         failTick(`❌ ${record.label}: handler failed ${MAX_FAILURES}× — ${e.message}`);
         return;
       }
+    }
+
+    // Stop/Undo/Snooze can win while a slow handler is fetching. Discard the
+    // returned object before mutating this shared record unless it is still the
+    // exact active watcher. Managed preference monitors also repeat their full
+    // receipt/preference/code authorization after the handler and before any
+    // new state, history, terminal status, or cadence is persisted.
+    let postHandlerLive = _byUser.get(record.userId)?.active
+      ?.find(watcher => watcher.id === record.id);
+    const postHandlerSnooze = Date.parse(record.snoozedUntil || '');
+    if (postHandlerLive !== record || record.status !== 'active'
+      || (Number.isFinite(postHandlerSnooze) && postHandlerSnooze > Date.now())) return;
+    if (isManagedPreferenceWatcher(record)) {
+      let stillAuthorized = false;
+      try {
+        const authorization = await import('../lib/personalization/preference-opportunities.mjs');
+        stillAuthorized = isSafeInformationalWatcher(record)
+          ? await authorization.preferenceSafeAutoWatcherIsAuthorized(record.userId, record)
+          : await authorization.preferenceApprovedWatcherIsAuthorized(record.userId, record);
+      } catch { stillAuthorized = false; }
+      if (!stillAuthorized) {
+        await stopUnauthorizedPreferenceWatcher(record);
+        return;
+      }
+      postHandlerLive = _byUser.get(record.userId)?.active
+        ?.find(watcher => watcher.id === record.id);
+      if (postHandlerLive !== record || record.status !== 'active') return;
     }
 
     record.failures = 0;
@@ -896,7 +1422,7 @@ async function tickOne(record) {
             record.origCadenceSec = null;
           }
           pushHistory(record, { text: result.textUpdate, ts: Date.now() });
-          if (_sendStatusFn) {
+          if (!isManagedPreferenceWatcher(record) && _sendStatusFn) {
             _sendStatusFn(record.userId, {
               type: 'status',
               agent: record.agentId,
@@ -913,7 +1439,13 @@ async function tickOne(record) {
         // A handler can flag the terminal state as a failure — a silent-task
         // reap must not render as a green "done" chip with an error message.
         const finalStatus = result.failed ? 'error' : 'done';
-        finalizeWatcher(record, finalStatus, result.textUpdate || `✓ ${record.label} done.`);
+        const finalText = result.textUpdate || `✓ ${record.label} done.`;
+        if (isManagedPreferenceWatcher(record)) {
+          await deliverManagedPreferenceUpdate(record, finalText, {
+            dispatchApproved: isApprovedPreferenceWatcher(record) && finalStatus === 'done',
+          });
+        }
+        finalizeWatcher(record, finalStatus, finalText);
         return;
       }
     }
@@ -928,7 +1460,7 @@ async function tickOne(record) {
     // news") — they only emit a textUpdate on a transition. Treating that
     // steady state as "stuck" fires a false "may be stuck" alert and halves the
     // check cadence on a perfectly healthy host, so exempt them.
-    const stuckEligible = record.kind !== 'profile_health';
+    const stuckEligible = record.kind !== 'profile_health' && !isManagedPreferenceWatcher(record);
     if (stuckEligible && !record.stuckAnnounced && sinceChange > stuckThresholdMs) {
       record.stuckAnnounced = true;
       record.stuckSinceAt = record.stuckSinceAt || Date.now();
@@ -959,6 +1491,9 @@ async function tickOne(record) {
     persistUser(record.userId);
   } finally {
     _inFlight.delete(inFlightKey);
+    if (_inFlightControllers.get(inFlightKey) === tickController) {
+      _inFlightControllers.delete(inFlightKey);
+    }
   }
 }
 
@@ -990,6 +1525,7 @@ function watcherStatusPayload(record, text, extra = {}) {
 function finalizeWatcher(record, status, finalText) {
   const data = _byUser.get(record.userId);
   if (!data) return;
+  abortInFlightWatcher(record.userId, record.id, status);
   const idx = data.active.findIndex(w => w.id === record.id);
   if (idx >= 0) data.active.splice(idx, 1);
   if (record.kind === 'event_subscription') unsubscribeFromEvent(record);
@@ -1009,7 +1545,7 @@ function finalizeWatcher(record, status, finalText) {
   data.recent.unshift(record);
   data.recent = data.recent.slice(0, 20);
   persistUser(record.userId);
-  if (_sendStatusFn && finalText) {
+  if (_sendStatusFn && finalText && !isManagedPreferenceWatcher(record)) {
     _sendStatusFn(record.userId, watcherStatusPayload(record, finalText, {
       final: true,
       finalStatus: status,
@@ -1018,11 +1554,13 @@ function finalizeWatcher(record, status, finalText) {
   // Only fire the chained action on a successful predicate hit. Errors,
   // expiries, and user-cancellations should not auto-run an agent — that
   // would burn cloud tokens on a state the user didn't intend to act on.
-  if (status === 'done' && record.onFire && record.onFire.type && record.onFire.type !== 'notify') {
+  if (status === 'done' && !isManagedPreferenceWatcher(record)
+    && record.onFire && record.onFire.type && record.onFire.type !== 'notify') {
     executeOnFire(record).catch(e =>
       log.warn('watchers', 'on_fire failed', { id: record.id, type: record.onFire?.type, err: e.message })
     );
   }
+  releaseApprovedPreferenceGrant(record);
 }
 
 // Minimal HTML→text for the plain-text alternative part when a handler fires
@@ -1042,6 +1580,277 @@ function stripHtml(html) {
     .trim() || 'New update.';
 }
 
+/**
+ * Last-line authorization for either server-reviewed safe-auto monitoring or
+ * a monitor the user explicitly approved. Both classes are receipt-backed,
+ * preference-bound, sandboxed, and locally auditable. Safe-auto additionally
+ * requires the live Safe initiative policy; approval-backed monitors retain
+ * only the exact delivery channel the user accepted.
+ */
+async function managedPreferenceDeliveryAllowed(record, { immediate = false } = {}) {
+  if (!isManagedPreferenceWatcher(record)) return false;
+  const isSnoozed = value => {
+    const until = Date.parse(value?.snoozedUntil || '');
+    return Number.isFinite(until) && until > Date.now();
+  };
+  if (isSnoozed(record)) return false;
+  if (record.status !== 'active') return false;
+  const active = (listWatchers(record.userId)?.active || []).find(watcher => watcher.id === record.id);
+  if (!active || !isManagedPreferenceWatcher(active) || isSnoozed(active)) return false;
+  try {
+    const [configModule, policy] = await Promise.all([
+      import('../lib/personalization/config.mjs'),
+      import('../lib/personalization/graduation.mjs'),
+    ]);
+    const cfg = await configModule.getConfig(record.userId);
+    if (cfg.enabled !== true || cfg.setupComplete !== true || cfg.proactivity === 'quiet') return false;
+    if (await policy.isKindSuppressed(record.userId, record.personalizationOrigin.offerKind)) return false;
+    if (isSafeInformationalWatcher(record)
+      && (cfg.initiativeMode !== 'safe_auto'
+        || !(await policy.isKindSafeAutoAllowed(record.userId, record.personalizationOrigin.offerKind)))) return false;
+    if (immediate && (cfg.deliveryMode !== 'immediate' || configModule.isQuietHours(cfg, new Date()))) return false;
+    // Snooze may race the config/policy reads above. Re-read the live record
+    // before authorizing durable enqueue or an immediate notification.
+    const live = (listWatchers(record.userId)?.active || []).find(watcher => watcher.id === record.id);
+    if (isSnoozed(record) || !live || isSnoozed(live)) return false;
+    // A handler can spend up to two minutes fetching. Revalidate the full
+    // receipt, preference, skill enablement, reviewed code, utility, and exact
+    // contract again at the last delivery boundary so an edit/delete made
+    // while it was in flight wins before any result is persisted or sent.
+    const authorization = await import('../lib/personalization/preference-opportunities.mjs');
+    return isSafeInformationalWatcher(record)
+      ? await authorization.preferenceSafeAutoWatcherIsAuthorized(record.userId, record)
+      : await authorization.preferenceApprovedWatcherIsAuthorized(record.userId, record);
+  } catch { return false; }
+}
+
+async function deliverManagedPreferenceUpdate(record, value, { dispatchApproved = false } = {}) {
+  if (!isManagedPreferenceWatcher(record)) return false;
+  const text = String(value || '').trim().slice(0, 1_000);
+  if (!text) return false;
+  if (!(await managedPreferenceDeliveryAllowed(record))) return false;
+  const origin = record.personalizationOrigin;
+  const payloadDigest = createHash('sha256').update(text).digest('hex');
+  const digest = payloadDigest.slice(0, 16);
+  let stateIdentity = '';
+  try { stateIdentity = JSON.stringify(record.state ?? null); } catch { stateIdentity = '[unserializable]'; }
+  const occurrenceDigest = createHash('sha256')
+    .update(String(Number(record.ticks) || 0)).update('\0')
+    .update(stateIdentity).update('\0')
+    .update(payloadDigest).digest('hex');
+  const inbox = await import('../lib/personalization/proactive-inbox.mjs');
+  const recentUpdates = await inbox.listProactiveEventsByKind(
+    record.userId, 'preference_monitor_update', { limit: 500 },
+  );
+  const existingPending = recentUpdates
+    .find(item => item.status === 'pending' && item.sourceId === record.id);
+  let coalesciblePending = existingPending;
+  const approvedExternal = dispatchApproved && isApprovedPreferenceWatcher(record)
+    && origin.expectedDelivery !== 'notify';
+  const committedOccurrence = approvedExternal
+    ? recentUpdates.find(item => item.sourceId === record.id
+      && item.metadata?.executionState === 'succeeded'
+      && item.metadata?.occurrenceDigest === occurrenceDigest)
+    : null;
+  if (committedOccurrence) {
+    // Delivery and watcher-state persistence cannot share one transaction. The
+    // tick/state fingerprint stays stable only when a process dies before the
+    // handler result commits, so it safely closes that exact retry window while
+    // allowing the same prose again on a later, successfully advanced tick.
+    if (committedOccurrence.status === 'pending') {
+      await inbox.markProactiveEventDelivered(record.userId, committedOccurrence.id, {
+        deliveryCount: 1, channel: origin.expectedDelivery,
+      });
+    }
+    return true;
+  }
+  if (approvedExternal && existingPending) {
+    const executionState = existingPending.metadata?.executionState;
+    const samePayload = typeof existingPending.metadata?.payloadDigest === 'string'
+      ? existingPending.metadata.payloadDigest === payloadDigest
+      : existingPending.text === text;
+    const sameOccurrence = typeof existingPending.metadata?.occurrenceDigest === 'string'
+      ? existingPending.metadata.occurrenceDigest === occurrenceDigest
+      : samePayload;
+    if (executionState === 'succeeded') {
+      // The external send committed but the process stopped before the inbox
+      // status update. Finish that receipt without repeating the send.
+      await inbox.markProactiveEventDelivered(record.userId, existingPending.id, {
+        deliveryCount: 1, channel: origin.expectedDelivery,
+      });
+      if (sameOccurrence) return true;
+      coalesciblePending = null;
+    }
+    if (executionState === 'started') {
+      const startedAt = Date.parse(existingPending.metadata?.externalDispatchStartedAt || '');
+      if (!Number.isFinite(startedAt) || Date.now() - startedAt >= EXTERNAL_DISPATCH_STALE_MS) {
+        await inbox.updateProactiveEventByDedupKey(record.userId, existingPending.dedupKey, {
+          expectedExecutionState: 'started',
+          metadata: {
+            executionState: 'uncertain', deliveryState: 'manual_review',
+            externalDispatchUncertainAt: new Date().toISOString(),
+          },
+        });
+        if (!sameOccurrence) coalesciblePending = null;
+      }
+      if (sameOccurrence || coalesciblePending) return false;
+    }
+    if (['failed', 'uncertain', 'canceled'].includes(executionState)) {
+      if (sameOccurrence) return false;
+      coalesciblePending = null;
+    }
+  }
+  const event = await inbox.enqueueProactiveEvent(record.userId, {
+    // Coalesce an offline/briefing backlog to one pending update per watcher.
+    // After acknowledgement, a new event key is created for the next hit.
+    dedupKey: coalesciblePending?.dedupKey || `preference-monitor-update:${record.id}:${Date.now()}:${digest}`,
+    kind: 'preference_monitor_update',
+    sourceId: record.id,
+    title: record.label || 'Preference monitor update',
+    text,
+    metadata: {
+      watcherId: record.id,
+      skillId: record.skillId,
+      watcherKind: record.kind,
+      offerKind: origin.offerKind,
+      contractFingerprint: origin.contractFingerprint,
+      autonomy: isApprovedPreferenceWatcher(record) ? 'approved' : 'informational',
+      payloadDigest,
+      occurrenceDigest,
+      deliveryState: 'ready',
+      executionState: 'ready',
+      control: {
+        actions: ['useful', 'not_useful', 'acted', 'snooze', 'edit_preference', 'stop', 'undo'],
+        eventId: origin.receiptEventId,
+        source: {
+          ...(origin.preferenceMemoryId ? { preferenceMemoryId: origin.preferenceMemoryId } : {}),
+          context: origin.utilityContextKey || 'general',
+        },
+      },
+    },
+  });
+  // Stop/Snooze can race between the first authorization check and enqueue.
+  // Recheck before treating the item as shown; if control won, neutralize the
+  // just-created pending row so it cannot reappear after the controller's
+  // earlier cancellation sweep.
+  if (!(await managedPreferenceDeliveryAllowed(record))) {
+    await inbox.cancelPendingProactiveEventsBySource(
+      record.userId, 'preference_monitor_update', record.id,
+      { reason: record.snoozedUntil ? 'snoozed' : 'authorization_revoked' },
+    ).catch(() => 0);
+    return false;
+  }
+  // Persist visible watcher state only after the post-enqueue authorization
+  // wins. Stop/Snooze/Edit racing the fetch therefore cannot leave a newly
+  // visible task-chip/history line after its pending inbox row was canceled.
+  if (text !== record.lastStatusText) {
+    record.lastStatusText = text;
+    record.lastChangeAt = Date.now();
+    pushHistory(record, { text, ts: Date.now() });
+    persistUser(record.userId);
+  }
+  try {
+    const { recordOpportunityOutcome } = await import('../lib/personalization/opportunity-utility.mjs');
+    await recordOpportunityOutcome(record.userId, {
+      actionContract: 'skill_preference_activation',
+      contractFingerprint: origin.contractFingerprint,
+    }, 'shown', {
+      contextKey: origin.utilityContextKey || 'general',
+      eventId: event.id,
+    });
+  } catch (e) {
+    log.warn('watchers', 'Could not record preference monitor visibility', {
+      watcherId: record.id, err: e?.message || String(e),
+    });
+  }
+
+  if (approvedExternal) {
+    if (record.onFire?.type !== origin.expectedDelivery) return false;
+    const dispatchClaim = await inbox.updateProactiveEventByDedupKey(record.userId, event.dedupKey, {
+      expectedExecutionState: 'ready',
+      metadata: { executionState: 'started', externalDispatchStartedAt: new Date().toISOString() },
+    });
+    if (dispatchClaim) {
+      if (!(await managedPreferenceDeliveryAllowed(record))) {
+        await inbox.updateProactiveEventByDedupKey(record.userId, event.dedupKey, {
+          expectedExecutionState: 'started',
+          metadata: { executionState: 'canceled', externalDispatchCanceledAt: new Date().toISOString() },
+        }).catch(() => null);
+        return false;
+      }
+      try {
+        // No handler-supplied delivery override reaches this boundary. The
+        // immutable, receipt-authorized watcher onFire configuration is used.
+        const sent = await executeOnFire(record);
+        if (!sent) throw new Error(`${origin.expectedDelivery} delivery was not accepted`);
+        const committed = await inbox.updateProactiveEventByDedupKey(record.userId, event.dedupKey, {
+          expectedExecutionState: 'started',
+          metadata: { executionState: 'succeeded', externalDispatchedAt: new Date().toISOString() },
+        });
+        if (!committed) throw new Error('external delivery receipt could not be committed');
+      } catch (e) {
+        await inbox.updateProactiveEventByDedupKey(record.userId, event.dedupKey, {
+          expectedExecutionState: 'started',
+          metadata: {
+            executionState: 'failed', externalDispatchFailedAt: new Date().toISOString(),
+            externalDispatchError: String(e?.message || e).slice(0, 160),
+          },
+        }).catch(() => null);
+        return false;
+      }
+    } else {
+      const current = await inbox.getProactiveEvent(record.userId, event.id).catch(() => null);
+      if (current?.metadata?.executionState !== 'succeeded') return false;
+    }
+    await inbox.markProactiveEventDelivered(record.userId, event.id, {
+      deliveryCount: 1, channel: origin.expectedDelivery,
+    });
+    return true;
+  }
+  if (event.status === 'delivered' || event.status === 'read') return true;
+
+  if (!(await managedPreferenceDeliveryAllowed(record, { immediate: true }))) return true;
+
+  const claimed = await inbox.claimProactiveEvent(record.userId, event.id, { now: new Date() });
+  if (!claimed) return true;
+  const budget = await import('../lib/personalization/graduation.mjs');
+  const budgetOk = await budget.consumePingBudget(record.userId).catch(() => false);
+  if (!budgetOk) {
+    await inbox.recordProactiveDeliveryAttempt(record.userId, event.id, {
+      claimToken: claimed.claimToken, deliveryCount: 0, channel: 'websocket', error: 'daily ping budget exhausted',
+    });
+    return true;
+  }
+
+  const allowed = await managedPreferenceDeliveryAllowed(record, { immediate: true });
+  if (!allowed) {
+    await budget.refundPingBudget(record.userId).catch(() => false);
+    await inbox.recordProactiveDeliveryAttempt(record.userId, event.id, {
+      claimToken: claimed.claimToken, deliveryCount: 0, channel: 'websocket', error: 'delivery controls changed',
+    });
+    return true;
+  }
+
+  let delivered = 0;
+  let error = null;
+  try {
+    // Stop mutates this same record to a terminal status; this last-line check
+    // closes the in-flight tick race immediately before the websocket send.
+    if (!(await managedPreferenceDeliveryAllowed(record, { immediate: true }))) throw new Error('delivery authorization changed');
+    delivered = Number(_sendNotificationFn?.(record.userId, {
+      type: 'agent_notification', agent: record.agentId, content: text,
+      from: { userName: record.label || record.skillId }, event: record.kind,
+      data: {}, ts: Date.now(),
+    })) || 0;
+  } catch (e) { error = e?.message || String(e); }
+  if (!(delivered > 0)) await budget.refundPingBudget(record.userId).catch(() => false);
+  await inbox.recordProactiveDeliveryAttempt(record.userId, event.id, {
+    claimToken: claimed.claimToken, deliveryCount: delivered, channel: 'websocket',
+    error: delivered > 0 ? null : (error || 'user offline'),
+  });
+  return true;
+}
+
 // Run the watcher's onFire action. The supported shapes are:
 //
 //   { type: 'notify' }                 — status bubble only (default; not handled here)
@@ -1056,8 +1865,13 @@ function stripHtml(html) {
 // the agent, then re-scope for streaming. The systemNote pattern mirrors
 // scheduler.mjs's [SCHEDULED RUN] note — same constraint (no human present).
 async function executeOnFire(record) {
-  const cfg = record.onFire;
-  if (!cfg) return;
+  // Safe-auto informational monitors are permanently clamped at the final
+  // delivery boundary. A handler-supplied override can never reach an agent
+  // turn, email, or Telegram even if the persisted onFire object is mutated.
+  const cfg = isSafeInformationalWatcher(record) ? { type: 'notify' } : record.onFire;
+  if (!cfg) return false;
+  const finalPreferenceAuthorization = async () => !isManagedPreferenceWatcher(record)
+    || await managedPreferenceDeliveryAllowed(record);
 
   // If the watcher's owning skill is SANDBOXED (untrusted), onFire must not become an
   // escape hatch out of the jail. This is the single chokepoint — registration-time
@@ -1076,13 +1890,17 @@ async function executeOnFire(record) {
   if (untrusted && cfg.type === 'agent') {
     const fireText = record.lastStatusText || `Monitor "${record.label}" fired.`;
     try {
-      _sendNotificationFn?.(record.userId, {
+      if (!(await finalPreferenceAuthorization())) return false;
+      const delivered = Number(_sendNotificationFn?.(record.userId, {
         type: 'agent_notification', agent: record.agentId,
         content: `🔔 ${record.label}: ${fireText}`,
         from: { userName: record.label || record.skillId }, event: record.kind, data: {}, ts: Date.now(),
-      });
-    } catch (e) { log.warn('watchers', 'untrusted onFire notify threw', { id: record.id, err: e.message }); }
-    return;
+      })) || 0;
+      return delivered > 0;
+    } catch (e) {
+      log.warn('watchers', 'untrusted onFire notify threw', { id: record.id, err: e.message });
+      return false;
+    }
   }
 
   // ── Email delivery — no LLM, no agent turn ───────────────────────────────
@@ -1097,6 +1915,7 @@ async function executeOnFire(record) {
       const subject = cfg.subject || `Monitor: ${record.label}`;
       const html    = cfg._html || record.lastStatusHtml || undefined;
       const body    = record.lastStatusText || (html ? stripHtml(html) : null) || `Your monitor "${record.label}" fired.`;
+      if (!(await finalPreferenceAuthorization())) return false;
       const r = await sendEmailToUser(record.userId, {
         // Untrusted skills may only email the account owner (self) — ignore a
         // skill-supplied recipient, else onFire is a data-exfiltration channel.
@@ -1104,10 +1923,11 @@ async function executeOnFire(record) {
       });
       if (!r.ok) log.warn('watchers', 'email onFire failed', { id: record.id, err: r.message });
       else log.info('watchers', 'email onFire sent', { id: record.id, to: cfg.to || '(self)' });
+      return r.ok === true;
     } catch (e) {
       log.warn('watchers', 'email onFire threw', { id: record.id, err: e.message });
+      return false;
     }
-    return;
   }
 
   // ── Telegram delivery — no LLM, no agent turn ────────────────────────────
@@ -1118,16 +1938,18 @@ async function executeOnFire(record) {
       const { sendTelegramToUser } = await import('../routes/telegram.mjs');
       const body = record.lastStatusText || `Your monitor "${record.label}" fired.`;
       const text = cfg.prefix ? `${cfg.prefix}\n\n${body}` : body;
+      if (!(await finalPreferenceAuthorization())) return false;
       const ok = await sendTelegramToUser(record.userId, text);
       if (!ok) log.warn('watchers', 'telegram onFire failed', { id: record.id });
       else log.info('watchers', 'telegram onFire sent', { id: record.id });
+      return !!ok;
     } catch (e) {
       log.warn('watchers', 'telegram onFire threw', { id: record.id, err: e.message });
+      return false;
     }
-    return;
   }
 
-  if (cfg.type !== 'agent') return;
+  if (cfg.type !== 'agent') return false;
 
   const { getAgent } = await import('../agents.mjs');
   const { streamChat } = await import('../chat.mjs');
@@ -1140,7 +1962,7 @@ async function executeOnFire(record) {
   const rawAgentId = scoped.startsWith(`${userId}_`) ? scoped.slice(userId.length + 1) : scoped;
   if (!rawAgentId) {
     log.warn('watchers', 'on_fire: no agent id on record', { id: record.id });
-    return;
+    return false;
   }
 
   const isChild = getUser(userId)?.role === 'child';
@@ -1148,11 +1970,13 @@ async function executeOnFire(record) {
     ?? (isChild ? null : getAgent(rawAgentId));
   if (!resolved) {
     log.warn('watchers', 'on_fire: agent not resolvable', { id: record.id, agentId: rawAgentId });
-    return;
+    return false;
   }
 
   const sessionKey = `${userId}_${resolved.id}`;
   const scopedAgent = { ...resolved, id: sessionKey };
+
+  if (!(await finalPreferenceAuthorization())) return false;
 
   const fireText = record.lastStatusText || `Watch "${record.label}" fired.`;
   const userPrompt = (cfg.prompt && String(cfg.prompt).trim())
@@ -1223,6 +2047,7 @@ async function executeOnFire(record) {
     taskId: `watcher_${record.id}`,
     agent: resolved.id,
   });
+  return succeeded === true;
 }
 
 // Bulk-cancel watchers matching a predicate. Returns the count cancelled.
@@ -1238,6 +2063,7 @@ export function unregisterMatchingWatchers(userId, predicate, reason = 'cancelle
     let match = false;
     try { match = !!predicate(w); } catch { match = false; }
     if (match) {
+      abortInFlightWatcher(userId, w.id, reason);
       if (w.kind === 'event_subscription') unsubscribeFromEvent(w);
       w.status = reason;
       w.endedAt = Date.now();
@@ -1317,7 +2143,7 @@ export function handlerHelpers(record) {
     const bd = path.join(SKILLS_DIR, record.skillId);
     return fs.existsSync(bd) ? bd : null;
   })();
-  const runtimeHelpers = _skillDir ? {
+  const runtimeHelpers = _skillDir && !isManagedPreferenceWatcher(record) ? {
     /** @param {{ name?: string }} [opts] */
     ensureRuntime: async ({ name } = {}) => {
       if (!name) throw new Error('ensureRuntime: { name } required');
@@ -1332,18 +2158,36 @@ export function handlerHelpers(record) {
       return sb.runSandboxed(bin, binArgs, { ...opts, roDirs });
     },
   } : {};
+  const credentialHelpers = record.skillId
+    ? buildSkillCredentials(record.userId, record.skillId)
+    : null;
+  const exposedCredentials = isManagedPreferenceWatcher(record) && credentialHelpers
+    ? { get: credentialHelpers.get, list: credentialHelpers.list }
+    : credentialHelpers;
   return {
     userId: record.userId,
     agentId: record.agentId,
     watcherId: record.id,
     // Per-skill encrypted secret store — same accessor as ctx.credentials, so a
     // skill's watcher handler reads the same config its tools stored.
-    credentials: record.skillId ? buildSkillCredentials(record.userId, record.skillId) : null,
+    credentials: exposedCredentials,
+    personalization: buildSkillPersonalizationHelpers({
+      userId: record.userId,
+      skillId: record.skillId,
+      ...(isManagedPreferenceWatcher(record)
+        ? { preferenceMemoryId: record.personalizationOrigin?.preferenceMemoryId } : {}),
+    }),
     ...runtimeHelpers,
     browser,
-    showImage: async (img) => _showImageFn?.(record.userId, { ...img, agent: record.agentId }),
-    showVideo: async (vid) => _showVideoFn?.(record.userId, { ...vid, agent: record.agentId }),
-    postStatus: (text) => {
+    showImage: async (img) => isManagedPreferenceWatcher(record)
+      ? false : _showImageFn?.(record.userId, { ...img, agent: record.agentId }),
+    showVideo: async (vid) => isManagedPreferenceWatcher(record)
+      ? false : _showVideoFn?.(record.userId, { ...vid, agent: record.agentId }),
+    postStatus: async (text) => {
+      if (isManagedPreferenceWatcher(record)) {
+        const delivered = await deliverManagedPreferenceUpdate(record, text);
+        return delivered;
+      }
       if (text === record.lastStatusText) return;
       record.lastStatusText = text;
       pushHistory(record, { text, ts: Date.now() });
@@ -1356,7 +2200,11 @@ export function handlerHelpers(record) {
     // events that warrant the user's attention NOW even with the chat closed —
     // a service going down, a deploy failing, a deadline missed. Routine
     // progress updates should use postStatus instead.
-    notify: (content, opts = {}) => {
+    notify: async (content, opts = {}) => {
+      if (isManagedPreferenceWatcher(record)) {
+        const delivered = await deliverManagedPreferenceUpdate(record, content);
+        return delivered;
+      }
       const ts = Date.now();
       const fromName = opts.from || record.label || record.kind;
       _sendNotificationFn?.(record.userId, {
@@ -1404,6 +2252,18 @@ export function handlerHelpers(record) {
       const tgPrefix   = isObj ? arg.telegramPrefix : null;
       const itemKey    = isObj ? arg.itemKey        : null;
       let   forceDeliv = isObj ? arg.deliver        : null;
+
+      if (isManagedPreferenceWatcher(record)) {
+        // Ignore every caller/item delivery override. Only the server-owned,
+        // receipt-bound delivery path is reachable. Approved monitors may use
+        // the exact persisted channel the user accepted; safe-auto remains
+        // local notify-only.
+        const safeMessage = message || (html ? stripHtml(html) : '') || record.label;
+        const delivered = await deliverManagedPreferenceUpdate(record, safeMessage, {
+          dispatchApproved: isApprovedPreferenceWatcher(record),
+        });
+        return delivered;
+      }
 
       // Per-item delivery override (collection mode): if the caller passed
       // itemKey AND that item carries its own `deliver`, that wins. Caller's
@@ -1470,6 +2330,14 @@ export function handlerHelpers(record) {
     // call fireAgent directly. Keep the old gate-on-agent semantics so they
     // never accidentally email when they meant to narrate.
     fireAgent: async (promptOverride) => {
+      if (isSafeInformationalWatcher(record)) return false;
+      if (isApprovedPreferenceWatcher(record)) {
+        if (record.personalizationOrigin?.expectedDelivery !== 'agent') return false;
+        return deliverManagedPreferenceUpdate(
+          record, promptOverride || record.lastStatusText || record.label,
+          { dispatchApproved: true },
+        );
+      }
       if (!record.onFire || record.onFire.type !== 'agent') return false;
       const tempCfg = promptOverride
         ? { ...record.onFire, prompt: promptOverride }

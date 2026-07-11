@@ -5,10 +5,12 @@
   "icon": "🌐",
   "category": "utility",
   "enabled_by_default": true,
-  "systemPromptAddition": "## Web Access\n\nYou have web_search (Brave) and fetch_url for reading current information.\n- Prefer web_search over fetch_url when you don't already have a URL — it returns multiple candidates with snippets.\n- Use fetch_url to read a specific article, doc page, or result that web_search surfaced.\n- Pass a real http:// or https:// URL to fetch_url. Never call it with a missing or malformed URL — if you don't have one, search first.\n- Avoid news.google.com redirector URLs — find the original publisher URL instead.\n- Long fetches may truncate. If a page is too long to summarize faithfully, say so rather than guessing.\n- Cite sources inline (publisher + date) for factual claims from the web. Don't present scraped content as your own analysis.",
+  "refreshCadence": "hourly",
+  "systemPromptAddition": "## Web Access\n\nYou have web_search (Brave) and fetch_url for reading current information.\n- Prefer web_search over fetch_url when you don't already have a URL — it returns multiple candidates with snippets.\n- Use fetch_url to read a specific article, doc page, or result that web_search surfaced.\n- Pass a real http:// or https:// URL to fetch_url. Never call it with a missing or malformed URL — if you don't have one, search first.\n- Avoid news.google.com redirector URLs — find the original publisher URL instead.\n- Long fetches may truncate. If a page is too long to summarize faithfully, say so rather than guessing.\n- Cite sources inline (publisher + date) for factual claims from the web. Don't present scraped content as your own analysis.\n- If and only if the user explicitly asks you to keep checking an empty search and notify them later, set follow_up:true on web_search. Never set it merely because a search happened to return no results.",
   "tools": [
     {
       "type": "function",
+      "readOnly": true,
       "function": {
         "name": "web_search",
         "description": "Search the web using Brave Search. Use for current news, facts, or anything that needs up-to-date information.",
@@ -16,7 +18,8 @@
           "type": "object",
           "properties": {
             "query":  { "type": "string",  "description": "Search query" },
-            "count":  { "type": "integer", "description": "Number of results to return (default: 5, max: 10)" }
+            "count":  { "type": "integer", "description": "Number of results to return (default: 5, max: 10)" },
+            "follow_up": { "type": "boolean", "description": "Set true only when the user explicitly asked to keep checking and notify them later if this search is currently empty." }
           },
           "required": ["query"]
         }

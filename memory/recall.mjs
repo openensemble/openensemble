@@ -92,6 +92,7 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
   // Role-scope filter only applies to user_facts (cross-agent shared table).
   // Other tables are agent-scoped by table name already.
   const scopeFilter = type === 'user_facts' ? scopeClause(myRoles) : '';
+  const activeStatus = type === 'user_facts' ? " AND status != 'contradicted'" : '';
   // Empty: inline contradiction/supersede was reverted (see memory/lance.mjs)
   // because auto-superseding from the small contradiction head could silently
   // hide legitimate/pinned facts. Nothing sets superseded_by on the fact path
@@ -100,10 +101,10 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
   const notSuperseded = "";
 
   let [immortals, semantic] = await Promise.all([
-    table.query().where(`immortal = true AND forgotten = false${notSuperseded}${scopeFilter}`).toArray().catch(() => []),
+    table.query().where(`immortal = true AND forgotten = false${activeStatus}${notSuperseded}${scopeFilter}`).toArray().catch(() => []),
     queryVecBad
       ? Promise.resolve([])
-      : table.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${notSuperseded}${dateFilter}${scopeFilter}`).limit(searchLimit).toArray().catch(() => []),
+      : table.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${activeStatus}${notSuperseded}${dateFilter}${scopeFilter}`).limit(searchLimit).toArray().catch(() => []),
   ]);
   // Cap pinned facts so a heavily-pinned user doesn't blow up every prompt.
   if (type === 'user_facts') immortals = capImmortalFacts(immortals, TOKEN_BUDGET.userContext);
@@ -113,10 +114,10 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
     const sharedTable = await getTable('user_facts', userId);
     const sharedScope = scopeClause(myRoles);
     const [si, ss] = await Promise.all([
-      sharedTable.query().where(`immortal = true AND forgotten = false${notSuperseded}${sharedScope}`).toArray().catch(() => []),
+      sharedTable.query().where(`immortal = true AND forgotten = false AND status != 'contradicted'${notSuperseded}${sharedScope}`).toArray().catch(() => []),
       queryVecBad
         ? Promise.resolve([])
-        : sharedTable.vectorSearch(queryVec).where(`immortal = false AND forgotten = false${notSuperseded}${sharedScope}`).limit(3).toArray().catch(() => []),
+        : sharedTable.vectorSearch(queryVec).where(`immortal = false AND forgotten = false AND status != 'contradicted'${notSuperseded}${sharedScope}`).limit(3).toArray().catch(() => []),
     ]);
     sharedFacts = [...capImmortalFacts(si, TOKEN_BUDGET.userContext), ...ss.slice(0, 3)];
   }
@@ -145,14 +146,21 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
     const tName = m.agent_id === 'shared' ? 'user_facts' : `${m.agent_id}_${type}`;
     queuedWrite(tName, async () => {
       const t = await getTable(tName, userId);
+      // Access frequency is not evidence that a fact is true. In particular,
+      // repeatedly retrieving a stale personalization inference must not make
+      // it progressively harder to correct or forget. Keep the spacing-effect
+      // stability boost for episodic/parameter memories, but not user facts.
+      const values = {
+        recall_count: (m.recall_count || 0) + 1,
+        retention_score: 1.0,
+        last_recalled_at: new Date().toISOString(),
+        ...(tName === 'user_facts' ? {} : {
+          stability: Math.min(MAX_STABILITY, (m.stability || 24) * 1.8),
+        }),
+      };
       await t.update({
         where: `id = '${assertId(m.id)}'`,
-        values: {
-          recall_count: (m.recall_count || 0) + 1,
-          stability: Math.min(MAX_STABILITY, (m.stability || 24) * 1.8),
-          retention_score: 1.0,
-          last_recalled_at: new Date().toISOString(),
-        }
+        values,
       }).catch(e => console.debug('[cortex] LanceDB update error:', e.message));
     });
   });
@@ -236,12 +244,25 @@ export async function forget({ agentId = 'main', type = 'episodes', exactId, use
 // ── forgetByText — semantic search then soft-delete matching memories ───────
 // By default, immortal memories are protected. Set includeImmortal: true when
 // the caller explicitly wants to remove pinned facts (e.g. the forget_fact tool).
-export async function forgetByText({ agentId = 'main', text, userId = 'default', includeImmortal = false }) {
-  const tableNames = [
-    `${agentId}_params`,
-    `${agentId}_episodes`,
-    'user_facts',
-  ];
+const FORGET_MEMORY_TYPES = new Set(['params', 'episodes', 'user_facts']);
+const PERSONALIZATION_FACT_SOURCES = new Set(['personalization', 'user_confirmed', 'user_corrected']);
+
+function forgetTableNames(agentId, types) {
+  const requested = types === undefined ? [...FORGET_MEMORY_TYPES] : types;
+  if (!Array.isArray(requested)) return [];
+  return [...new Set(requested)]
+    .filter(type => FORGET_MEMORY_TYPES.has(type))
+    .map(type => type === 'user_facts' ? type : `${agentId}_${type}`);
+}
+
+function ledgerStatementFromMemoryText(text) {
+  return String(text || '').trim().replace(/^INFERRED:\s*/i, '');
+}
+
+export async function forgetByText({
+  agentId = 'main', text, userId = 'default', includeImmortal = false, types = undefined,
+}) {
+  const tableNames = forgetTableNames(agentId, types);
   const whereClause = includeImmortal
     ? 'forgotten = false'
     : 'forgotten = false AND immortal = false';
@@ -260,15 +281,46 @@ export async function forgetByText({ agentId = 'main', text, userId = 'default',
     try {
       const table = await getTable(tableName, userId);
       const hits = await table.vectorSearch(vec).where(whereClause).limit(5).toArray().catch(() => []);
-      for (const hit of hits) {
-        // Only forget if the memory is semantically close (distance < 0.35)
-        if ((hit._distance ?? 1) < 0.35) {
-          await queuedWrite(tableName, () =>
-            table.update({ where: `id = '${assertId(hit.id)}'`, values: { forgotten: true } })
-          );
-          totalForgotten++;
-          forgottenTexts.push(hit.text);
+      const closeHits = hits.filter(hit => (hit._distance ?? 1) < 0.35);
+      let ledgerApi = null;
+      let ownedProfileIds = new Set();
+      if (tableName === 'user_facts' && closeHits.length) {
+        try {
+          ledgerApi = await import('../lib/personalization/ledger.mjs');
+          ownedProfileIds = new Set((await ledgerApi.listLedger(userId)).map(row => row.id));
+        } catch (error) {
+          console.warn('[cortex] personalization ledger unavailable during semantic forget:', error?.message || error);
         }
+      }
+      for (const hit of closeHits) {
+        if (tableName === 'user_facts' && ownedProfileIds.has(hit.id)) {
+          try {
+            const forgotten = await ledgerApi.forgetLedgerRow(userId, hit.id, {
+              reason: 'forgotten',
+              expectedStatement: ledgerStatementFromMemoryText(hit.text),
+            });
+            if (forgotten) {
+              totalForgotten++;
+              forgottenTexts.push(hit.text);
+            }
+          } catch (error) {
+            console.warn('[cortex] personalization forget transaction failed:', error?.message || error);
+          }
+          // Raw Cortex fallback would leave a live profile sidecar behind.
+          continue;
+        }
+        if (tableName === 'user_facts' && PERSONALIZATION_FACT_SOURCES.has(hit.source)) {
+          // A tagged row without exact readable ownership may be a crash
+          // orphan or racing sidecar commit. It is already excluded from
+          // personalization context; never create a Cortex/sidecar split via
+          // raw fallback, regardless of whether the ledger read succeeded.
+          continue;
+        }
+        await queuedWrite(tableName, () =>
+          table.update({ where: `id = '${assertId(hit.id)}'`, values: { forgotten: true } })
+        );
+        totalForgotten++;
+        forgottenTexts.push(hit.text);
       }
     } catch (e) { console.warn('[cortex] forgetByText error for table', tableName + ':', e.message); }
   }

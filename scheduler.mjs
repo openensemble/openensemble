@@ -532,14 +532,22 @@ async function runTask(task, broadcast, opts = {}) {
       ? `\nThe user's own email address is ${ownerProfile.email} — if the request says "send me an email" / "email myself", that is the recipient.`
       : '';
     // Personalization: append compact insights + pending-offer summary for
-    // briefing-shaped tasks (ADDENDUM D — a briefing IS just a scheduled task
-    // whose label/prompt says so; no bespoke "briefing assembler" exists).
+    // tasks explicitly marked as briefings. Keep the text check only as a
+    // compatibility bridge for tasks created before `meta.briefing` existed;
+    // new callers no longer have to rely on an English keyword in a label.
     let briefingNote = '';
-    if (/brief/i.test(task.label || '') || /brief/i.test(task.prompt || '')) {
+    let briefingAcknowledgements = [];
+    const isBriefingTask = task.meta?.briefing === true
+      || /brief/i.test(task.label || '')
+      || /brief/i.test(task.prompt || '');
+    if (isBriefingTask) {
       try {
         const { getBriefingSection } = await import('./lib/personalization/reflect.mjs');
         const section = await getBriefingSection(userId);
-        if (section?.text) briefingNote = `\n\n[PERSONALIZATION]\n${section.text}`;
+        if (section?.text) {
+          briefingNote = `\n\n[PERSONALIZATION]\n${section.text}`;
+          briefingAcknowledgements = Array.isArray(section.acknowledgements) ? section.acknowledgements : [];
+        }
       } catch (e) {
         console.warn('[scheduler] personalization briefing section failed:', e.message);
       }
@@ -619,13 +627,16 @@ async function runTask(task, broadcast, opts = {}) {
           succeeded: succeeded && (info.errorCount || 0) === 0,
           output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
           lastError: lastError || (info.errorCount ? 'background work failed' : null),
-          manual, sessionKey, broadcast,
+          manual, sessionKey, broadcast, briefingAcknowledgements, briefingUserId: userId,
         }),
       });
     } else {
       // Barrier bypassed: no reaction turn, finalize directly after the main
       // turn (pre-barrier behavior). Background work, if any, runs detached.
-      await finalizeScheduledTask(task, { succeeded, output: assistantContent, lastError, manual, sessionKey, broadcast });
+      await finalizeScheduledTask(task, {
+        succeeded, output: assistantContent, lastError, manual, sessionKey, broadcast,
+        briefingAcknowledgements, briefingUserId: userId,
+      });
     }
   } catch (e) {
     const errMsg = e?.message || String(e);
@@ -707,7 +718,19 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
 // children + any reaction rounds). The single finalize path — replaces the
 // former inline finalize in runTask so a delegating task can't be double-stamped
 // or have a one-shot removed out from under its own pending background work.
-async function finalizeScheduledTask(task, { succeeded, output, lastError, manual, sessionKey, broadcast }) {
+async function finalizeScheduledTask(task, {
+  succeeded, output, lastError, manual, sessionKey, broadcast,
+  briefingAcknowledgements = [], briefingUserId = task.ownerId,
+}) {
+  if (succeeded && briefingAcknowledgements.length) {
+    try {
+      const { acknowledgeBriefingSection } = await import('./lib/personalization/reflect.mjs');
+      await acknowledgeBriefingSection(briefingUserId, briefingAcknowledgements);
+    } catch (e) {
+      // Leave rows pending for a later at-least-once briefing retry.
+      console.warn('[scheduler] personalization briefing acknowledgement failed:', e.message);
+    }
+  }
   // On failure, append a visible error message to the session so the chat shows
   // what happened instead of an orphan header. Manual test fires skip this (the
   // "will retry on its next run" copy is wrong for an out-of-band run; the

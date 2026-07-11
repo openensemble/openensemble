@@ -166,14 +166,47 @@ async function calendarSnapshot(args, userId) {
   });
 }
 
-export default async function execute(name, args, userId) {
+async function maybeRegisterCalendarFollowUp(args, result, ctx) {
+  if (args?.follow_up !== true || typeof ctx?.registerLead !== 'function') return result;
+  let empty = result === 'No upcoming events found.';
+  if (!empty) {
+    try {
+      const parsed = JSON.parse(result);
+      empty = Array.isArray(parsed?.events) && parsed.events.length === 0;
+    } catch { /* non-JSON gcal_list output */ }
+  }
+  if (!empty) return result;
+
+  const toolName = args._follow_up_tool === 'gcal_list' ? 'gcal_list' : 'calendar_snapshot';
+  const storedArgs = toolName === 'gcal_list'
+    ? Object.fromEntries(Object.entries(args).filter(([key]) => !['follow_up', 'follow_up_query', '_follow_up_tool'].includes(key)))
+    : {
+        ...(Number.isInteger(args.days) ? { days: args.days } : {}),
+        ...(typeof args.startDate === 'string' ? { startDate: args.startDate } : {}),
+      };
+  const query = String(args.follow_up_query || 'A calendar event appears in the requested date range').trim().slice(0, 300);
+  const followUp = await ctx.registerLead({
+    query,
+    toolName,
+    args: storedArgs,
+    skillId: 'gcal',
+    cadenceHint: 'daily',
+    dedupKey: `gcal:${toolName}:${JSON.stringify(storedArgs)}`,
+  });
+  return followUp?.announce ? `${result}\n\n${followUp.announce}` : result;
+}
+
+export default async function execute(name, args = {}, userId, _agentId, ctx) {
   if (name === 'calendar_snapshot') {
-    try { return await calendarSnapshot(args, userId); }
+    try {
+      const result = await calendarSnapshot(args, userId);
+      return maybeRegisterCalendarFollowUp(args, result, ctx);
+    }
     catch (e) { return `calendar_snapshot failed: ${e.message}. Fall back to gcal_list.`; }
   }
   const cmdArgs = buildCmdArgs(name, args);
   if (!cmdArgs) return `Unknown or invalid gcal tool: ${name}`;
-  return new Promise((resolve) => {
+  const result = await new Promise((resolve) => {
     const proc = spawn('node', [GCAL_CLI, ...cmdArgs], { env: { ...process.env, OE_USER_ID: userId } });
     let out = '', err = '';
     proc.stdout.on('data', d => out += d);
@@ -181,4 +214,7 @@ export default async function execute(name, args, userId) {
     proc.on('close', () => resolve((out || err || 'done').trim()));
     proc.on('error', e => resolve(`Error running gcal CLI: ${e.message}`));
   });
+  return name === 'gcal_list'
+    ? maybeRegisterCalendarFollowUp({ ...args, _follow_up_tool: 'gcal_list' }, result, ctx)
+    : result;
 }

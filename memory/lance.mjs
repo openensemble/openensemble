@@ -28,7 +28,7 @@ const JAILBREAK_MARKERS = [
   /\bdeveloper\s+mode\b/i,
   /\bas\s+an?\s+unrestricted\s+AI\b/i,
 ];
-function looksLikeJailbreak(text) {
+export function looksLikeJailbreak(text) {
   if (!text || typeof text !== 'string') return false;
   return JAILBREAK_MARKERS.some(re => re.test(text));
 }
@@ -39,6 +39,11 @@ function _readRoleForUser(userId) {
     if (!existsSync(p)) return null;
     return JSON.parse(readFileSync(p, 'utf8'))?.role ?? null;
   } catch { return null; }
+}
+
+/** Shared guard for callers that would otherwise promote a child jailbreak. */
+export function isChildAccountJailbreak(userId, text) {
+  return _readRoleForUser(userId) === 'child' && looksLikeJailbreak(text);
 }
 
 // ── DB handle cache ──────────────────────────────────────────────────────────
@@ -304,8 +309,7 @@ export async function remember({
   // Child accounts: never let a jailbreak fact become immortal / stable. Drop
   // immortality, force low salience so the record decays within hours rather
   // than amplifying the jailbreak across sessions.
-  const isChild = _readRoleForUser(userId) === 'child';
-  const jailbreak = isChild && looksLikeJailbreak(text);
+  const jailbreak = isChildAccountJailbreak(userId, text);
   if (jailbreak) {
     immortal = false;
     metadata = { ...metadata, priority: 0.1 };

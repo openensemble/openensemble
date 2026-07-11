@@ -23,6 +23,10 @@ import { buildAgentContext, formatContext, addToSessionBuffer, processSignals } 
 import { trackFriction } from './memory/signals.mjs';
 import { loadSession, appendToSession, loadCrossAgentContext } from './sessions.mjs';
 import { getUserFilesDir } from './lib/paths.mjs';
+import {
+  detectProactiveNegativeFeedback,
+  handleProactiveNegativeFeedback,
+} from './lib/personalization/negative-feedback.mjs';
 import { log } from './logger.mjs';
 import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
@@ -385,6 +389,19 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
         console.warn('[skill-triggers] append failed:', e.message);
       }
     })();
+  }
+
+  // Proactive stop feedback is an explicit control command, not memory
+  // inference. Run it before the finance/email/scheduler signal gate and the
+  // tools-used gate so provider choice or an assistant-side tool call cannot
+  // make "stop these updates" a no-op. Ephemeral worker turns have no stable
+  // user-facing proactive context, so they remain excluded.
+  if (!agent.ephemeral && detectProactiveNegativeFeedback(sessionText)) {
+    handleProactiveNegativeFeedback({
+      userId, agentId: agent.id, userMessage: sessionText,
+      contextText: persistedAssistantContent,
+    }).catch(e => console.warn('[personalization] Proactive feedback failed:', e.message));
+    return;
   }
 
   if (skipSignals) return;

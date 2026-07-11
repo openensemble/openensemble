@@ -148,7 +148,7 @@ the draft — the user needs to choose how they hear about events.
 
 ---
 
-## 8. Pref-aware filtering (cortex memory)
+## 8. Pref-aware filtering (confirmed preferences)
 
 **Trigger:** user mentions a personal preference relevant to filtering
 the data — "only deals on grocery items I actually buy", "skip beauty
@@ -159,9 +159,56 @@ you, so you only hear about {matching items}. Anything that doesn't
 match your preferences will be silently skipped, so the alerts stay
 useful."
 
+**Implementation:** for simple matching, tool handlers read
+`await ctx.personalization.confirmedPreferences()` and watcher handlers read
+`await helpers.personalization.confirmedPreferences()`. For domain conditions,
+use `confirmedPreferenceDetails()` on the same surfaces. It returns at most 20
+objects shaped as `{statement, subject, sentiment:'positive', merchant?,
+context?, priceCeiling?:{value,currency?,unit?}, temporary?:{hint?,expiresAt?}}`.
+Prefer `subject`; honor optional conditions only when relevant.
+
+Both helpers are bounded to active, positive, user-confirmed rows that match
+THIS skill's validated `preferenceOpportunities[].preferenceKeywords` and are
+global or scoped to this skill. They expose no memory id, evidence, provenance,
+general memory, inferred row, or another skill's scoped preference. Expired
+temporary preferences are omitted. They return `[]` when Personalization is off
+or unavailable. Never fuzzy-search general memory or maintain a hidden copy.
+
+If the skill already has a durable watcher and the user wants this to become
+an ambient "surprise me when something relevant appears" capability, also add
+a validated `preferenceOpportunities` manifest recipe from the blueprint. It
+maps narrow, skill-owned domain keywords to this skill's own
+`destructive:true` activation tool and declared watcher kind. The framework
+discovers this same contract for any enabled custom skill; do not add
+skill-specific matching to platform code. An ordinary lookup or question is
+not a preference signal and must not start a watcher.
+
+Preference activation snapshots the exact executor and every literal local
+`.mjs`/`.json` dependency. Keep this kind of skill self-contained with Node
+builtins and same-skill modules; non-literal dynamic imports, package imports,
+CommonJS/`.js`, symlinks, mutable `state/` imports, and app-internal imports are
+not eligible. Reach platform features through `ctx`/`helpers` instead.
+
+Omit `autonomy` for a one-time **Turn it on** card. Add
+`autonomy: 'informational'` only for an informational, private,
+exactly stoppable watcher with `deliver: 'notify'`; agent delivery starts an
+executable LLM turn and does not qualify. Users who
+enabled **Safe initiative** may let that start automatically with a durable
+receipt, feedback, Stop, and Undo, but only after the exact implementation has
+a server review. New or modified contracts may first be evaluated silently in
+neutral shadow mode and otherwise remain ask-first. Purchases, messages, calendar changes, email/Telegram
+delivery, destructive behavior, or anything without exact undo stays ask-first.
+
+The platform owns outcome learning: useful/acted outcomes can raise utility;
+Not useful, Stop, and Undo make future behavior more cautious; dismiss is a
+decaying "not now" signal; ignored/shadowed are neutral; Snooze pauses the exact
+watcher. Skills must not implement their own feedback store or treat display as
+approval. No learned score overrides the hard safety and consent gates.
+
 **Decisions to surface:**
 - Whether to actually filter (some users want EVERYTHING regardless)
-- What signal counts as preference (cortex search vs explicit list)
+- Whether confirmed profile preferences or a skill-local explicit list should
+  control the filter
 
 **Skip when:** there are no plausible "filter out" preferences for the
 domain.

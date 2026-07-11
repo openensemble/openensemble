@@ -24,12 +24,14 @@ export async function executeSkillTool(name, args, userId, agentId) {
 export default executeSkillTool;
 ```
 
-**5th `ctx` parameter (optional)** — only declare it if the skill needs to push images/videos inline to the chat (see "Showing images and videos" below). Skills that don't take 5 params still work normally:
+**5th `ctx` parameter (optional)** — declare it when the skill needs runtime helpers such as inline media or a durable personalization follow-up. Skills that don't take 5 params still work normally:
 
 ```js
 export async function executeSkillTool(name, args, userId, agentId, ctx) {
   // ctx.showImage({ base64, mimeType, filename, savedPath, prompt })
   // ctx.showVideo({ url, filename, savedPath })
+  // ctx.registerLead({ query, toolName, args, skillId, cadenceHint })
+  // ctx.personalization.confirmedPreferenceDetails()
   ...
 }
 ```
@@ -172,6 +174,164 @@ Only set `readOnly: true` on a tool that is a pure data-fetch: no side effects, 
 
 A tool without `readOnly: true` still works normally in live turns — the flag has no effect on ordinary use. It only means no follow-up lead can be registered against it: `ctx.registerLead` is rejected at registration and reports that honestly back to the calling skill (it never claims it'll check back and then silently drop the follow-up).
 
+To make an empty lookup genuinely useful later, register a lead only after the
+user explicitly asks for a follow-up. Return the helper's `announce` line so the
+user knows whether tracking was actually stored:
+
+```js
+if (args.follow_up === true && result === 'No results found.') {
+  const followUp = await ctx.registerLead({
+    query: `Find an available result for ${args.query}`,
+    toolName: 'usr_myskill_search',
+    args: { query: args.query }, // omit follow_up: re-checks must not recurse
+    skillId: 'usr_myskill',
+    cadenceHint: 'daily'
+  });
+  return `${result}\n\n${followUp.announce}`;
+}
+```
+
+The stored tool must be declared `readOnly: true`. Never register a lead from
+an ordinary empty result, and never store the follow-up flag in the re-check
+arguments; both rules prevent surprise monitoring and recursive duplicate
+registrations.
+
+### preferenceOpportunities (optional — preference-aware monitoring with graduated autonomy)
+
+A skill that already knows how to monitor its domain can offer that capability
+when a **confirmed** user preference becomes relevant. The bridge is generic:
+Personalization enumerates every enabled custom skill's validated recipes; it
+does not contain a store-, product-, or skill-specific matcher. Each skill owns
+its narrow domain vocabulary, activation tool, watcher, and result filtering.
+
+This contract is ask-first by default. Casual queries (for example, "are apples
+on sale?"), tool calls, and unconfirmed inferences never become preferences or
+start monitoring. A separately confirmed statement such as "I love Honeycrisp
+apples" can match any enabled skill that explicitly declares the relevant
+domain terms.
+
+```jsonc
+"preferenceOpportunities": [{
+  "id": "preference-deal-watch",              // lowercase kebab slug
+  "preferenceKeywords": ["apple", "fruit"],  // skill-owned domain match terms
+  "activationTool": "myskill_watch_preferences",
+  "activationArgs": { "deliver": "notify" }, // static, secret-free defaults
+  "watcherKind": "myskill_preference_check",
+  "dedupKey": "myskill-preferences-default",  // same key stored by proposeMonitor
+  "autonomy": "informational",                // optional; omit to stay ask-first
+  "title": "Watch for deals on things you like?",
+  "body": "This skill can compare new deals with your confirmed preferences. It asks first unless you enabled Safe initiative; proactive activity explains why it appeared and includes feedback and control actions."
+}]
+```
+
+Optional `interestSignals` mappings let an ordinary successful lookup count as
+weak topical evidence without pretending the question was a preference:
+
+```jsonc
+"interestSignals": [
+  { "tool": "myskill_search", "arg": "query" }
+]
+```
+
+Each mapping must name this manifest's non-destructive tool and one declared,
+non-sensitive string argument. Only interactive successful calls whose value
+matches the recipe's `preferenceKeywords` are retained, at low confidence. One
+lookup never confirms a preference or starts a monitor; repeated observations
+may later support an inferred suggestion that still requires the normal user
+confirmation path. Automation ticks, failed calls, undeclared args, results,
+credentials, and arbitrary tool arguments do not become interest evidence.
+
+The activation tool must belong to the same manifest and have
+`"destructive": true`, because it creates durable watcher state. It should
+call `ctx.proposeMonitor` with the declared `watcherKind`, `skillId`, and
+`dedupKey`; the watcher itself owns fetching, domain matching, state, cadence,
+and delivery. Activation args are size-bounded and rejected if they contain
+credential-like fields or values. Keep credentials in `ctx.getCredential`,
+never in this manifest block.
+
+Because approval can outlive the current turn, preference-enabled execution is
+bound to an immutable code snapshot. Keep that executor self-contained: Node
+builtins plus literal relative `.mjs`/`.json` imports inside the same skill are
+supported and the complete local import closure is pinned. Non-literal dynamic
+imports, CommonJS/`.js`, package imports, symlinks, imports from mutable
+`state/`, and relative imports that escape the skill directory fail closed for
+preference activation. Use `ctx`/`helpers` capabilities for platform services
+instead of importing app internals from a preference-enabled executor.
+
+The declaration is also the skill's least-privilege profile-read scope.
+`preferenceKeywords` must be narrow domain terms, never copied user values or a
+catch-all vocabulary. A valid recipe gives only that skill access to matching,
+active, positive, confirmed preferences in global or same-skill scope. It does
+not grant access to general memory, evidence, provenance, other skills' scoped
+preferences, negative rows, or inferred rows. The helpers return `[]` when
+Personalization is off, incomplete, unavailable, or the recipe is invalid.
+
+Use the legacy string projection for simple text matching:
+
+```js
+const statements = await ctx.personalization.confirmedPreferences();
+// In a watcher: await helpers.personalization.confirmedPreferences()
+```
+
+Use the structured projection when the skill can honor bounded conditions:
+
+```js
+const details = await ctx.personalization.confirmedPreferenceDetails();
+// [{
+//   statement, subject, sentiment: 'positive',
+//   merchant?, context?,
+//   priceCeiling?: { value, currency?, unit? },
+//   temporary?: { hint?, expiresAt? }
+// }]
+```
+
+Both projections return at most 20 matches. Strings and nested fields are
+clamped, expired temporary preferences are omitted, and no memory id, evidence,
+or provenance is exposed. Prefer `subject` over parsing `statement`; apply
+`merchant`, `context`, `priceCeiling`, and `temporary` only when they matter to
+the skill's domain. Do not fuzzy-search Cortex or build a second preference
+store inside the skill.
+
+`"autonomy": "informational"` is the only unattended first-activation
+contract. Use it only when the tool does nothing except start an informational,
+private, exactly stoppable watcher, and set `activationArgs.deliver` explicitly
+to `"notify"`. Agent delivery starts an executable LLM turn and therefore does
+not qualify. It remains ask-first unless the user separately
+enables **Safe initiative**. When enabled, the runtime reserves a durable
+receipt before execution, revalidates the live contract, requires exactly one
+new matching watcher, and exposes feedback plus **Stop/Undo**. A mismatch is
+torn down.
+The declaration is not self-authorizing: unattended execution also requires a
+server-reviewed implementation digest. New or modified skill code therefore
+cannot cold-start automatically. A new, unreviewed contract may first be
+evaluated silently in shadow mode (nothing is shown or run) before it becomes
+eligible for an ordinary **Turn it on** card. Shadow observations are neutral,
+not evidence that the user liked the suggestion.
+
+Never use informational autonomy for agent turns, purchases, messages, posts,
+calendar changes, email/Telegram delivery, destructive operations, or any behavior
+without an exact undo identity. Those must omit `autonomy` and remain
+ask-first. A skill's label is a safety promise, not a way to bypass consent.
+
+The runtime revalidates the live manifest, confirmed preference match, master
+Personalization switch, skill availability, exact tool/args, and absence of an
+active matching watcher at activation time. Quiet proactivity emits no new
+activation cards or safe-auto starts. Ask-first cards do not graduate to
+unattended watcher activation; the separate Safe initiative setting and
+`informational` contract are the only first-activation path.
+
+The platform, not the skill, learns utility for the exact versioned activation
+contract and a bounded categorical context. **Useful** and acted-on outcomes
+increase confidence; **Not useful**, **Stop**, and **Undo** downgrade future
+behavior; a dismissal is a decaying "not now" signal; ignored and shadowed
+candidates are neutral. **Snooze** pauses the exact watcher temporarily, and
+**Edit preference** changes the user-owned source rather than teaching a hidden
+skill profile. A current "why this appeared" explanation points back to that
+confirmed preference. Skills must not persist these outcomes or infer approval
+from a notification being shown. Learned utility can make the runtime more
+cautious, but can never override consent, review, delivery, action-risk, quiet
+hours, skill availability, or exact-undo gates.
+
 ---
 
 ### localIntents — handle simple requests locally (no cloud LLM)
@@ -212,7 +372,7 @@ Rules of thumb:
 - **Lead with `utterances`.** They are the classifier — 3–8 varied, real phrasings (same spirit as `intent_examples`). The tier learns new phrasings on its own, so you don't have to enumerate every wording.
 - **Use `patterns` only to capture a structured-token slot** (email, id, ZIP, date, SKU) via a `(?<slot>...)` named group. Do NOT write patterns as classifiers (`^(?:check|show|list)\\b.*\\binbox\\b`) — embeddings do that better and self-improve. Do NOT write `.+` free-text slots — the extract model handles those. A pattern that captures no slot is ignored for routing.
 - **`tool`** must be one of this skill's own tools. **`slots`** name that tool's parameters; only the named ones are filled by the local tier, the rest use the tool's defaults.
-- Set **`confirm: true`** for anything destructive or irreversible. Those never auto-run locally — they hand off to the normal "APPROVE" confirmation.
+- Set **`confirm: true`** for anything destructive or otherwise requiring confirmation. This is mandatory when the target tool has `destructive: true`; the manifest validator rejects a local intent that tries to downgrade such a tool. Confirmed intents never auto-run locally—they hand off to the normal "APPROVE" flow.
 - You can add `localIntents` at create time (`skill_create`) or to an existing skill (`skill_update_manifest`). Adding them is free latency/cost savings — do it for any skill with simple, unambiguous operations.
 
 ---
@@ -409,7 +569,7 @@ If your skill is a **per-user / custom skill** (it lives in `users/{userId}/skil
 
 On `skill_update_code`, the tool re-scans and flags if the skill isn't sandboxed or if new code needs network; grant later via `skill_update_manifest({id, sandbox:true})` / `({id, allow_network:true})`.
 
-**File I/O — owner's media/doc folders only.** You may read/write the owner's `documents`, `images`, `videos`, and `audio` folders (via `getUserFilesDir`) plus your own per-skill state dir (below). `research` and `code` are NOT mounted for custom skills, and anything outside these — other users' dirs, `config.json`, OAuth/token files, the master key — does not exist inside the sandbox, so reads fail with `ENOENT`.
+**File I/O — owner's output folders only.** You may read/write the owner's `documents`, `images`, `videos`, `audio`, and `research` folders (via `getUserFilesDir`) plus your own per-skill state dir (below). The `code` folder is NOT mounted for custom skills, and anything outside these — other users' dirs, `config.json`, OAuth/token files, the master key — does not exist inside the sandbox, so reads fail with `ENOENT`.
 
 **Secrets / API keys — use `ctx.credentials`, never the filesystem.** Don't read token files and don't write a key into a data folder. Store and fetch your skill's own secrets through the brokered store:
 ```js
@@ -624,12 +784,11 @@ Every proactive skill has the same four pieces — design them in this order:
    - `hourly` — feeds, channels, social
    - `daily` — release notes, blogs, store ads (when the day-of-week matters, see below)
    - `weekly` — slow-rotating sources
-3. **Pref-aware filter** — read the user's cortex memory before notifying so the user only hears about items they care about. Example:
+3. **Pref-aware filter** — read only the preferences the user explicitly confirmed before notifying, so the user hears about items they care about without treating guesses or incidental memory as policy. When the domain has structured conditions, prefer the detail helper in a watcher handler:
    ```js
-   const { searchMemory } = await import('../../memory.mjs');
-   const prefs = await searchMemory(userId, 'grocery preferences', 8);
+   const prefs = await helpers.personalization.confirmedPreferenceDetails();
    ```
-   Use the returned facts to filter the fetched items inside your watcher handler. **Skipping this step means the user gets noisy notifications about everything.**
+   Tool handlers use the matching `ctx` surface. Use `confirmedPreferences()` instead when a bounded `string[]` is sufficient. Shared-profile access requires this skill's valid, narrow `preferenceOpportunities` declaration and returns only matching positive confirmed rows; otherwise it returns `[]`. Use `subject` and any relevant merchant/context/price/temporary conditions to filter results. Do not fuzzy-search general memory, treat an ordinary lookup as a preference, or notify about everything when the helper is empty.
 4. **Delivery** — pick `deliver` based on the user's explicit ask:
    - `deliver: 'agent'` (default) — injects a `[WATCHER FIRED]` system note and runs an agent turn so the LLM summarizes naturally (good for voice + chat). Pair with `agentPrompt: '...'`.
    - `deliver: 'email'` — when the user says "email me when X" / "send it to my email" / "notify me by email". Sends FROM the user's primary connected account TO their profile email — **no agent turn, no `ask_agent` round-trip**. Pair with `emailSubject: '...'`. **Never route email delivery through `ask_agent` to an email agent**; this branch handles it directly via `lib/email-delivery.mjs`.

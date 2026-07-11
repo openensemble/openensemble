@@ -10,9 +10,20 @@
 //   DELETE /api/learnings/routines/:id
 
 let _learnState = { pending: [], learnings: null, ledger: null, busy: new Set(), policyBusy: false };
+let _learnFactRefs = new Map();
+const _learnProfileTypes = new Set(['pattern', 'fact', 'relationship', 'preference', 'constraint', 'goal', 'routine']);
+
+function _learnFactRef(id) {
+  const key = `lf_${_learnFactRefs.size + 1}`;
+  _learnFactRefs.set(key, id);
+  return key;
+}
+function _learnFactIdFromEl(el) {
+  return _learnFactRefs.get(el?.dataset?.learnFactKey);
+}
 
 function _learnAgo(ms) {
-  if (!ms) return '';
+  if (!Number.isFinite(ms) || ms <= 0) return '';
   const diff = Date.now() - ms;
   if (diff < 60_000)      return `${Math.round(diff / 1000)}s ago`;
   if (diff < 3_600_000)   return `${Math.round(diff / 60_000)} min ago`;
@@ -43,6 +54,25 @@ async function loadLearnDrawer() {
   }
 }
 
+// Public bridge used by personalization receipts. The caller supplies only an
+// opaque ledger id returned by the authenticated inbox API; we reload the
+// user's ledger and refuse to open an editor unless that row still exists.
+async function openLearnFactEditor(memoryId) {
+  if (typeof memoryId !== 'string' || !/^[a-zA-Z0-9_-]{3,120}$/.test(memoryId)) return false;
+  if (typeof toggleDrawer === 'function'
+    && (typeof activeDrawerId === 'undefined' || activeDrawerId !== 'drawerLearn')) {
+    toggleDrawer('drawerLearn', 'sbtnLearn');
+  }
+  await loadLearnDrawer();
+  if (!Array.isArray(_learnState.ledger) || !_learnState.ledger.some(row => row?.id === memoryId)) {
+    alert('That preference is no longer in your learned profile.');
+    return false;
+  }
+  const key = _learnFactRef(memoryId);
+  await learnEditFact({ dataset: { learnFactKey: key } });
+  return true;
+}
+
 function _updateLearnBadge() {
   const badge = $('learnBadge');
   if (!badge) return;
@@ -58,6 +88,7 @@ function _updateLearnBadge() {
 function _renderLearnDrawer() {
   const body = $('learnBody');
   if (!body) return;
+  _learnFactRefs = new Map();
   const L = _learnState.learnings || {};
   body.innerHTML = [
     _renderLearningSettingsSection(L.learningPolicy || {}),
@@ -182,6 +213,8 @@ function _renderPendingCard(p) {
   const message = escHtml(p.message || '').replace(/\n/g, '<br>');
   const preview = policy.preview || p.preview;
   const previewHtml = preview ? `<div style="font-size:11px;line-height:1.35;color:var(--muted);margin:-4px 0 10px">${escHtml(_learnPreviewText(preview))}</div>` : '';
+  const whyHtml = p.personalizationWhy
+    ? `<div style="font-size:11px;line-height:1.4;color:var(--muted);margin:-4px 0 10px">${escHtml(p.personalizationWhy)}</div>` : '';
   const accept = escHtml(p.accept_label || 'Accept');
   const dismiss = escHtml(p.dismiss_label || 'Dismiss');
   const disabled = busy ? 'disabled' : '';
@@ -191,11 +224,13 @@ function _renderPendingCard(p) {
       ${kindBadge}${ageNote}
     </div>
     <div style="font-size:13px;line-height:1.45;margin-bottom:10px">${message}</div>
+    ${whyHtml}
     ${previewHtml}
     <div style="display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn-small" data-action="learnAcceptProposal" data-args='${btnArgs}' ${disabled} style="background:var(--accent,#4f82ff);color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer">${accept}</button>
       <button class="btn-small" data-action="learnSnoozeProposal" data-args='${btnArgs}' ${disabled} style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--text)">Snooze 7d</button>
       <button class="btn-small" data-action="learnDismissProposal" data-args='${btnArgs}' ${disabled} style="background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted)">${dismiss}</button>
+      ${p.editPreferenceId ? `<button class="btn-small" data-action="openLearnFactEditor" data-args='${JSON.stringify([p.editPreferenceId]).replace(/"/g, '&quot;')}' ${disabled} style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--text)">Edit preference</button>` : ''}
       <button class="btn-small" data-action="learnNeverProposal" data-args='${btnArgs}' ${disabled} title="Never suggest this again (a normal dismiss only hides it for 24h)" style="background:transparent;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--muted);text-decoration:underline">Don't propose again</button>
     </div>
   </div>`;
@@ -260,35 +295,78 @@ function _renderLedgerSection(rows) {
   } else if (!rows.length) {
     body = _renderEmptyHint('Nothing yet. The coordinator reflects on your activity every 6 hours; facts it infers about you land here for review.');
   } else {
-    body = rows.map(row => {
+    const sortedRows = [...rows].sort((a, b) => {
+      const aFlagged = a?.status === 'contradicted' || a?.flag === 'contradicted' || !!a?.flag;
+      const bFlagged = b?.status === 'contradicted' || b?.flag === 'contradicted' || !!b?.flag;
+      if (aFlagged !== bFlagged) return aFlagged ? -1 : 1;
+      const aTime = Date.parse(a?.updatedAt || a?.confirmedAt || a?.createdAt || '') || 0;
+      const bTime = Date.parse(b?.updatedAt || b?.confirmedAt || b?.createdAt || '') || 0;
+      return bTime - aTime;
+    });
+    body = sortedRows.map(row => {
       const tier = row.tier === 'confirmed' ? 'confirmed' : 'inferred';
       const evCount = Array.isArray(row.evidence) ? row.evidence.length : (row.evidence ? 1 : 0);
-      const args = JSON.stringify([row.id]).replace(/"/g, '&quot;');
+      const key = _learnFactRef(row.id);
+      const category = _learnProfileTypes.has(row.type) ? row.type : 'fact';
+      const confidence = Number.isFinite(row.confidence)
+        ? (row.confidence >= .8 ? 'strong' : row.confidence >= .6 ? 'moderate' : 'tentative')
+        : null;
+      const date = row.updatedAt || row.confirmedAt || row.createdAt;
+      const evidenceDetails = Array.isArray(row.evidenceDetails) ? row.evidenceDetails : [];
+      const contradicted = row.status === 'contradicted' || row.flag === 'contradicted';
       const tierBadge = tier === 'confirmed'
-        ? `<span style="font-size:10px;background:var(--green,#3a7);color:#fff;padding:1px 6px;border-radius:3px">confirmed</span>`
-        : `<span style="font-size:10px;background:var(--bg1);border:1px solid var(--border);color:var(--muted);padding:1px 6px;border-radius:3px">inferred</span>`;
+        ? '<span class="learn-fact-chip learn-fact-confirmed">confirmed</span>'
+        : '<span class="learn-fact-chip">inferred</span>';
       const flagBadge = row.flag
-        ? `<span style="font-size:10px;background:var(--orange,#c80);color:#fff;padding:1px 6px;border-radius:3px" title="May contradict something learned earlier">flagged</span>`
+        ? `<span class="learn-fact-chip learn-fact-flag" title="New evidence may conflict with this fact">${contradicted ? 'conflicting evidence' : 'flagged'}</span>`
         : '';
-      const confirmBtn = tier === 'confirmed' ? '' :
-        `<button class="btn-small" data-action="learnConfirmFact" data-args='${args}' title="Mark as correct — confirmed facts are kept by Start fresh" style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer">Confirm</button>`;
-      return `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px">
-        <div style="flex:1">
-          <div style="line-height:1.4">${escHtml(row.statement ?? '')}</div>
-          <div style="display:flex;gap:6px;margin-top:3px;align-items:center">
-            ${tierBadge}${flagBadge}
-            <span style="color:var(--muted);font-size:11px" title="Observations behind this">${evCount} evidence</span>
+      const confirmBtn = tier === 'confirmed' && !contradicted ? '' :
+        `<button class="btn-small" data-action="learnConfirmFact" data-args='["$el"]' data-learn-fact-key="${key}" title="Mark the original fact as correct — confirmed facts are kept by Start fresh">${contradicted ? 'Keep original' : 'Confirm'}</button>`;
+      const conflictDetail = contradicted && row.contradictionStatement
+        ? `<div class="learn-fact-conflict"><b>New evidence suggests:</b> ${escHtml(row.contradictionStatement)}<br><small>This is a model judgment. Keep the original, use this suggestion, edit it, or remove it.</small></div>`
+        : '';
+      const useSuggestionBtn = contradicted && typeof row.contradictionStatement === 'string'
+        && row.contradictionStatement.trim().length >= 3 && row.contradictionStatement.trim().length <= 300
+        ? `<button class="btn-small" data-action="learnUseFactSuggestion" data-args='["$el"]' data-learn-fact-key="${key}">Use new suggestion</button>`
+        : '';
+      const why = evidenceDetails.length
+        ? evidenceDetails.map((ev, i) => `<div class="learn-evidence-item">
+            <div>${escHtml(ev.summary || `Supporting activity ${i + 1}`)}</div>
+            <small>${escHtml(ev.source || 'activity')}${ev.at ? ` · ${escHtml(_learnAgo(Date.parse(ev.at)))}` : ''}</small>
+          </div>`).join('')
+        : `<div class="learn-evidence-item"><div>${evCount ? `${evCount} supporting observation${evCount === 1 ? '' : 's'}.` : 'No supporting detail was retained.'}</div><small>Older facts may only have an evidence count.</small></div>`;
+      return `<div class="learn-fact-row ${row.flag ? 'learn-fact-row-flagged' : ''}">
+        <div class="learn-fact-main">
+          <div class="learn-fact-statement">${escHtml(row.statement ?? '')}</div>
+          ${conflictDetail}
+          <div class="learn-fact-meta">
+            ${tierBadge}${flagBadge}<span class="learn-fact-chip">${escHtml(category)}</span>
+            ${confidence ? `<span class="learn-fact-chip">${confidence} confidence</span>` : ''}
+            ${date ? `<span class="learn-fact-date">updated ${escHtml(_learnAgo(Date.parse(date)))}</span>` : ''}
           </div>
+          <details class="learn-why"><summary>Why does OpenEnsemble think this? · ${evCount} evidence</summary>${why}</details>
         </div>
-        ${confirmBtn}
-        <button class="btn-small" data-action="learnDeleteFact" data-args='${args}' style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer">Forget</button>
+        <div class="learn-fact-actions">
+          ${confirmBtn}
+          ${useSuggestionBtn}
+          <button class="btn-small" data-action="learnEditFact" data-args='["$el"]' data-learn-fact-key="${key}">Edit</button>
+          <details class="learn-fact-more"><summary>More</summary><div>
+            <button data-action="learnFactNotTrue" data-args='["$el"]' data-learn-fact-key="${key}">Not true</button>
+            <button data-action="learnFactOutdated" data-args='["$el"]' data-learn-fact-key="${key}">Outdated</button>
+            <button data-action="learnFactTooPersonal" data-args='["$el"]' data-learn-fact-key="${key}">Too personal</button>
+            <button data-action="learnDeleteFact" data-args='["$el"]' data-learn-fact-key="${key}">Forget</button>
+          </div></details>
+        </div>
       </div>`;
     }).join('');
   }
-  return _renderSectionHdr("What I've learned about you", Array.isArray(rows) ? rows.length : 0) + body;
+  const intro = '<div class="learn-about-intro">Review what Personalization believes about you. Confirm accurate facts, edit close ones, or explain why something should be removed.</div>';
+  return _renderSectionHdr('About you', Array.isArray(rows) ? rows.length : 0) + intro + body;
 }
 
-async function learnConfirmFact(id) {
+async function learnConfirmFact(el) {
+  const id = _learnFactIdFromEl(el);
+  if (!id) return;
   try {
     const r = await fetch(`/api/personalization/ledger/${encodeURIComponent(id)}/confirm`, { method: 'POST' });
     if (!r.ok) {
@@ -301,7 +379,66 @@ async function learnConfirmFact(id) {
   loadLearnDrawer();
 }
 
-async function learnDeleteFact(id) {
+async function learnEditFact(el) {
+  const id = _learnFactIdFromEl(el);
+  if (!id) return;
+  const row = (_learnState.ledger || []).find(r => r.id === id);
+  if (!row) return;
+  const statement = prompt('Correct this fact:', row.statement || '');
+  if (statement == null) return;
+  const next = statement.trim();
+  if (next.length < 3 || next.length > 300) { alert('A fact must be 3–300 characters.'); return; }
+  const categoryInput = prompt(
+    'Category (pattern, fact, relationship, preference, constraint, goal, or routine):',
+    _learnProfileTypes.has(row.type) ? row.type : 'fact',
+  );
+  if (categoryInput == null) return;
+  const category = categoryInput.trim().toLowerCase();
+  if (!_learnProfileTypes.has(category)) { alert('Choose a valid category.'); return; }
+  try {
+    const r = await fetch(`/api/personalization/ledger/${encodeURIComponent(id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ statement: next, type: category }),
+    });
+    if (!r.ok) { const err = await r.json().catch(() => ({})); alert(`Failed: ${err.error || r.statusText}`); }
+  } catch (e) { alert(`Failed: ${e.message}`); }
+  loadLearnDrawer();
+}
+
+async function learnUseFactSuggestion(el) {
+  const id = _learnFactIdFromEl(el);
+  if (!id) return;
+  const row = (_learnState.ledger || []).find(r => r.id === id);
+  const statement = typeof row?.contradictionStatement === 'string' ? row.contradictionStatement.trim() : '';
+  if (statement.length < 3 || statement.length > 300) return;
+  if (!confirm('Replace the original fact with this new suggestion and mark it confirmed?')) return;
+  try {
+    const r = await fetch(`/api/personalization/ledger/${encodeURIComponent(id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ statement, type: _learnProfileTypes.has(row.type) ? row.type : 'fact' }),
+    });
+    if (!r.ok) { const err = await r.json().catch(() => ({})); alert(`Failed: ${err.error || r.statusText}`); }
+  } catch (e) { alert(`Failed: ${e.message}`); }
+  loadLearnDrawer();
+}
+
+async function _learnFactFeedback(el, reason, question) {
+  const id = _learnFactIdFromEl(el);
+  if (!id || !confirm(question)) return;
+  try {
+    const r = await fetch(`/api/personalization/ledger/${encodeURIComponent(id)}/feedback`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }),
+    });
+    if (!r.ok) { const err = await r.json().catch(() => ({})); alert(`Failed: ${err.error || r.statusText}`); }
+  } catch (e) { alert(`Failed: ${e.message}`); }
+  loadLearnDrawer();
+}
+function learnFactNotTrue(el) { return _learnFactFeedback(el, 'not_true', 'Remove this because it is not true? OpenEnsemble will avoid relearning the same claim.'); }
+function learnFactOutdated(el) { return _learnFactFeedback(el, 'outdated', 'Remove this as outdated? It may be learned again later if new activity supports it.'); }
+function learnFactTooPersonal(el) { return _learnFactFeedback(el, 'too_personal', 'Remove this as too personal? You can also disable individual learning sources in Settings → Personalization.'); }
+
+async function learnDeleteFact(el) {
+  const id = _learnFactIdFromEl(el);
+  if (!id) return;
   if (!confirm('Forget this fact about you?')) return;
   try {
     const r = await fetch(`/api/personalization/ledger/${encodeURIComponent(id)}`, { method: 'DELETE' });

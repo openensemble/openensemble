@@ -5,11 +5,16 @@
  */
 
 import {
-  assertId, queuedWrite, generateCombined, safeParseJSON, providerHealthy,
+  generateCombined, safeParseJSON, providerHealthy,
 } from './shared.mjs';
-import { getTable, remember, pin, searchSimilar } from './lance.mjs';
+import { remember, pin, searchSimilar } from './lance.mjs';
 import { forgetByText } from './recall.mjs';
 import { embed } from './embedding.mjs';
+import { handleProactiveNegativeFeedback } from '../lib/personalization/negative-feedback.mjs';
+import {
+  extractPreferenceStructure,
+  hasAmbiguousPreferenceAction,
+} from '../lib/personalization/preference-structure.mjs';
 
 // Cortex was trained on the bare `User: "..." Agent: "..."` wrapper (per
 // training/train.py format_record('signals')) — sending a verbose schema
@@ -26,6 +31,26 @@ const AGENT_ACTION_RESPONSE_RE = /\b(moved to trash|trashed|permanently deleted|
 // like pineapples"), the signals classifier otherwise sees the agent's echo
 // and re-saves the same preference on every recall.
 const QUESTION_ONLY_RE = /^(?:what'?s?|which|who'?s?|whose|when|where|why|how|do|does|did|is|are|was|were|can|could|should|would|will|am|have|has|had)\b[^.!]*\??\s*$/i;
+const NAMED_NEGATIVE_SUBJECT_RE = /^[\p{Lu}][\p{L}\p{M}'’.-]{1,39}\s+(?=(?:no\b|do(?:es)?\s+not\b|don['’]?t\b|doesn['’]?t\b|dislikes?\b|hates?\b|avoids?\b|never\b|can(?:not|'t)\b|(?:am\s+)?allergic\b))/u;
+const NEGATIVE_PREFERENCE_RE = /^(?:the user\s+)?(?:i\s+)?(?:no\b|do(?:es)?\s+not\b|don['’]?t\b|doesn['’]?t\b|dislikes?\b|hates?\b|avoids?\b|never\b|can(?:not|'t)\b|(?:am\s+)?allergic\b)/i;
+
+// The shared structurizer deliberately accepts a very small grammar. Normalize
+// the one common contraction whose expanded form is already in that grammar so
+// "I'm allergic to peanuts" receives the same deterministic treatment as
+// "I am allergic to peanuts". Do not generally rewrite user prose here: every
+// other form must still pass the exact standalone-declaration grammar.
+function normalizeDeterministicPreferenceText(text) {
+  return String(text || '').replace(/^\s*i['’]m\s+allergic\s+to\b/i, 'I am allergic to');
+}
+
+async function extractPreferenceStructureForUser(userId, text) {
+  let timeZone = null;
+  try {
+    const { getConfig } = await import('../lib/personalization/config.mjs');
+    timeZone = (await getConfig(userId))?.timezone || null;
+  } catch { /* server-local fallback */ }
+  return extractPreferenceStructure(normalizeDeterministicPreferenceText(text), { timeZone });
+}
 
 async function detectSignals({ agentId, userMessage, agentLastResponse, userId = 'default' }) {
   if (!await providerHealthy()) return { correction: null, preference: null };
@@ -43,7 +68,7 @@ async function detectSignals({ agentId, userMessage, agentLastResponse, userId =
   // A pure question from the user is a recall, not an assertion. Drop any
   // preference the classifier emits so we don't re-save the agent's echoed
   // answer on every "what fruit do i like" turn.
-  if (QUESTION_ONLY_RE.test(userMessage.trim())) {
+  if (QUESTION_ONLY_RE.test(userMessage.trim()) || /\?\s*$/.test(userMessage.trim())) {
     s.is_preference = false;
     s.preference = null;
   }
@@ -74,30 +99,71 @@ async function detectSignals({ agentId, userMessage, agentLastResponse, userId =
     // dismissal cooldown, role auto-detection, and the rule write itself.
     maybePromoteCorrection({ agentId, userId, correctionRecord, correctionText: s.correction })
       .catch(e => console.warn('[cortex] Correction promotion check failed:', e.message));
+
+    // Feed the same high-confidence, user-authored signal into the typed
+    // personalization consolidator. This is much stronger evidence than an
+    // incidental tool call and avoids running a second classifier.
+    import('../lib/personalization/recorder.mjs')
+      .then(m => m.recordStructuredSignal({
+        userId, agentId, type: 'correction', statement: s.correction,
+        source: 'cortex_signal', metadata: { confidence: 0.99 },
+      }))
+      .catch(e => console.warn('[personalization] correction signal capture failed:', e.message));
   }
 
-  // Handle preference — strength determines confidence and immortality
+  // Handle a model-classified preference as reviewable inferred evidence.
   if (s.is_preference && s.preference) {
     const strength = s.preference_strength || 'moderate';
-    const strengthMap = { strong: { confidence: 0.99, immortal: true }, moderate: { confidence: 0.92, immortal: false }, weak: { confidence: 0.75, immortal: false } };
-    const { confidence, immortal } = strengthMap[strength] || strengthMap.moderate;
-    const text = `PREFERENCE: ${s.preference}`;
-    preferenceRecord = await remember({ agentId, type: 'params', source: 'preference',
-      confidence, text, metadata: { category: 'preference', strength }, userId });
-    // Strong preferences get pinned as immortal
-    if (immortal && preferenceRecord?.id) {
-      const tableName = `${agentId}_params`;
-      queuedWrite(tableName, async () => {
-        const table = await getTable(tableName, userId);
-        await table.update({
-          where: `id = '${assertId(preferenceRecord.id)}'`,
-          values: { immortal: true, stability: 999999 },
-        }).catch(e => console.debug('[cortex] Preference pin error:', e.message));
+    // This branch is model-classified: deterministic, unmistakable user
+    // statements already returned through the confirmed fast path above.
+    // Keep uncertain model judgments inferred and non-immortal until the user
+    // confirms them in About you.
+    const strengthMap = { strong: { confidence: 0.8 }, moderate: { confidence: 0.7 }, weak: { confidence: 0.6 } };
+    const { confidence } = strengthMap[strength] || strengthMap.moderate;
+    // Never write this branch to the legacy agent params table. Params are
+    // rendered as trusted remembered rules, while this is only a model
+    // judgment. The typed ledger is the sole storage path: it labels the row
+    // INFERRED, makes it reviewable, and keeps the personalization consent
+    // switch authoritative.
+    // Keep negative preferences from becoming positive deal/monitor matches.
+    // Use a narrow leading-phrase test so mixed statements such as "I love
+    // Honeycrisp, not Gala" retain their primary positive polarity.
+    const preferenceText = String(s.preference).trim()
+      .replace(NAMED_NEGATIVE_SUBJECT_RE, '');
+    const preferencePolarity = NEGATIVE_PREFERENCE_RE.test(preferenceText)
+      ? 'negative' : 'positive';
+    try {
+      const recorder = await import('../lib/personalization/recorder.mjs');
+      const observation = await recorder.recordStructuredSignal({
+        userId, agentId, type: 'preference', statement: s.preference,
+        source: 'cortex_inference',
+        metadata: {
+          confidence, strength, polarity: preferencePolarity,
+          classification: 'model',
+        },
       });
+      // recordStructuredSignal returns null when personalization is off,
+      // onboarding consent is incomplete, or session learning is disabled.
+      // Do not bypass that decision by writing directly to the typed ledger.
+      if (observation) {
+        const ledger = await import('../lib/personalization/ledger.mjs');
+        const structure = await extractPreferenceStructureForUser(userId, String(s.preference));
+        const inference = await ledger.applyInference(userId, {
+          statement: s.preference, type: 'preference', verb: 'new',
+          confidence, scope: 'global', polarity: preferencePolarity,
+          subject: structure?.subject || null,
+          structure: structure?.sentiment === preferencePolarity ? structure : null,
+          evidence: observation?.id ? [observation.id] : [],
+          evidenceDetails: observation?.id ? [{
+            id: observation.id, source: 'model-classified preference', at: observation.ts,
+            summary: observation.digest,
+          }] : [],
+        });
+        if (inference?.action && inference.action !== 'skipped') preferenceRecord = inference;
+      }
+    } catch (e) {
+      console.warn('[personalization] preference signal capture failed:', e.message);
     }
-    // Cross-agent: also store as shared user fact
-    remember({ agentId: 'shared', type: 'user_facts', source: 'preference',
-      confidence, text, metadata: { category: 'preference', strength }, userId }).catch(() => {});
   }
 
   return { correction: correctionRecord, preference: preferenceRecord };
@@ -359,8 +425,144 @@ function detectExplicitRemember(text) {
   return null;
 }
 
+// High-confidence preference phrases should not depend on the learned signal
+// head being available. This deliberately handles only unmistakable, standalone
+// declarations; everything ambiguous still goes through the classifier below.
+export function _testDetectExplicitPreference(text) {
+  const t = normalizeDeterministicPreferenceText(text).trim().replace(/[.!]+$/, '').trim();
+  if (!t || t.length > 300 || t.endsWith('?')) return null;
+  // This fast path is intentionally for one standalone declaration. Reject
+  // internal sentence/semicolon boundaries conservatively; decimal prices
+  // remain valid because their period is not followed by whitespace + text.
+  if (/[;!?]|\.(?=\s+[\p{L}\p{N}])/u.test(t)) return null;
+  if (hasAmbiguousDeterministicPreferenceAction(t)) return null;
+
+  let m = t.match(/^(?:i|we)\s+(?:(really|absolutely|especially)\s+)?(love|adore|like|enjoy|prefer)\s+(.{3,220})$/i);
+  if (m) {
+    let subject = m[3].trim();
+    if (/^(?:that|how|when|what)\s+you\b|^your\b/i.test(subject)
+      || /^(?:it|this|that|them|these|those)$/i.test(subject)
+      || /\b(?:can|could|would|will)\s+you\b|[,;]\s*(?:find|search|look|show|get|tell|remind|schedule|check)\b/i.test(subject)) return null;
+    subject = subject.split(/\s+(?:over|rather than|instead of)\s+/i)[0].trim();
+    if (subject.length < 3) return null;
+    if (!extractPreferenceStructure(t)) return null;
+    return {
+      statement: subject.slice(0, 220),
+      polarity: 'positive',
+      strength: /love|adore/i.test(m[2]) || /really|absolutely/i.test(m[1] || '') ? 'strong' : 'moderate',
+    };
+  }
+
+  m = t.match(/^my\s+favou?rite\s+(.{2,70}?)\s+(?:is|are)\s+(.{3,160})$/i);
+  if (m) {
+    const category = m[1].trim();
+    const favorite = m[2].trim();
+    const statement = new RegExp(`\\b${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(favorite)
+      ? favorite : `${favorite} ${category}`;
+    if (!extractPreferenceStructure(t)) return null;
+    return { statement: statement.slice(0, 220), polarity: 'positive', strength: 'strong' };
+  }
+
+  // Bounded first-person habits and constraints. These verbs exactly mirror
+  // the structurizer's durable domains; open-ended verbs such as "always go"
+  // remain model-only. The structurizer supplies the final action/question/
+  // secret and subject safety gate.
+  m = t.match(/^(?:i|we)\s+(only|always|never|do\s+not|don['’]?t)\s+(buy|purchase|order|choose|eat|drink|use|wear|want)\s+(.{3,245})$/i);
+  if (m && extractPreferenceStructure(t)) {
+    const quantifier = m[1].toLowerCase().replace(/\s+/g, ' ');
+    const verb = ({
+      buy: 'buys', purchase: 'purchases', order: 'orders', choose: 'chooses',
+      eat: 'eats', drink: 'drinks', use: 'uses', wear: 'wears', want: 'wants',
+    })[m[2].toLowerCase()];
+    const subject = m[3].trim();
+    // "I always want you to ..." is an instruction, not a profile fact.
+    if (/^(?:you|the assistant)\b/i.test(subject)) return null;
+    const negative = /^(?:never|do not|don['’]?t)$/i.test(quantifier);
+    return {
+      statement: (negative
+        ? `Avoids ${subject}`
+        : `${quantifier === 'always' ? 'Always' : 'Only'} ${verb} ${subject}`).slice(0, 220),
+      polarity: negative ? 'negative' : 'positive',
+      strength: 'strong',
+    };
+  }
+
+  m = t.match(/^(?:i|we)\s+(?:(?:really|absolutely)\s+)?(?:do\s+not\s+like|don['’]?t\s+like|dislike|hate|avoid|can['’]?t\s+stand|am\s+allergic\s+to)\s+(.{3,200})$/i);
+  if (m) {
+    const subject = m[1].trim();
+    if (/^(?:it|this|that|them|these|those)$/i.test(subject)) return null;
+    if (!extractPreferenceStructure(t)) return null;
+    return { statement: `Avoids ${subject}`.slice(0, 220), polarity: 'negative', strength: 'strong' };
+  }
+  return null;
+}
+
+async function storeDeterministicPreference({ userId, agentId, preference, structure }) {
+  if (!structure || structure.sentiment !== preference.polarity) return null;
+  try {
+    const recorder = await import('../lib/personalization/recorder.mjs');
+    const observation = await recorder.recordStructuredSignal({
+      userId,
+      agentId,
+      type: 'preference',
+      statement: preference.statement,
+      source: 'explicit_phrase',
+      metadata: { confidence: 0.99, strength: preference.strength, polarity: preference.polarity },
+    });
+    if (!observation) return null;
+    const ledger = await import('../lib/personalization/ledger.mjs');
+    const row = await ledger.upsertExplicitProfile(userId, {
+      statement: preference.statement,
+      type: 'preference',
+      scope: 'global',
+      subject: structure.subject,
+      polarity: preference.polarity,
+      structure,
+      evidence: [observation.id],
+      evidenceDetails: [{
+        id: observation.id,
+        source: 'explicit preference phrase',
+        at: observation.ts,
+        summary: observation.digest,
+      }],
+    });
+    if (row) queuePreferenceOpportunityRefresh(userId);
+    return row;
+  } catch (e) {
+    console.warn('[personalization] deterministic preference capture failed:', e.message);
+    return null;
+  }
+}
+
+function queuePreferenceOpportunityRefresh(userId) {
+  import('../lib/personalization/preference-opportunities.mjs')
+    .then(module => module.refreshPreferenceOpportunitiesForProfileChange?.(userId, { limit: 1 }))
+    .catch(e => console.warn('[personalization] immediate preference opportunity check deferred:', e?.message || e));
+}
+
 // Messages that are action/task requests — not preferences, skip signal detection
 const ACTION_REQUEST_RE = /\b(schedule|remind me|in \d+ (minute|hour|second|min|hr)s?|run .{1,40} in|set (up )?a task|create a task|check .{1,30} in \d+|search for|look up|find me|pull .{1,30} in|get me .{1,30} in \d+|delete|trash|archive|reply to|forward|unsubscribe|send (an? )?email|check my (email|inbox|mail)|show me (my )?(email|inbox|mail)|still (seeing|getting|receiving|have))\b.{0,60}(email|message|mail|inbox|\bfrom\b)/i;
+
+const DETERMINISTIC_PREFERENCE_CUE_RE = /^(?:i|we)\s+(?:(?:really|absolutely|especially)\s+)?(?:(?:love|adore|like|enjoy|prefer|dislike|hate|avoid|can['’]?t\s+stand|am\s+allergic\s+to)\b|(?:only|always|never|do\s+not|don['’]?t)\s+(?:buy|purchase|order|choose|eat|drink|use|wear|want)\b)|^i['’]m\s+allergic\s+to\b|^my\s+favou?rite\b/i;
+const MIXED_PREFERENCE_ACTION_RE = /(?:[.,;:!?&]|\s[-—]\s|\b(?:and|but|so|then)\b)\s*(?:(?:also|now|just|later|next|afterwards?|after\s+that|subsequently)\s+)*(?:please\s+)?(?:(?:(?:can|could|would|will)\s+you|(?:i|we)\s+(?:want|need)\s+you\s+to)\s+(?:please\s+)?)?(?:buy|purchase|order|add|find|search|look|show|get|grab|pick\s+up|tell|check|remind|schedule|send|book|reserve|notify|alert|watch|monitor)\b|\bplease\s+(?:buy|purchase|order|add|find|search|look|show|get|grab|pick\s+up|tell|check|remind|schedule|send|book|reserve|notify|alert|watch|monitor)\b/i;
+const PREFERENCE_DOMAIN_IMPERATIVE_RE = /^(?:please\s+)?(?:(?:do\s+not|don['’]?t|never)\s+)?(?:buy|purchase|order|choose|eat|drink|use|wear|want)\b/i;
+const ASSISTANT_DIRECTED_ACTION_RE = /^(?:(?:i|we)\s+(?:would\s+like|want|need)\s+you\s+to|(?:i|we)['’]d\s+like\s+you\s+to)\s+(?:buy|purchase|order|choose|eat|drink|use|wear|find|search|check|remind|schedule|send|watch|monitor)\b/i;
+
+function hasAmbiguousDeterministicPreferenceAction(text) {
+  const value = String(text || '').trim();
+  return DETERMINISTIC_PREFERENCE_CUE_RE.test(value)
+    && MIXED_PREFERENCE_ACTION_RE.test(value);
+}
+
+function hasInternalPreferenceClauseBoundary(text) {
+  const value = String(text || '').trim();
+  if (!DETERMINISTIC_PREFERENCE_CUE_RE.test(value)) return false;
+  // Standalone declarations may end in emphasis, but a second sentence,
+  // semicolon clause, question, or dash clause is no longer deterministic
+  // profile input. Short-circuit before the model classifier even when the
+  // second clause uses an action synonym outside our bounded verb list.
+  return /;|\?(?:\s|$)|[!?](?=\s+\S)|\.(?=\s+\S)|\s[-—]\s/u.test(value);
+}
 
 // Short confirmations/rejections — never meaningful for memory
 const CONFIRMATION_RE = /^(yes|no|ok|okay|sure|confirm|cancel|go|stop|done|trash|delete|send|proceed|continue|skip|nope|yep|yup|aye|nah|please|thanks|thank you|got it|sounds good|do it|go ahead|abort)[\s!.]*$/i;
@@ -449,6 +651,24 @@ export async function processSignals({ agentId, userMessage, agentLastResponse =
     return { correction: false, preference: false };
   }
 
+  // Terse negative feedback about a just-visible proactive receipt/watcher is
+  // an instruction to stop that originating behavior, not a new user
+  // preference or a correction to the assistant's prose. The deterministic
+  // helper fails closed when no single user-owned target can be identified.
+  // Recognized-but-ambiguous feedback still short-circuits the LLM signal head
+  // so "not useful" is never accidentally stored as a durable preference.
+  const proactiveFeedback = await handleProactiveNegativeFeedback({
+    userId, agentId, userMessage, contextText: agentLastResponse,
+  });
+  if (proactiveFeedback.recognized) {
+    return {
+      correction: false,
+      preference: false,
+      proactiveFeedback: proactiveFeedback.handled,
+      proactiveFeedbackResult: proactiveFeedback,
+    };
+  }
+
   // Check for explicit forget request first
   const forgetSubject = detectForgetRequest(userMessage);
   if (forgetSubject) {
@@ -465,6 +685,12 @@ export async function processSignals({ agentId, userMessage, agentLastResponse =
   // Explicit remember/fact — deterministic fast-path, no LLM required
   const factSubject = detectExplicitRemember(userMessage);
   if (factSubject) {
+    const preference = _testDetectExplicitPreference(factSubject);
+    if (preference) {
+      const structure = await extractPreferenceStructureForUser(userId, factSubject);
+      const stored = await storeDeterministicPreference({ userId, agentId, preference, structure });
+      return { correction: false, preference: !!stored, remembered: !!stored };
+    }
     pinFact({ agentId, text: factSubject, userId }).catch(e => console.warn('[cortex] Fact pin failed:', e.message));
     return { correction: false, preference: false, remembered: true, factText: factSubject };
   }
@@ -472,6 +698,32 @@ export async function processSignals({ agentId, userMessage, agentLastResponse =
   // Skip preference/correction detection for action/scheduling requests
   if (ACTION_REQUEST_RE.test(userMessage)) {
     return { correction: false, preference: false };
+  }
+
+  // A bare domain verb addresses the assistant; only first-person standalone
+  // declarations qualify for deterministic learning.
+  if (PREFERENCE_DOMAIN_IMPERATIVE_RE.test(userMessage.trim())
+    || ASSISTANT_DIRECTED_ACTION_RE.test(userMessage.trim())) {
+    return { correction: false, preference: false };
+  }
+
+  // A statement plus a request ("I love apples, find me a sale") may still
+  // be useful for the current task, but it is not an unambiguous instruction
+  // to create durable personalization. Do not let the model reclassify it.
+  if (hasAmbiguousPreferenceAction(userMessage)
+    || hasAmbiguousDeterministicPreferenceAction(userMessage)
+    || hasInternalPreferenceClauseBoundary(userMessage)
+    || (DETERMINISTIC_PREFERENCE_CUE_RE.test(userMessage.trim()) && /\?\s*$/.test(userMessage.trim()))) {
+    return { correction: false, preference: false };
+  }
+
+  const explicitPreference = _testDetectExplicitPreference(userMessage);
+  if (explicitPreference) {
+    const structure = await extractPreferenceStructureForUser(userId, userMessage);
+    const stored = await storeDeterministicPreference({
+      userId, agentId, preference: explicitPreference, structure,
+    });
+    return { correction: false, preference: !!stored };
   }
 
   // One combined model call for all signals
