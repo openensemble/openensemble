@@ -14,16 +14,19 @@ import fs from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { USERS_DIR } from './lib/paths.mjs';
-import { appendToSession } from './sessions.mjs';
 import {
-  markAgentBusy, openTurn, finalizeTurn,
-  isAgentBusy, waitForAgentIdle, getActiveStreams, abortChat, abortAllChats,
+  appendToSession, appendUserTurnPending, failPendingTurn,
+  appendTurnArtifactOnce, getSessionEpoch, markTurnTerminal,
+} from './sessions.mjs';
+import {
+  markAgentBusy, openTurn, finalizeTurn, recordStreamEvent,
+  isAgentBusy, waitForAgentIdle, getActiveStreams, getActiveStream, abortChat, abortAllChats,
 } from './chat-dispatch/slot-registry.mjs';
 // Re-export the slot-registry surface so external importers
 // (ws-handler, routes/telegram, skills/delegate, server) keep working
 // without each switching to the new module path.
 export {
-  isAgentBusy, waitForAgentIdle, markAgentBusy, getActiveStreams,
+  isAgentBusy, waitForAgentIdle, markAgentBusy, getActiveStreams, getActiveStream,
   abortChat, abortAllChats,
 } from './chat-dispatch/slot-registry.mjs';
 import { tryHandleSlashCommand } from './chat-dispatch/slash-commands.mjs';
@@ -118,43 +121,49 @@ function isDesktopToolName(name) {
 // cost per turn is a map lookup, not a re-import.
 const APPROVAL_KIND_ORDER = ['email_purge', 'expense_delete', 'trust_promotion', 'watcher_op'];
 
-/** @returns {Promise<Record<string, {phrase: string, description: string, expiresAt?: number|null}>>} */
-export async function snapshotPendingApprovals(userId) {
-  const out = /** @type {Record<string, {phrase: string, description: string, expiresAt?: number|null}>} */ ({});
+/**
+ * @param {string} userId
+ * @param {string|null} [agentId]  scope the snapshot to ops staged from this
+ *   agent's chat (null-agent legacy entries still match — see
+ *   lib/pending-approvals.mjs wildcard semantics). Omitting it (tests,
+ *   out-of-turn callers) matches any staging agent.
+ * @returns {Promise<Record<string, {phrase: string, description: string, expiresAt?: number|null, opId?: string|null}>>}
+ */
+export async function snapshotPendingApprovals(userId, agentId = null) {
+  const out = /** @type {Record<string, {phrase: string, description: string, expiresAt?: number|null, opId?: string|null}>} */ ({});
   try {
     const { getPendingEmail } = await import('./skills/email/execute.mjs');
-    const p = getPendingEmail(userId);
-    if (p) out.email_purge = { phrase: 'APPROVE PURGE', description: p.desc || 'perform a destructive email operation' };
+    const p = getPendingEmail(userId, agentId);
+    if (p) out.email_purge = { phrase: 'APPROVE PURGE', description: p.desc || 'perform a destructive email operation', expiresAt: p.expiresAt ?? null, opId: p.opId ?? null };
   } catch (e) { console.warn('[chat-dispatch] approval snapshot (email) failed:', e.message); }
   try {
     const { getPendingDelete } = await import('./skills/expenses/execute.mjs');
-    const p = getPendingDelete(userId);
+    const p = getPendingDelete(userId, agentId);
     if (p) {
       const desc = p.name === 'expense_delete_all'
         ? 'delete ALL transactions'
         : p.name === 'expense_delete_batch'
           ? `delete ${(p.args?.ids || []).length} transaction(s)`
           : `delete transaction ${p.args?.id ?? ''}`;
-      out.expense_delete = { phrase: 'CONFIRM DELETION', description: desc };
+      out.expense_delete = { phrase: 'CONFIRM DELETION', description: desc, expiresAt: p.expiresAt ?? null, opId: p.opId ?? null };
     }
   } catch (e) { console.warn('[chat-dispatch] approval snapshot (expenses) failed:', e.message); }
   try {
     const { getPendingProven } = await import('./skills/profiles/execute.mjs');
-    const p = getPendingProven(userId);
-    if (p) out.trust_promotion = { phrase: 'APPROVE PROVEN', description: `promote "${p.service_id}" on "${p.node_id}" to proven` };
+    const p = getPendingProven(userId, agentId);
+    if (p) out.trust_promotion = { phrase: 'APPROVE PROVEN', description: `promote "${p.service_id}" on "${p.node_id}" to proven`, expiresAt: p.expiresAt ?? null, opId: p.opId ?? null };
   } catch (e) { console.warn('[chat-dispatch] approval snapshot (profiles) failed:', e.message); }
   try {
     const { getPendingWatcherOp } = await import('./skills/tasks/execute.mjs');
-    const p = getPendingWatcherOp(userId);
+    const p = getPendingWatcherOp(userId, agentId);
     if (p) {
       out.watcher_op = {
         phrase: 'APPROVE WATCHER OP',
         description: p.action === 'cancel'
           ? `cancel watcher "${p.watcherLabel}"`
           : `update watcher "${p.watcherLabel}"${p.changes?.length ? ` (${p.changes.join('; ')})` : ''}`,
-        // Mirrors PENDING_WATCHER_TTL_MS (5 min) in skills/tasks/execute.mjs —
-        // that module doesn't export the constant, so it's inlined here too.
-        expiresAt: p.ts + 5 * 60 * 1000,
+        expiresAt: p.expiresAt ?? null,
+        opId: p.opId ?? null,
       };
     }
   } catch (e) { console.warn('[chat-dispatch] approval snapshot (tasks) failed:', e.message); }
@@ -174,19 +183,26 @@ export async function snapshotPendingApprovals(userId) {
  * this is what keeps a background-task tick (which never touches the
  * pending maps) from re-announcing an already-shown pill every cycle.
  *
- * @param {Record<string, {phrase: string, description: string, expiresAt?: number|null}>} before
- * @param {Record<string, {phrase: string, description: string, expiresAt?: number|null}>} after
- * @returns {Array<{type: 'approval_pending'|'approval_resolved', kind: string, phrase?: string, description?: string, expiresAt?: number|null}>}
+ * @param {Record<string, {phrase: string, description: string, expiresAt?: number|null, opId?: string|null}>} before
+ * @param {Record<string, {phrase: string, description: string, expiresAt?: number|null, opId?: string|null}>} after
+ * @returns {Array<{type: 'approval_pending'|'approval_resolved', kind: string, phrase?: string, description?: string, expiresAt?: number|null, opId?: string|null}>}
  */
 export function diffPendingApprovals(before, after) {
-  const entries = /** @type {Array<{type: 'approval_pending'|'approval_resolved', kind: string, phrase?: string, description?: string, expiresAt?: number|null}>} */ ([]);
+  const entries = /** @type {Array<{type: 'approval_pending'|'approval_resolved', kind: string, phrase?: string, description?: string, expiresAt?: number|null, opId?: string|null}>} */ ([]);
   for (const kind of APPROVAL_KIND_ORDER) {
     const b = before?.[kind] || null;
     const a = after?.[kind] || null;
-    if (a && (!b || b.description !== a.description)) {
-      entries.push({ type: 'approval_pending', kind, phrase: a.phrase, description: a.description, expiresAt: a.expiresAt ?? null });
+    // Re-stage detection: prefer opId (unique per staging, so an identical
+    // description re-staged still yields a fresh pill); description compare
+    // remains as the legacy-row fallback.
+    const restaged = b && a && ((a.opId || b.opId) ? a.opId !== b.opId : b.description !== a.description);
+    if (a && (!b || restaged)) {
+      entries.push({ type: 'approval_pending', kind, phrase: a.phrase, description: a.description, expiresAt: a.expiresAt ?? null, ...(a.opId ? { opId: a.opId } : {}) });
     } else if (!a && b) {
-      entries.push({ type: 'approval_resolved', kind });
+      // Carry the id of the operation that actually disappeared. A delayed
+      // resolution for op X must not collapse a freshly re-staged op Y card
+      // of the same family in another tab.
+      entries.push({ type: 'approval_resolved', kind, ...(b.opId ? { opId: b.opId } : {}) });
     }
   }
   return entries;
@@ -379,6 +395,9 @@ function normalizeToolPlan(plan) {
  * @param {boolean} [opts._hiddenUser]               internal turn; persist user prompt hidden from UI
  * @param {boolean} [opts._isBackgroundContinuation] internal guard for completed background-task wakeups
  * @param {boolean} [opts._isolatedTaskRun]          internal scheduled/background task turn with no chat history
+ * @param {string|null} [opts.turnId]                external correlation id (voice/legacy clients)
+ * @param {string|null} [opts.messageId]             logical browser message id (stable across explicit retries)
+ * @param {string|null} [opts.attemptId]             idempotency key for one execution attempt
  * @returns {Promise<void>}
  */
 export async function handleChatMessage({
@@ -411,6 +430,9 @@ export async function handleChatMessage({
   _hiddenUser = false,
   _isBackgroundContinuation = false,
   _isolatedTaskRun = false,
+  turnId = null,
+  messageId = null,
+  attemptId = null,
 }) {
   // Wake-slot routing — household-shared voice device.
   //
@@ -455,7 +477,8 @@ export async function handleChatMessage({
   // ask_agent, and public/docs.js's "ask about this doc") reduce to one
   // ordered, capped array. Everything below reads `attachmentList`;
   // `rawAttachment`/`rawAttachments` are not touched again.
-  const attachmentList = normalizeAttachments(rawAttachments, rawAttachment);
+  const attachmentList = normalizeAttachments(rawAttachments, rawAttachment)
+    .map(attachment => ({ ...attachment }));
 
   // Turn trace (correlation spine). One record per top-level turn; nested
   // streamChat runs (specialist-router, ask_agent delegation) inherit this store
@@ -467,8 +490,63 @@ export async function handleChatMessage({
   // a child turn and unwind without corrupting this one. beginTurn/recorders
   // fail-open, so nothing here can break a turn.
   return turnTraceContext.run(undefined, async () => {
-  beginTurn({ userId, agentId, source: source ?? 'web' });
+  const turnStore = beginTurn({
+    userId,
+    agentId,
+    source: source ?? 'web',
+    turnId: attemptId ?? turnId,
+    messageId,
+    attemptId: attemptId ?? turnId,
+  });
   recordRouting({ toolPlan: toolPlan?.mode || 'auto' });
+
+  // Correlate every outward event before it reaches WS/Telegram adapters. The
+  // browser reducer uses (turn_id, seq) to drop late/duplicate events after an
+  // agent switch or reconnect. `done` is deliberately held until the outer
+  // finalizer has persisted approval/attachment rows too, making it a genuine
+  // whole-turn durability barrier rather than merely "the model stopped".
+  const rawOnEvent = onEvent;
+  const wireTurnId = turnStore?.turnId ?? attemptId ?? turnId ?? null;
+  const wireMessageId = messageId ?? null;
+  const wireAttemptId = attemptId ?? turnId ?? wireTurnId;
+  let eventSeq = 0;
+  let eventScopedSessionKey = `${userId}_${agentId}`;
+  /** @type {Record<string, any>|null} */
+  let heldDoneEvent = null;
+  /** @type {Record<string, any>|null} */
+  let heldErrorEvent = null;
+  let terminalErrorEmitted = false;
+  let postCommitFailed = false;
+  let skipPostTurnArtifacts = false;
+  const replayedArtifactSignatures = new Set();
+  let outwardText = '';
+  onEvent = (event) => {
+    if (!event || typeof event !== 'object') return rawOnEvent(event);
+    if (event.type === 'token' && typeof event.text === 'string') outwardText += event.text;
+    if (event.type === 'replace' && typeof event.text === 'string') outwardText = event.text;
+    if (event.type === 'done') {
+      heldDoneEvent = { ...event };
+      return;
+    }
+    if (event.type === 'error') {
+      terminalErrorEmitted = true;
+      heldErrorEvent = { ...event };
+      return;
+    }
+    // A nested/internal dispatcher may already have its own trace id, but the
+    // outer browser attempt remains the wire owner. Re-envelope here so one
+    // visible turn never switches ids mid-stream.
+    const tagged = {
+      ...event,
+      ...(wireTurnId ? { turn_id: wireTurnId } : {}),
+      ...(wireMessageId ? { message_id: wireMessageId } : {}),
+      ...(wireAttemptId ? { attempt_id: wireAttemptId } : {}),
+      ...(turnStore?.sessionEpoch ? { session_epoch: turnStore.sessionEpoch } : {}),
+      seq: ++eventSeq,
+    };
+    recordStreamEvent(eventScopedSessionKey, tagged);
+    return rawOnEvent(tagged);
+  };
 
   // Snapshot ambient state for voice-device turns. The firmware kills any
   // playing ambient when a wake fires (s_ambient_stop in main.c — barge-in
@@ -486,7 +564,7 @@ export async function handleChatMessage({
   // themselves stay on disk regardless. After the turn lands, ask the user
   // whether to keep or discard EACH one (see the attachment_decision emit
   // in the finally block below — one decision bubble per file_id).
-  const _attachmentsForDecision = (source !== 'voice-device' && !_isRoutineFollowup)
+  let _attachmentsForDecision = (source !== 'voice-device' && !_isRoutineFollowup)
     ? attachmentList.filter(a => a?.file_id).map(a => ({ file_id: a.file_id, name: a.name, mimeType: a.mimeType }))
     : [];
 
@@ -494,7 +572,11 @@ export async function handleChatMessage({
   // runs — tryApprovalIntercept executes-and-clears or clears-on-any-miss
   // inside that chain. Diffed against the post-turn state in the finally
   // below to drive the approval_pending / approval_resolved pill events.
-  const _pendingApprovalsBefore = await snapshotPendingApprovals(userId);
+  // Assigned AFTER the @-mention redirect (inside the try) so both snapshots
+  // are scoped to the agent the turn actually ran on; null means the turn
+  // returned before approvals could possibly change → the finally skips the
+  // diff entirely.
+  let _pendingApprovalsBefore = null;
 
   // Hoisted above the outer try so the finally can always release the agent's
   // busy-slot. finalizeTurnOnce() is idempotent and a no-op until busySlot is
@@ -545,6 +627,234 @@ export async function handleChatMessage({
     }
   }
 
+  const chatUser = getUser(userId);
+  if (isUserTimeBlocked(userId)) {
+    onEvent({ type: 'error', message: 'Access is restricted at this time. Please try again later.', agent: agentId ?? 'system', ...documentEventMeta });
+    return;
+  }
+
+  // Resolve the final agent before ANY side-effecting voice/browser fastpath.
+  // This lets the send-time pending row protect timer/control/proposal turns as
+  // well as normal LLM turns.
+  let agent = getAgentsForUser(userId).find(a => a.id === agentId);
+  if (!agent) {
+    onEvent({ type: 'error', message: `Unknown agent: ${agentId}`, agent: agentId, ...documentEventMeta });
+    return;
+  }
+
+  const scopedSessionKey = `${userId}_${agentId}`;
+  eventScopedSessionKey = scopedSessionKey;
+  if (turnStore) {
+    turnStore.sessionKey = scopedSessionKey;
+    // Capture before the first await. appendUserTurnPending compare-and-sets
+    // this generation under the writer lock, so Clear cannot be crossed by a
+    // paused pre-open request that later adopts the new epoch.
+    turnStore.sessionEpoch = getSessionEpoch(scopedSessionKey);
+  }
+
+  // False-positive wake/noise turns are deliberately ephemeral. Handle them
+  // before the send-time durability write so a one-character STT fragment
+  // cannot leave a permanent `running` row (and so these non-commands still
+  // do not pollute chat history).
+  if (await tryVoiceEmptyFastpath({
+    source, userText: rawText, userId, agentId, onEvent,
+  })) return;
+
+  if (!_hiddenUser && !_isolatedTaskRun && (rawText?.trim() || attachmentList.length)) {
+    try {
+      const pendingUserEntry = {
+        role: 'user',
+        content: rawText?.trim() || attachmentList.map(a => `[Attached: ${a?.name ?? 'file'}]`).join('\n'),
+        ts: Date.now(),
+        ...(wireMessageId ? { messageId: wireMessageId } : {}),
+        ...(wireAttemptId ? { attemptId: wireAttemptId } : {}),
+        ...(documentRequest ? { documentRequest } : {}),
+        ...(attachmentList.length ? {
+          attachments: attachmentList.map(a => ({
+            name: a?.name ?? null, mimeType: a?.mimeType ?? null,
+            isImage: Boolean(a?.isImage), file_id: a?.file_id ?? null,
+          })),
+        } : {}),
+      };
+      const pendingResult = await appendUserTurnPending(scopedSessionKey, pendingUserEntry);
+      if (pendingResult?.duplicate) {
+        onEvent({ type: 'turn_accepted', agent: agentId, duplicate: true, status: pendingResult.status || 'accepted' });
+
+        const replayArtifacts = Array.isArray(pendingResult.artifacts) ? pendingResult.artifacts : [];
+        const persistedApprovalState = {};
+        const decidedFileIds = new Set();
+        for (const row of replayArtifacts) {
+          if ((row?.role === 'approval_pending' || row?.role === 'approval_resolved') && row.kind) {
+            replayedArtifactSignatures.add(`${row.role}:${row.kind}:${row.opId ?? ''}`);
+          }
+          if (row?.role === 'approval_pending' && row.kind) {
+            persistedApprovalState[row.kind] = {
+              phrase: row.phrase, description: row.description,
+              expiresAt: row.expiresAt ?? null, opId: row.opId ?? null,
+            };
+          } else if (row?.role === 'approval_resolved' && row.kind) {
+            const prior = persistedApprovalState[row.kind];
+            if (!row.opId || !prior?.opId || prior.opId === row.opId) delete persistedApprovalState[row.kind];
+          } else if (row?.role === 'attachment_decision' && row.file_id) {
+            decidedFileIds.add(row.file_id);
+          }
+          const { role, turnId: _turnId, messageId: _messageId, attemptId: _attemptId,
+            hidden: _hidden, excludeFromModel: _exclude, ...fields } = row || {};
+          if (role) onEvent({ type: role, agent: agentId, ...fields, replay: true });
+        }
+
+        if (pendingResult.status === 'complete') {
+          skipPostTurnArtifacts = true;
+          onEvent({ type: 'done', agent: agentId, replay: true });
+        } else if (pendingResult.status === 'failed' || pendingResult.status === 'stopped') {
+          skipPostTurnArtifacts = true;
+          const terminal = pendingResult.terminal || {};
+          onEvent({
+            type: 'error', agent: agentId, replay: true,
+            code: terminal.code || 'duplicate_attempt',
+            retryable: terminal.retryable === true,
+            message: terminal.message || 'That execution attempt already ended. Use Retry to create a new attempt.',
+          });
+        } else if (pendingResult.status === 'finalizing' && pendingResult.recoverable) {
+          // The prior process durably wrote the reply/failure but died before
+          // the whole-turn marker. Re-run ONLY the idempotent artifact finalizer;
+          // never re-enter interceptors, tools, or the model.
+          busySlot = markAgentBusy(scopedSessionKey);
+          await busySlot.waitTurn();
+          const currentActive = getActiveStream(userId, agentId);
+          if (currentActive) {
+            // Another reconnect won recovery ownership while this duplicate was
+            // queued. Its broadcast will carry the authoritative artifacts and
+            // terminal; do not abort or race it.
+            busySlot.release();
+            busySlot = null;
+            skipPostTurnArtifacts = true;
+            return;
+          }
+          turnAc = openTurn(scopedSessionKey, userId, agentId, {
+            turnId: wireTurnId,
+            messageId: wireMessageId,
+            attemptId: wireAttemptId,
+            seq: eventSeq,
+          });
+          _pendingApprovalsBefore = pendingResult.approvalBefore || persistedApprovalState;
+          const replayAttachments = Array.isArray(pendingResult.userMessage?.attachments)
+            ? pendingResult.userMessage.attachments
+            : [];
+          _attachmentsForDecision = replayAttachments
+            .filter(att => att?.file_id && !decidedFileIds.has(att.file_id))
+            .map(att => ({ file_id: att.file_id, name: att.name, mimeType: att.mimeType }));
+          const terminal = pendingResult.terminal || {};
+          if (terminal.terminalType === 'done') heldDoneEvent = { type: 'done', agent: agentId, replay: true };
+          else {
+            terminalErrorEmitted = true;
+            heldErrorEvent = {
+              type: 'error', agent: agentId, replay: true,
+              code: terminal.code || 'turn_failed', retryable: terminal.retryable === true,
+              message: terminal.message || 'The prior turn failed before completion.',
+            };
+          }
+        } else {
+          // A live owner is still finalizing this attempt. Its broadcast carries
+          // the one authoritative terminal; this duplicate must not race it.
+          skipPostTurnArtifacts = true;
+        }
+        return;
+      }
+      onEvent({ type: 'turn_accepted', agent: agentId, status: 'accepted', userMessage: pendingUserEntry });
+    } catch (e) {
+      skipPostTurnArtifacts = true;
+      const cleared = e?.code === 'SESSION_CLEARED';
+      onEvent({
+        type: 'error', agent: agentId,
+        code: cleared ? 'session_cleared' : 'persistence_failed',
+        retryable: !cleared,
+        message: cleared
+          ? 'This turn was not executed because the session was cleared.'
+          : 'Your message could not be saved, so it was not executed. Please check storage and try again.',
+      });
+      console.warn('[chat-dispatch] send-time user persist failed:', e.message);
+      return;
+    }
+  }
+
+  if (!rawText?.trim() && !attachmentList.length) {
+    onEvent({ type: 'done', agent: agentId, ...documentEventMeta });
+    return;
+  }
+
+  // Register synchronously after acceptance, before attachment hydration or
+  // any other await. Stop/Clear can now abort a large image re-read as well as
+  // every pre-LLM fastpath. Duplicate attempts returned above without replacing
+  // the live original owner.
+  busySlot = markAgentBusy(scopedSessionKey);
+  if (_isBackgroundContinuation) {
+    await busySlot.waitTurn();
+    if (turnStore?.sessionEpoch && getSessionEpoch(scopedSessionKey) !== turnStore.sessionEpoch) {
+      busySlot.release();
+      busySlot = null;
+      onEvent({ type: 'error', agent: agentId, code: 'session_cleared', retryable: false, message: 'This turn was not executed because the session was cleared.' });
+      return;
+    }
+  }
+  const ac = openTurn(scopedSessionKey, userId, agentId, {
+    turnId: wireTurnId,
+    messageId: wireMessageId,
+    attemptId: wireAttemptId,
+    seq: eventSeq,
+  });
+  turnAc = ac;
+
+  // The browser's crash-safe outbox intentionally does not put large image
+  // base64 blobs in localStorage. A replay carries the already-uploaded
+  // profile `file_id`; restore the vision payload from that user-scoped path
+  // after idempotent acceptance and before any interceptor/model can run.
+  for (const attachment of attachmentList) {
+    if (!attachment?.isImage || attachment.base64 || !attachment.file_id) continue;
+    try {
+      const { getProfileFilePath } = await import('./lib/profile-files.mjs');
+      const filePath = getProfileFilePath(userId, attachment.file_id);
+      if (!filePath) throw new Error('uploaded image is no longer available');
+      attachment.base64 = (await fs.promises.readFile(filePath)).toString('base64');
+    } catch (e) {
+      skipPostTurnArtifacts = true;
+      await failPendingTurn(scopedSessionKey, 'The attached image is no longer available', {
+        retryable: false,
+      }).catch(() => {});
+      onEvent({
+        type: 'error', agent: agentId, code: 'attachment_missing', retryable: false,
+        message: 'The attached image could not be reopened, so this turn was not executed. Attach it again to retry.',
+      });
+      console.warn('[chat-dispatch] attachment replay hydration failed:', e.message);
+      return;
+    }
+  }
+
+  // Attachment hydration is asynchronous. Clear may land after the pending
+  // row was accepted but before those reads finish; recheck immediately before
+  // interceptors so no side effect can cross the generation boundary.
+  if (ac.signal.aborted) return;
+  if (turnStore?.sessionEpoch && getSessionEpoch(scopedSessionKey) !== turnStore.sessionEpoch) {
+    skipPostTurnArtifacts = true;
+    onEvent({ type: 'error', agent: agentId, code: 'session_cleared', retryable: false, message: 'This turn was not executed because the session was cleared.' });
+    return;
+  }
+
+  _pendingApprovalsBefore = await snapshotPendingApprovals(userId, agentId);
+
+  const persistEarlyHandledTurn = async () => {
+    try {
+      await appendToSession(scopedSessionKey,
+        { role: 'user', content: rawText?.trim() || '(voice command)', ts: Date.now() },
+        { role: 'assistant', content: outwardText || '(completed)', ts: Date.now() });
+      return true;
+    } catch (e) {
+      await failPendingTurn(scopedSessionKey, 'Persistence failed after the voice action', { retryable: false }).catch(() => {});
+      onEvent({ type: 'error', agent: agentId, code: 'persistence_failed', retryable: false, message: 'The action finished, but its chat record could not be saved. Do not retry automatically.' });
+      return false;
+    }
+  };
+
   // @-file references handled inside the transcribe fast-path (see
   // tryTranscribeAttachmentFastpath in chat-dispatch/fastpaths.mjs). That
   // fast-path now also covers the "@video/foo transcribe this" case in
@@ -564,12 +874,14 @@ export async function handleChatMessage({
   const _vTrace = source === 'voice-device';
   if (await tryVoiceProposalReply({ source, deviceId, rawText, agentId, onEvent })) {
     if (_vTrace) console.log(`[voice-trace] proposal-reply: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
+    await persistEarlyHandledTurn();
     return;
   }
   if (_vTrace) console.log(`[voice-trace] proposal-reply: miss device=${deviceId}`);
   const timerResult = await tryVoiceTimerIntent({ source, deviceId, rawText, userId, agentId, onEvent });
   if (timerResult) {
     if (_vTrace) console.log(`[voice-trace] timer-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
+    await persistEarlyHandledTurn();
     if (timerResult.awaitReplyMs && deviceId) {
       // Disambiguation question ("the 5 or 10 minute one?") — the pending pick
       // expires server-side, so the mic must reopen for the full TTL even when
@@ -590,28 +902,10 @@ export async function handleChatMessage({
   if (_vTrace) console.log(`[voice-trace] timer-intent: miss device=${deviceId}`);
   if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode, bargeIn, recentReplyStop })) {
     if (_vTrace) console.log(`[voice-trace] control-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
+    await persistEarlyHandledTurn();
     return;
   }
   if (_vTrace) console.log(`[voice-trace] control-intent: miss device=${deviceId} text="${(rawText || '').slice(0, 60)}" — falling through to LLM`);
-
-  const chatUser = getUser(userId);
-
-  // Honor accessSchedule on every incoming message — a session opened during
-  // allowed hours cannot keep chatting past curfew.
-  if (isUserTimeBlocked(userId)) {
-    onEvent({ type: 'error', message: 'Access is restricted at this time. Please try again later.', agent: agentId ?? 'system', ...documentEventMeta });
-    return;
-  }
-
-  // Strict: the target agent must be in the caller's roster. No global-registry
-  // fallback — that path let any authed user chat with another user's agents so
-  // long as the model passed their allowedModels gate, consuming the agent
-  // owner's API credits. getAgentsForUser is the canonical visibility list.
-  let agent = getAgentsForUser(userId).find(a => a.id === agentId);
-  if (!agent) {
-    onEvent({ type: 'error', message: `Unknown agent: ${agentId}`, agent: agentId, ...documentEventMeta });
-    return;
-  }
 
   // Voice-device source → slim tool subset. Reasoning effort kept at the
   // agent default (typically 'high' for gpt-5.x — required for reliable
@@ -652,36 +946,19 @@ export async function handleChatMessage({
 
   // Model restriction check
   if (chatUser?.allowedModels != null && agent.model && !chatUser.allowedModels.includes(agent.model)) {
+    await failPendingTurn(scopedSessionKey, `Model "${agent.model}" is not available for this account`, { retryable: false });
     onEvent({ type: 'error', message: `Model "${agent.model}" is not available for your account. Ask your admin to grant access.`, agent: agentId, ...documentEventMeta });
     return;
   }
 
-  if (!rawText?.trim() && !attachmentList.length) {
-    // Terminal event even for a no-op — a client showing a pending state on
-    // send otherwise hangs until its own timeout.
-    onEvent({ type: 'done', agent: agentId, ...documentEventMeta });
-    return;
-  }
   recordActivity(userId, agentId, { message: true });
 
   // Profile intercepts: news-topic preference (side-effect; pipeline continues)
   // and agent rename / re-emoji (short-circuits with a spoken confirmation).
   if (!documentRequest) {
     tryNewsPrefIntercept({ rawText, userId, onEvent });
-    if (tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
+    if (await tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
   }
-
-  const scopedSessionKey = `${userId}_${agentId}`;
-  // Register this WS run so concurrent delegate calls queue behind it.
-  // Key matches the scopedAgent.id used in streamChat (userId-scoped).
-  busySlot = markAgentBusy(scopedSessionKey);
-  // Background-task continuations queue behind any in-flight turn so they can't
-  // clobber each other or an active user turn. Interactive turns keep the
-  // openTurn() barge-in semantics: a new user message interrupts the prior
-  // stream rather than waiting for it.
-  if (_isBackgroundContinuation) await busySlot.waitTurn();
-  const ac = openTurn(scopedSessionKey, userId, agentId);
-  turnAc = ac;
 
   const scopedAgent = { ...agent, id: `${userId}_${agentId}` };
   {
@@ -802,10 +1079,6 @@ export async function handleChatMessage({
     tryHaFastpath, tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
   ]);
   const INTERCEPTORS = documentRequest ? [] : [
-    // Voice-only: catch empty / 1-char STT transcripts before they reach the
-    // LLM and cause the device to hang in THINKING. Must run before every
-    // other interceptor because the others assume a non-empty userText.
-    tryVoiceEmptyFastpath,
     // Audio/video attachment + "transcribe this" (or bare attachment) goes
     // straight to STT — no LLM round-trip needed. Falls through to the
     // coordinator when the user's text suggests something else (e.g. "what's
@@ -838,13 +1111,16 @@ export async function handleChatMessage({
       // (specialist routing sets its own mode above, so it never lands here).
       recordRouting({ mode: 'fastpath', fastPath: handler.name || null, localHandler: handler.name || null, llmAvoided: true, cloudCall: false });
     }
-    finalizeTurnOnce();
     // followupPrompt re-enters handleChatMessage and runs an LLM turn, whose
     // own finally re-arms — arming here too would double-send the window.
     if (!r.followupPrompt && CONVERSATION_REARM_FASTPATHS.has(handler)) {
       await armConversationFollowup({ source, deviceId, conversationMode, ac });
     }
     if (r.followupPrompt) {
+      // The nested prompt becomes the active owner for the same agent. Release
+      // this setup phase immediately before re-entry; the nested turn retains
+      // ownership through its own artifact+terminal barrier.
+      finalizeTurnOnce();
       // Routine's run_prompt action: the trigger phrase set the scene (lights
       // dimmed, sound playing), the followup is what the user actually wants
       // the LLM to answer. _isRoutineFollowup is a defensive bypass so the
@@ -952,8 +1228,22 @@ export async function handleChatMessage({
       hiddenUser: _hiddenUser,
       isolatedTaskRun: _isolatedTaskRun,
     });
-  } finally {
-    finalizeTurnOnce();
+  } catch (e) {
+    const key = `${userId}_${agentId}`;
+    await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
+      status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',
+      retryable: false,
+    }).catch(() => {});
+    if (!terminalErrorEmitted) {
+      onEvent({
+        type: 'error', agent: agentId,
+        code: e?.code === 'SESSION_CLEARED' ? 'session_cleared' : 'turn_failed',
+        retryable: false,
+        message: e?.code === 'SESSION_CLEARED'
+          ? 'This turn was stopped because the session was cleared.'
+          : (e?.message || 'The turn failed unexpectedly.'),
+      });
+    }
   }
 
   // Post-turn alias learning — fire-and-forget, never blocks return.
@@ -979,12 +1269,26 @@ export async function handleChatMessage({
     } catch (e) { console.warn('[chat-dispatch] post-turn learn failed:', e.message); }
   })();
 
+  } catch (e) {
+    const key = `${userId}_${agentId}`;
+    await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
+      status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',
+      retryable: false,
+    }).catch(() => {});
+    if (!terminalErrorEmitted) {
+      onEvent({
+        type: 'error', agent: agentId,
+        code: e?.code === 'SESSION_CLEARED' ? 'session_cleared' : 'turn_failed',
+        retryable: false,
+        message: e?.code === 'SESSION_CLEARED'
+          ? 'This turn was stopped because the session was cleared.'
+          : (e?.message || 'The turn failed unexpectedly.'),
+      });
+    }
   } finally {
-    // Always release the agent's busy-slot — even if an interceptor above threw
-    // before the normal finalize ran. Idempotent; a no-op if the turn already
-    // finalized. Without this, an interceptor exception would leave the slot
-    // held forever and deadlock the next turn (continuations await the prior).
-    finalizeTurnOnce();
+    const staleOrAborted = Boolean(turnAc?.signal?.aborted);
+    if (staleOrAborted) skipPostTurnArtifacts = true;
+    try {
 
     // Flush the turn trace — one greppable `tag:"turn"` record carrying every
     // span (incl. delegated sub-agents) + the delegation chain + routing. Wrapped
@@ -1006,14 +1310,27 @@ export async function handleChatMessage({
     // every background tick. New event types the firmware doesn't recognize
     // ride through ws-handler unspoken (it only TTS's token/done/error).
     try {
-      const pendingAfter = await snapshotPendingApprovals(userId);
-      for (const { type, kind, ...fields } of diffPendingApprovals(_pendingApprovalsBefore, pendingAfter)) {
-        const entry = { kind, ts: Date.now(), ...fields };
-        appendToSession(`${userId}_${agentId}`, { role: type, ...entry });
-        onEvent({ type, agent: agentId, ...entry });
+      if (!skipPostTurnArtifacts && _pendingApprovalsBefore) {
+        const pendingAfter = await snapshotPendingApprovals(userId, agentId);
+        for (const { type, kind, ...fields } of diffPendingApprovals(_pendingApprovalsBefore, pendingAfter)) {
+          const entry = { kind, ts: Date.now(), ...fields };
+          const signature = `${type}:${kind}:${fields.opId ?? ''}`;
+          if (replayedArtifactSignatures.has(signature)) continue;
+          // Awaited: the pill row must be durable before the event reaches the
+          // client — a reload racing the write showed a card the session
+          // couldn't replay (or vice versa for the resolution).
+          const persisted = await appendTurnArtifactOnce(`${userId}_${agentId}`, { role: type, ...entry });
+          const { role: _role, ...persistedFields } = persisted.row;
+          onEvent({ type, agent: agentId, ...persistedFields });
+        }
       }
     } catch (e) {
+      postCommitFailed = true;
       console.warn('[chat-dispatch] approval-pill diff failed:', e.message);
+      onEvent({
+        type: 'error', agent: agentId, code: 'persistence_failed', retryable: false,
+        message: 'The reply finished, but its approval state could not be saved. Do not retry the action until storage is healthy.',
+      });
     }
 
     // Post-turn attachment save/discard prompt. Chat-upload always persists
@@ -1024,7 +1341,7 @@ export async function handleChatMessage({
     // accumulate. One independent decision (own decisionId) per file — a
     // 3-file turn shows 3 pills. Skipped for voice-device (no screen) and
     // routine follow-ups (the original turn already showed the prompt).
-    for (const att of _attachmentsForDecision) {
+    for (const att of (skipPostTurnArtifacts ? [] : _attachmentsForDecision)) {
       try {
         const decisionId = 'att_' + randomBytes(6).toString('hex');
         const ts = Date.now();
@@ -1036,18 +1353,24 @@ export async function handleChatMessage({
           mimeType: att.mimeType,
           ts,
         };
-        appendToSession(`${userId}_${agentId}`, entry);
+        const persisted = await appendTurnArtifactOnce(`${userId}_${agentId}`, entry);
+        const artifact = persisted.row;
         onEvent({
           type: 'attachment_decision',
-          decisionId,
+          decisionId: artifact.decisionId,
           agent: agentId,
-          file_id: att.file_id,
-          name: att.name,
-          mimeType: att.mimeType,
-          ts,
+          file_id: artifact.file_id,
+          name: artifact.name,
+          mimeType: artifact.mimeType,
+          ts: artifact.ts,
         });
       } catch (e) {
+        postCommitFailed = true;
         console.warn('[chat-dispatch] attachment_decision emit failed:', e.message);
+        onEvent({
+          type: 'error', agent: agentId, code: 'persistence_failed', retryable: false,
+          message: 'The reply finished, but an attachment decision could not be saved. The chat turn will not be marked complete.',
+        });
       }
     }
 
@@ -1094,6 +1417,86 @@ export async function handleChatMessage({
       }, 3000);
       _ambientRestoreTimers.set(deviceId, restoreTimer);
     }
+
+    // The only place a top-level terminal reaches the transport. Approval and
+    // attachment events above therefore cannot arrive after done/error.
+    const heldTerminal = heldErrorEvent || (!postCommitFailed ? heldDoneEvent : null);
+    if (staleOrAborted) {
+      // A replacement/Stop owns the visible surface now. Persist the old turn's
+      // stopped boundary. When the epoch is unchanged this is Stop/barge-in,
+      // and every tab still needs the correlated terminal so it can clear the
+      // old busy state (a newer turn reducer drops it by turn_id). Clear rotates
+      // the epoch and broadcasts session_cleared, so suppress the old terminal
+      // in that case — the clear event is authoritative.
+      const epochStillCurrent = !turnStore?.sessionEpoch
+        || getSessionEpoch(eventScopedSessionKey) === turnStore.sessionEpoch;
+      if (epochStillCurrent) {
+        let stoppedCode = 'stopped';
+        let stoppedMessage = 'Stopped before whole-turn finalization completed.';
+        try {
+          // Abort can land during pre-LLM attachment hydration, before
+          // runLlmTurn has a chance to convert the pending user row. Persist a
+          // visible stopped error when that row still exists; this is a no-op
+          // when the LLM/error path already recorded it.
+          await failPendingTurn(eventScopedSessionKey, 'Stopped by user', {
+            status: 'stopped', retryable: false, partial: outwardText,
+          });
+          await markTurnTerminal(eventScopedSessionKey, {
+            type: 'stopped', code: stoppedCode, retryable: false,
+            message: stoppedMessage,
+          });
+        } catch (e) {
+          console.warn('[chat-dispatch] stopped terminal persist failed:', e.message);
+          stoppedCode = 'persistence_failed';
+          stoppedMessage = 'The turn stopped, but its terminal state could not be saved. Reload before retrying.';
+        }
+        const terminal = {
+          type: 'error', agent: agentId, code: stoppedCode,
+          retryable: false, message: stoppedMessage, status: 'stopped',
+          ...(wireTurnId ? { turn_id: wireTurnId } : {}),
+          ...(wireMessageId ? { message_id: wireMessageId } : {}),
+          ...(wireAttemptId ? { attempt_id: wireAttemptId } : {}),
+          ...(turnStore?.sessionEpoch ? { session_epoch: turnStore.sessionEpoch } : {}),
+          seq: ++eventSeq,
+        };
+        recordStreamEvent(eventScopedSessionKey, terminal);
+        rawOnEvent(terminal);
+      }
+    } else if (heldTerminal) {
+      try {
+        await markTurnTerminal(eventScopedSessionKey, {
+          ...heldTerminal,
+          type: heldErrorEvent ? 'error' : 'done',
+        });
+      } catch (e) {
+        console.warn('[chat-dispatch] whole-turn terminal persist failed:', e.message);
+        heldErrorEvent = {
+          type: 'error', agent: agentId, code: 'persistence_failed', retryable: false,
+          message: 'The reply finished, but its terminal state could not be saved. Reload before taking another action.',
+        };
+      }
+      // Turns intentionally without a session row (voice-empty/no-op/internal)
+      // return false and still need their transport terminal. A thrown write is
+      // surfaced as a fail-closed persistence error instead of a false done.
+      const outboundTerminal = heldErrorEvent || heldTerminal;
+      const terminal = /** @type {{type: string, [k: string]: any}} */ ({
+        ...outboundTerminal,
+        type: heldErrorEvent ? 'error' : 'done',
+        ...(wireTurnId ? { turn_id: wireTurnId } : {}),
+        ...(wireMessageId ? { message_id: wireMessageId } : {}),
+        ...(wireAttemptId ? { attempt_id: wireAttemptId } : {}),
+        ...(turnStore?.sessionEpoch ? { session_epoch: turnStore.sessionEpoch } : {}),
+        seq: ++eventSeq,
+      });
+      recordStreamEvent(eventScopedSessionKey, terminal);
+      rawOnEvent(terminal);
+    }
+    } finally {
+      // Ownership lasts through artifact persistence, durable terminal marking,
+      // and the actual terminal send. Releasing earlier let reconnect report no
+      // active turn and let a second turn mutate approval state mid-finalizer.
+      finalizeTurnOnce();
+    }
   }
   });
 }
@@ -1108,10 +1511,17 @@ export async function handleChatMessage({
 async function slashAdapter({ userText, userId, agentId, agent, onEvent }) {
   const r = await tryHandleSlashCommand({ userText, userId, agentId, agent });
   if (!r) return null;
-  appendToSession(`${userId}_${agentId}`,
-    { role: 'user', content: userText, ts: Date.now() },
-    { role: 'assistant', content: r.reply, ts: Date.now() }
-  );
+  try {
+    await appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: userText, ts: Date.now() },
+      { role: 'assistant', content: r.reply, ts: Date.now() }
+    );
+  } catch (e) {
+    console.warn('[chat-dispatch] slash persist failed:', e.message);
+    await failPendingTurn(`${userId}_${agentId}`, 'Persistence failed after the command ran', { retryable: false }).catch(() => {});
+    onEvent({ type: 'error', code: 'persistence_failed', retryable: false, message: 'The command finished, but the chat record could not be saved. Do not retry it automatically.', agent: agentId });
+    return { handled: true };
+  }
   onEvent({ type: 'token', text: r.reply, agent: agentId });
   onEvent({ type: 'done', agent: agentId });
   return { handled: true };

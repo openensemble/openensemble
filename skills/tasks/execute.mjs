@@ -4,6 +4,13 @@
 // tools let the agent's own model handle phrasings the interceptor doesn't
 // recognize ("i need to X in five minutes", "ping me at 3", etc).
 
+import {
+  stagePending as stagePendingApproval,
+  getPending as getPendingApproval,
+  takePending as takePendingApproval,
+  clearPendingFor as clearPendingApproval,
+} from '../../lib/pending-approvals.mjs';
+
 function unscopeAgentId(agentId, userId) {
   if (!agentId || !userId) return agentId;
   return typeof agentId === 'string' && agentId.startsWith(`${userId}_`)
@@ -106,26 +113,23 @@ async function canActOnWatcher(watcher, callerAgentId, userId) {
 // ── Pending cross-agent watcher op (staged for user approval) ──────────────
 // Same pattern as expenses' CONFIRM DELETION / email's APPROVE PURGE — a
 // destructive op that requires the user to type the magic phrase before
-// it actually runs. Key by userId, TTL'd so a stale stage from one session
-// doesn't fire when an unrelated approval phrase shows up later.
-const _pendingWatcherOps = new Map(); // userId → { action, watcherId, args, requestedBy, ts }
+// it actually runs. Lives in the shared disk-persisted approval store —
+// keyed (userId, staging agent) so it survives restarts and a message in
+// another agent's chat can't wipe or execute it (lib/pending-approvals.mjs).
+// TTL'd so a stale stage from one session doesn't fire when an unrelated
+// approval phrase shows up later.
 const PENDING_WATCHER_TTL_MS = 5 * 60 * 1000;
 
-export function getPendingWatcherOp(userId) {
-  const p = _pendingWatcherOps.get(userId);
-  if (!p) return null;
-  if (Date.now() - p.ts > PENDING_WATCHER_TTL_MS) {
-    _pendingWatcherOps.delete(userId);
-    return null;
-  }
-  return p;
+export function getPendingWatcherOp(userId, agentId = null) {
+  return getPendingApproval(userId, 'watcher_op', agentId, { ttlMs: PENDING_WATCHER_TTL_MS });
 }
-export function clearPendingWatcherOp(userId) { _pendingWatcherOps.delete(userId); }
+export function clearPendingWatcherOp(userId, agentId = null, expectedOpId = null) {
+  return clearPendingApproval(userId, 'watcher_op', agentId, { expectedOpId });
+}
 
-export async function executePendingWatcherOp(userId) {
-  const pending = getPendingWatcherOp(userId);
+export async function executePendingWatcherOp(userId, agentId = null, expectedOpId = null) {
+  const pending = takePendingApproval(userId, 'watcher_op', agentId, { ttlMs: PENDING_WATCHER_TTL_MS, expectedOpId });
   if (!pending) return 'No pending watcher operation (it may have expired).';
-  _pendingWatcherOps.delete(userId);
   const { unregisterWatcher, updateWatcher } = await import('../../scheduler/watchers.mjs');
   if (pending.action === 'cancel') {
     const ok = unregisterWatcher(userId, pending.watcherId, 'cancelled');
@@ -638,14 +642,13 @@ async function execUpdateWatch(args, userId, agentId) {
   // captures exactly what would change. canActOnWatcher returned needsApproval
   // for cross-agent coordinator-delegated calls; defer until the user echoes.
   if (auth.ok === false && 'needsApproval' in auth && auth.needsApproval) {
-    _pendingWatcherOps.set(userId, {
+    stagePendingApproval(userId, 'watcher_op', {
       action: 'update',
       watcherId: args.id,
       watcherLabel: auth.watcherLabel,
       patch,
       changes,
       requestedBy: unscopeAgentId(agentId, userId),
-      ts: Date.now(),
     });
     return `⚠️ A specialist has asked me (the coordinator) to update watcher "${auth.watcherLabel}" (${changes.join('; ')}), which was created by a different agent (${auth.watcherOwner}). Because this change didn't come directly from you, I'm staging it. Type **APPROVE WATCHER OP** in the chat to proceed, or say anything else to abandon.`;
   }
@@ -663,12 +666,11 @@ async function execCancelWatch(id, userId, agentId) {
   if (!watcher) return `No active watch with id "${id}".`;
   const auth = await canActOnWatcher(watcher, agentId, userId);
   if (auth.ok === false && 'needsApproval' in auth && auth.needsApproval) {
-    _pendingWatcherOps.set(userId, {
+    stagePendingApproval(userId, 'watcher_op', {
       action: 'cancel',
       watcherId: id,
       watcherLabel: auth.watcherLabel,
       requestedBy: unscopeAgentId(agentId, userId),
-      ts: Date.now(),
     });
     return `⚠️ A specialist has asked me (the coordinator) to cancel watcher "${auth.watcherLabel}", which was created by a different agent (${auth.watcherOwner}). Because this cancel didn't come directly from you, I'm staging it. Type **APPROVE WATCHER OP** in the chat to proceed, or say anything else to abandon.`;
   }

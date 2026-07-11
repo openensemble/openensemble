@@ -10,6 +10,84 @@ let _lastPongAt = 0;
 // push (status / agent_report) merely seeded an empty array — those still need a
 // real load_session so switching to them doesn't show only the stray push.
 let sessionsLoaded = new Set();
+const agentSessionEpochs = Object.create(null);
+const terminalTurnIds = Object.create(null);
+const agentLiveRevisions = Object.create(null);
+const agentSnapshotGenerations = Object.create(null);
+const agentCredentialPrompts = Object.create(null);
+const _sessionLoadRequests = new Map();
+const _latestSessionRequest = Object.create(null);
+let _sessionLoadSeq = 0;
+let _connectionGeneration = 0;
+let _serverBootId = null;
+
+const TURN_EVENT_TYPES = new Set([
+  'turn_accepted', 'token', 'replace', 'tool_call', 'tool_progress', 'tool_result',
+  'permission_request', 'hide_turn', 'done', 'error', 'image', 'video', 'perf',
+  'approval_pending', 'approval_resolved', 'attachment_decision', 'document_response',
+  'credential_prompt', 'credential_resolved', 'credential_error',
+]);
+const TURN_AUX_EVENT_TYPES = new Set([
+  'approval_pending', 'approval_resolved', 'attachment_decision', 'document_response',
+]);
+const CREDENTIAL_EVENT_TYPES = new Set(['credential_prompt', 'credential_resolved', 'credential_error']);
+
+function noteAgentLiveRevision(msg) {
+  if (!msg?.agent || !Number.isFinite(msg.chat_revision)) return;
+  const agent = clientSessionAgentId(msg.agent);
+  agentLiveRevisions[agent] = Math.max(agentLiveRevisions[agent] ?? 0, msg.chat_revision);
+}
+
+function observeServerBootId(bootId) {
+  if (typeof bootId !== 'string' || !bootId) return;
+  if (_serverBootId && _serverBootId !== bootId) {
+    for (const key of Object.keys(agentLiveRevisions)) delete agentLiveRevisions[key];
+    for (const key of Object.keys(agentSnapshotGenerations)) delete agentSnapshotGenerations[key];
+    for (const key of Object.keys(agentStreams)) delete agentStreams[key];
+    for (const key of Object.keys(terminalTurnIds)) delete terminalTurnIds[key];
+    for (const prompts of Object.values(agentCredentialPrompts)) prompts?.clear?.();
+    for (const request of _sessionLoadRequests.values()) request.liveRevision = 0;
+  }
+  _serverBootId = bootId;
+}
+
+function requestAgentSession(agent) {
+  if (!agent || ws?.readyState !== WebSocket.OPEN) return null;
+  const requestId = `load_${Date.now()}_${++_sessionLoadSeq}`;
+  const request = {
+    requestId, agent,
+    liveRevision: agentLiveRevisions[agent] ?? 0,
+    startedAt: Date.now(),
+    generation: _connectionGeneration,
+    ordinal: _sessionLoadSeq,
+  };
+  _sessionLoadRequests.set(requestId, request);
+  _latestSessionRequest[agent] = request;
+  ws.send(JSON.stringify({ type: 'load_session', agent, request_id: requestId }));
+  return requestId;
+}
+
+function credentialPromptMap(agent) {
+  if (!agentCredentialPrompts[agent]) agentCredentialPrompts[agent] = new Map();
+  return agentCredentialPrompts[agent];
+}
+
+function credentialPromptAgent(msg) {
+  if (msg?.agent) return clientSessionAgentId(msg.agent);
+  if (msg?.credentialId) {
+    for (const [agent, prompts] of Object.entries(agentCredentialPrompts)) {
+      if (prompts?.has(msg.credentialId)) return agent;
+    }
+  }
+  return activeAgent;
+}
+
+function projectCredentialPrompts(agent) {
+  if (agent !== activeAgent) return;
+  for (const prompt of credentialPromptMap(agent).values()) {
+    appendCredentialPromptBubble(prompt.credentialId, prompt.label, prompt.description, prompt.kind);
+  }
+}
 
 function clientSessionAgentId(agent) {
   if (typeof agent !== 'string' || !agent) return agent;
@@ -26,7 +104,158 @@ function clientSessionAgentId(agent) {
   return agent.replace(/^user_[^_]+_/, '');
 }
 
+function freshAgentTurnState(agent, source = {}) {
+  return {
+    agent,
+    buf: String(source.content ?? source.buf ?? ''),
+    toolEvents: Array.isArray(source.toolEvents) ? source.toolEvents.map(ev => ({ ...ev })) : [],
+    active: source.phase !== 'failed' && source.phase !== 'complete',
+    phase: source.phase || 'running',
+    turnId: source.turnId ?? source.turn_id ?? null,
+    messageId: source.messageId ?? source.message_id ?? null,
+    attemptId: source.attemptId ?? source.attempt_id ?? source.turnId ?? source.turn_id ?? null,
+    lastSeq: Number(source.seq) || 0,
+    liveRevision: Number(source.chatRevision ?? source.chat_revision) || 0,
+    needsResync: source.needsResync === true,
+    resyncRevision: Number(source.resyncRevision) || 0,
+    sessionEpoch: source.sessionEpoch ?? source.session_epoch ?? agentSessionEpochs[agent] ?? null,
+    hidden: source.hidden === true,
+    permissionRequest: source.permissionRequest ? { ...source.permissionRequest } : null,
+    startedAt: source.startTs ?? Date.now(),
+  };
+}
+
+// Validate the wire envelope before any handler touches DOM globals. Events for
+// an old cleared generation, an old turn on the same agent, or a duplicate seq
+// are dropped uniformly whether the agent is selected or in the background.
+function acceptTurnEnvelope(msg) {
+  if (!TURN_EVENT_TYPES.has(msg.type) || !msg.agent) return true;
+  const agent = clientSessionAgentId(msg.agent);
+  msg.agent = agent;
+  const knownEpoch = agentSessionEpochs[agent] ?? null;
+  if (msg.session_epoch && knownEpoch && msg.session_epoch !== knownEpoch) return false;
+
+  let state = agentStreams[agent] ?? null;
+  const incomingTurnId = msg.turn_id ?? null;
+  // Credential cards have their own stable credentialId lifecycle. A prompt
+  // from turn A must still be removable after turn B barges in; only the
+  // session epoch, not current-turn ownership, gates these events.
+  if (CREDENTIAL_EVENT_TYPES.has(msg.type)) return true;
+  if (TURN_AUX_EVENT_TYPES.has(msg.type)) {
+    // These rows carry their own stable operation/decision/request ids and are
+    // durable independently of whichever turn currently owns the stream pane.
+    // A later turn may barge in before an older turn's post-commit card arrives;
+    // render/cache it, but do not advance the newer turn's sequence counter.
+    const ownsCurrentState = state && (!incomingTurnId || !state.turnId || state.turnId === incomingTurnId);
+    if (ownsCurrentState && Number.isFinite(msg.seq)) {
+      if (Number.isFinite(msg.chat_revision)) {
+        state.liveRevision = Math.max(state.liveRevision || 0, msg.chat_revision);
+      }
+      if (msg.seq > (state.lastSeq || 0) + 1 && ws?.readyState === WebSocket.OPEN) {
+        state.needsResync = true;
+        state.resyncRevision = Number(msg.chat_revision) || state.liveRevision || 0;
+        requestAgentSession(agent);
+      }
+      if (msg.seq > (state.lastSeq || 0)) state.lastSeq = msg.seq;
+    }
+    return true;
+  }
+  if (msg.type === 'turn_accepted') {
+    if (incomingTurnId) delete terminalTurnIds[agent];
+    if (!state || (incomingTurnId && state.turnId !== incomingTurnId)) {
+      // The current frame has not been reduced yet. Seeding lastSeq from it
+      // made the generic duplicate guard below drop the first event for every
+      // non-originating tab (which has no optimistic state).
+      state = agentStreams[agent] = freshAgentTurnState(agent, { ...msg, seq: 0 });
+    }
+    state.active = !['failed', 'complete'].includes(msg.status);
+    state.phase = msg.status === 'accepted' ? 'running' : (msg.status || state.phase);
+  } else if (incomingTurnId) {
+    if (!state && terminalTurnIds[agent] === incomingTurnId) return false;
+    if (state && !state.active && terminalTurnIds[agent] === incomingTurnId) return false;
+    if (!state) state = agentStreams[agent] = freshAgentTurnState(agent, { ...msg, seq: 0 });
+    else if (state.turnId && state.turnId !== incomingTurnId) return false;
+    else if (!state.turnId) state.turnId = incomingTurnId;
+  }
+  if (state) {
+    if (Number.isFinite(msg.seq) && msg.seq <= (state.lastSeq || 0)) return false;
+    if (Number.isFinite(msg.seq) && msg.seq > (state.lastSeq || 0) + 1
+        && ws?.readyState === WebSocket.OPEN) {
+      // A reconnect/suspension gap: ask for an authoritative active snapshot.
+      // Continue reducing this event; the same-or-newer snapshot will replace
+      // the incomplete local state when it arrives.
+      state.needsResync = true;
+      state.resyncRevision = Number(msg.chat_revision) || state.liveRevision || 0;
+      requestAgentSession(agent);
+    }
+    if (Number.isFinite(msg.seq)) state.lastSeq = msg.seq;
+    if (msg.message_id) state.messageId = msg.message_id;
+    if (msg.attempt_id) state.attemptId = msg.attempt_id;
+    if (msg.session_epoch) state.sessionEpoch = msg.session_epoch;
+    if (Number.isFinite(msg.chat_revision)) {
+      state.liveRevision = Math.max(state.liveRevision || 0, msg.chat_revision);
+    }
+  }
+  return true;
+}
+
+function mergeActiveStreamSnapshot(agent, snapshot, sessionEpoch = null) {
+  if (!snapshot) return null;
+  const incoming = freshAgentTurnState(agent, { ...snapshot, sessionEpoch });
+  const current = agentStreams[agent];
+  if (current) {
+    const currentRevision = Number(current.liveRevision) || 0;
+    const incomingRevision = Number(incoming.liveRevision) || 0;
+    // Revision is per-agent and stamped at the exact active-registry snapshot.
+    // An older response must not replace a newer turn merely because the turn
+    // ids differ; that was the reconnect path that resurrected old streams.
+    const healsKnownGap = current.needsResync
+      && incomingRevision >= (Number(current.resyncRevision) || 0);
+    if (incomingRevision < currentRevision) return current;
+    if (incomingRevision === currentRevision) {
+      if (current.turnId && incoming.turnId && current.turnId !== incoming.turnId) return current;
+      if (!healsKnownGap && current.turnId === incoming.turnId && (current.lastSeq || 0) > incoming.lastSeq) return current;
+    }
+  }
+  agentStreams[agent] = incoming;
+  return incoming;
+}
+
+// DOM is a projection of the selected agent's canonical turn state. Called
+// after session rerenders, reconnect snapshots, and agent switches.
+function projectAgentStreamState(agent) {
+  if (agent !== activeAgent) return;
+  const state = agentStreams[agent];
+  streamEl = null;
+  streamBuf = '';
+  resetToolRun();
+  awaitingPermission = false;
+  projectCredentialPrompts(agent);
+  if (!state?.active) {
+    setStreaming(false); setTyping(false);
+    return;
+  }
+  streamBuf = state.hidden ? '' : (state.buf || '');
+  if (!state.hidden) {
+    streamEl = appendStreamingBubble();
+    if (streamBuf) streamEl.innerHTML = renderMarkdown(streamBuf);
+  }
+  if (typeof restoreToolRun === 'function') restoreToolRun(state.toolEvents || []);
+  setStreaming(true);
+  setTyping(!streamBuf && !state.permissionRequest);
+  if (state.permissionRequest) {
+    if (streamEl && !streamBuf) streamEl.closest('.msg')?.remove();
+    streamEl = null;
+    appendAssistantBubble(state.permissionRequest.text || 'Permission required', Date.now(), true);
+    awaitingPermission = true;
+    $('btnSend').disabled = false;
+    $('input').disabled = false;
+  }
+  scrollToBottom();
+}
+
 function connect() {
+  _connectionGeneration++;
   // Tear down any prior socket first. Signup/login/invite flows can call init()
   // — and thus connect() — multiple times; without this, old sockets keep their
   // onmessage handler wired to handleServerMessage and the same server event
@@ -45,6 +274,7 @@ function connect() {
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${wsProto}://${location.host}`);
   ws.onopen  = () => {
+    sessionsLoaded.clear();
     // Authenticate via first message instead of URL query string
     ws.send(JSON.stringify({ type: 'auth', token: getToken() ?? '' }));
     // Safety net: explicitly request history for the currently active agent.
@@ -52,20 +282,22 @@ function connect() {
     // but on mobile (iOS PWA / backgrounded tab) that burst is easy to miss —
     // so we always re-fetch for the active agent on every successful connect.
     if (activeAgent) {
-      ws.send(JSON.stringify({ type: 'load_session', agent: activeAgent }));
+      requestAgentSession(activeAgent);
     }
     _reconnectDelay = 1000; if (!streaming) setStatus('online'); schedulePing();
   };
   ws.onclose = () => {
     clearTimeout(_pingTimer);
-    // Mirror forceReconnect: commit any in-progress stream to the session and
-    // null the stream state. Without this, reconnect's session_loaded re-render
-    // detaches the live bubble while tokens keep painting into the detached
-    // node — the user sees a typing dot but no text.
+    // Preserve the live overlay under its agent/turn. Never commit a partial
+    // into persisted-history cache: session_loaded + pendingStream used to
+    // double/split that synthetic row on reconnect.
     const wasStreaming = streaming;
-    if (streamEl && streamBuf && activeAgent) {
-      if (!sessions[activeAgent]) sessions[activeAgent] = [];
-      sessions[activeAgent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
+    if (wasStreaming && activeAgent) {
+      const state = agentStreams[activeAgent] || freshAgentTurnState(activeAgent);
+      state.buf = streamBuf || state.buf;
+      state.toolEvents = currentLiveToolEvents() || state.toolEvents || [];
+      state.active = true;
+      agentStreams[activeAgent] = state;
     }
     streamEl = null; streamBuf = ''; resetToolRun();
     if (!wasStreaming) { setStreaming(false); setTyping(false); }
@@ -97,12 +329,15 @@ function schedulePing() {
 // because the client never processed the close. So we can't trust readyState
 // here: always tear down the old socket and reconnect fresh.
 function forceReconnect() {
-  // Commit any in-progress stream to the session before reconnecting,
-  // so it survives the session_loaded overwrite from the server.
+  // Preserve the in-flight overlay before reconnecting; authoritative history
+  // and active-turn state arrive separately from the server.
   const wasStreaming = streaming;
-  if (streamEl && streamBuf && activeAgent) {
-    if (!sessions[activeAgent]) sessions[activeAgent] = [];
-    sessions[activeAgent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
+  if (wasStreaming && activeAgent) {
+    const state = agentStreams[activeAgent] || freshAgentTurnState(activeAgent);
+    state.buf = streamBuf || state.buf;
+    state.toolEvents = currentLiveToolEvents() || state.toolEvents || [];
+    state.active = true;
+    agentStreams[activeAgent] = state;
   }
   streamEl = null; streamBuf = ''; resetToolRun();
   // Don't reset the status dot yet — keep it busy until the server confirms
@@ -177,7 +412,6 @@ function flushStreamRender() {
 
 function finishDocumentStreamUi(agentId) {
   if (agentId !== activeAgent) return;
-  lastSentAttempt = null;
   flushStreamRender();
   if (streamEl) streamEl.closest('.msg')?.remove();
   streamEl = null;
@@ -188,59 +422,120 @@ function finishDocumentStreamUi(agentId) {
 }
 
 function reloadDocumentSession(agentId) {
-  if (agentId && ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'load_session', agent: agentId }));
-  }
+  if (agentId) requestAgentSession(agentId);
 }
 
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
+  observeServerBootId(msg?.boot_id);
+  noteAgentLiveRevision(msg);
+  if (!acceptTurnEnvelope(msg)) return;
   switch (msg.type) {
     case 'pong': _lastPongAt = Date.now(); break;
     case 'session_loaded': {
+      const agent = clientSessionAgentId(msg.agent);
       const serverMsgs = msg.messages ?? [];
-      sessionsLoaded.add(msg.agent); // genuine history load — see switchAgent gate
-      const clientMsgs = sessions[msg.agent] ?? [];
+      const request = msg.request_id ? _sessionLoadRequests.get(msg.request_id) : null;
+      if (msg.request_id) _sessionLoadRequests.delete(msg.request_id);
+      const latestRequest = _latestSessionRequest[agent];
+      // Multiple reconnect/switch requests may be in flight. Once a newer
+      // request exists, its response is the only one allowed to reconcile.
+      if (request && latestRequest && request.ordinal < latestRequest.ordinal) break;
+      const snapshotGeneration = Number(msg.snapshotGeneration) || 0;
+      if (snapshotGeneration && snapshotGeneration < (agentSnapshotGenerations[agent] ?? 0)) break;
+      const knownEpoch = agentSessionEpochs[agent] ?? null;
+      // Within one connection an epoch mismatch can only be an old response
+      // racing a clear. Across reconnect, sessionsLoaded was cleared so the
+      // first response is allowed to establish the server's current epoch.
+      if (sessionsLoaded.has(agent) && knownEpoch && msg.sessionEpoch && msg.sessionEpoch !== knownEpoch) break;
+      const snapshotRevision = Number.isFinite(msg.sessionRevision)
+        ? msg.sessionRevision
+        : (request?.liveRevision ?? 0);
+      const hasExactActiveRevision = Number.isFinite(msg.activeSnapshotRevision);
+      const activeSnapshotRevision = hasExactActiveRevision
+        ? msg.activeSnapshotRevision
+        : snapshotRevision;
+      const currentLiveRevision = agentLiveRevisions[agent] ?? 0;
+      sessionsLoaded.add(agent);
+      if (snapshotGeneration) agentSnapshotGenerations[agent] = snapshotGeneration;
+      if (msg.sessionEpoch) agentSessionEpochs[agent] = msg.sessionEpoch;
+      const clientMsgs = sessions[agent] ?? [];
       // Merge: use server data as the authoritative base, but preserve any
       // client-only messages that haven't been persisted yet (e.g. a user
       // message sent just before the WS dropped, or a streamed reply that
       // was committed to sessions by forceReconnect).
       if (clientMsgs.length > 0 && serverMsgs.length >= 0) {
-        const lastServerTs = serverMsgs.length > 0
-          ? Math.max(...serverMsgs.map(m => m.ts || 0))
-          : 0;
-        // Client and server stamp ts independently with Date.now(), so the
-        // client's copy of a just-completed message is usually a few ms newer
-        // than the server's persisted ts. Without a content check, that drift
-        // makes the merge keep the client's copy on top of the server's list
-        // and the last bubble doubles up after a WS reconnect.
-        const clientOnly = clientMsgs.filter(m =>
-          (m.ts || 0) > lastServerTs &&
-          !(typeof sessionHasEquivalent === 'function'
+        // Stable turn/message/op ids win. Timestamp is only a legacy fallback
+        // for optimistic rows created by pre-correlation clients.
+        const clientOnly = clientMsgs.filter(m => {
+          const equivalent = typeof sessionHasEquivalent === 'function'
             ? sessionHasEquivalent(serverMsgs, m)
-            : serverMsgs.some(s => s.role === m.role && s.content === m.content)));
-        sessions[msg.agent] = clientOnly.length > 0
+            : serverMsgs.some(s => s.role === m.role && s.content === m.content);
+          if (equivalent) return false;
+          // Optimistic sends are retained until the server proves acceptance.
+          if (m.role === 'user' && m.turnStatus === 'running') return true;
+          // A snapshot begun before this live row/event cannot erase it.
+          return currentLiveRevision > snapshotRevision
+            && Number(m._liveRevision) > snapshotRevision;
+        });
+        sessions[agent] = clientOnly.length > 0
           ? [...serverMsgs, ...clientOnly]
           : serverMsgs;
       } else {
-        sessions[msg.agent] = serverMsgs;
+        sessions[agent] = serverMsgs;
       }
-      // If the server has a partial stream buffer (tab closed mid-stream),
-      // append it so the user sees what was captured before disconnect.
-      if (msg.pendingStream?.content) {
-        const already = sessions[msg.agent].some(m =>
-          m.role === 'assistant' && m.ts === msg.pendingStream.ts);
+      if (typeof reconcilePendingAttemptsFromSession === 'function') {
+        reconcilePendingAttemptsFromSession(agent, serverMsgs, _connectionGeneration, msg.activeStream);
+      }
+      const lastTerminal = [...serverMsgs].reverse().find(m =>
+        (m.role === 'assistant' || m.role === 'turn_error') && m.turnId);
+      if (lastTerminal?.turnId) terminalTurnIds[agent] = lastTerminal.turnId;
+      if (msg.activeStream) {
+        if (terminalTurnIds[agent] === msg.activeStream.turnId) delete terminalTurnIds[agent];
+        mergeActiveStreamSnapshot(agent, msg.activeStream, msg.sessionEpoch);
+      } else {
+        const local = agentStreams[agent];
+        const acceptedAfterSnapshot = local?.active && (
+          (local.liveRevision || 0) > activeSnapshotRevision
+          || (!hasExactActiveRevision && request && local.startedAt >= request.startedAt)
+        );
+        // Never let an older no-active response erase a turn accepted after
+        // that load began. The short grace remains for legacy servers without
+        // revision/request metadata.
+        const legacyAcceptanceWindow = !hasExactActiveRevision && local?.active && local.phase === 'running'
+          && Date.now() - local.startedAt < 3000;
+        if (!acceptedAfterSnapshot && !legacyAcceptanceWindow) {
+          delete agentStreams[agent];
+        }
+      }
+      if (Array.isArray(msg.credentialPrompts)) {
+        const prompts = credentialPromptMap(agent);
+        prompts.clear();
+        for (const prompt of msg.credentialPrompts) {
+          if (prompt?.credentialId) prompts.set(prompt.credentialId, { ...prompt, agent });
+        }
+      }
+      // A buffer with no live server turn is crash recovery, not an overlay.
+      if (!msg.activeStream && msg.pendingStream?.content) {
+        const already = sessions[agent].some(m =>
+          (msg.pendingStream.turnId && m.turnId === msg.pendingStream.turnId)
+          || (m.role === 'assistant' && m.ts === msg.pendingStream.ts));
         if (!already) {
-          sessions[msg.agent].push({
+          sessions[agent].push({
             role: 'assistant',
             content: msg.pendingStream.content,
             ts: msg.pendingStream.ts,
             partial: true,
+            turnId: msg.pendingStream.turnId ?? null,
+            messageId: msg.pendingStream.messageId ?? null,
+            attemptId: msg.pendingStream.attemptId ?? null,
+            toolEvents: msg.pendingStream.toolEvents ?? [],
           });
         }
       }
-      if (msg.agent === activeAgent) {
+      if (agent === activeAgent) {
         renderSession();
+        projectAgentStreamState(agent);
         // Page-load / reconnect draft restore. session_loaded is the first
         // point activeAgent's history is actually known to be settled — but
         // it also refires on every reconnect, so only populate when the
@@ -252,19 +547,48 @@ function handleServerMessage(msg) {
       }
       break;
     }
+    case 'turn_accepted': {
+      if (msg.attempt_id && typeof acceptPendingAttempt === 'function') acceptPendingAttempt(msg.attempt_id);
+      const state = agentStreams[msg.agent] || (agentStreams[msg.agent] = freshAgentTurnState(msg.agent, msg));
+      if (msg.userMessage) {
+        if (!sessions[msg.agent]) sessions[msg.agent] = [];
+        const row = {
+          ...msg.userMessage,
+          role: 'user',
+          turnId: msg.turn_id ?? msg.userMessage.turnId ?? null,
+          messageId: msg.message_id ?? msg.userMessage.messageId ?? null,
+          attemptId: msg.attempt_id ?? msg.userMessage.attemptId ?? null,
+          turnStatus: 'running',
+          ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+        };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[msg.agent], row))) {
+          sessions[msg.agent].push(row);
+          if (msg.agent === activeAgent) renderSession();
+        }
+      }
+      state.active = !['complete', 'failed', 'stopped'].includes(msg.status);
+      if (msg.agent === activeAgent && state.active) {
+        setStreaming(true); setTyping(true);
+      }
+      if (msg.duplicate && msg.status === 'complete') reloadDocumentSession(msg.agent);
+      buildTabs(); buildAgentDrawer();
+      break;
+    }
     case 'token':
       if (typeof handleDocumentChatToken === 'function' && handleDocumentChatToken(msg.agent, msg.text, msg.documentRequest)) {
         setTyping(false);
         break;
       }
-      if (msg.agent !== activeAgent) {
-        // Buffer tokens for background agents
+      {
         const isNew = !agentStreams[msg.agent];
-        if (isNew) agentStreams[msg.agent] = { buf: '', toolNames: [], active: true };
-        agentStreams[msg.agent].buf += msg.text;
-        agentStreams[msg.agent].active = true;
+        const state = agentStreams[msg.agent] || (agentStreams[msg.agent] = freshAgentTurnState(msg.agent, msg));
+        state.buf += msg.text;
+        state.active = true;
+        state.phase = 'running';
+        if (msg.agent !== activeAgent) {
         if (isNew) { buildTabs(); buildAgentDrawer(); }
         break;
+        }
       }
       // Route to widget if active
       if (typeof widgetStreamAppend === 'function' && widgetStreamAppend(msg.text)) {
@@ -272,23 +596,23 @@ function handleServerMessage(msg) {
         break;
       }
       if (!streamEl) { streamBuf = ''; streamEl = appendStreamingBubble(); setTyping(false); }
-      streamBuf += msg.text;
+      streamBuf = agentStreams[msg.agent]?.buf ?? (streamBuf + msg.text);
       scheduleStreamRender();
       break;
     case 'permission_request':
-      if (msg.agent !== activeAgent) break;
+      {
+        const state = agentStreams[msg.agent] || (agentStreams[msg.agent] = freshAgentTurnState(msg.agent, msg));
+        state.permissionRequest = { text: msg.text, permissionId: msg.permissionId ?? msg.permission_id ?? null };
+        state.phase = 'awaiting_permission';
+        state.active = true;
+      }
+      if (msg.agent !== activeAgent) { buildTabs(); buildAgentDrawer(); break; }
       // Commit any in-progress stream bubble
       flushStreamRender();
-      if (streamEl && streamBuf) {
-        if (!sessions[msg.agent]) sessions[msg.agent] = [];
-        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
-      }
       streamEl = null; streamBuf = '';
       // appendMessage never existed — this threw a ReferenceError the moment
       // a permission request reached the active agent, killing the handler
       // before the input unlock below.
-      if (!sessions[msg.agent]) sessions[msg.agent] = [];
-      sessions[msg.agent].push({ role: 'assistant', content: msg.text, ts: Date.now() });
       appendAssistantBubble(msg.text, Date.now(), true);
       // Unlock input so user can type APPROVE or DENY (bypasses streaming guard)
       awaitingPermission = true;
@@ -300,13 +624,19 @@ function handleServerMessage(msg) {
       if (typeof handleDocumentChatToolCall === 'function' && handleDocumentChatToolCall(msg.agent, msg.name, msg.args, msg.documentRequest)) break;
       if (msg.documentTurn && typeof handleRemoteDocumentToolCall === 'function'
           && handleRemoteDocumentToolCall(msg.agent, msg.documentRequest, msg.name)) break;
-      if (msg.agent !== activeAgent) {
+      {
         const isNew = !agentStreams[msg.agent];
-        if (isNew) agentStreams[msg.agent] = { buf: '', toolNames: [], active: true };
-        agentStreams[msg.agent].toolNames.push(msg.name);
-        agentStreams[msg.agent].active = true;
+        const state = agentStreams[msg.agent] || (agentStreams[msg.agent] = freshAgentTurnState(msg.agent, msg));
+        state.toolEvents.push({
+          name: msg.name, args: msg.args ?? null,
+          callId: msg.toolCallId || msg.tool_call_id || msg.callId || null,
+          startedAt: Date.now(), status: 'running',
+        });
+        state.active = true;
+        if (msg.agent !== activeAgent) {
         if (isNew) { buildTabs(); buildAgentDrawer(); }
         break;
+        }
       }
       if (getActiveWidgetTarget?.()) break; // Suppress tool pills when response is in widget
       showToolPill(msg.name, msg.args);
@@ -315,6 +645,13 @@ function handleServerMessage(msg) {
       if (typeof handleDocumentChatToolProgress === 'function' && handleDocumentChatToolProgress(msg.agent, msg.name, msg.text, msg.documentRequest)) break;
       if (msg.documentTurn && typeof handleRemoteDocumentToolProgress === 'function'
           && handleRemoteDocumentToolProgress(msg.agent, msg.documentRequest)) break;
+      {
+        const state = agentStreams[msg.agent];
+        const callId = msg.toolCallId || msg.tool_call_id || msg.callId || null;
+        const target = state && [...state.toolEvents].reverse().find(ev =>
+          ev.status !== 'done' && (callId ? ev.callId === callId : ev.name === msg.name));
+        if (target) target.progressPreview = String(msg.text || '').slice(-1200);
+      }
       if (msg.agent !== activeAgent) break;
       if (getActiveWidgetTarget?.()) break;
       appendToolPillProgress(msg.name, msg.text);
@@ -323,28 +660,68 @@ function handleServerMessage(msg) {
       if (typeof handleDocumentChatToolResult === 'function' && handleDocumentChatToolResult(msg.agent, msg.name, msg.text, msg.documentRequest)) break;
       if (msg.documentTurn && typeof handleRemoteDocumentToolResult === 'function'
           && handleRemoteDocumentToolResult(msg.agent, msg.documentRequest, msg.documentArtifact)) break;
-      if (msg.agent !== activeAgent) break;
+      {
+        const evs = agentStreams[msg.agent]?.toolEvents;
+        const callId = msg.toolCallId || msg.tool_call_id || msg.callId || null;
+        if (evs) {
+          for (let i = evs.length - 1; i >= 0; i--) {
+            const ev = evs[i];
+            if (ev.status !== 'done' && (callId ? ev.callId === callId : ev.name === msg.name)) {
+              ev.status = 'done';
+              ev.endedAt = Date.now();
+              ev.durationMs = ev.startedAt ? ev.endedAt - ev.startedAt : null;
+              ev.preview = msg.preview || '';
+              ev.text = msg.text || '';
+              break;
+            }
+          }
+        }
+      }
+      if (msg.agent !== activeAgent) {
+        break;
+      }
       updateToolPill(msg.name, msg.preview, msg.text);
       break;
     case 'credential_prompt':
-      if (typeof appendCredentialPromptBubble === 'function') {
+      {
+        const target = credentialPromptAgent(msg);
+        if (target && msg.credentialId) credentialPromptMap(target).set(msg.credentialId, { ...msg, agent: target });
+        if (target === activeAgent && typeof appendCredentialPromptBubble === 'function') {
         appendCredentialPromptBubble(msg.credentialId, msg.label, msg.description, msg.kind);
+        }
       }
       break;
     case 'credential_resolved':
-      if (typeof resolveCredentialBubble === 'function') {
+      {
+        const targets = msg.agent
+          ? [credentialPromptAgent(msg)]
+          : Object.entries(agentCredentialPrompts)
+              .filter(([, prompts]) => prompts?.has(msg.credentialId))
+              .map(([agent]) => agent);
+        for (const target of targets) {
+          if (target && msg.credentialId) credentialPromptMap(target).delete(msg.credentialId);
+        }
+        if ((!targets.length || targets.includes(activeAgent)) && typeof resolveCredentialBubble === 'function') {
         resolveCredentialBubble(msg.credentialId, msg.cancelled === true);
+        }
       }
       break;
     case 'credential_error':
-      if (typeof markCredentialBubbleError === 'function') {
+      {
+        const target = credentialPromptAgent(msg);
+        if ((!msg.agent || target === activeAgent) && typeof markCredentialBubbleError === 'function') {
         markCredentialBubbleError(msg.credentialId, msg.error);
+        }
       }
       break;
     case 'replace':
       if (typeof handleDocumentChatReplace === 'function' && handleDocumentChatReplace(msg.agent, msg.text, msg.documentRequest)) break;
+      {
+        const state = agentStreams[msg.agent] || (agentStreams[msg.agent] = freshAgentTurnState(msg.agent, msg));
+        state.buf = msg.text || '';
+        state.active = true;
+      }
       if (msg.agent !== activeAgent) {
-        if (agentStreams[msg.agent]) agentStreams[msg.agent].buf = msg.text;
         break;
       }
       if (typeof widgetStreamReplace === 'function' && widgetStreamReplace(msg.text)) break;
@@ -369,7 +746,18 @@ function handleServerMessage(msg) {
       if (typeof handleDocumentChatReplace === 'function' && handleDocumentChatReplace(msg.agent, msg.text, msg.documentRequest)) break;
       if (msg.documentTurn && typeof handleRemoteDocumentResponse === 'function'
           && handleRemoteDocumentResponse(msg.agent, msg.text, msg.documentRequest)) break;
-      if (msg.agent === activeAgent && msg.text) appendAssistantBubble(msg.text, Date.now(), true);
+      if (msg.text) {
+        if (!sessions[msg.agent]) sessions[msg.agent] = [];
+        const row = {
+          role: 'assistant', content: msg.text, ts: Date.now(),
+          ...(msg.turn_id ? { turnId: msg.turn_id } : {}),
+          ...(msg.message_id ? { messageId: msg.message_id } : {}),
+          ...(msg.attempt_id ? { attemptId: msg.attempt_id } : {}),
+          ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+        };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[msg.agent], row))) sessions[msg.agent].push(row);
+        if (msg.agent === activeAgent) appendAssistantBubble(msg.text, row.ts, true);
+      }
       break;
     case 'perf':
       if (msg.agent !== activeAgent) break;
@@ -391,6 +779,11 @@ function handleServerMessage(msg) {
       // render — the task_proxy chip IS the user-visible reply. Drop the
       // in-flight streamEl from the chat and clear the buffer so the
       // subsequent 'done' doesn't persist the redundant text.
+      if (agentStreams[msg.agent]) {
+        agentStreams[msg.agent].hidden = true;
+        agentStreams[msg.agent].buf = '';
+      }
+      if (msg.agent !== activeAgent) break;
       if (streamEl) {
         try { streamEl.closest('.msg')?.remove(); } catch {}
       }
@@ -398,8 +791,14 @@ function handleServerMessage(msg) {
       setTyping(false);
       break;
     case 'done':
+      {
+      const finishingState = agentStreams[msg.agent] || null;
+      if (typeof acceptPendingAttempt === 'function') acceptPendingAttempt(msg.attempt_id || msg.turn_id);
+      if (msg.agent && (msg.attempt_id || msg.turn_id)) requestAgentSession(msg.agent);
+      if (lastSentAttempt && (lastSentAttempt.attemptId === (msg.attempt_id || msg.turn_id))) lastSentAttempt = null;
       if (typeof finishDocumentChatTurn === 'function' && finishDocumentChatTurn(msg.agent, msg.documentRequest)) {
         finishDocumentStreamUi(msg.agent);
+        if (msg.turn_id) terminalTurnIds[msg.agent] = msg.turn_id;
         delete agentStreams[msg.agent];
         buildTabs(); buildAgentDrawer();
         break;
@@ -428,16 +827,32 @@ function handleServerMessage(msg) {
         // armed and silently swallows the next active-agent reply.
         if (typeof getActiveWidgetTargetAgent === 'function' && getActiveWidgetTargetAgent() === msg.agent) {
           const wbuf = widgetStreamFinish();
-          if (wbuf) {
+          if (wbuf && !finishingState?.needsResync) {
             if (!sessions[msg.agent]) sessions[msg.agent] = [];
-            sessions[msg.agent].push({ role: 'assistant', content: wbuf, ts: Date.now(), hidden: true });
+            sessions[msg.agent].push({ role: 'assistant', content: wbuf, ts: Date.now(), hidden: true, ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
           }
         }
-        // Background agent finished — save to session, clear stream state
+        // Background agent finished — save to session, clear stream state.
+        // Buffered tool events ride along (parity with the foreground commit
+        // below) so the finished turn's tool activity survives a later
+        // switch/re-render instead of being dropped with the buffer.
         const bg = agentStreams[msg.agent];
-        if (bg?.buf) {
+        if (bg?.buf && !bg.needsResync) {
           if (!sessions[msg.agent]) sessions[msg.agent] = [];
-          sessions[msg.agent].push({ role: 'assistant', content: bg.buf, ts: Date.now() });
+          const bgToolEvents = (bg.toolEvents || []).map(ev => ({
+            ...ev,
+            args: ev.args && typeof scrubToolArgsForSession === 'function' ? scrubToolArgsForSession(ev.args) : (ev.args ?? null),
+            status: ev.status || 'done',
+            text: ev.text ? String(ev.text).slice(0, 10000) : '',
+          }));
+          sessions[msg.agent].push({
+            role: 'assistant', content: bg.buf, ts: Date.now(),
+            ...(bg.turnId ? { turnId: bg.turnId } : {}),
+            ...(bg.messageId ? { messageId: bg.messageId } : {}),
+            ...(bg.attemptId ? { attemptId: bg.attemptId } : {}),
+            ...(bgToolEvents.length ? { toolEvents: bgToolEvents } : {}),
+            ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+          });
         }
         delete agentStreams[msg.agent];
         buildTabs(); buildAgentDrawer();
@@ -445,46 +860,54 @@ function handleServerMessage(msg) {
       }
       // Foreground turn completed successfully — forget the in-flight attempt so
       // a later stray error can't attach a Retry to an already-answered message.
-      lastSentAttempt = null;
+      if (lastSentAttempt?.agent === msg.agent
+          && (!msg.turn_id || lastSentAttempt.attemptId === msg.turn_id)) lastSentAttempt = null;
       // If response was routed to a widget, save as hidden and clear
       if (typeof getActiveWidgetTarget === 'function' && getActiveWidgetTarget() && msg.agent === activeAgent) {
         const finalBuf = widgetStreamFinish();
-        if (finalBuf) {
+        if (finalBuf && !finishingState?.needsResync) {
           if (!sessions[msg.agent]) sessions[msg.agent] = [];
-          sessions[msg.agent].push({ role: 'assistant', content: finalBuf, ts: Date.now(), hidden: true, toolEvents: currentLiveToolEvents() });
+          const state = agentStreams[msg.agent];
+          sessions[msg.agent].push({ role: 'assistant', content: finalBuf, ts: Date.now(), hidden: true, toolEvents: currentLiveToolEvents(), ...(state?.turnId ? { turnId: state.turnId } : {}), ...(state?.messageId ? { messageId: state.messageId } : {}), ...(state?.attemptId ? { attemptId: state.attemptId } : {}), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
         }
         streamEl = null; streamBuf = ''; resetToolRun();
         setStreaming(false);
         break;
       }
       flushStreamRender();
-      if (streamEl && streamBuf) {
+      if (finishingState?.needsResync && streamEl) {
+        try { streamEl.closest('.msg')?.remove(); } catch {}
+      } else if (streamEl && streamBuf) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
+        const state = agentStreams[msg.agent];
         updateToolRunHeader(liveToolRun, true);
-        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents() });
+        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents(), ...(state?.turnId ? { turnId: state.turnId } : {}), ...(state?.messageId ? { messageId: state.messageId } : {}), ...(state?.attemptId ? { attemptId: state.attemptId } : {}), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
         addTimestamp(streamEl.closest('.msg'));
         if (msg.agent === activeAgent) updateSessionWarning();
       } else if (liveToolRun?.events?.length) {
         updateToolRunHeader(liveToolRun, true);
       }
       streamEl = null; streamBuf = ''; resetToolRun();
+      awaitingPermission = false;
       setStreaming(false); setTyping(false);
+      if (msg.turn_id) terminalTurnIds[msg.agent] = msg.turn_id;
       delete agentStreams[msg.agent];
       if (agents.find(a => a.skillCategory === 'expenses')?.id === msg.agent && $('drawerExpenses')?.classList.contains('open')) loadExpTxns();
       break;
+      }
     case 'image':
       if (msg.agent !== activeAgent) break;
       setTyping(false);
       appendImageBubble({ base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, Date.now());
       if (!sessions[msg.agent]) sessions[msg.agent] = [];
-      sessions[msg.agent].push({ role: 'assistant', image: { base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, content: `[Image: ${msg.filename}]`, ts: Date.now() });
+      sessions[msg.agent].push({ role: 'assistant', image: { base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, content: `[Image: ${msg.filename}]`, ts: Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
       break;
     case 'video':
       if (msg.agent !== activeAgent) break;
       setTyping(false);
       appendVideoBubble({ url: msg.url, filename: msg.filename, savedPath: msg.savedPath }, Date.now());
       if (!sessions[msg.agent]) sessions[msg.agent] = [];
-      sessions[msg.agent].push({ role: 'assistant', video: { url: msg.url, filename: msg.filename, savedPath: msg.savedPath }, content: `[Video: ${msg.filename}]`, ts: Date.now() });
+      sessions[msg.agent].push({ role: 'assistant', video: { url: msg.url, filename: msg.filename, savedPath: msg.savedPath }, content: `[Video: ${msg.filename}]`, ts: Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
       break;
     case 'error':
       // Server-side auth rejection on the WS handshake — clear the stale
@@ -499,6 +922,15 @@ function handleServerMessage(msg) {
         _currentUser = null;
         showLoginScreen();
         break;
+      }
+      if (typeof pendingAttemptForId === 'function') {
+        const attemptId = msg.attempt_id || msg.turn_id;
+        msg._clientAttempt = pendingAttemptForId(attemptId);
+        if (msg._clientAttempt) {
+          msg._clientAttempt.lastError = { retryable: msg.retryable === true, code: msg.code || null };
+          if (msg._clientAttempt.accepted) acceptPendingAttempt(attemptId);
+          if (msg.agent) requestAgentSession(msg.agent);
+        }
       }
       if (typeof failDocumentChatTurn === 'function' && failDocumentChatTurn(msg.agent || activeAgent, msg.message, msg.documentRequest)) {
         if (!msg.agent || msg.agent === activeAgent) {
@@ -515,20 +947,54 @@ function handleServerMessage(msg) {
         finishDocumentStreamUi(msg.agent || activeAgent);
         break;
       }
+      if (msg.agent) {
+        const state = agentStreams[msg.agent] || freshAgentTurnState(msg.agent, msg);
+        state.active = false;
+        state.phase = 'failed';
+        state.error = msg.message;
+        agentStreams[msg.agent] = state;
+        if (state.needsResync) requestAgentSession(msg.agent);
+        if (msg.turn_id) terminalTurnIds[msg.agent] = msg.turn_id;
+        if (!sessions[msg.agent]) sessions[msg.agent] = [];
+        const errorRow = {
+          role: 'turn_error', content: msg.message, error: msg.message,
+          retryable: msg.retryable === true, code: msg.code || 'turn_failed',
+          assistantPartial: state.needsResync ? '' : (state.buf || (msg.agent === activeAgent ? streamBuf : '')),
+          ts: Date.now(),
+          ...(state.turnId ? { turnId: state.turnId } : {}),
+          ...(state.messageId ? { messageId: state.messageId } : {}),
+          ...(state.attemptId ? { attemptId: state.attemptId } : {}),
+          ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+        };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[msg.agent], errorRow))) {
+          sessions[msg.agent].push(errorRow);
+        }
+        buildTabs(); buildAgentDrawer();
+      }
       if (msg.agent && msg.agent !== activeAgent) break;
       // Finalize any partial stream so the NEXT reply gets a fresh bubble —
       // without this, its tokens concatenate onto the aborted reply's buffer.
-      // The partial text stays visible but is NOT committed to the session
-      // (the failed turn was never persisted server-side; retry resends it).
+      // The partial text stays visible; the server has already persisted a
+      // terminal turn_error row before emitting this event.
       flushStreamRender();
+      if (agentStreams[msg.agent]?.needsResync && streamEl) {
+        try { streamEl.closest('.msg')?.remove(); } catch {}
+      }
       streamEl = null; streamBuf = ''; resetToolRun();
-      setStreaming(false); setTyping(false); showTurnError(msg.message); break;
+      setStreaming(false); setTyping(false); showTurnError(msg.message, msg); break;
     case 'proposal':
       // Friction-tracker proposal — actionable repeat detected, two-button
       // bubble offering to set up the suggested automation. Persisted to
       // the agent's session jsonl so it survives reload.
       if (!msg.agent || msg.agent === activeAgent) {
         appendProposalBubble(msg);
+      }
+      if (msg.agent) {
+        const target = clientSessionAgentId(msg.agent);
+        if (!sessions[target]) sessions[target] = [];
+        const row = { ...msg, type: undefined, role: 'proposal', ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) };
+        delete row.type;
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[target], row))) sessions[target].push(row);
       }
       break;
     case 'proposal_outcome':
@@ -539,6 +1005,12 @@ function handleServerMessage(msg) {
       if (!msg.agent || msg.agent === activeAgent) {
         applyProposalOutcome(msg.proposalId, msg.status, msg.outcome);
       }
+      if (msg.agent) {
+        const target = clientSessionAgentId(msg.agent);
+        if (!sessions[target]) sessions[target] = [];
+        const row = { role: 'proposal_outcome', proposalId: msg.proposalId, status: msg.status, outcome: msg.outcome, ts: msg.ts || Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[target], row))) sessions[target].push(row);
+      }
       break;
     case 'approval_pending':
       // Post-turn pending-approval pill (see chat-dispatch.mjs
@@ -547,39 +1019,113 @@ function handleServerMessage(msg) {
       // PROVEN / APPROVE WATCHER OP) — renders Approve/Cancel buttons that
       // send a normal chat message, reusing the existing text intercept
       // unchanged. Persisted to session jsonl so it survives reload.
-      if (!msg.agent || msg.agent === activeAgent) {
-        appendApprovalPendingBubble(msg);
+      {
+        const approvalAgent = clientSessionAgentId(msg.agent || activeAgent);
+        if (!approvalAgent) break;
+        if (!sessions[approvalAgent]) sessions[approvalAgent] = [];
+        const row = {
+          role: 'approval_pending', kind: msg.kind,
+          phrase: msg.phrase, description: msg.description,
+          expiresAt: msg.expiresAt ?? null, opId: msg.opId ?? null,
+          ts: msg.ts ?? Date.now(),
+          ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+        };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[approvalAgent], row))) {
+          sessions[approvalAgent].push(row);
+        }
+        if (approvalAgent === activeAgent) {
+          appendApprovalPendingBubble(msg);
+        }
       }
       break;
     case 'approval_resolved':
       // Server pushes this once the staged op is gone (approved-and-executed,
       // or cleared by "say anything else to cancel") — mutates the matching
       // pill in place rather than a fresh reload-only clear.
-      if (!msg.agent || msg.agent === activeAgent) {
-        applyApprovalResolved(msg.kind);
+      {
+        const approvalAgent = clientSessionAgentId(msg.agent || activeAgent);
+        if (!approvalAgent) break;
+        if (!sessions[approvalAgent]) sessions[approvalAgent] = [];
+        const row = {
+          role: 'approval_resolved', kind: msg.kind,
+          opId: msg.opId ?? null, ts: msg.ts ?? Date.now(),
+          ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+        };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[approvalAgent], row))) {
+          sessions[approvalAgent].push(row);
+        }
+        if (approvalAgent === activeAgent) {
+          applyApprovalResolved(msg.kind, msg.opId ?? null, msg.ts ?? null);
+        }
       }
       break;
+    case 'session_cleared': {
+      const agent = clientSessionAgentId(msg.agent);
+      if (msg.sessionEpoch) agentSessionEpochs[agent] = msg.sessionEpoch;
+      sessions[agent] = [];
+      sessionsLoaded.add(agent);
+      delete agentStreams[agent];
+      delete terminalTurnIds[agent];
+      credentialPromptMap(agent).clear();
+      if (typeof clearPendingAttemptsForAgent === 'function') clearPendingAttemptsForAgent(agent);
+      if (lastSentAttempt?.agent === agent) lastSentAttempt = null;
+      if (failedAttempt?.agent === agent) failedAttempt = null;
+      if (agent === activeAgent) {
+        streamEl = null; streamBuf = ''; resetToolRun(true);
+        awaitingPermission = false;
+        setStreaming(false); setTyping(false);
+        renderSession();
+        updateSessionWarning();
+      }
+      buildTabs(); buildAgentDrawer();
+      break;
+    }
+    case 'stop_ignored': {
+      const agent = clientSessionAgentId(msg.agent);
+      if (msg.requested_turn_id && sessions[agent]) {
+        sessions[agent] = sessions[agent].filter(row => !(
+          row?.role === 'turn_error' && row?.status === 'stopped'
+          && (row.turnId === msg.requested_turn_id || row.attemptId === msg.requested_turn_id)
+        ));
+      }
+      if (msg.activeStream) mergeActiveStreamSnapshot(agent, msg.activeStream, agentSessionEpochs[agent] ?? null);
+      if (agent === activeAgent) {
+        renderSession();
+        projectAgentStreamState(agent);
+        showToast(msg.activeStream
+          ? 'That reply was already replaced by a newer turn; the newer turn is still running.'
+          : 'That reply had already finished.');
+      }
+      buildTabs(); buildAgentDrawer();
+      break;
+    }
     case 'attachment_decision':
       // Post-turn save/discard prompt for a chat-upload. Renders Keep/Discard
       // buttons; the file is already on disk so 'keep' is a no-op and
       // 'discard' deletes via /api/chat-attachment-decision. Persisted to
       // session jsonl so reload preserves the choice.
-      if (!msg.agent || msg.agent === activeAgent) {
-        // Stash on the active session so renderSession picks it up post-reload.
-        if (sessions[activeAgent]) {
-          sessions[activeAgent].push({
-            role: 'attachment_decision',
-            decisionId: msg.decisionId, file_id: msg.file_id,
-            name: msg.name, mimeType: msg.mimeType, ts: msg.ts,
-          });
-        }
-        appendAttachmentDecisionBubble(msg);
+      {
+        const target = clientSessionAgentId(msg.agent || activeAgent);
+        if (!sessions[target]) sessions[target] = [];
+        const row = {
+          role: 'attachment_decision', decisionId: msg.decisionId,
+          file_id: msg.file_id, name: msg.name, mimeType: msg.mimeType, ts: msg.ts,
+          ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+        };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[target], row))) sessions[target].push(row);
+        if (target === activeAgent) appendAttachmentDecisionBubble(msg);
       }
       break;
     case 'attachment_decision_outcome':
       // Fan-out from another tab (or this tab's click). Mutate the bubble
       // in place to the resolved state.
-      applyAttachmentDecisionOutcome(msg.decisionId, msg.decision);
+      {
+        const target = clientSessionAgentId(msg.agent || activeAgent);
+        if (!sessions[target]) sessions[target] = [];
+        const row = { role: 'attachment_decision_outcome', decisionId: msg.decisionId, decision: msg.decision, ts: msg.ts, ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) };
+        if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[target], row))) sessions[target].push(row);
+        if (target === activeAgent) applyAttachmentDecisionOutcome(msg.decisionId, msg.decision);
+      }
       break;
     case 'status':
       // Watcher supervisor pushes these — muted/italic bubble outside any
@@ -601,7 +1147,7 @@ function handleServerMessage(msg) {
       if (msg.agent) {
         const agentKey = clientSessionAgentId(msg.agent);
         if (!sessions[agentKey]) sessions[agentKey] = [];
-        const statusEntry = { role: 'status', status: { text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question, state: msg.state, recentHistory: msg.recentHistory }, content: `[Status: ${msg.text}]`, ts: msg.ts || Date.now() };
+        const statusEntry = { role: 'status', status: { text: msg.text, label: msg.label, kind: msg.kind, watcherId: msg.watcherId, final: msg.final, finalStatus: msg.finalStatus, awaiting_input: msg.awaiting_input, pending_question: msg.pending_question, state: msg.state, recentHistory: msg.recentHistory }, content: `[Status: ${msg.text}]`, ts: msg.ts || Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) };
         const arr = sessions[agentKey];
         const existingIdx = msg.watcherId
           ? arr.findIndex(m => m.role === 'status' && m.status?.watcherId === msg.watcherId)
@@ -635,7 +1181,7 @@ function handleServerMessage(msg) {
         activeAgent = agents[0].id;
         if (!(activeAgent in sessions)) {
           sessions[activeAgent] = [];
-          ws?.send(JSON.stringify({ type: 'load_session', agent: activeAgent }));
+          requestAgentSession(activeAgent);
         }
         renderSession();
       } else if (agents.length === 0) {
@@ -737,22 +1283,21 @@ function handleServerMessage(msg) {
       showToast(msg.message || 'Cortex runtime issue', 8000);
       break;
     case 'active_streams': {
-      // Restore streaming state for agents that are still working
+      // Authoritative reconnect snapshot: full text/tool/permission state plus
+      // per-turn seq. Remove stale local busy flags absent from the server.
       const activeIds = new Set((msg.agents ?? []).map(a => a.agentId));
       if (typeof reconcileDocumentChatTurns === 'function') reconcileDocumentChatTurns(activeIds);
-      for (const { agentId } of (msg.agents ?? [])) {
-        if (agentId === activeAgent) {
-          setStreaming(true);
-          setTyping(true);
-        } else {
-          if (!agentStreams[agentId]) agentStreams[agentId] = { buf: '', toolNames: [], active: true };
-          agentStreams[agentId].active = true;
-        }
+      for (const snapshot of (msg.agents ?? [])) {
+        mergeActiveStreamSnapshot(snapshot.agentId, snapshot, agentSessionEpochs[snapshot.agentId] ?? null);
       }
-      // If the active agent is NOT in the list, it finished while we were away
-      if (!activeIds.has(activeAgent)) {
-        setStreaming(false); setTyping(false);
+      for (const [agentId, state] of Object.entries(agentStreams)) {
+        if (!state?.active || activeIds.has(agentId)) continue;
+        const snapshotRevision = Number(msg.snapshotRevisions?.[agentId]) || 0;
+        // A state accepted after this snapshot's watermark is newer than the
+        // absence claim and must survive until a later authoritative snapshot.
+        if ((state.liveRevision || 0) <= snapshotRevision) delete agentStreams[agentId];
       }
+      projectAgentStreamState(activeAgent);
       buildTabs();
       buildAgentDrawer();
       break;

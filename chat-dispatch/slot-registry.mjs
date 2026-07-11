@@ -19,7 +19,7 @@
  * module-private state — every concurrency concern goes through this surface.
  */
 
-import { clearStreamBuffer } from '../sessions.mjs';
+import { clearStreamBuffer, writeStreamBuffer } from '../sessions.mjs';
 
 // Track active AbortControllers so in-progress runs can be cancelled.
 // Keyed by `${userId}_${agentId}` so one user's chat can't abort another user's
@@ -28,7 +28,7 @@ const abortControllers = new Map();
 
 // Track which agents are actively streaming, so reconnecting clients can be told.
 // Same scoped key as abortControllers.
-const activeStreams = new Map(); // `${userId}_${agentId}` → { userId, agentId, startTs }
+const activeStreams = new Map(); // `${userId}_${agentId}` → authoritative reconnect snapshot
 
 // Track in-flight work per agent (WS *and* delegate) so ask_agent can queue
 // behind an active run instead of colliding with it.
@@ -84,9 +84,118 @@ export function markAgentBusy(agentId) {
 export function getActiveStreams(userId) {
   const result = [];
   for (const info of activeStreams.values()) {
-    if (info.userId === userId) result.push({ agentId: info.agentId, startTs: info.startTs });
+    if (info.userId === userId) result.push(snapshotActiveStream(info));
   }
   return result;
+}
+
+export function getActiveStream(userId, agentId) {
+  const info = activeStreams.get(`${userId}_${agentId}`);
+  return info ? snapshotActiveStream(info) : null;
+}
+
+/** @param {any} info */
+function snapshotActiveStream(info) {
+  return {
+    agentId: info.agentId,
+    startTs: info.startTs,
+    turnId: info.turnId ?? null,
+    messageId: info.messageId ?? null,
+    attemptId: info.attemptId ?? info.turnId ?? null,
+    seq: info.seq ?? 0,
+    phase: info.phase ?? 'running',
+    content: info.content ?? '',
+    hidden: info.hidden === true,
+    toolEvents: (info.toolEvents || []).map(ev => ({ ...ev })),
+    permissionRequest: info.permissionRequest ? { ...info.permissionRequest } : null,
+  };
+}
+
+/**
+ * Fold one already-correlated outward event into the server's authoritative
+ * in-flight snapshot. Browser reconnects consume this instead of trying to
+ * stitch a persisted `.streaming` fragment to newly arriving tokens.
+ */
+export function recordStreamEvent(scopedSessionKey, event) {
+  const info = activeStreams.get(scopedSessionKey);
+  if (!info || !event || typeof event !== 'object') return;
+  if (event.turn_id && info.turnId && event.turn_id !== info.turnId) return;
+  if (Number.isFinite(event.seq)) info.seq = Math.max(info.seq ?? 0, event.seq);
+  switch (event.type) {
+    case 'turn_accepted':
+      info.phase = 'running';
+      break;
+    case 'token':
+      info.content += String(event.text ?? '');
+      info.phase = 'running';
+      break;
+    case 'replace':
+      info.content = String(event.text ?? '');
+      break;
+    case 'tool_call': {
+      const callId = event.toolCallId || event.tool_call_id || event.callId || null;
+      info.toolEvents.push({
+        name: event.name,
+        args: event.args ?? null,
+        callId,
+        startedAt: Date.now(),
+        status: 'running',
+      });
+      break;
+    }
+    case 'tool_progress': {
+      const callId = event.toolCallId || event.tool_call_id || event.callId || null;
+      const target = [...info.toolEvents].reverse().find(ev =>
+        ev.status !== 'done' && (callId ? ev.callId === callId : ev.name === event.name));
+      if (target) target.progressPreview = String(event.text ?? '').slice(-1200);
+      break;
+    }
+    case 'tool_result': {
+      const callId = event.toolCallId || event.tool_call_id || event.callId || null;
+      const target = [...info.toolEvents].reverse().find(ev =>
+        ev.status !== 'done' && (callId ? ev.callId === callId : ev.name === event.name));
+      if (target) {
+        target.status = 'done';
+        target.endedAt = Date.now();
+        target.durationMs = target.startedAt ? target.endedAt - target.startedAt : null;
+        target.preview = String(event.preview ?? '').slice(0, 1200);
+        target.text = String(event.text ?? '').slice(0, 10_000);
+      }
+      break;
+    }
+    case 'permission_request':
+      info.phase = 'awaiting_permission';
+      info.permissionRequest = {
+        text: String(event.text ?? ''),
+        permissionId: event.permissionId ?? event.permission_id ?? null,
+      };
+      break;
+    case 'hide_turn':
+      info.hidden = true;
+      info.content = '';
+      break;
+    case 'error':
+      info.phase = 'failed';
+      break;
+    case 'done':
+      info.phase = 'complete';
+      break;
+  }
+
+  // Throttled/durable crash snapshot. Raw tool args are intentionally omitted
+  // from disk; they can contain credentials. The live in-memory snapshot still
+  // carries args for a same-process reconnect.
+  writeStreamBuffer(scopedSessionKey, {
+    content: info.content,
+    turnId: info.turnId,
+    messageId: info.messageId,
+    attemptId: info.attemptId,
+    seq: info.seq,
+    phase: info.phase,
+    hidden: info.hidden,
+    toolEvents: info.toolEvents.map(({ args, text, ...ev }) => ({ ...ev, ...(text ? { text } : {}) })),
+    permissionRequest: info.permissionRequest,
+  });
 }
 
 /**
@@ -94,12 +203,35 @@ export function getActiveStreams(userId) {
  * Returns the AbortController so the caller can pass `.signal` to streamChat.
  * Aborts any prior controller for the same scoped key first — defensive,
  * since handleChatMessage shouldn't be entered twice for the same key.
+ * @param {string} scopedSessionKey
+ * @param {string} userId
+ * @param {string} agentId
+ * @param {{turnId?: string|null, messageId?: string|null, attemptId?: string|null, seq?: number}} [meta]
  */
-export function openTurn(scopedSessionKey, userId, agentId) {
+export function openTurn(scopedSessionKey, userId, agentId, meta = {}) {
   abortControllers.get(scopedSessionKey)?.abort();
   const ac = new AbortController();
   abortControllers.set(scopedSessionKey, ac);
-  activeStreams.set(scopedSessionKey, { userId, agentId, startTs: Date.now() });
+  const info = {
+    userId,
+    agentId,
+    startTs: Date.now(),
+    turnId: meta.turnId ?? null,
+    messageId: meta.messageId ?? null,
+    attemptId: meta.attemptId ?? meta.turnId ?? null,
+    seq: meta.seq ?? 0,
+    phase: 'running',
+    content: '',
+    hidden: false,
+    toolEvents: [],
+    permissionRequest: null,
+  };
+  activeStreams.set(scopedSessionKey, info);
+  writeStreamBuffer(scopedSessionKey, {
+    content: '', turnId: info.turnId, messageId: info.messageId,
+    attemptId: info.attemptId, seq: info.seq, phase: info.phase,
+    hidden: false, toolEvents: [], permissionRequest: null,
+  });
   return ac;
 }
 

@@ -19,7 +19,7 @@
  */
 
 import { streamChat } from '../chat.mjs';
-import { appendToSession, writeStreamBuffer, loadSession } from '../sessions.mjs';
+import { appendToSession, loadSession, failPendingTurn } from '../sessions.mjs';
 import { getRoleAssignments, listRoles, getRoleTools } from '../roles.mjs';
 import { matchOverride as matchRoutingOverride, logFire as logRoutingFire } from '../lib/routing-overrides.mjs';
 import {
@@ -31,7 +31,7 @@ import { runWithTurnContext } from '../lib/turn-abort-context.mjs';
 import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
 import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
-import { recordRouting } from '../lib/turn-trace-context.mjs';
+import { getTurn, recordRouting } from '../lib/turn-trace-context.mjs';
 
 // ── Specialist router (pre-LLM) ───────────────────────────────────────────────
 // Skip the coordinator's reasoning turn when the user's message clearly
@@ -255,6 +255,33 @@ export async function runSpecialistRoute({
     // streamChat (it inherits the dispatcher's turn store via ALS).
     recordRouting({ mode: 'specialist', specialist: route.skillId ?? null, redirectedTo: route.agentId ?? null, strategy: route.strategy ?? 'regex', llmAvoided: false });
     let routerBuf = '';
+    let sawInnerDone = false;
+    let sawInnerError = false;
+    let routeCompleted = false;
+    /** @type {Record<string, any> | null} */
+    let innerDoneEvent = null;
+    /** @type {Record<string, any> | null} */
+    let routeErrorEvent = null;
+    const emitRouteTerminalError = async (code, message) => {
+      let durable = false;
+      try {
+        durable = await failPendingTurn(`${userId}_${agentId}`, message, {
+          status: ac.signal.aborted ? 'stopped' : 'failed',
+          retryable: false,
+          partial: routerBuf,
+        });
+      } catch (e) {
+        console.warn('[chat] specialist failure status persist failed:', e.message);
+      }
+      if (ac.signal.aborted) return;
+      onEvent({
+        type: 'error',
+        code: durable ? code : 'persistence_failed',
+        message: durable ? message : `Storage error while recording the specialist failure: ${message}`,
+        retryable: false,
+        agent: agentId,
+      });
+    };
     try {
       // runWithTurnContext: tools executed inside this stream (incl. ask_agent
       // sync delegations) link their own AbortControllers to this turn's
@@ -262,15 +289,59 @@ export async function runSpecialistRoute({
       // origin lets backgrounded work announce its completion on the device.
       await runWithTurnContext({ signal: ac.signal, deviceId, conversationMode }, async () => {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
+        // The routed specialist is ephemeral, so its terminal event is only an
+        // inner-run boundary — it does NOT mean the coordinator session is on
+        // disk. Hold it until the coordinator write below succeeds. streamChat
+        // currently uses this callback for auxiliary events, but suppress a
+        // callback terminal defensively so this remains a one-done contract if
+        // that event surface grows later.
+        if (e?.type === 'done') {
+          sawInnerDone = true;
+          innerDoneEvent = { ...e };
+          return;
+        }
+        if (e?.type === 'error') { sawInnerError = true; routeErrorEvent = { ...e }; return; }
         onEvent({ ...e, agent: agentId });
       }, userId, _attachments, null, false, { source, deviceId }, { toolPlan })) {
         if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
         if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
         if (event.type === 'token')    routerBuf += event.text;
         if (event.type === 'replace')  routerBuf = event.text;
+        if (event.type === 'done') {
+          sawInnerDone = true;
+          innerDoneEvent = { ...event };
+          continue;
+        }
+        if (event.type === 'error') { sawInnerError = true; routeErrorEvent = { ...event }; continue; }
         onEvent({ ...event, agent: agentId });
       }
       });
+
+      // A stop/abort or provider error must leave the send-time pending user
+      // row intact. Persisting routerBuf here would turn a partial (or empty)
+      // stream into a completed assistant reply and router note.
+      if (ac.signal.aborted) {
+        await failPendingTurn(`${userId}_${agentId}`, 'Stopped by user', {
+          status: 'stopped', retryable: false, partial: routerBuf,
+        }).catch(() => {});
+        return { handled: true };
+      }
+      if (sawInnerError) {
+        await emitRouteTerminalError(
+          routeErrorEvent?.code || 'specialist_failed',
+          routeErrorEvent?.message || 'The specialist reply failed before completion.',
+        );
+        return { handled: true };
+      }
+      if (!sawInnerDone) {
+        console.error('[chat] specialist-router ended without a terminal done');
+        await emitRouteTerminalError(
+          'specialist_incomplete',
+          'The specialist reply ended before it could be completed. Nothing was marked complete; please reload before trying again.',
+        );
+        return { handled: true };
+      }
+
       // Persist the turn under the coordinator's session so the user sees it
       // in the chat they actually typed into. The specialist ran ephemerally,
       // so this is the only durable record.
@@ -282,11 +353,26 @@ export async function runSpecialistRoute({
       // this, short follow-ups like "send" land on the coordinator with no
       // idea what the prior routed turn did, and it asks "send what, where?".
       const viaTs = Date.now();
-      appendToSession(`${userId}_${agentId}`,
-        { role: 'user', content: userText, ts: viaTs },
-        { role: 'assistant', content: routerBuf, ts: viaTs, via: route.skillId, viaAgent: route.agentId, viaName: route.name },
-        { role: 'system', content: `[routed to ${route.name} (${route.skillId}) — that specialist ran ephemerally and produced the assistant reply above; you (the coordinator) did not run a turn]`, ts: viaTs + 1, routerNote: true }
-      );
+      try {
+        await appendToSession(`${userId}_${agentId}`,
+          { role: 'user', content: userText, ts: viaTs },
+          { role: 'assistant', content: routerBuf, ts: viaTs, via: route.skillId, viaAgent: route.agentId, viaName: route.name },
+          { role: 'system', content: `[routed to ${route.name} (${route.skillId}) — that specialist ran ephemerally and produced the assistant reply above; you (the coordinator) did not run a turn]`, ts: viaTs + 1, routerNote: true }
+        );
+      } catch (e) {
+        console.error('[chat] specialist persist failed:', e.message);
+        await emitRouteTerminalError(
+          'persistence_failed',
+          'The specialist finished, but its reply could not be saved. It was not marked complete; reload before retrying to avoid repeating any actions.',
+        );
+        return { handled: true };
+      }
+
+      // Release exactly one terminal event only after the coordinator session
+      // is durable. Preserve any future metadata carried by streamChat's inner
+      // done while forcing the visible agent back to the coordinator.
+      routeCompleted = true;
+      onEvent({ ...(innerDoneEvent ?? {}), type: 'done', agent: agentId });
       console.log(`[chat] specialist-router done: skill=${route.skillId} trim=${trimEnabled ? 'on' : 'off'} tools=${usedToolCount} durationMs=${Date.now() - routerStart} bytes=${routerBuf.length}`);
       // Local-tier learning also applies to ROUTED turns — they never reach
       // chat-dispatch's post-LLM learn block (the interceptor chain returns
@@ -302,7 +388,11 @@ export async function runSpecialistRoute({
     } catch (e) {
       if (e.name !== 'AbortError') {
         console.error('[chat] specialist-router stream failed:', e.message);
-        onEvent({ type: 'error', message: e.message, agent: agentId });
+        await emitRouteTerminalError('specialist_failed', e.message);
+      } else {
+        await failPendingTurn(`${userId}_${agentId}`, 'Stopped by user', {
+          status: 'stopped', retryable: false, partial: routerBuf,
+        }).catch(() => {});
       }
     } finally {
       // Specialist-routed turns are LLM turns that happen to be routed — they
@@ -310,7 +400,7 @@ export async function runSpecialistRoute({
       // armFollowupForReply). Without this, every routed voice turn silently
       // ended the conversation even with conversation_mode:true, because
       // runLlmTurn's finally never runs for interceptor-handled turns.
-      armFollowupForReply({ source, deviceId, conversationMode, reply: routerBuf, ac });
+      if (routeCompleted) armFollowupForReply({ source, deviceId, conversationMode, reply: routerBuf, ac });
       recordActivity(userId, agentId, { apiCall: true });
     }
     return { handled: true };
@@ -336,10 +426,16 @@ export async function buildSchedulerNote({ userId, agentId, userText, skipInterc
   // task. The time note below is still emitted.
   if (userText && !skipIntercept) {
     try {
-      const recentHistory = await loadSession(`${userId}_${agentId}`, 6);
+      const recentHistory = (await loadSession(`${userId}_${agentId}`, 10))
+        .filter(m => m.excludeFromModel !== true)
+        .slice(-6);
       const intercept = await interceptScheduling({ userId, agentId, text: userText, history: recentHistory });
       if (intercept.matched) {
         schedulerNote = `<scheduler_result>\n${intercept.outcome}\n</scheduler_result>`;
+        if (intercept.sideEffectCommitted === true) {
+          const turn = getTurn();
+          if (turn) turn.preLlmSideEffectCommitted = true;
+        }
       }
     } catch (e) {
       console.warn('[chat-dispatch] scheduler intercept threw:', e.message);
@@ -421,8 +517,39 @@ export async function runLlmTurn({
   // the whole turn on a fallback provider, or that tool fires twice. Tracked on
   // both the emit callback and the yielded stream to be robust to either path.
   let toolInvoked = false;
+  // The built-in scheduler can create/cancel/reschedule before narration starts.
+  // Provider failover within this attempt is safe (the scheduler note is reused),
+  // but a user Retry would execute that mutation again, so terminal failures
+  // must be nonretryable even though no model-visible tool_call was emitted.
+  const preLlmSideEffectCommitted = getTurn()?.preLlmSideEffectCommitted === true;
+  let callbackError = null;
+
+  async function emitTurnFailure(event, retryable = !toolInvoked) {
+    const message = String(event?.message || 'The turn failed before completion.');
+    retryable = retryable === true && !preLlmSideEffectCommitted;
+    let durable = false;
+    try {
+      durable = await failPendingTurn(scopedSessionKey, message, {
+        status: ac.signal.aborted ? 'stopped' : 'failed',
+        retryable: retryable === true,
+        partial: streamBuf,
+      });
+    } catch (e) {
+      console.warn('[chat] failed to persist terminal turn status:', e.message);
+    }
+    if (ac.signal.aborted) return;
+    onEvent({
+      ...event,
+      type: 'error',
+      message: durable ? message : `Storage error while recording the failed turn: ${message}`,
+      code: durable ? (event?.code || 'turn_failed') : 'persistence_failed',
+      retryable: durable ? retryable === true : false,
+      agent: agentId,
+    });
+  }
 
   async function runStream(agentObj) {
+    callbackError = null;
     // runWithTurnContext: skill executors reached from this stream's tool loop
     // (notably ask_agent's sync delegations) link their own AbortControllers
     // to this turn's signal via getTurnSignal() — without it, a user stop
@@ -432,6 +559,7 @@ export async function runLlmTurn({
     return runWithTurnContext({ signal: ac.signal, deviceId, conversationMode }, async () => {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       if (e.type === 'tool_call') toolInvoked = true;
+      if (e.type === 'error') { callbackError = e; return; }
       onEvent({ ...e, agent: agentId });
     }, userId ?? 'default', _attachments, schedulerNote, false, { source, deviceId }, {
       toolPlan, documentRequest, hiddenUser, isolatedTaskRun,
@@ -439,18 +567,15 @@ export async function runLlmTurn({
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
       if (event.type === 'tool_call') toolInvoked = true;
-      // Check if this error is retriable — return it instead of emitting
-      if (event.type === 'error' && RETRIABLE_RE.test(event.message ?? '')) {
-        return event; // signal caller to attempt failover
-      }
+      // All terminal errors are returned to the owner so it can persist a
+      // failed status BEFORE exposing the error/Retry UI.
+      if (event.type === 'error') return event;
       // Accumulate stream content for persistence buffer
       if (event.type === 'token')   streamBuf += event.text;
       if (event.type === 'replace') streamBuf = event.text;
-      // Document-drawer turns have their own artifact surface. Never expose a
-      // body-sized narration through reconnect's generic pendingStream path.
-      if (streamBuf && !documentRequest) writeStreamBuffer(scopedSessionKey, streamBuf);
       onEvent({ ...event, agent: agentId });
     }
+    if (callbackError) { const error = callbackError; callbackError = null; return error; }
     return null; // success
     });
   }
@@ -462,7 +587,8 @@ export async function runLlmTurn({
     if (failoverError) {
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
-      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && !toolInvoked) {
+      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel
+          && RETRIABLE_RE.test(failoverError.message ?? '') && !toolInvoked) {
         console.log(`[failover] Primary ${scopedAgent.provider}/${scopedAgent.model} failed: ${failoverError.message} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         // Voice devices TTS every token — never speak provider/model names
         // (spoken errors are provider-agnostic by rule). Web keeps the
@@ -475,16 +601,14 @@ export async function runLlmTurn({
           model: fo.fallbackModel,
         };
         const fallbackError = await runStream(fallbackAgent);
-        if (fallbackError) {
-          onEvent({ ...fallbackError, agent: agentId });
-        }
+        if (fallbackError) await emitTurnFailure(fallbackError, !toolInvoked && fallbackError.retryable !== false);
       } else {
         // No failover (not configured, or a tool already ran this turn — re-running
         // would double-execute its side effects). Emit the original error.
         if (toolInvoked && fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel) {
           console.log(`[failover] skipped — a tool already ran this turn; re-running on ${fo.fallbackProvider}/${fo.fallbackModel} could double-execute side effects`);
         }
-        onEvent({ ...failoverError, agent: agentId });
+        await emitTurnFailure(failoverError, !toolInvoked && failoverError.retryable !== false);
       }
     }
   } catch (e) {
@@ -515,17 +639,22 @@ export async function runLlmTurn({
         try {
           const fallbackAgent = { ...scopedAgent, provider: fo.fallbackProvider, model: fo.fallbackModel };
           const fallbackError = await runStream(fallbackAgent);
-          if (fallbackError) onEvent({ ...fallbackError, agent: agentId });
+          if (fallbackError) await emitTurnFailure(fallbackError, !toolInvoked && fallbackError.retryable !== false);
         } catch (e2) {
           if (e2.name !== 'AbortError') {
             const cause2 = e2?.cause?.code || e2?.cause?.message;
             const msg2 = cause2 && !e2.message?.includes(cause2) ? `${e2.message} (${cause2})` : e2.message;
-            onEvent({ type: 'error', message: msg2, agent: agentId });
+            await emitTurnFailure({ type: 'error', message: msg2 }, !toolInvoked);
           }
         }
       } else {
-        onEvent({ type: 'error', message: enrichedMessage, agent: agentId });
+        const storageFailure = e?.code === 'SESSION_CLEARED' || /persist|session.*clear|storage/i.test(enrichedMessage || '');
+        await emitTurnFailure({ type: 'error', message: enrichedMessage, ...(storageFailure ? { code: 'persistence_failed' } : {}) }, !toolInvoked && !storageFailure);
       }
+    } else {
+      await failPendingTurn(scopedSessionKey, 'Stopped by user', {
+        status: 'stopped', retryable: false, partial: streamBuf,
+      }).catch(() => {});
     }
   } finally {
     // Follow-up listening — see armFollowupForReply for the full comment on

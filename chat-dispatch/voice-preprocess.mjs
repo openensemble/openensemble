@@ -24,7 +24,7 @@
  *                                asked to touch another agent's watcher)
  */
 
-import { appendToSession } from '../sessions.mjs';
+import { appendToSession, failPendingTurn } from '../sessions.mjs';
 import {
   classifyTimerIntent, createVoiceTimer,
   classifyTimerCancelIntent, cancelVoiceTimer,
@@ -426,66 +426,104 @@ export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agent
  * @returns {Promise<{ handled: true } | null>}
  */
 export async function tryApprovalIntercept({ userText, userId, agentId, onEvent }) {
-  // Intercept "CONFIRM DELETION" — execute staged delete without hitting the model
-  if (userText.toUpperCase() === 'CONFIRM DELETION' && getPendingDelete(userId)) {
-    const result = await executePendingDelete(userId);
-    appendToSession(`${userId}_${agentId}`,
-      { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', content: result, ts: Date.now() }
-    );
-    onEvent({ type: 'token', text: result, agent: agentId });
-    onEvent({ type: 'done', agent: agentId });
-    return { handled: true };
-  }
-  if (getPendingDelete(userId)) clearPendingDelete(userId);
+  // Every get/execute/clear below is scoped to (userId, agentId): an approval
+  // phrase only matches an op staged from THIS agent's chat, and the
+  // clear-on-any-miss rule only cancels THIS agent's staged ops. Typing
+  // "CONFIRM DELETION" in agent B no longer executes agent A's delete (and
+  // records it in B's session), and chatting with B no longer silently wipes
+  // A's staged op behind its still-rendered approval card.
+  //
+  // The approval-card Approve button sends "<PHRASE> #<opId>" (the id minted
+  // at stage time — see lib/pending-approvals.mjs). An id that no longer
+  // matches the currently staged op means the card is stale: the op it
+  // described was resolved, replaced, or expired. Stale clicks are refused
+  // with a notice and have NO side effects — they neither execute the newer
+  // op nor cancel it. Bare typed phrases (no #id) keep matching the current
+  // op, exactly as before.
+  //
+  // appendToSession is awaited before the terminal `done` — emitting done
+  // first let a reload land between the two and show an executed destructive
+  // op with no record of it.
+  const m = String(userText ?? '').trim().match(/^(.+?)\s*#([A-Za-z0-9_-]+)$/);
+  const phrase = (m ? m[1] : String(userText ?? '').trim()).toUpperCase();
+  const opId = m ? m[2] : null;
 
-  // Intercept "APPROVE PURGE" — execute staged destructive email op
-  if (userText.toUpperCase() === 'APPROVE PURGE' && getPendingEmail(userId)) {
-    const result = await executePendingEmail(userId);
-    const text = typeof result === 'string' ? result : (result?.text ?? String(result));
-    appendToSession(`${userId}_${agentId}`,
-      { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', content: text, ts: Date.now() }
-    );
+  /** @param {string} text @returns {Promise<{handled: true}>} */
+  const finish = async (text) => {
+    try {
+      await appendToSession(`${userId}_${agentId}`,
+        { role: 'user', content: userText, ts: Date.now() },
+        { role: 'assistant', content: text, ts: Date.now() }
+      );
+    } catch (e) {
+      console.warn('[approval] result persist failed:', e.message);
+      await failPendingTurn(`${userId}_${agentId}`, 'Persistence failed after the approval action', { retryable: false }).catch(() => {});
+      onEvent({
+        type: 'error', code: 'persistence_failed', retryable: false, agent: agentId,
+        message: 'The approval action finished, but its chat record could not be saved. Do not retry the approval until storage is healthy.',
+      });
+      return { handled: /** @type {true} */ (true) };
+    }
     onEvent({ type: 'token', text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
-    return { handled: true };
-  }
-  if (getPendingEmail(userId)) clearPendingEmail(userId);
+    return { handled: /** @type {true} */ (true) };
+  };
 
-  // Intercept "APPROVE PROVEN" — execute staged trust-state promotion to proven
-  if (userText.toUpperCase() === 'APPROVE PROVEN' && getPendingProven(userId)) {
-    // executePendingProven returns either a string or whatever
-    // execProfileSetTrustState yields (currently an object with optional
-    // .text). Cast widens for the union-narrowing branch below.
-    const result = /** @type {string | { text?: string }} */ (await executePendingProven(userId));
-    const text = typeof result === 'string' ? result : (result?.text ?? String(result));
-    appendToSession(`${userId}_${agentId}`,
-      { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', content: text, ts: Date.now() }
-    );
-    onEvent({ type: 'token', text, agent: agentId });
-    onEvent({ type: 'done', agent: agentId });
-    return { handled: true };
-  }
-  if (getPendingProven(userId)) clearPendingProven(userId);
+  const FAMILIES = [
+    // "APPROVE WATCHER OP": staged cross-agent watcher cancel/update the
+    // coordinator deferred when a specialist asked it to touch a watcher
+    // owned by a different agent — see canActOnWatcher in skills/tasks.
+    { phrase: 'CONFIRM DELETION',   get: getPendingDelete,    clear: clearPendingDelete,    run: executePendingDelete },
+    { phrase: 'APPROVE PURGE',      get: getPendingEmail,     clear: clearPendingEmail,     run: executePendingEmail },
+    { phrase: 'APPROVE PROVEN',     get: getPendingProven,    clear: clearPendingProven,    run: executePendingProven },
+    { phrase: 'APPROVE WATCHER OP', get: getPendingWatcherOp, clear: clearPendingWatcherOp, run: executePendingWatcherOp },
+  ];
 
-  // Intercept "APPROVE WATCHER OP" — execute staged cross-agent watcher
-  // cancel/update that the coordinator deferred when a specialist asked it
-  // to touch a watcher owned by a different agent. See canActOnWatcher in
-  // skills/tasks/execute.mjs for the staging logic.
-  if (userText.toUpperCase() === 'APPROVE WATCHER OP' && getPendingWatcherOp(userId)) {
-    /** @type {string} */
-    const text = await executePendingWatcherOp(userId);
-    appendToSession(`${userId}_${agentId}`,
-      { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', content: text, ts: Date.now() }
-    );
-    onEvent({ type: 'token', text, agent: agentId });
-    onEvent({ type: 'done', agent: agentId });
-    return { handled: true };
+  // Approval-card Cancel buttons use a targeted phrase rather than the old
+  // generic "cancel" message. Match the exact staged operation id so a stale
+  // card cannot cancel a newer operation of the same family. Bare phrases and
+  // ordinary-message miss-clear behavior remain unchanged below for legacy
+  // clients and keyboard users.
+  if (phrase === 'CANCEL APPROVAL' && opId) {
+    // Compare-and-remove happens atomically inside the store lock. Iterating
+    // families is safe because opIds are globally unique; a concurrent re-stage
+    // cannot make this stale card clear the replacement.
+    const cancelled = FAMILIES.some(f => f.clear(userId, agentId, opId) === true);
+    return cancelled
+      ? finish('Cancelled that pending approval. Nothing was executed.')
+      : finish('That approval is no longer pending — it was already resolved, cancelled, expired, or replaced. Nothing was executed.');
   }
-  if (getPendingWatcherOp(userId)) clearPendingWatcherOp(userId);
+
+  const matched = FAMILIES.find(f => f.phrase === phrase);
+  if (matched) {
+    const pending = matched.get(userId, agentId);
+    if (opId && !pending) {
+      return finish('That approval is no longer pending — it was already resolved, cancelled, or expired. Nothing was executed.');
+    }
+    if (opId && pending?.opId !== opId) {
+      return finish('⚠️ That approval card is stale — a newer operation of the same type is now pending in this chat. Nothing was executed and the newer operation is still staged; review its approval card before confirming.');
+    }
+    if (pending) {
+      // executors return either a string or an object with optional .text
+      // The expected id is validated and consumed in ONE store transaction.
+      // The pre-read above exists only for a clearer stale-card message; it is
+      // not relied on for safety.
+      const result = /** @type {string | { text?: string }} */ (await matched.run(userId, agentId, opId));
+      const text = typeof result === 'string' ? result : (result?.text ?? String(result));
+      return finish(text);
+    }
+    // Typed phrase with nothing staged of that kind: fall through to the LLM
+    // (and the miss-clear below), same as any other message.
+  }
+
+  // Miss-clear ("say anything else to cancel"): an ordinary message cancels
+  // every staged op in THIS agent's chat. Note the deliberate change from the
+  // old walk: a message that successfully approves one family no longer
+  // clears the families staged before it — an explicit approval is not
+  // "anything else".
+  for (const f of FAMILIES) {
+    if (f.get(userId, agentId)) f.clear(userId, agentId);
+  }
 
   return null;
 }

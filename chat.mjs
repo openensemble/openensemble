@@ -152,7 +152,10 @@ function documentArtifactContent(request, artifact, fallback = '') {
   return `[Document ${artifact.action}: ${artifact.filename || request?.filename || 'document'}${artifact.version ? ` (v${artifact.version})` : ''}]`;
 }
 
-function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null } = {}) {
+// async since the durability fix: the session write is awaited so callers can
+// hold the terminal `done` until the turn is actually on disk. Everything
+// after the write (friction/proposers/signals) stays fire-and-forget.
+async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null } = {}) {
   const safeDocumentRequest = normalizeDocumentRequest(documentRequest);
   const documentArtifact = safeDocumentRequest ? findDocumentMutation(toolsUsed) : null;
   const persistedAssistantContent = documentArtifactContent(safeDocumentRequest, documentArtifact, assistantContent);
@@ -273,7 +276,7 @@ function persist(agent, sessionText, assistantContent, userId, emit, skipSignals
         isImage: Boolean(a?.isImage), file_id: a?.file_id ?? null,
       })) }
     : {};
-  appendToSession(agent.id,
+  await appendToSession(agent.id,
     {
       role: 'user', content: sessionText, ts: Date.now(),
       ...(hiddenUser ? { hidden: true } : {}),
@@ -897,7 +900,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const _ctxPromise = agent.ephemeral ? Promise.resolve(null) : (async () => {
     let recallQuery = userText;
     if (!isolatedTaskRun && (userText.length < 50 || NEEDS_CONTEXT_RE.test(userText))) {
-      const recentMsgs = await loadSession(agent.id, 4);
+      const recentMsgs = (await loadSession(agent.id, 6)).filter(m => m.excludeFromModel !== true).slice(-4);
       if (recentMsgs.length) {
         const lastUser = recentMsgs.filter(m => m.role === 'user').slice(-1)[0];
         const lastAsst = recentMsgs.filter(m => m.role === 'assistant').slice(-1)[0];
@@ -1105,7 +1108,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // it wrote. Same idea for `via:` on router-routed turns — the coordinator
   // needs to know the prior reply came from a specialist, not its own run.
   const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
-  const _histSrc = isolatedTaskRun ? [] : (await loadSession(agent.id)).filter(m => LLM_ROLES.has(m.role));
+  const _histSrc = isolatedTaskRun ? [] : (await loadSession(agent.id)).filter(m =>
+    LLM_ROLES.has(m.role) && m.excludeFromModel !== true);
   // Full tool-result bodies are inlined ONLY for the last two assistant
   // turns that carry them. Follow-ups ("delete it", "reply to that", "open
   // the second one") reference recent handles — while re-inflating EVERY
@@ -1356,10 +1360,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         savedPath = desktopSavedPath;
       }
 
-      if (!silent) appendToSession(agent.id,
-        { role: 'user', content: userText, ts: Date.now() },
-        { role: 'assistant', video: { url: videoUrl, filename }, content: `[Video: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
-      );
+      if (!silent) {
+        try {
+          await appendToSession(agent.id,
+            { role: 'user', content: userText, ts: Date.now() },
+            { role: 'assistant', video: { url: videoUrl, filename }, content: `[Video: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
+          );
+        } catch (e) {
+          console.warn('[chat] video persist failed:', e.message);
+          yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The video was generated, but the chat turn could not be saved. Reload before trying again.' };
+          return;
+        }
+      }
       yield { type: 'video', url: videoUrl, filename, savedPath, prompt };
       yield { type: 'done' };
       return;
@@ -1408,10 +1420,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       savedPath = desktopSavedPath;
     }
 
-    if (!silent) appendToSession(agent.id,
-      { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', image: { base64, mimeType, filename }, content: `[Image: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
-    );
+    if (!silent) {
+      try {
+        await appendToSession(agent.id,
+          { role: 'user', content: userText, ts: Date.now() },
+          { role: 'assistant', image: { base64, mimeType, filename }, content: `[Image: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
+        );
+      } catch (e) {
+        console.warn('[chat] image persist failed:', e.message);
+        yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The image was generated, but the chat turn could not be saved. Reload before trying again.' };
+        return;
+      }
+    }
     yield { type: 'image', base64, mimeType, prompt, filename, savedPath };
     yield { type: 'done' };
     return;
@@ -1536,10 +1556,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       savedPath = desktopSavedPath;
     }
 
-    if (!silent) appendToSession(agent.id,
-      { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', image: { base64, mimeType, filename }, content: `[Image: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
-    );
+    if (!silent) {
+      try {
+        await appendToSession(agent.id,
+          { role: 'user', content: userText, ts: Date.now() },
+          { role: 'assistant', image: { base64, mimeType, filename }, content: `[Image: ${filename}]${savedPath ? `\nSaved to: ${savedPath}` : ''}`, ts: Date.now() }
+        );
+      } catch (e) {
+        console.warn('[chat] image persist failed:', e.message);
+        yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The image was generated, but the chat turn could not be saved. Reload before trying again.' };
+        return;
+      }
+    }
     yield { type: 'image', base64, mimeType, prompt, filename, savedPath };
     yield { type: 'done' };
     return;
@@ -1794,11 +1822,16 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // A provider can fail after update_document already committed. Preserve the
     // successful artifact even though there is no final narration to persist.
     if (!silent && turnOpts?.documentRequest && findDocumentMutation(toolsUsed)) {
-      persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
-        withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
-        hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
-        documentRequest: turnOpts.documentRequest,
-      });
+      try {
+        await persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
+          withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
+          hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+          documentRequest: turnOpts.documentRequest,
+        });
+      } catch (e) {
+        console.warn('[chat] error-path persist failed:', e.message);
+        yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The document action may have completed, but its chat record could not be saved. Do not retry automatically.' };
+      }
     }
     return;
   }
@@ -1846,20 +1879,32 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       }
     }
   }
-  if (assistantContent || turnOpts?.documentRequest) {
-    if (!silent) persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
-      withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
-      hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
-      documentRequest: turnOpts?.documentRequest ?? null,
-    });
-    // Phase-14 chip-replaces-turn: emit __content only when we're NOT
-    // hiding the turn. The browser would otherwise render the coordinator's
-    // assistant bubble alongside the chip — redundant.
-    if (!hideTurn) {
-      yield { type: '__content', content: _observableAssistantContent };
-    } else {
-      yield { type: 'hide_turn', taskId: hideTaskId };
+  // Every successful visible turn gets a completed assistant row, including
+  // tool-only/empty narration. Otherwise `done` would leave the pending user
+  // row looking permanently in-flight after reload.
+  if (!silent) {
+    // Awaited so `done` below means "this turn is on disk" — a reload landing
+    // between the reply and a fire-and-forget write used to show only the
+    // pending user row and lose the assistant reply. A failed write terminates
+    // with a non-retryable storage error; the dispatcher then records failure.
+    try {
+      await persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
+        withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
+        hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+        documentRequest: turnOpts?.documentRequest ?? null,
+      });
+    } catch (e) {
+      console.warn('[chat] persist failed:', e.message);
+      yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The reply finished, but the chat turn could not be saved. Reload before trying again.' };
+      return;
     }
+  }
+  // Phase-14 chip-replaces-turn: emit __content only when we're NOT hiding
+  // the turn. Silent/internal consumers retain the pre-existing event shape.
+  if ((assistantContent || turnOpts?.documentRequest) && !hideTurn) {
+    yield { type: '__content', content: _observableAssistantContent };
+  } else if (hideTurn) {
+    yield { type: 'hide_turn', taskId: hideTaskId };
   }
   _emitTurnTrace(null);
   yield { type: 'done' };

@@ -29,9 +29,9 @@ import { getAgentScope } from './agents.mjs';
 // path carries boot_id.
 const BOOT_ID = randomBytes(8).toString('hex');
 console.log(`[ws] boot_id: ${BOOT_ID}`);
-import { handleChatMessage, abortChat, getActiveStreams } from './chat-dispatch.mjs';
+import { handleChatMessage, abortChat, getActiveStreams, getActiveStream } from './chat-dispatch.mjs';
 import { getActiveTasks as getActiveBgTasks } from './background-tasks.mjs';
-import { loadSession, clearSession, appendToSession, getStreamBuffer } from './sessions.mjs';
+import { loadSession, clearSession, appendToSession, getStreamBuffer, getSessionEpoch } from './sessions.mjs';
 import { markAlarmFired, markAlarmAcked } from './lib/alarms.mjs';
 import { handleTvCommandResult, handleTvState } from './lib/tv-commands.mjs';
 import { buildDashboardData } from './lib/tv-dashboard.mjs';
@@ -46,9 +46,13 @@ import { getSessionMeta, setSessionDeviceId, adoptSession } from './routes/_help
 import { getSlotAssignment, findDeviceByTokenPrefix, findDeviceByTokenAnyUser, recordTokenSecret, getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice, recordDeviceOtaProgress } from './lib/voice-devices.mjs';
 import { getAmbientForDevice, dropAmbientForDevice } from './routes/devices.mjs';
 import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from './lib/voice-config.mjs';
-import { submitCredential, cancelCredential, setCredentialEmitter } from './lib/credentials.mjs';
+import {
+  submitCredential, cancelCredential, cancelPendingCredentialPrompts,
+  setCredentialEmitter, getPendingCredentialPrompts,
+} from './lib/credentials.mjs';
 import { hasVoiceAnnouncements, nextVoiceAnnouncement } from './lib/voice-announcements.mjs';
 import { normalizeDocumentRequest } from './lib/document-artifacts.mjs';
+import { getProfileFilePath } from './lib/profile-files.mjs';
 
 // Backfill ws._deviceId for voice-device sessions that were created before
 // the deviceId was stored on the session record (pre-2026-05-12). Looks up
@@ -116,6 +120,47 @@ let _nodeWss = null;
 let _termWss = null;
 let _browserExtWss = null;
 let _desktopWss = null;
+
+// Monotonic per-user/per-agent watermark for live chat/session events. A
+// session load captures this value BEFORE its async disk read; if the browser
+// has already reduced a larger value by the time that response arrives, it
+// knows the snapshot is older and must merge rather than erase those live rows.
+const _chatRevisions = new Map();
+let _sessionSnapshotSeq = 0;
+
+function rawChatAgentId(userId, agentId) {
+  const value = typeof agentId === 'string' ? agentId : '';
+  const prefix = `${userId}_`;
+  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
+}
+
+function chatRevisionKey(userId, agentId) {
+  return `${userId}:${rawChatAgentId(userId, agentId)}`;
+}
+
+function getChatRevision(userId, agentId) {
+  return _chatRevisions.get(chatRevisionKey(userId, agentId)) ?? 0;
+}
+
+function stampChatEvent(userId, event) {
+  if (!event || typeof event !== 'object' || !event.agent) return event;
+  if (Number.isFinite(event.chat_revision)) return event;
+  const key = chatRevisionKey(userId, event.agent);
+  const revision = (_chatRevisions.get(key) ?? 0) + 1;
+  _chatRevisions.set(key, revision);
+  return { ...event, chat_revision: revision };
+}
+
+async function rehydrateChatAttachments(userId, attachments) {
+  if (!Array.isArray(attachments)) return attachments;
+  return Promise.all(attachments.map(async attachment => {
+    if (!attachment || typeof attachment !== 'object') return attachment;
+    if (!attachment.isImage || attachment.base64 || !attachment.file_id) return attachment;
+    const file = getProfileFilePath(userId, attachment.file_id);
+    const buf = await fs.promises.readFile(file);
+    return { ...attachment, base64: buf.toString('base64') };
+  }));
+}
 
 // Same-origin check for browser-initiated WebSocket upgrades. Browsers send
 // Origin automatically; native clients (mobile apps, node agents, curl) do
@@ -696,8 +741,15 @@ function initBrowserExtWss() {
           const tutorAgentId = getRoleAssignments(ws._userId)?.['role_browser_tutor'] || null;
           const rawAgentId = tutorAgentId || getUserCoordinatorAgentId(ws._userId);
           const { clearSession } = await import('./sessions.mjs');
-          clearSession(`${ws._userId}_${rawAgentId}`);
-          try { ws.send(JSON.stringify({ type: 'chat_session_cleared', agentId: rawAgentId })); } catch {}
+          abortChat(ws._userId, rawAgentId);
+          cancelPendingCredentialPrompts(ws._userId, { agentId: rawAgentId });
+          const sessionEpoch = await clearSession(`${ws._userId}_${rawAgentId}`);
+          const cleared = stampChatEvent(ws._userId, { type: 'session_cleared', agent: rawAgentId, sessionEpoch });
+          for (const client of _wss.clients) {
+            if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN) continue;
+            try { client.send(JSON.stringify(cleared)); } catch {}
+          }
+          try { ws.send(JSON.stringify({ type: 'chat_session_cleared', agentId: rawAgentId, sessionEpoch })); } catch {}
         } catch (e) {
           try { ws.send(JSON.stringify({ type: 'error', message: 'session clear failed: ' + (e?.message || String(e)) })); } catch {}
         }
@@ -820,15 +872,40 @@ function onConnection(ws, req) {
     // the slowest single read, not the sum.
     const sessionLoads = await Promise.all(userAgents.map(async (agent) => {
       const key = sessionKey(ws._userId, agent.id);
-      return { agent, messages: await loadSession(key, 60), pendingStream: getStreamBuffer(key) };
+      const sessionRevision = getChatRevision(ws._userId, agent.id);
+      const snapshotGeneration = ++_sessionSnapshotSeq;
+      return {
+        agent,
+        messages: await loadSession(key, 60),
+        pendingStream: getStreamBuffer(key),
+        sessionEpoch: getSessionEpoch(key),
+        sessionRevision,
+        snapshotGeneration,
+        credentialPrompts: getPendingCredentialPrompts(ws._userId, agent.id),
+      };
     }));
-    for (const { agent, messages, pendingStream } of sessionLoads) {
-      ws.send(JSON.stringify({ type: 'session_loaded', agent: agent.id, messages, pendingStream }));
+    // Capture active streams only AFTER the async history reads. Capturing
+    // before them allowed a turn accepted during those reads to be erased by
+    // the later, stale active_streams frame.
+    const activeSnapshotRevisions = Object.fromEntries(userAgents.map(agent => [
+      agent.id, getChatRevision(ws._userId, agent.id),
+    ]));
+    const active = getActiveStreams(ws._userId).map(stream => ({
+      ...stream,
+      chatRevision: activeSnapshotRevisions[stream.agentId] ?? 0,
+    }));
+    const activeByAgent = new Map(active.map(s => [s.agentId, s]));
+    for (const { agent, messages, pendingStream, sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts } of sessionLoads) {
+      ws.send(JSON.stringify({
+        type: 'session_loaded', agent: agent.id, messages, pendingStream,
+        activeStream: activeByAgent.get(agent.id) ?? null,
+        activeSnapshotRevision: activeSnapshotRevisions[agent.id] ?? 0,
+        sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts,
+      }));
     }
     // Tell the client which agents are actively streaming and which background tasks are running
-    const active = getActiveStreams(ws._userId);
     const tasks = getActiveBgTasks().filter(t => t.userId === ws._userId);
-    ws.send(JSON.stringify({ type: 'active_streams', agents: active, tasks }));
+    ws.send(JSON.stringify({ type: 'active_streams', agents: active, tasks, snapshotRevisions: activeSnapshotRevisions }));
   }
 
   if (ws._authenticated) {
@@ -1148,8 +1225,14 @@ function onConnection(ws, req) {
     if (msg.type === 'clear_session') {
       const agentId = msg.agent;
       if (agentId) {
-        clearSession(sessionKey(ws._userId, agentId));
-        ws.send(JSON.stringify({ type: 'session_loaded', agent: agentId, messages: [] }));
+        abortChat(ws._userId, agentId);
+        cancelPendingCredentialPrompts(ws._userId, { agentId });
+        const sessionEpoch = await clearSession(sessionKey(ws._userId, agentId));
+        const cleared = stampChatEvent(ws._userId, { type: 'session_cleared', agent: agentId, sessionEpoch });
+        for (const client of _wss.clients) {
+          if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN) continue;
+          try { client.send(JSON.stringify(cleared)); } catch {}
+        }
       }
       return;
     }
@@ -1167,7 +1250,10 @@ function onConnection(ws, req) {
       }
       const result = await submitCredential({ credentialId, value, userId: ws._userId });
       if (!result.ok) {
-        ws.send(JSON.stringify({ type: 'credential_error', credentialId, error: result.error }));
+        ws.send(JSON.stringify(stampChatEvent(ws._userId, {
+          type: 'credential_error', credentialId, error: result.error,
+          ...(result.prompt || {}),
+        })));
       }
       return;
     }
@@ -1242,7 +1328,30 @@ function onConnection(ws, req) {
         }
       } else {
         const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
-        if (stopAgent) abortChat(ws._userId, stopAgent);
+        if (stopAgent) {
+          const requestedTurnId = typeof msg.turn_id === 'string' && msg.turn_id.length <= 80
+            ? msg.turn_id : null;
+          const active = getActiveStream(ws._userId, stopAgent);
+          // Browser Stop targets the turn visible when the button was clicked.
+          // Another tab may have barged in with a newer turn before this frame
+          // is processed; never abort that replacement.
+          if (requestedTurnId && (!active || (active.turnId && active.turnId !== requestedTurnId))) {
+            ws.send(JSON.stringify({
+              type: 'stop_ignored', agent: stopAgent,
+              requested_turn_id: requestedTurnId,
+              activeStream: active ? {
+                ...active,
+                chatRevision: getChatRevision(ws._userId, stopAgent),
+              } : null,
+            }));
+          } else {
+            abortChat(ws._userId, stopAgent);
+            cancelPendingCredentialPrompts(ws._userId, {
+              agentId: stopAgent,
+              ...(requestedTurnId ? { turnId: requestedTurnId } : {}),
+            });
+          }
+        }
       }
       return;
     }
@@ -1315,9 +1424,26 @@ function onConnection(ws, req) {
     if (msg.type === 'load_session') {
       const agentId = msg.agent;
       if (agentId) {
-        const messages = await loadSession(sessionKey(ws._userId, agentId), 60);
-        const pendingStream = getStreamBuffer(sessionKey(ws._userId, agentId));
-        ws.send(JSON.stringify({ type: 'session_loaded', agent: agentId, messages, pendingStream }));
+        const key = sessionKey(ws._userId, agentId);
+        const sessionRevision = getChatRevision(ws._userId, agentId);
+        const snapshotGeneration = ++_sessionSnapshotSeq;
+        const messages = await loadSession(key, 60);
+        const pendingStream = getStreamBuffer(key);
+        const activeStream = getActiveStream(ws._userId, agentId);
+        const activeSnapshotRevision = getChatRevision(ws._userId, agentId);
+        const sessionEpoch = getSessionEpoch(key);
+        const requestId = typeof msg.request_id === 'string' && msg.request_id.length <= 80
+          ? msg.request_id : null;
+        ws.send(JSON.stringify({
+          type: 'session_loaded', agent: agentId, messages, pendingStream,
+          activeStream: activeStream ? {
+            ...activeStream,
+            chatRevision: activeSnapshotRevision,
+          } : null,
+          activeSnapshotRevision,
+          sessionEpoch, sessionRevision, snapshotGeneration, request_id: requestId,
+          credentialPrompts: getPendingCredentialPrompts(ws._userId, agentId),
+        }));
       }
       return;
     }
@@ -1341,6 +1467,19 @@ function onConnection(ws, req) {
       // every event of this turn so the firmware can drop stale-turn events.
       const deviceTurnId = (typeof msg.turn_id === 'string' && msg.turn_id.length > 0 && msg.turn_id.length <= 24)
         ? msg.turn_id : null;
+      // Browser chat uses a logical message id plus a per-execution attempt id.
+      // Re-sending the SAME attempt after a lost ACK is idempotent; pressing the
+      // explicit Retry button keeps message_id but mints a new attempt_id.
+      const validBrowserId = value => typeof value === 'string'
+        && value.length > 0 && value.length <= 80
+        && /^[A-Za-z0-9_-]+$/.test(value);
+      if (!ws._deviceId && ((msg.message_id != null && !validBrowserId(msg.message_id))
+          || (msg.attempt_id != null && !validBrowserId(msg.attempt_id)))) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Invalid chat correlation id', agent: msg.agent || 'system', retryable: false }));
+        return;
+      }
+      const browserMessageId = !ws._deviceId && validBrowserId(msg.message_id) ? msg.message_id : null;
+      const browserAttemptId = !ws._deviceId && validBrowserId(msg.attempt_id) ? msg.attempt_id : null;
       // Speech-barge turn (fw ≥ 0.2.66): the barge pre-roll may prefix the
       // transcript with a sliver of the interrupted reply's audio, so intent
       // matchers relax their bare-word anchors ("…Paris. Stop." still stops).
@@ -1517,6 +1656,24 @@ function onConnection(ws, req) {
         silentAckTimer.unref?.();
       }
 
+      let chatAttachments = msg.attachments;
+      try {
+        // A browser outbox deliberately stores only the durable file_id (plus
+        // bounded extracted text), never multi-megabyte image base64. Restore
+        // image bytes from the user's profile file before an idempotent replay.
+        chatAttachments = await rehydrateChatAttachments(effectiveUserId, msg.attachments);
+      } catch (e) {
+        sendToUser(effectiveUserId, {
+          type: 'error', agent: msg.agent || getUserCoordinatorAgentId(effectiveUserId),
+          ...(browserAttemptId ? { turn_id: browserAttemptId, attempt_id: browserAttemptId } : {}),
+          ...(browserMessageId ? { message_id: browserMessageId } : {}),
+          code: 'attachment_rehydrate_failed', retryable: false,
+          message: 'The uploaded file is no longer available, so this message was not executed. Please attach it again.',
+        });
+        log.warn('chat', 'attachment replay rehydrate failed', { userId: effectiveUserId, err: e?.message || String(e) });
+        return;
+      }
+
       await handleChatMessage({
         userId:     ws._userId,
         // Empty string → undefined so chat-dispatch's coordinator fallback
@@ -1533,7 +1690,7 @@ function onConnection(ws, req) {
         // composer's multi-file tray sends. Voice-device 'chat' frames never
         // set either field, so this is a no-op for that path.
         attachment:  msg.attachment,
-        attachments: msg.attachments,
+        attachments: chatAttachments,
         toolPlan:   msg.toolPlan,
         documentRequest: incomingDocumentRequest,
         // Source hint — voice-device chats get a slim tool subset for low
@@ -1553,6 +1710,9 @@ function onConnection(ws, req) {
         deviceId:   ws._deviceId,
         wakeSlot:   wakeSlot,
         conversationMode: !!(ws._deviceId && devicePrefs?.conversation_mode),
+        turnId: deviceTurnId,
+        messageId: browserMessageId,
+        attemptId: browserAttemptId,
         bargeIn,
         // "stop"/"that's enough" arriving as a speech barge OR shortly after
         // a reply was cut by a wake-barge is aimed at the REPLY — the stop
@@ -1569,6 +1729,10 @@ function onConnection(ws, req) {
           if (incomingDocumentRequest && e && typeof e === 'object' && !e.documentRequest) {
             e = { ...e, documentRequest: incomingDocumentRequest, documentTurn: true };
           }
+          // One revision shared by every tab receiving this event. Session
+          // snapshots capture the pre-read revision, so clients can prove that
+          // an older response must not erase this already-rendered event.
+          e = stampChatEvent(effectiveUserId, e);
           // Voice-device fan-out: the firmware only TTS's `token` events
           // (oe_ws.c emits OE_WS_EVT_CHAT_TOKEN → speak). Plain `error`
           // events arrive but are silently dropped. Keep voice errors short
@@ -1781,7 +1945,8 @@ export function broadcastToUsers(userIds, msg) {
 /** Send a message to every tab the given user has open. Returns delivery count. */
 export function sendToUser(userId, msg) {
   if (!_wss) return 0;
-  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  const stamped = typeof msg === 'string' ? msg : stampChatEvent(userId, msg);
+  const data = typeof stamped === 'string' ? stamped : JSON.stringify(stamped);
   let delivered = 0;
   for (const client of _wss.clients) {
     if (client.readyState === client.OPEN && !client._deviceId && client._userId === userId) {

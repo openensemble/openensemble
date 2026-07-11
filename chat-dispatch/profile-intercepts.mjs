@@ -18,7 +18,7 @@
  */
 
 import { updateCustomAgent, loadCustomAgents } from '../agents.mjs';
-import { appendToSession } from '../sessions.mjs';
+import { appendToSession, failPendingTurn } from '../sessions.mjs';
 import {
   modifyUser, detectNewsPref, detectRenameCommand, saveUserAgentOverride,
 } from '../routes/_helpers.mjs';
@@ -48,9 +48,9 @@ export function tryNewsPrefIntercept({ rawText, userId, onEvent }) {
  * confirmation, persists the turn, and returns {handled:true} so the
  * caller short-circuits the rest of the pipeline.
  *
- * @returns {{ handled: true } | null}
+ * @returns {Promise<{ handled: true } | null>}
  */
-export function tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast }) {
+export async function tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast }) {
   const rename = detectRenameCommand(rawText);
   if (!rename) return null;
   // Strip null values so we only update what was actually specified
@@ -75,11 +75,20 @@ export function tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, o
   const newName  = changes.name  ?? agent.name;
   const newEmoji = changes.emoji ?? agent.emoji ?? '';
   const reply = `Got it — I'll go by **${newName}**${newEmoji ? ` ${newEmoji}` : ''} from now on.`;
+  // Persist BEFORE the events: `done` must mean the turn is on disk (a reload
+  // racing a post-done write showed an empty turn).
+  try {
+    await appendToSession(`${userId}_${agentId}`,
+      { role: 'user', content: rawText, ts: Date.now() },
+      { role: 'assistant', content: reply, ts: Date.now() }
+    );
+  } catch (e) {
+    console.warn('[chat] rename persist failed:', e.message);
+    await failPendingTurn(`${userId}_${agentId}`, 'Persistence failed after the rename was applied', { retryable: false }).catch(() => {});
+    onEvent({ type: 'error', code: 'persistence_failed', retryable: false, message: 'The rename was applied, but the chat record could not be saved. Do not retry until storage is healthy.', agent: agentId });
+    return { handled: true };
+  }
   onEvent({ type: 'token', text: reply, agent: agentId });
   onEvent({ type: 'done', agent: agentId });
-  appendToSession(`${userId}_${agentId}`,
-    { role: 'user', content: rawText, ts: Date.now() },
-    { role: 'assistant', content: reply, ts: Date.now() }
-  );
   return { handled: true };
 }

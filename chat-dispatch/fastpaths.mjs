@@ -15,7 +15,7 @@
  *   3. Trivia (clock) — "what time is it", "what's the date", etc.
  */
 
-import { appendToSession } from '../sessions.mjs';
+import { appendToSession, failPendingTurn } from '../sessions.mjs';
 import { classifyRoutineIntent, executeRoutine, resolveRoutineDeviceId, runDeferredAmbient } from '../lib/routines.mjs';
 import { speakRoutineTts } from '../lib/voice-reminder.mjs';
 
@@ -26,6 +26,23 @@ function estimateTtsMs(text) {
   const words = String(text || '').trim().split(/\s+/).filter(Boolean).length;
   if (!words) return 0;
   return Math.max(1000, Math.round((words / 2.5) * 1000) + 500);
+}
+
+async function persistFastpath(sessionKey, messages, onEvent, agentId, label) {
+  try {
+    await appendToSession(sessionKey, ...messages);
+    return true;
+  } catch (e) {
+    console.warn(`[chat] ${label} persist failed:`, e.message);
+    await failPendingTurn(sessionKey, `Persistence failed after ${label}`, {
+      status: 'failed', retryable: false,
+    }).catch(() => {});
+    onEvent({
+      type: 'error', code: 'persistence_failed', retryable: false, agent: agentId,
+      message: 'The action finished, but the chat record could not be saved. Do not retry it automatically.',
+    });
+    return false;
+  }
 }
 
 // ── HA fast-path (pre-LLM) ────────────────────────────────────────────────────
@@ -253,10 +270,13 @@ export async function tryHaFastpath({ userText, userId, agentId, chatUser, onEve
       console.log(`[chat] ha-fastpath miss-then-error: ${result.error} — falling through to LLM`);
       return null;
     }
-    appendToSession(`${userId}_${agentId}`,
+    // Awaited (with a swallow) before done: the turn must be on disk when the
+    // client sees it end, and a failed WRITE must not hit the outer catch and
+    // fall through to the LLM after the action already executed.
+    if (!await persistFastpath(`${userId}_${agentId}`, [
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', content: result.text, ts: Date.now() }
-    );
+    ], onEvent, agentId, 'ha-fastpath')) return { handled: true };
     onEvent({ type: 'token', text: result.text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
     console.log(`[chat] ha-fastpath: ${haIntent.verb} ${haIntent.entity_id}`);
@@ -320,13 +340,12 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
     // setup step — speak the routine's collected text first, then signal the
     // caller to hand the prompt off to the user's coordinator agent.
     if (result.followupPrompt) {
-      appendToSession(`${userId}_${agentId}`,
+      const rows = [
         { role: 'user', content: userText, ts: Date.now() },
-      );
+        ...(reply ? [{ role: 'assistant', content: reply, ts: Date.now() }] : []),
+      ];
+      if (!await persistFastpath(`${userId}_${agentId}`, rows, onEvent, agentId, 'routine')) return { handled: true };
       if (reply) {
-        appendToSession(`${userId}_${agentId}`,
-          { role: 'assistant', content: reply, ts: Date.now() },
-        );
         // Skip the WS token push when the routine is bound to a different
         // device — speakRoutineTts above already spoke it in the right room.
         if (!targetDiffers) { onEvent({ type: 'token', text: reply, agent: agentId }); ttsMs = estimateTtsMs(reply); }
@@ -335,10 +354,10 @@ export async function tryRoutineFastpath({ source, userText, userId, agentId, de
       console.log(`[chat] routine-fastpath: ${routine.id} → followup prompt`);
       return { handled: true, followupPrompt: result.followupPrompt, targetDeviceId };
     }
-    appendToSession(`${userId}_${agentId}`,
+    if (!await persistFastpath(`${userId}_${agentId}`, [
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', content: reply || '(routine executed silently)', ts: Date.now() }
-    );
+    ], onEvent, agentId, 'routine')) return { handled: true };
     // Only stream the spoken reply over the originating WS when the routine
     // fires on that same device — otherwise speakRoutineTts above has already
     // pushed it to the target device.
@@ -553,10 +572,10 @@ export async function tryTranscribeAttachmentFastpath(ctx) {
     reply = parts.join('\n\n---\n\n');
   }
 
-  appendToSession(`${userId}_${agentId}`,
+  if (!await persistFastpath(`${userId}_${agentId}`, [
     { role: 'user', content: cleanedText || `[Transcribe: ${audioVideo.map(r => r.filename).join(', ')}]`, ts: Date.now() },
     { role: 'assistant', content: reply, ts: Date.now() },
-  );
+  ], onEvent, agentId, 'transcribe')) return { handled: true };
   onEvent({ type: 'token', text: reply, agent: agentId });
   onEvent({ type: 'done', agent: agentId });
   console.log(`[chat] transcribe fast-path: ${transcripts.length} ok, ${errors.length} err`);
@@ -622,10 +641,10 @@ export async function tryCalendarFastpath({ source, userText, userId, agentId, o
       console.log('[chat] calendar-fastpath: intent matched but mirror unavailable — falling through to LLM');
       return null;
     }
-    appendToSession(`${userId}_${agentId}`,
+    if (!await persistFastpath(`${userId}_${agentId}`, [
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', content: result.text, ts: Date.now() }
-    );
+    ], onEvent, agentId, 'calendar-fastpath')) return { handled: true };
     onEvent({ type: 'token', text: result.text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
     _calendarCtx.set(sessionKey, { ts: Date.now(), seq });
@@ -646,10 +665,10 @@ export async function tryTriviaFastpath({ source, userText, userId, agentId, onE
     if (!triviaIntent) return null;
     const result = executeTriviaIntent(triviaIntent, userId, { voice: source === 'voice-device' });
     if (!result?.text) return null;
-    appendToSession(`${userId}_${agentId}`,
+    if (!await persistFastpath(`${userId}_${agentId}`, [
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', content: result.text, ts: Date.now() }
-    );
+    ], onEvent, agentId, 'trivia-fastpath')) return { handled: true };
     onEvent({ type: 'token', text: result.text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
     console.log(`[chat] trivia-fastpath: ${triviaIntent.kind}`);

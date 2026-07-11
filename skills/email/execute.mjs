@@ -11,6 +11,12 @@ import { fileURLToPath } from 'url';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
 import { resolveBodyDoc, deleteBodyDoc } from '../../lib/email-body-doc.mjs';
 import { isVoiceSource } from '../../lib/voice-context.mjs';
+import {
+  stagePending as stagePendingApproval,
+  getPending as getPendingApproval,
+  takePending as takePendingApproval,
+  clearPendingFor as clearPendingApproval,
+} from '../../lib/pending-approvals.mjs';
 import { emailLabelsEnabled, recordLabelings, recordCorrection, removeCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
 
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -658,14 +664,17 @@ function wrapUntrusted(text) {
 // user before executing — protects against phishing emails or prompt-injected
 // content asking the agent to mass-delete on a user's behalf.
 const DESTRUCTIVE_TOOLS = new Set(['email_purge_sender', 'email_batch_trash']);
-const _pendingDestructive = new Map(); // userId -> { name, args }
+// { name, args, desc } staged in the shared disk-persisted approval store —
+// keyed (userId, staging agent) so it survives restarts and a message in
+// another agent's chat can't wipe or execute it. See lib/pending-approvals.mjs.
 
-export function getPendingEmail(userId)   { return _pendingDestructive.get(userId) ?? null; }
-export function clearPendingEmail(userId) { _pendingDestructive.delete(userId); }
-export async function executePendingEmail(userId) {
-  const pending = _pendingDestructive.get(userId);
+export function getPendingEmail(userId, agentId = null)   { return getPendingApproval(userId, 'email_purge', agentId); }
+export function clearPendingEmail(userId, agentId = null, expectedOpId = null) {
+  return clearPendingApproval(userId, 'email_purge', agentId, { expectedOpId });
+}
+export async function executePendingEmail(userId, agentId = null, expectedOpId = null) {
+  const pending = takePendingApproval(userId, 'email_purge', agentId, { expectedOpId });
   if (!pending) return 'No pending email operation.';
-  _pendingDestructive.delete(userId);
   // Mark approved to bypass the gate on this single call
   return execute(pending.name, { ...pending.args, _userApproved: true }, userId);
 }
@@ -680,8 +689,11 @@ export default async function execute(name, args, userId) {
       : `move ${(args.messageIds || []).length} email(s) to trash`;
     // desc is stashed alongside {name, args} so chat-dispatch's post-turn
     // approval-pill check (snapshotPendingApprovals) can read a ready-made
-    // description without duplicating this ternary.
-    _pendingDestructive.set(userId, { name, args, desc });
+    // description without duplicating this ternary. Boot-time validation
+    // probes (roles.mjs, {__validate:true} with a null user) must never
+    // stage a real approval — the same non-null return without the staging
+    // side effect keeps the probe's "tool recognised" semantics.
+    if (!args?.__validate) stagePendingApproval(userId, 'email_purge', { name, args, desc });
     return `⚠️ You are about to ${desc}. This is destructive. Type **APPROVE PURGE** in the chat to proceed, or say anything else to cancel.`;
   }
 

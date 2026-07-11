@@ -120,48 +120,40 @@ function switchAgent(id) {
   }
   // Save current agent's streaming state if still active
   if (streaming) {
-    // Capture tool pill names from DOM before clearing
-    const savedToolNames = [];
-    if (toolPillsEl) {
-      toolPillsEl.querySelectorAll('.tool-pill').forEach(p => {
-        const name = p.textContent.replace(/^⚙\s*/, '').trim();
-        if (name) savedToolNames.push(name);
-      });
-    }
-    agentStreams[activeAgent] = { buf: widgetBuf || streamBuf, toolNames: savedToolNames, active: true };
+    // Snapshot the live tool run's full event objects (chat.js). The old DOM
+    // scrape queried `.tool-pill` elements that the `.tool-run` redesign no
+    // longer renders — it always came back empty, so in-flight tool activity
+    // silently vanished on every mid-turn agent switch.
+    const savedToolEvents = (typeof snapshotLiveToolRun === 'function' ? snapshotLiveToolRun() : null) || [];
+    const state = agentStreams[activeAgent] || (typeof freshAgentTurnState === 'function'
+      ? freshAgentTurnState(activeAgent)
+      : { buf: '', toolEvents: [], active: true });
+    state.buf = widgetBuf || streamBuf || state.buf || '';
+    state.toolEvents = savedToolEvents.length ? savedToolEvents : (state.toolEvents || []);
+    state.active = true;
+    agentStreams[activeAgent] = state;
   }
   activeAgent = id;
   if (typeof restoreDraftForAgent === 'function') restoreDraftForAgent(id); // chat.js: per-agent composer draft
   streamEl = null; streamBuf = ''; toolPillsEl = null;
+  awaitingPermission = false;
   // Clear the in-flight tool run too — otherwise a turn already streaming on the
   // NEW agent commits the previous agent's tool events onto it.
   resetToolRun();
   _historyWindow = HISTORY_RENDER_WINDOW; // new pane starts at the base window
   buildTabs();
   buildAgentDrawer();
-  // Fetch real history unless it's been genuinely loaded. `id in sessions` isn't
-  // enough: a status / agent_report push may have seeded an empty array, which
-  // would otherwise leave the agent showing only the stray push with no history.
-  if (!sessionsLoaded.has(id)) {
-    if (!(id in sessions)) sessions[id] = [];
-    ws?.send(JSON.stringify({ type: 'load_session', agent: id }));
-  }
+  // Render cache immediately, then always reconcile with authoritative history
+  // and the server's active-turn snapshot. Live structured events can arrive
+  // while an agent is hidden, and relying on a one-time `sessionsLoaded` bit
+  // left cards/errors stale forever after a missed event.
+  if (!(id in sessions)) sessions[id] = [];
+  if (typeof requestAgentSession === 'function') requestAgentSession(id);
 
   renderSession();
   scrollToBottom(true); // switching agents always lands at the latest message
-  // Restore streaming state if the new agent is still generating
-  const bg = agentStreams[id];
-  if (bg?.active) {
-    streamBuf = bg.buf;
-    streamEl = appendStreamingBubble();
-    if (streamBuf) streamEl.innerHTML = renderMarkdown(streamBuf);
-    for (const tn of bg.toolNames) showToolPill(tn);
-    setStreaming(true); setTyping(!streamBuf);
-    delete agentStreams[id];
-    scrollToBottom();
-  } else {
-    setStreaming(false); setTyping(false);
-  }
+  if (typeof projectAgentStreamState === 'function') projectAgentStreamState(id);
+  else { setStreaming(false); setTyping(false); }
   closeAllDrawers();
   updateSessionWarning();
 }
@@ -193,10 +185,11 @@ function updateSessionWarning() {
 function clearSession() {
   const agentName = agents.find(a => a.id === activeAgent)?.name ?? activeAgent;
   if (!confirm(`Clear ${agentName} session?`)) return;
-  sessions[activeAgent] = [];
-  renderSession();
-  ws?.send(JSON.stringify({ type: 'clear_session', agent: activeAgent }));
-  updateSessionWarning();
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showToast('Not connected — the session was not cleared');
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'clear_session', agent: activeAgent }));
 }
 
 // ── New Agent ─────────────────────────────────────────────────────────────────

@@ -7,6 +7,12 @@ import fs   from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { withLock, isPrivileged, getExpBooksForUser, loadExpBooks, modifyExpBooks } from '../../routes/_helpers.mjs';
+import {
+  stagePending as stagePendingApproval,
+  getPending as getPendingApproval,
+  takePending as takePendingApproval,
+  clearPendingFor as clearPendingApproval,
+} from '../../lib/pending-approvals.mjs';
 
 import { fileURLToPath } from 'url';
 
@@ -410,16 +416,18 @@ function expenseCategories() {
 }
 
 // ── Pending delete confirmation ────────────────────────────────────────────────
-// Keyed by userId — stores { name, args } waiting for "CONFIRM DELETION"
-const _pendingDeletes = new Map();
+// Stores { name, args } waiting for "CONFIRM DELETION" in the shared
+// disk-persisted approval store — keyed (userId, staging agent) so it
+// survives restarts and a message in another agent's chat can't wipe or
+// execute it. See lib/pending-approvals.mjs.
+export function getPendingDelete(userId, agentId = null) { return getPendingApproval(userId, 'expense_delete', agentId); }
+export function clearPendingDelete(userId, agentId = null, expectedOpId = null) {
+  return clearPendingApproval(userId, 'expense_delete', agentId, { expectedOpId });
+}
 
-export function getPendingDelete(userId) { return _pendingDeletes.get(userId) ?? null; }
-export function clearPendingDelete(userId) { _pendingDeletes.delete(userId); }
-
-export async function executePendingDelete(userId) {
-  const pending = _pendingDeletes.get(userId);
+export async function executePendingDelete(userId, agentId = null, expectedOpId = null) {
+  const pending = takePendingApproval(userId, 'expense_delete', agentId, { expectedOpId });
   if (!pending) return 'No pending delete operation.';
-  _pendingDeletes.delete(userId);
   switch (pending.name) {
     case 'expense_delete':       return expenseDelete(pending.args);
     case 'expense_delete_batch': return expenseDeleteBatch(pending.args);
@@ -475,7 +483,7 @@ export async function executeSkillTool(name, args, userId) {
     }
 
     // Stage the delete and require explicit confirmation from the user
-    _pendingDeletes.set(userId, { name, args });
+    stagePendingApproval(userId, 'expense_delete', { name, args });
     const desc = name === 'expense_delete_all'
       ? 'ALL transactions'
       : name === 'expense_delete_batch'

@@ -14,7 +14,7 @@
  * called, so the tier adds zero overhead.
  */
 
-import { appendToSession } from '../sessions.mjs';
+import { appendToSession, failPendingTurn } from '../sessions.mjs';
 import { localTierEnabled, dispatch, runIntent } from '../lib/local-label.mjs';
 
 // executeRoleTool can return a string, an object with `.text`, or an async
@@ -49,10 +49,17 @@ export async function tryLocalIntentFastpath({ userText, userId, agentId, onEven
     }
 
     const text = await normalizeResult(await runIntent(match, userId, agentId));
-    appendToSession(`${userId}_${agentId}`,
-      { role: 'user', content: userText, ts: Date.now() },
-      { role: 'assistant', content: text, ts: Date.now() },
-    );
+    try {
+      await appendToSession(`${userId}_${agentId}`,
+        { role: 'user', content: userText, ts: Date.now() },
+        { role: 'assistant', content: text, ts: Date.now() },
+      );
+    } catch (e) {
+      console.warn('[local-label] persist failed:', e.message);
+      await failPendingTurn(`${userId}_${agentId}`, 'Persistence failed after the local action', { retryable: false }).catch(() => {});
+      onEvent({ type: 'error', code: 'persistence_failed', retryable: false, message: 'The local action finished, but the chat record could not be saved. Do not retry it automatically.', agent: agentId });
+      return { handled: true };
+    }
     onEvent({ type: 'token', text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
     console.log(`[local-label] dispatch handled ${match.skillId}/${match.intentId} via ${match.via} (no LLM)`);

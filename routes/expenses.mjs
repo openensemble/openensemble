@@ -244,9 +244,9 @@ export async function handle(req, res) {
     try {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       const { decisionId, file_id, decision, agent } = body;
-      if (!decisionId || !file_id || !decision) {
+      if (!decisionId || !file_id || !decision || !agent) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'decisionId, file_id, decision required' }));
+        res.end(JSON.stringify({ error: 'decisionId, file_id, decision, agent required' }));
         return true;
       }
       if (decision !== 'keep' && decision !== 'discard') {
@@ -254,23 +254,26 @@ export async function handle(req, res) {
         res.end(JSON.stringify({ error: 'decision must be keep|discard' }));
         return true;
       }
-      if (decision === 'discard') {
-        await discardProfileFile(authId, file_id);
+      const agentId = String(agent);
+      const key = agentId.startsWith(`${authId}_`) ? agentId : `${authId}_${agentId}`;
+      const { resolveAttachmentDecision } = await import('../sessions.mjs');
+      const outcome = await resolveAttachmentDecision(
+        key,
+        { decisionId, fileId: file_id, decision },
+        decision === 'discard' ? () => discardProfileFile(authId, file_id) : undefined,
+      );
+      if (outcome.status === 'missing' || outcome.status === 'conflict') {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: outcome.status === 'missing'
+            ? 'This attachment decision is stale or does not match that file.'
+            : `This attachment was already resolved as ${outcome.decision}.`,
+          status: outcome.status,
+          decision: outcome.decision ?? null,
+        }));
+        return true;
       }
-      const ts = Date.now();
-      try {
-        const { appendToSession } = await import('../sessions.mjs');
-        const agentId = String(agent || '');
-        if (agentId) {
-          const key = agentId.startsWith(`${authId}_`) ? agentId : `${authId}_${agentId}`;
-          appendToSession(key, {
-            role: 'attachment_decision_outcome',
-            decisionId, decision, ts,
-          });
-        }
-      } catch (e) {
-        console.warn('[chat-attachment-decision] persist outcome failed:', e.message);
-      }
+      const ts = outcome.ts ?? Date.now();
       // Fan out to the user's other tabs so they update in-place too.
       try {
         const { sendToUser } = await import('../ws-handler.mjs');

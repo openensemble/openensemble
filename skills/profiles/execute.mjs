@@ -16,6 +16,12 @@ import {
   ProfileValidationError,
 } from '../../lib/service-profile.mjs';
 import { verifyProfileReadonly, dispatchCapabilityCall } from '../../lib/capability-dispatcher.mjs';
+import {
+  stagePending as stagePendingApproval,
+  getPending as getPendingApproval,
+  takePending as takePendingApproval,
+  clearPendingFor as clearPendingApproval,
+} from '../../lib/pending-approvals.mjs';
 import { rollbackOperation, rollbackOperationHostLevel } from '../../lib/rollback.mjs';
 import { findOpRecord, getRollbackStatus } from '../../lib/op-record.mjs';
 import { listIncidents, closeIncident, loadIncident } from '../../lib/incident.mjs';
@@ -154,15 +160,18 @@ async function execProfileList(args, userId) {
 // running verification). Code-enforce: stage the transition, ask the user to
 // type APPROVE PROVEN in chat, only then call setTrustState. unverified and
 // reviewed transitions still go through unchanged.
-const _pendingProven = new Map(); // userId -> { node_id, service_id }
+// { node_id, service_id } staged in the shared disk-persisted approval store —
+// keyed (userId, staging agent) so it survives restarts and a message in
+// another agent's chat can't wipe or execute it. See lib/pending-approvals.mjs.
 
-export function getPendingProven(userId)   { return _pendingProven.get(userId) ?? null; }
-export function clearPendingProven(userId) { _pendingProven.delete(userId); }
-export async function executePendingProven(userId) {
-  const pending = _pendingProven.get(userId);
+export function getPendingProven(userId, agentId = null)   { return getPendingApproval(userId, 'trust_promotion', agentId); }
+export function clearPendingProven(userId, agentId = null, expectedOpId = null) {
+  return clearPendingApproval(userId, 'trust_promotion', agentId, { expectedOpId });
+}
+export async function executePendingProven(userId, agentId = null, expectedOpId = null) {
+  const pending = takePendingApproval(userId, 'trust_promotion', agentId, { expectedOpId });
   if (!pending) return 'No pending trust-state transition.';
-  _pendingProven.delete(userId);
-  return execProfileSetTrustState({ ...pending, state: 'proven', _userApproved: true }, userId);
+  return execProfileSetTrustState({ node_id: pending.node_id, service_id: pending.service_id, state: 'proven', _userApproved: true }, userId);
 }
 
 async function execProfileSetTrustState(args, userId) {
@@ -171,7 +180,7 @@ async function execProfileSetTrustState(args, userId) {
     return 'profile_set_trust_state needs node_id, service_id, and state. Call this tool again with all three.';
   }
   if (state === 'proven' && !args._userApproved) {
-    _pendingProven.set(userId, { node_id, service_id });
+    stagePendingApproval(userId, 'trust_promotion', { node_id, service_id });
     return `⚠️ Promoting "${service_id}" on "${node_id}" to **proven** permits medium-risk fixes (service restarts, reloads, reversible config changes) on verified operations when the node Auto-fix gate is enabled. High-risk ops still always require confirmation. Type **APPROVE PROVEN** in chat to confirm, or say anything else to cancel.`;
   }
   let updated;

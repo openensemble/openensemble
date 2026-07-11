@@ -15,12 +15,287 @@
 // upload time, not as a surprise at send time.
 const MAX_CHAT_ATTACHMENTS_PER_MESSAGE = 6; // mirrors MAX_CHAT_ATTACHMENTS in chat/providers/_shared.mjs
 let pendingAttachments = [];
-// Retry-on-error state. A failed turn is never persisted server-side (the LLM
-// never sees it), so recovery is purely client-side: we remember the last
-// outgoing message and, if it errors, keep it on screen with a Retry button
-// until the user retries or types a fresh message.
-let lastSentAttempt = null; // { agent, text, attachments, userBubbleEl, sessionEntry } — in flight
+// Retry/idempotency state. messageId identifies the logical user message;
+// attemptId identifies one execution. A lost ACK may resend the same attempt
+// safely, while an explicit Retry keeps messageId and mints a new attemptId.
+let lastSentAttempt = null; // { agent, text, attachments, messageId, attemptId, userBubbleEl, sessionEntry }
 let failedAttempt = null;   // same shape + errorEl — set once a turn has errored
+const LEGACY_CHAT_OUTBOX_KEY = 'oe.chatOutbox.v1';
+const CHAT_OUTBOX_PREFIX = 'oe.chatOutbox.v2:';
+const CHAT_OUTBOX_TOMBSTONE_PREFIX = 'oe.chatOutboxDone.v2:';
+const CHAT_OUTBOX_TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const pendingSentAttempts = new Map();
+let _outboxLoadedUserId = null;
+
+function currentOutboxUserId() {
+  return (typeof _currentUser !== 'undefined' && _currentUser?.id) ? String(_currentUser.id) : null;
+}
+
+function safeOutboxAttachments(attachments) {
+  return (attachments || []).map(a => ({
+    name: a?.name ?? null,
+    mimeType: a?.mimeType ?? null,
+    isImage: Boolean(a?.isImage),
+    isFinanceFile: Boolean(a?.isFinanceFile),
+    file_id: a?.file_id ?? null,
+    extractedText: typeof a?.extractedText === 'string' ? a.extractedText.slice(0, 30_000) : null,
+  })).filter(a => a.file_id);
+}
+
+function outboxUserPrefix(prefix, userId) {
+  return `${prefix}${encodeURIComponent(userId)}:`;
+}
+
+function outboxAttemptKey(userId, attemptId) {
+  return `${outboxUserPrefix(CHAT_OUTBOX_PREFIX, userId)}${attemptId}`;
+}
+
+function outboxTombstoneKey(userId, attemptId) {
+  return `${outboxUserPrefix(CHAT_OUTBOX_TOMBSTONE_PREFIX, userId)}${attemptId}`;
+}
+
+function serializeOutboxAttempt(attempt) {
+  return {
+    agent: attempt.agent,
+    text: attempt.text || '',
+    attachments: safeOutboxAttachments(attempt.attachments),
+    toolPlan: attempt.toolPlan || null,
+    displayText: attempt.displayText || attempt.text || '',
+    messageId: attempt.messageId,
+    attemptId: attempt.attemptId,
+    createdAt: attempt.createdAt || Date.now(),
+    accepted: attempt.accepted === true,
+  };
+}
+
+function isOutboxTombstoned(userId, attemptId) {
+  try { return Boolean(localStorage.getItem(outboxTombstoneKey(userId, attemptId))); }
+  catch { return false; }
+}
+
+function writeOutboxAttempt(attempt) {
+  const userId = currentOutboxUserId();
+  if (!userId || !attempt?.attemptId) return;
+  try {
+    if (isOutboxTombstoned(userId, attempt.attemptId)) {
+      pendingSentAttempts.delete(attempt.attemptId);
+      localStorage.removeItem(outboxAttemptKey(userId, attempt.attemptId));
+      return;
+    }
+    localStorage.setItem(
+      outboxAttemptKey(userId, attempt.attemptId),
+      JSON.stringify(serializeOutboxAttempt(attempt)),
+    );
+  } catch {}
+}
+
+function tombstoneOutboxAttempt(attemptId) {
+  const userId = currentOutboxUserId();
+  if (!userId || !attemptId) return;
+  try {
+    // Tombstone first: another tab with a stale in-memory copy can never
+    // recreate the entry after this terminal observation.
+    localStorage.setItem(outboxTombstoneKey(userId, attemptId), JSON.stringify({ ts: Date.now() }));
+    localStorage.removeItem(outboxAttemptKey(userId, attemptId));
+  } catch {}
+}
+
+function ensureChatOutboxLoaded() {
+  const userId = currentOutboxUserId();
+  if (!userId || _outboxLoadedUserId === userId) return;
+  pendingSentAttempts.clear();
+  _outboxLoadedUserId = userId;
+  const entryPrefix = outboxUserPrefix(CHAT_OUTBOX_PREFIX, userId);
+  const tombstonePrefix = outboxUserPrefix(CHAT_OUTBOX_TOMBSTONE_PREFIX, userId);
+  try {
+    // One key per attempt avoids read/modify/write lost updates when two tabs
+    // send concurrently. Tombstones are also per attempt for the same reason.
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (key.startsWith(tombstonePrefix)) {
+        try {
+          const ts = Number(JSON.parse(localStorage.getItem(key) || '{}').ts) || 0;
+          if (ts && Date.now() - ts > CHAT_OUTBOX_TOMBSTONE_TTL_MS) {
+            const attemptId = key.slice(tombstonePrefix.length);
+            // Delete any stale-tab resurrection before expiring its guard.
+            localStorage.removeItem(outboxAttemptKey(userId, attemptId));
+            localStorage.removeItem(key);
+          }
+        } catch {}
+        continue;
+      }
+      if (!key.startsWith(entryPrefix)) continue;
+      let row;
+      try { row = JSON.parse(localStorage.getItem(key) || '{}'); }
+      catch { continue; }
+      if (!row?.attemptId || !row?.messageId || !row?.agent) continue;
+      if (isOutboxTombstoned(userId, row.attemptId)) {
+        localStorage.removeItem(key);
+        continue;
+      }
+      pendingSentAttempts.set(row.attemptId, {
+        ...row,
+        attachments: safeOutboxAttachments(row.attachments),
+        accepted: row.accepted === true,
+        restoredFromOutbox: true,
+      });
+    }
+
+    // One-time compatibility read for tabs that loaded the first stability
+    // patch before v2's per-attempt keys.
+    const legacy = JSON.parse(localStorage.getItem(LEGACY_CHAT_OUTBOX_KEY) || '{}');
+    for (const row of (Array.isArray(legacy[userId]) ? legacy[userId] : [])) {
+      if (!row?.attemptId || !row?.messageId || !row?.agent) continue;
+      if (pendingSentAttempts.has(row.attemptId) || isOutboxTombstoned(userId, row.attemptId)) continue;
+      const migrated = {
+        ...row, attachments: safeOutboxAttachments(row.attachments),
+        accepted: row.accepted === true, restoredFromOutbox: true,
+      };
+      pendingSentAttempts.set(row.attemptId, migrated);
+      writeOutboxAttempt(migrated);
+    }
+    // Remove only this user's migrated bucket, preserving any other signed-in
+    // profiles on the same browser. Otherwise an expired v2 tombstone could let
+    // the immutable v1 copy reappear and execute again days later.
+    if (Object.prototype.hasOwnProperty.call(legacy, userId)) {
+      delete legacy[userId];
+      if (Object.keys(legacy).length) localStorage.setItem(LEGACY_CHAT_OUTBOX_KEY, JSON.stringify(legacy));
+      else localStorage.removeItem(LEGACY_CHAT_OUTBOX_KEY);
+    }
+  } catch {}
+}
+
+function registerPendingAttempt(attempt) {
+  ensureChatOutboxLoaded();
+  const tracked = { createdAt: Date.now(), accepted: false, ...attempt };
+  const userId = currentOutboxUserId();
+  if (userId && isOutboxTombstoned(userId, tracked.attemptId)) return tracked;
+  pendingSentAttempts.set(tracked.attemptId, tracked);
+  writeOutboxAttempt(tracked);
+  return tracked;
+}
+
+function pendingAttemptForId(attemptId) {
+  ensureChatOutboxLoaded();
+  return attemptId ? (pendingSentAttempts.get(attemptId) || null) : null;
+}
+
+function acceptPendingAttempt(attemptId) {
+  ensureChatOutboxLoaded();
+  const attempt = pendingSentAttempts.get(attemptId);
+  if (!attempt) return null;
+  attempt.accepted = true;
+  writeOutboxAttempt(attempt);
+  return attempt;
+}
+
+function finishPendingAttempt(attemptId) {
+  if (!attemptId) return null;
+  ensureChatOutboxLoaded();
+  const attempt = pendingSentAttempts.get(attemptId) || null;
+  tombstoneOutboxAttempt(attemptId);
+  pendingSentAttempts.delete(attemptId);
+  return attempt;
+}
+
+function clearPendingAttemptsForAgent(agent) {
+  ensureChatOutboxLoaded();
+  for (const [attemptId, attempt] of pendingSentAttempts) {
+    if (attempt.agent !== agent) continue;
+    tombstoneOutboxAttempt(attemptId);
+    pendingSentAttempts.delete(attemptId);
+  }
+}
+
+function replayPendingAttempt(attempt, connectionGeneration) {
+  if (!attempt || attempt.lastReplayGeneration === connectionGeneration) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  attempt.lastReplayGeneration = connectionGeneration;
+  const replay = {
+    type: 'chat', agent: attempt.agent, text: attempt.text || '',
+    message_id: attempt.messageId, attempt_id: attempt.attemptId,
+  };
+  if (attempt.attachments?.length) replay.attachments = attempt.attachments;
+  if (attempt.toolPlan) replay.toolPlan = attempt.toolPlan;
+  ws.send(JSON.stringify(replay));
+}
+
+// Called by websocket.js after an authoritative session load. The same attempt
+// id is safe to replay repeatedly; one replay per connection avoids bursts from
+// the initial all-agent load plus the active-agent safety-net load.
+function reconcilePendingAttemptsFromSession(agent, serverMsgs, connectionGeneration, activeStream = null) {
+  ensureChatOutboxLoaded();
+  const rows = serverMsgs || [];
+  for (const [attemptId, attempt] of pendingSentAttempts) {
+    if (attempt.agent !== agent) continue;
+    const matchingRows = rows.filter(row => row?.attemptId === attemptId || row?.turnId === attemptId);
+    // Only the whole-turn marker proves assistant/failure + every post-turn
+    // approval/attachment artifact are durable. A bare assistant/turn_error row
+    // is still `finalizing` and the same attempt must remain replayable.
+    if (matchingRows.some(row => row?.role === 'turn_terminal')) {
+      finishPendingAttempt(attemptId);
+      continue;
+    }
+    if (!matchingRows.length && attempt.lastError && attempt.lastError.retryable !== true) {
+      finishPendingAttempt(attemptId);
+      continue;
+    }
+    if (matchingRows.some(row => row?.role === 'user')) acceptPendingAttempt(attemptId);
+    if (!sessions[agent]) sessions[agent] = [];
+    if (!matchingRows.some(row => row?.role === 'user')) {
+      const optimistic = {
+        role: 'user', content: attempt.displayText || attempt.text || '',
+        ts: attempt.createdAt || Date.now(), attachments: attempt.attachments || [],
+        messageId: attempt.messageId, attemptId, turnId: attemptId, turnStatus: 'running',
+      };
+      if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[agent], optimistic))) {
+        sessions[agent].push(optimistic);
+      }
+    }
+    const activeAttemptId = activeStream?.attemptId || activeStream?.turnId || null;
+    if (activeAttemptId !== attemptId) replayPendingAttempt(attempt, connectionGeneration);
+  }
+}
+
+window.addEventListener('storage', event => {
+  const userId = currentOutboxUserId();
+  if (!userId || !event.key) return;
+  const entryPrefix = outboxUserPrefix(CHAT_OUTBOX_PREFIX, userId);
+  const tombstonePrefix = outboxUserPrefix(CHAT_OUTBOX_TOMBSTONE_PREFIX, userId);
+  if (event.key.startsWith(tombstonePrefix) && event.newValue) {
+    const attemptId = event.key.slice(tombstonePrefix.length);
+    pendingSentAttempts.delete(attemptId);
+    try { localStorage.removeItem(outboxAttemptKey(userId, attemptId)); } catch {}
+    return;
+  }
+  if (!event.key.startsWith(entryPrefix)) return;
+  const attemptId = event.key.slice(entryPrefix.length);
+  if (!event.newValue || isOutboxTombstoned(userId, attemptId)) {
+    pendingSentAttempts.delete(attemptId);
+    if (event.newValue) {
+      try { localStorage.removeItem(event.key); } catch {}
+    }
+    return;
+  }
+  try {
+    const row = JSON.parse(event.newValue);
+    if (row?.attemptId === attemptId && row?.messageId && row?.agent) {
+      const prior = pendingSentAttempts.get(attemptId);
+      pendingSentAttempts.set(attemptId, {
+        ...row, attachments: safeOutboxAttachments(row.attachments),
+        accepted: row.accepted === true, restoredFromOutbox: true,
+        ...(prior?.lastReplayGeneration != null ? { lastReplayGeneration: prior.lastReplayGeneration } : {}),
+        ...(prior?.lastError ? { lastError: prior.lastError } : {}),
+      });
+    }
+  } catch {}
+});
+
+function makeChatCorrelationId(prefix) {
+  const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  return `${prefix}_${id.replace(/[^A-Za-z0-9_-]/g, '')}`;
+}
 
 // ── Per-agent draft persistence ──────────────────────────────────────────────
 // The composer is one shared <textarea> — without this, a half-typed message
@@ -563,10 +838,8 @@ async function send() {
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
   if (pendingAttachments.some(a => a._uploading)) { showToast('Still uploading — one moment'); return; }
 
-  // A fresh send supersedes any failed attempt still showing — the message the
-  // user just typed is almost always what they were retrying. Remove its bubble
-  // + error so nothing stale lingers (it was never persisted, so the LLM is
-  // unaffected).
+  // A fresh send supersedes the local Retry affordance. The failed row itself
+  // stays in durable history; only an explicit Retry reuses its messageId.
   clearFailedAttempt();
 
   // @-mention redirect: "@<agent> make me a skill" switches the active agent
@@ -615,15 +888,23 @@ async function send() {
     base64: a.base64, extractedText: a.extractedText,
   }));
   const displayText = text || (attachments.length ? attachments.map(a => `[${a.name}]`).join(' ') : '');
+  const messageId = makeChatCorrelationId('msg');
+  const attemptId = makeChatCorrelationId('att');
 
   if (!sessions[activeAgent]) sessions[activeAgent] = [];
-  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachments };
+  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachments, messageId, attemptId, turnId: attemptId, turnStatus: 'running' };
   sessions[activeAgent].push(sessionEntry);
   updateSessionWarning();
   const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, attachments);
   scrollToBottom(true); // sending always jumps to the bottom, even from scrollback
   // Remember this attempt so it can be cleared/retried if the turn errors.
-  lastSentAttempt = { agent: activeAgent, text, attachments, userBubbleEl, sessionEntry };
+  lastSentAttempt = registerPendingAttempt({
+    agent: activeAgent, text, displayText, attachments, toolPlan,
+    messageId, attemptId, userBubbleEl, sessionEntry,
+  });
+  agentStreams[activeAgent] = typeof freshAgentTurnState === 'function'
+    ? freshAgentTurnState(activeAgent, { turnId: attemptId, messageId, attemptId, phase: 'running', seq: 0 })
+    : { buf: '', toolEvents: [], active: true, turnId: attemptId, messageId, attemptId, lastSeq: 0 };
   // Composer/draft cleanup — skipped when an @-mention redirect already did
   // it for the ORIGINATING agent pre-switch: at this point activeAgent is
   // the mention TARGET, whose input holds their own restored draft (not the
@@ -651,7 +932,7 @@ async function send() {
     setStreaming(true); setTyping(true);
   }
 
-  const payload = { type: 'chat', agent: activeAgent, text };
+  const payload = { type: 'chat', agent: activeAgent, text, message_id: messageId, attempt_id: attemptId };
   if (attachments.length) payload.attachments = attachments;
   if (toolPlan) payload.toolPlan = toolPlan;
   ws.send(JSON.stringify(payload));
@@ -686,6 +967,7 @@ function renderSessionInner(keepScroll) {
   const msgs = $('messages');
   [...msgs.children].forEach(el => {
     if (el.id) return;
+    if (el._approvalExpiryTimer) clearTimeout(el._approvalExpiryTimer);
     // Image bubbles hold object URLs — revoke before dropping the element or
     // every re-render leaks the decoded image memory for the tab's lifetime.
     el.querySelectorAll('img[src^="blob:"]').forEach(img => { try { URL.revokeObjectURL(img.src); } catch {} });
@@ -770,7 +1052,8 @@ function renderSessionInner(keepScroll) {
     else if (m.role === 'attachment_decision' && m.decisionId) appendAttachmentDecisionBubble(m, false);
     else if (m.role === 'attachment_decision_outcome' && m.decisionId) applyAttachmentDecisionOutcome(m.decisionId, m.decision);
     else if (m.role === 'approval_pending' && m.kind) appendApprovalPendingBubble(m, false);
-    else if (m.role === 'approval_resolved' && m.kind) applyApprovalResolved(m.kind);
+    else if (m.role === 'approval_resolved' && m.kind) applyApprovalResolved(m.kind, m.opId ?? null, m.ts ?? null);
+    else if (m.role === 'turn_error') appendTurnErrorBubble(m);
     else if ((m.role === 'agent_report' || m.kind === 'agent_report') && isNodeExecTaskReport(m)) {
       appendNodeExecTaskReport(m, null, false);
       appendAgentReportImages(m, false);
@@ -2005,8 +2288,9 @@ async function respondToAttachmentDecision(el, decisionId, fileId, decision, kee
 // profile trust-state promotion, cross-agent watcher op — is pending after a
 // turn. Approve sends the exact confirmation phrase as a normal chat message
 // (the server's existing tryApprovalIntercept text match executes it
-// unchanged, so the keyboard path keeps working too); Cancel sends a benign
-// message, which the same intercept's any-other-message rule clears.
+// unchanged, so the keyboard path keeps working too); modern Cancel buttons
+// send a targeted CANCEL APPROVAL #opId phrase so a stale card cannot clear a
+// newer operation (legacy cards without an id retain the old fallback).
 // Persisted as role:'approval_pending' so a reload still shows it; the
 // resolution arrives as role:'approval_resolved' (applyApprovalResolved).
 function appendApprovalPendingBubble(pending, scroll = true) {
@@ -2017,10 +2301,22 @@ function appendApprovalPendingBubble(pending, scroll = true) {
   // push) refreshes the existing pill's text instead of stacking a second.
   const existing = document.querySelector(`.msg.approval-pending[data-approval-kind="${CSS.escape(kind)}"]`);
   const el = existing || document.createElement('div');
+  if (el._approvalExpiryTimer) {
+    clearTimeout(el._approvalExpiryTimer);
+    el._approvalExpiryTimer = null;
+  }
   if (!existing) {
     el.className = 'msg approval-pending';
     el.dataset.approvalKind = kind;
   }
+  // Operation id minted at stage time (lib/pending-approvals.mjs). Sent as a
+  // "#<opId>" suffix on Approve so the server can refuse a stale card — one
+  // describing an op that was since replaced by a newer staging of the same
+  // kind. Absent on legacy rows; those fall back to the bare phrase.
+  if (pending.opId) el.dataset.opId = pending.opId;
+  else delete el.dataset.opId;
+  if (pending.ts != null && Number.isFinite(Number(pending.ts))) el.dataset.approvalTs = String(Number(pending.ts));
+  else delete el.dataset.approvalTs;
   delete el.dataset.appliedStatus; // re-pending clears any prior resolved marker
   el.style.cssText = 'padding:10px 12px;margin:6px 0;font-size:13px;border-left:3px solid var(--red, #f44336);background:rgba(244,67,54,0.06);border-radius:4px';
   el.innerHTML = '';
@@ -2037,17 +2333,61 @@ function appendApprovalPendingBubble(pending, scroll = true) {
   const approveBtn = document.createElement('button');
   approveBtn.textContent = `Approve (${phrase})`;
   approveBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--red, #f44336);background:var(--red, #f44336);color:#fff;border-radius:4px;cursor:pointer;font-size:12px';
-  approveBtn.addEventListener('click', () => respondToApproval(phrase, approveBtn, cancelBtn));
+  // Read the opId off the element at click time (not capture time) so a
+  // re-staged pill that refreshed this bubble in place sends the CURRENT id.
+  approveBtn.addEventListener('click', () => respondToApproval(el.dataset.opId ? `${phrase} #${el.dataset.opId}` : phrase, approveBtn, cancelBtn));
   actions.appendChild(approveBtn);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.textContent = 'Cancel';
   cancelBtn.style.cssText = 'padding:6px 12px;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:4px;cursor:pointer;font-size:12px';
-  cancelBtn.addEventListener('click', () => respondToApproval('cancel', approveBtn, cancelBtn));
+  cancelBtn.addEventListener('click', () => {
+    const currentOpId = el.dataset.opId;
+    respondToApproval(currentOpId ? `CANCEL APPROVAL #${currentOpId}` : 'cancel', approveBtn, cancelBtn);
+  });
   actions.appendChild(cancelBtn);
 
   el.appendChild(actions);
   if (!existing) insertBefore(el);
+
+  // Watcher approvals currently carry a five-minute expiry. Disable the card
+  // at that deadline (including immediately on replay of an already-expired
+  // persisted row) so it cannot look actionable after the server has dropped
+  // the staged operation. The expected id guard prevents an old timer from
+  // disabling a refreshed card for a newer staging of the same kind.
+  const expiresAt = typeof pending.expiresAt === 'number'
+    ? pending.expiresAt
+    : Date.parse(pending.expiresAt || '');
+  if (Number.isFinite(expiresAt)) {
+    el.dataset.expiresAt = String(expiresAt);
+    const expectedOpId = el.dataset.opId || '';
+    const expire = () => {
+      if ((el.dataset.opId || '') !== expectedOpId) return;
+      if (el.dataset.appliedStatus === 'resolved') return;
+      const remaining = expiresAt - Date.now();
+      if (remaining > 0) {
+        el._approvalExpiryTimer = setTimeout(expire, Math.min(remaining, 2_147_483_647));
+        return;
+      }
+      el._approvalExpiryTimer = null;
+      el.dataset.appliedStatus = 'expired';
+      [...el.querySelectorAll('button')].forEach(b => {
+        b.disabled = true;
+        b.style.opacity = '0.5';
+        b.style.cursor = 'default';
+      });
+      el.style.borderLeftColor = 'var(--border)';
+      el.style.opacity = '0.6';
+      const footer = document.createElement('div');
+      footer.className = 'approval-status';
+      footer.style.cssText = 'font-size:12px;color:var(--muted);font-style:italic;margin-top:6px';
+      footer.textContent = '· Expired';
+      el.appendChild(footer);
+    };
+    expire();
+  } else {
+    delete el.dataset.expiresAt;
+  }
   if (scroll) scrollToBottom();
 }
 
@@ -2056,16 +2396,34 @@ function appendApprovalPendingBubble(pending, scroll = true) {
 // applyProposalOutcome / applyAttachmentDecisionOutcome. Fires once the
 // staged op is gone: approved-and-executed, or cleared by the "say anything
 // else to cancel" rule (any non-matching message clears it server-side).
-function applyApprovalResolved(kind) {
+function applyApprovalResolved(kind, opId = null, resolvedTs = null) {
   if (!kind) return;
   const el = document.querySelector(`.msg.approval-pending[data-approval-kind="${CSS.escape(kind)}"]`);
   if (!el) return;
+  const renderedOpId = el.dataset.opId || null;
+  // New resolution events must match exactly. For pre-upgrade resolution rows
+  // that lack an id, timestamps are the safe migration fallback: only a row at
+  // or after this card's staging may resolve it. An older delayed row cannot
+  // collapse a newer operation, and rows with no usable correlation stay put.
+  if (opId) {
+    if (renderedOpId !== opId) return;
+  } else if (renderedOpId !== null) {
+    const pendingTs = Number(el.dataset.approvalTs);
+    const eventTs = resolvedTs == null ? NaN : Number(resolvedTs);
+    if (!Number.isFinite(pendingTs) || !Number.isFinite(eventTs) || eventTs < pendingTs) return;
+  }
   if (el.dataset.appliedStatus === 'resolved') return;
+  if (el._approvalExpiryTimer) {
+    clearTimeout(el._approvalExpiryTimer);
+    el._approvalExpiryTimer = null;
+  }
   el.dataset.appliedStatus = 'resolved';
   [...el.querySelectorAll('button')].forEach(b => b.remove());
+  el.querySelector('.approval-status')?.remove();
   el.style.borderLeftColor = 'var(--border)';
   el.style.opacity = '0.6';
   const footer = document.createElement('div');
+  footer.className = 'approval-status';
   footer.style.cssText = 'font-size:12px;color:var(--muted);font-style:italic;margin-top:6px';
   footer.textContent = '· Resolved';
   el.appendChild(footer);
@@ -2073,23 +2431,28 @@ function applyApprovalResolved(kind) {
 
 // Approve/Cancel click handler: sends the given text through the existing
 // send() pipeline — the same code path as if the user had typed the phrase
-// themselves — so the server's text-match intercept (or, for "cancel", the
-// LLM) handles it exactly as before this feature existed. Mirrors send()'s
-// own guard clauses so a click while offline/mid-stream doesn't leave the
-// buttons permanently disabled with nothing actually sent.
+// themselves — so the server's text-match intercept handles it. Mirrors
+// send()'s guards and restores a half-written composer draft after the action.
 function respondToApproval(text, approveBtn, cancelBtn) {
   if (streaming && !awaitingPermission) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
+  if (pendingAttachments.length) { showToast('Send or remove attachments before responding to an approval'); return; }
   approveBtn.disabled = true; cancelBtn.disabled = true;
   approveBtn.style.opacity = '0.5'; cancelBtn.style.opacity = '0.5';
   const input = $('input');
   const prevValue = input.value;
   input.value = text;
   send();
-  // send() clears input.value on success; if it bailed on a guard we didn't
-  // already check above, restore whatever the user had been typing rather
-  // than clobbering it.
-  if (input.value === text) input.value = prevValue;
+  // send() clears input.value on success. Either way, put back the user's
+  // draft; approval buttons should not silently destroy unrelated typing.
+  const sent = input.value !== text;
+  input.value = prevValue;
+  resizeTextarea();
+  saveDraftForAgent(activeAgent);
+  if (!sent) {
+    approveBtn.disabled = false; cancelBtn.disabled = false;
+    approveBtn.style.opacity = '1'; cancelBtn.style.opacity = '1';
+  }
 }
 
 async function toggleWatcherHistory(el, watcherId) {
@@ -2354,6 +2717,22 @@ function ensureToolRun() {
   liveToolRun = { el, events: [], startedAt: Date.now() };
   toolPillsEl = el;
   return liveToolRun;
+}
+
+// Snapshot/restore of the in-flight tool run across agent switches
+// (agents.js switchAgent). Full event objects, not just names — args,
+// status, previews and results all survive the round-trip, so a restored
+// run keeps ticking (tool_result events find their pending entries) instead
+// of spinning forever on name-only stubs.
+function snapshotLiveToolRun() {
+  return liveToolRun ? liveToolRun.events.map(ev => ({ ...ev })) : null;
+}
+
+function restoreToolRun(events) {
+  if (!events?.length) return;
+  const run = ensureToolRun();
+  run.events = events;
+  updateToolRunHeader(run, events.every(ev => ev.status === 'done'));
 }
 
 function visibleToolEvents(events) {
@@ -2706,6 +3085,10 @@ function openToolModal(name, text) {
 }
 function sessionMessageKey(m) {
   if (!m || typeof m !== 'object') return null;
+  if (m.role === 'user' && m.messageId) return `user:${m.messageId}`;
+  if (m.role === 'assistant' && m.turnId) return `assistant:${m.turnId}`;
+  if (m.role === 'turn_error' && (m.attemptId || m.turnId)) return `turn_error:${m.attemptId || m.turnId}`;
+  if (m.role === 'turn_terminal' && (m.attemptId || m.turnId)) return `turn_terminal:${m.attemptId || m.turnId}`;
   if (m.role === 'agent_report' || m.kind === 'agent_report') {
     if (m.reportId) return `agent_report:${m.reportId}`;
     if (m.spanId) return `agent_report:${m.spanId}`;
@@ -2716,12 +3099,14 @@ function sessionMessageKey(m) {
   if (m.role === 'proposal_outcome' && m.proposalId) return `proposal_outcome:${m.proposalId}:${m.status || ''}`;
   if (m.role === 'attachment_decision' && m.decisionId) return `attachment_decision:${m.decisionId}`;
   if (m.role === 'attachment_decision_outcome' && m.decisionId) return `attachment_decision_outcome:${m.decisionId}`;
+  if (m.role === 'approval_pending' && m.kind) return `approval_pending:${m.kind}:${m.opId || m.ts || 'legacy'}`;
+  if (m.role === 'approval_resolved' && m.kind) return `approval_resolved:${m.kind}:${m.opId || m.ts || 'legacy'}`;
   return null;
 }
 function sameSessionMessage(a, b) {
   const ak = sessionMessageKey(a);
   const bk = sessionMessageKey(b);
-  if (ak && bk && ak === bk) return true;
+  if (ak && bk) return ak === bk;
   return a?.role === b?.role && a?.content === b?.content;
 }
 function sessionHasEquivalent(messages, msg) {
@@ -2739,20 +3124,60 @@ function appendError(msg, onRetry = null) {
   return el;
 }
 
-// A turn errored. Keep the failed message + error on screen with a Retry button.
-// The failed turn is never persisted server-side, so the LLM never sees it — we
-// only manage the client-side view here.
-function showTurnError(message) {
-  const forThisAgent = lastSentAttempt && lastSentAttempt.agent === activeAgent;
-  const errorEl = appendError(message, forThisAgent ? retryFailedAttempt : null);
+function appendTurnErrorBubble(row) {
+  if (row?.assistantPartial) {
+    appendAssistantBubble(`${row.assistantPartial}\n\n_Reply incomplete_`, row.ts, false);
+  }
+  appendError(
+    row?.error || row?.content || 'Turn failed',
+    row?.retryable === true ? () => retryPersistedTurn(row) : null,
+  );
+}
+
+function retryPersistedTurn(errorRow) {
+  if (streaming && !awaitingPermission) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
+  const arr = sessions[activeAgent] || [];
+  const user = [...arr].reverse().find(m =>
+    m.role === 'user' && (errorRow.messageId ? m.messageId === errorRow.messageId : m.turnId === errorRow.turnId));
+  if (!user) { showToast('The original message is no longer available'); return; }
+  const messageId = user.messageId || makeChatCorrelationId('msg');
+  if (typeof finishPendingAttempt === 'function') finishPendingAttempt(errorRow.attemptId || errorRow.turnId);
+  const attemptId = makeChatCorrelationId('att');
+  const attachments = user.attachments || [];
+  sessions[activeAgent] = arr.filter(m => m !== errorRow && !(m.role === 'turn_error' && m.messageId === messageId));
+  Object.assign(user, { messageId, attemptId, turnId: attemptId, turnStatus: 'running', retryable: undefined });
+  renderSession();
+  lastSentAttempt = registerPendingAttempt({
+    agent: activeAgent, text: user.content || '', attachments,
+    displayText: user.content || '',
+    messageId, attemptId, userBubbleEl: null, sessionEntry: user,
+  });
+  agentStreams[activeAgent] = typeof freshAgentTurnState === 'function'
+    ? freshAgentTurnState(activeAgent, { turnId: attemptId, messageId, attemptId, phase: 'running', seq: 0 })
+    : { buf: '', toolEvents: [], active: true, turnId: attemptId, messageId, attemptId, lastSeq: 0 };
+  setStreaming(true); setTyping(true);
+  const payload = { type: 'chat', agent: activeAgent, text: user.content || '', message_id: messageId, attempt_id: attemptId };
+  if (attachments.length) payload.attachments = attachments;
+  ws.send(JSON.stringify(payload));
+}
+
+// A terminal failure is already durable server-side. Keep the user row in the
+// cache and offer Retry only when the server proves no side-effecting tool ran.
+function showTurnError(message, event = {}) {
+  const attempt = event._clientAttempt
+    || (lastSentAttempt && (!event.turn_id || lastSentAttempt.attemptId === event.turn_id)
+      ? lastSentAttempt : null);
+  const forThisAgent = attempt && attempt.agent === activeAgent;
+  const canRetry = Boolean(forThisAgent && event.retryable === true);
+  const errorEl = appendError(message, canRetry ? retryFailedAttempt : null);
   if (forThisAgent) {
-    // Drop the optimistic in-memory entry so an agent switch / re-render doesn't
-    // resurrect it as a normal message. The visible bubble stays until the user
-    // retries or types a new message.
-    const arr = sessions[lastSentAttempt.agent];
-    if (arr) { const i = arr.indexOf(lastSentAttempt.sessionEntry); if (i !== -1) arr.splice(i, 1); }
-    failedAttempt = { ...lastSentAttempt, errorEl };
-    lastSentAttempt = null;
+    if (attempt.sessionEntry) {
+      attempt.sessionEntry.turnStatus = 'failed';
+      attempt.sessionEntry.retryable = canRetry;
+    }
+    failedAttempt = canRetry ? { ...attempt, errorEl } : null;
+    if (lastSentAttempt?.attemptId === attempt.attemptId) lastSentAttempt = null;
   }
 }
 
@@ -2760,7 +3185,10 @@ function showTurnError(message) {
 // fresh send (Retry button or a newly-typed message).
 function clearFailedAttempt() {
   if (!failedAttempt) return;
-  try { failedAttempt.userBubbleEl?.remove(); } catch {}
+  // A new message supersedes a pre-acceptance retryable send; do not let that
+  // abandoned outbox entry execute on a later reconnect. Accepted attempts stay
+  // until their durable turn_terminal is observed.
+  if (!failedAttempt.accepted) finishPendingAttempt(failedAttempt.attemptId);
   try { failedAttempt.errorEl?.remove(); } catch {}
   failedAttempt = null;
 }
@@ -2770,21 +3198,35 @@ function clearFailedAttempt() {
 function retryFailedAttempt() {
   if (!failedAttempt) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
-  const { agent, text, attachments } = failedAttempt;
+  const prior = failedAttempt;
+  const { agent, text, attachments, toolPlan, messageId } = prior;
+  finishPendingAttempt(prior.attemptId);
   clearFailedAttempt();
   if (agent !== activeAgent) return;
   const list = attachments || [];
-  const displayText = text || (list.length ? list.map(a => `[${a.name}]`).join(' ') : '');
+  const attemptId = makeChatCorrelationId('att');
   if (!sessions[activeAgent]) sessions[activeAgent] = [];
-  const sessionEntry = { role: 'user', content: displayText, ts: Date.now(), attachments: list };
-  sessions[activeAgent].push(sessionEntry);
+  sessions[activeAgent] = sessions[activeAgent].filter(m =>
+    !(m.role === 'turn_error' && m.messageId === messageId));
+  let sessionEntry = sessions[activeAgent].find(m => m.role === 'user' && m.messageId === messageId);
+  if (!sessionEntry) {
+    sessionEntry = prior.sessionEntry;
+    sessions[activeAgent].push(sessionEntry);
+  }
+  Object.assign(sessionEntry, { attemptId, turnId: attemptId, turnStatus: 'running', retryable: undefined });
   updateSessionWarning();
-  const userBubbleEl = appendUserBubble(displayText, sessionEntry.ts, true, list);
-  scrollToBottom(true);
-  lastSentAttempt = { agent: activeAgent, text, attachments: list, userBubbleEl, sessionEntry };
+  lastSentAttempt = registerPendingAttempt({
+    agent: activeAgent, text, displayText: sessionEntry.content || text,
+    attachments: list, toolPlan, messageId, attemptId,
+    userBubbleEl: prior.userBubbleEl, sessionEntry,
+  });
+  agentStreams[activeAgent] = typeof freshAgentTurnState === 'function'
+    ? freshAgentTurnState(activeAgent, { turnId: attemptId, messageId, attemptId, phase: 'running', seq: 0 })
+    : { buf: '', toolEvents: [], active: true, turnId: attemptId, messageId, attemptId, lastSeq: 0 };
   setStreaming(true); setTyping(true);
-  const payload = { type: 'chat', agent: activeAgent, text };
+  const payload = { type: 'chat', agent: activeAgent, text, message_id: messageId, attempt_id: attemptId };
   if (list.length) payload.attachments = list;
+  if (toolPlan) payload.toolPlan = toolPlan;
   ws.send(JSON.stringify(payload));
 }
 function appendNotification(msg) {
@@ -2808,7 +3250,7 @@ function appendNotification(msg) {
 // Render a direct report card from a background agent, inline in the current chat
 function handleAgentReport(msg) {
   const { agent, reportId, agentName, agentEmoji, content, displayContent, ts, toolEvents, images, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, watcherId, rootWatcherId, spanId, tool, status } = msg;
-  const report = { role: 'agent_report', reportId, agentName, agentEmoji, content, displayContent, toolEvents, images, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, watcherId, rootWatcherId, spanId, tool, status, ts };
+  const report = { role: 'agent_report', reportId, agentName, agentEmoji, content, displayContent, toolEvents, images, targetAgentId, originalTask, taskId, rootTaskId, parentTaskId, watcherId, rootWatcherId, spanId, tool, status, ts, ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) };
   const agentKey = chatSessionAgentId(agent);
   // Push into the target coordinator's session cache so the report survives
   // agent-tab switches. Without this, the DOM bubble is the only copy
