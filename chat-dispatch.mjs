@@ -395,6 +395,8 @@ function normalizeToolPlan(plan) {
  * @param {boolean} [opts._hiddenUser]               internal turn; persist user prompt hidden from UI
  * @param {boolean} [opts._isBackgroundContinuation] internal guard for completed background-task wakeups
  * @param {boolean} [opts._isolatedTaskRun]          internal scheduled/background task turn with no chat history
+ * @param {boolean} [opts._readOnlyTurn]             internal untrusted-context turn; no interceptors, tools, or learning
+ * @param {string|null} [opts._untrustedContext]     current-turn-only data appended for the model, never persisted
  * @param {string|null} [opts.turnId]                external correlation id (voice/legacy clients)
  * @param {string|null} [opts.messageId]             logical browser message id (stable across explicit retries)
  * @param {string|null} [opts.attemptId]             idempotency key for one execution attempt
@@ -430,6 +432,8 @@ export async function handleChatMessage({
   _hiddenUser = false,
   _isBackgroundContinuation = false,
   _isolatedTaskRun = false,
+  _readOnlyTurn = false,
+  _untrustedContext = null,
   turnId = null,
   messageId = null,
   attemptId = null,
@@ -955,7 +959,7 @@ export async function handleChatMessage({
 
   // Profile intercepts: news-topic preference (side-effect; pipeline continues)
   // and agent rename / re-emoji (short-circuits with a spoken confirmation).
-  if (!documentRequest) {
+  if (!documentRequest && !_readOnlyTurn) {
     tryNewsPrefIntercept({ rawText, userId, onEvent });
     if (await tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
   }
@@ -1052,7 +1056,7 @@ export async function handleChatMessage({
   // "ask <name>") in the incoming user message are logged against the
   // previous turn's pickedAgent so we can propose a routing override after
   // threshold. Fire-and-forget — detection never blocks dispatch.
-  if (ctx.userText && !_isBackgroundContinuation) {
+  if (ctx.userText && !_isBackgroundContinuation && !_readOnlyTurn) {
     import('./lib/router-mistakes.mjs').then(m =>
       m.detectAndLog({ userId, currentAgentId: agentId, userText: ctx.userText })
     ).catch(e => console.warn('[router-mistakes] hook failed:', e.message));
@@ -1078,7 +1082,7 @@ export async function handleChatMessage({
   const CONVERSATION_REARM_FASTPATHS = new Set([
     tryHaFastpath, tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
   ]);
-  const INTERCEPTORS = documentRequest ? [] : [
+  const INTERCEPTORS = (documentRequest || _readOnlyTurn) ? [] : [
     // Audio/video attachment + "transcribe this" (or bare attachment) goes
     // straight to STT — no LLM round-trip needed. Falls through to the
     // coordinator when the user's text suggests something else (e.g. "what's
@@ -1149,7 +1153,7 @@ export async function handleChatMessage({
   // would spawn a duplicate of itself. A task must never create a task.
   const _schedulerNotePromise = buildSchedulerNote({
     userId, agentId, userText: ctx.userText,
-    skipIntercept: _isBackgroundContinuation || _isolatedTaskRun || !!documentRequest,
+    skipIntercept: _readOnlyTurn || _isBackgroundContinuation || _isolatedTaskRun || !!documentRequest,
   });
 
   // Pre-LLM alias learning: if the previous turn ended with a "did you mean X?"
@@ -1167,7 +1171,7 @@ export async function handleChatMessage({
   // The affirmation→hints chain must stay ordered, but it touches only alias
   // stores while buildSchedulerNote touches only scheduler state — so the two
   // run concurrently to cut serial pre-LLM latency.
-  const _hintsPromise = (async () => {
+  const _hintsPromise = _readOnlyTurn ? Promise.resolve('') : (async () => {
     try {
       const { maybeConsumeAffirmation } = await import('./lib/alias-learner.mjs');
       await maybeConsumeAffirmation(userId, ctx.userText);
@@ -1216,10 +1220,14 @@ export async function handleChatMessage({
   // chatting with — coordinator or specialist — so it must NOT be labelled
   // 'coordinator' (that wrongly implied the agent's role in the trace).
   recordRouting({ mode: 'direct', llmAvoided: false });
+  const modelUserText = _readOnlyTurn && typeof _untrustedContext === 'string' && _untrustedContext.trim()
+    ? `${ctx.userText}\n\n${_untrustedContext.slice(0, 50_000)}`
+    : ctx.userText;
   try {
     await runLlmTurn({
       userId, agentId, scopedAgent, scopedSessionKey,
-      userText: ctx.userText, attachment: ctx.attachment, attachments: ctx.attachments,
+      userText: modelUserText, sessionUserText: ctx.userText,
+      attachment: ctx.attachment, attachments: ctx.attachments,
       toolPlan: ctx.toolPlan,
       documentRequest: ctx.documentRequest,
       schedulerNote: resolvedNote, source, deviceId,
@@ -1227,6 +1235,7 @@ export async function handleChatMessage({
       ac, onEvent: wrappedOnEvent, onNotify,
       hiddenUser: _hiddenUser,
       isolatedTaskRun: _isolatedTaskRun,
+      readOnlyTurn: _readOnlyTurn,
     });
   } catch (e) {
     const key = `${userId}_${agentId}`;
@@ -1253,7 +1262,7 @@ export async function handleChatMessage({
   //   Path B: if the LLM's reply asked "did you mean X?", stash a pending
   //           clarification keyed by userId. The next turn's affirmation
   //           check (above) consumes it.
-  (async () => {
+  if (!_readOnlyTurn) (async () => {
     try {
       const learner = await import('./lib/alias-learner.mjs');
       await learner.observeTurnAndLearn(userId, ctx.userText, scopedSessionKey);

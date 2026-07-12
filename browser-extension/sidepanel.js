@@ -163,7 +163,7 @@ $('askThisPage').addEventListener('click', async () => {
     _currentRequestId = null;
   }
 });
-$('teachThisSite').addEventListener('click', () => sendChat("Let's enter teach mode for the current site. Turn watch mode on, and I'll walk you through it."));
+$('teachThisSite').addEventListener('click', () => appendMessage('assistant', 'Teach Mode is temporarily unavailable while its tab-scoped consent control is being added.'));
 $('chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat($('chatInput').value); }
 });

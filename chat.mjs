@@ -159,7 +159,7 @@ function documentArtifactContent(request, artifact, fallback = '') {
 // async since the durability fix: the session write is awaited so callers can
 // hold the terminal `done` until the turn is actually on disk. Everything
 // after the write (friction/proposers/signals) stays fire-and-forget.
-async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null } = {}) {
+async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false } = {}) {
   const safeDocumentRequest = normalizeDocumentRequest(documentRequest);
   const documentArtifact = safeDocumentRequest ? findDocumentMutation(toolsUsed) : null;
   const persistedAssistantContent = documentArtifactContent(safeDocumentRequest, documentArtifact, assistantContent);
@@ -290,6 +290,12 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
     ...imageEntries,
     assistantEntry);
 
+  // One-shot browser snapshots are deliberately non-learning turns. Persist
+  // the human question + answer for continuity, then stop before friction,
+  // proposals, telemetry, trigger learning, feedback intercepts, episodes,
+  // or memory signals can treat hostile page text as user intent.
+  if (readOnlyTurn) return;
+
   // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
   // toolsUsed, before any other gate. It's about repeat-detection, not
   // preference inference, so the existing signal-suppression rules don't
@@ -297,14 +303,16 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   // repeats "remind me to clean my desk at 5pm" three times triggers a
   // proposal even though every repeat fires schedule_task and even though
   // scheduler-intent intercepted the message before the agent saw it.
-  trackFriction({ agentId: agent.id, userMessage: sessionText, userId })
-    .catch(e => console.warn('[cortex] Friction tracking failed:', e.message));
+  if (!readOnlyTurn) {
+    trackFriction({ agentId: agent.id, userMessage: sessionText, userId })
+      .catch(e => console.warn('[cortex] Friction tracking failed:', e.message));
+  }
 
   // Auto-skill proposer — Hermes-style: a turn that used several real tools
   // is a candidate for bundling into a reusable user skill. Runs in parallel
   // with friction tracking; declines internally on rate-limit, destructive
   // verbs, mutation-only tool sets, etc. Skip ephemeral one-shots.
-  if (!agent.ephemeral) {
+  if (!readOnlyTurn && !agent.ephemeral) {
     import('./lib/skill-proposer.mjs')
       .then(m => m.maybeProposeSkill({
         userId, agentId: agent.id, agentName: agent.name,
@@ -750,6 +758,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const attachments = normalizeAttachments(Array.isArray(attachment) ? attachment : null, Array.isArray(attachment) ? null : attachment);
   const attachment0 = attachments[0] ?? null;
   const isolatedTaskRun = turnOpts?.isolatedTaskRun === true;
+  const readOnlyTurn = turnOpts?.readOnlyTurn === true;
+  const sessionUserText = typeof turnOpts?.sessionUserText === 'string'
+    ? turnOpts.sessionUserText
+    : userText;
   // Per-turn memory-scope tracker: records which service-role skills' tools run
   // this turn so a fact remembered mid-turn scopes to the skill that produced
   // it (see lib/memory-scope-context.mjs). enterWith here propagates through the
@@ -787,7 +799,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // instructionText() to whichever it gets.
   const routeText = (typeof turnOpts?.routeText === 'string' && turnOpts.routeText.trim())
     ? turnOpts.routeText.trim()
-    : userText;
+    : sessionUserText;
   // Per-turn tool routing: trim the coordinator's outbound tool list to the
   // always-on subset + on-demand skills whose intent_examples match this
   // user message. Other agents (specialists) are already tightly scoped and
@@ -865,7 +877,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // proposer stashes after qualifying multi-tool turns and only emits on the
   // next turn — so we can drop the candidate if the user's current message
   // is corrective. Fire-and-forget; failures here must never block chat.
-  if (!agent.ephemeral && !silent) {
+  if (!readOnlyTurn && !agent.ephemeral && !silent) {
     import('./lib/skill-proposer.mjs')
       .then(m => m.flushPendingSkillCandidate({ agentId: agent.id, currentUserMessage: userText }))
       .catch(e => console.warn('[skill-proposer] flush failed:', e.message));
@@ -874,7 +886,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // ephemeral specialist-router runs (Helen). On voice-device pipelines
   // every user turn lands in Helen ephemerally, so gating on !ephemeral
   // would mean the flush never fires for voice-only users. Keyed by userId.
-  if (!silent) {
+  if (!readOnlyTurn && !silent) {
     import('./lib/routine-proposer.mjs')
       .then(m => m.flushPendingRoutineCandidate({ userId, currentUserMessage: userText }))
       .catch(e => console.warn('[routine-proposer] flush failed:', e.message));
@@ -883,7 +895,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Location-fact-proposer flush — same shape as skill-proposer: drop the
   // pending candidate if the new turn looks corrective, otherwise emit the
   // host-fact proposal bubble.
-  if (!agent.ephemeral && !silent) {
+  if (!readOnlyTurn && !agent.ephemeral && !silent) {
     import('./lib/location-fact-proposer.mjs')
       .then(m => m.flushPendingLocationFact({ userId, agentId: agent.id, currentUserMessage: userText }))
       .catch(e => console.warn('[location-fact-proposer] flush failed:', e.message));
@@ -896,10 +908,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // the scheduler DB owns that state, so don't duplicate it as a memory. Users
   // who want a behavior preference captured can state it in a separate turn.
   const schedulerFired = (systemNote ?? '').includes('<scheduler_result>');
-  const skipSignals = schedulerFired || agent.ephemeral || agent.skillCategory === 'finance' || agent.skillCategory === 'expenses' || agent.skillCategory === 'email';
+  const skipSignals = readOnlyTurn || schedulerFired || agent.ephemeral || agent.skillCategory === 'finance' || agent.skillCategory === 'expenses' || agent.skillCategory === 'email';
   // General/manager agents: skip episode storage (task requests aren't useful memories)
   // but still run processSignals to capture genuine preferences/corrections
-  const skipEpisodes = schedulerFired || agent.ephemeral || agent.skillCategory === 'general';
+  const skipEpisodes = readOnlyTurn || schedulerFired || agent.ephemeral || agent.skillCategory === 'general';
   // ── Concurrent pre-LLM lookups ────────────────────────────────────────
   // Cortex recall, trigger nudge, cross-agent reads, and the monitorable
   // classifier are mutually independent and don't read agent.tools or
@@ -914,15 +926,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Ephemeral agents (deep_research_parallel workers, etc.) skip cortex loads
   // — they're pure stateless one-shots and shouldn't read the user's memory.
   const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
-  const _ctxPromise = agent.ephemeral ? Promise.resolve(null) : (async () => {
-    let recallQuery = userText;
-    if (!isolatedTaskRun && (userText.length < 50 || NEEDS_CONTEXT_RE.test(userText))) {
+  const _ctxPromise = (agent.ephemeral || readOnlyTurn) ? Promise.resolve(null) : (async () => {
+    let recallQuery = sessionUserText;
+    if (!isolatedTaskRun && (sessionUserText.length < 50 || NEEDS_CONTEXT_RE.test(sessionUserText))) {
       const recentMsgs = (await loadSession(agent.id, 6)).filter(m => m.excludeFromModel !== true).slice(-4);
       if (recentMsgs.length) {
         const lastUser = recentMsgs.filter(m => m.role === 'user').slice(-1)[0];
         const lastAsst = recentMsgs.filter(m => m.role === 'assistant').slice(-1)[0];
         const ctx_parts = [lastUser?.content?.slice(0, 150), lastAsst?.content?.slice(0, 150)].filter(Boolean);
-        if (ctx_parts.length) recallQuery = `${userText} [context: ${ctx_parts.join(' ')}]`;
+        if (ctx_parts.length) recallQuery = `${sessionUserText} [context: ${ctx_parts.join(' ')}]`;
       }
     }
     return buildAgentContext(agent.id, recallQuery, userId, { includeEpisodes: !isolatedTaskRun }).catch(() => null);
@@ -933,11 +945,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // when not. Empty string for ephemeral agents and for users with no custom
   // skills — buildTriggerNudgeBlock handles both. Concatenated into the
   // system prompt below alongside memBlock.
-  const _triggersPromise = (!agent.ephemeral && userId && userId !== 'default')
+  const _triggersPromise = (!readOnlyTurn && !agent.ephemeral && userId && userId !== 'default')
     ? (async () => {
         try {
           const { buildTriggerNudgeBlock } = await import('./lib/skill-triggers.mjs');
-          return (await buildTriggerNudgeBlock(userId, userText)) || '';
+          return (await buildTriggerNudgeBlock(userId, sessionUserText)) || '';
         } catch (e) {
           console.debug('[skill-triggers] nudge build failed:', e.message);
           return '';
@@ -948,7 +960,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Cross-agent context — let this agent see recent messages from other agents.
   // Skip for ephemeral agents: "ephemeral" means a hermetic run with no carried-over
   // context, and crossAgentRead would silently leak another agent's history.
-  const _crossAgentPromise = (!isolatedTaskRun && !agent.ephemeral && agent.crossAgentRead?.length && userId && userId !== 'default')
+  const _crossAgentPromise = (!readOnlyTurn && !isolatedTaskRun && !agent.ephemeral && agent.crossAgentRead?.length && userId && userId !== 'default')
     ? (async () => {
         const parts = [];
         for (const otherId of agent.crossAgentRead) {
@@ -978,14 +990,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // judge would otherwise mistake for "a changing source the user keeps asking
   // about," escalating a giant internal prompt into a watch proposal. There is
   // also no human in the loop to see (let alone accept) the offer on these turns.
-  const interactiveMonitorTurn = !silent && !isolatedTaskRun && turnOpts?.hiddenUser !== true;
-  const _monitorablePromise = (interactiveMonitorTurn && !agent.ephemeral && userId && userId !== 'default' && userText && !userText.trim().startsWith('/'))
+  const interactiveMonitorTurn = !readOnlyTurn && !silent && !isolatedTaskRun && turnOpts?.hiddenUser !== true;
+  const _monitorablePromise = (interactiveMonitorTurn && !agent.ephemeral && userId && userId !== 'default' && sessionUserText && !sessionUserText.trim().startsWith('/'))
     ? (async () => {
         try {
           const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('./lib/monitorable-classifier.mjs');
-          const hit = await classifyMonitorable(userText);
+          const hit = await classifyMonitorable(sessionUserText);
           if (hit.monitorable) {
-            const offer = await recordMonitorableHit({ userId, agentId: agent.id, userText, hit });
+            const offer = await recordMonitorableHit({ userId, agentId: agent.id, userText: sessionUserText, hit });
             log.info('chat', 'monitorable intent detected', { userId, score: hit.score.toFixed(3), matched: hit.matched, action: offer.action, count: offer.count });
             if (offer.action === 'ask') return buildMonitorableSystemNote(hit);
           }
@@ -1187,7 +1199,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     }
     attachmentNotes.push(note);
   }
-  const sessionText = attachmentNotes.length ? `${attachmentNotes.join('\n')}\n${userText}`.trim() : userText;
+  const sessionText = attachmentNotes.length ? `${attachmentNotes.join('\n')}\n${sessionUserText}`.trim() : sessionUserText;
 
   // Working copy for the tool loop (no ts fields).
   // Trim history if it gets too long — rough token estimate: 1 token ≈ 4 chars.
@@ -1775,7 +1787,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     model: agent.model,
     source: voiceCtx?.source ?? 'web',
     durationMs: _llmMeta.durationMs,
-    input: userText,
+    input: sessionUserText,
     output: _observableAssistantContent,
     // Trace summary stays single-item (run-inspector's shape, read by
     // public/run-inspector.js — not owned by this change) even on a
@@ -1843,6 +1855,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         await persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
           withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
           hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+          readOnlyTurn,
           documentRequest: turnOpts.documentRequest,
         });
       } catch (e) {
@@ -1908,6 +1921,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       await persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
         withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
         hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+        readOnlyTurn,
         documentRequest: turnOpts?.documentRequest ?? null,
       });
     } catch (e) {

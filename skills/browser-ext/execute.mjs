@@ -69,11 +69,15 @@ function _composeNotesBlock(userId, domain) {
 
 function _humanList(browsers) {
   if (!browsers.length) {
-    return 'No browser extension connected. Install the OE browser extension from `~/.openensemble/browser-extension/` (Load unpacked in chrome://extensions), paste your OE auth token in the extension popup, and reconnect.';
+    return 'No browser extension connected. Install OE Bridge from `~/.openensemble/browser-extension/` (Load unpacked in the browser extensions page), open OE while logged in, then use Detect & connect. Never ask the user to paste an auth token into chat.';
   }
   const lines = [`${browsers.length} connected extension(s):`];
   for (const b of browsers) {
-    lines.push(`- \`${b.extId}\` — ${b.name}${b.version ? ` (v${b.version})` : ''}, ${b.tabCount} tab(s)`);
+    if (b.accessError) {
+      lines.push(`- \`${b.extId}\` — ${b.name}${b.version ? ` (v${b.version})` : ''}, connected but tab access is unavailable: ${b.accessError}`);
+      continue;
+    }
+    lines.push(`- \`${b.extId}\` — ${b.name}${b.version ? ` (v${b.version})` : ''}, ${b.tabs.length} explicitly shared tab(s)`);
     for (const t of b.tabs.slice(0, 15)) {
       const star = t.active ? '★' : ' ';
       lines.push(`    ${star} tabId=${t.tabId}  ${t.title || '(no title)'}\n      ${t.url}`);
@@ -83,9 +87,27 @@ function _humanList(browsers) {
   return lines.join('\n');
 }
 
+async function _liveBrowsers(userId) {
+  const connected = listBrowsers(userId);
+  return Promise.all(connected.map(async browser => {
+    try {
+      const tabs = await sendCommand(userId, 'list_tabs', {}, { extId: browser.extId, timeoutMs: 5000 });
+      return { ...browser, tabs: Array.isArray(tabs) ? tabs : [], tabCount: Array.isArray(tabs) ? tabs.length : 0 };
+    } catch (e) {
+      return { ...browser, tabs: [], tabCount: 0, accessError: e?.message || String(e) };
+    }
+  }));
+}
+
+async function _activeLeasedTab(userId, extId = null) {
+  const browsers = await _liveBrowsers(userId);
+  const browser = extId ? browsers.find(b => b.extId === extId) : browsers[0];
+  return browser?.tabs?.find(t => t.active) || browser?.tabs?.[0] || null;
+}
+
 export default async function execute(name, args, userId, agentId) {
   if (name === 'browser_list') {
-    return _humanList(listBrowsers(userId));
+    return _humanList(await _liveBrowsers(userId));
   }
 
   if (name === 'browser_open_tab') {
@@ -238,8 +260,7 @@ export default async function execute(name, args, userId, agentId) {
         : `No shared notes yet. Use browser_site_notes_write with domain="_shared" to set cross-cutting patterns (user preferences that apply to every site, general web flows).`;
     }
     if (!domain) {
-      const list = listBrowsers(userId);
-      const activeTab = list?.[0]?.tabs?.find(t => t.active);
+      const activeTab = await _activeLeasedTab(userId, args?.extId);
       domain = _domainOf(activeTab?.url);
     }
     if (!domain) return 'No domain specified, and no active tab to infer from. Pass `domain: "<example.com>"` (or `"_shared"` for the cross-cutting file).';
@@ -255,8 +276,7 @@ export default async function execute(name, args, userId, agentId) {
     if (!content.trim()) return 'content is required (free-form markdown).';
     if (domain !== '_shared' && domain !== '*') {
       if (!domain) {
-        const list = listBrowsers(userId);
-        const activeTab = list?.[0]?.tabs?.find(t => t.active);
+        const activeTab = await _activeLeasedTab(userId, args?.extId);
         domain = _domainOf(activeTab?.url);
       }
       if (!domain) return 'No domain specified, and no active tab to infer from.';
@@ -340,7 +360,7 @@ export default async function execute(name, args, userId, agentId) {
     try {
       const data = await sendCommand(userId, 'type', { tabId, text }, { extId: args?.extId, timeoutMs: 8000 });
       const what = data?.elementSummary ? ` into ${data.elementSummary}` : '';
-      return `Typed ${text.length} character(s)${what}. ${text.includes('\n') ? '' : 'If the form needs submitting, call browser_keypress with key="Enter".'}`;
+      return `Typed ${text.length} character(s)${what}. Submission is intentionally left to the user until the per-use confirmation UI is available.`;
     } catch (e) {
       return `Failed to type: ${e?.message || String(e)}`;
     }
@@ -351,6 +371,9 @@ export default async function execute(name, args, userId, agentId) {
     const key = String(args?.key || '').trim();
     if (!Number.isFinite(tabId)) return 'tabId is required.';
     if (!key) return 'key is required.';
+    if (/^(enter|numpadenter|space|spacebar)$/i.test(key)) {
+      return `${key} can submit a form or trigger an application action, so OE will not send it without per-use confirmation. Ask the user to press it themselves.`;
+    }
     try {
       const data = await sendCommand(userId, 'keypress', { tabId, key }, { extId: args?.extId, timeoutMs: 5000 });
       return `Sent ${key} keypress${data?.elementSummary ? ` to ${data.elementSummary}` : ''}.`;

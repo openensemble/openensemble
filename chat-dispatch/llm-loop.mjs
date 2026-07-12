@@ -504,9 +504,9 @@ export function armFollowupForReply({ source, deviceId, conversationMode, reply,
  */
 export async function runLlmTurn({
   userId, agentId, scopedAgent, scopedSessionKey,
-  userText, attachment, attachments, toolPlan, documentRequest, schedulerNote, source, deviceId,
+  userText, sessionUserText = userText, attachment, attachments, toolPlan, documentRequest, schedulerNote, source, deviceId,
   conversationMode = false,
-  ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false,
+  ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false, readOnlyTurn = false,
 }) {
   // See the matching comment in runSpecialistRoute above — same fallback,
   // no shared import, for the same test-mock reasons.
@@ -563,6 +563,7 @@ export async function runLlmTurn({
       onEvent({ ...e, agent: agentId });
     }, userId ?? 'default', _attachments, schedulerNote, false, { source, deviceId }, {
       toolPlan, documentRequest, hiddenUser, isolatedTaskRun,
+      readOnlyTurn, sessionUserText,
     })) {
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }

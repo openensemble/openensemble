@@ -4,11 +4,9 @@
 // don't see that on the page, the content script isn't being injected.
 //
 // Listens for click / input / submit on the page and reports them to the
-// background SW. The SW buffers events ONLY when watch_mode is on
-// (default off) so this listener is privacy-safe — events fire into a
-// drop sink unless the user has explicitly enabled watch mode via the
-// popup. When watch mode is ON, a persistent banner appears at the top
-// of every page so the user is never unknowingly observed.
+// background SW only while a scoped Teach session is active. When off,
+// events are discarded in this content script and never cross the runtime
+// message boundary.
 //
 // Sensitive fields (password, credit card autocomplete hints) NEVER
 // have their value captured — only the FACT of typing into them.
@@ -17,8 +15,10 @@
   console.log('[OE-observe] loaded on', location.href);
   const BANNER_HOST_ID = '__oe_bridge_watch_banner__';
   let _bannerEl = null;
+  let _watchOn = false;
 
   function ensureWatchBanner(on) {
+    _watchOn = !!on;
     if (!on) {
       if (_bannerEl && _bannerEl.parentNode) _bannerEl.parentNode.removeChild(_bannerEl);
       _bannerEl = null;
@@ -41,7 +41,7 @@
           box-shadow: 0 1px 4px rgba(0,0,0,0.15);
         }
       </style>
-      <div class="bar">👁 OE is watching your inputs (teach / watch mode) — toggle off in the OE Bridge popup to stop</div>
+      <div class="bar">👁 OE Teach Mode is observing this page — stop it from OE Bridge at any time</div>
     `;
     document.documentElement.appendChild(_bannerEl);
   }
@@ -83,6 +83,7 @@
   }
 
   function send(event) {
+    if (!_watchOn) return;
     console.log('[OE-observe] firing event', event.kind, event.element?.tag, 'tabUrl=' + event.tabUrl);
     try {
       chrome.runtime.sendMessage({ type: 'observation', event }, (resp) => {

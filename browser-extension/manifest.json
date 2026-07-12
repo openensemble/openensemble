@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "OpenEnsemble Bridge",
   "short_name": "OE Bridge",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Chat with your OpenEnsemble server about the web. OE can only see or act on a tab after you grant a short, origin-bound, visible, revocable access lease.",
   "permissions": ["tabs", "storage", "scripting", "activeTab", "alarms", "sidePanel"],
   "side_panel": { "default_path": "sidepanel.html" },
