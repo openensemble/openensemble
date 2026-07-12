@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OE Bridge</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; width: 380px; padding: 12px; font-size: 13px; color: #222; background: #f8f9fa; }
+    h1 { display: flex; align-items: center; gap: 7px; font-size: 14px; margin: 0 0 8px 0; }
+    h1 img { width: 20px; height: 20px; }
+    .status { padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; }
+    .status.ok    { background: #d4f4dd; color: #1a6c2f; }
+    .status.bad   { background: #fbe2e2; color: #8a2424; }
+    .status.idle  { background: #e4e7ec; color: #555; }
+    label { display: block; margin: 8px 0 4px 0; font-weight: 600; }
+    input { width: 100%; padding: 6px 8px; box-sizing: border-box; border: 1px solid #c0c4cc; border-radius: 4px; font-family: monospace; font-size: 12px; }
+    .row { display: flex; gap: 6px; margin-top: 10px; }
+    button { flex: 1; padding: 8px; border: 1px solid #c0c4cc; background: #fff; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    button:hover { filter: brightness(0.95); }
+    .meta { font-size: 11px; color: #666; margin-top: 6px; font-family: monospace; word-break: break-all; }
+    details { margin-top: 10px; font-size: 11px; color: #666; }
+    details summary { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1><img src="icons/oe-bridge-32.png" alt="">OpenEnsemble Bridge</h1>
+
+  <div id="status" class="status idle">…</div>
+
+  <!-- ── Chat with Sydney from anywhere ───────────────────────────── -->
+  <div id="chatPanel" style="display:none">
+    <!-- Capability lease — the only place a grant can originate. -->
+    <div id="leasePanel" style="background:#fff;border:1px solid #d4d6db;border-radius:6px;padding:8px 10px;margin-bottom:8px;font-size:11px">
+      <div id="leaseStatus" style="margin-bottom:6px;color:#555">…</div>
+      <div style="display:flex;gap:6px">
+        <button id="leaseGrant" style="flex:1;padding:6px;background:#d97706;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;font-size:11px">Allow OE to use this tab (15 min)</button>
+        <button id="leaseRevoke" style="display:none;padding:6px 10px;border:1px solid #c0c4cc;background:#fff;border-radius:4px;cursor:pointer;font-size:11px">Revoke</button>
+      </div>
+    </div>
+    <div style="background:#fff8e6;border:1px solid #f6cb70;border-radius:6px;padding:8px 10px;margin-bottom:8px;font-size:11px;color:#7a5a00">
+      💡 For teach mode (you clicking on the page while chatting): open the chat as a side panel — it stays visible while you interact with sites.
+      <button id="openSidepanel" style="margin-top:6px;width:100%;padding:6px;background:#f6cb70;color:#503b00;border:none;border-radius:4px;cursor:pointer;font-weight:600;font-size:11px">Open chat in side panel</button>
+    </div>
+    <div id="chatReply" style="background:#fff;border:1px solid #d4d6db;border-radius:6px;padding:10px;font-size:12px;line-height:1.5;min-height:60px;max-height:240px;overflow-y:auto;margin-bottom:8px;white-space:pre-wrap;word-wrap:break-word;color:#1d1f23"></div>
+    <div style="display:flex;gap:6px;margin-bottom:6px">
+      <button id="askThisPage" title="Sends a one-time snapshot of this page with your question. Does not give OE any ongoing access to the tab." style="flex:1;padding:6px;border:1px solid #c0c4cc;background:#fff;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;color:#2563eb">📄 Ask about this page (one-shot)</button>
+    </div>
+    <textarea id="chatInput" placeholder="Ask Sydney…  (Enter = send, Shift+Enter = newline)" rows="2" style="width:100%;padding:8px 10px;box-sizing:border-box;border:1px solid #c0c4cc;border-radius:6px;font-family:inherit;font-size:12px;resize:vertical"></textarea>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button id="chatSend" class="primary" style="flex:1;padding:8px;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:4px;cursor:pointer;font-weight:600">Send</button>
+      <button id="chatClear" style="padding:8px 12px;border:1px solid #c0c4cc;background:#fff;border-radius:4px;cursor:pointer">Clear</button>
+    </div>
+  </div>
+
+  <div class="row" style="margin-bottom: 12px;">
+    <button id="autopair" class="primary" title="If you're already logged into OE on this browser, this finds the token for you and connects.">Detect &amp; connect</button>
+  </div>
+
+  <details>
+    <summary>Manual setup (OE on a different machine)</summary>
+    <label for="serverUrl">OE server URL</label>
+    <input id="serverUrl" placeholder="http://192.0.2.10:3737" />
+
+    <label for="token">Auth token</label>
+    <input id="token" type="password" placeholder="paste your OE auth token" />
+
+    <label for="name">Browser name (optional)</label>
+    <input id="name" placeholder="my laptop chrome" />
+
+    <div class="row">
+      <button id="save" class="primary">Save &amp; connect</button>
+      <button id="reconnect">Reconnect</button>
+    </div>
+
+    <div class="meta" style="margin-top:8px;">
+      Token: open <code>http://&lt;your-oe&gt;/api/browser/setup-token</code> in a logged-in tab and copy the <code>token</code> field.
+    </div>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">OpenEnsemble Bridge</title>
+  <defs>
+    <linearGradient id="panel" x1="18" y1="10" x2="110" y2="118" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#17233a"/>
+      <stop offset="1" stop-color="#080d18"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="64" y1="24" x2="64" y2="100" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#55d6cf"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#panel)"/>
+  <rect x="5.5" y="5.5" width="117" height="117" rx="26.5" fill="none" stroke="#33415d" stroke-width="3"/>
+  <g fill="url(#signal)">
+    <rect x="18" y="66" width="15" height="34" rx="7.5"/>
+    <rect x="37" y="43" width="15" height="57" rx="7.5"/>
+    <rect x="56.5" y="24" width="15" height="76" rx="7.5"/>
+    <rect x="76" y="49" width="15" height="51" rx="7.5"/>
+    <rect x="95" y="69" width="15" height="31" rx="7.5"/>
+  </g>
+</svg>

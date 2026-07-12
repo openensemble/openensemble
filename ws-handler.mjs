@@ -698,6 +698,11 @@ function initBrowserExtWss() {
         ws._authenticated = true;
         ws._userId = meta.userId;
         try {
+          const user = getUser(meta.userId);
+          const rawUserName = user?.displayName || user?.name;
+          const userName = typeof rawUserName === 'string' && rawUserName.trim()
+            ? rawUserName.trim().slice(0, 64)
+            : null;
           const extId = registerBrowser(ws, {
             userId: meta.userId,
             name: msg.name,
@@ -708,6 +713,7 @@ function initBrowserExtWss() {
             type: 'auth_ok',
             extId,
             userId: meta.userId,
+            userName,
             sourceVersion: getExtensionSourceVersion(),
           }));
         } catch (e) {
