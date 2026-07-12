@@ -66,6 +66,7 @@ import { handle as handlePlanRuntime }   from './routes/plan-runtime.mjs';
 import { handle as handleSharing }      from './routes/sharing.mjs';
 import { handle as handleNodes }        from './routes/nodes.mjs';
 import { handle as handleAdmission }    from './routes/admission.mjs';
+import { handle as handleBrowserPairing } from './routes/browser-pairing.mjs';
 import { handle as handleDevices }      from './routes/devices.mjs';
 import { handle as handleWakewords }    from './routes/wakewords.mjs';
 import { handle as handleTv }           from './routes/tv.mjs';
@@ -292,6 +293,7 @@ const routeHandlers = [
   handleDesktop,
   handleNodes,
   handleAdmission,
+  handleBrowserPairing,
   handleDevices,
   handleWakewords,
   handleTv,        // /api/tv/* + /api/tv-app/* + /api/wakewords/stock/:id.tflite
@@ -515,7 +517,17 @@ const httpServer = http.createServer(async (req, res) => {
     const isOAuthCallback = req.url.startsWith('/api/oauth/') && req.url.includes('/callback');
     // Telegram webhooks come from Telegram's own servers with no Origin
     const isTelegramHook  = req.url.startsWith('/api/telegram/');
-    if (!isOAuthCallback && !isTelegramHook) {
+    // OE Bridge has no same-origin page context during device-code pairing.
+    // These two endpoints are intentionally unauthenticated and protected by
+    // a high-entropy claim secret + dedicated rate limits. Allow only native
+    // clients (no Origin) or extension schemes; approval is NOT exempt.
+    const pairingPath = req.url.split('?', 1)[0];
+    const pairingOrigin = String(req.headers.origin || '');
+    const isBrowserPairingClient = (
+      pairingPath === '/api/browser/pairing/requests' ||
+      pairingPath === '/api/browser/pairing/claims'
+    ) && (!pairingOrigin || /^(?:chrome|moz)-extension:\/\/[a-z0-9_-]+$/i.test(pairingOrigin));
+    if (!isOAuthCallback && !isTelegramHook && !isBrowserPairingClient) {
       const origin = req.headers.origin || req.headers.referer;
       if (origin) {
         try {

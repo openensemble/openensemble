@@ -2,9 +2,10 @@
   "manifest_version": 3,
   "name": "OpenEnsemble Bridge",
   "short_name": "OE Bridge",
-  "version": "0.4.0",
-  "description": "Chat with your OpenEnsemble server about the web. OE can only see or act on a tab after you grant a short, origin-bound, visible, revocable access lease.",
-  "permissions": ["tabs", "storage", "scripting", "activeTab", "alarms", "sidePanel"],
+  "version": "0.5.0",
+  "description": "Ask, clip, compare, teach, watch fields, and run confirmed browser tasks with browser-bound pairing and scoped access.",
+  "permissions": ["tabs", "storage", "scripting", "activeTab", "alarms", "sidePanel", "contextMenus"],
+  "omnibox": { "keyword": "oe" },
   "side_panel": { "default_path": "sidepanel.html" },
   "host_permissions": ["<all_urls>"],
   "background": {
@@ -27,6 +28,12 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content-observe.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-field-picker.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

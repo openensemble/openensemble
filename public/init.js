@@ -17,6 +17,11 @@ async function init() {
   $('loginScreen').classList.add('hidden');
   ensureMediaToken().catch(() => {});
 
+  const browserPairingRequestId = new URLSearchParams(window.location.search).get('browser-pairing');
+  if (browserPairingRequestId) {
+    setTimeout(() => showBrowserPairingApproval(browserPairingRequestId), 0);
+  }
+
   // Handle OAuth callback redirect (?oauth=success|error)
   const oauthParam = new URLSearchParams(window.location.search).get('oauth');
   if (oauthParam) {
@@ -257,6 +262,74 @@ async function init() {
 }
 
 function reconnectWS() { init(); }
+
+function showBrowserPairingApproval(requestId) {
+  if (!/^[A-Za-z0-9_-]{20,80}$/.test(String(requestId || ''))) {
+    showToast('That browser pairing link is invalid.');
+    history.replaceState({}, '', '/');
+    return;
+  }
+  document.getElementById('browserPairingApproval')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'browserPairingApproval';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;z-index:10001;padding:16px;backdrop-filter:blur(4px)';
+  overlay.innerHTML = `
+    <div role="dialog" aria-modal="true" aria-labelledby="browserPairingTitle" style="background:var(--bg1);border:1px solid var(--border);border-radius:14px;padding:24px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+      <h2 id="browserPairingTitle" style="margin:0 0 7px;font-size:20px;color:var(--text)">Pair OE Bridge</h2>
+      <p style="margin:0 0 16px;color:var(--muted);font-size:13px;line-height:1.5">Enter the code shown by the browser extension. Approving binds that browser to your current OE profile; it does not give the extension your login token.</p>
+      <label for="browserPairingCode" style="display:block;color:var(--muted);font-size:12px;margin-bottom:5px">Browser code</label>
+      <input id="browserPairingCode" inputmode="text" autocomplete="one-time-code" maxlength="9" placeholder="ABCD-1234" style="box-sizing:border-box;width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:12px;font:700 19px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:1px" />
+      <div id="browserPairingError" aria-live="polite" style="min-height:18px;margin-top:7px;color:#e06b6b;font-size:12px"></div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="browserPairingCancel" type="button" style="flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px;cursor:pointer">Not now</button>
+        <button id="browserPairingApprove" type="button" style="flex:1;background:var(--accent);border:0;color:#fff;border-radius:8px;padding:10px;font-weight:700;cursor:pointer">Approve browser</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const code = overlay.querySelector('#browserPairingCode');
+  const error = overlay.querySelector('#browserPairingError');
+  const approve = overlay.querySelector('#browserPairingApprove');
+  const close = () => {
+    overlay.remove();
+    const url = new URL(location.href);
+    url.searchParams.delete('browser-pairing');
+    history.replaceState({}, '', url.pathname + url.search + url.hash);
+  };
+  const submit = async () => {
+    const userCode = String(code.value || '').trim().toUpperCase();
+    if (!/^[0-9A-Z]{4}-?[0-9A-Z]{4}$/.test(userCode)) {
+      error.textContent = 'Enter the 8-character code from OE Bridge.';
+      code.focus();
+      return;
+    }
+    approve.disabled = true;
+    approve.textContent = 'Approving…';
+    error.textContent = '';
+    try {
+      const response = await fetch('/api/browser/pairing/approvals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId, userCode }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'The code was not accepted.');
+      close();
+      showToast('OE Bridge paired to this profile.');
+    } catch (e) {
+      error.textContent = e?.message || String(e);
+      approve.disabled = false;
+      approve.textContent = 'Approve browser';
+    }
+  };
+  overlay.querySelector('#browserPairingCancel').addEventListener('click', close);
+  approve.addEventListener('click', submit);
+  code.addEventListener('input', () => {
+    const raw = code.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 8);
+    code.value = raw.length > 4 ? `${raw.slice(0, 4)}-${raw.slice(4)}` : raw;
+  });
+  code.addEventListener('keydown', event => { if (event.key === 'Enter') submit(); });
+  code.focus();
+}
 
 async function showChildHelperOnboarding() {
   const emojiChoices = ['🤖','🐶','🦊','🐼','🐯','🦄','🐙','🐳','🦖','🐝','🌟','🚀'];

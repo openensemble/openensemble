@@ -20,12 +20,65 @@
     .meta { font-size: 11px; color: #666; margin-top: 6px; font-family: monospace; word-break: break-all; }
     details { margin-top: 10px; font-size: 11px; color: #666; }
     details summary { cursor: pointer; }
+    .pairing { margin: 0 0 12px; padding: 10px; border: 1px solid #cfd7e6; border-radius: 8px; background: #fff; }
+    .pairing h2 { margin: 0 0 4px; font-size: 13px; }
+    .pairing p { margin: 5px 0; color: #4b5563; line-height: 1.4; }
+    .pairing label { font-size: 11px; }
+    .pairing-code { margin: 9px 0; padding: 10px; border-radius: 6px; background: #eef3ff; color: #173f91; font: 700 21px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; letter-spacing: 1px; user-select: all; }
+    .check-label { display: flex; align-items: flex-start; gap: 7px; margin: 8px 0; font-weight: 400; color: #4b5563; }
+    .check-label input { width: auto; margin-top: 2px; }
+    .pairing-note { font-size: 10px; color: #6b7280; }
+    button:disabled { opacity: .55; cursor: default; }
+    #actionConfirmation { margin:0 0 12px;padding:10px;border:1px solid #f59e0b;border-radius:8px;background:#fff7ed; }
+    #actionConfirmation p { margin:4px 0 8px;line-height:1.4;color:#713f12; }
+    #popupConfirmationOrigin { font-size:10px;color:#78716c;word-break:break-word; }
   </style>
 </head>
 <body>
   <h1><img src="icons/oe-bridge-32.png" alt="">OpenEnsemble Bridge</h1>
 
   <div id="status" class="status idle">…</div>
+
+  <section id="actionConfirmation" hidden aria-label="Confirm browser action">
+    <b>OE is waiting for you</b>
+    <p id="popupConfirmationSummary"></p>
+    <div id="popupConfirmationOrigin"></div>
+    <div class="row">
+      <button id="popupConfirmationDecline">Decline</button>
+      <button id="popupConfirmationApprove" class="primary">Allow once</button>
+    </div>
+  </section>
+
+  <section id="pairingPanel" class="pairing" aria-labelledby="pairingHeading">
+    <h2 id="pairingHeading">Securely pair this browser</h2>
+    <div id="pairingStart">
+      <p>Connect without copying a token. OE will show who is approving this browser before anything is saved.</p>
+      <label for="serverUrl">OE server URL (optional)</label>
+      <input id="serverUrl" placeholder="http://192.0.2.10:3737" />
+      <label for="pairingName">Browser name</label>
+      <input id="pairingName" placeholder="My Vivaldi" maxlength="120" />
+      <p class="pairing-note">For household privacy, each person must pair from their own browser profile.</p>
+      <button id="pairingBegin" class="primary" style="width:100%">Pair this browser</button>
+      <div id="pairingStartMessage" class="pairing-note" aria-live="polite"></div>
+    </div>
+    <div id="pairingPending" hidden>
+      <p>In OpenEnsemble, approve this browser and confirm this code:</p>
+      <div id="pairingCode" class="pairing-code">…</div>
+      <p id="pairingServer" class="pairing-note"></p>
+      <p id="pairingCountdown" class="pairing-note" aria-live="polite"></p>
+      <div class="row">
+        <button id="pairingOpenApproval" class="primary">Open OE to approve</button>
+        <button id="pairingCheck">I've approved — check now</button>
+      </div>
+      <div class="row"><button id="pairingCancel">Cancel pairing</button></div>
+      <div id="pairingPendingMessage" class="pairing-note" aria-live="polite"></div>
+    </div>
+    <div id="pairingComplete" hidden>
+      <p><b id="pairingCompleteLabel">Securely paired.</b></p>
+      <p class="pairing-note">Your existing connection stays in place until the new browser credential passes its first signed connection.</p>
+      <button id="pairingAgain" style="width:100%">Pair again</button>
+    </div>
+  </section>
 
   <!-- ── Chat with Sydney from anywhere ───────────────────────────── -->
   <div id="chatPanel" style="display:none">
@@ -52,31 +105,6 @@
     </div>
   </div>
 
-  <div class="row" style="margin-bottom: 12px;">
-    <button id="autopair" class="primary" title="If you're already logged into OE on this browser, this finds the token for you and connects.">Detect &amp; connect</button>
-  </div>
-
-  <details>
-    <summary>Manual setup (OE on a different machine)</summary>
-    <label for="serverUrl">OE server URL</label>
-    <input id="serverUrl" placeholder="http://192.0.2.10:3737" />
-
-    <label for="token">Auth token</label>
-    <input id="token" type="password" placeholder="paste your OE auth token" />
-
-    <label for="name">Browser name (optional)</label>
-    <input id="name" placeholder="my laptop chrome" />
-
-    <div class="row">
-      <button id="save" class="primary">Save &amp; connect</button>
-      <button id="reconnect">Reconnect</button>
-    </div>
-
-    <div class="meta" style="margin-top:8px;">
-      Token: open <code>http://&lt;your-oe&gt;/api/browser/setup-token</code> in a logged-in tab and copy the <code>token</code> field.
-    </div>
-  </details>
-
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

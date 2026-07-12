@@ -16,18 +16,19 @@ The puzzle-piece icon appears in your toolbar. Pin it.
 ## Configure
 
 1. Click the extension icon to open the popup.
-2. **OE server URL** — `http://localhost:3737` if OE is running on this machine, or `http://<lan-ip>:3737` if it's on another box on your LAN.
-3. While logged into OE in this browser, press **Detect & connect**. This legacy cookie handoff is temporary; browser-only device-code pairing replaces it in the next release slice.
-4. **Browser name** — optional friendly label ("Living Room Browser").
-5. **Save & connect**. Status pill should turn green within a couple of seconds.
+2. Optionally enter the OE server URL, then give this browser a friendly name. Each household member must use a separate browser profile; shared profiles are refused because they cannot isolate identity.
+3. Press **Pair this browser**. The extension discovers OE and creates a browser-only P-256 identity key.
+4. Open the approval link, confirm the displayed code in OE, then return to the popup. It polls automatically, or you can press **I've approved — check now**.
+
+An unfinished request lives only for the browser session, so opening OE to approve it does not lose the code. OE never gives the extension a web-session token. Re-pairing stages the replacement key and keeps the current credential untouched until the new key completes its first signed connection.
 
 ## What it does
 
 Command tiers (enforced by the broker in `background.js`):
 
 - **Requires an active lease** — `list_tabs` (active leased tabs only), `read_page` (reduced text + links + JSON-LD, no raw HTML), `screenshot`, safe `type`/`keypress`, and tab navigation (`back`/`forward`/`reload`/`close_tab`/`focus_tab`/`focus_window`). Every action is bound to the exact tab and live page authorized by the broker.
-- **Requires per-use confirmation** — `open_tab`, `click_xy`, `media_control`, `submit_form`, Enter, and Space. The confirmation UI is the next slice, so these actions currently fail closed.
-- **Teach Mode** — the old server-enabled, all-tab mode is disabled. It returns only after the extension has a direct user-clicked, tab-and-origin-scoped Teach grant.
+- **Requires per-use confirmation** — opening tabs, ambiguous or consequential clicks, and media control. Confirmations bind to the exact inspected tab, origin, document, and target; form submission, Enter, and Space remain unavailable.
+- **Teach Mode** — starts only from a direct user click, observes one tab and origin, redacts sensitive identifiers and values, and can save semantic routines or bounded site notes. Routines persist accessibility targets—not selectors or coordinates—and revalidate every step during replay.
 
 Lease semantics:
 
@@ -36,17 +37,21 @@ Lease semantics:
 
 There is **no ambient telemetry**: the server receives no tab list at connect time and no tab open/close/navigate events. Page content is treated as untrusted data — nothing a page says can grant a lease, resume one, or trigger a command, and one-shot snapshots are framed to the model as untrusted data.
 
+Field watches are a separate standing permission, created from **Watch field** in the side panel. The user clicks one displayed value and confirms the full exact URL, selector, predicate, and cadence. OE first uses matching schema.org/JSON-LD product data when available; otherwise only the paired browser that created the watch may open that exact URL and read that exact selector. Routine checks send a bounded value record—never a screenshot, page HTML, surrounding text, cookies, clicks, or a general tab lease—and two matching changed readings are required before notification. Active watches and their permissions can be listed or revoked from the same panel.
+
+Other explicit, no-lease actions include selection/page/image/screenshot/PDF questions, versioned Clip-to-project, comparison of locally selected tabs, TV/speaker handoff, and push-to-talk. Public PDFs are fetched cookie-free by OE with DNS pinning and extracted inside a resource-limited systemd sandbox. Project suggestions use coarse label-free matchers locally; project names are revealed only after the user opens a generic match, with Remember, Not relevant, and Forget controls.
+
 ## Security notes
 
 - LAN-only by design — extension talks only to the OE server URL you set.
-- No third-party services involved.
+- The extension connects only to the paired OE server; any model/provider use follows that OE profile's normal provider configuration.
 - Leases can only be created by a click in the extension's own UI, never by the server or page content. They live in `storage.session` (cleared on browser restart), use a deny tombstone if storage fails, and are revocable from the popup or banner.
 - The browser-owned toolbar badge is the authoritative lease indicator (`ON` active, pause symbol suspended); page banners are a helpful secondary indicator that a hostile page could remove.
 - Password, payment, and one-time-code fields always reject OE typing.
-- The current general session token in `chrome.storage.local` is transitional and must not be used for a published build; browser-only pairing is the next required release gate.
+- Secure pairing stores a P-256 private JWK in extension-local storage and registers only its public JWK with OE. Pending claim secrets and unfinished keys use session storage and disappear on browser restart. Browser WebSockets accept signed browser credentials only; revocation disconnects the live socket immediately.
 
 ## Uninstalling
 
 `chrome://extensions` → click **Remove** on OpenEnsemble Bridge.
 
-The token is wiped with the extension storage. The OE server forgets the connection within a few seconds.
+The private browser key is wiped with extension storage. Revoke its paired-browser entry in OE to invalidate the server-side public credential and disconnect any live socket immediately.

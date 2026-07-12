@@ -13,6 +13,16 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSy
 import path from 'path';
 import { listBrowsers, sendCommand } from '../../lib/browser-bus.mjs';
 import { getUserFilesDir, userSiteNotesDir, userSiteNotesPath, userSharedSiteNotesPath } from '../../lib/paths.mjs';
+import {
+  deleteBrowserRoutine,
+  listBrowserRoutines,
+  replayBrowserRoutine,
+  saveBrowserRoutineFromTeachEvents,
+} from '../../lib/browser-routines.mjs';
+import { atomicWriteSync } from '../../routes/_helpers/io-lock.mjs';
+
+const MAX_SITE_NOTE_WRITE = 8_000;
+const MAX_SITE_NOTES_FILE = 64_000;
 
 // Pull the registrable domain out of a URL — strips scheme, www., port,
 // path. Used by browser_screenshot / browser_read_page to find site
@@ -56,12 +66,12 @@ function _composeNotesBlock(userId, domain) {
   }
   if (perDomain) {
     parts.push(`## What you know about ${domain}`,
-      'These are your own notes from prior visits / teaching sessions. Use them as priors — but trust the live page when reality differs, and update via browser_site_notes_write if you learn something new.',
+      'These are your own notes from prior explicit teaching sessions. Use them as priors, but trust the live page when reality differs. Updates require an active user-started Teach session on this exact origin.',
       '',
       perDomain.trim(),
       '');
   } else if (domain) {
-    parts.push(`*No site notes yet for ${domain}. After you finish this task, consider writing some via browser_site_notes_write — your future self will thank you.${shared ? ' Your general patterns above still apply.' : ''}*`, '');
+    parts.push(`*No site notes yet for ${domain}. Notes can be created only while the user explicitly runs Teach Mode on this site.${shared ? ' Your confirmed general patterns above still apply.' : ''}*`, '');
   }
   parts.push('---', '');
   return parts.join('\n');
@@ -69,7 +79,7 @@ function _composeNotesBlock(userId, domain) {
 
 function _humanList(browsers) {
   if (!browsers.length) {
-    return 'No browser extension connected. Install OE Bridge from `~/.openensemble/browser-extension/` (Load unpacked in the browser extensions page), open OE while logged in, then use Detect & connect. Never ask the user to paste an auth token into chat.';
+    return 'No browser extension connected. Install OE Bridge from `~/.openensemble/browser-extension/` (Load unpacked in the browser extensions page), open its popup, and use Pair this browser. Never ask the user to paste an auth token into chat.';
   }
   const lines = [`${browsers.length} connected extension(s):`];
   for (const b of browsers) {
@@ -115,7 +125,7 @@ export default async function execute(name, args, userId, agentId) {
     if (!url) return 'url is required.';
     if (!/^https?:\/\//i.test(url)) return 'url must start with http:// or https://.';
     try {
-      const data = await sendCommand(userId, 'open_tab', { url }, { extId: args?.extId, timeoutMs: 8000 });
+      const data = await sendCommand(userId, 'open_tab', { url }, { extId: args?.extId, timeoutMs: 65_000 });
       return `Opened ${url} in browser. tabId=${data?.tabId ?? '?'}`;
     } catch (e) {
       return `Failed to open tab: ${e?.message || String(e)}`;
@@ -188,11 +198,12 @@ export default async function execute(name, args, userId, agentId) {
 
   if (name === 'browser_watch_mode') {
     const on = !!args?.on;
+    if (on) {
+      return 'Teach Mode must be started by the user: ask them to open the OE side panel on the page they want to teach and press “Teach this site.” The grant covers only that tab and origin for 15 minutes; do not claim it is active until browser_observe succeeds.';
+    }
     try {
-      const data = await sendCommand(userId, 'set_watch_mode', { on }, { extId: args?.extId, timeoutMs: 5000 });
-      return on
-        ? `Watch mode ON. Every click / input / submit you make in any tab is now visible to me — the orange banner across the top of each page confirms it. When you're done teaching, ask me to turn watch mode OFF and the buffer clears.`
-        : `Watch mode OFF. Observation buffer cleared.`;
+      await sendCommand(userId, 'set_watch_mode', { on: false }, { extId: args?.extId, timeoutMs: 5000 });
+      return 'Teach Mode stopped. Its transient observation buffer was cleared.';
     } catch (e) {
       return `Failed to set watch mode: ${e?.message || String(e)}`;
     }
@@ -215,7 +226,7 @@ export default async function execute(name, args, userId, agentId) {
       const events = Array.isArray(data?.events) ? data.events : [];
       const watched = Array.isArray(data?.watchedTabs) ? data.watchedTabs : [];
       if (!data?.watchMode) {
-        return `Watch mode is OFF — no observations are being captured. Call browser_watch_mode({on:true}) first to start watching the user demonstrate.`;
+        return 'Teach Mode is OFF — no observations are being captured. Ask the user to press “Teach this site” in the OE side panel on the exact tab they want to demonstrate.';
       }
       if (!events.length) {
         if (watched.length) {
@@ -223,7 +234,7 @@ export default async function execute(name, args, userId, agentId) {
           const summary = watched
             .map(w => `tab ${w.tabId} (${w.eventCount} event${w.eventCount === 1 ? '' : 's'})`)
             .join(', ');
-          return `No events on tab ${data?.tabId ?? '?'} — but watch mode is buffering activity on: ${summary}. Call browser_observe with one of those tabIds, OR omit tabId and I'll auto-pick the tab with the freshest activity.`;
+          return `No events on tab ${data?.tabId ?? '?'} — the active Teach session is on: ${summary}. Read only that explicitly granted tab.`;
         }
         return `Watch mode is ON but no events captured yet — nobody has clicked / typed on any page since watch mode came on. Ask the user to demonstrate something and I'll see it. (Tab being polled: ${data?.tabId ?? 'no active tab found'}.) If you ARE seeing the orange banner on the right page, this means the page might be in an iframe or chrome:// or otherwise unscriptable.`;
       }
@@ -233,7 +244,7 @@ export default async function execute(name, args, userId, agentId) {
         const el = e.element || {};
         const elDesc = `<${el.tag || '?'}${el.id ? '#'+el.id : ''}${el.class ? '.'+el.class : ''}>${el.text ? ` "${el.text}"` : ''}${el.placeholder ? ` placeholder="${el.placeholder}"` : ''}${el.ariaLabel ? ` aria-label="${el.ariaLabel}"` : ''}`;
         if (e.kind === 'click') {
-          lines.push(`- ${ago}s ago: **clicked** ${elDesc} at (${e.x}, ${e.y})`);
+          lines.push(`- ${ago}s ago: **clicked** ${elDesc}`);
         } else if (e.kind === 'input') {
           lines.push(`- ${ago}s ago: **typed** into ${elDesc} → ${e.value == null ? '[sensitive — value redacted]' : `"${e.value}"`}`);
         } else if (e.kind === 'change') {
@@ -249,6 +260,95 @@ export default async function execute(name, args, userId, agentId) {
     }
   }
 
+  if (name === 'browser_routine_create_from_teach') {
+    const routineName = typeof args?.name === 'string' ? args.name.trim() : '';
+    if (!routineName) return 'name is required.';
+    const rawTabId = args?.tabId != null ? Number(args.tabId) : null;
+    const tabId = Number.isInteger(rawTabId) && rawTabId > 0 ? rawTabId : null;
+    try {
+      const data = await sendCommand(
+        userId,
+        'get_observations',
+        { ...(tabId == null ? {} : { tabId }), limit: 200 },
+        { extId: args?.extId, timeoutMs: 5000 },
+      );
+      if (!data?.watchMode) {
+        return 'Teach Mode is not active. Ask the user to press “Teach this site,” demonstrate the routine, then ask to save it.';
+      }
+      if (!data?.teach?.origin || !data?.teach?.url || Number(data?.teach?.tabId) !== Number(data?.tabId)) {
+        return 'Teach Mode did not return an exact active tab/origin scope, so nothing was saved. Reload the updated OE Bridge and try again.';
+      }
+      const saved = await saveBrowserRoutineFromTeachEvents(userId, {
+        name: routineName,
+        description: typeof args?.description === 'string' ? args.description : '',
+        events: Array.isArray(data?.events) ? data.events : [],
+        origin: data.teach.origin,
+      });
+      import('../../lib/browser-attention.mjs')
+        .then(({ recordBrowserAttention }) => recordBrowserAttention(userId, {
+          action: 'teach', domains: [saved.routine.origin], sharedProfile: false,
+        }))
+        .catch(() => {});
+      let stopWarning = '';
+      try {
+        await sendCommand(userId, 'set_watch_mode', { on: false }, { extId: args?.extId, timeoutMs: 5000 });
+      } catch (error) {
+        stopWarning = ` Teach Mode could not be stopped automatically: ${error?.message || String(error)}`;
+      }
+      const warnings = saved.warnings.length ? ` Omitted/adjusted: ${saved.warnings.join(' ')}` : '';
+      return `Saved browser routine “${saved.routine.name}” (${saved.routine.id}) with ${saved.routine.steps.length} semantic step(s), bound to ${saved.routine.origin}. Risk: ${saved.routine.risk.level}. Replay still requires a live lease; consequential steps ask for confirmation.${warnings}${stopWarning}`;
+    } catch (error) {
+      return `Failed to create browser routine: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_routine_list') {
+    try {
+      const routines = listBrowserRoutines(userId);
+      if (!routines.length) return 'No taught browser routines yet.';
+      return [
+        `${routines.length} taught browser routine(s):`,
+        ...routines.map(routine =>
+          `- ${routine.name} — id=${routine.id}, origin=${routine.origin}, ${routine.steps.length} step(s), risk=${routine.risk.level}`),
+      ].join('\n');
+    } catch (error) {
+      return `Failed to list browser routines: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_routine_delete') {
+    const routineId = typeof args?.routineId === 'string' ? args.routineId.trim() : '';
+    if (!routineId) return 'routineId is required.';
+    try {
+      return await deleteBrowserRoutine(userId, routineId)
+        ? `Deleted browser routine ${routineId}.`
+        : `No browser routine ${routineId} belongs to this user.`;
+    } catch (error) {
+      return `Failed to delete browser routine: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_routine_run') {
+    const routineId = typeof args?.routineId === 'string' ? args.routineId.trim() : '';
+    const tabId = Number(args?.tabId);
+    if (!routineId) return 'routineId is required.';
+    if (!Number.isInteger(tabId) || tabId < 1) return 'tabId is required (integer from browser_list).';
+    try {
+      const result = await replayBrowserRoutine(userId, routineId, {
+        tabId,
+        command: (action, commandArgs, options = {}) => sendCommand(
+          userId,
+          action,
+          commandArgs,
+          { extId: args?.extId, timeoutMs: options.timeoutMs },
+        ),
+      });
+      return `Completed browser routine “${result.name}” on tab ${result.tabId}: ${result.completedSteps} step(s). Consequential steps, if any, were confirmed individually by the user.`;
+    } catch (error) {
+      return `Browser routine did not complete: ${error?.message || String(error)}`;
+    }
+  }
+
   // Site-notes tools — Sydney's institutional memory of how each
   // website works. Markdown free-form, NOT step-by-step recipes.
   if (name === 'browser_site_notes_read') {
@@ -257,7 +357,7 @@ export default async function execute(name, args, userId, agentId) {
       const shared = _readSharedNotes(userId);
       return shared
         ? `# Your general / cross-site patterns\n\n${shared}`
-        : `No shared notes yet. Use browser_site_notes_write with domain="_shared" to set cross-cutting patterns (user preferences that apply to every site, general web flows).`;
+        : 'No shared notes yet. Cross-site preferences must be stated and confirmed in normal OE chat; browser agents cannot write them.';
     }
     if (!domain) {
       const activeTab = await _activeLeasedTab(userId, args?.extId);
@@ -265,7 +365,7 @@ export default async function execute(name, args, userId, agentId) {
     }
     if (!domain) return 'No domain specified, and no active tab to infer from. Pass `domain: "<example.com>"` (or `"_shared"` for the cross-cutting file).';
     const notes = _readNotes(userId, domain);
-    if (!notes) return `No site notes for ${domain} yet. Use browser_site_notes_write to start building them.`;
+    if (!notes) return `No site notes for ${domain} yet. The user can start Teach Mode on that exact site before notes are written.`;
     return `# Site notes for ${domain}\n\n${notes}`;
   }
 
@@ -274,28 +374,47 @@ export default async function execute(name, args, userId, agentId) {
     const content = typeof args?.content === 'string' ? args.content : '';
     const mode = args?.mode === 'append' ? 'append' : 'replace';
     if (!content.trim()) return 'content is required (free-form markdown).';
-    if (domain !== '_shared' && domain !== '*') {
-      if (!domain) {
-        const activeTab = await _activeLeasedTab(userId, args?.extId);
-        domain = _domainOf(activeTab?.url);
-      }
-      if (!domain) return 'No domain specified, and no active tab to infer from.';
+    if (content.length > MAX_SITE_NOTE_WRITE) return `Site-note updates are limited to ${MAX_SITE_NOTE_WRITE} characters.`;
+    if (domain === '_shared' || domain === '*') {
+      return 'Cross-site notes require a separate explicit confirmation and cannot be written from a browser agent turn. Ask the user to state the preference in normal OE chat instead.';
     }
     try {
-      const p = (domain === '_shared' || domain === '*')
-        ? userSharedSiteNotesPath(userId)
-        : userSiteNotesPath(userId, domain);
+      // Persistence is allowed only while the extension proves a live,
+      // UI-minted, exact-origin Teach grant. The domain comes from Chrome's
+      // authenticated tab metadata—not page text or an LLM-supplied URL.
+      const observed = await sendCommand(userId, 'get_observations', {}, {
+        extId: args?.extId, timeoutMs: 5_000,
+      });
+      if (!observed?.watchMode || !observed?.teach?.origin || !observed?.teach?.url) {
+        return 'Site notes can be saved only during an active “Teach this site” session.';
+      }
+      const taughtDomain = _domainOf(observed.teach.url);
+      if (!taughtDomain || new URL(observed.teach.url).origin !== observed.teach.origin) {
+        return 'Teach Mode did not provide a valid exact-origin scope; no notes were saved.';
+      }
+      if (domain) {
+        const requested = _domainOf(domain.includes('://') ? domain : `https://${domain}`);
+        if (!requested || requested !== taughtDomain) {
+          return `Teach Mode is scoped to ${taughtDomain}; it cannot write notes for another site.`;
+        }
+      }
+      domain = taughtDomain;
+      const p = userSiteNotesPath(userId, domain);
       mkdirSync(userSiteNotesDir(userId), { recursive: true });
+      let next;
       if (mode === 'append' && existsSync(p)) {
         const existing = readFileSync(p, 'utf8').replace(/\n+$/, '');
         const sep = existing ? '\n\n' : '';
-        writeFileSync(p, `${existing}${sep}${content.trim()}\n`);
+        next = `${existing}${sep}${content.trim()}\n`;
       } else {
-        writeFileSync(p, content.trim() + '\n');
+        next = content.trim() + '\n';
       }
+      if (Buffer.byteLength(next) > MAX_SITE_NOTES_FILE) {
+        return `Site notes for ${domain} are at the ${MAX_SITE_NOTES_FILE}-byte limit; shorten or replace them before adding more.`;
+      }
+      atomicWriteSync(p, next, { mode: 0o600 });
       const size = statSync(p).size;
-      const label = (domain === '_shared' || domain === '*') ? 'shared / cross-site notes' : `site notes for ${domain}`;
-      return `${mode === 'append' ? 'Appended to' : 'Wrote'} ${label} (${size} bytes total).`;
+      return `${mode === 'append' ? 'Appended to' : 'Wrote'} site notes for ${domain} (${size} bytes total) from the active Teach session.`;
     } catch (e) {
       return `Failed to write notes: ${e?.message || String(e)}`;
     }
@@ -344,7 +463,7 @@ export default async function execute(name, args, userId, agentId) {
       return 'tabId, x, y are all required and must be integers.';
     }
     try {
-      const data = await sendCommand(userId, 'click_xy', { tabId, x, y }, { extId: args?.extId, timeoutMs: 5000 });
+      const data = await sendCommand(userId, 'click_xy', { tabId, x, y }, { extId: args?.extId, timeoutMs: 65_000 });
       const what = data?.elementSummary ? ` on ${data.elementSummary}` : '';
       return `Clicked at (${x}, ${y})${what}. Take another screenshot if you need to verify the result.`;
     } catch (e) {
@@ -360,7 +479,7 @@ export default async function execute(name, args, userId, agentId) {
     try {
       const data = await sendCommand(userId, 'type', { tabId, text }, { extId: args?.extId, timeoutMs: 8000 });
       const what = data?.elementSummary ? ` into ${data.elementSummary}` : '';
-      return `Typed ${text.length} character(s)${what}. Submission is intentionally left to the user until the per-use confirmation UI is available.`;
+      return `Typed ${text.length} character(s)${what}. This did not submit the form; submission requires a separate explicit confirmation.`;
     } catch (e) {
       return `Failed to type: ${e?.message || String(e)}`;
     }
@@ -388,7 +507,7 @@ export default async function execute(name, args, userId, agentId) {
       return 'action must be one of: next, previous, playpause.';
     }
     try {
-      const data = await sendCommand(userId, 'media_control', { action }, { extId: args?.extId, timeoutMs: 5000 });
+      const data = await sendCommand(userId, 'media_control', { action }, { extId: args?.extId, timeoutMs: 65_000 });
       const where = data?.matchedHost ? `on ${data.matchedHost}` : (data?.tabUrl ? `on ${new URL(data.tabUrl).host}` : 'in the active tab');
       const verb = action === 'next' ? 'Skipped' : action === 'previous' ? 'Back' : 'Toggled play/pause';
       return `${verb} ${where}.${data?.method ? ` (via ${data.method})` : ''}`;

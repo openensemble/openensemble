@@ -25,6 +25,7 @@ import { registerSystemWatcherHandler } from './watchers.mjs';
 import { isUrlSafe } from '../lib/url-guard.mjs';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { log } from '../logger.mjs';
+import { registerBrowserFieldWatchHandler } from '../lib/browser-field-watches.mjs';
 
 const execAsync = promisify(cpExec);
 
@@ -250,5 +251,8 @@ export function registerSystemWatchHandlers() {
   registerSystemWatcherHandler('http_jsonpath', httpJsonpathHandler);
   registerSystemWatcherHandler('exec',          execHandler);
   registerSystemWatcherHandler('file_stat',     fileStatHandler);
-  log.info('watchers', 'System watch handlers registered', { kinds: ['http_jsonpath', 'exec', 'file_stat'] });
+  registerBrowserFieldWatchHandler();
+  log.info('watchers', 'System watch handlers registered', {
+    kinds: ['http_jsonpath', 'exec', 'file_stat', 'browser_field_watch'],
+  });
 }

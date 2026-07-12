@@ -74,26 +74,6 @@ async function getEmailUnreadCount(userId) {
 }
 
 export async function handle(req, res) {
-  // ── Browser extension setup token ───────────────────────────────────────
-  // Returns the caller's current auth token so the local OE Bridge browser
-  // extension can paste it into its popup. Cookie-authenticated — only an
-  // already-logged-in browser can fetch this; no CSRF surface because the
-  // token only goes to the requester. The "echo your own token" pattern
-  // mirrors how OAuth desktop flows hand-off (the server hands the caller
-  // back something they already control).
-  if (req.url === '/api/browser/setup-token' && req.method === 'GET') {
-    const authId = requireAuth(req, res); if (!authId) return true;
-    const token = (await import('./_helpers.mjs')).getAuthToken(req);
-    if (!token) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'no token in cookie' }));
-      return true;
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ token, userId: authId, instructions: 'Paste this token into the OE Bridge extension popup. Treat like a password.' }));
-    return true;
-  }
-
   // ── Browser extension status (lists connected extensions for this user) ─
   if (req.url === '/api/browser/status' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;

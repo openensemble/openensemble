@@ -37,9 +37,9 @@
       padding: 8px 12px 12px; background: #fff; border-top: 1px solid #e2e4e8;
       flex-shrink: 0;
     }
-    .quick-row { display: flex; gap: 6px; margin-bottom: 8px; }
+    .quick-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
     .quick-row button {
-      flex: 1; padding: 6px 8px; border: 1px solid #c0c4cc; background: #f8f9fa; border-radius: 4px;
+      flex: 1 1 42%; padding: 6px 8px; border: 1px solid #c0c4cc; background: #f8f9fa; border-radius: 4px;
       cursor: pointer; font-size: 11px; font-weight: 600; color: #2563eb;
     }
     textarea {
@@ -54,7 +54,51 @@
       cursor: pointer; font-weight: 600; font-size: 12px;
     }
     .send-row button.primary { background: #2563eb; color: #fff; border-color: #2563eb; flex: 1; }
+    .send-row button.recording { background: #b91c1c; color: #fff; border-color: #b91c1c; }
     .empty { color: #9aa0a6; text-align: center; padding: 20px; font-size: 12px; }
+    #tabPicker, #clipPicker, #handoffPicker, #fieldWatchPanel, #actionConfirmation {
+      position: fixed; inset: 44px 8px 10px; z-index: 50;
+      display: flex; flex-direction: column; gap: 8px;
+      padding: 12px; border: 1px solid #c0c4cc; border-radius: 8px;
+      background: #fff; box-shadow: 0 8px 30px rgba(0,0,0,.18);
+    }
+    #tabPicker[hidden], #clipPicker[hidden], #handoffPicker[hidden], #fieldWatchPanel[hidden], #actionConfirmation[hidden] { display: none; }
+    #tabPickerList { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+    .tab-choice { display: grid; grid-template-columns: 18px 1fr; gap: 6px; align-items: start; padding: 6px; border-radius: 5px; background: #f8f9fa; }
+    .tab-choice small { display: block; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .picker-actions { display: flex; gap: 6px; }
+    .picker-actions button { flex: 1; padding: 8px; border: 1px solid #c0c4cc; border-radius: 4px; background: #fff; font-weight: 600; }
+    .picker-actions .primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    #clipPicker label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #4b5563; }
+    #clipPicker select, #clipPicker input {
+      box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid #c0c4cc;
+      border-radius: 4px; background: #fff; color: #222;
+    }
+    #clipSummary { padding: 8px; border-radius: 5px; background: #f8f9fa; font-size: 12px; overflow-wrap: anywhere; }
+    #clipMessage { min-height: 16px; color: #6b7280; font-size: 11px; }
+    #handoffTargets { flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px; }
+    .handoff-choice { display:grid;grid-template-columns:18px 1fr;gap:7px;padding:8px;border-radius:6px;background:#f8f9fa; }
+    .handoff-choice small { display:block;color:#6b7280;margin-top:2px; }
+    #handoffMessage { min-height:16px;color:#6b7280;font-size:11px; }
+    #confirmationSummary { padding:10px;border-radius:6px;background:#fff7ed;border:1px solid #fed7aa;line-height:1.45; }
+    #confirmationOrigin { color:#6b7280;font-size:11px;overflow-wrap:anywhere; }
+    #fieldWatchPanel { overflow-y:auto; }
+    #fieldWatchCreate[hidden] { display:none !important; }
+    #fieldWatchPanel label { display:flex;flex-direction:column;gap:4px;font-size:11px;color:#4b5563; }
+    #fieldWatchPanel input, #fieldWatchPanel select { box-sizing:border-box;width:100%;padding:7px;border:1px solid #c0c4cc;border-radius:4px;background:#fff;color:#222; }
+    #fieldWatchPanel .check-row { display:grid;grid-template-columns:18px 1fr;gap:7px;align-items:start;line-height:1.35; }
+    #fieldWatchPanel .check-row input { width:auto;margin-top:2px; }
+    #fieldWatchSelection { padding:8px;border-radius:5px;background:#fffbeb;border:1px solid #fcd34d;font-size:11px;overflow-wrap:anywhere; }
+    #fieldWatchMessage { min-height:16px;color:#6b7280;font-size:11px; }
+    #fieldWatchList { display:flex;flex-direction:column;gap:6px; }
+    .field-watch-row { padding:8px;border-radius:6px;background:#f8f9fa;border:1px solid #e5e7eb;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start; }
+    .field-watch-row small { display:block;color:#6b7280;margin-top:3px;overflow-wrap:anywhere; }
+    .field-watch-row button { padding:5px 7px;border:1px solid #dc2626;border-radius:4px;background:#fff;color:#b91c1c;font-size:11px; }
+    #suggestionCard { margin:8px 12px 0;padding:9px 10px;border:1px solid #bfdbfe;border-radius:7px;background:#eff6ff;color:#1e3a8a;font-size:11px; }
+    #suggestionCard[hidden], #suggestionDetails[hidden] { display:none; }
+    #suggestionCard button { padding:5px 7px;border:1px solid #93c5fd;border-radius:4px;background:#fff;color:#1d4ed8;font-size:11px;font-weight:600; }
+    #suggestionActions { display:flex;gap:5px;flex-wrap:wrap;margin-top:7px; }
+    #suggestionReason { margin-top:6px;line-height:1.4;color:#334155; }
   </style>
 </head>
 <body>
@@ -63,17 +107,122 @@
     <span id="status" class="status idle">…</span>
   </header>
 
+  <section id="suggestionCard" hidden aria-live="polite">
+    <div id="suggestionPrompt">OE found something that may relate to one of your projects.</div>
+    <button id="suggestionWhy" style="margin-top:6px">Why am I seeing this?</button>
+    <div id="suggestionDetails" hidden>
+      <div id="suggestionReason"></div>
+      <div id="suggestionActions">
+        <button id="suggestionRemember">Remember</button>
+        <button id="suggestionIgnore">Not relevant</button>
+        <button id="suggestionForget">Forget project matcher</button>
+      </div>
+    </div>
+  </section>
+
   <div id="messages">
     <div id="empty" class="empty">No conversation yet. Ask Sydney something.</div>
   </div>
 
+  <section id="tabPicker" hidden aria-label="Choose tabs to compare">
+    <strong>Choose tabs to compare</strong>
+    <div style="font-size:11px;color:#6b7280">This list stays in your browser. OE receives snapshots only from checked tabs.</div>
+    <div id="tabPickerList"></div>
+    <div class="picker-actions">
+      <button id="tabPickerCancel">Cancel</button>
+      <button id="tabPickerCompare" class="primary">Compare selected</button>
+    </div>
+  </section>
+
+  <section id="clipPicker" hidden aria-label="Save browser clip">
+    <strong>Save to OE</strong>
+    <div id="clipSummary">Preparing page…</div>
+    <label>
+      Document or project
+      <select id="clipTarget"></select>
+    </label>
+    <label id="clipNewNameRow" hidden>
+      New project document name
+      <input id="clipNewName" maxlength="160" placeholder="Mower research">
+    </label>
+    <div id="clipMessage"></div>
+    <div class="picker-actions">
+      <button id="clipCancel">Cancel</button>
+      <button id="clipSave" class="primary">Save clip</button>
+    </div>
+  </section>
+
+  <section id="handoffPicker" hidden aria-label="Send page to a device">
+    <strong>Send this page</strong>
+    <div style="font-size:11px;color:#6b7280">OE sends a bounded text card to TVs or a short excerpt to speakers. It does not expose your full page or open the URL remotely.</div>
+    <div id="handoffTargets"></div>
+    <div id="handoffMessage"></div>
+    <div class="picker-actions">
+      <button id="handoffCancel">Cancel</button>
+      <button id="handoffSend" class="primary">Send page</button>
+    </div>
+  </section>
+
+  <section id="fieldWatchPanel" hidden aria-label="Manage field watches">
+    <strong>Watch one page field</strong>
+    <div style="font-size:11px;color:#6b7280">OE will re-read only the value you pick at this exact URL. It receives no screenshot, page HTML, tab list, clicks, or general browser access.</div>
+    <button id="fieldWatchPick" class="primary" style="padding:8px;border:1px solid #2563eb;border-radius:4px;background:#2563eb;color:#fff;font-weight:600">Pick a field on this page</button>
+    <div id="fieldWatchSelection" hidden></div>
+    <div id="fieldWatchCreate" hidden style="display:flex;flex-direction:column;gap:8px">
+      <label>Watch name <input id="fieldWatchLabel" maxlength="160" placeholder="Mower price"></label>
+      <label>Notify me when
+        <select id="fieldWatchPredicate">
+          <option value="changed">the value changes</option>
+          <option value="below">it drops below…</option>
+          <option value="at_or_below">it reaches or drops below…</option>
+          <option value="above">it rises above…</option>
+          <option value="at_or_above">it reaches or rises above…</option>
+          <option value="equals">it equals…</option>
+          <option value="not_equals">it no longer equals…</option>
+        </select>
+      </label>
+      <label id="fieldWatchTargetRow" hidden>Target value <input id="fieldWatchTarget" maxlength="120" inputmode="decimal"></label>
+      <label>Check interval
+        <select id="fieldWatchCadence">
+          <option value="900">Every 15 minutes</option>
+          <option value="3600">Every hour</option>
+          <option value="21600" selected>Every 6 hours</option>
+          <option value="86400">Daily</option>
+        </select>
+      </label>
+      <label class="check-row"><input id="fieldWatchConfirm" type="checkbox"><span>I allow OE to re-read only this selected field at this exact URL until I revoke it.</span></label>
+      <button id="fieldWatchCreateButton" class="primary" style="padding:8px;border:1px solid #2563eb;border-radius:4px;background:#2563eb;color:#fff;font-weight:600">Start watch</button>
+    </div>
+    <div id="fieldWatchMessage" aria-live="polite"></div>
+    <div style="border-top:1px solid #e5e7eb;padding-top:8px"><strong style="font-size:12px">Active watches</strong></div>
+    <div id="fieldWatchList"><span style="font-size:11px;color:#6b7280">Loading…</span></div>
+    <div class="picker-actions"><button id="fieldWatchClose">Close</button></div>
+  </section>
+
+  <section id="actionConfirmation" hidden aria-label="Confirm browser action">
+    <strong>OE is waiting for you</strong>
+    <div id="confirmationSummary"></div>
+    <div id="confirmationOrigin"></div>
+    <div style="font-size:11px;color:#6b7280">The page cannot approve this. Only a click here in the extension can continue the exact inspected action.</div>
+    <div class="picker-actions">
+      <button id="confirmationDecline">Decline</button>
+      <button id="confirmationApprove" class="primary">Allow once</button>
+    </div>
+  </section>
+
   <footer>
     <div class="quick-row">
-      <button id="askThisPage" title="Take a screenshot of the current tab and ask Sydney to describe it.">📷 Ask about this page</button>
-      <button id="teachThisSite" disabled title="Teach Mode is temporarily unavailable while tab-scoped consent is being added.">🎓 Teach Mode—coming next</button>
+      <button id="askThisPage" title="Share a one-time reduced text snapshot of the current page.">📄 Ask page</button>
+      <button id="askScreenshot" title="Share a one-time screenshot for charts, canvas apps, maps, and PDFs.">🖼️ Ask screenshot</button>
+      <button id="clipThisPage" title="Choose an OE document or project, then save this page as a versioned clip.">📌 Clip page</button>
+      <button id="teachThisSite" title="Observe your clicks and non-sensitive inputs on this tab and site for up to 15 minutes.">🎓 Teach this site</button>
+      <button id="watchField" title="Pin one value at this exact URL and notify me when it changes.">👁️ Watch field</button>
     </div>
     <textarea id="chatInput" placeholder="Ask Sydney…  (Enter = send, Shift+Enter = newline)" rows="3"></textarea>
     <div class="send-row">
+      <button id="compareTabs">Compare tabs</button>
+      <button id="sendToDevice">Send to…</button>
+      <button id="pushToTalk" title="Hold a short conversation with OE. The microphone is active only while recording.">🎙️ Talk</button>
       <button id="chatSend" class="primary">Send</button>
       <button id="chatClear">Clear</button>
     </div>

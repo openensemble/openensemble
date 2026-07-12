@@ -471,11 +471,13 @@ function _normalizeCadence(sec) {
 }
 
 /**
- * Append an item to a collection watcher's `state.items`. Returns
+ * Append an item to a collection watcher's `state.items`. Pass
+ * `{ requirePersist: true }` for standing grants or other mutations that must
+ * roll back instead of reporting success when the disk write fails. Returns
  * { added: bool, item } — `added: false` means an item with the same `id` was
  * already present (the existing item is left untouched). Persists on add.
  */
-export function addCollectionItem(userId, ref, item) {
+export function addCollectionItem(userId, ref, item, opts = {}) {
   if (!item || typeof item !== 'object' || !item.id) {
     throw new Error('addCollectionItem: item.id required');
   }
@@ -494,7 +496,10 @@ export function addCollectionItem(userId, ref, item) {
     addedAt: Date.now(),
   };
   items.push(normalized);
-  persistUser(userId);
+  if (!persistUser(userId) && opts.requirePersist === true) {
+    items.pop();
+    return { added: false, item: null, error: 'collection watcher update could not be persisted' };
+  }
   return { added: true, item: normalized };
 }
 
@@ -521,21 +526,27 @@ export function removeCollectionItem(userId, ref, itemId, opts = {}) {
  * Patch an item in place. `patch` is shallow-merged; passing `cadenceSec`
  * resets `nextDueAt = now` so the new cadence applies on the very next
  * supervisor sweep instead of waiting out the old cadence. Reserved fields
- * (`id`, `addedAt`) are ignored.
+ * (`id`, `addedAt`) are ignored. `{ requirePersist: true }` makes the mutation
+ * transactional with respect to the on-disk watcher envelope.
  */
-export function updateCollectionItem(userId, ref, itemId, patch) {
+export function updateCollectionItem(userId, ref, itemId, patch, opts = {}) {
   const w = _findCollectionWatcher(userId, ref);
   if (!w) return { updated: false, error: 'collection watcher not found' };
   const items = w.state.items || [];
   const it = items.find(x => x.id === itemId);
   if (!it) return { updated: false };
+  const previous = opts.requirePersist === true ? JSON.parse(JSON.stringify(it)) : null;
   const { id: _ignore1, addedAt: _ignore2, ...rest } = patch || {};
   Object.assign(it, rest);
   if (Object.prototype.hasOwnProperty.call(rest, 'cadenceSec')) {
     it.cadenceSec = _normalizeCadence(it.cadenceSec);
     it.nextDueAt = 0;
   }
-  persistUser(userId);
+  if (!persistUser(userId) && opts.requirePersist === true) {
+    const idx = items.indexOf(it);
+    if (idx >= 0) items[idx] = previous;
+    return { updated: false, error: 'collection watcher update could not be persisted' };
+  }
   return { updated: true, item: it };
 }
 

@@ -163,7 +163,9 @@
     // through a suspension.
     if (_leaseState === 'none') return;
     const ts = window.__oeSyntheticActionTs || 0;
-    if (ts && (Date.now() - ts) < 1500) {
+    const confirmedTs = window.__oeConfirmedActionTs || 0;
+    const explicitlyConfirmed = confirmedTs && confirmedTs === ts;
+    if (ts && (Date.now() - ts) < 1500 && !explicitlyConfirmed) {
       e.preventDefault();
       e.stopImmediatePropagation();
       try { chrome.runtime.sendMessage({ type: 'oe_submit_blocked', url: location.href }); } catch {}

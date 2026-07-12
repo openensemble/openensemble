@@ -39,10 +39,15 @@
           background: #d97706; color: #fff;
           padding: 4px 12px; text-align: center;
           box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+          display:flex;align-items:center;justify-content:center;gap:10px;pointer-events:auto;
         }
+        button { border:0;border-radius:4px;background:rgba(255,255,255,.2);color:#fff;padding:3px 8px;font:inherit;font-weight:700;cursor:pointer; }
       </style>
-      <div class="bar">👁 OE Teach Mode is observing this page — stop it from OE Bridge at any time</div>
+      <div class="bar"><span>👁 OE Teach Mode is observing only this site</span><button type="button">Stop teaching</button></div>
     `;
+    shadow.querySelector('button').addEventListener('click', () => {
+      try { chrome.runtime.sendMessage({ type: 'teach_stop' }); } catch {}
+    });
     document.documentElement.appendChild(_bannerEl);
   }
 
@@ -51,17 +56,34 @@
     const tag = el.tagName.toLowerCase();
     const type = el.getAttribute?.('type') || '';
     const autocomplete = el.getAttribute?.('autocomplete') || '';
-    const sensitive =
+    let sensitive =
       type === 'password' ||
       /^(cc-|credit|cvv|card)/i.test(autocomplete) ||
-      /password|credit|card.?(number|cvv)/i.test(el.name || '') ||
-      /password|credit|card.?(number|cvv)/i.test(el.id || '');
+      /one-time-code|otp/i.test(autocomplete) ||
+      /password|credit|card.?(number|cvv)|otp|one.?time|verification.?code|security.?code/i.test(el.name || '') ||
+      /password|credit|card.?(number|cvv)|otp|one.?time|verification.?code|security.?code/i.test(el.id || '');
     const id = el.id || null;
     const cls = (typeof el.className === 'string' && el.className) ? el.className.split(/\s+/).filter(Boolean).slice(0, 3).join('.') : null;
     const text = (el.innerText || el.value || '').slice(0, 80).trim();
     const ariaLabel = el.getAttribute?.('aria-label') || null;
+    const explicitRole = el.getAttribute?.('role') || null;
     const placeholder = el.getAttribute?.('placeholder') || null;
     const name = el.getAttribute?.('name') || null;
+    const labelledBy = String(el.getAttribute?.('aria-labelledby') || '')
+      .split(/\s+/).filter(Boolean)
+      .map(id => document.getElementById(id)?.innerText || '')
+      .join(' ').replace(/\s+/g, ' ').trim();
+    const nativeLabel = Array.from(el.labels || [])
+      .map(label => label.innerText || '')
+      .join(' ').replace(/\s+/g, ' ').trim();
+    const wrappingLabel = el.closest?.('label')?.innerText || '';
+    const label = (labelledBy || nativeLabel || wrappingLabel)
+      .replace(/\s+/g, ' ').trim().slice(0, 160) || null;
+    const identity = `${name || ''} ${id || ''} ${ariaLabel || ''} ${placeholder || ''} ${label || ''} ${autocomplete}`;
+    sensitive = sensitive ||
+      /password|passphrase|passcode|passwd|\bpin\b|one[ -]?time|\botp\b|2fa|mfa|verification.?code|security.?code|credit|debit|card.?number|payment.?card|cvv|cvc|expir(?:y|ation)|routing.?number|bank.?account|\biban\b|\bswift\b|social.?security|\bssn\b|medical.?record|patient.?id|member.?id|private.?key|api.?key|access.?token|auth.?token|secret.?key/i.test(identity);
+    const accessibleName = (ariaLabel || label || (sensitive ? '' : text) || placeholder || name || '')
+      .replace(/\s+/g, ' ').trim().slice(0, 160) || null;
     // Best-effort path: ancestor chain with first id or first class on each level.
     const path = [];
     let cur = el;
@@ -75,7 +97,8 @@
       cur = cur.parentNode;
     }
     return {
-      tag, id, class: cls, type, name, ariaLabel, placeholder,
+      tag, id, class: cls, type, name, role: explicitRole, ariaLabel,
+      accessibleName, label, placeholder, multiple: Boolean(el.multiple),
       sensitive,
       text: sensitive ? null : text,
       selector: path.join(' > '),
@@ -100,8 +123,6 @@
     send({
       kind: 'click',
       element: el,
-      x: Math.round(e.clientX),
-      y: Math.round(e.clientY),
       tabUrl: location.href,
       ts: Date.now(),
     });

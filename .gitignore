@@ -30,6 +30,7 @@ gmail-credentials.json
 /active-sessions.json
 /background-task-journal.json
 /mcp-access-tokens.json
+/browser-pairing.json
 /nodes.json
 /admission-requests.json
 /mdns-instance.json
