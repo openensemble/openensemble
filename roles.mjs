@@ -860,18 +860,19 @@ function getAlwaysOnTools() {
   return tools;
 }
 
-// Tools that ride along with a primary role — e.g. active-agents is "the
-// coordinator's job" and skill-builder is "the coder's job". The manifest
-// declares `bundled_with_role: <roleId>` and the resolver auto-injects
-// those tools whenever an agent's skillCategory matches. Treated as part
-// of the role, not a separately-assignable skill (so they're also marked
-// `hidden: true` so they don't show up in Settings → Skills).
-function getBundledRoleTools(skillCategory) {
-  if (!skillCategory) return [];
+// Tools that ride along with owned roles — e.g. active-agents is "the
+// coordinator's job" and skill-builder is "the coder's job". In the
+// single-coordinator shape one agent can own several service roles, so looking
+// only at its primary skillCategory silently drops bundles for every secondary
+// role. Treat every assigned role as owned; bundles remain inherent to their
+// role rather than separately assignable (and stay hidden in Settings).
+function getBundledRoleTools(roleIds) {
+  const owned = new Set(Array.isArray(roleIds) ? roleIds : [roleIds].filter(Boolean));
+  if (!owned.size) return [];
   const tools = [];
   for (const wrap of _manifests.values()) {
     if (wrap.userId !== null) continue;
-    if (wrap.manifest.bundled_with_role === skillCategory) {
+    if (owned.has(wrap.manifest.bundled_with_role)) {
       tools.push(...(wrap.manifest.tools ?? []));
     }
   }
@@ -913,10 +914,17 @@ export function resolveAgentTools(skillCategory, userSkills, agentId = null, use
   // Primary role is always a global skill category (coder, email, etc.).
   const primaryTools = skillCategory ? (getRoleManifest(skillCategory)?.tools ?? []) : [];
 
-  // Tools bundled with the primary role (e.g. active-agents → coordinator,
-  // skill-builder → coder). These are treated as inherent to the role, not
-  // as separately-assignable skills, so they're auto-injected here.
-  const bundledTools = getBundledRoleTools(skillCategory);
+  // Bundles follow every role this agent owns, not only its primary role.
+  // This matters when one Jarvis coordinator owns coordinator + coder + email
+  // and the coder role's hidden skill-builder bundle must remain available.
+  // Secondary assignments still have to be enabled for this user; a stale
+  // assignment must not resurrect a bundle after an admin revokes its role.
+  const enabledSkills = new Set(userSkills);
+  const ownedRoleIds = [
+    skillCategory,
+    ...Object.keys(assignments).filter(roleId => enabledSkills.has(roleId) && isAssignedTo(roleId)),
+  ].filter(Boolean);
+  const bundledTools = getBundledRoleTools(ownedRoleIds);
 
   const dedup = tools => {
     const seen = new Set();

@@ -8,6 +8,18 @@
   "bundled_with_role": "coder",
   "always_on": false,
   "enabled_by_default": false,
+  "intent_examples": [
+    "build a new custom skill",
+    "make me a skill that tracks prices",
+    "create a skill for my workflow",
+    "add a tool to my existing skill",
+    "update the code in my custom skill",
+    "fix a bug in the skill we built",
+    "show me the code for this skill",
+    "delete one of my custom skills",
+    "change the tool schema in my skill",
+    "roll back my last skill edit"
+  ],
   "alias_catalog": {
     "entity_kind": "skill",
     "noun_singular": "skill",

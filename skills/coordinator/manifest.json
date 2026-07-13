@@ -245,7 +245,7 @@
       "type": "function",
       "function": {
         "name": "request_tools",
-        "description": "Expand your tool surface mid-turn. Your initial tool list this turn was trimmed to only the tools the router predicted you'd need — this is normal and saves tokens. If you find you need a tool that isn't currently available (e.g. you wanted to call a Home Assistant or email or calendar tool but it isn't here), call this with a short description of what you're trying to do; the router will add the matching skill's tools to your toolset on the very next iteration. Prefer this over `ask_agent` only when a specialist for the task already exists — otherwise delegating is better. The cost is one extra LLM round-trip, so don't call speculatively — call only when you tried and the tool you wanted is missing.",
+        "description": "Expand your own tool surface mid-turn. Your initial list was trimmed to the tools predicted for this request; the server still retains your full permission-scoped surface. If a tool you need is missing, call request_tools and continue the same task yourself. Do not delegate merely to reach a tool you already own. Use ask_agent only when genuinely parallel or specialist background work is useful. The cost is one extra model round-trip, so call only when the needed tool is absent.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -258,7 +258,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Optional explicit list of skill IDs to load if you know them. Valid values: 'email', 'gcal', 'expenses', 'coder', 'nodes', 'deep_research', 'skill-builder', 'role_tutor', 'image_generator', 'role_video_generator', 'role_home_assistant', 'oe-admin', 'profiles', 'tasks', 'routines'. Either reason or groups (or both) are required."
+              "description": "Optional explicit list of skill IDs to load if you know them. Built-in values: 'tasks', 'routines', 'oe-admin', 'profiles', 'desktop', 'browser-ext', 'mcp-admin', 'active-agents', 'role_home_assistant', 'role_tv_control', 'email', 'gcal', 'expenses', 'coder', 'nodes', 'deep_research', 'skill-builder', 'role_tutor', 'image_generator', 'role_video_generator', 'transcribe', 'documents'. A user-defined auto-routed skill ID is also valid. Either reason or groups (or both) are required."
             }
           }
         }

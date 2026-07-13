@@ -99,6 +99,7 @@ function buildToolOwnerIndex(userId) {
 
 export function getAgentsForUser(userId) {
   const userSkills = getUserEnabledSkills(userId);
+  const enabledSkillIds = new Set(userSkills);
   let overrides = {}, userRole = 'user';
   let currentUser = null;
   if (userId) {
@@ -137,10 +138,12 @@ export function getAgentsForUser(userId) {
   // to ask_agent and the coordinator would hallucinate an id.
   const skillAssignmentsForDesc = getRoleAssignments(userId);
   const effectiveSkillCategory = (a) => {
-    const assigned = Object.entries(skillAssignmentsForDesc).filter(([, v]) => v === a.id).map(([k]) => k);
-    // A multi-role agent holding coordinator IS the coordinator regardless of
-    // assignment key order — otherwise a coder assignment placed first would
-    // silently turn it into a specialist and disable coordinator routing.
+    const assigned = Object.entries(skillAssignmentsForDesc)
+      .filter(([id, owner]) => owner === a.id && enabledSkillIds.has(id))
+      .map(([id]) => id);
+    // A multi-role Jarvis remains the coordinator regardless of JSON key order.
+    // Otherwise a coder assignment placed first silently turns the same agent
+    // into a specialist and disables coordinator routing.
     // (Single mode relies on this: the primary holds every enabled skill.)
     const roleSkillId = assigned.includes('coordinator')
       ? 'coordinator'
@@ -163,7 +166,9 @@ export function getAgentsForUser(userId) {
 
   return visibleBase.map(a => {
     const withOverrides = overrides[a.id] ? { ...a, ...overrides[a.id] } : a;
-    const assignedSkillIds = Object.entries(skillAssignments).filter(([, v]) => v === a.id).map(([k]) => k);
+    const assignedSkillIds = Object.entries(skillAssignments)
+      .filter(([id, owner]) => owner === a.id && enabledSkillIds.has(id))
+      .map(([id]) => id);
     // Coordinator wins over key order — see effectiveSkillCategory above.
     const roleSkillId = assignedSkillIds.includes('coordinator')
       ? 'coordinator'
@@ -229,14 +234,17 @@ export function getAgentsForUser(userId) {
           .filter(Boolean)
       );
       // Bundled tools — manifests that declare `bundled_with_role: <id>`
-      // are inherent to the role's tool surface (active-agents → coordinator,
-      // skill-builder → coder). They bypass defaultToolIds for the same
-      // reason heldRoleTools do: the role IS the assignment.
+      // are inherent to every role this agent owns (active-agents →
+      // coordinator, skill-builder → coder). Include secondary assignments as
+      // well as the primary category; otherwise an all-in-one coordinator that
+      // also owns coder receives skill-builder in resolveAgentTools only to
+      // have this primary-role allowlist discard it again.
       const bundledForCategory = (() => {
-        if (!skillCategory) return [];
+        const ownedRoleIds = new Set([skillCategory, ...assignedSkillIds].filter(Boolean));
+        if (!ownedRoleIds.size) return [];
         const out = [];
         for (const m of listRoles(userId)) {
-          if (m.bundled_with_role === skillCategory) {
+          if (ownedRoleIds.has(m.bundled_with_role)) {
             out.push(...(m.tools ?? []).map(t => t.function?.name).filter(Boolean));
           }
         }
