@@ -288,6 +288,13 @@ export function getAgentsForUser(userId) {
       tools = [...tools, ...mcpToolDefs];
     }
 
+    // Do not ship an unusable named-agent delegation schema to a one-Jarvis
+    // deployment. Background multitasking remains available through the other
+    // delegate tools (spawn_worker/check_workers/stop_worker/report_progress).
+    // Filtering the resolved full surface also prevents request_tools from
+    // resurrecting ask_agent later in the same turn.
+    if (rosterSolo) tools = tools.filter(tool => tool.function?.name !== 'ask_agent');
+
     // Tool-presence SPA injection lives in lib/skill-prompt-composer.mjs so
     // chat.mjs can re-compose after per-turn tool trimming. See module
     // docstring for why: without the post-trim recompose, big SPAs (notably
@@ -437,6 +444,12 @@ export function getAgentsForUser(userId) {
           ...t.function.parameters.properties,
           agent_id: { type: 'string', description: askAgentDesc }
         }}}};
+      }
+      if (rosterSolo && t.function?.name === 'request_tools') {
+        return { ...t, function: {
+          ...t.function,
+          description: 'Expand your own tool surface mid-turn. Your initial list was trimmed, but the server retains your full permission-scoped surface. If a needed tool is absent, call request_tools and continue the task yourself. Use spawn_worker only for genuinely long or parallel work. The cost is one extra model round-trip, so call only when the needed tool is missing.',
+        }};
       }
       return t;
     });
