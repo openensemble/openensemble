@@ -201,7 +201,13 @@ const promptCases = [
   ...ROUTER_CASES.map(testCase => (
     ((testCase.category === 'weather' && testCase.id !== 'W6') || testCase.id === 'N6')
       && toolsBySkill.has('localweather')
-      ? { ...testCase, required: [...(testCase.required ?? []), 'localweather'] }
+      ? {
+        ...testCase,
+        required: [...(testCase.required ?? []), 'localweather'],
+        // On a singleton roster, localweather replaces the legacy always-on
+        // web fallback for the conditions its manifest actually covers.
+        requiresAlways: (testCase.requiresAlways ?? []).filter(name => name !== 'web_search'),
+      }
       : testCase
   )),
   ...additionalPromptCases
