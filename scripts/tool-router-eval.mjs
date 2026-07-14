@@ -104,10 +104,14 @@ if ((evaluatedUserId || evaluatedAgentId) && !evaluatedAgent) {
   throw new Error(`Cannot resolve live agent ${evaluatedAgentId ?? '<missing>'} for user ${evaluatedUserId ?? '<missing>'}`);
 }
 const manifests = listRoles(evaluatedUserId);
+const rosterSolo = evaluatedAgent?._rosterSolo === true;
 const onDemand = new Set([
   ..._internal.ON_DEMAND_SKILL_IDS,
   ...manifests
-    .filter(m => m.custom === true && m.coordinator_scope === 'auto')
+    .filter(m => m.custom === true && (
+      m.coordinator_scope === 'auto'
+      || (rosterSolo && m.coordinator_scope === 'exclude')
+    ))
     .map(m => m.id),
 ]);
 const allTools = evaluatedAgent?.tools ?? uniqueTools(manifests);
@@ -169,7 +173,17 @@ const additionalPromptCases = [
   { prompt: 'Turn off the kitchen lights and remind me to lock the door at 10 PM', required: ['role_home_assistant', 'tasks'] },
   { prompt: 'Generate a birthday image and email it to Shawn', required: ['image_generator', 'email'] },
   { prompt: 'Research the GPU market and email me the report', required: ['deep_research', 'email'] },
-  { prompt: 'show me the weather report', required: [], forbidden: ['role_tv_control', 'documents'] },
+  { prompt: 'Find an affordable flight from Fort Myers to Denver next month', required: ['flight-booker'], userCustom: true },
+  { prompt: 'Find a good hotel near Union Square for next weekend', required: ['hotel-booker'], userCustom: true },
+  { prompt: 'Check the Cape Coral forecast for tomorrow morning', required: ['localweather'], userCustom: true },
+  { prompt: 'Look for new Pokemon elite trainer box preorder listings', required: ['pokemon-etb-preorders'], userCustom: true },
+  { prompt: 'Which Publix BOGO deals include coffee this week?', required: ['publix-bogos'], userCustom: true },
+  { prompt: 'Save the newest upload from one of my watched YouTube channels', required: ['youtube-download'], userCustom: true },
+  { prompt: 'Use oe-update-checker to compare the installed commit with upstream', required: ['oe-update-checker'], userCustom: true },
+  { prompt: 'List the Secure Cloud GPUs available on Runpod', required: ['runpod'], userCustom: true },
+  { prompt: 'Show the GPU configurations available from Thunder Compute', required: ['thunder-compute'], userCustom: true },
+  { prompt: 'Find a flight to Denver and email me the options', required: ['flight-booker', 'email'], userCustom: true },
+  { prompt: 'show me the weather report', required: ['localweather'], forbidden: ['role_tv_control', 'documents'], userCustom: true },
   { prompt: 'explain this compiler error message', required: [], forbidden: ['email'] },
   { prompt: 'write a Python script that sorts a list', required: ['coder'], forbidden: ['role_home_assistant'] },
   { prompt: 'turn off notifications in the chat app', required: [], forbidden: ['role_home_assistant'] },
@@ -182,8 +196,15 @@ const additionalPromptCases = [
 // them accumulate arbitrary extra on-demand skills while still reporting a
 // pass, inflating the clear-pass metric.
 const promptCases = [
-  ...ROUTER_CASES,
-  ...additionalPromptCases.map(testCase => ({ strict: true, ...testCase })),
+  ...ROUTER_CASES.map(testCase => (
+    ((testCase.category === 'weather' && testCase.id !== 'W6') || testCase.id === 'N6')
+      && toolsBySkill.has('localweather')
+      ? { ...testCase, required: [...(testCase.required ?? []), 'localweather'] }
+      : testCase
+  )),
+  ...additionalPromptCases
+    .filter(testCase => !testCase.userCustom || (testCase.required ?? []).every(id => toolsBySkill.has(id)))
+    .map(testCase => ({ strict: true, ...testCase })),
 ];
 
 const promptResults = [];
@@ -193,6 +214,7 @@ for (const testCase of promptCases) {
     id: evaluatedAgent?.id ?? 'offline_router_eval',
     skillCategory: evaluatedAgent?.skillCategory ?? 'coordinator',
     provider: evaluatedAgent?.provider ?? 'anthropic',
+    _rosterSolo: rosterSolo,
     tools: allTools,
   };
   const started = performance.now();
@@ -263,7 +285,7 @@ for (const skillId of onDemand) {
 
   explicitRecovery.tested++;
   {
-    const agent = { tools: requestToolsDef ? [requestToolsDef] : [] };
+    const agent = { tools: requestToolsDef ? [requestToolsDef] : [], _rosterSolo: rosterSolo };
     const result = await expandToolsByReason({
       agent, fullTools: allTools, reason: null, groups: [skillId], userId: evaluatedUserId,
       alreadyIncludedSkills: new Set(),
@@ -281,7 +303,7 @@ for (const skillId of onDemand) {
   const reason = reasonCase?.prompt;
   if (reason) {
     reasonRecovery.tested++;
-    const agent = { tools: requestToolsDef ? [requestToolsDef] : [] };
+    const agent = { tools: requestToolsDef ? [requestToolsDef] : [], _rosterSolo: rosterSolo };
     const result = await expandToolsByReason({
       agent, fullTools: allTools, reason, groups: null, userId: evaluatedUserId,
       alreadyIncludedSkills: new Set(),
@@ -391,9 +413,9 @@ report.adversarialMatrix = {
   clearRoutablePassed: adversarialResults.filter(result => clearRoutable(result) && resultPassed(result)).length,
 };
 
+let output;
 if (process.argv.includes('--summary')) {
-  console.log('ROUTER_EVAL_SUMMARY_JSON');
-  console.log(JSON.stringify({
+  output = `ROUTER_EVAL_SUMMARY_JSON\n${JSON.stringify({
     mode: report.mode,
     corpus: report.corpus,
     intentExampleSelfRecall: report.intentExampleSelfRecall,
@@ -410,9 +432,14 @@ if (process.argv.includes('--summary')) {
     routingLatencyMs: report.routingLatencyMs,
     capabilityGaps: report.capabilityGaps,
     criticalFailureCount: report.criticalFailureCount,
-  }, null, 2));
+  }, null, 2)}\n`;
 } else {
-  console.log('ROUTER_EVAL_JSON');
-  console.log(JSON.stringify(report, null, 2));
+  output = `ROUTER_EVAL_JSON\n${JSON.stringify(report, null, 2)}\n`;
 }
-if (criticalFailures.length) process.exitCode = 1;
+// loadRoleManifests initializes background registries whose timers are useful
+// in the server but would keep this one-shot evaluator alive indefinitely.
+// Flush the complete report, then terminate explicitly with the gate result.
+await new Promise((resolve, reject) => {
+  process.stdout.write(output, err => err ? reject(err) : resolve());
+});
+process.exit(criticalFailures.length ? 1 : 0);

@@ -431,12 +431,26 @@ export function getAgentsForUser(userId) {
     const askAgentDesc = isCoordinatorAgent
       ? `Which specialist to delegate to: ${delegateAgentDesc}`
       : `Pass "coordinator" to escalate this task to the coordinator (who will route to whichever specialist can finish it). You may NOT call other specialists directly — only the coordinator.`;
+    const recoverableCustomGroups = [...new Set(tools
+      .map(t => toolOwnerIndex[t.function?.name])
+      .filter(id => getRoleManifest(id, userId)?.custom === true))]
+      .sort();
     tools = tools.map(t => {
-      if (t.function?.name !== 'ask_agent') return t;
-      return { ...t, function: { ...t.function, parameters: { ...t.function.parameters, properties: {
-        ...t.function.parameters.properties,
-        agent_id: { type: 'string', description: askAgentDesc }
-      }}}};
+      if (t.function?.name === 'ask_agent') {
+        return { ...t, function: { ...t.function, parameters: { ...t.function.parameters, properties: {
+          ...t.function.parameters.properties,
+          agent_id: { type: 'string', description: askAgentDesc }
+        }}}};
+      }
+      if (t.function?.name === 'request_tools' && recoverableCustomGroups.length) {
+        const groupSchema = t.function.parameters?.properties?.groups ?? {};
+        const customDescription = ` User-defined group IDs available to this agent: ${recoverableCustomGroups.map(id => `'${id}'`).join(', ')}.`;
+        return { ...t, function: { ...t.function, parameters: { ...t.function.parameters, properties: {
+          ...t.function.parameters.properties,
+          groups: { ...groupSchema, description: `${groupSchema.description ?? ''}${customDescription}`.trim() },
+        }}}};
+      }
+      return t;
     });
     const result = {
       ...withOverrides, systemPrompt, tools, skillCategory,
