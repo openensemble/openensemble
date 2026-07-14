@@ -708,7 +708,8 @@ function applyUserToolPlan(agent, plan) {
   const selected = new Set(clean.selectedTools);
   const controlTools = new Set(SELECTED_PLAN_CONTROL_TOOLS);
   try { for (const t of getSelectedPlanKeepTools()) controlTools.add(t); } catch { /* registry not loaded yet — base set still applies */ }
-  if (agent.skillCategory === 'coordinator' || selected.size === 0) controlTools.add('ask_agent');
+  if ((agent.skillCategory === 'coordinator' || selected.size === 0)
+      && agent._rosterSolo !== true) controlTools.add('ask_agent');
   agent.tools = agent.tools.filter(t => {
     const name = t.function?.name;
     return selected.has(name) || controlTools.has(name);
