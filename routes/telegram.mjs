@@ -59,16 +59,30 @@ async function callTelegram(token, method, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return resp.json();
+  const result = await resp.json().catch(() => null);
+  if (!resp.ok || result?.ok !== true) {
+    const detail = String(result?.description || `HTTP ${resp.status}`).slice(0, 300);
+    throw new Error(`Telegram ${method} failed: ${detail}`);
+  }
+  return result;
 }
 
-async function sendMessage(token, chatId, text) {
+export async function sendTelegramApiMessage(token, chatId, text) {
+  const messageIds = [];
   for (const chunk of splitMessage(text)) {
-    await callTelegram(token, 'sendMessage', {
+    const result = await callTelegram(token, 'sendMessage', {
       chat_id: chatId, text: chunk, parse_mode: 'HTML',
-    }).catch(e => console.warn('[telegram] sendMessage failed:', e.message));
+    });
+    const messageId = result?.result?.message_id;
+    if (!Number.isSafeInteger(messageId)) {
+      throw new Error('Telegram sendMessage succeeded without a message id');
+    }
+    messageIds.push(messageId);
   }
+  return messageIds;
 }
+
+const sendMessage = sendTelegramApiMessage;
 
 async function sendTyping(token, chatId) {
   await callTelegram(token, 'sendChatAction', { chat_id: chatId, action: 'typing' })
