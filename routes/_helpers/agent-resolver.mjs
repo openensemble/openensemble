@@ -296,8 +296,10 @@ export function getAgentsForUser(userId) {
     const agentEmoji = withOverrides.emoji ?? a.emoji ?? '';
     const serverIp = getLanAddress();
     const emailNoConfirm = currentUser?.emailSendWithoutConfirm === true;
-    // rosterSolo rides in composerInputs so chat.mjs's post-trim SPA
-    // recompose (which spreads agent._composerInputs) inherits it unchanged.
+    // rosterSolo comes from the stored orchestration policy (computed at the
+    // top of this function — NEVER from roster shape, plan D4). It rides in
+    // composerInputs so chat.mjs's post-trim SPA recompose (which spreads
+    // agent._composerInputs) inherits it unchanged.
     const composerInputs = { userId, userName, agentName, agentEmoji, serverIp, emailNoConfirm, rosterSolo };
     const skillPromptAdditions = composeSkillSpaBlock({ tools, ...composerInputs });
     // Same expander composeSkillSpaBlock uses internally — needed below for
