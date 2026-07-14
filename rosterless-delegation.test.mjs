@@ -15,10 +15,25 @@ const MULTI_ROSTER = [
 ];
 
 let roster = SOLO_ROSTER;
+// Stock lands the redirect behind the stored orchestration policy (plan D4):
+// single mode triggers it, ensemble keeps the resolution ladder even for a
+// one-agent roster. Mocked here so each case pins the mode explicitly.
+let orchestrationMode = 'single';
 
 vi.mock('./routes/_helpers.mjs', async (importOriginal) => {
   const orig = await importOriginal();
   return { ...orig, getAgentsForUser: () => roster };
+});
+
+vi.mock('./lib/orchestration-policy.mjs', async (importOriginal) => {
+  const orig = await importOriginal();
+  return {
+    ...orig,
+    getOrchestrationPolicy: () => ({
+      mode: orchestrationMode,
+      primaryAgentId: orchestrationMode === 'single' ? 'jarvis_lab' : null,
+    }),
+  };
 });
 
 const { executeSkillTool } = await import('./skills/delegate/execute.mjs');
@@ -39,6 +54,7 @@ async function runAskAgent(args, callerAgentId) {
 
 afterEach(() => {
   roster = SOLO_ROSTER;
+  orchestrationMode = 'single';
 });
 
 describe('rosterless ask_agent redirect', () => {
@@ -80,8 +96,21 @@ describe('rosterless ask_agent redirect', () => {
     expect(chunks[0].text).toBe('Missing agent_id or task.');
   });
 
-  it('leaves multi-agent rosters on the existing not-found path', async () => {
+  it('leaves ensemble accounts on the existing not-found path', async () => {
     roster = MULTI_ROSTER;
+    orchestrationMode = 'ensemble';
+    const chunks = await runAskAgent(
+      { agent_id: 'agent_nope9999', task: 'do something' },
+      'user_roster_test_jarvis_lab',
+    );
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].text).toContain('not found');
+    expect(chunks[0].text).not.toContain('spawn_worker');
+  });
+
+  it('D4: an ensemble account with ONE agent still gets the ladder, never the redirect', async () => {
+    roster = SOLO_ROSTER;
+    orchestrationMode = 'ensemble';
     const chunks = await runAskAgent(
       { agent_id: 'agent_nope9999', task: 'do something' },
       'user_roster_test_jarvis_lab',
