@@ -70,6 +70,7 @@ function selectedOnDemand(trim) {
 
 const userArgIndex = process.argv.indexOf('--user');
 const agentArgIndex = process.argv.indexOf('--agent');
+const growthMode = process.argv.includes('--growth');
 const evaluatedUserId = userArgIndex >= 0 ? process.argv[userArgIndex + 1] : null;
 const evaluatedAgentId = agentArgIndex >= 0 ? process.argv[agentArgIndex + 1] : null;
 
@@ -104,6 +105,7 @@ if ((evaluatedUserId || evaluatedAgentId) && !evaluatedAgent) {
   throw new Error(`Cannot resolve live agent ${evaluatedAgentId ?? '<missing>'} for user ${evaluatedUserId ?? '<missing>'}`);
 }
 const manifests = listRoles(evaluatedUserId);
+const syntheticSkills = new Set(manifests.filter(manifest => manifest.synthetic === true).map(manifest => manifest.id));
 const rosterSolo = evaluatedAgent?._rosterSolo === true;
 const onDemand = new Set([
   ..._internal.ON_DEMAND_SKILL_IDS,
@@ -263,6 +265,77 @@ for (const testCase of promptCases) {
   if (missing.length || missingTools.length || forbidden.length || unexpected.length || missingAlways.length) promptFailures.push(result);
 }
 
+// Growth-mode recall intentionally measures a bounded family rather than a
+// single exact synthetic variant. The generated surface contains near-
+// duplicate variants on purpose: forcing one top-1 winner would recreate the
+// failure this stress test exists to catch. Production skills retain their
+// strict exact-self-recall gate below.
+const growthFamilyCases = growthMode && syntheticSkills.size ? [
+  { id: 'growth-aquarium', prompt: 'How is the reef aquarium doing?', family: 'synthx_aquarium' },
+  { id: 'growth-printer', prompt: 'Show me the latest 3D printer readings', family: 'synthx_printer3d' },
+  { id: 'growth-solar', prompt: 'Are there any alerts from the solar panels?', family: 'synthx_solar' },
+  { id: 'growth-beehive', prompt: 'Check the beehive status', family: 'synthx_beehive' },
+  { id: 'growth-golf', prompt: 'Search my golf rounds for last month', family: 'synthx_golf' },
+  { id: 'growth-pantry', prompt: 'Am I running low on anything in the pantry?', family: 'synthx_pantry' },
+  { id: 'growth-freezer', prompt: "What's in my chest freezer?", family: 'synthx_freezer' },
+  { id: 'growth-marathon', prompt: 'Plan my next marathon training session', family: 'synthx_marathon' },
+] : [];
+const growthFamilyResults = [];
+for (const testCase of growthFamilyCases) {
+  const agent = {
+    id: evaluatedAgent?.id ?? 'offline_router_eval',
+    skillCategory: evaluatedAgent?.skillCategory ?? 'coordinator',
+    provider: evaluatedAgent?.provider ?? 'anthropic',
+    _rosterSolo: rosterSolo,
+    tools: allTools,
+  };
+  const trim = await trimToolsForTurn({ agent, userText: testCase.prompt, userId: evaluatedUserId, source: 'web' });
+  const selected = selectedOnDemand(trim);
+  const selectedSynthetic = selected.filter(skillId => syntheticSkills.has(skillId));
+  const inFamily = skillId => skillId === testCase.family || skillId.startsWith(`${testCase.family}_`);
+  const familyCandidates = selectedSynthetic.filter(inFamily);
+  const unrelated = selected.filter(skillId => !inFamily(skillId));
+  const passed = familyCandidates.length >= 1
+    && familyCandidates.length <= _internal.MAX_AMBIGUITY_CANDIDATES
+    && unrelated.length === 0;
+  growthFamilyResults.push({ ...testCase, selected, familyCandidates, unrelated, passed });
+}
+
+const growthPrecisionLeaks = growthMode
+  ? promptResults
+    .filter(result => !result.ambiguous && !result.required.some(skillId => syntheticSkills.has(skillId)))
+    .map(result => ({
+      id: result.id,
+      prompt: result.prompt,
+      synthetic: result.selected.filter(skillId => syntheticSkills.has(skillId)),
+    }))
+    .filter(result => result.synthetic.length)
+  : [];
+
+let growthFloor = null;
+if (growthMode) {
+  const floorAgent = {
+    id: evaluatedAgent?.id ?? 'offline_router_eval',
+    skillCategory: evaluatedAgent?.skillCategory ?? 'coordinator',
+    provider: evaluatedAgent?.provider ?? 'anthropic',
+    _rosterSolo: rosterSolo,
+    tools: allTools,
+  };
+  const floorTrim = await trimToolsForTurn({
+    agent: floorAgent,
+    userText: 'What is 17 times 23?',
+    userId: evaluatedUserId,
+    source: 'web',
+  });
+  const selected = selectedOnDemand(floorTrim);
+  growthFloor = {
+    toolCount: floorTrim.trimmedTools.length,
+    schemaBytes: Buffer.byteLength(JSON.stringify(floorTrim.trimmedTools)),
+    selectedOnDemand: selected,
+    syntheticSelected: selected.filter(skillId => syntheticSkills.has(skillId)),
+  };
+}
+
 // 3. Explicit request_tools recovery must work for every toolful on-demand
 // group, and natural-language recovery must work from held-out corpus wording.
 const explicitRecovery = { tested: 0, passed: 0, failures: [] };
@@ -349,11 +422,18 @@ const isCapabilityOnlyFailure = failure =>
   && failure.unexpected.length === 0
   && failure.missingAlways.length === 0;
 const criticalFailures = [
-  ...selfRecall.missed.map(failure => ({ type: 'intent-example-missed', ...failure })),
-  ...selfRecall.wrong.map(failure => ({ type: 'intent-example-wrong', ...failure })),
+  ...selfRecall.missed
+    .filter(failure => !growthMode || !syntheticSkills.has(failure.skillId))
+    .map(failure => ({ type: 'intent-example-missed', ...failure })),
+  ...selfRecall.wrong
+    .filter(failure => !growthMode || !syntheticSkills.has(failure.skillId))
+    .map(failure => ({ type: 'intent-example-wrong', ...failure })),
   ...promptFailures.filter(f => !f.ambiguous),
   ...explicitRecovery.failures,
-  ...reasonRecovery.failures,
+  ...reasonRecovery.failures.filter(failure => !growthMode || !syntheticSkills.has(failure.skillId)),
+  ...growthFamilyResults.filter(result => !result.passed).map(result => ({ type: 'growth-family-recall', ...result })),
+  ...growthPrecisionLeaks.map(result => ({ type: 'growth-precision-leak', ...result })),
+  ...(growthFloor?.syntheticSelected?.length ? [{ type: 'growth-floor-leak', ...growthFloor }] : []),
   ...zeroToolSkills.map(skillId => ({ type: 'zero-tool-on-demand-skill', skillId })),
   ...(!requestToolsDef ? [{ type: 'request-tools-missing-from-evaluated-agent' }] : []),
 ];
@@ -396,6 +476,27 @@ const report = {
     max: Number(Math.max(0, ...latencyValues).toFixed(1)),
   },
   capabilityGaps: zeroToolSkills.map(skillId => `${skillId} exposes no coordinator-callable tool`),
+  growth: growthMode ? {
+    syntheticSkills: syntheticSkills.size,
+    syntheticTools: manifests
+      .filter(manifest => syntheticSkills.has(manifest.id))
+      .reduce((count, manifest) => count + (manifest.tools?.length ?? 0), 0),
+    realIntentSelfRecall: {
+      total: selfRecall.total - [...syntheticSkills]
+        .reduce((count, skillId) => count + (getRoleManifest(skillId, evaluatedUserId)?.intent_examples?.length ?? 0), 0),
+      failures: [
+        ...selfRecall.missed.filter(failure => !syntheticSkills.has(failure.skillId)),
+        ...selfRecall.wrong.filter(failure => !syntheticSkills.has(failure.skillId)),
+      ],
+    },
+    syntheticExactSelfRecallDiagnostic: {
+      missed: selfRecall.missed.filter(failure => syntheticSkills.has(failure.skillId)).length,
+      wrong: selfRecall.wrong.filter(failure => syntheticSkills.has(failure.skillId)).length,
+    },
+    floor: growthFloor,
+    familyRecall: growthFamilyResults,
+    precisionLeaks: growthPrecisionLeaks,
+  } : null,
   criticalFailureCount: criticalFailures.length,
 };
 
@@ -431,6 +532,7 @@ if (process.argv.includes('--summary')) {
     providerLoopInspection: report.providerLoopInspection,
     routingLatencyMs: report.routingLatencyMs,
     capabilityGaps: report.capabilityGaps,
+    growth: report.growth,
     criticalFailureCount: report.criticalFailureCount,
   }, null, 2)}\n`;
 } else {

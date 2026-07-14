@@ -258,7 +258,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Optional explicit list of skill IDs to load if you know them. Built-in values: 'tasks', 'routines', 'oe-admin', 'profiles', 'desktop', 'browser-ext', 'mcp-admin', 'active-agents', 'role_home_assistant', 'role_tv_control', 'email', 'gcal', 'expenses', 'coder', 'nodes', 'deep_research', 'skill-builder', 'role_tutor', 'image_generator', 'role_video_generator', 'transcribe', 'documents'. A user-defined auto-routed skill ID is also valid. Either reason or groups (or both) are required."
+              "description": "Optional explicit list of skill IDs to load if you know them. Built-in values: 'tasks', 'routines', 'oe-admin', 'profiles', 'desktop', 'browser-ext', 'mcp-admin', 'active-agents', 'role_home_assistant', 'role_tv_control', 'email', 'gcal', 'expenses', 'coder', 'nodes', 'deep_research', 'skill-builder', 'role_tutor', 'image_generator', 'role_video_generator', 'transcribe', 'documents'. A permission-scoped user-defined skill ID is also valid; otherwise describe the need in reason. Either reason or groups (or both) are required."
             }
           }
         }
