@@ -542,16 +542,21 @@ async function uploadDoc() {
 
 // ── Download ──────────────────────────────────────────────────────────────────
 
-async function downloadDoc(id, filename) {
-  try {
-    const resp = await fetch(`/api/shared-docs/${id}/download`);
-    if (!resp.ok) throw new Error('Server error ' + resp.status);
-    const blob = await resp.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  } catch (e) { showToast('Download failed: ' + e.message); }
+function _startBrowserDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function downloadDoc(id, filename) {
+  const token = getMediaTokenSync();
+  const url = `/api/shared-docs/${encodeURIComponent(id)}/download`
+    + (token ? `?token=${encodeURIComponent(token)}` : '');
+  _startBrowserDownload(url, filename);
 }
 
 async function downloadResearchDoc(id, filename) {
@@ -1624,16 +1629,13 @@ async function saveDocShare() {
 
 // ── AI-sourced file helpers ──────────────────────────────────────────────────
 
-async function downloadAiFile(type, filename) {
-  try {
-    const resp = await fetch(`/api/desktop/${type}/${encodeURIComponent(filename)}`);
-    if (!resp.ok) throw new Error('Server error ' + resp.status);
-    const blob = await resp.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  } catch (e) { showToast('Download failed: ' + e.message); }
+function downloadAiFile(type, filename) {
+  // Let the browser own the transfer so large videos appear in Downloads
+  // immediately instead of being silently buffered into page memory first.
+  const token = getMediaTokenSync();
+  const url = `/api/files/${encodeURIComponent(type)}/${encodeURIComponent(filename)}`
+    + (token ? `?token=${encodeURIComponent(token)}` : '');
+  _startBrowserDownload(url, filename);
 }
 
 async function deleteAiImage(filename) {
