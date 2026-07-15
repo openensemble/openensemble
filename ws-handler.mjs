@@ -1684,7 +1684,12 @@ function onConnection(ws, req) {
       try {
         const { BASE_DIR } = await import('./lib/paths.mjs');
         const capRoot = path.join(BASE_DIR, 'wake-captures-manual');
-        if (fs.existsSync(path.join(capRoot, 'ENABLE'))) {
+        // Per-device flag `ENABLE-<deviceId>` scopes capture to a single device
+        // (e.g. only the kitchen during a harvest so other rooms keep working);
+        // legacy global `ENABLE` still captures on every device. Either one
+        // present for this device arms capture.
+        if (fs.existsSync(path.join(capRoot, `ENABLE-${ws._deviceId}`)) ||
+            fs.existsSync(path.join(capRoot, 'ENABLE'))) {
           const { wavWrapPcm16kMono } = await import('./lib/stt.mjs');
           const dir = path.join(capRoot, ws._deviceId);
           await fs.promises.mkdir(dir, { recursive: true });
