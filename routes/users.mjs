@@ -11,13 +11,13 @@ import {
   isPrivileged, loadUsers, loadConfig, modifyUsers, modifyUser, hashPassword, validatePassword, verifyPassword, readBody,
   createSession, clearUserSessions, clearUserSessionsExcept, modifyExpGroups, isTimeBlocked, parseMultipart,
   safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB, getClientIp,
-  setSessionCookie,
+  setSessionCookie, getUserCoordinatorAgentId,
 } from './_helpers.mjs';
 // uaFromReq isn't re-exported by the ._helpers.mjs aggregator yet — import
 // straight from the submodule (see routes/_helpers/auth-sessions.mjs).
 import { uaFromReq } from './_helpers/auth-sessions.mjs';
 import { migrateSharedCortexToUser } from '../memory.mjs';
-import { NEW_ACCOUNT_DEFAULT_MODE } from '../lib/orchestration-policy.mjs';
+import { NEW_ACCOUNT_DEFAULT_MODE, getOrchestrationPolicy, setOrchestrationPolicy } from '../lib/orchestration-policy.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
@@ -149,6 +149,48 @@ export async function handle(req, res) {
     const full = sanitizeUserForWire(u);
     const safe = (isPrivileged(authId) || authId === userMatch[1]) ? full : { id: u.id, name: u.name, emoji: u.emoji, color: u.color };
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(safe)); return true;
+  }
+
+  // Orchestration mode (single vs ensemble) — dedicated route rather than an
+  // EDITABLE_FIELDS entry because the value needs cross-record validation
+  // (primary-agent ownership) that lib/orchestration-policy.mjs owns. The
+  // settings toggle only EDITS the policy; enforcement happens server-side at
+  // agent resolution (plan D2).
+  const orchMatch = req.url.match(/^\/api\/users\/(user_[\w]+)\/orchestration$/);
+  if (orchMatch && req.method === 'PUT') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const targetId = orchMatch[1];
+    const authRole = getUserRole(authId);
+    const isPriv = authRole === 'owner' || authRole === 'admin';
+    if (!isPriv && authId !== targetId) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true; }
+    const target = loadUsers().find(u => u.id === targetId);
+    if (!target) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    // Admins manage only their own child/user accounts (same scope as PATCH).
+    if (authRole === 'admin' && authId !== targetId && target.parentId !== authId) {
+      res.writeHead(403); res.end(JSON.stringify({ error: 'You can only manage your own child/user accounts' })); return true;
+    }
+    // Children never reconfigure their own orchestration; a parent/admin can.
+    if (authId === targetId && target.role === 'child') {
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Orchestration mode is managed by a parent or admin for this account' })); return true;
+    }
+    try {
+      const { mode, primaryAgentId } = JSON.parse(await readBody(req));
+      let primary = typeof primaryAgentId === 'string' && primaryAgentId ? primaryAgentId : null;
+      if (mode === 'single' && !primary && !getOrchestrationPolicy(targetId).primaryAgentId) {
+        primary = getUserCoordinatorAgentId(targetId);   // sensible default; validated below
+      }
+      const applied = await setOrchestrationPolicy(targetId, { mode, ...(primary ? { primaryAgentId: primary } : {}) });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(applied));
+    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    return true;
+  }
+  if (orchMatch && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    if (!isPrivileged(authId) && authId !== orchMatch[1]) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(getOrchestrationPolicy(orchMatch[1])));
+    return true;
   }
 
   if (userMatch && req.method === 'PATCH') {

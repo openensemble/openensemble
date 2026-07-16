@@ -309,6 +309,59 @@ export default async function execute(name, args, userId, agentId) {
     return `Removed rule: ${removed}`;
   }
 
+  if (name === 'set_orchestration_mode') {
+    if (!userId) return 'userId is required.';
+    const { mode, primary_agent: primaryArg } = args;
+    if (mode !== 'single' && mode !== 'ensemble') return "mode must be 'single' or 'ensemble'.";
+    const user = getUserById(userId);
+    if (!user) return `User profile not found for ${userId}.`;
+    // Account-level guard: children never reconfigure their own orchestration.
+    if (user.role === 'child') return 'Orchestration mode is managed by a parent or admin for this account.';
+    const { getOrchestrationPolicy, setOrchestrationPolicy } = await import('../../lib/orchestration-policy.mjs');
+    const current = getOrchestrationPolicy(userId);
+    if (current.mode === mode && !primaryArg) {
+      return mode === 'single'
+        ? 'This account is already in single-agent mode.'
+        : 'This account is already in ensemble mode.';
+    }
+    let primaryAgentId = null;
+    if (mode === 'single') {
+      // Resolve by id or (case-insensitive) name against the agents this user
+      // actually owns — listAgents is unprojected, so this works even while
+      // already in single mode (e.g. re-pointing the primary).
+      const { listAgents } = await import('../../agents.mjs');
+      const owned = listAgents().filter(a => a.ownerId === userId);
+      if (primaryArg) {
+        const wanted = String(primaryArg).trim();
+        const match = owned.find(a => a.id === wanted)
+          ?? owned.find(a => (a.name ?? '').toLowerCase() === wanted.toLowerCase());
+        if (!match) {
+          const names = owned.map(a => `${a.name} (${a.id})`).join(', ') || 'none';
+          return `No agent named "${wanted}" found on this account. Available agents: ${names}.`;
+        }
+        primaryAgentId = match.id;
+      } else {
+        // Default: stored primary from a previous stint in single mode, else
+        // the current coordinator, else the only agent if there is one.
+        const { getUserCoordinatorAgentId } = await import('../../routes/_helpers.mjs');
+        primaryAgentId = current.primaryAgentId
+          ?? getUserCoordinatorAgentId(userId)
+          ?? (owned.length === 1 ? owned[0].id : null);
+        if (!primaryAgentId || !owned.some(a => a.id === primaryAgentId)) {
+          const names = owned.map(a => `${a.name} (${a.id})`).join(', ') || 'none';
+          return `Single-agent mode needs to know which agent becomes the one assistant. Available agents: ${names}. Ask the user to pick one, then call again with primary_agent.`;
+        }
+      }
+    }
+    const applied = await setOrchestrationPolicy(userId, { mode, ...(primaryAgentId ? { primaryAgentId } : {}) });
+    if (applied.mode === 'single') {
+      const { listAgents } = await import('../../agents.mjs');
+      const primary = listAgents().find(a => a.id === applied.primaryAgentId);
+      return `Switched to single-agent mode. ${primary?.name ?? 'The chosen agent'} is now the one assistant and handles every skill on this account, using background workers for long or parallel jobs. The other agents and their histories are parked, not deleted — switching back to ensemble restores them exactly. Takes effect from the next message.`;
+    }
+    return 'Switched back to ensemble mode. All agents, role assignments, and histories are restored exactly as they were. Takes effect from the next message.';
+  }
+
   if (name === 'set_email_send_without_confirm') {
     if (!userId) return 'userId is required.';
     const { enabled } = args;

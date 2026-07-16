@@ -56,6 +56,28 @@
     {
       "type": "function",
       "function": {
+        "name": "set_orchestration_mode",
+        "description": "Switch this user's account between the two orchestration modes: 'ensemble' (the classic setup — multiple agents, each assigned specific roles/skills, with a coordinator that delegates) and 'single' (one assistant that handles everything itself and uses background workers for long or parallel jobs). Call this when the user says things like 'switch me to single agent mode', 'I just want one assistant that does everything', 'combine my agents into one', or the inverse ('go back to my team of agents', 'switch back to ensemble', 'I want my separate agents again'). The switch is non-destructive in BOTH directions: switching to single quietly parks the other agents and their histories exactly as they are, and switching back restores them untouched. Confirm with the user before calling if their intent is not explicit. Children cannot change this setting.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["single", "ensemble"],
+              "description": "'single' for one do-everything assistant with background workers; 'ensemble' for the classic multi-agent setup"
+            },
+            "primary_agent": {
+              "type": "string",
+              "description": "Only used when mode='single': which agent becomes the one assistant, by name or agent id. Omit to use the current coordinator (the usual choice, and what was used last time if the user has switched before)."
+            }
+          },
+          "required": ["mode"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
         "name": "set_email_send_without_confirm",
         "description": "Toggle the per-user email send-without-confirmation gate. When ON, email agents (Gmail, Microsoft, IMAP) send replies and new emails directly when the user explicitly asks — no draft preview, no 'are you sure?'. When OFF (default), email agents always show a draft and wait for explicit approval. Call this when the user says things like 'stop asking me to confirm emails', 'just send emails directly', 'turn off email confirmation', or the inverse ('require confirmation before sending email', 'always ask before sending'). The setting persists across conversations until the user changes it again. Note: this only affects sends the user explicitly asked for in their message; drafts the agent proactively suggested still wait for approval regardless.",
         "parameters": {

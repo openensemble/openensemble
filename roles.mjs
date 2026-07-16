@@ -689,7 +689,18 @@ function _projectAssignmentsForOrchestration(user, raw) {
   if (orch?.mode !== 'single' || !primary) return raw;
   const projected = {};
   for (const skillId of Object.keys(raw)) projected[skillId] = primary;
-  if (Array.isArray(user.skills)) for (const skillId of user.skills) projected[skillId] = primary;
+  // Enabled skills expand onto the primary, but never beyond the account's
+  // allowedSkills scope (child accounts, plan D7): enabled_by_default skills
+  // are backfilled into `skills` for everyone, and without this intersection
+  // a restricted account's primary would receive schemas in single mode that
+  // no agent carried in ensemble mode. Explicit raw assignments above are
+  // kept as-is — they're admin-configured and already exposed in ensemble.
+  const allowed = Array.isArray(user.allowedSkills) ? new Set(user.allowedSkills) : null;
+  if (Array.isArray(user.skills)) {
+    for (const skillId of user.skills) {
+      if (!allowed || allowed.has(skillId)) projected[skillId] = primary;
+    }
+  }
   projected.coordinator = primary;
   return projected;
 }
