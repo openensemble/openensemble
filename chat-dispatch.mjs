@@ -65,6 +65,7 @@ import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { normalizeAttachments } from './chat/providers/_shared.mjs';
 import { compactDocumentFallback, normalizeDocumentRequest, parseDocumentMutationResult } from './lib/document-artifacts.mjs';
+import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
 
 // Pending ambient-restore timers, keyed by deviceId. A burst of wakes seconds
 // apart (e.g. a real command immediately followed by a false wake) would each
@@ -545,6 +546,7 @@ export async function handleChatMessage({
   let skipPostTurnArtifacts = false;
   const replayedArtifactSignatures = new Set();
   let outwardText = '';
+  let fastPathEvidence = null;
   onEvent = (event) => {
     if (!event || typeof event !== 'object') return rawOnEvent(event);
     if (event.type === 'token' && typeof event.text === 'string') outwardText += event.text;
@@ -1128,6 +1130,7 @@ export async function handleChatMessage({
   for (const handler of INTERCEPTORS) {
     const r = await handler(ctx);
     if (!r?.handled) continue;
+    if (r.trace && typeof r.trace === 'object') fastPathEvidence = r.trace;
     // Tag routing for the trace. The specialist router sets its own mode
     // ('specialist'); for the named fast-paths record which one handled it.
     if (!getTurn()?.routing?.mode) {
@@ -1325,7 +1328,57 @@ export async function handleChatMessage({
     // so a trace bug can never break the turn.
     try {
       const trace = finishTurn();
-      if (trace) log.info('turn', 'summary', trace);
+      if (trace) {
+        log.info('turn', 'summary', trace);
+        // Model-backed runs record their own inspector row. A true pre-model
+        // fast path has no span, so persist an explicit zero-call row here.
+        if (trace.routing?.llmAvoided === true && (trace.spans?.length ?? 0) === 0) {
+          const evidence = fastPathEvidence;
+          const used = evidence?.name ? [{
+            name: evidence.name,
+            argsPreview: JSON.stringify(redactArgsForTrace(evidence.args ?? {})).slice(0, 500),
+            resultPreview: String(evidence.result ?? '').slice(0, 500),
+          }] : [];
+          recordRunTrace(userId, {
+            turnId: trace.turnId,
+            rootId: trace.rootId,
+            parentTurnId: trace.parentTurnId,
+            messageId: trace.messageId,
+            attemptId: trace.attemptId,
+            agentId: trace.agentId ?? agentId,
+            source: trace.source ?? source ?? 'web',
+            durationMs: trace.durationMs,
+            input: rawText,
+            output: outwardText,
+            status: heldErrorEvent ? 'error' : 'complete',
+            error: heldErrorEvent?.message ?? null,
+            modelExpected: false,
+            modelCalls: [],
+            routing: {
+              initialSkills: [], addedSkills: [], recoveredMissingTools: false,
+              fullToolCount: 0, recoveryLoads: [],
+            },
+            sizes: {
+              systemPromptChars: 0, toolsBytes: 0, toolCount: 0,
+              historyMessages: 0, historyBytes: 0, userTextChars: String(rawText ?? '').length,
+            },
+            tools: {
+              usedNames: used.map(item => item.name),
+              used,
+              events: evidence?.name ? [{
+                name: evidence.name,
+                status: evidence.status ?? 'done',
+                durationMs: evidence.durationMs ?? null,
+                preview: String(evidence.result ?? '').slice(0, 500),
+              }] : [],
+            },
+            meta: {
+              fastPath: trace.routing?.fastPath ?? null,
+              localHandler: trace.routing?.localHandler ?? null,
+            },
+          });
+        }
+      }
     } catch { /* never throw from the finalizer */ }
 
     // Post-turn approval-pill diff (see snapshotPendingApprovals above). A

@@ -27,13 +27,22 @@ vi.mock('./lib/scheduled-child-barrier.mjs', () => ({
   completeScheduledChild: vi.fn(),
 }));
 
-vi.mock('./sessions.mjs', () => ({ appendToSession: vi.fn(async () => true) }));
+vi.mock('./sessions.mjs', () => ({
+  appendToSession: vi.fn(async () => true),
+  appendSessionReportOnce: vi.fn(async () => 'appended'),
+}));
 vi.mock('./ws-handler.mjs', () => ({ noteDeviceBackgroundWork: vi.fn() }));
 
 // Keep workers live until stopWorker aborts them, so ownership/status can be
 // asserted against the real in-memory background registry.
 vi.mock('./chat.mjs', () => ({
-  streamChat: async function* (_agent, _task, signal) {
+  streamChat: async function* (_agent, _task, signal, _emit, _userId, _attachment, _note, silent) {
+    if (silent) {
+      yield { type: 'token', text: 'Primary completion.' };
+      yield { type: '__content', content: 'Primary completion.' };
+      yield { type: 'done' };
+      return;
+    }
     await new Promise(resolve => {
       if (signal?.aborted) return resolve();
       signal?.addEventListener('abort', resolve, { once: true });

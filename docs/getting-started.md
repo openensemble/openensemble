@@ -43,10 +43,15 @@ docker run -p 3737:3737 -v oe-data:/app/users openensemble
 1. Open `http://<your-server-ip>:3737`.
 2. Create the owner account, or restore an existing backup.
 3. Connect one provider in **Settings → Providers**.
-4. Create a coordinator or specialist agent and send a message.
+4. Create your first assistant and send a message. New accounts use one
+   primary assistant by default; existing upgraded accounts keep their agent
+   ensemble unless they choose to switch.
 
 Everything else — email, calendar, MCP servers, remote nodes, voice devices,
 tunnels, and backups — can be added later.
+
+See [Single assistant and ensembles]({{ site.baseurl }}/single-agent-mode) for
+mode switching, preserved agents and memory, and the rollout/rollback runbook.
 
 ## Configuring LLM providers
 

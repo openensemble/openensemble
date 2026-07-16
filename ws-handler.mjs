@@ -419,6 +419,16 @@ export function initWs(httpServer) {
   // Wire the credential primitive so server-side tools can emit
   // `credential_prompt` frames via the per-user broadcast helper.
   setCredentialEmitter(sendToUser);
+
+  // The server ignores this return value. Embedders and integration tests use
+  // the handles to close every noServer WebSocketServer cleanly.
+  return {
+    browser: _wss,
+    nodes: _nodeWss,
+    terminal: _termWss,
+    browserExtension: _browserExtWss,
+    desktop: _desktopWss,
+  };
 }
 
 /**

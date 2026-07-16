@@ -6,7 +6,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import {
   OPENROUTER_URL, readAnthropicSSE, getOpenRouterKey, fetchWithRetry,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
-  capabilityNotice,
+  capabilityNotice, modelCallTraceEvent,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -99,6 +99,10 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     if (orTools) body.tools = orTools;
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, 'openrouter', agent);
+
+    yield modelCallTraceEvent({
+      provider: 'openrouter', model: agent.model, tools: body.tools, round: guard.count,
+    });
 
     const res = await fetchWithRetry(OPENROUTER_URL, {
       method: 'POST', signal,

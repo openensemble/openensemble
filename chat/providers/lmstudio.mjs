@@ -11,7 +11,7 @@ import { getLmsResponseId, setLmsResponseId } from '../../sessions.mjs';
 import {
   getLmstudioNativeUrl, getLmstudioCompatUrl, lmstudioAuthHeaders, readAnthropicSSE,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
-  fetchWithRetry,
+  fetchWithRetry, modelCallTraceEvent,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -55,6 +55,10 @@ export async function* streamLMStudio(agent, systemPrompt, messages, signal, use
     if (effort === 'high') body.reasoning = 'on';
   }
   if (prevId) body.previous_response_id = prevId;
+
+  yield modelCallTraceEvent({
+    provider: 'lmstudio', model: agent.model, tools: body.tools, round: 1,
+  });
 
   const res = await fetchWithRetry(getLmstudioNativeUrl(), {
     method: 'POST', signal,
@@ -151,7 +155,7 @@ export async function* streamLMStudio(agent, systemPrompt, messages, signal, use
   if (_lmsTokensPredicted) {
     // Input tokens not available in native mode; approximate from prompt length
     const approxInput = Math.ceil(userText.length / 4);
-    yield { type: '__usage', inputTokens: approxInput, outputTokens: _lmsTokensPredicted, provider: 'lmstudio', model: agent.model };
+    yield { type: '__usage', inputTokens: approxInput, outputTokens: _lmsTokensPredicted, estimated: true, provider: 'lmstudio', model: agent.model };
   }
 }
 
@@ -206,6 +210,10 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
       if (effort === 'off' || agent.think === false) body.reasoning = 'off';
       if (effort === 'high') body.reasoning = 'on';
     }
+
+    yield modelCallTraceEvent({
+      provider: 'lmstudio', model: agent.model, tools: body.tools, round: guard.count,
+    });
 
     const res = await fetchWithRetry(getLmstudioCompatUrl(), {
       method: 'POST', signal,
@@ -392,6 +400,6 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
     yield { type: '__usage', inputTokens: lmInputTokens, outputTokens: lmOutputTokens, provider: 'lmstudio', model: agent.model };
   } else if (totalCompatTokens > 0) {
     const approxInput = Math.ceil(userText.length / 4);
-    yield { type: '__usage', inputTokens: approxInput, outputTokens: totalCompatTokens, provider: 'lmstudio', model: agent.model };
+    yield { type: '__usage', inputTokens: approxInput, outputTokens: totalCompatTokens, estimated: true, provider: 'lmstudio', model: agent.model };
   }
 }

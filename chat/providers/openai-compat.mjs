@@ -10,6 +10,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import {
   OPENAI_COMPAT_PROVIDERS, readAnthropicSSE, getCompatKey, fetchWithRetry,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
+  modelCallTraceEvent,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -84,6 +85,10 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     if (!streamUsageDisabled) body.stream_options = { include_usage: true };
     if (compatTools)     body.tools      = compatTools;
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, providerKey, agent);
+
+    yield modelCallTraceEvent({
+      provider: providerKey, model: agent.model, tools: body.tools, round: guard.count,
+    });
 
     const res = await fetchWithRetry(endpoint, {
       method: 'POST', signal,

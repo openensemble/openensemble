@@ -13,7 +13,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import { writeFileSync } from 'fs';
 import path from 'path';
 import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth.mjs';
-import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS, capabilityNotice } from './_shared.mjs';
+import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS, capabilityNotice, modelCallTraceEvent } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
@@ -117,10 +117,11 @@ function saveImageGenerationResult(userId, item) {
   return { base64, mimeType: 'image/png', filename, savedPath };
 }
 
-async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000 } = {}) {
+async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAttempt = null } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
+      onAttempt?.();
       return await fetch(url, init);
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
@@ -149,17 +150,42 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     ? `${OPENAI_OAUTH_BASE}/responses`
     : `${OPENAI_COMPAT_PROVIDERS['xai'].baseUrl.replace(/\/$/, '')}/responses`;
 
+  let assistantContent = '';
+  let totalInputTokens = 0, totalOutputTokens = 0, totalCachedTokens = 0;
+  // Track request/completion/usage cardinality separately from token totals.
+  // Aggregate totals cannot prove that every logical provider round produced
+  // exactly one terminal record and one usage object.
+  let reqCount = 0, completionCount = 0, usageCount = 0;
+  let usageCardinalityValid = true;
+  const usageTelemetry = () => ({
+    type: '__usage',
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    cachedTokens: totalCachedTokens,
+    provider: tag,
+    model: agent.model,
+    reqCount,
+    completionCount,
+    usageCount,
+    usageComplete: reqCount > 0
+      && usageCardinalityValid
+      && reqCount === completionCount
+      && reqCount === usageCount,
+  });
+
   let auth;
   if (isCodex) {
     try {
       auth = await ensureFreshToken(userId);
     } catch (e) {
+      yield usageTelemetry();
       yield { type: 'error', message: `OpenAI Codex OAuth: ${e.message}` };
       return;
     }
   } else {
     const key = getCompatKey('xai');
     if (!key) {
+      yield usageTelemetry();
       yield { type: 'error', message: 'xAI Grok API key not set. Add it in Settings → Providers.' };
       return;
     }
@@ -178,9 +204,11 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   // fields, and 100% of our Codex traffic flows through here anyway.
   const promptCacheKey = isCodex ? `oe:${userId}:${agent.id ?? agent.name ?? 'agent'}` : null;
 
-  let assistantContent = '';
-  let totalInputTokens = 0, totalOutputTokens = 0, totalCachedTokens = 0;
   const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  // A tool call is not a final assistant answer. Remember when the most recent
+  // permitted provider round ended in tools so loop-budget exhaustion cannot
+  // masquerade as a successful empty completion.
+  let awaitingPostToolAnswer = false;
   // Set if the Codex backend rejects the hosted web_search tool, so we resend
   // with the Brave function tool restored. Guards against the experimental
   // backend dropping hosted-tool support (the way it rejects web_search_preview
@@ -194,7 +222,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   const NATIVE_IMAGE_GEN_CAP = 3;
   let nativeImagesThisTurn = 0;
 
-  while (guard.tick()) {
+  try {
+    while (guard.tick()) {
     // Re-read tools per iteration so dynamic toolset mutations (e.g. the
     // request_tools meta-tool expanding the coordinator's surface mid-turn)
     // take effect on the very next provider call. Cost: one O(tools) map
@@ -256,6 +285,9 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     }
 
     console.log(`[${tag}] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}${body.prompt_cache_key ? ` cache_key=${body.prompt_cache_key}` : ''}`);
+    yield modelCallTraceEvent({
+      provider: tag, model: agent.model, tools: body.tools, round: guard.count,
+    });
     // The Codex backend occasionally drops connections at handshake time
     // (manifests as Node fetch's TypeError "fetch failed"). One quick retry
     // with a small backoff resolves the vast majority of these without the
@@ -265,12 +297,13 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     try {
       res = await postWithRetry(endpoint, {
         method: 'POST', signal, headers, body: JSON.stringify(body),
-      });
+      }, { onAttempt: () => { reqCount++; } });
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
       const cause = e?.cause?.code || e?.cause?.message;
       const errTag = cause ? `${e.message} (${cause})` : e.message;
       console.error(`[${tag}] POST failed after retry: ${errTag}`);
+      yield usageTelemetry();
       yield { type: 'error', message: `${displayName}: ${errTag}` };
       return;
     }
@@ -295,6 +328,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           auth = await forceRefreshToken(userId);
         } catch (e) {
           console.warn(`[openai-oauth] refresh_token also invalid for user=${userId}: ${e.message}`);
+          yield usageTelemetry();
           yield { type: 'error', message: REAUTH_MSG };
           return;
         }
@@ -308,11 +342,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         headers.Authorization = `Bearer ${auth.access_token}`;
         if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
         try {
+          // This rejected request had no completion/usage record. Preserve
+          // that gap even if the refreshed-token retry succeeds.
+          usageCardinalityValid = false;
           res = await postWithRetry(`${OPENAI_OAUTH_BASE}/responses`, {
             method: 'POST', signal, headers, body: JSON.stringify(body),
-          });
+          }, { onAttempt: () => { reqCount++; } });
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
+          yield usageTelemetry();
           yield { type: 'error', message: `OpenAI Codex: ${e.message}` };
           return;
         }
@@ -323,13 +361,16 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           // the same "session truly revoked" signal — show the same reconnect
           // prompt rather than a raw error blob.
           if (res.status === 401) {
+            yield usageTelemetry();
             yield { type: 'error', message: REAUTH_MSG };
           } else {
+            yield usageTelemetry();
             yield { type: 'error', message: `OpenAI Codex error ${res.status} after token refresh: ${retryErr}` };
           }
           return;
         }
       } else if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
+        usageCardinalityValid = false;
         console.warn(`[${tag}] reasoning effort rejected; retrying without reasoning field`);
         reasoningDisabled = true;
         { const notice = capabilityNotice(tag, 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');
@@ -341,6 +382,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         // web_search function restored — search still works, just via our local
         // path. Bounded: nativeSearchDisabled stays set, so a second failure
         // falls through to the generic error below (no retry loop).
+        usageCardinalityValid = false;
         console.warn(`[${tag}] hosted web_search rejected (${res.status}); falling back to Brave web_search`);
         nativeSearchDisabled = true;
         { const notice = capabilityNotice(tag, 'native_search', 'Provider rejected native web search — continuing with the standard search tool.');
@@ -348,6 +390,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         continue;
       } else {
         console.error(`[${tag}] error ${res.status}: ${errText.slice(0, 500)}`);
+        yield usageTelemetry();
         yield { type: 'error', message: `${displayName} error ${res.status}: ${errText}` };
         return;
       }
@@ -385,13 +428,27 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     const startedAt  = Date.now();
     let firstTokenAt = null;
     let finalized    = false;
+    let loopCompletionCount = 0;
+    let loopUsageCount = 0;
+    let loopUsageValuesValid = true;
+    // A completed response is authoritative only when it is the final parsed
+    // provider event for this request. The direct ChatGPT Codex endpoint closes
+    // cleanly after response.completed; other Responses providers must also
+    // send the standard [DONE] sentinel.
+    let loopTerminalWasLast = true;
+    let loopSseDoneCount = 0;
 
     const seenEventTypes = new Set();
     for await (const ev of readAnthropicSSE(res.body)) {
+      if (ev.__sseDone === true) {
+        loopSseDoneCount++;
+        continue;
+      }
       const t = ev.type;
+      if (finalized) loopTerminalWasLast = false;
       if (t && !seenEventTypes.has(t)) {
         seenEventTypes.add(t);
-        if (!/^response\.(output_text\.(delta|done|annotation\.added)|output_item\.(added|done)|function_call_arguments\.(delta|done)|created|in_progress|completed|content_part\.(added|done)|web_search_call\.(in_progress|searching|completed)|image_generation_call\.(in_progress|generating|partial_image|completed)|reasoning_summary_part\.(added|done)|reasoning_summary_text\.(delta|done))$/.test(t)) {
+        if (!/^response\.(output_text\.(delta|done|annotation\.added)|output_item\.(added|done)|function_call_arguments\.(delta|done)|created|in_progress|completed|incomplete|failed|content_part\.(added|done)|web_search_call\.(in_progress|searching|completed)|image_generation_call\.(in_progress|generating|partial_image|completed)|reasoning_summary_part\.(added|done)|reasoning_summary_text\.(delta|done))$/.test(t)) {
           console.log(`[${tag}] unknown SSE event type: ${t}`, JSON.stringify(ev).slice(0, 300));
         }
       }
@@ -458,6 +515,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         continue;
       }
       if (t === 'response.completed') {
+        completionCount++;
+        loopCompletionCount++;
         for (const item of ev.response?.output ?? []) {
           if (item?.type === 'image_generation_call') {
             const image = recordGeneratedImage(item);
@@ -465,24 +524,75 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           }
         }
         const usage = ev.response?.usage;
-        if (usage) {
-          totalInputTokens   += usage.input_tokens  ?? 0;
-          totalOutputTokens  += usage.output_tokens ?? 0;
+        if (usage && typeof usage === 'object') {
+          usageCount++;
+          loopUsageCount++;
+          const validUsage = Number.isSafeInteger(usage.input_tokens) && usage.input_tokens > 0
+            && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens > 0;
+          if (validUsage) {
+            const nextInputTokens = totalInputTokens + usage.input_tokens;
+            const nextOutputTokens = totalOutputTokens + usage.output_tokens;
+            if (Number.isSafeInteger(nextInputTokens) && Number.isSafeInteger(nextOutputTokens)) {
+              totalInputTokens = nextInputTokens;
+              totalOutputTokens = nextOutputTokens;
+            } else {
+              loopUsageValuesValid = false;
+            }
+          } else {
+            loopUsageValuesValid = false;
+          }
           // Responses API spells this `input_tokens_details.cached_tokens`
           // (vs Chat Completions' `prompt_tokens_details.cached_tokens`).
-          totalCachedTokens  += usage.input_tokens_details?.cached_tokens ?? 0;
+          const cached = usage.input_tokens_details?.cached_tokens;
+          if (validUsage && cached != null) {
+            if (Number.isSafeInteger(cached) && cached >= 0) {
+              const nextCachedTokens = totalCachedTokens + cached;
+              if (Number.isSafeInteger(nextCachedTokens)) totalCachedTokens = nextCachedTokens;
+              else loopUsageValuesValid = false;
+            } else {
+              loopUsageValuesValid = false;
+            }
+          }
         }
         finalized = true;
         continue;
       }
-      if (t === 'response.failed' || t === 'error') {
-        const msg = ev.response?.error?.message ?? ev.error?.message ?? 'unknown error';
+      if (t === 'response.incomplete' || t === 'response.failed' || t === 'error') {
+        const reason = ev.response?.incomplete_details?.reason;
+        const msg = ev.response?.error?.message ?? ev.error?.message
+          ?? (reason ? `response incomplete (${reason})` : 'response incomplete or failed');
+        usageCardinalityValid = false;
+        if (textContent.trim()) yield { type: 'replace', text: '' };
+        yield usageTelemetry();
         yield { type: 'error', message: `${displayName}: ${msg}` };
         return;
       }
     }
 
+    // Validate THIS request before executing tools or accepting final text.
+    // Aggregate equality cannot prove per-request integrity: a duplicate in one
+    // round and an omission in another could otherwise cancel out. ChatGPT's
+    // direct Codex endpoint legitimately closes at clean EOF after its single
+    // response.completed event; every other Responses provider must terminate
+    // with exactly one [DONE] sentinel.
+    const validStreamTerminator = loopSseDoneCount === 1
+      || (isCodex && loopSseDoneCount === 0);
+    const validTerminal = finalized
+      && loopCompletionCount === 1
+      && loopUsageCount === 1
+      && loopUsageValuesValid
+      && loopTerminalWasLast
+      && validStreamTerminator;
+    if (!validTerminal) {
+      usageCardinalityValid = false;
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      yield usageTelemetry();
+      yield { type: 'error', message: `${displayName}: incomplete or invalid response stream.` };
+      return;
+    }
+
     if (toolCalls.size > 0) {
+      awaitingPostToolAnswer = true;
       if (textContent.trim()) yield { type: 'replace', text: '' };
 
       const blocks = [...toolCalls.values()];
@@ -523,7 +633,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           }
         }
         { const sc = guard.check(results.map(r => ({ name: r.block.name, args: r.block.argsJson })), results.map(r => r.result));
-          if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
+          if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; awaitingPostToolAnswer = false; yield { type: 'token', text: assistantContent }; break; } }
         continue;
       }
 
@@ -572,11 +682,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         working.push(buildImageUserMessage('openai-oauth', payload.images, `[attached: image(s) returned by ${payload.name}]`));
       }
       { const sc = guard.check(seqResults.map(r => ({ name: r.name, args: r.args })), seqResults.map(r => r.result));
-        if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
+        if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; awaitingPostToolAnswer = false; yield { type: 'token', text: assistantContent }; break; } }
       if (_terminalReply != null) {
         // The pipeline reported its own final answer — deliver it as this
         // turn's reply and end the loop without another model call.
         assistantContent = _terminalReply;
+        awaitingPostToolAnswer = false;
         yield { type: 'replace', text: assistantContent };
         break;
       }
@@ -590,6 +701,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       textContent = [textContent.trim(), imageText].filter(Boolean).join('\n\n');
     }
     assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);
+    awaitingPostToolAnswer = false;
     if (assistantContent !== textContent) yield { type: 'replace', text: assistantContent };
     if (firstTokenAt && tokenCount > 0) {
       const genSecs = (Date.now() - firstTokenAt) / 1000;
@@ -599,19 +711,28 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         tokens: tokenCount,
       };
     }
-    if (!finalized) {
-      // Stream ended without a `response.completed` terminal event — the text
-      // is truncated. Emit what we have, but warn so it isn't silently treated
-      // as a complete reply.
-      yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
-    }
     break;
+  }
+  } catch (e) {
+    // Abort/read/tool exceptions are still observable usage outcomes. Emit
+    // counters before preserving the original exception semantics.
+    usageCardinalityValid = false;
+    yield usageTelemetry();
+    throw e;
+  }
+
+  if (awaitingPostToolAnswer) {
+    yield usageTelemetry();
+    yield {
+      type: 'error',
+      message: `${displayName}: tool-loop request budget ended before a final answer was produced.`,
+    };
+    return;
   }
 
   yield { type: '__content', content: assistantContent };
-  if (totalInputTokens || totalOutputTokens) {
-    yield { type: '__usage', inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cachedTokens: totalCachedTokens, provider: tag, model: agent.model };
-  }
+  // Always emit on normal exit, including explicit zero/incomplete evidence.
+  yield usageTelemetry();
   if (totalInputTokens) {
     const hitRate = totalCachedTokens / totalInputTokens;
     const tierMode = agent._promptTiersAssembled ? 'tiered' : 'flat';

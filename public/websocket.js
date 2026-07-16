@@ -25,10 +25,12 @@ const TURN_EVENT_TYPES = new Set([
   'turn_accepted', 'token', 'replace', 'tool_call', 'tool_progress', 'tool_result',
   'permission_request', 'hide_turn', 'done', 'error', 'image', 'video', 'perf',
   'approval_pending', 'approval_resolved', 'attachment_decision', 'document_response',
+  'assistant_notification',
   'credential_prompt', 'credential_resolved', 'credential_error',
 ]);
 const TURN_AUX_EVENT_TYPES = new Set([
   'approval_pending', 'approval_resolved', 'attachment_decision', 'document_response',
+  'assistant_notification',
 ]);
 const CREDENTIAL_EVENT_TYPES = new Set(['credential_prompt', 'credential_resolved', 'credential_error']);
 
@@ -759,6 +761,38 @@ function handleServerMessage(msg) {
         if (msg.agent === activeAgent) appendAssistantBubble(msg.text, row.ts, true);
       }
       break;
+    case 'assistant_notification': {
+      // A buffered background completion is independent of the foreground
+      // turn stream. Cache it without touching streamEl; the stable ids match
+      // the already-durable session row and suppress live/reload duplicates.
+      const target = clientSessionAgentId(msg.agent || activeAgent);
+      if (!target || !msg.content) break;
+      if (!sessions[target]) sessions[target] = [];
+      const row = {
+        role: msg.role === 'notification' ? 'notification' : 'assistant',
+        content: msg.content, ts: msg.ts || Date.now(),
+        ...(msg.from ? { from: msg.from } : {}),
+        turnId: msg.turn_id || msg.notification_id || null,
+        attemptId: msg.attempt_id || msg.turn_id || msg.notification_id || null,
+        reportId: msg.reportId || null,
+        taskId: msg.taskId || null,
+        backgroundTaskId: msg.taskId || null,
+        status: msg.status || 'done', asyncNotification: true,
+        ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}),
+      };
+      if (!(typeof sessionHasEquivalent === 'function' && sessionHasEquivalent(sessions[target], row))) {
+        sessions[target].push(row);
+      }
+      const foregroundActive = Boolean(agentStreams[target]?.active || (target === activeAgent && streamEl));
+      if (target === activeAgent && !foregroundActive) renderSession();
+      else if (target === activeAgent) showToast('Background work finished.');
+      else {
+        const label = agents.find(agent => agent.id === target)?.name || 'Assistant';
+        showToast(`${label} finished background work.`);
+      }
+      buildTabs(); buildAgentDrawer();
+      break;
+    }
     case 'perf':
       if (msg.agent !== activeAgent) break;
       if (streamEl) {

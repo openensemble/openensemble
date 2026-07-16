@@ -88,7 +88,7 @@ import { registerAlarm, getCachedAlarmTts, sendAlarmArm } from './lib/alarms.mjs
 import { formatDurationAdj } from './lib/voice-timer.mjs';
 import { startDiscoveryBeacon, stopDiscoveryBeacon, startMdnsAdvertiser, stopMdnsAdvertiser } from './discovery.mjs';
 import { migrateUserDirs }               from './migrate-user-dirs.mjs';
-import { setBackgroundBroadcastFn, bootRecoverInterruptedTasks } from './background-tasks.mjs';
+import { setBackgroundUserSendFn, bootRecoverInterruptedTasks } from './background-tasks.mjs';
 import { setNodesBroadcastFn } from './skills/nodes/execute.mjs';
 import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
 import { setSalienceNotifyBroadcast } from './lib/proposal-salience.mjs';
@@ -601,7 +601,7 @@ startVoiceDeviceMonitor();
 startCalendarMirrorLoop();
 
 setBroadcastFn(broadcastAgentList);
-setBackgroundBroadcastFn(broadcast);
+setBackgroundUserSendFn(sendToUser);
 setNodesBroadcastFn(sendToUser);
 setUserBroadcastFn(broadcastToUsers);
 setRuntimeWarnBroadcast(broadcast);

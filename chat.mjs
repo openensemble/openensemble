@@ -37,8 +37,13 @@ import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
 import { getSelectedPlanKeepTools } from './roles.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
-import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
+import { recordRunTrace, redactArgsForTrace, redactTextForTrace } from './lib/run-inspector.mjs';
 import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
+import {
+  buildWorkerStandingMemoryContext,
+  filterWorkerLeafTools,
+  workerStandingMemoryOwner,
+} from './lib/worker-memory-policy.mjs';
 import {
   compactDocumentToolArgs,
   compactDocumentFallback,
@@ -159,7 +164,13 @@ function documentArtifactContent(request, artifact, fallback = '') {
 // async since the durability fix: the session write is awaited so callers can
 // hold the terminal `done` until the turn is actually on disk. Everything
 // after the write (friction/proposers/signals) stays fire-and-forget.
-async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false } = {}) {
+async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, workerLeafRun = false } = {}) {
+  // Detached task workers are deliberately non-learning. Their completed
+  // report is persisted by the owner-continuation path; writing a second
+  // ephemeral session here is unnecessary, and proceeding below would also
+  // feed friction/routine proposals or Cortex learning from an internal task
+  // prompt. Operational run traces are recorded outside persist() and remain.
+  if (workerLeafRun) return;
   const safeDocumentRequest = normalizeDocumentRequest(documentRequest);
   const documentArtifact = safeDocumentRequest ? findDocumentMutation(toolsUsed) : null;
   const persistedAssistantContent = documentArtifactContent(safeDocumentRequest, documentArtifact, assistantContent);
@@ -478,7 +489,78 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
 // bail out on error. Returns the final assistantContent string (or '' on error/empty)
 // plus the list of tool invocations (name + result text) — used by persist() to
 // gate signal detection and pick the right UI badge for memory-mutating tools.
-async function* consumeProvider(providerGen, { suppressText = false } = {}) {
+function optionalSafeCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function sumKnown(a, b) {
+  const values = [a, b].filter(value => Number.isSafeInteger(value) && value >= 0);
+  if (!values.length) return null;
+  const sum = values.reduce((total, value) => total + value, 0);
+  return Number.isSafeInteger(sum) ? sum : null;
+}
+
+function hasUsageCardinality(usage) {
+  return usage && (
+    Number.isSafeInteger(usage.reqCount)
+    || Number.isSafeInteger(usage.completionCount)
+    || Number.isSafeInteger(usage.usageCount)
+    || typeof usage.usageComplete === 'boolean'
+  );
+}
+
+function hasCompleteUsageCardinality(usage) {
+  return usage
+    && Number.isSafeInteger(usage.inTok) && usage.inTok > 0
+    && Number.isSafeInteger(usage.outTok) && usage.outTok > 0
+    && Number.isSafeInteger(usage.reqCount) && usage.reqCount > 0
+    && Number.isSafeInteger(usage.completionCount) && usage.completionCount >= 0
+    && Number.isSafeInteger(usage.usageCount) && usage.usageCount >= 0
+    && usage.reqCount === usage.completionCount
+    && usage.reqCount === usage.usageCount
+    && typeof usage.usageComplete === 'boolean';
+}
+
+/** Preserve usage evidence across chat-level recovery provider generators. */
+export function mergeProviderUsage(first, second) {
+  if (!first && !second) return null;
+  const a = first || null;
+  const b = second || null;
+  const cardinalitySeen = hasUsageCardinality(a) || hasUsageCardinality(b);
+  const reqCount = sumKnown(a?.reqCount, b?.reqCount);
+  const completionCount = sumKnown(a?.completionCount, b?.completionCount);
+  const usageCount = sumKnown(a?.usageCount, b?.usageCount);
+  const inTok = sumKnown(a?.inTok, b?.inTok);
+  const outTok = sumKnown(a?.outTok, b?.outTok);
+  const aggregateCountsValid = Number.isSafeInteger(reqCount) && reqCount > 0
+    && Number.isSafeInteger(completionCount)
+    && Number.isSafeInteger(usageCount)
+    && reqCount === completionCount
+    && reqCount === usageCount;
+  const aggregateTokensValid = Number.isSafeInteger(inTok) && inTok > 0
+    && Number.isSafeInteger(outTok) && outTok > 0;
+  return {
+    inTok,
+    outTok,
+    cachedTok: sumKnown(a?.cachedTok, b?.cachedTok),
+    cacheCreateTok: sumKnown(a?.cacheCreateTok, b?.cacheCreateTok),
+    provider: b?.provider ?? a?.provider ?? null,
+    model: b?.model ?? a?.model ?? null,
+    estimated: a?.estimated === true || b?.estimated === true,
+    reqCount,
+    completionCount,
+    usageCount,
+    usageComplete: cardinalitySeen
+      ? Boolean(a && b
+        && hasCompleteUsageCardinality(a) && hasCompleteUsageCardinality(b)
+        && a.usageComplete === true && b.usageComplete === true
+        && aggregateCountsValid && aggregateTokensValid)
+      : null,
+  };
+}
+
+// Exported so internal event retention can be tested without a live provider.
+export async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   let assistantContent = '';
   let errored = false;
   // Phase-14 chip-replaces-turn: tools may yield `__hide_turn` to indicate
@@ -488,6 +570,7 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   let hideTaskId = null;
   const toolsUsed = [];
   const toolEvents = [];
+  const modelCalls = [];
   const turnImages = [];
   // One synthetic web_search record per turn when the provider's hosted search
   // runs (it emits only tool_progress, never a local tool_call/result pair).
@@ -502,19 +585,67 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
   // usage through every streamChat consumer. inTok/outTok avoid logger.mjs's
   // /token/ redact key (see lib/turn-trace-context.mjs).
   let usage = null;
+  try {
   for await (const event of providerGen) {
     if (event.type === '__content') { assistantContent = event.content; continue; }
+    if (event.type === '__model_call') {
+      const router = toolRouterContext.getStore();
+      modelCalls.push({
+        provider: event.provider ?? null,
+        model: event.model ?? null,
+        estimated: event.estimated === true,
+        phase: event.phase === 'dispatch_planned' ? event.phase : 'unknown',
+        providerRound: Number.isSafeInteger(event.round) ? event.round : null,
+        toolsPresent: event.toolsPresent === true,
+        toolNames: Array.isArray(event.toolNames) ? [...event.toolNames] : [],
+        toolCount: Number.isSafeInteger(event.toolCount) ? event.toolCount : null,
+        toolSchemaBytes: Number.isSafeInteger(event.toolSchemaBytes) ? event.toolSchemaBytes : null,
+        schemaTokEst: Number.isSafeInteger(event.schemaTokEst) ? event.schemaTokEst : null,
+        schemaHash: typeof event.schemaHash === 'string' ? event.schemaHash : null,
+        selectedSkills: [...(router?.keptSkills ?? router?.initiallyIncludedSkills ?? [])].sort(),
+        addedSkills: [...(router?.addedSkills ?? [])].sort(),
+        recoveryLoads: Array.isArray(router?.recoveryLoads)
+          ? router.recoveryLoads.map(load => ({
+              source: load?.source ?? null,
+              requestedGroups: Array.isArray(load?.requestedGroups) ? [...load.requestedGroups] : [],
+              addedSkills: Array.isArray(load?.addedSkills) ? [...load.addedSkills] : [],
+              addedToolNames: Array.isArray(load?.addedToolNames) ? [...load.addedToolNames] : [],
+            }))
+          : [],
+        ...(event.traceError === true ? { traceError: true } : {}),
+      });
+      continue;
+    }
     if (event.type === '__usage') {
+      const inTok = optionalSafeCount(event.inputTokens);
+      const outTok = optionalSafeCount(event.outputTokens);
+      const reqCount = optionalSafeCount(event.reqCount);
+      const completionCount = optionalSafeCount(event.completionCount);
+      const usageCount = optionalSafeCount(event.usageCount);
+      const completeCounts = Number.isSafeInteger(reqCount) && reqCount > 0
+        && Number.isSafeInteger(completionCount)
+        && Number.isSafeInteger(usageCount)
+        && reqCount === completionCount
+        && reqCount === usageCount;
+      const completeTokens = Number.isSafeInteger(inTok) && inTok > 0
+        && Number.isSafeInteger(outTok) && outTok > 0;
       usage = {
-        inTok: event.inputTokens ?? null,
-        outTok: event.outputTokens ?? null,
+        inTok,
+        outTok,
         // Prompt-cache read hits (OpenAI cached_tokens / Anthropic cache_read) and
         // Anthropic cache-creation tokens. Named *Tok (not *Tokens) so logger.mjs's
         // /token/i redact key doesn't blank them on the way to the turn trace.
-        cachedTok: event.cachedTokens ?? null,
-        cacheCreateTok: event.cacheCreatedTokens ?? null,
+        cachedTok: optionalSafeCount(event.cachedTokens),
+        cacheCreateTok: optionalSafeCount(event.cacheCreatedTokens),
         provider: event.provider ?? null,
         model: event.model ?? null,
+        estimated: event.estimated === true,
+        reqCount,
+        completionCount,
+        usageCount,
+        usageComplete: typeof event.usageComplete === 'boolean'
+          ? event.usageComplete === true && completeCounts && completeTokens
+          : null,
       };
     }
     if (event.type === '__hide_turn') { hideTurn = true; hideTaskId = event.taskId || null; continue; }
@@ -617,9 +748,15 @@ async function* consumeProvider(providerGen, { suppressText = false } = {}) {
     }
     if (event.type === 'error') { errored = true; break; }
   }
+  } catch (e) {
+    errored = true;
+    if (e?.name !== 'AbortError') {
+      yield { type: 'error', message: String(e?.message || e || 'Provider stream failed').slice(0, 500) };
+    }
+  }
   return errored
-    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, hideTurn: false, hideTaskId: null, usage }
-    : { assistantContent, errored: false, toolsUsed, toolEvents, hideTurn, hideTaskId, usage };
+    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
+    : { assistantContent, errored: false, toolsUsed, toolEvents, modelCalls, hideTurn, hideTaskId, usage, turnImages };
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
@@ -760,6 +897,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const attachment0 = attachments[0] ?? null;
   const isolatedTaskRun = turnOpts?.isolatedTaskRun === true;
   const readOnlyTurn = turnOpts?.readOnlyTurn === true;
+  const workerMemoryOwnerId = workerStandingMemoryOwner(agent, turnOpts);
   const sessionUserText = typeof turnOpts?.sessionUserText === 'string'
     ? turnOpts.sessionUserText
     : userText;
@@ -790,6 +928,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       source: turnOpts?.traceSource || (voiceCtx?.source === 'voice-device' ? 'voice-device' : 'background'),
       rootId: turnOpts?.rootTaskId || null,
       forceRoot: _detachedRun,
+      messageId: turnOpts?.messageId || null,
+      attemptId: turnOpts?.attemptId || null,
+      sessionKey: turnOpts?.sessionKey || null,
+      sessionEpoch: turnOpts?.sessionEpoch || null,
     });
     _ownsTurnTrace = true;
   }
@@ -817,7 +959,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (voiceCtx) {
     voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
   }
-  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, addedSkills: Set<string>, initialToolNames?: Set<string>} | null} */
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>} | null} */
   let _routerStore = null;
   // A task must never create a task. On any autonomous run strip the task /
   // reminder / alarm creators BEFORE tool routing, so they're absent from the
@@ -826,8 +968,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (isolatedTaskRun && Array.isArray(agent.tools)) {
     const before = agent.tools.length;
     agent.tools = agent.tools.filter(t => !AUTONOMOUS_TASK_CREATION_TOOLS.has(t.function?.name));
+    agent.tools = filterWorkerLeafTools(agent.tools, agent, turnOpts);
     if (agent.tools.length !== before) {
-      log.info('chat', 'stripped task-creation tools on autonomous run', { agentId: agent.id, removed: before - agent.tools.length });
+      recomposeAgentPromptForTools(agent);
+      log.info('chat', 'stripped autonomous/control-plane tools on isolated run', { agentId: agent.id, removed: before - agent.tools.length });
     }
   }
   const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan);
@@ -846,6 +990,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         initiallyIncludedSkills: new Set(),
         keptSkills: new Set(),
         addedSkills: new Set(),
+        recoveryLoads: [],
         initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
       };
       toolRouterContext.enterWith(_routerStore);
@@ -887,7 +1032,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // ephemeral specialist-router runs (Helen). On voice-device pipelines
   // every user turn lands in Helen ephemerally, so gating on !ephemeral
   // would mean the flush never fires for voice-only users. Keyed by userId.
-  if (!readOnlyTurn && !silent) {
+  if (!readOnlyTurn && !silent && !workerMemoryOwnerId) {
     import('./lib/routine-proposer.mjs')
       .then(m => m.flushPendingRoutineCandidate({ userId, currentUserMessage: userText }))
       .catch(e => console.warn('[routine-proposer] flush failed:', e.message));
@@ -924,10 +1069,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
 
   // 1. Build rich cortex context (relevant memories, preferences, past episodes)
   // Expand deictic/pronominal queries ("tell me more about that") with recent context.
-  // Ephemeral agents (deep_research_parallel workers, etc.) skip cortex loads
-  // — they're pure stateless one-shots and shouldn't read the user's memory.
+  // Generic ephemerals skip Cortex entirely. A detached worker may opt into
+  // the narrower standing-memory contract only when its explicit stable owner
+  // marker matches the request; episodes/history/cross-agent reads stay off.
   const NEEDS_CONTEXT_RE = /\b(that|this|it|those|these|there|the same|more about|what we|what you|yesterday|earlier|last time|before|again|continue|go on)\b/i;
-  const _ctxPromise = (agent.ephemeral || readOnlyTurn) ? Promise.resolve(null) : (async () => {
+  const _ctxPromise = (readOnlyTurn || (agent.ephemeral && !workerMemoryOwnerId)) ? Promise.resolve(null) : (async () => {
     let recallQuery = sessionUserText;
     if (!isolatedTaskRun && (sessionUserText.length < 50 || NEEDS_CONTEXT_RE.test(sessionUserText))) {
       const recentMsgs = (await loadSession(agent.id, 6)).filter(m => m.excludeFromModel !== true).slice(-4);
@@ -937,6 +1083,19 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         const ctx_parts = [lastUser?.content?.slice(0, 150), lastAsst?.content?.slice(0, 150)].filter(Boolean);
         if (ctx_parts.length) recallQuery = `${sessionUserText} [context: ${ctx_parts.join(' ')}]`;
       }
+    }
+    if (workerMemoryOwnerId) {
+      return buildWorkerStandingMemoryContext({
+        agent,
+        turnOpts,
+        userId,
+        query: recallQuery,
+        resolveOwnedAgent: async (ownerId, ownerUserId) => {
+          const { getAgentForUser } = await import('./routes/_helpers.mjs');
+          return getAgentForUser(ownerId, ownerUserId);
+        },
+        buildContext: buildAgentContext,
+      }).catch(() => null);
     }
     return buildAgentContext(agent.id, recallQuery, userId, { includeEpisodes: !isolatedTaskRun }).catch(() => null);
   })();
@@ -1013,7 +1172,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // so toolRouterContext.enterWith lands in streamChat's own async context and
   // propagates to the provider tool-loop. Must complete before basePrompt is
   // read below — recompose rewrites agent.systemPrompt.
-  const _trim = _trimPromise ? await _trimPromise : null;
+  const _trimResult = _trimPromise ? await _trimPromise : null;
+  // The pre-router filter is the primary boundary. Reapply it to both router
+  // outputs as a fail-closed invariant so request_tools can never recover a
+  // control-plane schema through fullTools after a router refactor or plugin
+  // implementation returns a broader set than the agent it was given.
+  const _trim = (_trimResult && workerMemoryOwnerId)
+    ? {
+        ..._trimResult,
+        trimmedTools: filterWorkerLeafTools(_trimResult.trimmedTools, agent, turnOpts),
+        fullTools: filterWorkerLeafTools(_trimResult.fullTools, agent, turnOpts),
+      }
+    : _trimResult;
   if (_trim) {
     const changed = _trim.trimmedTools.length !== _trim.fullTools.length;
     agent.tools = _trim.trimmedTools;
@@ -1030,6 +1200,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // must NOT see the deliberately-empty recovery set above.
       keptSkills: _trim.skillsKept || _trim.initiallyIncludedSkills,
       addedSkills: new Set(),
+      recoveryLoads: [],
       initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
     };
     toolRouterContext.enterWith(_routerStore);
@@ -1614,7 +1785,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // replaced with the corrected reply. `canRecover` only gates whether the
   // recovery passes run — it no longer suppresses streaming.
   const canRecover = Boolean(_routerStore);
-  let { assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage, turnImages } = yield* consumeProvider(providerGen, { suppressText: false });
+  let { assistantContent, errored, toolsUsed, toolEvents, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* consumeProvider(providerGen, { suppressText: false });
   let recoveredMissingTools = false;
   if (!errored && canRecover && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
     const missingSkills = inferMissingToolSkills({ userText: routeText, assistantText: assistantContent, userId });
@@ -1631,6 +1802,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         alreadyIncludedSkills: _routerStore.initiallyIncludedSkills,
       });
       for (const s of addedSkills) _routerStore.addedSkills.add(s);
+      _routerStore.recoveryLoads?.push({
+        source: 'automatic_missing_reply',
+        requestedGroups: [...missingSkills],
+        addedSkills: [...addedSkills],
+        addedToolNames: [...addedToolNames],
+      });
       const availableActionToolNames = (agent.tools ?? [])
         .map(t => t.function?.name)
         .filter(n => n && !RECOVERY_NOTE_EXCLUDED_TOOLS.has(n) && n !== 'ask_agent');
@@ -1650,7 +1827,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         // the device speaks it — then the corrected reply streams live after it.
         yield { type: 'token', text: `\n\n${MISSING_TOOL_NOTICE}\n\n` };
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-        { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = _r); turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
+        { const _priorUsage = usage, _priorModelCalls = modelCalls; const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
       }
     }
   }
@@ -1688,8 +1865,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
       // Preserve the first attempt's tool events/uses so persist() records them
       // (the destructure would otherwise replace them with the recovery run's).
-      const _priorToolsUsed = toolsUsed, _priorToolEvents = toolEvents;
-      { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId, usage } = _r); turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])]; toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])]; }
+      const _priorToolsUsed = toolsUsed, _priorToolEvents = toolEvents, _priorUsage = usage, _priorModelCalls = modelCalls;
+      { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])]; toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])]; }
       recoveredProgressClaim = true;
     } catch (e) {
       log.warn('chat', 'in-progress claim recovery failed', { err: e.message });
@@ -1702,6 +1879,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // the dispatcher's per-turn store (or our own lazily-begun one); we flush the
   // whole trace here only when this run owns it (direct background/scheduled
   // callers). See lib/turn-trace-context.mjs.
+  const _modelCallTrace = (modelCalls || []).map((call, index) => ({
+    ...call,
+    // Provider-local counters restart when chat-level recovery creates a new
+    // generator. This ordinal is canonical across the whole agent span.
+    ordinal: index + 1,
+  }));
   const _emitTurnTrace = (errInfo = null) => {
     try {
       const selectedTools = _routerStore?.initialToolNames
@@ -1728,7 +1911,21 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         agentId: agent.id ?? null,
         provider: usage?.provider ?? agent.provider ?? null,
         model: usage?.model ?? agent.model ?? null,
+        // Keep only bounded summaries in the global log; complete ordered
+        // names live in the authenticated per-user run inspector.
         tools: selectedTools.slice(0, 50),
+        toolCount: selectedTools.length,
+        modelCalls: _modelCallTrace.map(({ toolNames, recoveryLoads, selectedSkills, addedSkills, ...summary }) => ({
+          ...summary,
+          selectedSkillCount: selectedSkills?.length ?? 0,
+          addedSkillCount: addedSkills?.length ?? 0,
+          recoveryLoads: (recoveryLoads || []).map(load => ({
+            source: load.source ?? null,
+            requestedGroupCount: load.requestedGroups?.length ?? 0,
+            addedSkillCount: load.addedSkills?.length ?? 0,
+            addedToolCount: load.addedToolNames?.length ?? 0,
+          })),
+        })),
         toolCalls: (toolEvents ?? []).map(t => ({
           name: t.name,
           ok: t.status === 'done',
@@ -1739,6 +1936,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         outTok: usage?.outTok ?? null,
         cachedTok: usage?.cachedTok ?? null,
         cacheCreateTok: usage?.cacheCreateTok ?? null,
+        reqCount: usage?.reqCount ?? null,
+        completionCount: usage?.completionCount ?? null,
+        usageCount: usage?.usageCount ?? null,
+        usageComplete: usage?.usageComplete ?? null,
         toolRouter,
         ms: Date.now() - _streamChatStart,
         error: errInfo,
@@ -1779,13 +1980,24 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     droppedFromHistory: _sizes.droppedFromHistory,
     userTextChars: _sizes.userTextChars,
     toolNamesUsed: toolsUsed.map(t => t.name),
+    reqCount: usage?.reqCount ?? null,
+    completionCount: usage?.completionCount ?? null,
+    usageCount: usage?.usageCount ?? null,
+    usageComplete: usage?.usageComplete ?? null,
   };
+  const _turnIdentity = getTurn();
   const _traceBase = {
+    turnId: _turnIdentity?.turnId ?? null,
+    rootId: _turnIdentity?.rootId ?? null,
+    parentTurnId: _turnIdentity?.parentTurnId ?? null,
+    messageId: _turnIdentity?.messageId ?? null,
+    attemptId: _turnIdentity?.attemptId ?? null,
     agentId: agent.id,
     agentName: agent.name ?? null,
     skillCategory: agent.skillCategory ?? null,
     provider: agent.provider,
     model: agent.model,
+    modelExpected: true,
     source: voiceCtx?.source ?? 'web',
     durationMs: _llmMeta.durationMs,
     input: sessionUserText,
@@ -1804,7 +2016,20 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       addedSkills: [..._routerStore.addedSkills],
       recoveredMissingTools,
       fullToolCount: _routerStore.fullTools?.length ?? null,
+      recoveryLoads: _routerStore.recoveryLoads ?? [],
     } : null,
+    modelCalls: _modelCallTrace,
+    usage: {
+      inputTokens: usage?.inTok ?? null,
+      outputTokens: usage?.outTok ?? null,
+      cachedTokens: usage?.cachedTok ?? null,
+      cacheCreatedTokens: usage?.cacheCreateTok ?? null,
+      estimated: usage?.estimated === true,
+      requestCount: usage?.reqCount ?? null,
+      completionCount: usage?.completionCount ?? null,
+      usageRecordCount: usage?.usageCount ?? null,
+      usageComplete: usage?.usageComplete ?? null,
+    },
     sizes: {
       systemPromptChars: _sizes.spChars,
       toolsBytes: _sizes.toolsBytes,
@@ -1823,13 +2048,13 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         argsPreview: t.args
           ? JSON.stringify(compactDocumentToolArgs(t.name, redactArgsForTrace(t.args))).slice(0, 500)
           : '',
-        resultPreview: compactDocumentToolResult(t.name, t.text).slice(0, 500),
+        resultPreview: redactTextForTrace(compactDocumentToolResult(t.name, t.text)).slice(0, 500),
       })),
       events: toolEvents.map(t => ({
         name: t.name,
         status: t.status,
         durationMs: t.durationMs ?? null,
-        preview: compactDocumentToolPreview(t.name, t.preview ?? t.progressPreview),
+        preview: redactTextForTrace(compactDocumentToolPreview(t.name, t.preview ?? t.progressPreview)).slice(0, 500),
       })),
     },
     meta: {
@@ -1857,6 +2082,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
           hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
           readOnlyTurn,
+          workerLeafRun: Boolean(workerMemoryOwnerId),
           documentRequest: turnOpts.documentRequest,
         });
       } catch (e) {
@@ -1868,7 +2094,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
   log.info('chat', 'llm turn complete', _llmMeta);
   recordRunTrace(userId, { ..._traceBase, status: 'complete' });
-  if (_routerStore) {
+  if (_routerStore && !workerMemoryOwnerId) {
     // Telemetry: fire-and-forget, feeds the future learning loop that uses
     // prior {prompt → skill} pairs as extra intent examples. Never blocks.
     recordTurnRouting({
@@ -1923,6 +2149,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
         hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
         readOnlyTurn,
+        workerLeafRun: Boolean(workerMemoryOwnerId),
         documentRequest: turnOpts?.documentRequest ?? null,
       });
     } catch (e) {

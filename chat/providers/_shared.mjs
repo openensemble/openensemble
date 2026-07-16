@@ -6,7 +6,52 @@
  *   - stripThinking / stripReasoningPreamble text cleanup
  */
 
+import { createHash } from 'crypto';
 import { loadConfig } from '../../routes/_helpers.mjs';
+
+/**
+ * Build an internal metadata-only record of the exact provider-native tool
+ * bundle prepared for one logical model round. The consumer records the
+ * ordered names and hash without forwarding this event to clients.
+ */
+export function modelCallTraceEvent({ provider, model, tools, round = null }) {
+  try {
+    const toolsPresent = Array.isArray(tools);
+    const exactTools = toolsPresent ? tools : [];
+    // Attest the provider-native tool field itself. An omitted field has no
+    // wire bytes; it is not the same payload as a present-but-empty `[]`.
+    const json = toolsPresent ? JSON.stringify(exactTools) : '';
+    const bytes = Buffer.byteLength(json, 'utf8');
+    const toolNames = exactTools.map((tool, index) => {
+      const name = tool?.function?.name ?? tool?.name;
+      if (typeof name === 'string' && name) return name;
+      if (typeof tool?.type === 'string' && tool.type) return tool.type;
+      return `(unnamed:${index})`;
+    });
+    return {
+      type: '__model_call',
+      provider: provider ?? null,
+      model: model ?? null,
+      phase: 'dispatch_planned',
+      round: Number.isSafeInteger(round) ? round : null,
+      toolsPresent,
+      toolNames,
+      toolCount: toolNames.length,
+      toolSchemaBytes: bytes,
+      schemaTokEst: Math.ceil(bytes / 4),
+      schemaHash: createHash('sha256').update(json).digest('hex'),
+    };
+  } catch {
+    return {
+      type: '__model_call', provider: provider ?? null, model: model ?? null,
+      phase: 'dispatch_planned',
+      round: Number.isSafeInteger(round) ? round : null,
+      toolsPresent: Array.isArray(tools),
+      toolNames: [], toolCount: null, toolSchemaBytes: null,
+      schemaTokEst: null, schemaHash: null, traceError: true,
+    };
+  }
+}
 
 // ── Provider endpoints ───────────────────────────────────────────────────────
 export const ANTHROPIC_URL    = 'https://api.anthropic.com/v1/messages';

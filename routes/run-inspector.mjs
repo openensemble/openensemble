@@ -12,12 +12,14 @@ import { listRunTraces, getRunTrace, clearRunTraces } from '../lib/run-inspector
 
 export async function handle(req, res) {
   if (req.url?.startsWith('/api/run-inspector') && req.method === 'GET') {
-    const authId = requireAuth(req, res); if (!authId) return true;
+    // Traces contain prompt/output previews and exact routed tool names. A
+    // narrow media URL bearer must never grant diagnostic access.
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
     const url = new URL(req.url, 'http://localhost');
     try {
       if (url.pathname === '/api/run-inspector') {
         const traces = listRunTraces(authId, { limit: url.searchParams.get('limit') });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ traces }));
         return true;
       }
@@ -25,20 +27,20 @@ export async function handle(req, res) {
       if (!id) return false;
       const trace = getRunTrace(authId, id);
       if (!trace) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ error: 'Run trace not found' }));
         return true;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(trace));
     } catch (e) { safeError(res, e); }
     return true;
   }
 
   if (req.url === '/api/run-inspector' && req.method === 'DELETE') {
-    const authId = requireAuth(req, res); if (!authId) return true;
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
     const ok = clearRunTraces(authId);
-    res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
+    res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({ ok }));
     return true;
   }

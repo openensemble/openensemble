@@ -244,10 +244,11 @@ async function executeHaIntent(intent) {
  * successful HA service call; null on miss OR on tool-error (LLM gets a
  * chance to recover, e.g. by calling list_devices to find the right entity).
  *
- * @returns {Promise<{ handled: true } | null>}
+ * @returns {Promise<{ handled: true, trace?: { name: string, args: object, result: string, status: string, durationMs: number } } | null>}
  */
 export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
   if (!userText || !hasHaIntentSyntax(userText)) return null;
+  const startedAt = Date.now();
   // HA control stays GLOBAL (any agent fast-paths it): a light/lock command is
   // harmless and universal, and short-circuiting it to ~200ms from whatever
   // chat you're in beats falling through to an LLM + escalation. Inbox reading
@@ -268,17 +269,29 @@ export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
       console.log(`[chat] ha-fastpath miss-then-error: ${result.error} — falling through to LLM`);
       return null;
     }
+    const trace = {
+      name: HA_SERVICE_TOOL,
+      args: {
+        service: haIntent.service,
+        entity_id: haIntent.entity_id,
+        domain: haIntent.serviceDomain || haIntent.domain,
+        ...(haIntent.data ? { data: haIntent.data } : {}),
+      },
+      result: result.text,
+      status: 'done',
+      durationMs: Date.now() - startedAt,
+    };
     // Awaited (with a swallow) before done: the turn must be on disk when the
     // client sees it end, and a failed WRITE must not hit the outer catch and
     // fall through to the LLM after the action already executed.
     if (!await persistFastpath(`${userId}_${agentId}`, [
       { role: 'user', content: userText, ts: Date.now() },
       { role: 'assistant', content: result.text, ts: Date.now() }
-    ], onEvent, agentId, 'ha-fastpath')) return { handled: true };
+    ], onEvent, agentId, 'ha-fastpath')) return { handled: true, trace };
     onEvent({ type: 'token', text: result.text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
     console.log(`[chat] ha-fastpath: ${haIntent.verb} ${haIntent.entity_id}`);
-    return { handled: true };
+    return { handled: true, trace };
   } catch (e) {
     console.warn('[chat] ha-fastpath threw, falling through:', e.message);
     return null;

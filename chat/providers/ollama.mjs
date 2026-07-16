@@ -10,7 +10,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage, fetchWithRetry } from './_shared.mjs';
+import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage, fetchWithRetry, modelCallTraceEvent } from './_shared.mjs';
 import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
@@ -50,6 +50,10 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
       // Subsequent iterations (after a tool result) use 'auto' to allow a free-text final response.
       body.tool_choice = guard.count === 1 ? 'required' : 'auto';
     }
+
+    yield modelCallTraceEvent({
+      provider: 'ollama', model: agent.model, tools: body.tools, round: guard.count,
+    });
 
     // ── Ollama request diagnostics ─────────────────────────────────────────
     // One summary line always; the per-message dump (a console line per

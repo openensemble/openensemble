@@ -59,6 +59,13 @@ export default async function* execute(name, args, userId, agentId) {
       alreadyIncludedSkills: ctx.initiallyIncludedSkills,
     });
     for (const s of r.addedSkills) ctx.addedSkills.add(s);
+    if (!Array.isArray(ctx.recoveryLoads)) ctx.recoveryLoads = [];
+    ctx.recoveryLoads.push({
+      source: 'request_tools',
+      requestedGroups: (groups ?? []).filter(group => typeof group === 'string').slice(0, 64),
+      addedSkills: [...r.addedSkills],
+      addedToolNames: [...r.addedToolNames],
+    });
     if (!r.addedToolNames.length) {
       yield { type: 'result', text: `No additional tools matched (reason: "${reason ?? '?'}", groups: ${JSON.stringify(groups ?? [])}). If you need a role-gated capability, use ask_agent to delegate instead.` };
       return;

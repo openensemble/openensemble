@@ -1811,7 +1811,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
 
   // Per-agent allowlist enforcement. Reject with a generic "Unknown tool"
   // message so a probing model can't enumerate which tools exist on the box.
-  if (Array.isArray(allowedTools) && allowedTools.length) {
+  // `null` means the legacy caller supplied no per-turn schema boundary.
+  // An explicit empty array means the current turn has zero allowed tools and
+  // must fail closed; treating [] like null lets a model-emitted tool call
+  // bypass an intentionally empty worker/child schema.
+  if (Array.isArray(allowedTools)) {
     const allow = new Set(allowedTools.flatMap(n => [n, TOOL_ALIASES[n] ?? n]));
     if (!allow.has(resolvedName)) {
       log.warn('tool', 'tool call outside agent allowlist', { tool: resolvedName, userId, agentId });

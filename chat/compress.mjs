@@ -35,7 +35,10 @@ export class LoopGuard {
       }
       return false;
     }
-    return ++this.count < this.maxLoops;
+    // maxLoops is the number of provider rounds permitted, not an exclusive
+    // upper bound. The previous comparison allowed only maxLoops - 1 rounds,
+    // which could discard the final-answer round after the last tool call.
+    return ++this.count <= this.maxLoops;
   }
   /**
    * Call after tool execution, before `continue`.

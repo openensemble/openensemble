@@ -25,9 +25,9 @@ OpenEnsemble is a single Node.js server that serves a web UI on port 3737.
 Create the owner account, connect at least one model provider, create an
 agent, and start a conversation.
 
-- **Multi-agent chat** — specialist agents for coding, email, research,
-  calendar, expenses, image generation, and more. A coordinator delegates
-  incoming requests to the right specialist.
+- **One assistant or an ensemble** — choose one primary assistant that handles
+  every enabled skill, or use specialist agents for coding, email, research,
+  calendar, expenses, image generation, and more. Switching is non-destructive.
 - **Bring your own LLMs** — Anthropic, OpenAI (API key or ChatGPT
   login/OAuth), Grok, Gemini, DeepSeek, Mistral, Groq, Together, Perplexity,
   Fireworks, OpenRouter, Z.ai, Ollama, and LM Studio. Assign different models

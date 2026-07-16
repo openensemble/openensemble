@@ -281,6 +281,44 @@ export function appendToSession(agentId, ...messages) {
 }
 
 /**
+ * Atomically append a report-like row once. Background completions can be
+ * retried after a crash and from more than one OE process, so the ordinary
+ * load-then-append sequence is not sufficient: both writers could observe the
+ * row as absent. The stable reportId is the durable idempotency key.
+ *
+ * @returns {Promise<'appended'|'existing'>}
+ */
+export function appendSessionReportOnce(agentId, row) {
+  if (!row?.reportId) return Promise.reject(new Error('Session report requires a reportId'));
+  if (typeof agentId === 'string' && agentId.startsWith('ephemeral_')) {
+    return Promise.reject(new Error('Session report requires a persistent agent'));
+  }
+  const durable = applyTurnMetadata([row], getTurn())[0];
+  return withSessionWriteLock(agentId, async () => {
+    const p = sessionPath(agentId);
+    await fsp.mkdir(path.dirname(p), { recursive: true });
+    let rows = [];
+    try {
+      rows = (await fsp.readFile(p, 'utf8')).split('\n').filter(Boolean)
+        .map(line => { try { return JSON.parse(line); } catch { return null; } })
+        .filter(Boolean);
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+    if (rows.some(existing => existing?.reportId === durable.reportId)) return 'existing';
+    const fh = await fsp.open(p, 'a', 0o600);
+    try {
+      await fh.appendFile(JSON.stringify(durable) + '\n');
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    _lineCounts.set(agentId, (_lineCounts.get(agentId) ?? rows.length) + 1);
+    return 'appended';
+  });
+}
+
+/**
  * Send-time durability: persist the user's message BEFORE the turn runs,
  * tagged with the turn-trace id. appendToSession later REPLACES this row with
  * the final (possibly transformed — attachment notes, financePreprocess) user

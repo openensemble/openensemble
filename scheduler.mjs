@@ -6,7 +6,7 @@
 import { readFileSync, readdirSync, unlinkSync, mkdirSync, existsSync } from 'fs';
 import path from 'path';
 import { streamChat } from './chat.mjs';
-import { appendToSession } from './sessions.mjs';
+import { appendToSession, appendSessionReportOnce } from './sessions.mjs';
 import { withLock, atomicWriteSync, resolveRuntimeAgentForUser, getUser, isUserTimeBlocked, loadConfig } from './routes/_helpers.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { log } from './logger.mjs';
@@ -639,6 +639,7 @@ async function runTask(task, broadcast, opts = {}) {
           output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
           lastError: lastError || (info.errorCount ? 'background work failed' : null),
           manual, sessionKey, broadcast, briefingAcknowledgements, briefingUserId: userId,
+          runId: scheduledCtx.runId,
         }),
       });
     } else {
@@ -733,7 +734,7 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
 // or have a one-shot removed out from under its own pending background work.
 async function finalizeScheduledTask(task, {
   succeeded, output, lastError, manual, sessionKey, broadcast,
-  briefingAcknowledgements = [], briefingUserId = task.ownerId,
+  briefingAcknowledgements = [], briefingUserId = task.ownerId, runId = null,
 }) {
   const completionUserId = task.ownerId ?? 'default';
   const completionAgent = resolveRuntimeAgentForUser(completionUserId, task.agent)?.id ?? task.agent;
@@ -755,20 +756,26 @@ async function finalizeScheduledTask(task, {
   // drawer's lastError covers it). Silent tasks skip it by contract.
   if (!succeeded && !task.silent && !manual) {
     try {
-      appendToSession(completionSessionKey, {
+      const failureRow = {
         role: 'assistant',
         content: `⚠️ Scheduled task failed. Last error: ${lastError || 'unknown'}.\n\nThe task is still scheduled and will retry on its next run.`,
         scheduled: true,
         taskId: task.id,
         taskFailed: true,
         ts: Date.now(),
+      };
+      if (runId) await appendSessionReportOnce(completionSessionKey, {
+        ...failureRow,
+        reportId: `scheduled:${runId}:failure`,
       });
+      else await appendToSession(completionSessionKey, failureRow);
     } catch (e) {
       console.warn('[scheduler] Failed to append failure message to session:', e.message);
     }
   }
 
   recordTaskRun(task, {
+    ...(runId ? { runId } : {}),
     scheduledFor: task.datetime ?? task.time ?? null,
     status: succeeded ? 'ok' : 'error',
     ...(succeeded ? {} : { error: lastError || 'unknown' }),
@@ -778,7 +785,7 @@ async function finalizeScheduledTask(task, {
   if (manual) {
     // Test fire: never delete or disable. Record the outcome for the drawer
     // but leave the schedule + failure streak exactly as they were.
-    const patch = { lastRun: new Date().toISOString() };
+    const patch = { lastRun: new Date().toISOString(), ...(runId ? { lastFinalizedRunId: runId } : {}) };
     if (succeeded) { patch.lastError = null; patch.lastOutput = (output || '').trim().slice(0, 280); }
     else { patch.lastError = lastError || 'unknown'; }
     await updateTask(task.id, patch, task.ownerId);
@@ -786,7 +793,7 @@ async function finalizeScheduledTask(task, {
     // One-shot tasks vanish after firing.
     await removeTask(task.id, task.ownerId);
   } else {
-    const patch = { lastRun: new Date().toISOString() };
+    const patch = { lastRun: new Date().toISOString(), ...(runId ? { lastFinalizedRunId: runId } : {}) };
     // Cross-fire failure tracking. Per-fire retry (MAX_ATTEMPTS) handles
     // transient blips; this counter handles the broken-forever case — a cron
     // task whose handler can never succeed shouldn't keep burning tokens every
@@ -800,14 +807,19 @@ async function finalizeScheduledTask(task, {
         patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${lastError || 'unknown'}`;
         if (!task.silent) {
           try {
-            appendToSession(completionSessionKey, {
+            const disabledRow = {
               role: 'assistant',
               content: `⛔ Scheduled task "${task.label}" auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires. Last error: ${lastError || 'unknown'}.\n\nRe-enable it from the tasks drawer once the underlying issue is fixed.`,
               scheduled: true,
               taskId: task.id,
               taskAutoDisabled: true,
               ts: Date.now(),
+            };
+            if (runId) await appendSessionReportOnce(completionSessionKey, {
+              ...disabledRow,
+              reportId: `scheduled:${runId}:auto-disabled`,
             });
+            else await appendToSession(completionSessionKey, disabledRow);
           } catch (e) {
             console.warn('[scheduler] Failed to append auto-disable message:', e.message);
           }
@@ -825,6 +837,40 @@ async function finalizeScheduledTask(task, {
   }
 
   if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: completionAgent });
+}
+
+/**
+ * Crash recovery for a scheduled run whose producer was journaled but whose
+ * in-memory child barrier never durably acknowledged finalization. Replaying
+ * the continuation could repeat an external side effect, so recovery fails the
+ * occurrence honestly, preserves its producer result in chat, and stamps the
+ * schedule exactly once using the run id tombstone.
+ */
+export async function recoverInterruptedScheduledBackground({
+  userId,
+  originTaskId,
+  originTaskOwnerId = null,
+  originScheduledRunId = null,
+  manual = false,
+  aggregate = '',
+}) {
+  const ownerId = originTaskOwnerId || userId;
+  const task = findTaskById(originTaskId, ownerId);
+  if (!task) return { ok: true, alreadyFinalized: true };
+  if (originScheduledRunId && task.lastFinalizedRunId === originScheduledRunId) {
+    return { ok: true, alreadyFinalized: true };
+  }
+  const reason = 'Server restarted after background work finished but before the scheduled continuation was durably finalized. The producer was not rerun; its result was preserved for review.';
+  await finalizeScheduledTask(task, {
+    succeeded: false,
+    output: aggregate,
+    lastError: reason,
+    manual: manual === true,
+    sessionKey: task.agent ? `${userId}_${task.agent}` : null,
+    broadcast: _broadcast,
+    runId: originScheduledRunId || `recovery_${originTaskId}`,
+  });
+  return { ok: true, recoveredAsFailure: true };
 }
 
 // Track pending timers so we can cancel them on shutdown

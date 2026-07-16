@@ -973,7 +973,10 @@ function renderSessionInner(keepScroll) {
     el.querySelectorAll('img[src^="blob:"]').forEach(img => { try { URL.revokeObjectURL(img.src); } catch {} });
     el.remove();
   });
-  const ordered = orderSessionForRender(sessions[activeAgent] ?? []);
+  // Hidden rows are model/private bookkeeping, not browser history. Remove
+  // them before they can consume the render window or participate in document
+  // request/assistant pairing.
+  const ordered = orderSessionForRender(sessions[activeAgent] ?? []).filter(m => !m?.hidden);
   const start = Math.max(0, ordered.length - _historyWindow);
   if (start > 0) {
     const btn = document.createElement('button');
@@ -1027,6 +1030,9 @@ function renderSessionInner(keepScroll) {
   }
 
   visibleMessages.forEach((m, index) => {
+    // Raw worker reports are durable private model context. Only the primary's
+    // separately persisted completion is user-visible.
+    if (m?.hidden) return;
     if (m.scheduled)                 appendTaskHeader(m.content, m.ts, false);
     else if (m.role === 'notification') appendNotification({ agent: activeAgent, content: m.content, from: m.from, ts: m.ts });
     else if (m.role === 'user' && !m.hidden && m.documentRequest && typeof renderDocumentSessionRequest === 'function') {

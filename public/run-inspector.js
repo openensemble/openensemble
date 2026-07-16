@@ -100,6 +100,7 @@ function renderRunInspectorDetail(t) {
   const routing = t.routing || {};
   const tools = t.tools || {};
   const meta = t.meta || {};
+  const schemaBundles = new Map((t.modelSchemaBundles || []).map(bundle => [bundle.schemaHash, bundle]));
   return `
     <div class="run-detail-head">
       <div>
@@ -114,11 +115,17 @@ function renderRunInspectorDetail(t) {
       ${metric('Duration', fmtDuration(t.durationMs))}
       ${metric('Tools Shipped', sizes.toolCount)}
       ${metric('Tools Used', (tools.usedNames || []).length)}
+      ${metric('Logical Rounds', (t.modelCalls || []).length)}
+      ${metric('Schema Tok (est.)', (t.modelCalls || []).reduce((n, call) => n + (Number(call.schemaTokEst) || 0), 0))}
+      ${metric('Input / Output Tok', t.usage ? `${t.usage.inputTokens ?? '—'} / ${t.usage.outputTokens ?? '—'}` : '—')}
+      ${metric('Wire Requests', t.usage?.requestCount ?? '—')}
       ${metric('History', `${sizes.historyMessages ?? 0} msgs`)}
       ${metric('Prompt Chars', sizes.systemPromptChars)}
     </div>
 
     ${t.error ? `<div class="run-error">${escHtml(t.error)}</div>` : ''}
+    ${t.modelExpected !== false && t.usageTotalsComplete !== true ? `<div class="run-error">${t.usage?.estimated === true ? 'Provider token totals are estimated' : 'Provider token totals are missing or incomplete'}. This run cannot earn a cost pass.</div>` : ''}
+    ${t.modelExpected !== false && t.usageCardinalityComplete !== true ? '<div class="run-error">Provider request/completion/usage cardinality is missing or did not reconcile. This run cannot earn a cost pass.</div>' : ''}
 
     <div class="run-section">
       <div class="run-section-title">User Input</div>
@@ -143,6 +150,36 @@ function renderRunInspectorDetail(t) {
         <div class="run-section-title">Payload Sizes</div>
         <pre>${escHtml(JSON.stringify(sizes, null, 2))}</pre>
       </div>
+    </div>
+
+    <div class="run-section">
+      <div class="run-section-title">Logical Provider Tool Surface</div>
+      ${t.modelCallTraceComplete !== true ? '<div class="run-error">Model-surface evidence is missing or incomplete. This run cannot earn a trimming pass.</div>' : ''}
+      ${(t.modelCalls || []).length ? t.modelCalls.map(call => `
+        <details class="run-tool" open>
+          <summary>Round ${escHtml(call.ordinal)} · ${escHtml(call.toolCount ?? 0)} tools · ~${escHtml(call.schemaTokEst ?? 0)} schema tokens</summary>
+          <div class="run-tool-label">Provider / model</div>
+          <pre>${escHtml(`${call.provider || '—'} / ${call.model || '—'}`)}</pre>
+          <div class="run-tool-label">Selected skills</div>
+          <pre>${escHtml(JSON.stringify({ selected: call.selectedSkills || [], added: call.addedSkills || [], recoveryLoads: call.recoveryLoads || [] }, null, 2))}</pre>
+          <div class="run-tool-label">Schema attestation</div>
+          <pre>${escHtml(JSON.stringify({ fieldPresent: call.toolsPresent === true, bytes: call.toolSchemaBytes, estimatedTokens: call.schemaTokEst, sha256: call.schemaHash }, null, 2))}</pre>
+          <div class="run-tool-label">Ordered tool names in this provider-native surface</div>
+          <pre>${escHtml((schemaBundles.get(call.schemaHash)?.toolNames || []).join('\n'))}</pre>
+        </details>
+      `).join('') : `<div class="run-muted">${t.modelExpected === false ? 'Fast path: no model call.' : 'No model-call evidence was recorded; this run cannot earn a trimming pass.'}</div>`}
+    </div>
+
+    <div class="run-section">
+      <div class="run-section-title">Correlation</div>
+      <pre>${escHtml(JSON.stringify({
+        turnId: t.turnId || null,
+        rootId: t.rootId || null,
+        parentTurnId: t.parentTurnId || null,
+        messageId: t.messageId || null,
+        attemptId: t.attemptId || null,
+        traceVersion: t.modelCallTraceVersion || null,
+      }, null, 2))}</pre>
     </div>
 
     <div class="run-section">

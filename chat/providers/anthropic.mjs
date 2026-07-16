@@ -7,7 +7,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry, capabilityNotice } from './_shared.mjs';
+import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry, capabilityNotice, modelCallTraceEvent } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
@@ -117,6 +117,10 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     };
     if (anthropicTools) body.tools = anthropicTools;
     if (!reasoningDisabled) applyAnthropicReasoning(body, agent);
+
+    yield modelCallTraceEvent({
+      provider: 'anthropic', model: agent.model, tools: body.tools, round: guard.count,
+    });
 
     // Retried on 429/529/5xx + network failures (honoring Retry-After) — a
     // single overloaded_error used to throw straight out of the generator

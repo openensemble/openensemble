@@ -174,24 +174,57 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   const ownerAgent = agents.find(a => a.id === ownerKey);
   if (!ownerAgent) { yield { type: 'result', text: `Couldn't resolve your own agent record (${ownerKey}) to staff a worker.` }; return; }
 
-  const running = liveWorkers().length;
-  if (running >= MAX_WORKERS_PER_AGENT) {
-    yield { type: 'result', text: `You already have ${running} workers running (max ${MAX_WORKERS_PER_AGENT}). Wait for one to finish or stop one with stop_worker before hiring another.` };
-    return;
-  }
+  const capacityMessage = count => `You already have ${count} workers running (max ${MAX_WORKERS_PER_AGENT}). Wait for one to finish or stop one with stop_worker before hiring another.`;
 
   const label = args.label || (task.length > 56 ? task.slice(0, 56) + '…' : task);
   const workerId = `ephemeral_worker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
-  const workerAgent = { ...ownerAgent, id: workerId, ephemeral: true };
+  const workerAgent = { ...ownerAgent, id: workerId, ephemeral: true, workerOwnerId: ownerKey };
   // No human is watching the worker's session — make it run to completion on its
   // own and finish with a concise report.
   const workerTask = `${task}\n\n[You are a background worker running detached from the chat. Work autonomously to completion — do NOT ask for confirmation or wait for approval; the user is not watching this session. Use your tools directly. When finished, reply with a short summary of what you did and anything that needs a human.]`;
   const chipOwnerId = `${userId}_${ownerKey}`;   // owner's direct-chat session: chip + completion report land here
+  let sourceTurn = null;
+  try {
+    const trace = await import('../../lib/turn-trace-context.mjs');
+    sourceTurn = trace.getTurn?.() || null;
+  } catch { /* direct non-turn caller */ }
 
-  const tid = bg.spawnWorker({
-    workerAgent, task: workerTask, userId, chipOwnerId, ownerKey,
-    workerName: `${ownerAgent.name} worker`, emoji: ownerAgent.emoji || '🤖',
-  });
+  const { spawnWorkerIdempotently } = await import('../../lib/worker-spawn-idempotency.mjs');
+  let admitted;
+  try {
+    admitted = await spawnWorkerIdempotently({
+      userId, ownerKey, label, task,
+      // This runs while the durable admission helper holds its per-user lock,
+      // closing the race between concurrent distinct spawn_worker calls. Keep
+      // the existing single-mode user-wide quota and ensemble owner quota.
+      beforeSpawn: () => {
+        const current = liveWorkers().length;
+        if (current < MAX_WORKERS_PER_AGENT) return;
+        throw Object.assign(new Error(capacityMessage(current)), { code: 'WORKER_CAPACITY' });
+      },
+      spawn: () => bg.spawnWorker({
+        workerAgent, task: workerTask, userId, chipOwnerId, ownerKey,
+        originalTask: task,
+        workerName: `${ownerAgent.name} worker`, emoji: ownerAgent.emoji || '🤖',
+        rootTaskId: sourceTurn?.rootId || null,
+        sourceMessageId: sourceTurn?.messageId || null,
+        sourceAttemptId: sourceTurn?.attemptId || null,
+        sourceSessionKey: sourceTurn?.sessionKey || null,
+        sourceSessionEpoch: sourceTurn?.sessionEpoch || null,
+      }),
+    });
+  } catch (error) {
+    if (error?.code === 'WORKER_CAPACITY') {
+      yield { type: 'result', text: error.message };
+      return;
+    }
+    throw error;
+  }
+  const tid = admitted.taskId;
+  if (admitted.duplicate) {
+    yield { type: 'result', text: `This job already has a background worker (${tid}). Do NOT call spawn_worker again for this request; reply to the user now and use check_workers later for status.` };
+    return;
+  }
   yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}. It's running now — I can check on it anytime with check_workers, and its report will land here when it's done.` };
 }
 
@@ -771,6 +804,10 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
           if (event.type === 'token') {
             cap.fullText += event.text;
             yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: sLabel, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id, ...chipIds };
+          } else if (event.type === 'replace') {
+            cap.fullText = String(event.text || '');
+          } else if (event.type === '__content') {
+            cap.fullText = String(event.content || '');
           } else if (event.type === 'tool_call' && event.name) {
             cap.toolsUsed++;
             sCurrentTool = event.name;

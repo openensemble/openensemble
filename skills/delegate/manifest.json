@@ -59,7 +59,7 @@
       "type": "function",
       "function": {
         "name": "spawn_worker",
-        "description": "Hire a background WORKER that YOU own to do a long-running or repetitive job — draining/sorting an entire inbox, deep research across many sources, a multi-step sweep, anything that would otherwise make you loop many tool calls in the chat. The worker is a copy of YOU (your role and tools) running detached: it does the job on its own without blocking the conversation, and surfaces a live progress chip. Returns IMMEDIATELY with a worker id. Use this INSTEAD of grinding through a long loop yourself turn-by-turn. You can check on it anytime with check_workers, stop it with stop_worker, and its final report lands in your chat when it's done. NOTE: workers are individual contributors — a worker cannot hire its own workers.",
+        "description": "Hire a background WORKER that YOU own to do a long-running or repetitive job — draining/sorting an entire inbox, deep research across many sources, a multi-step sweep, anything that would otherwise make you loop many tool calls in the chat. The worker is a copy of YOU (your role and tools) running detached: it does the job on its own without blocking the conversation, and surfaces a live progress chip. Returns IMMEDIATELY with a worker id. Call once per intended job; after a successful result, reply to the user instead of calling spawn_worker again. To start multiple distinct workers, emit their calls together with distinct stable labels. Repeated calls and browser Retry are durably coalesced to the original worker. You can check on it anytime with check_workers, stop it with stop_worker, and its final report lands in your chat when it's done. NOTE: workers are individual contributors — a worker cannot hire its own workers.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -69,7 +69,7 @@
             },
             "label": {
               "type": "string",
-              "description": "Optional short label for the progress chip (e.g. 'Sort whole inbox')."
+              "description": "Short stable job label for the progress chip and duplicate protection (e.g. 'Sort whole inbox'). Use a distinct label for each intentionally parallel worker and reuse the same label if retrying."
             }
           },
           "required": [
