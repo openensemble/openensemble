@@ -31,7 +31,7 @@ async function loadAnthropicModels() {
 let grokChatModels = [];
 const grokMediaModels = [
   { name: 'grok-imagine-image',     provider: 'grok', displayName: 'Grok Imagine (image)',     supportsImageGeneration: true, capabilities: ['image_generation'] },
-  { name: 'grok-imagine-image-pro', provider: 'grok', displayName: 'Grok Imagine Pro (image)', supportsImageGeneration: true, capabilities: ['image_generation'] },
+  { name: 'grok-imagine-image-quality', provider: 'grok', displayName: 'Grok Imagine Quality (image)', supportsImageGeneration: true, capabilities: ['image_generation'] },
   { name: 'grok-imagine-video',     provider: 'grok', displayName: 'Grok Imagine (video)' },
 ];
 function getGrokModels() {

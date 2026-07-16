@@ -80,6 +80,20 @@ async function _emitAutoBgNotify(userId, agentId, notify) {
   } catch (_) { /* best-effort */ }
 }
 
+// Drain an async iterator after executeToolStreaming has already read the
+// event that crossed the foreground -> background threshold. The boundary
+// value belongs to the detached sink just as much as every later value; losing
+// it is especially damaging when it is the terminal result (and therefore the
+// only carrier for structured artifacts such as `_images`).
+export async function drainIteratorIncludingBoundary(iter, boundaryValue, visit) {
+  await visit(boundaryValue);
+  while (true) {
+    const next = await iter.next();
+    if (next.done) return;
+    await visit(next.value);
+  }
+}
+
 // Tools whose background completion warrants waking the owning agent with a
 // concise report-back turn. Most auto-backgrounded tools just drop their
 // result into the task chip + agent_report bubble — the user already sees it,
@@ -696,6 +710,41 @@ export function getRoleAssignments(userId) {
       skillId === 'coordinator' || allowed.has(skillId)));
   }
   return _projectAssignmentsForOrchestration(user, raw);
+}
+
+// Stored assignment lookup with account authorization but WITHOUT single-mode
+// projection. Durable background work uses this to follow its real specialist
+// when an ensemble is restored, while ordinary runtime consumers continue to
+// use getRoleAssignments() above.
+export function getDurableRoleAssignment(roleId, userId) {
+  const user = userId ? _readUserProfile(userId) : null;
+  let raw;
+  if (_isOwnerRole(user?.role) || !userId) raw = _readGlobalAssignments();
+  else if (user?.role === 'admin') raw = { ..._readGlobalAssignments(), ...(user.skillAssignments ?? {}) };
+  else raw = user?.skillAssignments ?? {};
+  const allowed = userId ? _allowedSkillIdsForProfile(user) : null;
+  if (allowed && roleId !== 'coordinator' && !allowed.has(roleId)) return null;
+  return typeof raw?.[roleId] === 'string' && raw[roleId] ? raw[roleId] : null;
+}
+
+/**
+ * Choose the durable owner stored on a newly-created watcher. While single
+ * mode is active, the executor is running under the projected primary even
+ * when the enclosing skill is still assigned to a parked specialist. Store
+ * that raw specialist target so switching back to ensemble restores the
+ * intended owner without rewriting watcher records. Generic/non-skill work
+ * follows the symbolic coordinator target instead.
+ */
+export async function resolveWatcherRegistrationAgentId(userId, currentAgentId, skillId = null) {
+  const { getOrchestrationPolicy } = await import('./lib/orchestration-policy.mjs');
+  if (getOrchestrationPolicy(userId).mode !== 'single') return currentAgentId;
+  if (skillId) {
+    const durableOwner = getDurableRoleAssignment(skillId, userId);
+    const validOwner = durableOwner && listAgents().some(agent =>
+      agent?.ownerId === userId && agent?.id === durableOwner);
+    if (validOwner) return `${userId}_${durableOwner}`;
+  }
+  return `${userId}_coordinator`;
 }
 
 /**
@@ -1391,18 +1440,26 @@ async function buildCtx(userId, agentId, skillId = null) {
   // estimate of how long the work takes. Pass `null` for indefinite watchers
   // (price alerts, "tell me when X" — supervisor never auto-reaps these,
   // user must dismiss them from the tasks drawer).
-  ctx.watch = /** @param {{kind?: string, state?: any, cadenceSec?: number, expiresAt?: number|null, skillId?: string, label?: string, onFire?: any}} [opts] */ async (opts = {}) => {
+  ctx.watch = /** @param {{kind?: string, state?: any, cadenceSec?: number, expiresAt?: number|null, skillId?: string, label?: string, onFire?: any, followDurableSkillOwner?: boolean, requirePersist?: boolean}} [opts] */ async (opts = {}) => {
     try {
       const watchers = await import('./scheduler/watchers.mjs');
-      return watchers.registerWatcher(/** @type {any} */ ({
-        ...opts,
+      const { followDurableSkillOwner, ...watcherOpts } = opts;
+      void followDurableSkillOwner; // legacy option; ownership is now automatic
+      const effectiveSkillId = opts.skillId || skillId || null;
+      const watcherAgentId = await resolveWatcherRegistrationAgentId(
         userId,
-        agentId: wsAgentId,
+        wsAgentId,
+        effectiveSkillId,
+      );
+      return watchers.registerWatcher(/** @type {any} */ ({
+        ...watcherOpts,
+        userId,
+        agentId: watcherAgentId,
         // If the caller didn't specify which skill owns this watcher, try to
         // infer it. The agent in this ctx might not be a skill; an explicit
         // skillId is best-effort and required only if the handler is not in
         // the system registry.
-        skillId: opts.skillId || null,
+        skillId: effectiveSkillId,
       }));
     } catch (e) { console.warn('[ctx.watch]', e.message); return null; }
   };
@@ -1577,6 +1634,14 @@ async function buildCtx(userId, agentId, skillId = null) {
   if (skillId) ctx.credentials = buildSkillCredentials(userId, skillId);
 
   return ctx;
+}
+
+// Regression seam for the context-bound watcher ownership contract. It lets
+// tests exercise a skill that calls ctx.watch without redundantly passing its
+// own skillId, while production execution continues through buildCtx above.
+export async function buildSkillExecutionContextForTest(userId, agentId, skillId = null) {
+  if (process.env.NODE_ENV !== 'test') throw new Error('skill execution context test seam is unavailable');
+  return buildCtx(userId, agentId, skillId);
 }
 
 // ── Custom-skill sandbox routing (multi-tenant isolation) ────────────────────
@@ -2131,10 +2196,6 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               // abort handle, so it stays non-cancellable.
               ...(adoptedChipId ? {} : { canCancel: false }),
             });
-            // Push the just-yielded value into the chip too
-            if (value?.type === 'tool_progress' && value.text) {
-              watchersMod.pushWatcherStatus(userId, watcherId, String(value.text).slice(-200));
-            }
           } catch (e) {
             console.warn('[auto-bg] watcher register failed; staying foreground:', e.message);
             // If we can't register the watcher, fall through to normal yield
@@ -2207,10 +2268,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   visibleAgentId: captured.visibleAgentId,
                   spanId: `${captured.rootTaskId}:${captured.name}`,
                 }, async () => {
-                  while (true) {
-                    const r = await iter.next();
-                    if (r.done) break;
-                    const v = r.value;
+                  await drainIteratorIncludingBoundary(iter, value, async (rawValue) => {
+                    const v = await _postProcessResult(rawValue);
                     rememberDelegationMeta(v);
                     if (v?.type === 'tool_progress' && v.text) {
                       watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-1200), {
@@ -2233,7 +2292,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                         });
                       }
                     }
-                  }
+                  });
+                  if (_resultWasError) throw new Error(_lastErrText || finalText || `${captured.name} failed`);
                 });
                 const bg = await import('./background-tasks.mjs');
                 const finalReportImages = Array.isArray(finalImages) ? finalImages : null;

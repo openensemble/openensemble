@@ -5,8 +5,35 @@
   "description": "Creates videos from text prompts using AI video generation models.",
   "category": "custom",
   "service": true,
-  "systemPromptAddition": "Generate videos from text descriptions provided by users\n- Support various video styles, durations, and aspect ratios\n- Provide guidance on prompt engineering for better video outputs\n- Handle video generation requests efficiently and return downloadable video files",
-  "tools": [],
+  "systemPromptAddition": "You can generate a video from a text description with `generate_video`. When the user clearly asks you to make, render, or generate a video, call `generate_video` immediately with the complete visual description in `prompt`; do not ask follow-up questions unless the request is genuinely unclear. The tool starts a durable background job, reports progress in the task drawer, then shows the finished video in chat and saves it under the user's Profile Files → Videos. Text-to-video is supported; editing an existing video or supplying a starting image is not supported through this tool yet. If the tool reports a provider, moderation, or credential error, relay that error briefly and do not claim a video was created.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "generate_video",
+        "description": "Start a durable text-to-video generation job. Progress appears in the task drawer; on completion the video is shown in chat and saved under Profile Files → Videos. Does not edit an existing video or accept an input image.",
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "Complete visual description of the requested video, including subject, action, setting, camera movement, lighting, and style when specified.",
+              "minLength": 1,
+              "maxLength": 4000
+            }
+          },
+          "required": ["prompt"]
+        }
+      }
+    }
+  ],
+  "watchers": [
+    {
+      "kind": "grok_video_generation",
+      "description": "Starts and polls a Grok video-generation job, reports progress, saves the finished video, and shows it in chat."
+    }
+  ],
   "enabled_by_default": false,
   "intent_patterns": [
     "^(?:generate|make|create|render)\\s+(?:me\\s+)?(?:an?\\s+|a\\s+)?(?:short\\s+)?(?:video|clip|animation)\\b",

@@ -58,6 +58,7 @@ vi.mock('./lib/tool-router.mjs', () => ({
   recordTurnRouting: state.recordTurnRouting,
   expandToolsByReason: vi.fn(async () => ({ addedToolNames: [], addedSkills: [] })),
   inferMissingToolSkills: vi.fn(() => new Set()),
+  shouldUseProviderHostedImageBackend: vi.fn(() => false),
 }));
 
 vi.mock('./lib/tool-plan-memory.mjs', () => ({

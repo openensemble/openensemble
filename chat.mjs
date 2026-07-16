@@ -28,7 +28,7 @@ import {
   handleProactiveNegativeFeedback,
 } from './lib/personalization/negative-feedback.mjs';
 import { log } from './logger.mjs';
-import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills } from './lib/tool-router.mjs';
+import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills, shouldUseProviderHostedImageBackend } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { beginMemoryScope } from './lib/memory-scope-context.mjs';
 import { getTurn, beginTurn, recordSpan, recordError, finishTurn } from './lib/turn-trace-context.mjs';
@@ -833,7 +833,7 @@ function recomposeAgentPromptForTools(agent) {
   }
 }
 
-function applyUserToolPlan(agent, plan) {
+export function applyUserToolPlan(agent, plan) {
   const clean = sanitizeToolPlanForStream(plan);
   if (!clean || !Array.isArray(agent.tools)) return null;
   const before = agent.tools.length;
@@ -842,7 +842,13 @@ function applyUserToolPlan(agent, plan) {
     agent.tools = [];
     return { mode: 'none', before, after: 0, selected: [], fullTools };
   }
-  const selected = new Set(clean.selectedTools);
+  // A cached or hand-crafted client plan can name a tool that the current
+  // orchestration policy no longer exposes. Intersect with the live resolved
+  // surface before filtering and before reporting the plan back into prompts,
+  // telemetry, or recipe learning; never describe a removed tool as selected.
+  const availableNames = new Set(fullTools.map(tool => tool?.function?.name).filter(Boolean));
+  const effectiveSelected = clean.selectedTools.filter(name => availableNames.has(name));
+  const selected = new Set(effectiveSelected);
   const controlTools = new Set(SELECTED_PLAN_CONTROL_TOOLS);
   try { for (const t of getSelectedPlanKeepTools()) controlTools.add(t); } catch { /* registry not loaded yet — base set still applies */ }
   if ((agent.skillCategory === 'coordinator' || selected.size === 0)
@@ -851,7 +857,22 @@ function applyUserToolPlan(agent, plan) {
     const name = t.function?.name;
     return selected.has(name) || controlTools.has(name);
   });
-  return { mode: 'selected', before, after: agent.tools.length, selected: clean.selectedTools, fullTools };
+  return { mode: 'selected', before, after: agent.tools.length, selected: effectiveSelected, fullTools };
+}
+
+export function buildUserToolPlanSystemBlock(agent, userToolPlanResult) {
+  if (!userToolPlanResult) return '';
+  const rosterSolo = agent?._rosterSolo === true;
+  const selectedNames = (Array.isArray(userToolPlanResult.selected) ? userToolPlanResult.selected : [])
+    .filter(name => !(rosterSolo && name === 'ask_agent'));
+  const selectedNote = rosterSolo
+    ? (selectedNames.length
+        ? ` These selected action tools are available this turn: ${selectedNames.join(', ')}. Control-plane tools such as request_tools may also be available so you can recover from an incomplete selected set and continue the task yourself. Do not claim unrelated tools are unavailable; request tools, answer, use a background worker for long or parallel work, or ask a concise follow-up if the selected set is insufficient.`
+        : ' None of the requested action tools are available in single-assistant mode. Use request_tools to recover a needed capability, continue without tools, or ask a concise follow-up.')
+    : ` These selected action tools are available this turn: ${userToolPlanResult.selected.join(', ')}. Control-plane tools such as ask_agent/request_tools may also be available so you can delegate or recover from an incomplete selected set. Do not claim unrelated tools are unavailable; delegate, request tools, answer, or ask a concise follow-up if the selected set is insufficient.`;
+  return `\n\n## User-selected tool plan\nThe user selected tool mode "${userToolPlanResult.mode}" before sending this message.${userToolPlanResult.mode === 'selected'
+    ? selectedNote
+    : ' No tools are available this turn; answer without tool calls or ask a concise follow-up if live action is required.'}`;
 }
 
 /**
@@ -1218,6 +1239,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     log.info('chat', 'tool-router trim', { userId, agentId: agent.id, category: agent.skillCategory, kept: _trim.trimmedTools.length, full: _trim.fullTools.length, notes: _trim.routerNotes, spChars: agent.systemPrompt.length });
   }
 
+  // Provider-hosted image generation is an implementation swap, never an
+  // ambient capability grant. The Responses adapter additionally requires the
+  // current (possibly tool-plan constrained or request_tools-expanded) surface
+  // to contain generate_image before it injects the hosted tool.
+  agent._providerHostedImageBackend = shouldUseProviderHostedImageBackend(agent, userId);
+
   const ctx = await _ctxPromise;
   const memBlock = ctx ? formatContext(ctx) : '';
   const skillTriggersBlock = await _triggersPromise;
@@ -1247,9 +1274,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // outcome). Goes into the system prompt — not userText — so the UI doesn't
   // render it and the session doesn't persist it into history.
   const noteBlock = systemNote ? `\n\n${systemNote}` : '';
-  const userToolPlanBlock = userToolPlanResult
-    ? `\n\n## User-selected tool plan\nThe user selected tool mode "${userToolPlanResult.mode}" before sending this message.${userToolPlanResult.mode === 'selected' ? ` These selected action tools are available this turn: ${userToolPlanResult.selected.join(', ')}. Control-plane tools such as ask_agent/request_tools may also be available so you can delegate or recover from an incomplete selected set. Do not claim unrelated tools are unavailable; delegate, request tools, answer, or ask a concise follow-up if the selected set is insufficient.` : ' No tools are available this turn; answer without tool calls or ask a concise follow-up if live action is required.'}`
-    : '';
+  const userToolPlanBlock = buildUserToolPlanSystemBlock(agent, userToolPlanResult);
   const desktopFoldersBlock = buildDesktopFoldersBlock(userId, voiceCtx?.source);
   const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
 

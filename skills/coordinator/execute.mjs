@@ -67,7 +67,11 @@ export default async function* execute(name, args, userId, agentId) {
       addedToolNames: [...r.addedToolNames],
     });
     if (!r.addedToolNames.length) {
-      yield { type: 'result', text: `No additional tools matched (reason: "${reason ?? '?'}", groups: ${JSON.stringify(groups ?? [])}). If you need a role-gated capability, use ask_agent to delegate instead.` };
+      const { getOrchestrationPolicy } = await import('../../lib/orchestration-policy.mjs');
+      const fallback = getOrchestrationPolicy(userId).mode === 'single'
+        ? 'Continue with your own tools, or use spawn_worker for genuinely long or parallel work.'
+        : 'If you need a role-gated capability, use ask_agent to delegate instead.';
+      yield { type: 'result', text: `No additional tools matched (reason: "${reason ?? '?'}", groups: ${JSON.stringify(groups ?? [])}). ${fallback}` };
       return;
     }
     // NOTE: the expanded skills' SPAs do NOT get added back into the system

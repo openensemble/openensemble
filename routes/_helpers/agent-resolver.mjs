@@ -421,8 +421,11 @@ export function getAgentsForUser(userId) {
     // The provider layer auto-parallelizes tool calls emitted together in one
     // assistant turn; this teaches every agent (not just the coordinator) to
     // batch independent work instead of sequencing it across turns.
+    const delegationBatchExample = rosterSolo
+      ? ''
+      : '\n- Multiple `ask_agent` delegations to different specialists: one turn (background dispatch handles them).';
     const parallelToolsGuidance = tools.length > 1
-      ? '## Parallel tool use (REQUIRED, not optional)\n\nWhen the next step needs multiple pieces of information that don\'t depend on each other, you MUST emit all those tool calls in a single assistant turn. They run in parallel; emitting one tool, waiting for its result, then emitting the next is forbidden when the second call doesn\'t need the first call\'s output. Every wasted turn costs an LLM round-trip and burns the user\'s rate budget.\n\n**Patterns that MUST be batched into one turn:**\n- Reading multiple files: `read_file(a)` + `read_file(b)` + `read_file(c)` — one turn.\n- Listing + grepping in parallel: `list_files(dir)` + `grep(pattern, dir)` — one turn.\n- Multiple independent shell commands (e.g. `git status` + `git diff` + `git log`): one turn.\n- Multiple `ask_agent` delegations to different specialists: one turn (background dispatch handles them).\n\n**Only sequence across turns when there is a real causal dependency** — e.g. "find a file matching X, then read it" needs the find result before the read. If you find yourself emitting `read_file` over and over, one per turn, on files you already know exist, stop — batch them.'
+      ? `## Parallel tool use (REQUIRED, not optional)\n\nWhen the next step needs multiple pieces of information that don't depend on each other, you MUST emit all those tool calls in a single assistant turn. They run in parallel; emitting one tool, waiting for its result, then emitting the next is forbidden when the second call doesn't need the first call's output. Every wasted turn costs an LLM round-trip and burns the user's rate budget.\n\n**Patterns that MUST be batched into one turn:**\n- Reading multiple files: \`read_file(a)\` + \`read_file(b)\` + \`read_file(c)\` — one turn.\n- Listing + grepping in parallel: \`list_files(dir)\` + \`grep(pattern, dir)\` — one turn.\n- Multiple independent shell commands (e.g. \`git status\` + \`git diff\` + \`git log\`): one turn.${delegationBatchExample}\n\n**Only sequence across turns when there is a real causal dependency** — e.g. "find a file matching X, then read it" needs the find result before the read. If you find yourself emitting \`read_file\` over and over, one per turn, on files you already know exist, stop — batch them.`
       : '';
     // Universal server-URL guidance. OpenEnsemble runs on a server the user
     // reaches over the LAN from a different machine, so "localhost"/"127.0.0.1"
@@ -538,6 +541,15 @@ export function resolveRuntimeAgentForUser(userId, requestedAgentId = null, { fa
     ? requestedAgentId.slice(prefix.length)
     : requestedAgentId;
   if (raw) {
+    // Durable schedulers/watchers historically store the symbolic
+    // "coordinator" target rather than a concrete registry id. Resolve that
+    // alias through the current orchestration projection: it follows the
+    // single-mode primary while the stored value stays untouched, then points
+    // back at the ensemble coordinator after switch-back.
+    if (raw === 'coordinator') {
+      const coordinatorId = getRoleAssignments(userId).coordinator ?? null;
+      return roster.find(agent => agent.id === coordinatorId) ?? roster[0] ?? null;
+    }
     const exact = roster.find(agent => agent.id === raw);
     if (exact) return exact;
     const owned = listAgents().some(agent => agent.ownerId === userId && agent.id === raw);

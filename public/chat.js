@@ -387,6 +387,28 @@ const TOOL_PLAN_CATALOG = [
   { name: 'forget_fact', label: 'Forget memory', desc: 'Removes a stored memory/fact.', group: 'Memory', re: /\b(?:forget|delete memory|remove memory)\b/i },
 ];
 
+// ask_agent is a mode-gated control-plane capability, not an ordinary tool.
+// Keep every picker path (suggestions, add menu, remembered recipes, manual
+// exact-name entry, and the final send payload) aligned with the stored
+// orchestration setting. Never infer this from `agents.length`: a one-agent
+// ensemble still has ask_agent, while single mode does not.
+function toolPlanToolAvailable(name, policy = (typeof _currentUser !== 'undefined' ? _currentUser?.orchestration : null)) {
+  return name !== 'ask_agent' || policy?.mode !== 'single';
+}
+
+function availableToolPlanCatalog(policy = (typeof _currentUser !== 'undefined' ? _currentUser?.orchestration : null)) {
+  return TOOL_PLAN_CATALOG.filter(tool => toolPlanToolAvailable(tool.name, policy));
+}
+
+function availableToolPlanNames(toolNames, policy = (typeof _currentUser !== 'undefined' ? _currentUser?.orchestration : null)) {
+  const candidates = toolNames != null
+    && typeof toolNames !== 'string'
+    && typeof toolNames[Symbol.iterator] === 'function'
+    ? Array.from(toolNames)
+    : [];
+  return [...new Set(candidates.filter(name => typeof name === 'string' && name && toolPlanToolAvailable(name, policy)))];
+}
+
 let toolPlanState = {
   mode: 'auto',
   expanded: false,
@@ -455,7 +477,7 @@ function matchToolRecipe(text, agentId = activeAgent) {
 }
 
 function rememberToolRecipe(text, selectedTools, mode = 'selected', agentId = activeAgent) {
-  const cleanTools = [...new Set((selectedTools || []).filter(Boolean))];
+  const cleanTools = availableToolPlanNames(selectedTools);
   if (!text?.trim()) return;
   if (mode === 'selected' && !cleanTools.length) return;
   const norm = normalizeToolPhrase(text);
@@ -499,7 +521,7 @@ function toolCatalogEntry(name) {
 
 function renderToolPlanAddOptions(excludedNames = new Set()) {
   const groups = new Map();
-  for (const item of TOOL_PLAN_CATALOG) {
+  for (const item of availableToolPlanCatalog()) {
     if (excludedNames.has(item.name)) continue;
     const group = item.group || 'Other';
     if (!groups.has(group)) groups.set(group, []);
@@ -521,7 +543,7 @@ function detectToolSuggestions(text) {
   if (!trimmed || trimmed.startsWith('/') || trimmed.startsWith('@')) return { suggestions: [], recipe: null };
   const recipe = matchToolRecipe(trimmed);
   const hits = [];
-  for (const item of TOOL_PLAN_CATALOG) {
+  for (const item of availableToolPlanCatalog()) {
     if (item.re?.test(trimmed)) hits.push({ ...item, source: 'suggested' });
   }
   if (/^\s*(?:ok|yes|do it|delete them|trash them|move them|label them)\s*$/i.test(trimmed)) {
@@ -529,7 +551,7 @@ function detectToolSuggestions(text) {
     hits.push({ ...toolCatalogEntry('email_batch_label'), source: 'context' });
   }
   if (recipe?.selectedTools?.length) {
-    for (const name of recipe.selectedTools) {
+    for (const name of availableToolPlanNames(recipe.selectedTools)) {
       if (!hits.some(h => h.name === name)) hits.unshift({ ...toolCatalogEntry(name), source: 'remembered' });
     }
   }
@@ -542,6 +564,11 @@ function renderToolPlanPicker() {
   const el = $('toolPlanPicker');
   if (!el) return;
   const text = $('input')?.value?.trim() || '';
+  const availableSelected = availableToolPlanNames(toolPlanState.selected);
+  if (availableSelected.length !== toolPlanState.selected.size) {
+    toolPlanState.selected = new Set(availableSelected);
+    if (toolPlanState.mode === 'selected' && !toolPlanState.selected.size) toolPlanState.mode = 'auto';
+  }
   const shouldShow = !!text && !text.startsWith('/') && !text.startsWith('@');
   if (!shouldShow) {
     el.style.display = 'none';
@@ -647,7 +674,7 @@ function renderToolPlanPicker() {
     const select = el.querySelector('#toolPlanAddSelect');
     const input = el.querySelector('#toolPlanAddName');
     const raw = (input?.value || select?.value || '').trim();
-    if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(raw)) {
+    if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(raw) || !toolPlanToolAvailable(raw)) {
       input?.focus();
       return;
     }
@@ -676,12 +703,13 @@ function renderToolPlanPicker() {
 
 function selectedToolPlanForSend(text) {
   if (!text?.trim()) return null;
-  if (toolPlanState.remember && (toolPlanState.mode === 'none' || toolPlanState.selected.size)) {
-    rememberToolRecipe(text, [...toolPlanState.selected], toolPlanState.mode);
+  const selectedTools = availableToolPlanNames(toolPlanState.selected);
+  if (toolPlanState.remember && (toolPlanState.mode === 'none' || selectedTools.length)) {
+    rememberToolRecipe(text, selectedTools, toolPlanState.mode);
   }
   if (toolPlanState.mode === 'none') return { mode: 'none', source: 'user', phrase: text.slice(0, 240), selectedTools: [] };
-  if (toolPlanState.mode === 'selected' && toolPlanState.selected.size) {
-    return { mode: 'selected', source: toolPlanState.recipe ? 'remembered' : 'user', phrase: text.slice(0, 240), selectedTools: [...toolPlanState.selected] };
+  if (toolPlanState.mode === 'selected' && selectedTools.length) {
+    return { mode: 'selected', source: toolPlanState.recipe ? 'remembered' : 'user', phrase: text.slice(0, 240), selectedTools };
   }
   return null;
 }
@@ -2523,12 +2551,28 @@ async function refreshWatcherHistory(el, watcherId) {
   }
 }
 
+function authenticatedVideoUrl(rawUrl) {
+  const value = typeof rawUrl === 'string' ? rawUrl : '';
+  if (!value.startsWith('/api/desktop/videos/')) return value;
+  const token = typeof getMediaTokenSync === 'function' ? getMediaTokenSync() : '';
+  if (!token) return value;
+  const hashAt = value.indexOf('#');
+  const hash = hashAt >= 0 ? value.slice(hashAt) : '';
+  const withoutHash = hashAt >= 0 ? value.slice(0, hashAt) : value;
+  const queryAt = withoutHash.indexOf('?');
+  const pathname = queryAt >= 0 ? withoutHash.slice(0, queryAt) : withoutHash;
+  const params = new URLSearchParams(queryAt >= 0 ? withoutHash.slice(queryAt + 1) : '');
+  params.set('token', token);
+  return `${pathname}?${params.toString()}${hash}`;
+}
+
 function appendVideoBubble(video, ts = Date.now(), scroll = true) {
   const el = msgEl('assistant');
   const bubble = el.querySelector('.msg-bubble');
+  const videoUrl = authenticatedVideoUrl(video.url);
 
   const videoEl = document.createElement('video');
-  videoEl.src = video.url;
+  videoEl.src = videoUrl;
   videoEl.controls = true;
   videoEl.style.cssText = 'max-width:100%;border-radius:8px;display:block';
   bubble.appendChild(videoEl);
@@ -2543,7 +2587,7 @@ function appendVideoBubble(video, ts = Date.now(), scroll = true) {
   } else {
     const dlBtn = document.createElement('a');
     dlBtn.innerHTML = `${icon('download', 12)} Download`;
-    dlBtn.href = video.url;
+    dlBtn.href = videoUrl;
     dlBtn.download = video.filename;
     dlBtn.target = '_blank';
     dlBtn.style.cssText = 'color:var(--accent);text-decoration:none;cursor:pointer;flex-shrink:0';
@@ -3236,7 +3280,13 @@ function retryFailedAttempt() {
   ws.send(JSON.stringify(payload));
 }
 function appendNotification(msg) {
-  const agentId = msg.agent;
+  // Watcher/scheduler events use server-scoped session ids
+  // (`user_<id>_<agent>`), while the browser stores the active tab as the raw
+  // registry id. Normalize before deciding inline-vs-toast so notifications
+  // projected onto a single-mode primary land in that primary's chat.
+  const agentId = typeof clientSessionAgentId === 'function'
+    ? clientSessionAgentId(msg.agent)
+    : chatSessionAgentId(msg.agent);
   const fromName = msg.from?.userName ?? 'Someone';
   const timeStr = new Date(msg.ts).toLocaleString([], { hour: '2-digit', minute: '2-digit' });
   // If notification is for the active agent, render inline

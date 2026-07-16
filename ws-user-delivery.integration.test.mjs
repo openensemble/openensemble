@@ -3,7 +3,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 
 import { createSession } from './routes/_helpers/auth-sessions.mjs';
-import { initWs, sendToUser } from './ws-handler.mjs';
+import { saveUser } from './routes/_helpers.mjs';
+import { createCustomAgent } from './agents.mjs';
+import { setOrchestrationPolicy } from './lib/orchestration-policy.mjs';
+import { broadcastAgentList, initWs, sendToUser } from './ws-handler.mjs';
 
 let httpServer;
 let wsServers;
@@ -69,6 +72,48 @@ afterAll(async () => {
 });
 
 describe('private WebSocket user delivery', () => {
+  it('carries normalized stored orchestration policy on initial and switched agent lists', async () => {
+    const userId = `ws-orchestration-${Date.now()}`;
+    saveUser({
+      id: userId,
+      name: 'WS Orchestration',
+      role: 'user',
+      skills: [],
+      skillAssignments: {},
+      orchestration: { mode: 'ensemble' },
+    });
+    const primary = createCustomAgent({
+      name: 'WS Primary',
+      description: 'websocket orchestration fixture',
+      provider: 'openai',
+      model: 'gpt-4',
+      toolSet: 'none',
+      systemPrompt: 'WS fixture.',
+      ownerId: userId,
+    });
+    saveUser({
+      id: userId,
+      name: 'WS Orchestration',
+      role: 'user',
+      skills: [],
+      skillAssignments: { coordinator: primary.id },
+      orchestration: { mode: 'ensemble', primaryAgentId: primary.id },
+    });
+    await setOrchestrationPolicy(userId, { mode: 'single', primaryAgentId: primary.id });
+
+    const client = await connectUser(createSession(userId));
+    const initial = client.messages.find(message => message.type === 'agent_list');
+    expect(initial.orchestration).toEqual({ mode: 'single', primaryAgentId: primary.id });
+    expect(initial.agents.map(agent => agent.id)).toEqual([primary.id]);
+
+    await setOrchestrationPolicy(userId, { mode: 'ensemble' });
+    broadcastAgentList();
+    await waitFor(() => client.messages.some(message =>
+      message.type === 'agent_list' && message.orchestration?.mode === 'ensemble'));
+    const restored = client.messages.findLast(message => message.type === 'agent_list');
+    expect(restored.orchestration).toEqual({ mode: 'ensemble', primaryAgentId: primary.id });
+  });
+
   it('delivers a background completion to the owner and never the other authenticated user', async () => {
     const userA = `ws-owner-a-${Date.now()}`;
     const userB = `ws-owner-b-${Date.now()}`;

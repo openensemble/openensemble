@@ -53,6 +53,7 @@ const MAX_PER_USER = 50;
 const MAX_FAILURES = 3;
 const RECENT_KEEP_MS = 60 * 60 * 1000;          // Keep completed/errored watchers visible 1h
 const MAX_HISTORY_ENTRIES = 100;                // Per-watcher progress scrollback cap
+const MAX_MEDIA_DELIVERY_RESERVATIONS = 20;
 const STUCK_RATIO = 5;                          // No change for 5×cadence → annotate as "stuck"
 const STUCK_BACKOFF_MAX_SEC = 3600;             // Back off noisy stuck polls up to hourly
 const EXTERNAL_DISPATCH_STALE_MS = 5 * 60 * 1000;
@@ -295,6 +296,8 @@ function loadAllUsersFromDisk() {
  * @param {{type: 'notify'|'agent', prompt?: string, [k: string]: any} | null} [opts.onFire]
  *                                   Action to run when this watcher reaches `done`
  *                                   status — see executeOnFire below.
+ * @param {boolean} [opts.requirePersist=false] Roll back registration unless
+ *                                   the initial durable write succeeds.
  * @returns {string} watcherId
  */
 export function registerWatcher(opts) {
@@ -398,10 +401,10 @@ export function registerWatcher(opts) {
   // Polling kinds skip this — the supervisor's regular sweep handles them.
   if (kind === 'event_subscription') subscribeToEvent(record);
   const persisted = persistUser(userId);
-  if (safeContext?.activationNonce && !persisted) {
+  if ((safeContext?.activationNonce || opts.requirePersist === true) && !persisted) {
     data.active = data.active.filter(watcher => watcher !== record);
     if (kind === 'event_subscription') unsubscribeFromEvent(record);
-    throw new Error('safe-auto watcher registration could not be persisted');
+    throw new Error('watcher registration could not be persisted');
   }
   return record.id;
 }
@@ -1276,7 +1279,7 @@ export async function runCustomWatcherSandboxed(record, { signal = null } = {}) 
 
 // ── supervisor loop ──────────────────────────────────────────────────────────
 
-async function tickOne(record) {
+async function tickOne(record, handlerOverride = null) {
   const inFlightKey = `${record.userId}:${record.id}`;
   if (_inFlight.has(inFlightKey)) return; // previous tick still running
   _inFlight.add(inFlightKey);
@@ -1388,14 +1391,14 @@ async function tickOne(record) {
       if (!sres.ok) { const serr = /** @type {any} */ (sres).error; log.warn('watchers', 'Sandboxed handler failed', { kind: record.kind, err: serr }); failTick(`❌ ${record.label}: sandboxed handler failed ${MAX_FAILURES}× — ${serr}`); return; }
       result = sres.result;
     } else {
-      const handler = await resolveHandler(record);
+      const handler = handlerOverride ?? await resolveHandler(record);
       if (!handler) {
         log.warn('watchers', 'Handler not found', { kind: record.kind, skillId: record.skillId });
         failTick(`❌ No handler registered for kind=${record.kind}.`);
         return;
       }
       try {
-        result = await handler(record.state, handlerHelpers(record));
+        result = await handler(record.state, handlerHelpers(record, { signal: tickController.signal }));
       } catch (e) {
         log.warn('watchers', 'Handler threw', { kind: record.kind, err: e.message });
         failTick(`❌ ${record.label}: handler failed ${MAX_FAILURES}× — ${e.message}`);
@@ -1529,7 +1532,13 @@ async function tickOne(record) {
     }
 
     record.nextTickAt = Date.now() + record.cadenceSec * 1000;
-    persistUser(record.userId);
+    const persisted = persistUser(record.userId);
+    if (result?.requirePersist === true && !persisted) {
+      // Paid/external submission claims must be durable before the following
+      // tick can initiate I/O. Remove the in-memory watcher on failure so this
+      // process cannot advance a claim that disk still records as queued.
+      finalizeWatcher(record, 'error', `❌ ${record.label}: durable pre-submission claim could not be saved; no provider request was sent.`);
+    }
   } finally {
     _inFlight.delete(inFlightKey);
     if (_inFlightControllers.get(inFlightKey) === tickController) {
@@ -2005,17 +2014,46 @@ async function executeOnFire(record) {
     return false;
   }
 
+  // A terminal successful watcher has already committed its predicate hit and
+  // must deliver even though finalizeWatcher moved it out of `active`. By
+  // contrast, fire()/fireAgent() run while a recurring watcher is still active;
+  // Stop/Undo must be able to revoke that pending action while it waits behind
+  // a topology writer. Those helpers pass a synthetic record, so check the live
+  // store by id rather than relying on object identity or the copied status.
+  const agentActionStillAllowed = () => {
+    if (record.status === 'done') return true;
+    if (record.status !== 'active') return false;
+    return _byUser.get(userId)?.active
+      ?.some(watcher => watcher.id === record.id && watcher.status === 'active') === true;
+  };
+
   let topologyLease = null;
-  for (let attempt = 0; attempt < 80 && !topologyLease; attempt++) {
+  let topologyWaits = 0;
+  while (!topologyLease) {
+    if (!agentActionStillAllowed()) {
+      log.info('watchers', 'on_fire cancelled while waiting for account topology', { id: record.id });
+      return false;
+    }
     topologyLease = tryAcquireUserTurnLease(userId, { label: `watcher:${record.id}` });
-    if (!topologyLease) await new Promise(resolve => setTimeout(resolve, 25));
-  }
-  if (!topologyLease) {
-    log.warn('watchers', 'on_fire deferred: account topology is changing', { id: record.id });
-    return false;
+    if (!topologyLease) {
+      topologyWaits++;
+      // Mode changes are brief under normal operation, but a fixed two-second
+      // retry cap silently discarded an already-fired action if storage or a
+      // deferred interactive transition ran long. Keep the watcher action
+      // pending in-process until the writer releases instead of
+      // converting ordinary topology contention into a dropped delivery.
+      if (topologyWaits === 80) {
+        log.info('watchers', 'on_fire waiting for account topology change', { id: record.id });
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
   }
 
   try {
+    // Stop/Undo may have won immediately before the writer released and this
+    // reader acquired. Recheck inside the lease before resolving or appending
+    // anything to an agent session.
+    if (!agentActionStillAllowed()) return false;
 
     const resolved = resolveRuntimeAgentForUser(userId, rawAgentId);
     if (!resolved) {
@@ -2039,10 +2077,13 @@ async function executeOnFire(record) {
     ts: Date.now(),
     });
 
+    const watcherActionGuidance = scopedAgent._rosterSolo === true
+      ? 'Use your own tools and complete the action directly. If a needed tool is missing this turn, call request_tools; use spawn_worker only for genuinely long or parallel work.'
+      : 'Use any ask_agent / tools needed and complete the action directly.';
     const watcherNote =
     `[WATCHER FIRED] You are reacting to a condition-triggered monitor that just fired. ` +
     `The user is NOT present. The watch label is "${record.label}" and its result is: ${fireText}. ` +
-    `Use any ask_agent / tools needed and complete the action directly — do NOT show a draft, ask "are you sure?", or wait for confirmation. ` +
+    `${watcherActionGuidance} Do NOT show a draft, ask "are you sure?", or wait for confirmation. ` +
     `Report what you did in your final message.`;
 
     log.info('watchers', 'on_fire agent run', { id: record.id, agentId: sessionKey });
@@ -2153,7 +2194,55 @@ function _onFireForDeliver(deliver, record) {
   }
 }
 
-export function handlerHelpers(record) {
+function reserveWatcherMediaDelivery(record, deliveryId, sessionKey) {
+  if (!record?.id || !record?.userId || typeof deliveryId !== 'string' || !deliveryId
+      || deliveryId.length > 300 || typeof sessionKey !== 'string'
+      || !sessionKey.startsWith(`${record.userId}_`) || sessionKey.length > 600
+      || /[\r\n\0]/.test(sessionKey)) {
+    throw new Error('watcher media delivery reservation is invalid');
+  }
+  const previous = record.mediaDeliveryReservations;
+  if (previous != null && !Array.isArray(previous)) {
+    throw new Error('watcher media delivery reservation store is invalid');
+  }
+  const existing = (previous || []).filter(row => row?.deliveryId === deliveryId);
+  if (existing.length > 1 || (existing[0] && (typeof existing[0].sessionKey !== 'string'
+      || !existing[0].sessionKey.startsWith(`${record.userId}_`)))) {
+    throw new Error('watcher media delivery reservation is corrupt');
+  }
+  if (existing[0]) return existing[0].sessionKey;
+  if ((previous?.length || 0) >= MAX_MEDIA_DELIVERY_RESERVATIONS) {
+    throw new Error('watcher media delivery reservation limit reached');
+  }
+
+  record.mediaDeliveryReservations = [
+    ...(previous || []),
+    { deliveryId, sessionKey, reservedAt: Date.now() },
+  ];
+  if (!persistUser(record.userId)) {
+    if (previous === undefined) delete record.mediaDeliveryReservations;
+    else record.mediaDeliveryReservations = previous;
+    throw new Error('watcher media delivery session could not be persisted');
+  }
+  return sessionKey;
+}
+
+async function acquireWatcherMediaTopologyLease(record, isLive, signal) {
+  while (isLive()) {
+    const lease = tryAcquireUserTurnLease(record.userId, {
+      label: `watcher-media:${record.id}`,
+    });
+    if (lease) return lease;
+    await new Promise(resolve => setTimeout(resolve, 25));
+    if (signal?.aborted) return null;
+  }
+  return null;
+}
+
+export function handlerHelpers(record, { signal = null } = {}) {
+  const mediaDeliveryIsLive = () => !signal?.aborted
+    && record.status === 'active'
+    && _byUser.get(record.userId)?.active?.find(watcher => watcher.id === record.id) === record;
   // ctx.browser shorthand for watcher handlers — same primitives the
   // skill-side ctx.browser exposes, bound to record.userId. Lets a
   // collection-watcher handler use the user's connected browser as its
@@ -2221,6 +2310,7 @@ export function handlerHelpers(record) {
     userId: record.userId,
     agentId: runtimeWatcherAgentRef(record),
     watcherId: record.id,
+    signal,
     // Per-skill encrypted secret store — same accessor as ctx.credentials, so a
     // skill's watcher handler reads the same config its tools stored.
     credentials: exposedCredentials,
@@ -2232,10 +2322,74 @@ export function handlerHelpers(record) {
     }),
     ...runtimeHelpers,
     browser,
-    showImage: async (img) => isManagedPreferenceWatcher(record)
-      ? false : _showImageFn?.(record.userId, { ...img, agent: runtimeWatcherAgentRef(record) }),
-    showVideo: async (vid) => isManagedPreferenceWatcher(record)
-      ? false : _showVideoFn?.(record.userId, { ...vid, agent: runtimeWatcherAgentRef(record) }),
+    showImage: async (img) => {
+      if (isManagedPreferenceWatcher(record) || !mediaDeliveryIsLive()) return false;
+      const topologyLease = await acquireWatcherMediaTopologyLease(
+        record,
+        mediaDeliveryIsLive,
+        signal,
+      );
+      if (!topologyLease) return false;
+      try {
+        if (!mediaDeliveryIsLive()) return false;
+        const runtimeAgent = runtimeWatcherAgentRef(record);
+        if (!runtimeAgent) return false;
+        return await _showImageFn?.(record.userId, { ...img, agent: runtimeAgent });
+      } finally {
+        topologyLease.release();
+      }
+    },
+    showVideo: async (vid) => {
+      if (isManagedPreferenceWatcher(record)) return false;
+      if (!mediaDeliveryIsLive()) return false;
+      const filename = typeof vid?.filename === 'string' ? vid.filename : '';
+      const url = typeof vid?.url === 'string' ? vid.url : '';
+      if (!filename || !url) return false;
+      const deliveryId = String(vid?.deliveryId || filename).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 300);
+      const reportId = `watcher-video:${record.id}:${deliveryId}`;
+      if (!deliveryId) return false;
+      const topologyLease = await acquireWatcherMediaTopologyLease(
+        record,
+        mediaDeliveryIsLive,
+        signal,
+      );
+      if (!topologyLease) return false;
+      try {
+        if (!mediaDeliveryIsLive()) return false;
+        // Resolve only after acquiring the topology reader and keep that lease
+        // through reservation, durable append, and the optional live send.
+        const runtimeAgent = runtimeWatcherAgentRef(record);
+        const currentSession = runtimeAgent
+          ? (String(runtimeAgent).startsWith(`${record.userId}_`)
+              ? String(runtimeAgent)
+              : `${record.userId}_${runtimeAgent}`)
+          : null;
+        if (!currentSession) return false;
+        const reservedSession = reserveWatcherMediaDelivery(
+          record,
+          deliveryId,
+          currentSession,
+        );
+        const { appendSessionReportOnce } = await import('../sessions.mjs');
+        const stored = await appendSessionReportOnce(reservedSession, {
+          role: 'assistant',
+          reportId,
+          video: { url, filename, savedPath: vid?.savedPath || null },
+          content: `[Video: ${filename}]${vid?.savedPath ? `\nSaved to: ${vid.savedPath}` : ''}`,
+          watcherId: record.id,
+          ts: Date.now(),
+        });
+        if (stored !== 'appended' || !mediaDeliveryIsLive()) return false;
+        // A reservation created before a crash remains authoritative. If the
+        // account switched modes before retry, persist once to that reserved
+        // session but do not broadcast to a now-stale live target.
+        if (reservedSession !== currentSession) return false;
+        await _showVideoFn?.(record.userId, { ...vid, agent: runtimeAgent });
+        return true;
+      } finally {
+        topologyLease.release();
+      }
+    },
     postStatus: async (text) => {
       if (isManagedPreferenceWatcher(record)) {
         const delivered = await deliverManagedPreferenceUpdate(record, text);
@@ -2351,8 +2505,7 @@ export function handlerHelpers(record) {
         synth.lastStatusText = stripHtml(html);
       }
       try {
-        await executeOnFire(synth);
-        return true;
+        return await executeOnFire(synth);
       } catch (e) {
         log.warn('watchers', 'fire threw', { id: record.id, err: e.message });
         return false;
@@ -2397,8 +2550,7 @@ export function handlerHelpers(record) {
         : record.onFire;
       const synth = { ...record, onFire: tempCfg };
       try {
-        await executeOnFire(synth);
-        return true;
+        return await executeOnFire(synth);
       } catch (e) {
         log.warn('watchers', 'fireAgent threw', { id: record.id, err: e.message });
         return false;
@@ -2418,6 +2570,10 @@ async function tick() {
     }
   }
 }
+
+// Narrow regression seam for durability/cancellation tests. Production code
+// drives the same function through the supervisor interval above.
+export const __test = Object.freeze({ tickOne, reserveWatcherMediaDelivery });
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
 

@@ -84,6 +84,29 @@ export function toResponsesTools(tools) {
   }));
 }
 
+/**
+ * Replace OE's authorized generate_image function with the Codex-hosted tool.
+ * The internal marker selects a backend; it is deliberately insufficient on
+ * its own. The current turn must still hold generate_image, preserving account
+ * allowedSkills, user tool plans, intent routing, and request_tools recovery.
+ */
+export function applyProviderHostedImageTool(agent, responsesTools, nativeImagesThisTurn, cap = 3) {
+  const holdsAuthorizedCapability = agent?._providerHostedImageBackend === true
+    && agent?.provider === 'openai-oauth'
+    && supportsImageGeneration('openai-oauth', agent?.model)
+    && agent?.tools?.some(tool => (tool?.function?.name ?? tool?.name) === 'generate_image');
+  if (!holdsAuthorizedCapability) return responsesTools;
+
+  const next = (responsesTools ?? []).filter(tool => !(
+    tool?.type === 'function' && tool?.name === 'generate_image'
+  ));
+  // Once the per-turn paid-generation cap is reached, keep the unavailable
+  // local fallback filtered too; advertising it would only produce a policy-
+  // bypass attempt or a guaranteed backend error.
+  if (nativeImagesThisTurn < cap) next.push({ type: 'image_generation' });
+  return next;
+}
+
 // Network-blip patterns we'll retry once before giving up. Anything else
 // (4xx, 5xx, auth, malformed body) propagates immediately — we don't want
 // to mask real provider errors as transient network issues.
@@ -96,25 +119,53 @@ function isRetriableNetworkError(e) {
   return RETRIABLE_NETWORK_RE.test(causeMsg) || RETRIABLE_NETWORK_RE.test(causeCode);
 }
 
-function saveImageGenerationResult(userId, item) {
-  let base64 = item?.result ?? item?.image_base64 ?? item?.b64_json;
+const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_NATIVE_IMAGE_BASE64_CHARS = Math.ceil(MAX_NATIVE_IMAGE_BYTES / 3) * 4 + 128;
+
+function decodeNativeImageBase64(value) {
+  let base64 = value;
   if (!base64 || typeof base64 !== 'string') return null;
   if (base64.includes(',')) base64 = base64.split(',').pop();
+  if (!base64 || base64.length > MAX_NATIVE_IMAGE_BASE64_CHARS
+      || base64.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) return null;
+  const bytes = Buffer.from(base64, 'base64');
+  if (!bytes.length || bytes.length > MAX_NATIVE_IMAGE_BYTES) return null;
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { bytes, base64, mimeType: 'image/png', extension: 'png' };
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[bytes.length - 2] === 0xff && bytes[bytes.length - 1] === 0xd9) {
+    return { bytes, base64, mimeType: 'image/jpeg', extension: 'jpg' };
+  }
+  if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') {
+    return { bytes, base64, mimeType: 'image/webp', extension: 'webp' };
+  }
+  if (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a') {
+    return { bytes, base64, mimeType: 'image/gif', extension: 'gif' };
+  }
+  return null;
+}
+
+export function saveImageGenerationResult(userId, item) {
+  let base64 = item?.result ?? item?.image_base64 ?? item?.b64_json;
+  const image = decodeNativeImageBase64(base64);
+  if (!image) return null;
+  base64 = image.base64;
   const idPart = String(item.id ?? item.call_id ?? 'openai_image')
     .replace(/[^a-z0-9]+/gi, '_')
     .toLowerCase()
     .replace(/^_+|_+$/g, '')
     .slice(0, 48);
-  const filename = `${idPart || 'openai_image'}_${Date.now()}.png`;
+  const filename = `${idPart || 'openai_image'}_${Date.now()}.${image.extension}`;
   let savedPath = null;
   try {
     const dir = getUserFilesDir(userId, 'images');
-    savedPath = path.join(dir, filename);
-    writeFileSync(savedPath, Buffer.from(base64, 'base64'));
+    const diskPath = path.join(dir, filename);
+    writeFileSync(diskPath, image.bytes, { mode: 0o600, flag: 'wx' });
+    savedPath = `images:${filename}`;
   } catch (e) {
     console.warn('[openai-oauth] Failed to save generated image:', e.message);
   }
-  return { base64, mimeType: 'image/png', filename, savedPath };
+  return { base64, mimeType: image.mimeType, filename, savedPath };
 }
 
 async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAttempt = null } = {}) {
@@ -248,12 +299,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search' && t.name !== 'fetch_url');
       responsesTools.push(nativeSearch.tool);
     }
-    if (isCodex && supportsImageGeneration('openai-oauth', agent.model)
-        && nativeImagesThisTurn < NATIVE_IMAGE_GEN_CAP) {
-      responsesTools = responsesTools || [];
-      if (!responsesTools.some(t => t.type === 'image_generation')) {
-        responsesTools.push({ type: 'image_generation' });
-      }
+    if (isCodex) {
+      responsesTools = applyProviderHostedImageTool(
+        agent, responsesTools, nativeImagesThisTurn, NATIVE_IMAGE_GEN_CAP,
+      );
     }
     const body = {
       model:        agent.model,
@@ -269,6 +318,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     if (!reasoningDisabled) body.reasoning = mapOpenAIResponsesReasoning(agent);
     if (responsesTools?.length) { body.tools = responsesTools; body.parallel_tool_calls = true; }
     if (promptCacheKey) body.prompt_cache_key = promptCacheKey;
+    const paidHostedImageOffered = body.tools?.some(tool => tool?.type === 'image_generation') === true;
 
     const headers = {
       'Content-Type':  'application/json',
@@ -297,7 +347,13 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     try {
       res = await postWithRetry(endpoint, {
         method: 'POST', signal, headers, body: JSON.stringify(body),
-      }, { onAttempt: () => { reqCount++; } });
+      }, {
+        // No verified idempotency primitive exists for the hosted paid image
+        // tool. A handshake failure may follow provider acceptance, so never
+        // automatically replay a request that offered image_generation.
+        attempts: paidHostedImageOffered ? 1 : 2,
+        onAttempt: () => { reqCount++; },
+      });
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
       const cause = e?.cause?.code || e?.cause?.message;
@@ -347,7 +403,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           usageCardinalityValid = false;
           res = await postWithRetry(`${OPENAI_OAUTH_BASE}/responses`, {
             method: 'POST', signal, headers, body: JSON.stringify(body),
-          }, { onAttempt: () => { reqCount++; } });
+          }, {
+            attempts: paidHostedImageOffered ? 1 : 2,
+            onAttempt: () => { reqCount++; },
+          });
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
           yield usageTelemetry();
@@ -398,13 +457,16 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
     let textContent  = '';
     const generatedImages = [];
-    const seenImageGenerationItems = new Set();
-    const recordGeneratedImage = (item) => {
-      const key = item?.id ?? item?.call_id ?? item?.result?.slice?.(0, 32);
-      if (key && seenImageGenerationItems.has(key)) return null;
+    const imageGenerationItemStatus = new Map();
+    const recordGeneratedImage = (item, fallbackKey = 'unkeyed-image-generation') => {
+      const key = String(item?.id ?? item?.call_id ?? fallbackKey).slice(0, 300);
+      if (imageGenerationItemStatus.get(key) === 'valid') return null;
       const image = saveImageGenerationResult(userId, item);
-      if (!image) return null;
-      if (key) seenImageGenerationItems.add(key);
+      if (!image) {
+        imageGenerationItemStatus.set(key, 'invalid');
+        return null;
+      }
+      imageGenerationItemStatus.set(key, 'valid');
       generatedImages.push(image);
       nativeImagesThisTurn++;
       // Hand the MODEL the artifact id immediately. The human-facing
@@ -497,7 +559,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           }
         }
         if (item.type === 'image_generation_call') {
-          const image = recordGeneratedImage(item);
+          const image = recordGeneratedImage(item, `output-item:${ev.output_index ?? 'unknown'}`);
           if (image) yield { type: 'image', ...image, prompt: '' };
         }
         continue;
@@ -517,9 +579,9 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       if (t === 'response.completed') {
         completionCount++;
         loopCompletionCount++;
-        for (const item of ev.response?.output ?? []) {
+        for (const [outputIndex, item] of (ev.response?.output ?? []).entries()) {
           if (item?.type === 'image_generation_call') {
-            const image = recordGeneratedImage(item);
+            const image = recordGeneratedImage(item, `response-output:${outputIndex}`);
             if (image) yield { type: 'image', ...image, prompt: '' };
           }
         }
@@ -588,6 +650,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       if (textContent.trim()) yield { type: 'replace', text: '' };
       yield usageTelemetry();
       yield { type: 'error', message: `${displayName}: incomplete or invalid response stream.` };
+      return;
+    }
+    if ([...imageGenerationItemStatus.values()].some(status => status === 'invalid')) {
+      yield usageTelemetry();
+      yield {
+        type: 'error',
+        message: `${displayName}: hosted image generation completed without a valid bounded image artifact.`,
+      };
       return;
     }
 

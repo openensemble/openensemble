@@ -4,12 +4,15 @@ import fs from 'fs';
 const chatSource = fs.readFileSync(new URL('./public/chat.js', import.meta.url), 'utf8');
 const renderStart = chatSource.indexOf('function renderSessionInner(keepScroll) {');
 const renderEnd = chatSource.indexOf('\nfunction orderSessionForRender(', renderStart);
+const notificationStart = chatSource.indexOf('function appendNotification(msg) {');
+const notificationEnd = chatSource.indexOf('\n// Render a direct report card', notificationStart);
 
-if (renderStart < 0 || renderEnd < 0) {
-  throw new Error('Unable to locate renderSessionInner in public/chat.js');
+if (renderStart < 0 || renderEnd < 0 || notificationStart < 0 || notificationEnd < 0) {
+  throw new Error('Unable to locate browser rendering functions in public/chat.js');
 }
 
 const renderSessionInnerSource = chatSource.slice(renderStart, renderEnd);
+const appendNotificationSource = chatSource.slice(notificationStart, notificationEnd);
 
 function makeRenderer(rows, historyWindow = 150) {
   const appendUserBubble = vi.fn();
@@ -104,5 +107,39 @@ describe('browser chat session visibility', () => {
 
     expect(renderer.renderDocumentSessionRequest).toHaveBeenCalledTimes(1);
     expect(renderer.renderDocumentSessionRequest.mock.calls[0][1]).toBe(visibleAssistant);
+  });
+});
+
+describe('browser watcher notification routing', () => {
+  it('renders a scoped notification inline for the raw active agent', () => {
+    const insertBefore = vi.fn();
+    const scrollToBottom = vi.fn();
+    const showToast = vi.fn();
+    const element = { className: '', innerHTML: '' };
+    const factory = new Function('deps', [
+      "const activeAgent = 'primary';",
+      "const agents = [{ id: 'primary', name: 'Primary' }];",
+      "const clientSessionAgentId = agent => agent === 'user_fixture_primary' ? 'primary' : agent;",
+      "const document = { createElement: () => deps.element };",
+      "const icon = () => 'icon';",
+      'const escHtml = value => String(value);',
+      'const insertBefore = deps.insertBefore;',
+      'const scrollToBottom = deps.scrollToBottom;',
+      'const showToast = deps.showToast;',
+      appendNotificationSource,
+      'return appendNotification;',
+    ].join('\n'));
+    const appendNotification = factory({ element, insertBefore, scrollToBottom, showToast });
+
+    appendNotification({
+      agent: 'user_fixture_primary',
+      content: 'watch fired',
+      from: { userName: 'Monitor' },
+      ts: Date.now(),
+    });
+
+    expect(insertBefore).toHaveBeenCalledWith(element);
+    expect(scrollToBottom).toHaveBeenCalledOnce();
+    expect(showToast).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,7 @@
 {
   "id": "image_generator",
   "name": "Image Generator",
-  "description": "Generates images from text prompts using Fireworks AI (Flux models).",
+  "description": "Generates or edits images using the server-configured Fireworks or Grok image provider.",
   "icon": "🎨",
   "category": "image",
   "service": true,
@@ -22,6 +22,44 @@
     "make a fantasy character portrait",
     "generate a black and white photo of a coffee shop"
   ],
-  "systemPromptAddition": "You are an image generation agent powered by Flux via Fireworks AI.\n\nWhen the user gives you a prompt, generate an image immediately — do not ask clarifying questions unless the prompt is completely unclear.\n\nAfter generating, you may offer brief suggestions (e.g. style variations, aspect ratios) but keep it short.\n\nIf the user provides an image to edit or use as a reference (with flux-kontext models), incorporate it naturally.\n\nDo not describe what you are about to do — just do it.",
-  "tools": []
+  "systemPromptAddition": "When the user asks for an image, call generate_image immediately — do not ask clarifying questions unless the request is completely unclear. Put the full visual description in the prompt argument. Omit quality to use the configured tier; request quality='quality' only when the user explicitly asks and the account has an approved quality model. To edit an attached profile image, pass its exact images: attachment ID as input_image_id; editing requires the configured model to be Flux Kontext. Never pass a path, URL, or base64 data. Provider and model selection are enforced server-side. After the image appears you may offer one brief suggestion, nothing more.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "generate_image",
+        "description": "Generate or edit an image and show it directly in chat. For editing, pass an exact owner-scoped images: attachment ID; arbitrary paths, URLs, and base64 data are not accepted.",
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8000,
+              "description": "Full visual description of the desired image: subject, style, setting, lighting, composition."
+            },
+            "quality": {
+              "type": "string",
+              "enum": ["fast", "quality"],
+              "description": "Optional quality tier. Omit it to use the configured model's tier; a requested tier must have an explicitly approved server-side model."
+            },
+            "aspect_ratio": {
+              "type": "string",
+              "enum": ["1:1", "21:9", "16:9", "3:2", "5:4", "4:5", "2:3", "9:16", "9:21", "4:3", "3:4"],
+              "description": "Optional aspect ratio like '1:1', '16:9', or '9:16'. Omit it to preserve the configured image agent's aspect ratio."
+            },
+            "input_image_id": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 300,
+              "pattern": "^images:[^/\\\\]+$",
+              "description": "Optional exact profile attachment ID (images:filename) to edit. Requires a configured Flux Kontext model. Do not pass a path, URL, or base64 data."
+            }
+          },
+          "required": ["prompt"]
+        }
+      }
+    }
+  ]
 }

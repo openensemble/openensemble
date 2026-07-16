@@ -929,20 +929,24 @@ function handleServerMessage(msg) {
       if (agents.find(a => a.skillCategory === 'expenses')?.id === msg.agent && $('drawerExpenses')?.classList.contains('open')) loadExpTxns();
       break;
       }
-    case 'image':
-      if (msg.agent !== activeAgent) break;
+    case 'image': {
+      const target = clientSessionAgentId(msg.agent);
+      if (target !== activeAgent) break;
       setTyping(false);
       appendImageBubble({ base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, Date.now());
-      if (!sessions[msg.agent]) sessions[msg.agent] = [];
-      sessions[msg.agent].push({ role: 'assistant', image: { base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, content: `[Image: ${msg.filename}]`, ts: Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
+      if (!sessions[target]) sessions[target] = [];
+      sessions[target].push({ role: 'assistant', image: { base64: msg.base64, mimeType: msg.mimeType, filename: msg.filename, savedPath: msg.savedPath }, content: `[Image: ${msg.filename}]`, ts: Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
       break;
-    case 'video':
-      if (msg.agent !== activeAgent) break;
+    }
+    case 'video': {
+      const target = clientSessionAgentId(msg.agent);
+      if (target !== activeAgent) break;
       setTyping(false);
       appendVideoBubble({ url: msg.url, filename: msg.filename, savedPath: msg.savedPath }, Date.now());
-      if (!sessions[msg.agent]) sessions[msg.agent] = [];
-      sessions[msg.agent].push({ role: 'assistant', video: { url: msg.url, filename: msg.filename, savedPath: msg.savedPath }, content: `[Video: ${msg.filename}]`, ts: Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
+      if (!sessions[target]) sessions[target] = [];
+      sessions[target].push({ role: 'assistant', video: { url: msg.url, filename: msg.filename, savedPath: msg.savedPath }, content: `[Video: ${msg.filename}]`, ts: Date.now(), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
       break;
+    }
     case 'error':
       // Server-side auth rejection on the WS handshake — clear the stale
       // token and bail. Without this, ws.onclose's reconnect loop would keep
@@ -1210,6 +1214,12 @@ function handleServerMessage(msg) {
       break;
     }
     case 'agent_list':
+      // The roster broadcast carries the normalized STORED policy so picker
+      // visibility updates for switches made in chat or another browser. Do
+      // not infer mode from roster length: one-agent ensembles are valid.
+      if (_currentUser && msg.orchestration && typeof msg.orchestration === 'object') {
+        _currentUser.orchestration = msg.orchestration;
+      }
       agents = msg.agents;
       if (agents.length > 0 && !agents.find(a => a.id === activeAgent)) {
         activeAgent = agents[0].id;
@@ -1223,6 +1233,7 @@ function handleServerMessage(msg) {
       }
       buildTabs();
       buildAgentDrawer();
+      if (typeof renderToolPlanPicker === 'function') renderToolPlanPicker();
       // Keep Settings' per-agent model rows in sync if the panel is rendered
       if (document.getElementById('agentModelRows') && typeof renderAgentModelRows === 'function') {
         renderAgentModelRows();

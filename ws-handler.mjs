@@ -54,6 +54,17 @@ import {
 import { hasVoiceAnnouncements, nextVoiceAnnouncement } from './lib/voice-announcements.mjs';
 import { normalizeDocumentRequest } from './lib/document-artifacts.mjs';
 import { getProfileFilePath } from './lib/profile-files.mjs';
+import { getOrchestrationPolicy, getRequestedOrchestrationPolicy } from './lib/orchestration-policy.mjs';
+
+function orchestrationPolicyForClient(userId) {
+  const requested = getRequestedOrchestrationPolicy(userId);
+  if (requested.pendingPrimary) return { mode: 'single', pendingPrimary: true };
+  const effective = getOrchestrationPolicy(userId);
+  return {
+    mode: effective.mode,
+    ...(effective.primaryAgentId ? { primaryAgentId: effective.primaryAgentId } : {}),
+  };
+}
 
 // Backfill ws._deviceId for voice-device sessions that were created before
 // the deviceId was stored on the session record (pre-2026-05-12). Looks up
@@ -1469,7 +1480,12 @@ function onConnection(ws, req) {
     // marginal-Wi-Fi airtime exactly when the link was already flapping.
     if (ws._deviceId) return;
     const userAgents = getAgentsForUser(ws._userId);
-    ws.send(JSON.stringify({ type: 'agent_list', agents: userAgents.map(agentToWire), boot_id: BOOT_ID }));
+    ws.send(JSON.stringify({
+      type: 'agent_list',
+      agents: userAgents.map(agentToWire),
+      orchestration: orchestrationPolicyForClient(ws._userId),
+      boot_id: BOOT_ID,
+    }));
     // Load every agent's session in parallel — loadSession is async since
     // the previous commit; the prior serial sync version was 5+ blocking
     // reads at WS connect time. Parallel async makes total wall time =
@@ -1694,13 +1710,13 @@ function onConnection(ws, req) {
       // wakeword-train/V9_PLAN.md §6.3.
       try {
         const { BASE_DIR } = await import('./lib/paths.mjs');
+        const { isManualWakeCaptureEnabled } = await import('./lib/manual-wake-capture.mjs');
         const capRoot = path.join(BASE_DIR, 'wake-captures-manual');
         // Per-device flag `ENABLE-<deviceId>` scopes capture to a single device
         // (e.g. only the kitchen during a harvest so other rooms keep working);
         // legacy global `ENABLE` still captures on every device. Either one
         // present for this device arms capture.
-        if (fs.existsSync(path.join(capRoot, `ENABLE-${ws._deviceId}`)) ||
-            fs.existsSync(path.join(capRoot, 'ENABLE'))) {
+        if (isManualWakeCaptureEnabled(capRoot, ws._deviceId)) {
           const { wavWrapPcm16kMono } = await import('./lib/stt.mjs');
           const dir = path.join(capRoot, ws._deviceId);
           await fs.promises.mkdir(dir, { recursive: true });
@@ -2543,7 +2559,11 @@ export function broadcastAgentList() {
     const uid = client._userId;
     let data = cache.get(uid);
     if (!data) {
-      data = JSON.stringify({ type: 'agent_list', agents: getAgentsForUser(uid).map(agentToWire) });
+      data = JSON.stringify({
+        type: 'agent_list',
+        agents: getAgentsForUser(uid).map(agentToWire),
+        orchestration: orchestrationPolicyForClient(uid),
+      });
       cache.set(uid, data);
     }
     try { client.send(data); } catch {}

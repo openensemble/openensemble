@@ -83,4 +83,3 @@ export function _resetBrowserPairingRateLimitsForTests() {
   globalBadClaims = 0;
   globalWindowStartedAt = Date.now();
 }
-

@@ -396,4 +396,78 @@ describe('Responses provider usage cardinality', () => {
     });
     expect(events.at(-1)).toMatchObject({ type: 'error', message: expect.stringContaining('500') });
   });
+
+  it('never automatically retries a request that offers the paid hosted image tool', async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const generateImageTool = {
+      type: 'function',
+      function: {
+        name: 'generate_image',
+        description: 'authorized image capability',
+        parameters: { type: 'object', properties: { prompt: { type: 'string' } } },
+      },
+    };
+
+    const events = await collect(streamOpenAIResponses(
+      agent({
+        provider: 'openai-oauth',
+        model: 'gpt-5.4',
+        tools: [generateImageTool],
+        _providerHostedImageBackend: true,
+      }),
+      'test prompt',
+      [{ role: 'user', content: 'generate an image' }],
+      AbortSignal.timeout(5_000),
+      'responses-usage-user',
+    ));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).tools).toContainEqual({ type: 'image_generation' });
+    expect(usageEvent(events)).toMatchObject({ reqCount: 1, usageComplete: false });
+    expect(events.at(-1)).toMatchObject({ type: 'error', message: expect.stringMatching(/fetch failed/i) });
+  });
+
+  it.each([
+    ['malformed', Buffer.from('not an image').toString('base64')],
+    ['oversized', 'A'.repeat(28_000_000)],
+  ])('fails the turn when a completed hosted image artifact is %s', async (_label, result) => {
+    const item = { type: 'image_generation_call', id: `image_${_label}`, result };
+    const terminal = completion({ input: 9, output: 2 });
+    terminal.response.output = [item];
+    vi.stubGlobal('fetch', vi.fn(async () => responseSse([
+      { type: 'response.output_item.done', output_index: 0, item },
+      terminal,
+    ])));
+    const generateImageTool = {
+      type: 'function',
+      function: {
+        name: 'generate_image',
+        description: 'authorized image capability',
+        parameters: { type: 'object', properties: { prompt: { type: 'string' } } },
+      },
+    };
+
+    const events = await collect(streamOpenAIResponses(
+      agent({
+        provider: 'openai-oauth',
+        model: 'gpt-5.4',
+        tools: [generateImageTool],
+        _providerHostedImageBackend: true,
+      }),
+      'test prompt',
+      [{ role: 'user', content: 'generate an image' }],
+      AbortSignal.timeout(5_000),
+      'responses-usage-user',
+    ));
+
+    expect(events.some(event => event.type === '__content')).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      message: expect.stringMatching(/completed without a valid bounded image artifact/i),
+    });
+    expect(usageEvent(events)).toMatchObject({ reqCount: 1, completionCount: 1, usageCount: 1 });
+  });
 });

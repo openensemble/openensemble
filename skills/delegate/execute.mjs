@@ -256,6 +256,25 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const directive = typeof rawDirective === 'string' ? rawDirective.trim() : '';
   if (!agent_id || !task) { yield { type: 'result', text: 'Missing agent_id or task.' }; return; }
 
+  // Execution-time policy gate. The schema resolver removes ask_agent in
+  // single mode, but a provider can still replay a stale tool call from the
+  // preceding ensemble turn (or a direct caller can bypass schema listing).
+  // Read the stored account policy before loading any delegation machinery or
+  // resolving a target, and fail closed without starting a specialist turn.
+  // This is intentionally NOT based on roster size: a one-agent ensemble keeps
+  // the normal ask_agent contract.
+  const { getOrchestrationPolicy } = await import('../../lib/orchestration-policy.mjs');
+  if (getOrchestrationPolicy(userId).mode === 'single') {
+    const isWorker = String(callerAgentId || '').startsWith('ephemeral_worker_');
+    yield {
+      type: 'result',
+      text: isWorker
+        ? 'You are a background worker and there are no other agents to hand work to. Finish the task yourself with your own tools, then reply with your report — it is delivered to your owner automatically.'
+        : 'This deployment runs a single agent (you) — there are no specialists to delegate to. Do the task directly with your own tools. For a long or parallel job, call spawn_worker with a complete, self-contained task: it runs detached, shows a progress chip, and its report lands back in this chat when done. If a tool you need is missing this turn, call request_tools.',
+    };
+    return;
+  }
+
   // Sync-vs-background is decided below, AFTER the delegation direction is known
   // (see "Decide sync vs background"). Auto-backgrounding applies only when the
   // coordinator dispatches DOWN to a specialist — never when a specialist
@@ -269,26 +288,6 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const { getScheduledNote } = await import('../../lib/scheduled-context.mjs');
 
   const agents = getAgentsForUser(userId);
-  // Single-agent mode (stored orchestration policy — NEVER inferred from
-  // roster size, plan D4; an ensemble user who happens to own one agent keeps
-  // stock's resolution ladder): there are no specialists to route to, so
-  // EVERY delegation attempt gets one deterministic redirect instead of the
-  // "not found" ladder below — models answer "not found" by retrying invented
-  // names, and agent_id="coordinator" would match the caller itself via the
-  // skillCategory fallback and self-delegate. Workers get their own wording:
-  // their report is delivered to the owner automatically, so "escalating"
-  // means finishing.
-  const { getOrchestrationPolicy } = await import('../../lib/orchestration-policy.mjs');
-  if (getOrchestrationPolicy(userId).mode === 'single') {
-    const isWorker = String(callerAgentId || '').startsWith('ephemeral_worker_');
-    yield {
-      type: 'result',
-      text: isWorker
-        ? 'You are a background worker and there are no other agents to hand work to. Finish the task yourself with your own tools, then reply with your report — it is delivered to your owner automatically.'
-        : 'This deployment runs a single agent (you) — there are no specialists to delegate to. Do the task directly with your own tools. For a long or parallel job, call spawn_worker with a complete, self-contained task: it runs detached, shows a progress chip, and its report lands back in this chat when done. If a tool you need is missing this turn, call request_tools.',
-    };
-    return;
-  }
   // Accept either the real id (agent_2dfdf5ca) or the display name.
   // Some models (notably gpt-5.x via the Codex backend) hallucinate names even
   // when the tool description lists real ids, so we fall back through several

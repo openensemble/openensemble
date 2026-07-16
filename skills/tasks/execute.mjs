@@ -69,6 +69,21 @@ async function canActOnWatcher(watcher, callerAgentId, userId) {
   const callerUnscoped = unscopeAgentId(callerAgentId, userId);
   if (ownerUnscoped === callerUnscoped) return { ok: true };
 
+  // Orchestration projects durable watcher ownership at runtime without
+  // rewriting watchers.json. In single mode a watcher saved against a parked
+  // agent (or the legacy symbolic `coordinator`) belongs to the active primary
+  // for control purposes; switching back restores the original authority.
+  // Unknown/deleted ids still resolve to null and continue through the strict
+  // orphan policy below.
+  let resolvedOwner = null;
+  let resolvedCaller = null;
+  try {
+    const { resolveRuntimeAgentId } = await import('../../routes/_helpers.mjs');
+    resolvedOwner = resolveRuntimeAgentId(userId, ownerUnscoped);
+    resolvedCaller = resolveRuntimeAgentId(userId, callerUnscoped);
+  } catch { /* fail closed below */ }
+  if (resolvedOwner && resolvedCaller && resolvedOwner === resolvedCaller) return { ok: true };
+
   // Non-owner. Two-condition orphan override for the coordinator:
   //   1. The creating agent no longer exists, AND
   //   2. The watcher's owning skill is currently unassigned.
@@ -76,9 +91,10 @@ async function canActOnWatcher(watcher, callerAgentId, userId) {
   // watcher (or who now holds the skill). Sole-authority is the rule.
   let watcherAgentExists = true;
   try {
-    const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
-    const all = getAgentsForUser(userId);
-    watcherAgentExists = all.some(a => a.id === ownerUnscoped || a.id === watcher.agentId);
+    const { listAgents } = await import('../../agents.mjs');
+    const allOwned = listAgents().filter(agent => agent.ownerId === userId);
+    watcherAgentExists = allOwned.some(agent =>
+      agent.id === ownerUnscoped || (resolvedOwner && agent.id === resolvedOwner));
   } catch { /* lookup failure shouldn't accidentally unlock — keep exists=true */ }
 
   let skillIsAssigned = false;
@@ -821,9 +837,17 @@ async function execAutonomyStatus(userId, agentId) {
     return acc;
   }, {});
   const stuck = active.filter(w => w.stuckAnnounced || w.stuckSinceAt);
-  const owned = agentId
-    ? active.filter(w => w.agentId === agentId || unscopeAgentId(w.agentId, userId) === unscopeAgentId(agentId, userId)).length
-    : 0;
+  let owned = 0;
+  if (agentId) {
+    try {
+      const { resolveRuntimeAgentId } = await import('../../routes/_helpers.mjs');
+      const callerRuntime = resolveRuntimeAgentId(userId, unscopeAgentId(agentId, userId));
+      owned = callerRuntime
+        ? active.filter(watcher =>
+            resolveRuntimeAgentId(userId, unscopeAgentId(watcher.agentId, userId)) === callerRuntime).length
+        : 0;
+    } catch { /* fail closed: report zero rather than claim another agent's watches */ }
+  }
 
   const lines = [
     `Autonomy status: ${active.length} active watcher(s), ${recent.length} recent watcher(s), ${proposals.length} pending proposal(s).`,
