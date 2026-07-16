@@ -102,12 +102,13 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
   } catch (e) { /* roles module unavailable in tests — default to unscoped only */ }
 
   const includeEpisodes = opts?.includeEpisodes !== false;
+  const suppressLearning = opts?.suppressLearning === true;
   const [paramsRaw, episodes, userFactsRaw, profileState] = await Promise.all([
-    recall({ agentId, type: 'params', query: currentQuery, queryVec, topK: paramsTopK, includeShared: false, userId }),
+    recall({ agentId, type: 'params', query: currentQuery, queryVec, topK: paramsTopK, includeShared: false, userId, suppressLearning }),
     includeEpisodes
-      ? recall({ agentId, type: 'episodes', query: currentQuery, queryVec, topK: episodeTopK, includeShared: false, recencyBoost: isTemporal, timeAnchor, userId })
+      ? recall({ agentId, type: 'episodes', query: currentQuery, queryVec, topK: episodeTopK, includeShared: false, recencyBoost: isTemporal, timeAnchor, userId, suppressLearning })
       : Promise.resolve([]),
-    recall({ agentId: 'shared', type: 'user_facts', query: currentQuery, queryVec, topK: 4, includeShared: false, userId, myRoles })
+    recall({ agentId: 'shared', type: 'user_facts', query: currentQuery, queryVec, topK: 4, includeShared: false, userId, myRoles, suppressLearning })
       .catch(() => []),
     Promise.all([
       import('../lib/personalization/ledger.mjs'),

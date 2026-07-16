@@ -6,10 +6,16 @@ import { USERS_DIR } from './lib/paths.mjs';
 const traceMocks = vi.hoisted(() => ({
   recordRunTrace: vi.fn(),
   fastpathCalls: vi.fn(),
+  transcribeCalls: vi.fn(),
+  slashCalls: vi.fn(async () => null),
+  extractTransactions: vi.fn(async () => []),
+  turnContexts: [],
 }));
 
 vi.mock('./chat.mjs', () => ({
   streamChat: vi.fn(async function* () {
+    const { getTurnContext } = await import('./lib/turn-abort-context.mjs');
+    traceMocks.turnContexts.push(getTurnContext());
     yield { type: 'token', text: 'safe summary' };
   }),
 }));
@@ -41,6 +47,10 @@ vi.mock('./lib/run-inspector.mjs', async importOriginal => ({
 
 vi.mock('./chat-dispatch/fastpaths.mjs', async importOriginal => ({
   ...(await importOriginal()),
+  tryTranscribeAttachmentFastpath: async function tryTranscribeAttachmentFastpath(ctx) {
+    traceMocks.transcribeCalls(ctx.userText);
+    return null;
+  },
   tryHaFastpath: async function tryHaFastpath(ctx) {
     traceMocks.fastpathCalls(ctx.userText);
     if (ctx.userText !== 'trace the kitchen fast path') return null;
@@ -54,6 +64,16 @@ vi.mock('./chat-dispatch/fastpaths.mjs', async importOriginal => ({
       },
     };
   },
+}));
+
+vi.mock('./chat-dispatch/slash-commands.mjs', async importOriginal => ({
+  ...(await importOriginal()),
+  tryHandleSlashCommand: traceMocks.slashCalls,
+}));
+
+vi.mock('./skills/expenses/execute.mjs', async importOriginal => ({
+  ...(await importOriginal()),
+  extractTransactions: traceMocks.extractTransactions,
 }));
 
 const { handleChatMessage } = await import('./chat-dispatch.mjs');
@@ -94,6 +114,10 @@ beforeEach(async () => {
   vi.mocked(interceptScheduling).mockClear();
   traceMocks.recordRunTrace.mockClear();
   traceMocks.fastpathCalls.mockClear();
+  traceMocks.transcribeCalls.mockClear();
+  traceMocks.slashCalls.mockClear();
+  traceMocks.extractTransactions.mockClear();
+  traceMocks.turnContexts.length = 0;
   await clearSession(`${USER_ID}_${agentId}`);
 });
 
@@ -154,5 +178,253 @@ describe('one-shot browser turn policy', () => {
       }),
       meta: { fastPath: 'tryHaFastpath', localHandler: 'tryHaFastpath' },
     }));
+  });
+
+  it('authenticates and preserves the lab verifier auto plan without leaking its lease token', async () => {
+    const priorLab = process.env.OPENENSEMBLE_LAB;
+    const priorLeasePath = process.env.OE_LAB_VERIFIER_LEASE_PATH;
+    const leasePath = path.join(USERS_DIR, USER_ID, 'lab-verifier-auth.test.json');
+    const leaseToken = 'a'.repeat(64);
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    fs.writeFileSync(leasePath, JSON.stringify({
+      version: 1,
+      runTag: 'real_router_1700000000000_aaaaaaaa',
+      token: leaseToken,
+      expiresAt: Date.now() + 60_000,
+    }));
+    fs.chmodSync(leasePath, 0o600);
+    try {
+      await handleChatMessage({
+        userId: USER_ID,
+        agentId,
+        text: 'Run the authenticated verifier case.',
+        source: 'web',
+        toolPlan: {
+          mode: 'auto', source: 'lab-verifier', maxProviderRequests: 3,
+          verifierAllowedTools: ['web_search'], leaseToken,
+        },
+        onEvent: () => {},
+      });
+
+      expect(streamChat).toHaveBeenCalledOnce();
+      expect(vi.mocked(streamChat).mock.calls[0][9]?.toolPlan).toEqual({
+        mode: 'auto', selectedTools: [], source: 'lab-verifier', phrase: null,
+        maxProviderRequests: 3, verifierAllowedTools: ['web_search'],
+      });
+      expect(traceMocks.turnContexts[0]).toMatchObject({
+        suppressLearning: true,
+        verifierLeaseRequired: true,
+        verifierLeaseToken: leaseToken,
+      });
+      expect(JSON.stringify(vi.mocked(streamChat).mock.calls[0])).not.toContain(leaseToken);
+    } finally {
+      fs.rmSync(leasePath, { force: true });
+      if (priorLab == null) delete process.env.OPENENSEMBLE_LAB;
+      else process.env.OPENENSEMBLE_LAB = priorLab;
+      if (priorLeasePath == null) delete process.env.OE_LAB_VERIFIER_LEASE_PATH;
+      else process.env.OE_LAB_VERIFIER_LEASE_PATH = priorLeasePath;
+    }
+  });
+
+  it('allows only the authenticated HA fast path for an auto-mode HA verifier case', async () => {
+    const priorLab = process.env.OPENENSEMBLE_LAB;
+    const priorLeasePath = process.env.OE_LAB_VERIFIER_LEASE_PATH;
+    const leasePath = path.join(USERS_DIR, USER_ID, 'lab-verifier-ha-fastpath.test.json');
+    const leaseToken = 'd'.repeat(64);
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    fs.writeFileSync(leasePath, JSON.stringify({
+      version: 1,
+      runTag: 'real_router_1700000000000_dddddddd',
+      token: leaseToken,
+      expiresAt: Date.now() + 60_000,
+    }));
+    fs.chmodSync(leasePath, 0o600);
+    try {
+      await handleChatMessage({
+        userId: USER_ID,
+        agentId,
+        text: 'trace the kitchen fast path',
+        source: 'web',
+        toolPlan: {
+          mode: 'auto', source: 'lab-verifier', maxProviderRequests: 1,
+          verifierAllowedTools: ['ha_call_service'], leaseToken,
+        },
+        onEvent: () => {},
+      });
+
+      expect(traceMocks.fastpathCalls).toHaveBeenCalledOnce();
+      expect(streamChat).not.toHaveBeenCalled();
+
+      await clearSession(`${USER_ID}_${agentId}`);
+      traceMocks.fastpathCalls.mockClear();
+      vi.mocked(streamChat).mockClear();
+
+      for (const verifierAllowedTools of [
+        ['web_search'],
+        ['ha_call_service', 'web_search'],
+      ]) {
+        await handleChatMessage({
+          userId: USER_ID,
+          agentId,
+          text: 'trace the kitchen fast path',
+          source: 'web',
+          toolPlan: {
+            mode: 'auto', source: 'lab-verifier', maxProviderRequests: 1,
+            verifierAllowedTools, leaseToken,
+          },
+          onEvent: () => {},
+        });
+      }
+
+      expect(traceMocks.fastpathCalls).not.toHaveBeenCalled();
+      expect(streamChat).toHaveBeenCalledTimes(2);
+    } finally {
+      fs.rmSync(leasePath, { force: true });
+      if (priorLab == null) delete process.env.OPENENSEMBLE_LAB;
+      else process.env.OPENENSEMBLE_LAB = priorLab;
+      if (priorLeasePath == null) delete process.env.OE_LAB_VERIFIER_LEASE_PATH;
+      else process.env.OE_LAB_VERIFIER_LEASE_PATH = priorLeasePath;
+    }
+  });
+
+  it('keeps verifier slash, transcription, and finance probes behind the model boundary', async () => {
+    const priorLab = process.env.OPENENSEMBLE_LAB;
+    const priorLeasePath = process.env.OE_LAB_VERIFIER_LEASE_PATH;
+    const leasePath = path.join(USERS_DIR, USER_ID, 'lab-verifier-interceptors.test.json');
+    const leaseToken = 'e'.repeat(64);
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    saveUser({
+      id: USER_ID,
+      name: 'Browser Test',
+      role: 'user',
+      skills: [],
+      skillAssignments: { coordinator: agentId, expenses: agentId },
+    });
+    fs.writeFileSync(leasePath, JSON.stringify({
+      version: 1,
+      runTag: 'real_router_1700000000000_eeeeeeee',
+      token: leaseToken,
+      expiresAt: Date.now() + 60_000,
+    }));
+    fs.chmodSync(leasePath, 0o600);
+    try {
+      const attachment = {
+        name: 'interceptor-probe.csv', mimeType: 'text/csv', isFinanceFile: true,
+      };
+      await handleChatMessage({
+        userId: USER_ID,
+        agentId,
+        text: '/threshold 0.2',
+        source: 'web',
+        attachment,
+        toolPlan: {
+          mode: 'auto', source: 'lab-verifier', maxProviderRequests: 1,
+          verifierAllowedTools: ['web_search'], leaseToken,
+        },
+        onEvent: () => {},
+      });
+
+      expect(traceMocks.transcribeCalls).not.toHaveBeenCalled();
+      expect(traceMocks.slashCalls).not.toHaveBeenCalled();
+      expect(traceMocks.extractTransactions).not.toHaveBeenCalled();
+      expect(streamChat).toHaveBeenCalledOnce();
+      expect(vi.mocked(streamChat).mock.calls[0][1]).toBe('/threshold 0.2');
+      expect(vi.mocked(streamChat).mock.calls[0][5]).toEqual([attachment]);
+    } finally {
+      saveUser({
+        id: USER_ID,
+        name: 'Browser Test',
+        role: 'user',
+        skills: [],
+        skillAssignments: { coordinator: agentId },
+      });
+      fs.rmSync(leasePath, { force: true });
+      if (priorLab == null) delete process.env.OPENENSEMBLE_LAB;
+      else process.env.OPENENSEMBLE_LAB = priorLab;
+      if (priorLeasePath == null) delete process.env.OE_LAB_VERIFIER_LEASE_PATH;
+      else process.env.OE_LAB_VERIFIER_LEASE_PATH = priorLeasePath;
+    }
+  });
+
+  it('rejects ordinary, spoofed, and out-of-contract turns while the verifier lease is active', async () => {
+    const priorLab = process.env.OPENENSEMBLE_LAB;
+    const priorLeasePath = process.env.OE_LAB_VERIFIER_LEASE_PATH;
+    const leasePath = path.join(USERS_DIR, USER_ID, 'lab-verifier-exclusive.test.json');
+    const leaseToken = 'b'.repeat(64);
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    fs.writeFileSync(leasePath, JSON.stringify({
+      version: 1,
+      runTag: 'real_router_1700000000000_bbbbbbbb',
+      token: leaseToken,
+      expiresAt: Date.now() + 60_000,
+    }));
+    fs.chmodSync(leasePath, 0o600);
+    try {
+      await expect(handleChatMessage({
+        userId: USER_ID, agentId, text: 'ordinary turn', source: 'web', onEvent: () => {},
+      })).rejects.toThrow(/exclusively leased/);
+      await expect(handleChatMessage({
+        userId: USER_ID, agentId, text: 'spoofed verifier', source: 'web',
+        toolPlan: { mode: 'auto', source: 'lab-verifier', maxProviderRequests: 1 },
+        onEvent: () => {},
+      })).rejects.toThrow(/exclusively leased/);
+      await expect(handleChatMessage({
+        userId: USER_ID, agentId, text: 'missing allowlist', source: 'web',
+        toolPlan: { mode: 'auto', source: 'lab-verifier', maxProviderRequests: 1, leaseToken },
+        onEvent: () => {},
+      })).rejects.toThrow(/requires a bounded server execution allowlist/);
+      await expect(handleChatMessage({
+        userId: USER_ID, agentId, text: 'cap too high', source: 'web',
+        toolPlan: {
+          mode: 'auto', source: 'lab-verifier', maxProviderRequests: 5,
+          verifierAllowedTools: [], leaseToken,
+        },
+        onEvent: () => {},
+      })).rejects.toThrow(/requires a provider request cap from 1 to 4/);
+      await expect(handleChatMessage({
+        userId: USER_ID, agentId, text: 'selected outside allowlist', source: 'web',
+        toolPlan: {
+          mode: 'selected', selectedTools: ['web_search'], source: 'lab-verifier',
+          maxProviderRequests: 1, verifierAllowedTools: [], leaseToken,
+        },
+        onEvent: () => {},
+      })).rejects.toThrow(/selected tools must be included/);
+      expect(streamChat).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(leasePath, { force: true });
+      if (priorLab == null) delete process.env.OPENENSEMBLE_LAB;
+      else process.env.OPENENSEMBLE_LAB = priorLab;
+      if (priorLeasePath == null) delete process.env.OE_LAB_VERIFIER_LEASE_PATH;
+      else process.env.OE_LAB_VERIFIER_LEASE_PATH = priorLeasePath;
+    }
+  });
+
+  it('rejects a verifier marker when no exclusive lease exists', async () => {
+    const priorLab = process.env.OPENENSEMBLE_LAB;
+    const priorLeasePath = process.env.OE_LAB_VERIFIER_LEASE_PATH;
+    const leasePath = path.join(USERS_DIR, USER_ID, 'lab-verifier-missing.test.json');
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    fs.rmSync(leasePath, { force: true });
+    try {
+      await expect(handleChatMessage({
+        userId: USER_ID, agentId, text: 'spoofed verifier', source: 'web',
+        toolPlan: {
+          mode: 'auto', source: 'lab-verifier', maxProviderRequests: 1,
+          verifierAllowedTools: [], leaseToken: 'c'.repeat(64),
+        },
+        onEvent: () => {},
+      })).rejects.toThrow(/without an active exclusive verifier lease/);
+      expect(streamChat).not.toHaveBeenCalled();
+    } finally {
+      if (priorLab == null) delete process.env.OPENENSEMBLE_LAB;
+      else process.env.OPENENSEMBLE_LAB = priorLab;
+      if (priorLeasePath == null) delete process.env.OE_LAB_VERIFIER_LEASE_PATH;
+      else process.env.OE_LAB_VERIFIER_LEASE_PATH = priorLeasePath;
+    }
   });
 });

@@ -1156,7 +1156,9 @@ export async function cleanStaleStreamBuffers({ onlyAgentId = null } = {}) {
 
 // Run cleanup on module load (recovers from server crashes). Fire-and-forget:
 // the mtime gate above makes it safe to run concurrently with new turns.
-cleanStaleStreamBuffers().catch(e => console.warn('[sessions] Stream buffer cleanup failed:', e.message));
+if (process.env.OPENENSEMBLE_LAB !== '1') {
+  cleanStaleStreamBuffers().catch(e => console.warn('[sessions] Stream buffer cleanup failed:', e.message));
+}
 
 // ── Cross-agent context ─────────────────────────────────────────────────────
 // async because it just forwards to loadSession, which is async since

@@ -9,6 +9,7 @@ import {
 } from './shared.mjs';
 import { embed } from './embedding.mjs';
 import { getTable } from './lance.mjs';
+import { getTurnContext } from '../lib/turn-abort-context.mjs';
 
 // Upper bound on `stability` (hours). Recall multiplies stability by 1.8 each
 // time; with no cap a hot memory grew geometrically until it overflowed JS
@@ -73,7 +74,10 @@ function capImmortalFacts(rows, tokenBudget) {
 }
 
 // ── recall — vector search with Ebbinghaus reranking ─────────────────────────
-export async function recall({ agentId = 'main', type = 'episodes', query, queryVec: precomputedVec = undefined, topK = 5, includeShared = true, recencyBoost = false, timeAnchor = null, userId = 'default', myRoles = null }) {
+// Retrieval remains identical in non-learning mode, but recall must not queue
+// count/stability writes that can land after the owning turn has terminated.
+export async function recall({ agentId = 'main', type = 'episodes', query, queryVec: precomputedVec = undefined, topK = 5, includeShared = true, recencyBoost = false, timeAnchor = null, userId = 'default', myRoles = null, suppressLearning = false }) {
+  const readOnlyRecall = suppressLearning || getTurnContext()?.suppressLearning === true;
   const queryVec = precomputedVec ?? await embed(query);
   // A zero/empty query vector means embed() failed (usually a misconfigured
   // embed model). vectorSearch with a zero vector returns arbitrary "nearest"
@@ -140,30 +144,33 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
     .sort((a, b) => b.final_score - a.final_score)
     .slice(0, topK);
 
-  // Update recall stats (strengthens memory via spacing effect)
-  reranked.forEach(m => {
-    if (!UUID_RE.test(m.id)) return; // skip legacy non-UUID IDs
-    const tName = m.agent_id === 'shared' ? 'user_facts' : `${m.agent_id}_${type}`;
-    queuedWrite(tName, async () => {
-      const t = await getTable(tName, userId);
-      // Access frequency is not evidence that a fact is true. In particular,
-      // repeatedly retrieving a stale personalization inference must not make
-      // it progressively harder to correct or forget. Keep the spacing-effect
-      // stability boost for episodic/parameter memories, but not user facts.
-      const values = {
-        recall_count: (m.recall_count || 0) + 1,
-        retention_score: 1.0,
-        last_recalled_at: new Date().toISOString(),
-        ...(tName === 'user_facts' ? {} : {
-          stability: Math.min(MAX_STABILITY, (m.stability || 24) * 1.8),
-        }),
-      };
-      await t.update({
-        where: `id = '${assertId(m.id)}'`,
-        values,
-      }).catch(e => console.debug('[cortex] LanceDB update error:', e.message));
+  // Normal recalls strengthen memory via the spacing effect. Verifier reads
+  // return the same ranking without turning observation into a queued write.
+  if (!readOnlyRecall) {
+    reranked.forEach(m => {
+      if (!UUID_RE.test(m.id)) return; // skip legacy non-UUID IDs
+      const tName = m.agent_id === 'shared' ? 'user_facts' : `${m.agent_id}_${type}`;
+      queuedWrite(tName, async () => {
+        const t = await getTable(tName, userId);
+        // Access frequency is not evidence that a fact is true. In particular,
+        // repeatedly retrieving a stale personalization inference must not make
+        // it progressively harder to correct or forget. Keep the spacing-effect
+        // stability boost for episodic/parameter memories, but not user facts.
+        const values = {
+          recall_count: (m.recall_count || 0) + 1,
+          retention_score: 1.0,
+          last_recalled_at: new Date().toISOString(),
+          ...(tName === 'user_facts' ? {} : {
+            stability: Math.min(MAX_STABILITY, (m.stability || 24) * 1.8),
+          }),
+        };
+        await t.update({
+          where: `id = '${assertId(m.id)}'`,
+          values,
+        }).catch(e => console.debug('[cortex] LanceDB update error:', e.message));
+      });
     });
-  });
+  }
 
   const immortalIds = new Set(immortals.map(m => m.id));
   return [...immortals, ...reranked.filter(m => !immortalIds.has(m.id))].slice(0, topK + immortals.length);

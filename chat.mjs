@@ -31,7 +31,11 @@ import { log } from './logger.mjs';
 import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills, shouldUseProviderHostedImageBackend } from './lib/tool-router.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { beginMemoryScope } from './lib/memory-scope-context.mjs';
-import { getTurn, beginTurn, recordSpan, recordError, finishTurn } from './lib/turn-trace-context.mjs';
+import { getTurnContext } from './lib/turn-abort-context.mjs';
+import {
+  getTurn, beginTurn, recordSpan, recordError, finishTurn,
+  setTurnLabProviderRequestCap,
+} from './lib/turn-trace-context.mjs';
 import { looksLikeToolError } from './lib/tool-error.mjs';
 import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
 import { getSelectedPlanKeepTools } from './roles.mjs';
@@ -163,8 +167,10 @@ function documentArtifactContent(request, artifact, fallback = '') {
 
 // async since the durability fix: the session write is awaited so callers can
 // hold the terminal `done` until the turn is actually on disk. Everything
-// after the write (friction/proposers/signals) stays fire-and-forget.
-async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, workerLeafRun = false } = {}) {
+// after the write (friction/proposers/signals) stays fire-and-forget on normal
+// turns. An authenticated verifier preserves the real session/tool path but
+// stops here before any delayed learning work can cross the terminal boundary.
+async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, suppressLearning = false, workerLeafRun = false } = {}) {
   // Detached task workers are deliberately non-learning. Their completed
   // report is persisted by the owner-continuation path; writing a second
   // ephemeral session here is unnecessary, and proceeding below would also
@@ -305,7 +311,7 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   // the human question + answer for continuity, then stop before friction,
   // proposals, telemetry, trigger learning, feedback intercepts, episodes,
   // or memory signals can treat hostile page text as user intent.
-  if (readOnlyTurn) return;
+  if (readOnlyTurn || suppressLearning) return;
 
   // Friction tracking runs UNCONDITIONALLY — before skipSignals, before
   // toolsUsed, before any other gate. It's about repeat-detection, not
@@ -917,7 +923,34 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const attachments = normalizeAttachments(Array.isArray(attachment) ? attachment : null, Array.isArray(attachment) ? null : attachment);
   const attachment0 = attachments[0] ?? null;
   const isolatedTaskRun = turnOpts?.isolatedTaskRun === true;
+  const detachedTaskRun = !!(turnOpts?.rootTaskId || turnOpts?.traceSource);
   const readOnlyTurn = turnOpts?.readOnlyTurn === true;
+  // Only the public dispatcher may authenticate a verifier lease. Nested
+  // streams inherit the resulting non-learning boundary through ambient turn
+  // context; a direct caller cannot self-authorize with a plan source string.
+  const inheritedLabVerifierTurn = process.env.OPENENSEMBLE_LAB === '1'
+    && getTurnContext()?.suppressLearning === true;
+  const labVerifierTurn = inheritedLabVerifierTurn;
+  const suppressLearning = readOnlyTurn || labVerifierTurn;
+  // Foreground verifier turns honor the dispatcher-authenticated 1..4 cap.
+  // Detached verifier work gets two bounded extra rounds so a multi-step task
+  // can correct one lookup and still produce a final answer.
+  const requestedForegroundCap = labVerifierTurn
+    && Number.isSafeInteger(turnOpts?.toolPlan?.maxProviderRequests)
+    && turnOpts.toolPlan.maxProviderRequests >= 1
+    && turnOpts.toolPlan.maxProviderRequests <= 4
+    ? turnOpts.toolPlan.maxProviderRequests
+    : 4;
+  const verifierWorkerCompletion = labVerifierTurn
+    && isolatedTaskRun
+    && detachedTaskRun
+    && readOnlyTurn
+    && turnOpts?.toolPlan?.mode === 'none'
+    && turnOpts.toolPlan.source === 'worker-completion'
+    && turnOpts.toolPlan.maxProviderRequests === 1;
+  const labProviderRequestCap = verifierWorkerCompletion
+    ? 1
+    : (labVerifierTurn && isolatedTaskRun && detachedTaskRun ? 6 : requestedForegroundCap);
   const workerMemoryOwnerId = workerStandingMemoryOwner(agent, turnOpts);
   const sessionUserText = typeof turnOpts?.sessionUserText === 'string'
     ? turnOpts.sessionUserText
@@ -941,7 +974,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // must own a fresh root keyed on its task id. An inline run (specialist-router,
   // ask_agent) shares the dispatcher's async tree, so getTurn() returns the live
   // turn and we just add our span to it.
-  const _detachedRun = !!(turnOpts?.rootTaskId || turnOpts?.traceSource);
+  const _detachedRun = detachedTaskRun;
   if (_detachedRun || !getTurn()) {
     beginTurn({
       userId,
@@ -955,6 +988,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       sessionEpoch: turnOpts?.sessionEpoch || null,
     });
     _ownsTurnTrace = true;
+  }
+  // Async provider generators may resume outside the tool-router context. Pin
+  // the authenticated spend ceiling to the turn trace before creating one.
+  if (process.env.OPENENSEMBLE_LAB === '1') {
+    setTurnLabProviderRequestCap(labProviderRequestCap);
   }
   // Routing/recipe key: when a delegation supplies an explicit `directive` (the
   // short "what the specialist must DO"), route + recover + learn on that rather
@@ -980,7 +1018,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (voiceCtx) {
     voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
   }
-  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>} | null} */
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>, labVerifierForeground?: boolean, labProviderRequestCap?: number} | null} */
   let _routerStore = null;
   // A task must never create a task. On any autonomous run strip the task /
   // reminder / alarm creators BEFORE tool routing, so they're absent from the
@@ -1013,6 +1051,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         addedSkills: new Set(),
         recoveryLoads: [],
         initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
+        labVerifierForeground: labVerifierTurn,
+        labProviderRequestCap,
       };
       toolRouterContext.enterWith(_routerStore);
     }
@@ -1044,7 +1084,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // proposer stashes after qualifying multi-tool turns and only emits on the
   // next turn — so we can drop the candidate if the user's current message
   // is corrective. Fire-and-forget; failures here must never block chat.
-  if (!readOnlyTurn && !agent.ephemeral && !silent) {
+  if (!suppressLearning && !agent.ephemeral && !silent) {
     import('./lib/skill-proposer.mjs')
       .then(m => m.flushPendingSkillCandidate({ agentId: agent.id, currentUserMessage: userText }))
       .catch(e => console.warn('[skill-proposer] flush failed:', e.message));
@@ -1053,7 +1093,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // ephemeral specialist-router runs (Helen). On voice-device pipelines
   // every user turn lands in Helen ephemerally, so gating on !ephemeral
   // would mean the flush never fires for voice-only users. Keyed by userId.
-  if (!readOnlyTurn && !silent && !workerMemoryOwnerId) {
+  if (!suppressLearning && !silent && !workerMemoryOwnerId) {
     import('./lib/routine-proposer.mjs')
       .then(m => m.flushPendingRoutineCandidate({ userId, currentUserMessage: userText }))
       .catch(e => console.warn('[routine-proposer] flush failed:', e.message));
@@ -1062,7 +1102,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // Location-fact-proposer flush — same shape as skill-proposer: drop the
   // pending candidate if the new turn looks corrective, otherwise emit the
   // host-fact proposal bubble.
-  if (!readOnlyTurn && !agent.ephemeral && !silent) {
+  if (!suppressLearning && !agent.ephemeral && !silent) {
     import('./lib/location-fact-proposer.mjs')
       .then(m => m.flushPendingLocationFact({ userId, agentId: agent.id, currentUserMessage: userText }))
       .catch(e => console.warn('[location-fact-proposer] flush failed:', e.message));
@@ -1075,10 +1115,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // the scheduler DB owns that state, so don't duplicate it as a memory. Users
   // who want a behavior preference captured can state it in a separate turn.
   const schedulerFired = (systemNote ?? '').includes('<scheduler_result>');
-  const skipSignals = readOnlyTurn || schedulerFired || agent.ephemeral || agent.skillCategory === 'finance' || agent.skillCategory === 'expenses' || agent.skillCategory === 'email';
+  const skipSignals = suppressLearning || schedulerFired || agent.ephemeral || agent.skillCategory === 'finance' || agent.skillCategory === 'expenses' || agent.skillCategory === 'email';
   // General/manager agents: skip episode storage (task requests aren't useful memories)
   // but still run processSignals to capture genuine preferences/corrections
-  const skipEpisodes = readOnlyTurn || schedulerFired || agent.ephemeral || agent.skillCategory === 'general';
+  const skipEpisodes = suppressLearning || schedulerFired || agent.ephemeral || agent.skillCategory === 'general';
   // ── Concurrent pre-LLM lookups ────────────────────────────────────────
   // Cortex recall, trigger nudge, cross-agent reads, and the monitorable
   // classifier are mutually independent and don't read agent.tools or
@@ -1118,7 +1158,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         buildContext: buildAgentContext,
       }).catch(() => null);
     }
-    return buildAgentContext(agent.id, recallQuery, userId, { includeEpisodes: !isolatedTaskRun }).catch(() => null);
+    return buildAgentContext(agent.id, recallQuery, userId, {
+      includeEpisodes: !isolatedTaskRun,
+      suppressLearning,
+    }).catch(() => null);
   })();
 
   // Per-turn user-skill trigger nudge. Embedding-ranked when cortex is up
@@ -1126,7 +1169,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // when not. Empty string for ephemeral agents and for users with no custom
   // skills — buildTriggerNudgeBlock handles both. Concatenated into the
   // system prompt below alongside memBlock.
-  const _triggersPromise = (!readOnlyTurn && !agent.ephemeral && userId && userId !== 'default')
+  const _triggersPromise = (!suppressLearning && !agent.ephemeral && userId && userId !== 'default')
     ? (async () => {
         try {
           const { buildTriggerNudgeBlock } = await import('./lib/skill-triggers.mjs');
@@ -1171,7 +1214,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // judge would otherwise mistake for "a changing source the user keeps asking
   // about," escalating a giant internal prompt into a watch proposal. There is
   // also no human in the loop to see (let alone accept) the offer on these turns.
-  const interactiveMonitorTurn = !readOnlyTurn && !silent && !isolatedTaskRun && turnOpts?.hiddenUser !== true;
+  const interactiveMonitorTurn = !suppressLearning && !silent && !isolatedTaskRun && turnOpts?.hiddenUser !== true;
   const _monitorablePromise = (interactiveMonitorTurn && !agent.ephemeral && userId && userId !== 'default' && sessionUserText && !sessionUserText.trim().startsWith('/'))
     ? (async () => {
         try {
@@ -1223,6 +1266,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       addedSkills: new Set(),
       recoveryLoads: [],
       initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
+      labVerifierForeground: labVerifierTurn,
+      labProviderRequestCap,
     };
     toolRouterContext.enterWith(_routerStore);
     // Recompose the SPA portion of the system prompt against the trimmed
@@ -2107,6 +2152,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
           hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
           readOnlyTurn,
+          suppressLearning,
           workerLeafRun: Boolean(workerMemoryOwnerId),
           documentRequest: turnOpts.documentRequest,
         });
@@ -2119,7 +2165,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   }
   log.info('chat', 'llm turn complete', _llmMeta);
   recordRunTrace(userId, { ..._traceBase, status: 'complete' });
-  if (_routerStore && !workerMemoryOwnerId) {
+  if (_routerStore && !workerMemoryOwnerId && !suppressLearning) {
     // Telemetry: fire-and-forget, feeds the future learning loop that uses
     // prior {prompt → skill} pairs as extra intent examples. Never blocks.
     recordTurnRouting({
@@ -2174,6 +2220,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
         hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
         readOnlyTurn,
+        suppressLearning,
         workerLeafRun: Boolean(workerMemoryOwnerId),
         documentRequest: turnOpts?.documentRequest ?? null,
       });

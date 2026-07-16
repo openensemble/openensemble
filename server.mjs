@@ -125,6 +125,10 @@ const PORT     = 3737;
 const HTTPS_PORT = 3739;  // adjacent to 3737; 3738 reserved for the node-agent UDP discovery broadcast
 const UI_DIR  = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 const BASE_DIR = path.dirname(fileURLToPath(import.meta.url));
+// The isolated real-model lab must not start any independent writer, network
+// listener, credential migration, or host repair before the later scheduler
+// guard is reached. Production never sets this environment variable.
+const ISOLATED_LAB_RUNTIME = process.env.OPENENSEMBLE_LAB === '1';
 
 // ── PID-file guard ───────────────────────────────────────────────────────────
 // Refuse to start if another OE server is already running. Prevents the
@@ -577,7 +581,7 @@ const httpServer = http.createServer(async (req, res) => {
 // live in ws-handler.mjs. Connect the broadcast helpers back into the parts
 // of the system that need to push events (scheduler, background tasks,
 // route modules via the _helpers injection points, /health metrics).
-initWs(httpServer);
+initWs(httpServer, { allowAuxiliary: !ISOLATED_LAB_RUNTIME });
 
 // Voice-device UDP diagnostic sink — devices (fw >= 0.2.52) forward their
 // [boot]/[hb]/[ambient-stats] heartbeat lines here over UDP so a Wi-Fi-only
@@ -587,19 +591,19 @@ initWs(httpServer);
 // online-but-deaf, [boot] frequency catches reboot storms; each confirmed
 // episode notifies the owner once, with a recovery follow-up. Must be wired
 // after initWs — attribution resolves sender IP via the live WS client set.
-startVoiceUdpLog({ onLine: recordDeviceDiag });
+if (!ISOLATED_LAB_RUNTIME) startVoiceUdpLog({ onLine: recordDeviceDiag });
 
 // Voice-device offline alerting — notifies the owner (Telegram/email) when a
 // paired device stays unreachable past the threshold, once per episode, with
 // a recovery note when it returns. Must start after initWs: it reads the live
 // WS client set via isDeviceOnline. See lib/voice-device-monitor.mjs.
-startVoiceDeviceMonitor();
+if (!ISOLATED_LAB_RUNTIME) startVoiceDeviceMonitor();
 
 // Calendar mirror refresh loop — 5-min incremental sync-token pulls for every
 // user with gcal creds, so calendar fast-paths and calendar_snapshot answer
 // from local data. See lib/calendar-mirror.mjs; disable via
 // calendarMirrorRefreshMin: 0 in config.json.
-startCalendarMirrorLoop();
+if (!ISOLATED_LAB_RUNTIME) startCalendarMirrorLoop();
 
 setBroadcastFn(broadcastAgentList);
 setBackgroundUserSendFn(sendToUser);
@@ -854,20 +858,26 @@ async function seedSystemTasks() {
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────
-migrateUserDirs();
+if (!ISOLATED_LAB_RUNTIME) migrateUserDirs();
 buildCSS();
 computeUiBuildId(); // after buildCSS so styles.css is part of the hash
-loadRoleManifests();
-validateSkills().catch(() => {});
+loadRoleManifests({ runMigrations: !ISOLATED_LAB_RUNTIME });
+if (!ISOLATED_LAB_RUNTIME) validateSkills().catch(() => {});
 loadDrawerManifests();
-reconcileRoleDrawers();
+if (!ISOLATED_LAB_RUNTIME) reconcileRoleDrawers();
 loadPersistedSessions();
+
+// A metered lab run must see one stable router for every case. Warm the local
+// embedding index before the HTTP/WebSocket surface becomes healthy, and fail
+// the lab closed if it cannot be built. Production retains its asynchronous
+// warm-up below so normal startup latency is unchanged.
+if (ISOLATED_LAB_RUNTIME) await loadIntentEmbeddings();
 
 // One-shot encryption migration for any plaintext API keys that survive a
 // pre-encryption build of OE. Idempotent — no-op once everything is
 // encrypted. Uses users/_system/.master-key (in OE backups) so reinstall +
 // restore works without manual key handling.
-await (async () => {
+if (!ISOLATED_LAB_RUNTIME) await (async () => {
   try {
     const { bootstrapEncryption, bootstrapProfileEncryption } = await import('./lib/config-secrets.mjs');
     const { atomicWriteSync } = await import('./routes/_helpers/io-lock.mjs');
@@ -911,7 +921,7 @@ await (async () => {
 // to restart — net effect was "shut down, never come back". Patches the
 // unit to Restart=always if needed; takes effect on next restart, doesn't
 // disrupt the current session.
-(async () => {
+if (!ISOLATED_LAB_RUNTIME) (async () => {
   try {
     const { repairSystemdUnit } = await import('./lib/systemd-repair.mjs');
     await repairSystemdUnit();
@@ -952,20 +962,24 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // Arm oe-admin boot-check. If a pending mutation is awaiting commit and
   // the server is now responding, this commits the change (or reverts +
   // exits if the deadline expires). Safe no-op when no pending marker.
-  runBootCheck({ port: PORT }).catch(e => console.warn('[oe-admin] boot-check failed:', e.message));
+  if (!ISOLATED_LAB_RUNTIME) {
+    runBootCheck({ port: PORT }).catch(e => console.warn('[oe-admin] boot-check failed:', e.message));
+  }
 
   // MCP tools — warm each user's tool cache from their registered servers.
   // Fire-and-forget so the listen callback doesn't block; users without
   // mcp.json (the vast majority right now) finish in ~0ms.
-  import('./lib/mcp-tools.mjs').then(m => m.warmAllUsersAtBoot())
-    .catch(e => console.warn('[mcp-tools] boot warm failed:', e.message));
+  if (!ISOLATED_LAB_RUNTIME) {
+    import('./lib/mcp-tools.mjs').then(m => m.warmAllUsersAtBoot())
+      .catch(e => console.warn('[mcp-tools] boot warm failed:', e.message));
+  }
 
   // HTTPS listener (port 3739) for browser features that need a secure
   // context — WebUSB / Web Serial for the voice-device flash wizard.
   // Self-signed cert lives at tls/{cert,key}.pem and is generated by
   // install.sh; absence is non-fatal (HTTPS just doesn't come up). To
   // use a real cert, drop your own pair into tls/ and restart.
-  try {
+  if (!ISOLATED_LAB_RUNTIME) try {
     const certPath = path.join(BASE_DIR, 'tls', 'cert.pem');
     const keyPath  = path.join(BASE_DIR, 'tls', 'key.pem');
     if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
@@ -995,21 +1009,34 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 
   // Seeds must complete before the arm loop reads the task files, or a
   // freshly seeded builtin task stays unarmed until the next restart.
-  (async () => {
-    try { await seedSystemTasks(); } catch (e) { log.warn('startup', 'seedSystemTasks failed', { err: e.message }); }
-    try { await initPersonalization(); } catch (e) { console.error('[personalization] initPersonalization failed:', e.message); }
-    startScheduler(broadcast);
-  })();
+  if (!ISOLATED_LAB_RUNTIME) {
+    (async () => {
+      try { await seedSystemTasks(); } catch (e) { log.warn('startup', 'seedSystemTasks failed', { err: e.message }); }
+      try { await initPersonalization(); } catch (e) { console.error('[personalization] initPersonalization failed:', e.message); }
+      startScheduler(broadcast);
+    })();
+  }
 
   // HA entity-name cache: powers the chat-dispatch fast-path so "turn on X"
   // skips the LLM. Lazy load on first use, plus a periodic refresh so newly
   // added HA devices show up without a server restart.
-  startHaCacheRefresh();
+  if (!ISOLATED_LAB_RUNTIME) startHaCacheRefresh();
 
   // Specialist intent-example embeddings — warm the embed-router cache so the
   // first user query doesn't pay the ~1-3s "embed N example phrases" cost.
   // Runs async; chat works without it (just falls through to regex/coordinator).
-  loadIntentEmbeddings().catch(e => log.warn?.('embed-router', 'load failed', { err: e.message }));
+  if (!ISOLATED_LAB_RUNTIME) {
+    loadIntentEmbeddings().catch(e => log.warn?.('embed-router', 'load failed', { err: e.message }));
+  }
+
+  // A real-model lab gate must have no independent writer that can race its
+  // exact mailbox/image/recipe baseline. Keep the router warm, but suppress
+  // scheduler, watcher, monitor, recovery, tunnel, OAuth-refresh, proposal,
+  // pruning, discovery, and self-heal loops. Production never sets this env.
+  if (ISOLATED_LAB_RUNTIME) {
+    log.info('startup', 'isolated lab background services suppressed');
+    return;
+  }
 
   // Watcher supervisor: per-user polling for long-running async work
   // (video gen, training, price alerts, etc.). Distinct from scheduler

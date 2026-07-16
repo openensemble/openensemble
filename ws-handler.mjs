@@ -132,6 +132,7 @@ let _nodeWss = null;
 let _termWss = null;
 let _browserExtWss = null;
 let _desktopWss = null;
+let _auxiliaryWsEnabled = true;
 
 // Monotonic per-user/per-agent watermark for live chat/session events. A
 // session load captures this value BEFORE its async disk read; if the browser
@@ -386,12 +387,13 @@ function isVoiceOutputSuppressed(ws, turn) {
   return !s.turnId && Date.now() < s.until;
 }
 
-export function initWs(httpServer) {
+export function initWs(httpServer, { allowAuxiliary = true } = {}) {
+  _auxiliaryWsEnabled = allowAuxiliary;
   _wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
-  _nodeWss = initNodeWss();
-  _termWss = initTerminalWss();
-  _browserExtWss = initBrowserExtWss();
-  _desktopWss = initDesktopWss();
+  _nodeWss = allowAuxiliary ? initNodeWss() : null;
+  _termWss = allowAuxiliary ? initTerminalWss() : null;
+  _browserExtWss = allowAuxiliary ? initBrowserExtWss() : null;
+  _desktopWss = allowAuxiliary ? initDesktopWss() : null;
 
   attachWsUpgrade(httpServer);
 
@@ -583,6 +585,11 @@ export function attachWsUpgrade(httpServer) {
       pathname === '/ws/nodes/terminal' ||
       pathname === '/ws/browser-ext' ||
       pathname === '/ws/desktop';
+    if (isExternalClientPath && !_auxiliaryWsEnabled) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     if (!isExternalClientPath && !isSameOriginWs(req)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();

@@ -76,7 +76,10 @@ vi.mock('./chat.mjs', () => ({
   streamChat: vi.fn(async function* (...args) {
     const [agent, task, signal, , userId, , , silent, , turnOpts] = args;
     if (silent) {
-      mocks.primaryCalls.push({ agent, task, signal, userId, turnOpts });
+      const { getTurnContext } = await import('./lib/turn-abort-context.mjs');
+      mocks.primaryCalls.push({
+        agent, task, signal, userId, turnOpts, turnContext: getTurnContext(),
+      });
       if (mocks.primaryFailures > 0) {
         mocks.primaryFailures--;
         yield { type: 'error', message: 'forced primary authoring failure' };
@@ -104,6 +107,8 @@ const { getTurnContext, runWithTurnContext } = await import('./lib/turn-abort-co
 const { toolRouterContext } = await import('./lib/tool-router-context.mjs');
 const JOURNAL_PATH = path.join(BASE_DIR, 'background-task-journal.json');
 const originalJournal = fs.existsSync(JOURNAL_PATH) ? fs.readFileSync(JOURNAL_PATH) : null;
+const originalLab = process.env.OPENENSEMBLE_LAB;
+const originalLeasePath = process.env.OE_LAB_VERIFIER_LEASE_PATH;
 
 function writeJournal(entries) {
   fs.writeFileSync(JOURNAL_PATH, JSON.stringify({ version: 1, entries }, null, 2), { mode: 0o600 });
@@ -112,6 +117,23 @@ function writeJournal(entries) {
 function readJournal() {
   const parsed = JSON.parse(fs.readFileSync(JOURNAL_PATH, 'utf8'));
   return parsed?.version === 1 ? parsed.entries : parsed;
+}
+
+function writeVerifierLease(leasePath, token) {
+  fs.writeFileSync(leasePath, JSON.stringify({
+    version: 1,
+    runTag: 'real_router_1700000000000_aaaaaaaa',
+    token,
+    expiresAt: Date.now() + 60_000,
+  }), { mode: 0o600 });
+  fs.chmodSync(leasePath, 0o600);
+}
+
+function restoreVerifierEnv() {
+  if (originalLab == null) delete process.env.OPENENSEMBLE_LAB;
+  else process.env.OPENENSEMBLE_LAB = originalLab;
+  if (originalLeasePath == null) delete process.env.OE_LAB_VERIFIER_LEASE_PATH;
+  else process.env.OE_LAB_VERIFIER_LEASE_PATH = originalLeasePath;
 }
 
 function spawn(userId, task = 'Inspect the background queue.', ownerKey = 'jarvis') {
@@ -144,6 +166,7 @@ function rowsForTask(taskId) {
 }
 
 beforeEach(async () => {
+  restoreVerifierEnv();
   mocks.workerScenarios.length = 0;
   mocks.primaryCalls.length = 0;
   mocks.primaryFailures = 0;
@@ -160,6 +183,7 @@ beforeEach(async () => {
 });
 
 afterAll(() => {
+  restoreVerifierEnv();
   if (originalJournal) fs.writeFileSync(JOURNAL_PATH, originalJournal, { mode: 0o600 });
   else fs.rmSync(JOURNAL_PATH, { force: true });
 });
@@ -212,7 +236,7 @@ describe('private durable worker lifecycle', () => {
       turnOpts: {
         readOnlyTurn: true,
         isolatedTaskRun: true,
-        toolPlan: { mode: 'none', source: 'worker-completion' },
+        toolPlan: { mode: 'none', source: 'worker-completion', maxProviderRequests: 1 },
         rootTaskId: taskId,
       },
     });
@@ -222,6 +246,132 @@ describe('private durable worker lifecycle', () => {
     expect(mocks.sendToUser.mock.calls.some(([, event]) => event?.type === 'agent_report')).toBe(false);
     expect(mocks.sendToUser.mock.calls.filter(([, event]) => event?.type === 'assistant_notification')).toHaveLength(1);
     expect(readJournal()[taskId]).toBeUndefined();
+  });
+
+  it('keeps a verifier lease capability memory-only and revalidates it for one tool-less completion call', async () => {
+    const token = 'c'.repeat(64);
+    const leasePath = path.join(BASE_DIR, `worker-verifier-${Date.now()}.lease.json`);
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    writeVerifierLease(leasePath, token);
+    let release;
+    let markStarted;
+    const gate = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { markStarted = resolve; });
+    mocks.workerScenarios.push(async function* () {
+      markStarted();
+      await gate;
+      yield { type: 'token', text: 'Verifier worker result.' };
+    });
+
+    let taskId;
+    try {
+      taskId = await runWithTurnContext({
+        suppressLearning: true,
+        verifierLeaseRequired: true,
+        verifierAllowedTools: ['spawn_worker'],
+        verifierLeaseToken: token,
+      }, () => spawn(`worker-verifier-${Date.now()}`, 'Verify a detached task.'));
+      await started;
+
+      const journalText = fs.readFileSync(JOURNAL_PATH, 'utf8');
+      expect(readJournal()[taskId]).toMatchObject({ verifierLeaseRequired: true });
+      expect(journalText).not.toContain(token);
+      expect(JSON.stringify(bg.getActiveTasks())).not.toContain(token);
+      release();
+      await waitFor(() => !bg.isTaskActive(taskId));
+
+      expect(mocks.primaryCalls).toHaveLength(1);
+      expect(mocks.primaryCalls[0]).toMatchObject({
+        agent: { tools: [] },
+        turnOpts: {
+          readOnlyTurn: true,
+          isolatedTaskRun: true,
+          toolPlan: { mode: 'none', source: 'worker-completion', maxProviderRequests: 1 },
+        },
+        turnContext: {
+          suppressLearning: true,
+          verifierLeaseRequired: true,
+          verifierAllowedTools: [],
+          verifierLeaseToken: token,
+        },
+      });
+      expect(mocks.primaryCalls[0].task).not.toContain(token);
+      expect(JSON.stringify(rowsForTask(taskId))).not.toContain(token);
+      expect(JSON.stringify(mocks.sendToUser.mock.calls)).not.toContain(token);
+    } finally {
+      release?.();
+      if (taskId) await waitFor(() => !bg.isTaskActive(taskId)).catch(() => {});
+      fs.rmSync(leasePath, { force: true });
+      restoreVerifierEnv();
+    }
+  });
+
+  it('makes zero completion model calls after a verifier lease is removed', async () => {
+    const token = 'd'.repeat(64);
+    const leasePath = path.join(BASE_DIR, `worker-verifier-expired-${Date.now()}.lease.json`);
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    writeVerifierLease(leasePath, token);
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mocks.workerScenarios.push(async function* () {
+      await gate;
+      yield { type: 'token', text: 'Result after lease removal.' };
+    });
+
+    let taskId;
+    try {
+      taskId = await runWithTurnContext({
+        suppressLearning: true,
+        verifierLeaseRequired: true,
+        verifierAllowedTools: ['spawn_worker'],
+        verifierLeaseToken: token,
+      }, () => spawn(`worker-verifier-removed-${Date.now()}`, 'Finish after lease removal.'));
+      fs.rmSync(leasePath, { force: true });
+      release();
+      await waitFor(() => !bg.isTaskActive(taskId));
+
+      expect(mocks.primaryCalls).toHaveLength(0);
+      expect(rowsForTask(taskId).filter(row => row.reportId === `${taskId}:primary-completion`))
+        .toEqual([expect.objectContaining({
+          role: 'notification', degradedSystemNotice: true, primaryAuthored: false,
+        })]);
+      expect(JSON.stringify(rowsForTask(taskId))).not.toContain(token);
+    } finally {
+      release?.();
+      if (taskId) await waitFor(() => !bg.isTaskActive(taskId)).catch(() => {});
+      fs.rmSync(leasePath, { force: true });
+      restoreVerifierEnv();
+    }
+  });
+
+  it('does not retry a verifier completion after one provider-authoring failure', async () => {
+    const token = 'e'.repeat(64);
+    const leasePath = path.join(BASE_DIR, `worker-verifier-failure-${Date.now()}.lease.json`);
+    process.env.OPENENSEMBLE_LAB = '1';
+    process.env.OE_LAB_VERIFIER_LEASE_PATH = leasePath;
+    writeVerifierLease(leasePath, token);
+    mocks.primaryFailures = 1;
+    let taskId;
+    try {
+      taskId = await runWithTurnContext({
+        suppressLearning: true,
+        verifierLeaseRequired: true,
+        verifierAllowedTools: ['spawn_worker'],
+        verifierLeaseToken: token,
+      }, () => spawn(`worker-verifier-failure-${Date.now()}`, 'Use one author attempt.'));
+      await waitFor(() => !bg.isTaskActive(taskId));
+
+      expect(mocks.primaryCalls).toHaveLength(1);
+      expect(rowsForTask(taskId).filter(row => row.reportId === `${taskId}:primary-completion`))
+        .toEqual([expect.objectContaining({
+          role: 'notification', degradedSystemNotice: true, primaryAuthored: false,
+        })]);
+    } finally {
+      fs.rmSync(leasePath, { force: true });
+      restoreVerifierEnv();
+    }
   });
 
   it('detaches abort and tool-router async context from the spawning foreground turn', async () => {
@@ -320,6 +470,7 @@ describe('private durable worker lifecycle', () => {
     const userId = `worker-restart-${Date.now()}`;
     const runningId = `wkr_running_${Date.now()}`;
     const completedId = `wkr_completed_${Date.now()}`;
+    const verifierCompletedId = `wkr_verifier_completed_${Date.now()}`;
     writeJournal({
       [runningId]: {
         userId, kind: 'worker', agentId: 'ephemeral_worker_running', agentName: 'Private worker',
@@ -332,15 +483,28 @@ describe('private durable worker lifecycle', () => {
         visibleAgentId: `${userId}_jarvis`, startedAt: Date.now() - 10_000,
         completion: { status: 'done', result: 'Recovered durable result.', error: '', images: [], completedAt: Date.now() - 500 },
       },
+      [verifierCompletedId]: {
+        userId, kind: 'worker', agentId: 'ephemeral_worker_verifier', agentName: 'Private worker',
+        summary: 'Verifier work', ownerKey: 'jarvis', coordinatorAgentId: `${userId}_jarvis`,
+        visibleAgentId: `${userId}_jarvis`, startedAt: Date.now() - 10_000,
+        verifierLeaseRequired: true,
+        completion: { status: 'done', result: 'Recovered verifier result.', error: '', images: [], completedAt: Date.now() - 500 },
+      },
     });
 
-    expect(await bg.bootRecoverInterruptedTasks()).toBe(2);
+    expect(await bg.bootRecoverInterruptedTasks()).toBe(3);
     expect(await bg.bootRecoverInterruptedTasks()).toBe(0);
     expect(readJournal()).toEqual({});
     expect(rowsForTask(runningId).filter(row => row.reportId === runningId)).toHaveLength(1);
     expect(rowsForTask(completedId).filter(row => row.reportId === completedId)).toHaveLength(1);
     expect(rowsForTask(runningId).filter(row => row.reportId === `${runningId}:primary-completion`)).toHaveLength(1);
     expect(rowsForTask(completedId).filter(row => row.reportId === `${completedId}:primary-completion`)).toHaveLength(1);
+    expect(rowsForTask(verifierCompletedId).filter(row => row.reportId === `${verifierCompletedId}:primary-completion`))
+      .toEqual([expect.objectContaining({
+        role: 'notification', degradedSystemNotice: true, primaryAuthored: false,
+      })]);
+    // The two ordinary recovered workers are authored; the verifier capability
+    // was intentionally not journaled, so its recovery makes no model call.
     expect(mocks.primaryCalls).toHaveLength(2);
     expect(mocks.sendToUser.mock.calls.every(([recipient]) => recipient === userId)).toBe(true);
   });

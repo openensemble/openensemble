@@ -71,7 +71,9 @@ async function summarizeIdleSessions() {
 }
 
 // Start the idle session checker
-setInterval(summarizeIdleSessions, SUMMARY_CHECK_INTERVAL_MS).unref?.();
+if (process.env.OPENENSEMBLE_LAB !== '1') {
+  setInterval(summarizeIdleSessions, SUMMARY_CHECK_INTERVAL_MS).unref?.();
+}
 
 // ── Daily episode dedup cache ────────────────────────────────────────────────
 // Prevents the same query from being stored multiple times in one day.

@@ -51,6 +51,7 @@ import {
 import { log } from './logger.mjs';
 import { listAgents } from './agents.mjs';
 import { normalizeOrchestrationPolicy } from './lib/orchestration-policy-core.mjs';
+import { getTurnContext } from './lib/turn-abort-context.mjs';
 
 // Resolve the agent id we should attribute background-task surfaces to
 // (chip, session injection) when the caller didn't pass one. Uses the
@@ -273,8 +274,12 @@ function* visibleEntries(userId) {
 
 // ── Loading ───────────────────────────────────────────────────────────────────
 
-// Load all manifests synchronously — called once at startup from server.mjs
-export function loadRoleManifests() {
+// Load all manifests synchronously — called once at startup from server.mjs.
+// Isolated lab copies are read-only fixtures: skip every startup migration so
+// verifier boot cannot rewrite copied profiles, assignments, or config.
+export function loadRoleManifests({
+  runMigrations = process.env.OPENENSEMBLE_LAB !== '1',
+} = {}) {
   _manifests.clear();
 
   // Pass 1: global skills
@@ -297,8 +302,10 @@ export function loadRoleManifests() {
   // Migration runs between the two passes: globals are loaded (needed for the
   // profile-cleanup logic to recognize global ids), then any legacy /skills/usr_*
   // entries get moved into /users/{createdBy}/skills/{slug} before Pass 2 picks them up.
-  try { migrateLegacyUserSkills(); }
-  catch (e) { console.warn('[migrate] Legacy user skill migration failed:', e.message); }
+  if (runMigrations) {
+    try { migrateLegacyUserSkills(); }
+    catch (e) { console.warn('[migrate] Legacy user skill migration failed:', e.message); }
+  }
 
   // Pass 2: per-user custom skills
   if (existsSync(USERS_DIR)) {
@@ -351,7 +358,7 @@ export function loadRoleManifests() {
       // (commit "lockdown specialist toolset"). After this runs once,
       // newly-created skills go through skill-builder's `assign_to` flow,
       // and existing skills can be reassigned via setRoleAssignment.
-      try {
+      if (runMigrations) try {
         const { getUserCoordinatorAgentId } = await import('./routes/_helpers.mjs');
         const seenUsers = new Set();
         for (const wrap of _manifests.values()) {
@@ -374,7 +381,7 @@ export function loadRoleManifests() {
       // roles, not separately-assignable. The current design uses
       // `bundled_with_role` in the manifest (see resolveAgentTools). Strip
       // any leftover skillAssignments entries so they don't ghost in the UI.
-      try {
+      if (runMigrations) try {
         const { loadUsers, modifyUser } = await import('./routes/_helpers.mjs');
         const stale = ['active-agents', 'skill-builder'];
         // Owner / admin scoped assignments live in config.json.
@@ -1400,6 +1407,7 @@ async function buildCtx(userId, agentId, skillId = null) {
   const wsAgentId = (userId && typeof agentId === 'string' && agentId.startsWith(`${userId}_`))
     ? agentId.slice(userId.length + 1)
     : agentId;
+  const suppressLearning = getTurnContext()?.suppressLearning === true;
   const ctx = { userId, agentId };
   // Structured failure signal: `return ctx.toolError('…')` records the tool call
   // as a failure (trace ok:false, flaky-tool proposals, not learned as a recipe)
@@ -1504,7 +1512,12 @@ async function buildCtx(userId, agentId, skillId = null) {
   // ctx.registerLead — personalization "open lead" registration: stores a
   // tool+args re-run for later (silent) follow-up when an answer isn't
   // available yet ("is this back in stock"). See lib/personalization/lead-helper.mjs.
-  ctx.registerLead = buildRegisterLead({ userId, agentId: wsAgentId });
+  ctx.registerLead = suppressLearning
+    ? async () => ({
+        ok: false,
+        announce: 'Automatic follow-up registration is disabled during this verification run.',
+      })
+    : buildRegisterLead({ userId, agentId: wsAgentId });
 
   // Read-only, master-switch-gated confirmed preferences scoped to the
   // owning skill's declared preferenceOpportunities keywords.
@@ -1849,6 +1862,18 @@ const TOOL_ALIASES = {
   'server_status':    'coder_server_status',
 };
 
+// Explicit self-management/Cortex mutations that an authenticated verifier
+// must never execute. Ordinary task side effects remain live so the harness
+// still exercises the production tools it is validating.
+const NON_LEARNING_BLOCKED_TOOLS = new Set([
+  'skill_add_rule', 'role_add_rule',
+  'skill_remove_rule', 'role_remove_rule',
+  'set_email_send_without_confirm',
+  'claim_role',
+  'remember_fact', 'forget_fact',
+  'teach_fastpath_phrase', 'forget_fastpath_phrase',
+]);
+
 // Read a user's profile directly without going through routes/_helpers.mjs
 // (which would create a circular import). Used only for the child-account
 // tool gate below — a tight, read-only, non-cached path.
@@ -1876,8 +1901,38 @@ function _readUserProfile(userId) {
 // the agent's declared toolset. Caller is responsible for resolving alias
 // names before passing the list (we re-check post-alias below).
 export async function* executeToolStreaming(name, args, userId = 'default', agentId = null, allowedTools = null) {
+  const turnContext = getTurnContext();
+  const suppressLearning = turnContext?.suppressLearning === true;
   // Resolve alias before lookup so models that drop the skill prefix still work.
   const resolvedName = TOOL_ALIASES[name] ?? name;
+
+  // The dispatcher authenticates the verifier lease and binds the ambient
+  // turn to the exact case allowlist. Enforce it before manifest lookup or
+  // executor invocation. An empty verifier list deliberately allows no tool.
+  if (Array.isArray(turnContext?.verifierAllowedTools)) {
+    const verifierAllow = new Set(turnContext.verifierAllowedTools
+      .flatMap(tool => [tool, TOOL_ALIASES[tool] ?? tool]));
+    if (!verifierAllow.has(resolvedName)) {
+      log.warn('tool', 'lab verifier blocked out-of-case tool', {
+        tool: resolvedName, userId, agentId,
+      });
+      yield {
+        type: 'result',
+        text: `Tool "${name}" is outside this verification case.`,
+        isError: true,
+      };
+      return;
+    }
+  }
+
+  if (suppressLearning && NON_LEARNING_BLOCKED_TOOLS.has(resolvedName)) {
+    yield {
+      type: 'result',
+      text: `Tool "${resolvedName}" is unavailable during this non-learning verification turn.`,
+      isError: true,
+    };
+    return;
+  }
 
   // Per-agent allowlist enforcement. Reject with a generic "Unknown tool"
   // message so a probing model can't enumerate which tools exist on the box.
@@ -1971,8 +2026,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // Memory scoping is recorded only after authorization succeeds. Scopable =
   // service roles + custom specialist skills assigned to an agent; utility
   // skills (self-mgmt, web, delegate, tasks…) stay shared.
-  try { if (isScopableSkill(owningSkillId, userId)) recordDomainSkill(owningSkillId); }
-  catch { /* lookup best-effort */ }
+  if (!suppressLearning) {
+    try { if (isScopableSkill(owningSkillId, userId)) recordDomainSkill(owningSkillId); }
+    catch { /* lookup best-effort */ }
+  }
   // Use resolvedName for actual execution
   name = resolvedName;
 
@@ -2021,7 +2078,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
 
   // Phase-4.5: record fill/reaffirm/override events for the default_arg
   // outcome measurer. Fire-and-forget — never blocks dispatch.
-  if (args && typeof args === 'object') {
+  if (!suppressLearning && args && typeof args === 'object') {
     recordPinUsage(userId, name, args)
       .catch(e => console.warn('[tool-defaults] pin-usage record failed:', e.message));
   }
@@ -2031,7 +2088,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // network/promise stays alive — events just get redirected to a
   // task_proxy chip instead of yielding up to the LLM. The coordinator's turn
   // finishes immediately with a "still running, see chip" synthetic result.
-  const AUTO_BG_MS = 10_000;
+  // A verifier-owned tool must remain inside its correlated turn. A generous
+  // foreground deadline prevents the normal UX auto-background path from
+  // detaching learning/report work beyond the terminal frame.
+  const AUTO_BG_MS = suppressLearning ? 600_000 : 10_000;
 
   // Ephemeral-delegation post-processor for the final `{type:'result'}` yield.
   // Two things happen here, only when agentId is an ephemeral_deleg_* session:
@@ -2074,6 +2134,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // Count a tool failure (threshold-gated tool_failure proposal). Shared by the
   // throw path (catch below) and the caught-and-returned-error path.
   const _reportToolFailure = (message) => {
+    if (suppressLearning) return;
     recordToolFailure(userId, name, message).then(async signal => {
       if (signal?.proposed) {
         try {
@@ -2305,7 +2366,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 // Personalization mirror: this result lands after the turn
                 // ends, so the primary hook (executeToolStreaming's common
                 // completion path) never sees it — record it here instead.
-                try {
+                if (!suppressLearning) try {
                   recordToolObservation({
                     userId: captured.userId, agentId: captured.agentId, toolName: captured.name,
                     skillId: captured.owningSkillId, args: captured.args, resultText: finalText, ok: true,
@@ -2418,7 +2479,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 });
                 // Scheduled runs react+finalize via the barrier; only a direct
                 // (non-scheduled, non-delegated) chat gets the inline report-back.
-                if (!captured.scheduledCtx?.originTaskId && !captured.targetAgentId) {
+                if (!suppressLearning && !captured.scheduledCtx?.originTaskId && !captured.targetAgentId) {
                   await _runAutoBgToolContinuation({
                     userId: captured.userId,
                     agentId: captured.agentId,
@@ -2461,7 +2522,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   resultText: '',
                   errorMsg: err.message,
                 });
-                if (!captured.scheduledCtx?.originTaskId && !captured.targetAgentId) {
+                if (!suppressLearning && !captured.scheduledCtx?.originTaskId && !captured.targetAgentId) {
                   await _runAutoBgToolContinuation({
                     userId: captured.userId,
                     agentId: captured.agentId,
@@ -2570,7 +2631,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           const notify = structured && val._notify ? val._notify : null;
           // Personalization mirror: single-promise auto-bg result also lands
           // after the turn ends — same rationale as the streaming-path mirror.
-          try {
+          if (!suppressLearning) try {
             recordToolObservation({
               userId, agentId: attribAgentId, toolName: name, skillId: owningSkillId,
               args: mergedArgs, resultText: text, ok: true,
@@ -2635,7 +2696,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           });
           // Scheduled runs react+finalize via the barrier; direct chats get the
           // inline report-back continuation.
-          if (!scheduledCtx?.originTaskId) {
+          if (!suppressLearning && !scheduledCtx?.originTaskId) {
             await _runAutoBgToolContinuation({
               userId,
               agentId: attribAgentId,
@@ -2668,7 +2729,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             resultText: '',
             errorMsg: err.message,
           });
-          if (!scheduledCtx?.originTaskId) {
+          if (!suppressLearning && !scheduledCtx?.originTaskId) {
             await _runAutoBgToolContinuation({
               userId,
               agentId: attribAgentId,
@@ -2706,14 +2767,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     // executor, so local successes are intentionally NOT recorded. Auto-
     // backgrounded tools (the return paths above) also don't record: their
     // result lands after the turn, and the recorder is consumed at turn end.
-    if (!_resultWasError) {
+    if (!suppressLearning && !_resultWasError) {
       try { recordToolExecution(userId, name); } catch { /* never block tool dispatch */ }
     }
 
     // Personalization: fire-and-forget observation of this tool result (the
     // recorder itself applies config/skip-list gating — this call is
     // unconditional so it also captures failures for the digest).
-    try {
+    if (!suppressLearning) try {
       recordToolObservation({
         userId, agentId, toolName: name, skillId: owningSkillId,
         args: mergedArgs, resultText: _resultWasError ? _lastErrText : _lastResultText, ok: !_resultWasError,
@@ -2724,7 +2785,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     // cascade_on_tools — when one of those tools succeeds, drop user-stored
     // aliases for the corresponding entity id. Fire-and-forget; never
     // blocks the main flow.
-    if (userId) {
+    if (!suppressLearning && userId) {
       import('./lib/skill-alias-framework.mjs')
         .then(fw => fw.maybeCascadeOnToolSuccess(userId, name, mergedArgs))
         .catch(() => {});

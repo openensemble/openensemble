@@ -19,6 +19,7 @@ import { appendTaskOutcome, loadTaskOutcomes } from './lib/task-outcomes.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { getOrchestrationPolicy } from './lib/orchestration-policy.mjs';
 import { withFileLockSync } from './lib/file-lock.mjs';
+import { assertActiveLabVerifierLeaseToken } from './lib/lab-verifier-lease.mjs';
 
 // Background completion is private user state. Never route it through the
 // process-wide browser broadcast: on a household install that discloses one
@@ -64,6 +65,9 @@ function _voiceOrigin() {
 
 // in-flight task registry: taskId -> { agentId, userId, agentName, startedAt }
 const activeTasks = new Map();
+// Verifier lease capabilities are tied to the in-memory task record without
+// becoming enumerable through getActiveTasks(), logs, or journal serializers.
+const verifierLeaseTokens = new WeakMap();
 
 // ── restart journal ───────────────────────────────────────────────────────────
 // activeTasks / rootTaskGraphs / the recent* rings are all in-memory, so a
@@ -171,6 +175,9 @@ function _journalAdd(taskId) {
     originScheduledTaskAgent: rec.originScheduledTaskAgent || null,
     originScheduledRunId: rec.originScheduledRunId || null,
     originScheduledManual: rec.originScheduledManual === true,
+    // Nonsecret restart guard only. The verifier lease capability itself is
+    // memory-only and is intentionally absent from this explicit serializer.
+    verifierLeaseRequired: rec.verifierLeaseRequired === true,
     startedAt: rec.startedAt,
   }; });
 }
@@ -383,6 +390,10 @@ export async function bootRecoverInterruptedTasks() {
         errorMsg: recoveredStatus === 'done' ? null : interruptNote,
         originalTask: e.originalTask || e.summary || '',
         persistedImages: Array.isArray(completion?.images) ? completion.images : [],
+        verifierLeaseRequired: e.verifierLeaseRequired === true,
+        // Verifier capabilities are never journaled. A recovered verifier task
+        // therefore takes the deterministic zero-model completion path.
+        verifierLeaseToken: null,
       });
       deliveryDurable = deliveryDurable && published;
       if (Array.isArray(completion?.images) && completion.images.length) {
@@ -989,6 +1000,8 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const visibleAgentId = opts?.visibleAgentId || coordinatorAgentId;
   const rootWatcherId = opts?.rootWatcherId || (rootTaskId === taskId ? null : parentWatcherId);
   const spanId = opts?.spanId || `${rootTaskId}:${_slug(agentName)}:${taskId}`;
+  const parentTurnCtx = getTurnContext() || {};
+  const suppressLearning = parentTurnCtx.suppressLearning === true;
   activeTasks.set(taskId, {
     agentId: scopedAgent.id, userId, agentName: pipeName, agentEmoji,
     startedAt: Date.now(), summary, phase: 'queued', status: 'running',
@@ -1004,6 +1017,10 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     sourceAttemptId: opts?.sourceAttemptId || null,
     sourceSessionKey: opts?.sourceSessionKey || null,
     sourceSessionEpoch: opts?.sourceSessionEpoch || null,
+    suppressLearning,
+    verifierAllowedTools: Array.isArray(parentTurnCtx.verifierAllowedTools)
+      ? [...parentTurnCtx.verifierAllowedTools]
+      : null,
     aliases: [taskId, scopedAgent.id].filter(Boolean),
     plannedAgentRefs,
     // Mark this as a coordinator→specialist DELEGATION (distinct from a worker
@@ -1359,6 +1376,7 @@ function _workerCompletionSystemNotice({ originalTask, result, errorMsg }) {
 
 async function _authorPrimaryWorkerCompletion({
   taskId, userId, agentId, agentName, result, errorMsg, originalTask, persistedImages = [],
+  verifierLeaseRequired = false, verifierLeaseToken = null,
 }) {
   const { getAgentForUser } = await import('./routes/_helpers.mjs');
   const primary = getAgentForUser(agentId, userId);
@@ -1395,22 +1413,38 @@ async function _authorPrimaryWorkerCompletion({
   let content = '';
   try {
     const { streamChat } = await import('./chat.mjs');
-    for await (const event of streamChat(
-      author, prompt, ac.signal, null, userId, null, null,
-      true, // silent: buffer here; do not persist or claim the foreground slot
-      null,
-      {
-        readOnlyTurn: true,
-        isolatedTaskRun: true,
-        toolPlan: { mode: 'none', source: 'worker-completion' },
-        rootTaskId: taskId,
-        traceSource: 'worker-completion',
-      },
-    )) {
-      if (event?.type === 'token') content += event.text || '';
-      else if (event?.type === 'replace') content = String(event.text ?? event.content ?? '');
-      else if (event?.type === '__content') content = String(event.content ?? '');
-      else if (event?.type === 'error') throw new Error(event.message || 'primary completion failed');
+    const consume = async () => {
+      if (verifierLeaseRequired) {
+        assertActiveLabVerifierLeaseToken(verifierLeaseToken);
+      }
+      for await (const event of streamChat(
+        author, prompt, ac.signal, null, userId, null, null,
+        true, // silent: buffer here; do not persist or claim the foreground slot
+        null,
+        {
+          readOnlyTurn: true,
+          isolatedTaskRun: true,
+          toolPlan: { mode: 'none', source: 'worker-completion', maxProviderRequests: 1 },
+          rootTaskId: taskId,
+          traceSource: 'worker-completion',
+        },
+      )) {
+        if (event?.type === 'token') content += event.text || '';
+        else if (event?.type === 'replace') content = String(event.text ?? event.content ?? '');
+        else if (event?.type === '__content') content = String(event.content ?? '');
+        else if (event?.type === 'error') throw new Error(event.message || 'primary completion failed');
+      }
+    };
+    if (verifierLeaseRequired) {
+      await runWithTurnContext({
+        signal: ac.signal,
+        suppressLearning: true,
+        verifierAllowedTools: [],
+        verifierLeaseRequired: true,
+        verifierLeaseToken,
+      }, consume);
+    } else {
+      await consume();
     }
   } finally {
     clearTimeout(timer);
@@ -1428,7 +1462,7 @@ async function _authorPrimaryWorkerCompletion({
  */
 async function _publishWorkerCompletion({
   taskId, userId, coordinatorAgentId, agentName, result, errorMsg, originalTask,
-  persistedImages = [],
+  persistedImages = [], verifierLeaseRequired = false, verifierLeaseToken = null,
 }) {
   const sessionAgentId = await _resolveRuntimeSessionKey(userId, coordinatorAgentId);
   if (!sessionAgentId) return false;
@@ -1454,10 +1488,12 @@ async function _publishWorkerCompletion({
   // One retry covers transient provider failures without leaving a completed
   // worker invisible. A deterministic, primary-labelled fallback is the final
   // crash-safe path; it is clearly marked in the durable row for inspection.
-  for (let attempt = 0; attempt < 2 && !body; attempt++) {
+  const maxAuthorAttempts = verifierLeaseRequired ? 1 : 2;
+  for (let attempt = 0; attempt < maxAuthorAttempts && !body; attempt++) {
     try {
       const authored = await _authorPrimaryWorkerCompletion({
         taskId, userId, agentId, agentName, result, errorMsg, originalTask, persistedImages,
+        verifierLeaseRequired, verifierLeaseToken,
       });
       body = authored.content;
       ownerName = authored.primary?.name || ownerName;
@@ -1466,6 +1502,9 @@ async function _publishWorkerCompletion({
     } catch (e) {
       authorError = e;
       console.warn('[background-tasks] primary completion authoring failed:', e?.message || e);
+      // A missing/expired/mismatched verifier capability is not transient.
+      // Never retry it, and never make an unleased provider request.
+      if (e?.code === 'LAB_VERIFIER_LEASE_INVALID') break;
     }
   }
   if (!body) {
@@ -1511,7 +1550,8 @@ async function _publishWorkerCompletion({
 async function _runContinuation({
   taskId, userId, coordinatorAgentId, targetAgentId, agentName, result, errorMsg,
   originalTask, scheduledCtx = null, traceOptions = null, isWorker = false,
-  reportImages = [], persistedImages = [],
+  reportImages = [], persistedImages = [], verifierLeaseRequired = false,
+  verifierLeaseToken = null,
 }) {
   if (!isWorker && (errorMsg || !result)) return false;
   const sessionAgentId = await _resolveRuntimeSessionKey(userId, coordinatorAgentId);
@@ -1521,6 +1561,7 @@ async function _runContinuation({
     const completionDelivered = await _publishWorkerCompletion({
       taskId, userId, coordinatorAgentId: sessionAgentId, agentName,
       result, errorMsg, originalTask, persistedImages,
+      verifierLeaseRequired, verifierLeaseToken,
     });
     await _publishWorkerArtifacts({
       taskId, userId, sessionAgentId, wsAgentId: agentId,
@@ -1738,7 +1779,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   let completionDeliveryDurable = completionJournalDurable;
   let scheduledBarrierFinalized = null;
 
-  if (!errorMsg && Array.isArray(toolEvents) && toolEvents.length) {
+  if (!rec?.suppressLearning && !errorMsg && Array.isArray(toolEvents) && toolEvents.length) {
     try {
       // Learn ONLY from the target agent's own tool calls. A forward pipeline
       // accumulates both stages into one toolEvents array; banking stage-2's
@@ -1894,7 +1935,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   // Direct (non-scheduled) delegations get the coordinator's inline react step.
   // Scheduled runs react+finalize via the barrier (scheduler.runScheduledReaction),
   // so they skip this — otherwise the task would get a duplicate reaction turn.
-  if (rec?.autoContinue && !rec?.originScheduledTaskId) {
+  if ((!rec?.suppressLearning || rec?.isWorker) && rec?.autoContinue && !rec?.originScheduledTaskId) {
     try {
       await _runContinuation({
         taskId,
@@ -1909,6 +1950,8 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
         isWorker: rec.isWorker === true,
         reportImages,
         persistedImages,
+        verifierLeaseRequired: rec?.verifierLeaseRequired === true,
+        verifierLeaseToken: rec ? (verifierLeaseTokens.get(rec) || null) : null,
       });
     } catch (e) {
       if (rec.isWorker) completionDeliveryDurable = false;
@@ -2287,7 +2330,18 @@ export function spawnWorker({
   const scheduledCtx = getScheduledContext();
   const rootTaskId = resolveBackgroundRootTaskId(taskId, { rootTaskId: requestedRootTaskId }, scheduledCtx);
   const parentTurnCtx = getTurnContext() || {};
-  activeTasks.set(taskId, {
+  const suppressLearning = parentTurnCtx.suppressLearning === true;
+  // Missing capability never downgrades a verifier-started worker to an
+  // ordinary completion: the required bit remains true and completion fails
+  // closed to the deterministic zero-model notice.
+  const verifierLeaseRequired = parentTurnCtx.verifierLeaseRequired === true
+    || (process.env.OPENENSEMBLE_LAB === '1' && suppressLearning);
+  const verifierLeaseToken = verifierLeaseRequired
+    && typeof parentTurnCtx.verifierLeaseToken === 'string'
+    && /^[a-f0-9]{64}$/.test(parentTurnCtx.verifierLeaseToken)
+    ? parentTurnCtx.verifierLeaseToken
+    : null;
+  const taskRecord = {
     agentId: workerAgent.id, userId, agentName: workerName, agentEmoji: emoji,
     startedAt: Date.now(), summary, ownerKey, isWorker: true, phase: 'queued',
     // chipOwnerId doubles as the report target on completion (_onComplete gets
@@ -2302,13 +2356,20 @@ export function spawnWorker({
     sourceAttemptId,
     sourceSessionKey,
     sourceSessionEpoch,
+    suppressLearning,
+    verifierLeaseRequired,
+    verifierAllowedTools: Array.isArray(parentTurnCtx.verifierAllowedTools)
+      ? [...parentTurnCtx.verifierAllowedTools]
+      : null,
     status: 'running', abort: (reason = 'cancelled') => ac.abort(reason),
     originScheduledTaskId: scheduledCtx?.originTaskId || null,
     originScheduledTaskOwnerId: scheduledCtx?.originTaskOwnerId || userId || null,
     originScheduledTaskAgent: scheduledCtx?.originTaskAgent || null,
     originScheduledRunId: scheduledCtx?.runId || null, // barrier per-fire nonce — must rejoin the SAME fire's group
     originScheduledManual: scheduledCtx?.manual === true,
-  });
+  };
+  activeTasks.set(taskId, taskRecord);
+  if (verifierLeaseToken) verifierLeaseTokens.set(taskRecord, verifierLeaseToken);
   if (scheduledCtx?.originTaskId) {
     // _onComplete's existing generic completion block (gated on
     // rec.originScheduledTaskId, shared by both delegations and workers)
@@ -2385,6 +2446,11 @@ export function spawnWorker({
         deviceId: parentTurnCtx.deviceId ?? null,
         conversationMode: parentTurnCtx.conversationMode ?? null,
         suppressLearning: parentTurnCtx.suppressLearning === true,
+        verifierAllowedTools: Array.isArray(parentTurnCtx.verifierAllowedTools)
+          ? [...parentTurnCtx.verifierAllowedTools]
+          : null,
+        verifierLeaseRequired,
+        verifierLeaseToken,
       }, () => toolRouterContext.run(null, () => runInTaskContext(taskCtx, async () => {
         const rec = activeTasks.get(taskId);
         for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, {

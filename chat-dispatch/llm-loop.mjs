@@ -124,7 +124,8 @@ function classifySpecialistIntent(text, userId, currentAgentId) {
  */
 export async function runSpecialistRoute({
   userText, userId, agentId, source, deviceId, attachment, attachments, toolPlan, ac, onEvent, onNotify,
-  conversationMode = false,
+  conversationMode = false, suppressLearning = false, verifierAllowedTools = null,
+  verifierLeaseRequired = false, verifierLeaseToken = null,
 }) {
   if (!userText) return null;
   // `attachments` (the composer's full multi-file array) is the preferred
@@ -163,7 +164,7 @@ export async function runSpecialistRoute({
           name: forced.name || override.forcedAgent,
           strategy: 'override',
         };
-        logRoutingFire(userId, override.id, userText).catch(() => {});
+        if (!suppressLearning) logRoutingFire(userId, override.id, userText).catch(() => {});
         console.log(`[chat] routing-override: → ${forced.name || override.forcedAgent} (pattern: "${override.pattern}")`);
       }
     }
@@ -247,7 +248,7 @@ export async function runSpecialistRoute({
     // straight to the right tool args.
     try {
       const { buildContextHints } = await import('../lib/context-resolvers.mjs');
-      const { hints } = await buildContextHints(userId, userText);
+      const { hints } = await buildContextHints(userId, userText, { suppressLearning });
       if (hints) {
         scopedSpec.systemPrompt = `${scopedSpec.systemPrompt}\n\n## Pre-resolved references\n${hints}`;
       }
@@ -289,7 +290,10 @@ export async function runSpecialistRoute({
       // sync delegations) link their own AbortControllers to this turn's
       // signal, so a user stop unwinds the whole delegation chain; the voice
       // origin lets backgrounded work announce its completion on the device.
-      await runWithTurnContext({ signal: ac.signal, deviceId, conversationMode }, async () => {
+      await runWithTurnContext({
+        signal: ac.signal, deviceId, conversationMode, suppressLearning, verifierAllowedTools,
+        verifierLeaseRequired, verifierLeaseToken,
+      }, async () => {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
         // The routed specialist is ephemeral, so its terminal event is only an
         // inner-run boundary — it does NOT mean the coordinator session is on
@@ -381,7 +385,7 @@ export async function runSpecialistRoute({
       // here first), yet they're exactly where single-tool custom-skill turns
       // live (field: every localweather ask was specialist-routed, so the
       // auto-proposer never saw them). Fire-and-forget; never blocks return.
-      (async () => {
+      if (!suppressLearning) (async () => {
         try {
           const il = await import('../lib/intent-learner.mjs');
           await il.captureFromTurn({ userId, agentId, userText, scopedSessionKey: `${userId}_${agentId}` });
@@ -509,6 +513,8 @@ export async function runLlmTurn({
   userText, sessionUserText = userText, attachment, attachments, toolPlan, documentRequest, schedulerNote, source, deviceId,
   conversationMode = false,
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false, readOnlyTurn = false,
+  suppressLearning = false, verifierAllowedTools = null,
+  verifierLeaseRequired = false, verifierLeaseToken = null,
 }) {
   // See the matching comment in runSpecialistRoute above — same fallback,
   // no shared import, for the same test-mock reasons.
@@ -558,7 +564,10 @@ export async function runLlmTurn({
     // killed the coordinator but a delegated specialist ran to completion.
     // deviceId/conversationMode ride along so auto-backgrounded work can
     // announce its completion on the originating voice device.
-    return runWithTurnContext({ signal: ac.signal, deviceId, conversationMode }, async () => {
+    return runWithTurnContext({
+      signal: ac.signal, deviceId, conversationMode, suppressLearning, verifierAllowedTools,
+      verifierLeaseRequired, verifierLeaseToken,
+    }, async () => {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       if (e.type === 'tool_call') toolInvoked = true;
       if (e.type === 'error') { callbackError = e; return; }

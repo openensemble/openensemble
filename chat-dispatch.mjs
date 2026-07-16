@@ -11,7 +11,6 @@
  */
 
 import fs from 'fs';
-import path from 'path';
 import { randomBytes } from 'crypto';
 import { USERS_DIR } from './lib/paths.mjs';
 import {
@@ -67,6 +66,7 @@ import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { normalizeAttachments } from './chat/providers/_shared.mjs';
 import { compactDocumentFallback, normalizeDocumentRequest, parseDocumentMutationResult } from './lib/document-artifacts.mjs';
 import { recordRunTrace, redactArgsForTrace } from './lib/run-inspector.mjs';
+import { assertLabVerifierLease } from './lib/lab-verifier-lease.mjs';
 
 // Pending ambient-restore timers, keyed by deviceId. A burst of wakes seconds
 // apart (e.g. a real command immediately followed by a false wake) would each
@@ -353,21 +353,60 @@ function voiceToolAllowlistFor(userId) {
 }
 
 function normalizeToolPlan(plan) {
+  const source = plan && typeof plan === 'object' && typeof plan.source === 'string'
+    ? plan.source.slice(0, 40) : null;
+  const labVerifierPlan = assertLabVerifierLease(plan, source);
   if (!plan || typeof plan !== 'object') return null;
   const mode = plan.mode === 'none' ? 'none' : plan.mode === 'selected' ? 'selected' : 'auto';
-  if (mode === 'auto') return null;
+  const maxProviderRequests = labVerifierPlan
+    && Number.isSafeInteger(plan.maxProviderRequests)
+    && plan.maxProviderRequests >= 1 && plan.maxProviderRequests <= 4
+    ? plan.maxProviderRequests
+    : null;
+  if (labVerifierPlan && maxProviderRequests == null) {
+    throw new Error('lab-verifier turn requires a provider request cap from 1 to 4');
+  }
+  let verifierAllowedTools = null;
+  if (labVerifierPlan) {
+    if (!Array.isArray(plan.verifierAllowedTools) || plan.verifierAllowedTools.length > 32) {
+      throw new Error('lab-verifier turn requires a bounded server execution allowlist');
+    }
+    verifierAllowedTools = [...new Set(plan.verifierAllowedTools.map(tool => {
+      if (typeof tool !== 'string') return null;
+      const normalized = tool.trim();
+      return /^[A-Za-z0-9_.:-]{1,120}$/.test(normalized) ? normalized : null;
+    }))];
+    if (verifierAllowedTools.includes(null)) {
+      throw new Error('lab-verifier execution allowlist contains an invalid tool name');
+    }
+  }
+  // Ordinary browser auto plans remain indistinguishable from no plan. The
+  // authenticated verifier keeps auto routing while carrying its non-learning
+  // marker and server-side execution contract.
+  if (mode === 'auto') {
+    return labVerifierPlan
+      ? { mode, selectedTools: [], source, phrase: null, maxProviderRequests, verifierAllowedTools }
+      : null;
+  }
   const selectedTools = Array.isArray(plan.selectedTools)
     ? [...new Set(plan.selectedTools
         .filter(t => typeof t === 'string')
         .map(t => t.trim())
         .filter(t => /^[A-Za-z0-9_.:-]{1,120}$/.test(t)))]
     : [];
-  if (mode === 'selected' && !selectedTools.length) return null;
+  if (mode === 'selected' && !selectedTools.length) {
+    if (labVerifierPlan) throw new Error('lab-verifier selected mode requires at least one valid selected tool');
+    return null;
+  }
+  if (labVerifierPlan && selectedTools.some(tool => !verifierAllowedTools.includes(tool))) {
+    throw new Error('lab-verifier selected tools must be included in its execution allowlist');
+  }
   return {
     mode,
     selectedTools,
-    source: typeof plan.source === 'string' ? plan.source.slice(0, 40) : null,
+    source,
     phrase: typeof plan.phrase === 'string' ? plan.phrase.slice(0, 240) : null,
+    ...(labVerifierPlan ? { maxProviderRequests, verifierAllowedTools } : {}),
   };
 }
 
@@ -383,7 +422,7 @@ function normalizeToolPlan(plan) {
  * @param {string} opts.text
  * @param {object|null} [opts.attachment]  legacy singular attachment (see normalizeAttachments)
  * @param {Array<object>|null} [opts.attachments]  preferred multi-attachment array — ws-handler/telegram/scheduler/background-tasks/ask_agent all funnel through here
- * @param {{mode?: string, selectedTools?: string[], source?: string, phrase?: string}|null} [opts.toolPlan]
+ * @param {{mode?: string, selectedTools?: string[], source?: string, phrase?: string, leaseToken?: string, maxProviderRequests?: number, verifierAllowedTools?: string[]}|null} [opts.toolPlan]
  * @param {{id?: string, filename?: string, mimeType?: string, source?: string, requestId?: string}|null} [opts.documentRequest]
  * @param {'voice-device'|'web'|'telegram'|'desktop-app'|'document-drawer'|null} [opts.source]
  * @param {string|null} [opts.deviceId]              voice-device id if applicable
@@ -500,6 +539,22 @@ export async function handleChatMessage({
   agentId = resolveRuntimeAgentId(userId, requestedAgentId, { fallbackUnknown: !!deviceId }) ?? requestedAgentId;
 
   const toolPlan = normalizeToolPlan(rawToolPlan);
+  // normalizeToolPlan preserves this source only after authenticating the
+  // exclusive random lease. Verifier turns retain real reads, routing, tools,
+  // model calls, and durable sessions while suppressing learning mutations.
+  const labVerifierTurn = process.env.OPENENSEMBLE_LAB === '1'
+    && toolPlan?.source === 'lab-verifier';
+  const labVerifierAllowedTools = labVerifierTurn
+    ? toolPlan.verifierAllowedTools
+    : null;
+  // normalizeToolPlan authenticated this exact raw capability, then stripped
+  // it from the model-visible/durable plan. Retain it only in AsyncLocalStorage
+  // so verifier-started workers can revalidate the live lease at completion.
+  const labVerifierLeaseToken = labVerifierTurn
+    && typeof rawToolPlan?.leaseToken === 'string'
+    && /^[a-f0-9]{64}$/.test(rawToolPlan.leaseToken)
+    ? rawToolPlan.leaseToken
+    : null;
   const documentRequest = normalizeDocumentRequest(rawDocumentRequest);
   const documentEventMeta = documentRequest ? { documentRequest, documentTurn: true } : {};
 
@@ -776,7 +831,9 @@ export async function handleChatMessage({
             attemptId: wireAttemptId,
             seq: eventSeq,
           });
-          _pendingApprovalsBefore = pendingResult.approvalBefore || persistedApprovalState;
+          _pendingApprovalsBefore = labVerifierTurn
+            ? null
+            : (pendingResult.approvalBefore || persistedApprovalState);
           const replayAttachments = Array.isArray(pendingResult.userMessage?.attachments)
             ? pendingResult.userMessage.attachments
             : [];
@@ -879,7 +936,9 @@ export async function handleChatMessage({
     return;
   }
 
-  _pendingApprovalsBefore = await snapshotPendingApprovals(userId, agentId);
+  _pendingApprovalsBefore = labVerifierTurn
+    ? null
+    : await snapshotPendingApprovals(userId, agentId);
 
   const persistEarlyHandledTurn = async () => {
     try {
@@ -994,7 +1053,7 @@ export async function handleChatMessage({
 
   // Profile intercepts: news-topic preference (side-effect; pipeline continues)
   // and agent rename / re-emoji (short-circuits with a spoken confirmation).
-  if (!documentRequest && !_readOnlyTurn) {
+  if (!documentRequest && !_readOnlyTurn && !labVerifierTurn) {
     tryNewsPrefIntercept({ rawText, userId, onEvent });
     if (await tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
   }
@@ -1057,6 +1116,7 @@ export async function handleChatMessage({
     attachment: attachmentList[0] ?? null,
     attachments: attachmentList,
     toolPlan,
+    suppressLearning: labVerifierTurn,
     documentRequest,
     _isRoutineFollowup,
     // Profile is threaded through so the HA fast-path can enforce the same
@@ -1091,7 +1151,7 @@ export async function handleChatMessage({
   // "ask <name>") in the incoming user message are logged against the
   // previous turn's pickedAgent so we can propose a routing override after
   // threshold. Fire-and-forget — detection never blocks dispatch.
-  if (ctx.userText && !_isBackgroundContinuation && !_readOnlyTurn) {
+  if (ctx.userText && !_isBackgroundContinuation && !_readOnlyTurn && !labVerifierTurn) {
     import('./lib/router-mistakes.mjs').then(m =>
       m.detectAndLog({ userId, currentAgentId: agentId, userText: ctx.userText })
     ).catch(e => console.warn('[router-mistakes] hook failed:', e.message));
@@ -1110,7 +1170,20 @@ export async function handleChatMessage({
   // LLM, then the natural-language fast-paths and the specialist router get
   // their crack. Anything not handled falls through to runLlmTurn.
   const planConstrained = toolPlan?.mode === 'selected' || toolPlan?.mode === 'none';
-  const allowIntentFastpaths = !planConstrained && !_isBackgroundContinuation && !documentRequest;
+  const allowIntentFastpaths = !planConstrained
+    && !_isBackgroundContinuation
+    && !documentRequest
+    && !labVerifierTurn;
+  // Verifier cases normally bypass all pre-model fast paths. Permit only the
+  // production HA dispatch path when ha_call_service is the sole authenticated
+  // server capability; a miss falls through to the same model/tool boundary.
+  const allowVerifierHaFastpath = labVerifierTurn
+    && toolPlan?.mode === 'auto'
+    && !_isBackgroundContinuation
+    && !documentRequest
+    && Array.isArray(labVerifierAllowedTools)
+    && labVerifierAllowedTools.length === 1
+    && labVerifierAllowedTools[0] === 'ha_call_service';
   // Answer-type fast-paths whose handled reply should keep a conversation-mode
   // exchange open (see armConversationFollowup). Everything else in the chain
   // ends or owns its own flow.
@@ -1118,25 +1191,43 @@ export async function handleChatMessage({
     tryHaFastpath, tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
   ]);
   const INTERCEPTORS = (documentRequest || _readOnlyTurn) ? [] : [
-    // Audio/video attachment + "transcribe this" (or bare attachment) goes
-    // straight to STT — no LLM round-trip needed. Falls through to the
-    // coordinator when the user's text suggests something else (e.g. "what's
-    // the duration", "extract the chords") so the LLM can pick the right tool.
-    tryTranscribeAttachmentFastpath,
-    // Staged-approval intercepts act on — and on any miss, CLEAR — pending
-    // destructive ops, so only a real user turn may run them. A background
-    // continuation or hidden internal turn arriving between "stage" and the
-    // user's APPROVE used to wipe the staged op before they could confirm.
-    ...((_isBackgroundContinuation || _hiddenUser) ? [] : [tryApprovalIntercept]),
-    slashAdapter,
-    financePreprocess,
-    ...(allowIntentFastpaths ? [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath, tryCalendarFastpath] : []),
+    // The verifier may not enter any pre-model path outside its authenticated
+    // server tool allowlist. Transcription, slash commands, finance extraction,
+    // and approval handling all bypass that boundary, so only ordinary turns
+    // may run them. The sole explicitly permitted verifier shortcut is the HA
+    // path below when ha_call_service is its only capability.
+    ...(!labVerifierTurn ? [
+      // Audio/video attachment + "transcribe this" (or bare attachment) goes
+      // straight to STT — no LLM round-trip needed. Falls through to the
+      // coordinator when the user's text suggests something else (e.g. "what's
+      // the duration", "extract the chords") so the LLM can pick the right tool.
+      tryTranscribeAttachmentFastpath,
+      // Staged-approval intercepts act on — and on any miss, CLEAR — pending
+      // destructive ops, so only a real user turn may run them. A background
+      // continuation or hidden internal turn arriving between "stage" and the
+      // user's APPROVE used to wipe the staged op before they could confirm.
+      ...((_isBackgroundContinuation || _hiddenUser) ? [] : [tryApprovalIntercept]),
+      slashAdapter,
+      financePreprocess,
+    ] : []),
+    ...(allowIntentFastpaths
+      ? [tryHaFastpath, tryRoutineFastpath, tryTriviaFastpath, tryCalendarFastpath]
+      : (allowVerifierHaFastpath ? [tryHaFastpath] : [])),
     // Skill-agnostic local cognition tier (dispatch face). Runs after the
     // bespoke fast-paths and before the embedding specialist router, so a
     // confident local-intent match never escalates to the cloud coordinator.
     // Inert unless cfg.localTier.enabled (kill switch). Falls through on miss.
     ...(allowIntentFastpaths ? [tryLocalIntentFastpath] : []),
-    ...(_isBackgroundContinuation ? [] : [c => runSpecialistRoute({ ...c, attachment: c.attachment, attachments: c.attachments, conversationMode })]),
+    ...(_isBackgroundContinuation ? [] : [c => runSpecialistRoute({
+      ...c,
+      attachment: c.attachment,
+      attachments: c.attachments,
+      conversationMode,
+      suppressLearning: labVerifierTurn,
+      verifierAllowedTools: labVerifierAllowedTools,
+      verifierLeaseRequired: labVerifierTurn,
+      verifierLeaseToken: labVerifierLeaseToken,
+    })]),
   ];
 
   for (const handler of INTERCEPTORS) {
@@ -1189,7 +1280,7 @@ export async function handleChatMessage({
   // would spawn a duplicate of itself. A task must never create a task.
   const _schedulerNotePromise = buildSchedulerNote({
     userId, agentId, userText: ctx.userText,
-    skipIntercept: _readOnlyTurn || _isBackgroundContinuation || _isolatedTaskRun || !!documentRequest,
+    skipIntercept: labVerifierTurn || _readOnlyTurn || _isBackgroundContinuation || _isolatedTaskRun || !!documentRequest,
   });
 
   // Pre-LLM alias learning: if the previous turn ended with a "did you mean X?"
@@ -1209,12 +1300,16 @@ export async function handleChatMessage({
   // run concurrently to cut serial pre-LLM latency.
   const _hintsPromise = _readOnlyTurn ? Promise.resolve('') : (async () => {
     try {
-      const { maybeConsumeAffirmation } = await import('./lib/alias-learner.mjs');
-      await maybeConsumeAffirmation(userId, ctx.userText);
+      if (!labVerifierTurn) {
+        const { maybeConsumeAffirmation } = await import('./lib/alias-learner.mjs');
+        await maybeConsumeAffirmation(userId, ctx.userText);
+      }
     } catch (e) { console.warn('[chat-dispatch] consume-affirmation failed:', e.message); }
     try {
       const { buildContextHints } = await import('./lib/context-resolvers.mjs');
-      return (await buildContextHints(userId, ctx.userText)).hints || '';
+      return (await buildContextHints(userId, ctx.userText, {
+        suppressLearning: labVerifierTurn,
+      })).hints || '';
     } catch (e) {
       console.warn('[chat-dispatch] context-resolvers failed:', e.message);
       return '';
@@ -1272,6 +1367,10 @@ export async function handleChatMessage({
       hiddenUser: _hiddenUser,
       isolatedTaskRun: _isolatedTaskRun,
       readOnlyTurn: _readOnlyTurn,
+      suppressLearning: labVerifierTurn,
+      verifierAllowedTools: labVerifierAllowedTools,
+      verifierLeaseRequired: labVerifierTurn,
+      verifierLeaseToken: labVerifierLeaseToken,
     });
   } catch (e) {
     const key = `${userId}_${agentId}`;
@@ -1298,7 +1397,7 @@ export async function handleChatMessage({
   //   Path B: if the LLM's reply asked "did you mean X?", stash a pending
   //           clarification keyed by userId. The next turn's affirmation
   //           check (above) consumes it.
-  if (!_readOnlyTurn) (async () => {
+  if (!_readOnlyTurn && !labVerifierTurn) (async () => {
     try {
       const learner = await import('./lib/alias-learner.mjs');
       await learner.observeTurnAndLearn(userId, ctx.userText, scopedSessionKey);
@@ -1405,7 +1504,7 @@ export async function handleChatMessage({
     // every background tick. New event types the firmware doesn't recognize
     // ride through ws-handler unspoken (it only TTS's token/done/error).
     try {
-      if (!skipPostTurnArtifacts && _pendingApprovalsBefore) {
+      if (!skipPostTurnArtifacts && !labVerifierTurn && _pendingApprovalsBefore) {
         const pendingAfter = await snapshotPendingApprovals(userId, agentId);
         for (const { type, kind, ...fields } of diffPendingApprovals(_pendingApprovalsBefore, pendingAfter)) {
           const entry = { kind, ts: Date.now(), ...fields };

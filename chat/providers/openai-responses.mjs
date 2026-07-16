@@ -21,6 +21,32 @@ import { applyRedactions } from '../../lib/credentials.mjs';
 import { nativeWebSearch, supportsImageGeneration } from '../../lib/model-capabilities.mjs';
 import { mapOpenAIResponsesReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 import { getUserFilesDir } from '../../lib/paths.mjs';
+import { getTurn, getTurnLabProviderRequestCap } from '../../lib/turn-trace-context.mjs';
+import { getToolRouterContext } from '../../lib/tool-router-context.mjs';
+import { getTurnContext } from '../../lib/turn-abort-context.mjs';
+import {
+  assertActiveLabVerifierLeaseToken,
+  inspectLabVerifierLease,
+} from '../../lib/lab-verifier-lease.mjs';
+
+// Keep the lab-only request ceiling shared across provider-generator restarts
+// and recovery calls. The trace cap is non-enumerated and cannot leak into
+// durable trace output.
+const labRequestsByTurn = new WeakMap();
+const LAB_MAX_OBSERVED_OUTPUT_TOKENS_PER_RESPONSE = 4_096;
+const LAB_DEFAULT_PROVIDER_REQUEST_CAP = 4;
+const LAB_MAX_INTERNAL_PROVIDER_REQUEST_CAP = 6;
+
+function currentLabProviderRequestCap() {
+  const tracedCap = getTurnLabProviderRequestCap();
+  if (tracedCap != null) return tracedCap;
+  const routedCap = getToolRouterContext()?.labProviderRequestCap;
+  return Number.isSafeInteger(routedCap)
+    && routedCap >= 1
+    && routedCap <= LAB_MAX_INTERNAL_PROVIDER_REQUEST_CAP
+    ? routedCap
+    : LAB_DEFAULT_PROVIDER_REQUEST_CAP;
+}
 
 export function toResponsesInput(messages) {
   // Translate OpenAI-compat messages → Responses API input items.
@@ -197,6 +223,9 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   const wsProvider  = isCodex ? 'openai-oauth' : 'xai';
   const tag         = isCodex ? 'openai-oauth' : 'grok';
   const displayName = isCodex ? 'OpenAI Codex' : 'xAI Grok';
+  const labCodexRelay = isCodex
+    && process.env.OPENENSEMBLE_LAB === '1'
+    && process.env.OE_LAB_CODEX_RELAY === '1';
   const endpoint    = isCodex
     ? `${OPENAI_OAUTH_BASE}/responses`
     : `${OPENAI_COMPAT_PROVIDERS['xai'].baseUrl.replace(/\/$/, '')}/responses`;
@@ -223,6 +252,54 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       && reqCount === completionCount
       && reqCount === usageCount,
   });
+  const assertProviderLeaseBoundary = () => {
+    // The required bit is itself part of the authenticated ambient context.
+    // Check it even if lab mode were accidentally toggled off mid-run; an
+    // environment change must not downgrade detached verifier work.
+    const turnContext = getTurnContext();
+    if (turnContext?.verifierLeaseRequired === true) {
+      assertActiveLabVerifierLeaseToken(turnContext.verifierLeaseToken);
+    } else if (process.env.OPENENSEMBLE_LAB === '1'
+      && inspectLabVerifierLease(null) !== 'absent') {
+      // Dispatcher exclusivity also covers direct/internal adapter callers.
+      // An ordinary worker that predates lease acquisition must not slip an
+      // unrelated request into the real-model evidence window.
+      throw Object.assign(
+        new Error('the isolated lab provider is exclusively leased by the verifier'),
+        { code: 'LAB_VERIFIER_LEASE_EXCLUSIVE' },
+      );
+    }
+  };
+  // Refuse before token freshness can perform any auth-network activity. The
+  // same assertion runs again at every fetch attempt below to bind each actual
+  // provider request to the still-live lease.
+  try {
+    assertProviderLeaseBoundary();
+  } catch (error) {
+    yield usageTelemetry();
+    yield { type: 'error', message: `${displayName}: ${error.message}` };
+    return;
+  }
+  const noteProviderAttempt = () => {
+    // Revalidate after all prompt construction and immediately before fetch.
+    // This closes the worker-completion gap if the lease expired, was removed,
+    // or changed after detached completion publication began.
+    assertProviderLeaseBoundary();
+    if (process.env.OPENENSEMBLE_LAB === '1') {
+      const turn = getTurn();
+      if (turn) {
+        const cap = currentLabProviderRequestCap();
+        const used = labRequestsByTurn.get(turn) || 0;
+        if (used >= cap) throw new Error(`Lab provider request cap (${cap}) reached for this turn`);
+        labRequestsByTurn.set(turn, used + 1);
+      } else if (reqCount >= LAB_DEFAULT_PROVIDER_REQUEST_CAP) {
+        // Direct adapter probes do not establish a turn trace. Keep the same
+        // hard ceiling within that generator instead of silently disabling it.
+        throw new Error('Lab provider request cap reached for this run');
+      }
+    }
+    reqCount++;
+  };
 
   let auth;
   if (isCodex) {
@@ -255,7 +332,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   // fields, and 100% of our Codex traffic flows through here anyway.
   const promptCacheKey = isCodex ? `oe:${userId}:${agent.id ?? agent.name ?? 'agent'}` : null;
 
-  const guard = new LoopGuard(agent.maxToolLoops ?? 500);
+  const configuredLoopCap = agent.maxToolLoops ?? 500;
+  // The isolated real-provider verifier must have a hard spend/runaway bound
+  // even if an agent config accidentally restores the production default.
+  // Production semantics remain unchanged outside the lab.
+  const loopCap = process.env.OPENENSEMBLE_LAB === '1'
+    ? Math.min(configuredLoopCap, currentLabProviderRequestCap())
+    : configuredLoopCap;
+  const guard = new LoopGuard(loopCap);
   // A tool call is not a final assistant answer. Remember when the most recent
   // permitted provider round ended in tools so loop-budget exhaustion cannot
   // masquerade as a successful empty completion.
@@ -292,14 +376,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // dynamic pages — exactly the failure we kept hitting. Routing everything
     // through the native tool keeps the answer streaming and avoids the OE fetch.
     const nativeSearch = nativeWebSearch(wsProvider, agent.model);
-    const useNativeSearch = !nativeSearchDisabled
+    const useNativeSearch = !labCodexRelay
+      && !nativeSearchDisabled
       && nativeSearch?.kind === 'responses'
       && agent.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
     if (useNativeSearch) {
       responsesTools = (responsesTools || []).filter(t => t.name !== 'web_search' && t.name !== 'fetch_url');
       responsesTools.push(nativeSearch.tool);
     }
-    if (isCodex) {
+    if (isCodex && !labCodexRelay) {
       responsesTools = applyProviderHostedImageTool(
         agent, responsesTools, nativeImagesThisTurn, NATIVE_IMAGE_GEN_CAP,
       );
@@ -315,6 +400,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       store:        false,
       stream:       true,
     };
+    if (process.env.OPENENSEMBLE_LAB === '1' && !labCodexRelay) {
+      // Public Responses-compatible providers accept this request-side cap.
+      // ChatGPT's internal Codex endpoint does not; the relay bounds transport
+      // while terminal usage is checked below before text or tools are kept.
+      body.max_output_tokens = LAB_MAX_OBSERVED_OUTPUT_TOKENS_PER_RESPONSE;
+    }
     if (!reasoningDisabled) body.reasoning = mapOpenAIResponsesReasoning(agent);
     if (responsesTools?.length) { body.tools = responsesTools; body.parallel_tool_calls = true; }
     if (promptCacheKey) body.prompt_cache_key = promptCacheKey;
@@ -351,8 +442,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         // No verified idempotency primitive exists for the hosted paid image
         // tool. A handshake failure may follow provider acceptance, so never
         // automatically replay a request that offered image_generation.
-        attempts: paidHostedImageOffered ? 1 : 2,
-        onAttempt: () => { reqCount++; },
+        attempts: process.env.OPENENSEMBLE_LAB === '1' || paidHostedImageOffered ? 1 : 2,
+        onAttempt: noteProviderAttempt,
       });
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
@@ -371,7 +462,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       // Force a refresh and retry once — refresh_token is usually still good
       // unless the user did a full logout, in which case we surface a clear
       // "please reconnect" instead of looping.
-      if (isCodex && res.status === 401 && /token_invalidated/i.test(errText)) {
+      if (labCodexRelay && (res.status === 401 || res.status === 403)) {
+        // The acceptance lab has an access-token snapshot only. Never invoke
+        // either OAuth refresh path from this process; a rejected snapshot
+        // must be deliberately reinjected from the host after review.
+        usageCardinalityValid = false;
+        yield usageTelemetry();
+        yield { type: 'error', message: 'The lab provider access snapshot is unavailable or expired.' };
+        return;
+      } else if (isCodex && res.status === 401 && /token_invalidated/i.test(errText)) {
         // Plain-English message for the user. Used in two spots below: when
         // refresh itself fails, and when the retry after a successful refresh
         // still returns 401. Both cases mean the session is unrecoverable
@@ -404,8 +503,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           res = await postWithRetry(`${OPENAI_OAUTH_BASE}/responses`, {
             method: 'POST', signal, headers, body: JSON.stringify(body),
           }, {
-            attempts: paidHostedImageOffered ? 1 : 2,
-            onAttempt: () => { reqCount++; },
+            attempts: process.env.OPENENSEMBLE_LAB === '1' || paidHostedImageOffered ? 1 : 2,
+            onAttempt: noteProviderAttempt,
           });
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
@@ -482,7 +581,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       });
       return image;
     };
-    // call_id → { id (same as call_id), name, argsJson }
+    // call_id → { id (same as call_id), name, argsJson, done }
     const toolCalls  = new Map();
     // output_index → call_id so *.delta events (keyed by output_index) route correctly
     const indexToCallId = new Map();
@@ -493,6 +592,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     let loopCompletionCount = 0;
     let loopUsageCount = 0;
     let loopUsageValuesValid = true;
+    let loopOutputBudgetValid = true;
     // A completed response is authoritative only when it is the final parsed
     // provider event for this request. The direct ChatGPT Codex endpoint closes
     // cleanly after response.completed; other Responses providers must also
@@ -501,7 +601,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     let loopSseDoneCount = 0;
 
     const seenEventTypes = new Set();
-    for await (const ev of readAnthropicSSE(res.body)) {
+    for await (const ev of readAnthropicSSE(res.body, { strict: labCodexRelay })) {
       if (ev.__sseDone === true) {
         loopSseDoneCount++;
         continue;
@@ -525,7 +625,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         const item = ev.item ?? {};
         if (item.type === 'function_call') {
           const callId = item.call_id ?? item.id;
-          toolCalls.set(callId, { id: callId, name: item.name ?? '', argsJson: typeof item.arguments === 'string' ? item.arguments : '' });
+          toolCalls.set(callId, {
+            id: callId,
+            name: item.name ?? '',
+            argsJson: typeof item.arguments === 'string' ? item.arguments : '',
+            done: false,
+          });
           if (typeof ev.output_index === 'number') indexToCallId.set(ev.output_index, callId);
           // Argument deltas reference the fc_… ITEM id, not the call_… id the
           // map is keyed by — without this alias every delta missed and only
@@ -554,8 +659,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
             if (typeof item.arguments === 'string' && item.arguments.length >= entry.argsJson.length) {
               entry.argsJson = item.arguments;
             }
+            entry.done = true;
           } else {
-            toolCalls.set(callId, { id: callId, name: item.name ?? '', argsJson: typeof item.arguments === 'string' ? item.arguments : '' });
+            toolCalls.set(callId, {
+              id: callId,
+              name: item.name ?? '',
+              argsJson: typeof item.arguments === 'string' ? item.arguments : '',
+              done: true,
+            });
           }
         }
         if (item.type === 'image_generation_call') {
@@ -592,6 +703,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           const validUsage = Number.isSafeInteger(usage.input_tokens) && usage.input_tokens > 0
             && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens > 0;
           if (validUsage) {
+            if (process.env.OPENENSEMBLE_LAB === '1'
+                && usage.output_tokens > LAB_MAX_OBSERVED_OUTPUT_TOKENS_PER_RESPONSE) {
+              loopOutputBudgetValid = false;
+            }
             const nextInputTokens = totalInputTokens + usage.input_tokens;
             const nextOutputTokens = totalOutputTokens + usage.output_tokens;
             if (Number.isSafeInteger(nextInputTokens) && Number.isSafeInteger(nextOutputTokens)) {
@@ -652,6 +767,16 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       yield { type: 'error', message: `${displayName}: incomplete or invalid response stream.` };
       return;
     }
+    // The ChatGPT Codex subscription backend does not support a request-side
+    // max_output_tokens field. Reject over-budget terminal usage before any
+    // completed function call can be emitted or executed, and clear transient
+    // text before it can become a retained final answer.
+    if (!loopOutputBudgetValid) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      yield usageTelemetry();
+      yield { type: 'error', message: `${displayName}: response exceeded the lab output-token acceptance cap.` };
+      return;
+    }
     if ([...imageGenerationItemStatus.values()].some(status => status === 'invalid')) {
       yield usageTelemetry();
       yield {
@@ -665,7 +790,32 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       awaitingPostToolAnswer = true;
       if (textContent.trim()) yield { type: 'replace', text: '' };
 
-      const blocks = [...toolCalls.values()];
+      // Never turn truncated or malformed arguments into an empty object. A
+      // completed stream is necessary but not sufficient: every call must
+      // have a stable identity, name, and JSON-object body before any sibling
+      // from the batch is emitted or executed.
+      let blocks;
+      try {
+        blocks = [...toolCalls.values()].map(block => {
+          if (block.done !== true
+              || typeof block.id !== 'string' || !block.id.trim()
+              || typeof block.name !== 'string' || !block.name.trim()
+              || typeof block.argsJson !== 'string' || !block.argsJson.trim()) {
+            throw new Error('tool call did not finish with a complete identity, name, and arguments');
+          }
+          const toolArgs = JSON.parse(block.argsJson);
+          if (toolArgs === null || typeof toolArgs !== 'object' || Array.isArray(toolArgs)) {
+            throw new Error('tool arguments must be a JSON object');
+          }
+          return { block, toolArgs };
+        });
+      } catch (error) {
+        usageCardinalityValid = false;
+        console.warn(`[${tag}] Refusing malformed provider tool call: ${error.message}`);
+        yield usageTelemetry();
+        yield { type: 'error', message: `${displayName}: received an invalid tool call; no tools were executed.` };
+        return;
+      }
 
       if (blocks.length > 1) {
         // Multiple tool calls in one assistant turn — run in parallel.
@@ -673,15 +823,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         // result returned). Promise.all gives us concurrency. For ask_agent,
         // the coordinator waits for specialist responses before synthesizing.
         // Events are buffered per-tool and replayed in order after all complete.
-        const parsed = blocks.map(block => {
-          let args = {};
-          try { args = JSON.parse(block.argsJson || '{}'); } catch { /* ignore */ }
-          return { block, toolArgs: args };
-        });
-        for (const { block, toolArgs } of parsed) {
-          yield { type: 'tool_call', name: block.name, args: toolArgs };
+        for (const { block, toolArgs } of blocks) {
+          yield { type: 'tool_call', name: block.name, args: toolArgs, toolCallId: block.id };
         }
-        const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
+        const results = await Promise.all(blocks.map(async ({ block, toolArgs }) => {
           const { text, _notify, _images, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
           return { block, toolArgs, result: text, _notify, _images, events };
         }));
@@ -689,7 +834,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
         for (const { block, result, _notify, events } of results) {
           for (const ev of events) yield ev;
-          yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
+          yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
           working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         }
@@ -707,7 +852,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         continue;
       }
 
-      const assistantToolCalls = blocks.map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: b.argsJson } }));
+      const assistantToolCalls = blocks.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
       working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
       const seqResults = [];
       const _imagesByBlockId = new Map();
@@ -717,19 +862,17 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       // result for transcript fidelity, then deliver it as assistantContent and
       // break the loop instead of re-inferring.
       let _terminalReply = null;
-      for (const block of blocks) {
-        let args = {};
-        try { args = JSON.parse(block.argsJson || '{}'); } catch (e) { console.warn('[openai-oauth] Failed to parse tool args:', e.message); }
-        yield { type: 'tool_call', name: block.name, args };
+      for (const { block, toolArgs: args } of blocks) {
+        yield { type: 'tool_call', name: block.name, args, toolCallId: block.id };
         let toolResultText = '';
         let _seqImages = null;
         for await (const chunk of executeToolStreaming(block.name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              toolResultText += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
           if (chunk.type === '__hide_turn')         yield { type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId };
-          if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
+          if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}) };
           if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
-          if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
+          if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text), ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}) };
           if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') yield chunk;
           if (chunk.type === 'result') {
             toolResultText = chunk.text;
@@ -740,7 +883,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         const { text: result, _notify, _images } = normalizeToolResult(toolResultText);
         const effectiveImages = _seqImages ?? _images;
         if (effectiveImages?.length) _imagesByBlockId.set(block.id, { name: block.name, images: effectiveImages });
-        yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
+        yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         seqResults.push({ name: block.name, args: block.argsJson, result });

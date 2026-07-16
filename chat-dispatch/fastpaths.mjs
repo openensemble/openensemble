@@ -101,9 +101,9 @@ async function fastpathToolAllowed(userId, skillId, toolName) {
   }
 }
 
-async function resolvePhrase(phrase, userId) {
+async function resolvePhrase(phrase, userId, suppressLearning = false) {
   const { resolveAlias } = await import('../lib/ha-aliases.mjs');
-  const aliased = resolveAlias(userId, phrase);
+  const aliased = resolveAlias(userId, phrase, { suppressLearning });
   if (aliased) {
     const domain = aliased.split('.', 1)[0];
     // The friendly name shown in the spoken confirmation — derive from the
@@ -125,7 +125,7 @@ async function resolvePhrase(phrase, userId) {
   return await lookupEntity(phrase);
 }
 
-async function classifyHaIntent(text, userId) {
+async function classifyHaIntent(text, userId, suppressLearning = false) {
   if (typeof text !== 'string') return null;
   const trimmed = text.trim().replace(/[.,!?]+$/, '');
 
@@ -134,7 +134,7 @@ async function classifyHaIntent(text, userId) {
   if (vm) {
     const verb = vm[1].toLowerCase().replace(/\s+/g, ' ');
     const phrase = vm[2];
-    const hit = await resolvePhrase(phrase, userId);
+    const hit = await resolvePhrase(phrase, userId, suppressLearning);
     if (!hit) return null;
     const { entity_id, domain, friendly_name } = hit;
 
@@ -167,7 +167,7 @@ async function classifyHaIntent(text, userId) {
   if (pm) {
     const phrase = pm[1];
     const pct = Math.max(0, Math.min(100, Number(pm[2])));
-    const hit = await resolvePhrase(phrase, userId);
+    const hit = await resolvePhrase(phrase, userId, suppressLearning);
     if (!hit) return null;
     const { entity_id, domain, friendly_name } = hit;
     let serviceDomain, service, data;
@@ -188,7 +188,7 @@ async function classifyHaIntent(text, userId) {
   if (dm) {
     const phrase = dm[1];
     const temp = Number(dm[2]);
-    const hit = await resolvePhrase(phrase, userId);
+    const hit = await resolvePhrase(phrase, userId, suppressLearning);
     if (!hit) return null;
     const { entity_id, domain, friendly_name } = hit;
     if (domain !== 'climate') return null;
@@ -246,7 +246,7 @@ async function executeHaIntent(intent) {
  *
  * @returns {Promise<{ handled: true, trace?: { name: string, args: object, result: string, status: string, durationMs: number } } | null>}
  */
-export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
+export async function tryHaFastpath({ userText, userId, agentId, onEvent, suppressLearning = false }) {
   if (!userText || !hasHaIntentSyntax(userText)) return null;
   const startedAt = Date.now();
   // HA control stays GLOBAL (any agent fast-paths it): a light/lock command is
@@ -262,7 +262,7 @@ export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
       console.log('[chat] ha-fastpath: gated by runtime skill policy — falling through to LLM');
       return null;
     }
-    const haIntent = await classifyHaIntent(userText, userId);
+    const haIntent = await classifyHaIntent(userText, userId, suppressLearning);
     if (!haIntent) return null;
     const result = await executeHaIntent(haIntent);
     if (result.error) {

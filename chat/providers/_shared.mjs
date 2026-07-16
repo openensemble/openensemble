@@ -259,7 +259,7 @@ export async function* readNDJSON(body) {
 }
 
 // Anthropic / OpenAI-style SSE reader — parses `data: {...}` lines
-export async function* readAnthropicSSE(body) {
+export async function* readAnthropicSSE(body, { strict = false } = {}) {
   const reader  = body.getReader();
   const decoder = new TextDecoder();
   let buffer    = '';
@@ -278,10 +278,21 @@ export async function* readAnthropicSSE(body) {
         // checks harmlessly skip) so a provider that ends via [DONE] without a
         // per-chunk finish_reason isn't mistaken for a truncated stream.
         if (data === '[DONE]') { yield { __sseDone: true }; return; }
-        try { yield JSON.parse(data); } catch { /* skip malformed SSE event */ }
+        try {
+          yield JSON.parse(data);
+        } catch (error) {
+          if (strict) throw new Error('Malformed SSE JSON event', { cause: error });
+          // Compatibility mode preserves the historical behavior for providers
+          // whose streams may include non-JSON extension rows.
+        }
       }
     }
   }
+  buffer += decoder.decode();
+  // A non-whitespace tail was never terminated as an SSE line/event. In the
+  // strict acceptance relay, silently discarding it could hide a truncated
+  // failure or duplicate terminal record after response.completed.
+  if (strict && buffer.trim()) throw new Error('Truncated SSE event at clean EOF');
 }
 
 // ── Reasoning cleanup ────────────────────────────────────────────────────────

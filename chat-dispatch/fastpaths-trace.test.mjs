@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   failPendingTurn: vi.fn(),
   haRequest: vi.fn(),
   runtimeEnabled: vi.fn(),
+  resolveHaAlias: vi.fn(),
 }));
 
 vi.mock('../sessions.mjs', () => ({
@@ -20,7 +21,7 @@ vi.mock('../roles.mjs', () => ({
   isSkillRuntimeEnabledForUser: mocks.runtimeEnabled,
 }));
 vi.mock('../lib/ha-aliases.mjs', () => ({
-  resolveAlias: vi.fn(() => 'light.kitchen_group'),
+  resolveAlias: mocks.resolveHaAlias,
 }));
 vi.mock('../lib/ha-cache.mjs', () => ({
   ensureCache: vi.fn(async () => new Map([['kitchen', {
@@ -44,6 +45,7 @@ describe('Home Assistant fast-path trace evidence', () => {
     mocks.failPendingTurn.mockReset().mockResolvedValue(undefined);
     mocks.haRequest.mockReset().mockResolvedValue([]);
     mocks.runtimeEnabled.mockReset().mockReturnValue(true);
+    mocks.resolveHaAlias.mockReset().mockReturnValue('light.kitchen_group');
   });
 
   it('returns the exact executed HA action while making zero model calls', async () => {
@@ -86,5 +88,17 @@ describe('Home Assistant fast-path trace evidence', () => {
     expect(events).toEqual([expect.objectContaining({
       type: 'error', code: 'persistence_failed', retryable: false,
     })]);
+  });
+
+  it('threads non-learning mode into HA alias resolution', async () => {
+    await tryHaFastpath({
+      userText: 'turn off kitchen', userId: 'user_test', agentId: 'jarvis',
+      suppressLearning: true,
+      onEvent: () => {},
+    });
+
+    expect(mocks.resolveHaAlias).toHaveBeenCalledWith(
+      'user_test', 'kitchen', { suppressLearning: true },
+    );
   });
 });
