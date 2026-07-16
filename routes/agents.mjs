@@ -316,6 +316,15 @@ export async function handle(req, res) {
       const removed = deleteAliasesByEntityId(ca.ownerId || authId, 'agent', agentMatch[1]);
       if (removed > 0) console.log(`[agents] dropped ${removed} agent alias(es) for "${agentMatch[1]}"`);
     } catch (e) { console.warn('[agents] alias cascade-delete failed:', e.message); }
+    // If this agent was the owner's single-mode primary, revert that account
+    // to ensemble explicitly — a dangling primaryAgentId would otherwise be
+    // silently degraded at read time.
+    try {
+      const { handleAgentDeleted } = await import('../lib/orchestration-policy.mjs');
+      if (await handleAgentDeleted(ca.ownerId || authId, agentMatch[1])) {
+        console.log(`[agents] single-mode primary ${agentMatch[1]} deleted — reverted ${ca.ownerId || authId} to ensemble`);
+      }
+    } catch (e) { console.warn('[agents] orchestration cascade failed:', e.message); }
     broadcastAgentList();
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
     return true;

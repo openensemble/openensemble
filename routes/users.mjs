@@ -17,6 +17,7 @@ import {
 // straight from the submodule (see routes/_helpers/auth-sessions.mjs).
 import { uaFromReq } from './_helpers/auth-sessions.mjs';
 import { migrateSharedCortexToUser } from '../memory.mjs';
+import { NEW_ACCOUNT_DEFAULT_MODE } from '../lib/orchestration-policy.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
@@ -121,7 +122,10 @@ export async function handle(req, res) {
         const tierOverrides = {};
         if (role === 'child' && typeof reqChildPrompt === 'string' && reqChildPrompt.trim()) tierOverrides.childSafetyPrompt = reqChildPrompt.trim();
         if ((role === 'child' || role === 'user') && Array.isArray(reqAllowedModels)) tierOverrides.allowedModels = reqAllowedModels;
-        user = { id, name: name.trim(), emoji, color: color ?? COLORS[list.length % COLORS.length], newsDefaultTopic: 0, emailProvider: 'none', role, ...freshUserDefaults, ...childDefaults, ...featureOverride, ...parentLink, ...tierOverrides, passwordHash, createdAt: new Date().toISOString() };
+        // Orchestration mode is written EXPLICITLY at creation (integration
+        // plan D4) — never left absent for later inference. primaryAgentId is
+        // set by the single-mode onboarding/switch flow once an agent exists.
+        user = { id, name: name.trim(), emoji, color: color ?? COLORS[list.length % COLORS.length], newsDefaultTopic: 0, emailProvider: 'none', role, orchestration: { mode: NEW_ACCOUNT_DEFAULT_MODE }, ...freshUserDefaults, ...childDefaults, ...featureOverride, ...parentLink, ...tierOverrides, passwordHash, createdAt: new Date().toISOString() };
         isFirst = list.length === 0;
         list.push(user);
       });

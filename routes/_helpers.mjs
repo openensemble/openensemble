@@ -189,6 +189,10 @@ export function saveConfig(cfg) {
  * @property {string[]} [allowedOAuthProviders]
  * @property {boolean} [skillsLocked]
  * @property {{blockedFrom?: string, blockedUntil?: string}} [accessSchedule]  child-safety curfew, HH:MM
+ * @property {{mode?: 'ensemble'|'single', primaryAgentId?: string}} [orchestration]
+ *   per-account orchestration policy. Read/write ONLY via
+ *   lib/orchestration-policy.mjs — missing/malformed resolves to 'ensemble',
+ *   and the mode is stored, never inferred from roster shape.
  */
 
 /** @type {User[] | null} */

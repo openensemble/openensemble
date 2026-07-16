@@ -928,6 +928,17 @@ loadPersistedSessions();
   } catch (e) {
     console.warn('[config-secrets] bootstrap migration failed:', e.message);
   }
+  // Orchestration-mode stamping (integration plan D4): every pre-existing
+  // profile gets an explicit { mode: 'ensemble' } so behavior never depends
+  // on field absence. After the encryption bootstrap so the two migrations
+  // don't interleave writes to the same profiles.
+  try {
+    const { stampOrchestrationDefaults } = await import('./lib/orchestration-policy.mjs');
+    const stamped = await stampOrchestrationDefaults();
+    if (stamped > 0) console.log(`[orchestration] stamped ensemble mode onto ${stamped} existing profile(s)`);
+  } catch (e) {
+    console.warn('[orchestration] default stamping failed:', e.message);
+  }
 })();
 
 // One-shot systemd unit self-repair. Old installs shipped with
