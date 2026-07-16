@@ -40,7 +40,7 @@ const { executeSkillTool } = await import('./skills/delegate/execute.mjs');
 
 const { default: fs } = await import('fs');
 const { default: path } = await import('path');
-const { SKILLS_DIR } = await import('./lib/paths.mjs');
+const { SKILLS_DIR, USERS_DIR } = await import('./lib/paths.mjs');
 const { loadRoleManifests } = await import('./roles.mjs');
 const { composeSkillSpaBlock } = await import('./lib/skill-prompt-composer.mjs');
 
@@ -133,6 +133,10 @@ describe('rosterless delegate SPA variant', () => {
   // the actual manifest text, not a fixture) plus one synthetic skill that has
   // no solo variant, to prove the fallback.
   fs.cpSync(path.resolve('skills/delegate'), path.join(SKILLS_DIR, 'delegate'), { recursive: true });
+  fs.mkdirSync(path.join(USERS_DIR, 'user_roster_test'), { recursive: true });
+  fs.writeFileSync(path.join(USERS_DIR, 'user_roster_test', 'profile.json'), JSON.stringify({
+    id: 'user_roster_test', role: 'owner', skills: ['delegate', 'nosolo_fixture'],
+  }));
   fs.mkdirSync(path.join(SKILLS_DIR, 'nosolo_fixture'), { recursive: true });
   fs.writeFileSync(path.join(SKILLS_DIR, 'nosolo_fixture', 'manifest.json'), JSON.stringify({
     id: 'nosolo_fixture',

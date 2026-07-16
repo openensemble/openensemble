@@ -37,6 +37,8 @@ import { log } from '../logger.mjs';
 import { buildSkillPersonalizationHelpers } from '../lib/personalization/skill-helper.mjs';
 import { getPreferenceSafeAutoContext } from '../lib/personalization/safe-auto-context.mjs';
 import { atomicWriteSync } from '../routes/_helpers/io-lock.mjs';
+import { resolveRuntimeAgentId } from '../routes/_helpers/agent-resolver.mjs';
+import { tryAcquireUserTurnLease } from '../chat-dispatch/slot-registry.mjs';
 
 const TICK_MS = 5_000;
 const DEFAULT_CADENCE_SEC = 30;
@@ -61,6 +63,19 @@ let _sendStatusFn = null;
 let _sendNotificationFn = null;
 let _showImageFn = null;
 let _showVideoFn = null;
+
+// Keep persisted watcher ownership untouched for exact switch-back behavior,
+// but route every outward surface through the currently active projection.
+function runtimeWatcherAgentRef(record) {
+  const stored = typeof record?.agentId === 'string' ? record.agentId : '';
+  const userId = record?.userId;
+  if (!userId) return stored;
+  const prefix = `${userId}_`;
+  const raw = stored.startsWith(prefix) ? stored.slice(prefix.length) : stored;
+  const resolved = resolveRuntimeAgentId(userId, raw || null);
+  if (!resolved) return stored;
+  return stored.startsWith(prefix) ? `${prefix}${resolved}` : resolved;
+}
 
 // In-memory cache per user, mirrored to disk on every change.
 //   _byUser: userId -> { active: WatcherRecord[], recent: WatcherRecord[] }
@@ -1206,7 +1221,7 @@ export async function runCustomWatcherSandboxed(record, { signal = null } = {}) 
     const { execPath } = customSkillBindings(record.userId, record.skillId);
     const jobPayload = {
       t: 'job', mode: 'watcher', skillExecPath: execPath, kind: record.kind,
-      state: record.state, userId: record.userId, agentId: record.agentId, watcherId: record.id,
+      state: record.state, userId: record.userId, agentId: runtimeWatcherAgentRef(record), watcherId: record.id,
     };
     // Default-deny egress on ticks too — only skills that declare sandbox.network get it.
     const net = skillDeclaresNetwork(record.userId, record.skillId);
@@ -1276,6 +1291,21 @@ async function tickOne(record) {
       .includes(record?.personalizationOrigin?.type)) {
       unregisterWatcher(record.userId, record.id, 'auto_activation_orphan');
       return;
+    }
+
+    // Revocation is checked before any custom module, preference verifier, or
+    // sandbox process can run. This covers child allowedSkills changes and
+    // ordinary per-user skill disablement for already-persisted watchers.
+    if (record.skillId) {
+      let enabled = false;
+      try {
+        const roles = await import('../roles.mjs');
+        enabled = roles.isSkillRuntimeEnabledForUser(record.skillId, record.userId);
+      } catch { enabled = false; }
+      if (!enabled) {
+        finalizeWatcher(record, 'cancelled', `Monitor stopped: skill "${record.skillId}" is no longer permitted.`);
+        return;
+      }
     }
 
     // `nextTickAt` is the normal scheduler gate, but event delivery and other
@@ -1436,7 +1466,7 @@ async function tickOne(record) {
           if (!isManagedPreferenceWatcher(record) && _sendStatusFn) {
             _sendStatusFn(record.userId, {
               type: 'status',
-              agent: record.agentId,
+              agent: runtimeWatcherAgentRef(record),
               watcherId: record.id,
               kind: record.kind,
               label: record.label,
@@ -1487,7 +1517,7 @@ async function tickOne(record) {
       if (_sendStatusFn) {
         _sendStatusFn(record.userId, {
           type: 'status',
-          agent: record.agentId,
+          agent: runtimeWatcherAgentRef(record),
           watcherId: record.id,
           kind: record.kind,
           label: record.label,
@@ -1519,7 +1549,7 @@ function pushHistory(record, entry) {
 function watcherStatusPayload(record, text, extra = {}) {
   return {
     type: 'status',
-    agent: record.agentId,
+    agent: runtimeWatcherAgentRef(record),
     watcherId: record.id,
     kind: record.kind,
     label: record.label,
@@ -1849,7 +1879,7 @@ async function deliverManagedPreferenceUpdate(record, value, { dispatchApproved 
     // closes the in-flight tick race immediately before the websocket send.
     if (!(await managedPreferenceDeliveryAllowed(record, { immediate: true }))) throw new Error('delivery authorization changed');
     delivered = Number(_sendNotificationFn?.(record.userId, {
-      type: 'agent_notification', agent: record.agentId, content: text,
+      type: 'agent_notification', agent: runtimeWatcherAgentRef(record), content: text,
       from: { userName: record.label || record.skillId }, event: record.kind,
       data: {}, ts: Date.now(),
     })) || 0;
@@ -1903,7 +1933,7 @@ async function executeOnFire(record) {
     try {
       if (!(await finalPreferenceAuthorization())) return false;
       const delivered = Number(_sendNotificationFn?.(record.userId, {
-        type: 'agent_notification', agent: record.agentId,
+        type: 'agent_notification', agent: runtimeWatcherAgentRef(record),
         content: `🔔 ${record.label}: ${fireText}`,
         from: { userName: record.label || record.skillId }, event: record.kind, data: {}, ts: Date.now(),
       })) || 0;
@@ -1962,10 +1992,9 @@ async function executeOnFire(record) {
 
   if (cfg.type !== 'agent') return false;
 
-  const { getAgent } = await import('../agents.mjs');
   const { streamChat } = await import('../chat.mjs');
   const { appendToSession } = await import('../sessions.mjs');
-  const { getAgentsForUser, getUser } = await import('../routes/_helpers.mjs');
+  const { resolveRuntimeAgentForUser } = await import('../routes/_helpers.mjs');
   const { runAgentWithRetry } = await import('../lib/run-agent-with-retry.mjs');
 
   const userId = record.userId;
@@ -1976,48 +2005,58 @@ async function executeOnFire(record) {
     return false;
   }
 
-  const isChild = getUser(userId)?.role === 'child';
-  const resolved = getAgentsForUser(userId).find(a => a.id === rawAgentId)
-    ?? (isChild ? null : getAgent(rawAgentId));
-  if (!resolved) {
-    log.warn('watchers', 'on_fire: agent not resolvable', { id: record.id, agentId: rawAgentId });
+  let topologyLease = null;
+  for (let attempt = 0; attempt < 80 && !topologyLease; attempt++) {
+    topologyLease = tryAcquireUserTurnLease(userId, { label: `watcher:${record.id}` });
+    if (!topologyLease) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  if (!topologyLease) {
+    log.warn('watchers', 'on_fire deferred: account topology is changing', { id: record.id });
     return false;
   }
 
-  const sessionKey = `${userId}_${resolved.id}`;
-  const scopedAgent = { ...resolved, id: sessionKey };
+  try {
 
-  if (!(await finalPreferenceAuthorization())) return false;
+    const resolved = resolveRuntimeAgentForUser(userId, rawAgentId);
+    if (!resolved) {
+      log.warn('watchers', 'on_fire: agent not resolvable', { id: record.id, agentId: rawAgentId });
+      return false;
+    }
 
-  const fireText = record.lastStatusText || `Watch "${record.label}" fired.`;
-  const userPrompt = (cfg.prompt && String(cfg.prompt).trim())
-    || `The watch you set ("${record.label}") just fired: ${fireText}. Act on this now.`;
+    const sessionKey = `${userId}_${resolved.id}`;
+    const scopedAgent = { ...resolved, id: sessionKey };
 
-  appendToSession(sessionKey, {
+    if (!(await finalPreferenceAuthorization())) return false;
+
+    const fireText = record.lastStatusText || `Watch "${record.label}" fired.`;
+    const userPrompt = (cfg.prompt && String(cfg.prompt).trim())
+      || `The watch you set ("${record.label}") just fired: ${fireText}. Act on this now.`;
+
+    appendToSession(sessionKey, {
     role: 'system',
     content: `[Watcher fired] ${record.label} — ${fireText}`,
     watcherId: record.id,
     ts: Date.now(),
-  });
+    });
 
-  const watcherNote =
+    const watcherNote =
     `[WATCHER FIRED] You are reacting to a condition-triggered monitor that just fired. ` +
     `The user is NOT present. The watch label is "${record.label}" and its result is: ${fireText}. ` +
     `Use any ask_agent / tools needed and complete the action directly — do NOT show a draft, ask "are you sure?", or wait for confirmation. ` +
     `Report what you did in your final message.`;
 
-  log.info('watchers', 'on_fire agent run', { id: record.id, agentId: sessionKey });
+    log.info('watchers', 'on_fire agent run', { id: record.id, agentId: sessionKey });
 
   // Retry on stream errors, fetch throws, and LoopGuard stalls — all surfaced
   // through the shared helper. Single attempt by default keeps the previous
   // single-shot behavior; bump if a watcher class proves to need more.
-  const { succeeded, lastError } = await runAgentWithRetry({
+    const { succeeded, lastError } = await runAgentWithRetry({
     scopedAgent, userText: userPrompt, systemNote: watcherNote, userId, streamChat,
     maxAttempts: 1,
     context: 'watchers',
-  });
+    });
 
-  if (!succeeded) {
+    if (!succeeded) {
     log.warn('watchers', 'on_fire run failed', { id: record.id, err: lastError });
     // Append a visible message to the session so the user sees something under
     // the [Watcher fired] header instead of a bare trigger with no follow-up.
@@ -2038,7 +2077,7 @@ async function executeOnFire(record) {
     // chained run unless we say otherwise.
     _sendStatusFn?.(record.userId, {
       type: 'status',
-      agent: record.agentId,
+      agent: runtimeWatcherAgentRef(record),
       watcherId: record.id,
       kind: record.kind,
       label: record.label,
@@ -2046,19 +2085,22 @@ async function executeOnFire(record) {
       ts: Date.now(),
       onFireFailed: true,
     });
-  }
+    }
 
   // Tell the user's connected client to reload the agent session so the
   // streamed turns become visible. Without this, the UI keeps showing the
   // pre-fire state and the user sees the trigger bubble but not the agent
   // response — same shape as scheduled tasks broadcasting task_complete.
   // Fires on both success and failure so the failure message above renders.
-  _sendStatusFn?.(record.userId, {
+    _sendStatusFn?.(record.userId, {
     type: 'task_complete',
     taskId: `watcher_${record.id}`,
     agent: resolved.id,
-  });
-  return succeeded === true;
+    });
+    return succeeded === true;
+  } finally {
+    topologyLease.release();
+  }
 }
 
 // Bulk-cancel watchers matching a predicate. Returns the count cancelled.
@@ -2121,7 +2163,7 @@ export function handlerHelpers(record) {
   async function getBrowser() {
     if (_browserCache) return _browserCache;
     const { buildBrowserHelpers } = await import('../lib/browser-helper.mjs');
-    _browserCache = buildBrowserHelpers({ userId: record.userId, agentId: record.agentId });
+    _browserCache = buildBrowserHelpers({ userId: record.userId, agentId: runtimeWatcherAgentRef(record) });
     return _browserCache;
   }
   const browser = {
@@ -2177,7 +2219,7 @@ export function handlerHelpers(record) {
     : credentialHelpers;
   return {
     userId: record.userId,
-    agentId: record.agentId,
+    agentId: runtimeWatcherAgentRef(record),
     watcherId: record.id,
     // Per-skill encrypted secret store — same accessor as ctx.credentials, so a
     // skill's watcher handler reads the same config its tools stored.
@@ -2191,9 +2233,9 @@ export function handlerHelpers(record) {
     ...runtimeHelpers,
     browser,
     showImage: async (img) => isManagedPreferenceWatcher(record)
-      ? false : _showImageFn?.(record.userId, { ...img, agent: record.agentId }),
+      ? false : _showImageFn?.(record.userId, { ...img, agent: runtimeWatcherAgentRef(record) }),
     showVideo: async (vid) => isManagedPreferenceWatcher(record)
-      ? false : _showVideoFn?.(record.userId, { ...vid, agent: record.agentId }),
+      ? false : _showVideoFn?.(record.userId, { ...vid, agent: runtimeWatcherAgentRef(record) }),
     postStatus: async (text) => {
       if (isManagedPreferenceWatcher(record)) {
         const delivered = await deliverManagedPreferenceUpdate(record, text);
@@ -2203,7 +2245,7 @@ export function handlerHelpers(record) {
       record.lastStatusText = text;
       pushHistory(record, { text, ts: Date.now() });
       _sendStatusFn?.(record.userId, {
-        type: 'status', agent: record.agentId, watcherId: record.id,
+        type: 'status', agent: runtimeWatcherAgentRef(record), watcherId: record.id,
         kind: record.kind, label: record.label, text, ts: Date.now(),
       });
     },
@@ -2220,7 +2262,7 @@ export function handlerHelpers(record) {
       const fromName = opts.from || record.label || record.kind;
       _sendNotificationFn?.(record.userId, {
         type: 'agent_notification',
-        agent: record.agentId,
+        agent: runtimeWatcherAgentRef(record),
         content,
         from: { userName: fromName },
         event: opts.event || record.kind,

@@ -16,6 +16,7 @@ import { learnToolPlanFromToolEvents, matchToolPlan } from './lib/tool-plan-memo
 import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-child-barrier.mjs';
 import { appendTaskOutcome, loadTaskOutcomes } from './lib/task-outcomes.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
+import { getOrchestrationPolicy } from './lib/orchestration-policy.mjs';
 
 let _broadcast = null;
 export function setBackgroundBroadcastFn(fn) { _broadcast = fn; }
@@ -141,7 +142,10 @@ export async function bootRecoverInterruptedTasks() {
     //    owning chat's LLM reads the interruption as conversation fact on its
     //    next turn. This is what kills the "already in progress" fabrication:
     //    the session that holds the old promise now also holds the cancellation.
-    const reportAgentId = e.visibleAgentId || e.coordinatorAgentId;
+    const reportAgentId = await _resolveRuntimeSessionKey(
+      e.userId,
+      e.visibleAgentId || e.coordinatorAgentId,
+    );
     const content = `[${name}'s background task was interrupted — re: "${e.summary}"]\nThe server restarted while ${name} was working on this. The task was cancelled and did NOT finish. If it is still wanted, it must be started again.`;
     const displayContent = `The server restarted while ${name} was working on this. The task was cancelled and did not finish. If it is still wanted, it must be started again.`;
     const reportId = e.spanId || taskId;
@@ -710,6 +714,12 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   // one AbortController covering the whole chain. `handoff.agent` is the real
   // (unscoped) second-stage agent record, resolved by the delegate skill.
   const handoff = (opts?.handoff && opts.handoff.agent) ? opts.handoff : null;
+  // Stage 2 has not received its ephemeral session id yet, but its durable
+  // agent already owns part of this live pipeline. Record that target up front
+  // so deletion is blocked while stage 1 is still running.
+  const plannedAgentRefs = handoff
+    ? [...new Set([_stableAgentRef(userId, handoff.agent.id)].filter(Boolean))]
+    : [];
   const pipeName = handoff ? `${agentName} → ${handoff.name || handoff.agent.name || 'Agent'}` : agentName;
   const rootTaskId = opts?.rootTaskId || taskId;
   const parentTaskId = opts?.parentTaskId || null;
@@ -729,6 +739,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     rootWatcherId,
     spanId,
     aliases: [taskId, scopedAgent.id].filter(Boolean),
+    plannedAgentRefs,
     // Mark this as a coordinator→specialist DELEGATION (distinct from a worker
     // and from a research ephemeral). This is what lets check_workers surface it
     // as user-level background work — so "is the specialist still working?" resolves no
@@ -1005,6 +1016,19 @@ function _coordinatorAgentIdFromSessionKey(sessionKey, userId) {
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
 
+async function _resolveRuntimeSessionKey(userId, sessionKey) {
+  if (!userId || !sessionKey) return sessionKey;
+  try {
+    const { resolveRuntimeAgentId } = await import('./routes/_helpers.mjs');
+    const raw = _coordinatorAgentIdFromSessionKey(sessionKey, userId);
+    const resolved = resolveRuntimeAgentId(userId, raw);
+    if (!resolved) return sessionKey;
+    return String(sessionKey).startsWith(`${userId}_`) ? `${userId}_${resolved}` : resolved;
+  } catch {
+    return sessionKey;
+  }
+}
+
 async function _runContinuation({ taskId, userId, coordinatorAgentId, targetAgentId, agentName, result, errorMsg, originalTask, scheduledCtx = null }) {
   if (errorMsg || !result) return;
   const agentId = _coordinatorAgentIdFromSessionKey(coordinatorAgentId, userId);
@@ -1209,7 +1233,10 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
   //    multiple background tasks are in flight at once.
   try {
     const { appendToSession } = await import('./sessions.mjs');
-    const reportAgentId = rec?.visibleAgentId || coordinatorAgentId;
+    const reportAgentId = await _resolveRuntimeSessionKey(
+      userId,
+      rec?.visibleAgentId || coordinatorAgentId,
+    );
     const taskSummary = rec?.summary || '';
     const taskRef = taskSummary
       ? ` — re: "${taskSummary.length > 80 ? taskSummary.slice(0, 80) + '…' : taskSummary}"`
@@ -1816,6 +1843,35 @@ export function listWorkersForOwner(userId, ownerKey) {
     });
 }
 
+/** Single-mode view: the primary manages all workers while specialists park. */
+export function listWorkersForUser(userId) {
+  const now = Date.now();
+  return [...activeTasks.entries()]
+    .filter(([, info]) => info.isWorker && info.userId === userId)
+    .map(([taskId, info]) => {
+      const lastAt = info.lastActivityAt || info.lastUpdateAt || info.startedAt;
+      return {
+        taskId,
+        rootTaskId: info.rootTaskId || taskId,
+        parentTaskId: info.parentTaskId || null,
+        parentWatcherId: info.parentWatcherId || null,
+        rootWatcherId: info.rootWatcherId || info.watcherId || null,
+        spanId: info.spanId || null,
+        watcherId: info.watcherId || null,
+        visibleAgentId: info.visibleAgentId || null,
+        ownerKey: info.ownerKey || null,
+        name: info.agentName,
+        summary: info.summary,
+        currentTool: info.currentTool || null,
+        toolsUsed: info.toolsUsed || 0,
+        elapsedSec: Math.round((now - info.startedAt) / 1000),
+        idleSec: Math.round((now - lastAt) / 1000),
+        stalled: (now - lastAt) > 120000,
+        progress: (info.progress || []).slice(-8),
+      };
+    });
+}
+
 // Reshape a durable task-outcomes.jsonl row back into the recent-ring shape
 // (taskId/name/summary/outcome/finalText/toolsUsed/startedAt/endedAt) so
 // callers (check_workers, describeBackgroundWorkForSession) can treat a
@@ -1861,6 +1917,18 @@ export function listRecentWorkersForOwner(userId, ownerKey) {
   let durable = [];
   try {
     durable = loadTaskOutcomes(userId, { kind: 'worker' }).filter(r => (r.ownerKey || null) === ownerKey);
+  } catch (e) { console.warn('[background-tasks] durable worker outcomes read failed:', e.message); }
+  return _mergeRecentWithDurable(ring, durable, userId, RECENT_READ_CAP)
+    .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
+}
+
+/** Recently-finished workers across every parked/active agent for single mode. */
+export function listRecentWorkersForUser(userId) {
+  const now = Date.now();
+  const ring = recentWorkers.filter(r => r.userId === userId);
+  let durable = [];
+  try {
+    durable = loadTaskOutcomes(userId, { kind: 'worker' });
   } catch (e) { console.warn('[background-tasks] durable worker outcomes read failed:', e.message); }
   return _mergeRecentWithDurable(ring, durable, userId, RECENT_READ_CAP)
     .map(r => ({ ...r, endedAgoSec: Math.round((now - r.endedAt) / 1000) }));
@@ -1936,17 +2004,23 @@ export function describeBackgroundWorkForSession(userId, sessionAgentId = null) 
     || raw.match(/^ephemeral_deleg_\d+_[a-z0-9]+_(.+)$/)
     || raw.match(/^user_[a-z0-9]+_(.+)$/);
   const ownerKey = m ? m[1] : (raw || null);
+  const singleMode = getOrchestrationPolicy(userId).mode === 'single';
   const ago = s => s < 90 ? `${s}s` : `${Math.round(s / 60)}m`;
   const lines = [];
   for (const d of listActiveDelegationsForUser(userId, sessionAgentId)) {
     lines.push(`RUNNING: ${d.name} — "${d.summary}" (${d.toolsUsed} tool calls, started ${ago(d.elapsedSec)} ago${d.stalled ? ', STALLED' : ''})`);
   }
-  for (const w of (ownerKey ? listWorkersForOwner(userId, ownerKey) : [])) {
+  const activeWorkers = singleMode
+    ? listWorkersForUser(userId)
+    : (ownerKey ? listWorkersForOwner(userId, ownerKey) : []);
+  for (const w of activeWorkers) {
     lines.push(`RUNNING worker: ${w.name} — "${w.summary}" (${w.toolsUsed} tool calls, started ${ago(w.elapsedSec)} ago${w.stalled ? ', STALLED' : ''})`);
   }
   const recent = [
     ...listRecentDelegationsForUser(userId, sessionAgentId),
-    ...(ownerKey ? listRecentWorkersForOwner(userId, ownerKey) : []),
+    ...(singleMode
+      ? listRecentWorkersForUser(userId)
+      : (ownerKey ? listRecentWorkersForOwner(userId, ownerKey) : [])),
   ].sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0)).slice(0, 5);
   for (const r of recent) {
     const verb = r.outcome === 'done' ? 'FINISHED' : (r.outcome === 'stopped' ? 'STOPPED' : 'FAILED');
@@ -1954,6 +2028,47 @@ export function describeBackgroundWorkForSession(userId, sessionAgentId = null) 
   }
   if (!lines.length) return 'NONE — no delegations or background workers are running for this user, and none finished recently.';
   return lines.join(' | ');
+}
+
+function _stableAgentRef(userId, value) {
+  let raw = String(value || '');
+  const scopedPrefix = `${userId}_`;
+  if (raw.startsWith(scopedPrefix)) raw = raw.slice(scopedPrefix.length);
+  const ephemeral = raw.match(/^ephemeral_worker_[^_]+_[^_]+_(.+)$/)
+    || raw.match(/^ephemeral_deleg_d\d+_\d+_[a-z0-9]+_(.+)$/)
+    || raw.match(/^ephemeral_deleg_\d+_[a-z0-9]+_(.+)$/);
+  return ephemeral?.[1] || raw;
+}
+
+/**
+ * Active autonomous work whose durable owner/session points at an agent.
+ * Agent deletion uses this under the account topology writer: deleting the
+ * record while a worker/delegation is still reporting back would otherwise
+ * orphan its session and make completion routing nondeterministic.
+ */
+export function listActiveBackgroundWorkForAgent(userId, agentId) {
+  const target = _stableAgentRef(userId, agentId);
+  if (!userId || !target) return [];
+  const out = [];
+  for (const [taskId, info] of activeTasks) {
+    if (info?.userId !== userId) continue;
+    const refs = [
+      info.ownerKey,
+      info.coordinatorAgentId,
+      info.visibleAgentId,
+      ...(Array.isArray(info.aliases) ? info.aliases : []),
+      ...(Array.isArray(info.plannedAgentRefs) ? info.plannedAgentRefs : []),
+    ];
+    if (!info.isWorker && !info.isDelegation) refs.push(info.agentId);
+    if (!refs.some(ref => _stableAgentRef(userId, ref) === target)) continue;
+    out.push({
+      taskId,
+      name: info.agentName || 'Background task',
+      summary: info.summary || '',
+      kind: info.isWorker ? 'worker' : (info.isDelegation ? 'delegation' : 'task'),
+    });
+  }
+  return out;
 }
 
 /**

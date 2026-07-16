@@ -39,6 +39,7 @@ import { initNodeWss, initTerminalWss } from './routes/nodes.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
   getSessionUserId, getAuthToken, resolveShareGroup, loadConfig,
+  resolveRuntimeAgentId,
 } from './routes/_helpers.mjs';
 import { getVoiceRef } from './lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from './lib/voice-tts-stream.mjs';
@@ -2154,9 +2155,16 @@ function onConnection(ws, req) {
           return;
         }
       }
-      const routedAgentId = slotAssignment
+      const requestedVoiceAgentId = slotAssignment
         ? (slotAssignment.agentId || getUserCoordinatorAgentId(effectiveUserId))
         : (msg.agent || devicePrefs?.default_agent_id || getUserCoordinatorAgentId(effectiveUserId));
+      // Voice preferences and wake-slot assignments remain stored unchanged so
+      // switching back to ensemble restores their original targets. Resolve
+      // the active turn through the current projection for abort keys, output
+      // events, and session bookkeeping as well as for chat dispatch itself.
+      const routedAgentId = resolveRuntimeAgentId(effectiveUserId, requestedVoiceAgentId, {
+        fallbackUnknown: true,
+      }) || getUserCoordinatorAgentId(effectiveUserId);
       const voiceTurn = makeVoiceTurn({ ws, effectiveUserId, agentId: routedAgentId, wakeSlot, turnId: deviceTurnId });
       if (voiceTurn) {
         messageVoiceTurn = voiceTurn;

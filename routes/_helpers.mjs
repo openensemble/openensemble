@@ -540,7 +540,8 @@ export {
 
 export {
   getDefaultChildSafetyPrompt, getUserEnabledSkills,
-  getAgentsForUser, getAgentForUser, saveUserAgentOverride,
+  getAgentsForUser, getAgentForUser, resolveRuntimeAgentForUser,
+  resolveRuntimeAgentId, saveUserAgentOverride,
 } from './_helpers/agent-resolver.mjs';
 
 // Re-export agent/role functions used by routes

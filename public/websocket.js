@@ -1193,6 +1193,27 @@ function handleServerMessage(msg) {
       if (document.getElementById('agentModelRows') && typeof renderAgentModelRows === 'function') {
         renderAgentModelRows();
       }
+      const refreshPendingPolicy = _currentUser?.orchestration?.pendingPrimary === true
+        && typeof loadOrchestrationSettings === 'function';
+      if (refreshPendingPolicy) {
+        loadOrchestrationSettings().then(() => {
+          if (typeof checkEmptyState === 'function') checkEmptyState();
+        });
+      }
+      // Mode changes can originate in chat or another browser. Keep an open
+      // Settings surface synchronized with the roster broadcast instead of
+      // leaving its mode/primary controls stale until the drawer is reopened.
+      if (document.getElementById('drawerSettings')?.classList.contains('open')) {
+        if (document.getElementById('stab-panel-agents')?.classList.contains('active')
+            && typeof loadOrchestrationSettings === 'function'
+            && !refreshPendingPolicy) {
+          loadOrchestrationSettings();
+        }
+        if (document.getElementById('stab-panel-users')?.classList.contains('active')
+            && typeof loadUserManagement === 'function') {
+          loadUserManagement();
+        }
+      }
       updateSessionWarning();
       break;
     case 'task_complete':

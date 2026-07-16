@@ -12,7 +12,12 @@ import { SKILLS_DIR, USERS_DIR } from './lib/paths.mjs';
 
 const { saveUser } = await import('./routes/_helpers.mjs');
 const { createCustomAgent } = await import('./agents.mjs');
-const { loadRoleManifests, executeToolStreaming, getRoleManifest } = await import('./roles.mjs');
+const {
+  loadRoleManifests,
+  executeToolStreaming,
+  getRoleManifest,
+  listAllRoles,
+} = await import('./roles.mjs');
 const { getAgentsForUser } = await import('./routes/_helpers/agent-resolver.mjs');
 const { setOrchestrationPolicy } = await import('./lib/orchestration-policy.mjs');
 const { getDefaultChildSafetyPrompt } = await import('./routes/_helpers/agent-resolver.mjs');
@@ -28,7 +33,11 @@ const ALLOWED = ['web', 'deep_research', 'fixture_allowed'];
 // enabled_by_default and gets backfilled into `skills`, which is exactly the
 // widening path the projection's allowedSkills intersection closes).
 const FORBIDDEN_SKILLS = ['email', 'gcal', 'expenses', 'coder', 'fixture_blocked'];
-let coordId, helperId;
+const CHILD_MISSING_ALLOWLIST = 'user_child_orch_missing_allowlist';
+const CHILD_MALFORMED_ALLOWLIST = 'user_child_orch_malformed_allowlist';
+let coordId, helperId, missingAllowlistAgentId, malformedAllowlistAgentId;
+let ownerByTool = new Map();
+let allManifestIds = [];
 
 const toolNames = a => (a.tools ?? []).map(t => t.function?.name).filter(Boolean);
 const ownerOf = (name) => {
@@ -37,6 +46,24 @@ const ownerOf = (name) => {
   }
   return null;
 };
+
+function effectiveToolOwner(name) {
+  if (name?.startsWith('mcp_') && name.includes('__')) return 'mcp';
+  return ownerByTool.get(name) ?? null;
+}
+
+function expectOnlyAllowedSchemas(roster, allowedSkillIds) {
+  const allowed = new Set(allowedSkillIds);
+  for (const agent of roster) {
+    for (const tool of (agent.tools ?? [])) {
+      const name = tool?.function?.name ?? tool?.name ?? null;
+      expect(name, `unnamed tool schema on ${agent.name}`).toBeTruthy();
+      const owner = effectiveToolOwner(name);
+      expect(owner, `unowned tool schema ${name} on ${agent.name}`).toBeTruthy();
+      expect(allowed.has(owner), `${owner}.${name} surfaced on ${agent.name}`).toBe(true);
+    }
+  }
+}
 
 async function collect(gen) {
   const out = [];
@@ -53,6 +80,34 @@ function writeFixtureSkill(id, toolName) {
   }));
   fs.writeFileSync(path.join(dir, 'execute.mjs'),
     "export default async function execute(name) { return 'fixture ok: ' + name; }\n");
+}
+
+function seedFailClosedChild(userId, allowedSkills, includeAllowedSkills) {
+  const baseProfile = {
+    id: userId,
+    name: userId,
+    role: 'child',
+    // Maximal hostile storage shape: every installed skill is marked enabled
+    // and assigned. A missing/malformed account allowlist must still reduce the
+    // runtime schema surface to zero.
+    skills: [...allManifestIds],
+    skillAssignments: {},
+    ...(includeAllowedSkills ? { allowedSkills } : {}),
+  };
+  fs.mkdirSync(path.join(USERS_DIR, userId), { recursive: true });
+  saveUser(baseProfile);
+  const agentId = createCustomAgent({
+    name: `${userId} Agent`, emoji: 'F', description: 'fail-closed child safety test',
+    provider: 'openai', model: 'gpt-4', toolSet: 'web',
+    systemPrompt: 'Fail-closed child agent.', ownerId: userId,
+  }).id;
+  const everySkillAssigned = Object.fromEntries(allManifestIds.map(id => [id, agentId]));
+  saveUser({
+    ...baseProfile,
+    skillAssignments: { ...everySkillAssigned, coordinator: agentId },
+    orchestration: { mode: 'ensemble' },
+  });
+  return agentId;
 }
 
 beforeAll(() => {
@@ -75,6 +130,17 @@ beforeAll(() => {
   writeFixtureSkill('fixture_allowed', 'fixture_allowed_tool');
   loadRoleManifests();
 
+  allManifestIds = listAllRoles().map(manifest => manifest.id).filter(Boolean);
+  ownerByTool = new Map();
+  // Match runtime first-writer-wins ownership: global manifests are loaded in
+  // registry order, and a duplicate tool name resolves through the first one.
+  for (const manifest of listAllRoles()) {
+    for (const tool of (manifest.tools ?? [])) {
+      const name = tool?.function?.name ?? tool?.name;
+      if (name && !ownerByTool.has(name)) ownerByTool.set(name, manifest.id);
+    }
+  }
+
   fs.mkdirSync(path.join(USERS_DIR, CHILD), { recursive: true });
   saveUser({ id: CHILD, name: 'Kid', role: 'child', skills: ['web', 'fixture_allowed'], allowedSkills: ALLOWED, skillAssignments: {} });
   coordId = createCustomAgent({
@@ -88,6 +154,13 @@ beforeAll(() => {
     systemPrompt: 'Kid helper.', ownerId: CHILD,
   }).id;
   saveUser({ id: CHILD, name: 'Kid', role: 'child', skills: ['web', 'fixture_allowed'], allowedSkills: ALLOWED, skillAssignments: { coordinator: coordId } });
+
+  missingAllowlistAgentId = seedFailClosedChild(
+    CHILD_MISSING_ALLOWLIST, undefined, false,
+  );
+  malformedAllowlistAgentId = seedFailClosedChild(
+    CHILD_MALFORMED_ALLOWLIST, { accidentally: 'an object' }, true,
+  );
 });
 
 // Sanity: the forbidden probe tool must exist and belong to a skill outside
@@ -101,6 +174,7 @@ describe('gate 1 — tool surface at resolution', () => {
   it('ensemble: no roster agent carries tools from non-enabled service skills', () => {
     const roster = getAgentsForUser(CHILD);
     expect(roster.length).toBeGreaterThan(1);
+    expectOnlyAllowedSchemas(roster, ALLOWED);
     for (const a of roster) {
       for (const n of toolNames(a)) expect(ownerOf(n), `${n} on ${a.name}`).toBeNull();
     }
@@ -110,6 +184,7 @@ describe('gate 1 — tool surface at resolution', () => {
     await setOrchestrationPolicy(CHILD, { mode: 'single', primaryAgentId: coordId });
     const roster = getAgentsForUser(CHILD);
     expect(roster.map(a => a.id)).toEqual([coordId]);
+    expectOnlyAllowedSchemas(roster, ALLOWED);
     for (const n of toolNames(roster[0])) expect(ownerOf(n), `${n} on primary`).toBeNull();
   });
 
@@ -119,6 +194,7 @@ describe('gate 1 — tool surface at resolution', () => {
     // allowedSkills intersection must keep its schemas off the primary.
     await setOrchestrationPolicy(CHILD, { mode: 'single', primaryAgentId: coordId });
     const single = getAgentsForUser(CHILD)[0];
+    expectOnlyAllowedSchemas([single], ALLOWED);
     for (const n of toolNames(single)) {
       expect(ownerOf(n), `single mode surfaced forbidden tool ${n}`).toBeNull();
     }
@@ -128,6 +204,37 @@ describe('gate 1 — tool surface at resolution', () => {
     const kidSkills = JSON.parse(fs.readFileSync(path.join(USERS_DIR, CHILD, 'profile.json'), 'utf8')).skills;
     expect(kidSkills).toContain('coder');            // backfill actually happened
     expect(toolNames(single)).toContain('fixture_allowed_tool');
+  });
+});
+
+describe('missing or malformed child allowlists fail closed', () => {
+  async function expectFailClosedInBothModes(userId, agentId) {
+    for (const policy of [
+      { mode: 'ensemble' },
+      { mode: 'single', primaryAgentId: agentId },
+    ]) {
+      await setOrchestrationPolicy(userId, policy);
+      const roster = getAgentsForUser(userId);
+      expect(roster.length, `${userId}:${policy.mode} should retain a chat agent`).toBeGreaterThan(0);
+      expectOnlyAllowedSchemas(roster, []);
+      for (const agent of roster) {
+        expect(toolNames(agent), `${userId}:${policy.mode}:${agent.id}`).toEqual([]);
+      }
+
+      const events = await collect(
+        executeToolStreaming('fixture_allowed_tool', {}, userId, agentId, null),
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].text).toContain('not permitted for this account');
+    }
+  }
+
+  it('treats an absent allowedSkills field as granting no schemas or execution', async () => {
+    await expectFailClosedInBothModes(CHILD_MISSING_ALLOWLIST, missingAllowlistAgentId);
+  });
+
+  it('treats a non-array allowedSkills field as granting no schemas or execution', async () => {
+    await expectFailClosedInBothModes(CHILD_MALFORMED_ALLOWLIST, malformedAllowlistAgentId);
   });
 });
 

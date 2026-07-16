@@ -14,8 +14,17 @@ import {
   BASE_DIR,
 } from './_helpers.mjs';
 import { createCustomAgent, deleteCustomAgent, updateCustomAgent } from '../agents.mjs';
-import { onRoleEnabled, getRoleAssignments, setRoleAssignment, getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools } from '../roles.mjs';
+import {
+  onRoleEnabled, getRoleAssignments, setRoleAssignment, clearRoleAssignmentsForAgent,
+  getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools,
+} from '../roles.mjs';
 import { normalizeReasoningEffort, reasoningEffortOptions } from '../lib/reasoning-effort.mjs';
+import {
+  tryAcquireUserTopologyTransition,
+  runWithUserTopologyLease,
+  finishUserTopologyTransition,
+  rollbackUserTopologyTransition,
+} from '../chat-dispatch/slot-registry.mjs';
 
 function setRoleAssignmentForUser(roleId, agentId, userId) {
   return setRoleAssignment(roleId, agentId || null, userId);
@@ -155,6 +164,7 @@ export async function handle(req, res) {
   // Create custom agent
   if (req.url === '/api/agents' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    let topologyTransition = null;
     try {
       // Per-user agent cap — guard against runaway creation from a compromised
       // or misbehaving account.
@@ -189,20 +199,55 @@ export async function handle(req, res) {
         systemPrompt = undefined;
         personality = undefined;
       }
-      const agent = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, personality, maxTokens, contextSize, ownerId: authId });
-      // reasoningEffort is account-specific: persist the creator's choice as a
-      // per-user override rather than on the shared agent record.
-      if (reasoningEffort !== 'auto') {
-        await saveUserAgentOverride(authId, agent.id, { reasoningEffort });
+      topologyTransition = tryAcquireUserTopologyTransition(authId);
+      if (!topologyTransition) {
+        res.writeHead(409);
+        res.end(JSON.stringify({ error: 'Another reply or account setup change is active. Try again when it finishes.' }));
+        return true;
       }
-      if (skillCategory) {
-        const { setRoleAssignment } = await import('../roles.mjs');
-        setRoleAssignment(skillCategory, agent.id, authId);
-      }
+      const agent = await runWithUserTopologyLease(topologyTransition.lease, async () => {
+        const { getRequestedOrchestrationPolicy, completePendingPrimary } = await import('../lib/orchestration-policy.mjs');
+        const needsPrimaryCompletion = getRequestedOrchestrationPolicy(authId).pendingPrimary === true;
+        const created = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, personality, maxTokens, contextSize, ownerId: authId });
+        // reasoningEffort is account-specific: persist the creator's choice as a
+        // per-user override rather than on the shared agent record.
+        if (reasoningEffort !== 'auto') {
+          await saveUserAgentOverride(authId, created.id, { reasoningEffort });
+        }
+        if (skillCategory) setRoleAssignment(skillCategory, created.id, authId);
+        // New accounts request single mode before an agent exists. Primary
+        // selection is part of this create transaction: returning success with
+        // a still-pending policy lets a retry create a second agent and strands
+        // onboarding permanently.
+        if (needsPrimaryCompletion) {
+          try {
+            if (!(await completePendingPrimary(authId, created.id))) {
+              throw new Error('pending primary was not completed');
+            }
+          } catch (e) {
+            try { await deleteCustomAgent(created.id); } catch {}
+            try { clearRoleAssignmentsForAgent(created.id, authId); } catch {}
+            try {
+              await modifyUser(authId, user => {
+                if (user.agentOverrides) delete user.agentOverrides[created.id];
+              });
+            } catch {}
+            throw new Error(`Could not finish single-agent onboarding: ${e.message}`);
+          }
+        }
+        return created;
+      });
+      finishUserTopologyTransition(topologyTransition);
+      topologyTransition = null;
       broadcastAgentList();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(agentToWire({ ...agent, reasoningEffort })));
-    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    } catch (e) {
+      res.writeHead(e?.code === 'ORCHESTRATION_BUSY' ? 409 : 400);
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      if (topologyTransition) rollbackUserTopologyTransition(topologyTransition);
+    }
     return true;
   }
 
@@ -307,26 +352,129 @@ export async function handle(req, res) {
     const ca = loadCustomAgents().find(a => a.id === agentMatch[1]);
     if (!ca) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found or not a custom agent' })); return true; }
     if (ca.ownerId && ca.ownerId !== authId) { res.writeHead(403); res.end(JSON.stringify({ error: 'Not your agent' })); return true; }
-    await deleteCustomAgent(agentMatch[1]);
-    // Cascade-delete the owner's agent aliases. routes/* deletions don't go
-    // through tool dispatch, so the framework's manifest cascade_on_tools
-    // doesn't fire — call the public helper directly.
+    const ownerId = ca.ownerId || authId;
+    const topologyTransition = tryAcquireUserTopologyTransition(ownerId);
+    if (!topologyTransition) {
+      res.writeHead(409);
+      res.end(JSON.stringify({ error: 'This agent is handling active work. Wait for it to finish before deleting it.' }));
+      return true;
+    }
+    let deletionCommitted = false;
+    let topologyReleased = false;
+    const cleanupWarnings = [];
+    const warnCleanup = (label, error) => {
+      const message = error?.message || String(error);
+      cleanupWarnings.push(`${label}: ${message}`);
+      console.warn(`[agents] ${label} after deleting "${agentMatch[1]}" failed:`, message);
+    };
+    const sendDeleteSuccess = () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        ...(cleanupWarnings.length ? { warnings: cleanupWarnings } : {}),
+      }));
+    };
     try {
-      const { deleteAliasesByEntityId } = await import('../lib/skill-alias-framework.mjs');
-      const removed = deleteAliasesByEntityId(ca.ownerId || authId, 'agent', agentMatch[1]);
-      if (removed > 0) console.log(`[agents] dropped ${removed} agent alias(es) for "${agentMatch[1]}"`);
-    } catch (e) { console.warn('[agents] alias cascade-delete failed:', e.message); }
-    // If this agent was the owner's single-mode primary, revert that account
-    // to ensemble explicitly — a dangling primaryAgentId would otherwise be
-    // silently degraded at read time.
-    try {
-      const { handleAgentDeleted } = await import('../lib/orchestration-policy.mjs');
-      if (await handleAgentDeleted(ca.ownerId || authId, agentMatch[1])) {
-        console.log(`[agents] single-mode primary ${agentMatch[1]} deleted — reverted ${ca.ownerId || authId} to ensemble`);
+      await runWithUserTopologyLease(topologyTransition.lease, async () => {
+        const { getOrchestrationPolicy, handleAgentDeleted } = await import('../lib/orchestration-policy.mjs');
+        const policy = getOrchestrationPolicy(ownerId);
+        // A child's orchestration policy is parent-managed. Letting the child
+        // delete its primary would indirectly change that policy.
+        if (getUser(authId)?.role === 'child' && policy.primaryAgentId === agentMatch[1]) {
+          const error = new Error('Your active agent is managed by your parent or administrator');
+          error.code = 'ORCHESTRATION_MANAGED';
+          throw error;
+        }
+
+        const { listActiveBackgroundWorkForAgent } = await import('../background-tasks.mjs');
+        const active = listActiveBackgroundWorkForAgent(ownerId, agentMatch[1]);
+        if (active.length) {
+          const error = new Error(`Stop ${active.length} active background task${active.length === 1 ? '' : 's'} owned by this agent before deleting it.`);
+          error.code = 'AGENT_BUSY';
+          throw error;
+        }
+
+        // Durable agent removal is the transaction's commit point. Every
+        // destructive precheck above runs first, while topology cleanup below
+        // is compensating repair. In particular, do not cancel watchers or
+        // rewrite orchestration before this succeeds: an agents.json write
+        // failure must leave the account exactly as it was.
+        await deleteCustomAgent(agentMatch[1]);
+        if (loadCustomAgents().some(agent => agent.id === agentMatch[1] && (agent.ownerId || authId) === ownerId)) {
+          throw new Error('Agent record still exists after deletion');
+        }
+        deletionCommitted = true;
+
+        // Repair a primary policy first. If the normal service fails, make one
+        // direct best-effort repair while the writer is still held. Read-time
+        // policy normalization is fail-safe even if both writes fail, and the
+        // startup stamp will retry the durable repair.
+        try {
+          if (await handleAgentDeleted(ownerId, agentMatch[1])) {
+            console.log(`[agents] single-mode primary ${agentMatch[1]} deleted — reverted ${ownerId} to ensemble`);
+          }
+        } catch (policyError) {
+          try {
+            await modifyUser(ownerId, user => {
+              if (user?.orchestration?.primaryAgentId === agentMatch[1]) {
+                user.orchestration = { mode: 'ensemble' };
+              }
+            });
+            console.warn(`[agents] orchestration service cleanup failed for "${agentMatch[1]}"; direct repair succeeded:`, policyError?.message || policyError);
+          } catch (fallbackError) {
+            warnCleanup('orchestration cleanup', fallbackError);
+          }
+        }
+
+        try {
+          const removedAssignments = clearRoleAssignmentsForAgent(agentMatch[1], ownerId);
+          if (removedAssignments > 0) console.log(`[agents] cleared ${removedAssignments} assignment(s) for deleted agent "${agentMatch[1]}"`);
+        } catch (e) {
+          warnCleanup('role-assignment cleanup', e);
+        }
+
+        // Persisted watchers are part of the deleted agent's topology. Cancel
+        // them after the commit while the writer still prevents a new tick
+        // from starting against the old id.
+        try {
+          const { unregisterMatchingWatchers } = await import('../scheduler/watchers.mjs');
+          const scopedId = `${ownerId}_${agentMatch[1]}`;
+          unregisterMatchingWatchers(ownerId,
+            watcher => watcher?.agentId === agentMatch[1] || watcher?.agentId === scopedId,
+            'agent_deleted');
+        } catch (e) {
+          warnCleanup('watcher cleanup', e);
+        }
+
+        // Cascade-delete the owner's aliases. HTTP deletions do not pass
+        // through tool dispatch, so manifest cascade_on_tools cannot fire.
+        try {
+          const { deleteAliasesByEntityId } = await import('../lib/skill-alias-framework.mjs');
+          const removed = deleteAliasesByEntityId(ownerId, 'agent', agentMatch[1]);
+          if (removed > 0) console.log(`[agents] dropped ${removed} agent alias(es) for "${agentMatch[1]}"`);
+        } catch (e) { warnCleanup('alias cleanup', e); }
+      });
+      finishUserTopologyTransition(topologyTransition);
+      topologyReleased = true;
+      try { broadcastAgentList(); } catch (e) { warnCleanup('roster broadcast', e); }
+      sendDeleteSuccess();
+    } catch (e) {
+      if (!topologyReleased) rollbackUserTopologyTransition(topologyTransition);
+      // No post-commit exception should turn a successful durable deletion
+      // into a 500 that tells the caller the agent still exists. Keep this
+      // guard for failures outside the individually protected cascades.
+      if (deletionCommitted) {
+        warnCleanup('post-delete cleanup', e);
+        try { broadcastAgentList(); } catch (broadcastError) { warnCleanup('roster broadcast', broadcastError); }
+        sendDeleteSuccess();
+        return true;
       }
-    } catch (e) { console.warn('[agents] orchestration cascade failed:', e.message); }
-    broadcastAgentList();
-    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
+      const status = e?.code === 'ORCHESTRATION_MANAGED' ? 403
+        : (e?.code === 'AGENT_BUSY' || e?.code === 'ORCHESTRATION_BUSY' ? 409 : 500);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+      return true;
+    }
     return true;
   }
 

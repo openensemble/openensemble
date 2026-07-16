@@ -217,7 +217,9 @@ export async function runSpecialistRoute({
     if (trimEnabled && route.skillId) {
       // Override-driven routes don't carry a specialist skill — keep the
       // forced agent's full tool surface so it can answer the actual query.
-      const skillTools = getRoleTools(route.skillId, userId);
+      const authorizedTargetNames = new Set((target.tools ?? []).map(tool => tool?.function?.name).filter(Boolean));
+      const skillTools = getRoleTools(route.skillId, userId)
+        .filter(tool => authorizedTargetNames.has(tool?.function?.name));
       if (skillTools.length) {
         scopedSpec.tools = skillTools;
         usedToolCount = skillTools.length;

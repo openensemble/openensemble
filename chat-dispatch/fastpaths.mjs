@@ -61,6 +61,12 @@ const HA_VERB_RE      = /^(turn\s+on|turn\s+off|toggle|activate|run|lock|unlock|
 const HA_SET_PCT_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:%|percent)\s*$/i;
 const HA_SET_DEG_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:degrees?|deg)\s*$/i;
 
+function hasHaIntentSyntax(text) {
+  if (typeof text !== 'string') return false;
+  const trimmed = text.trim().replace(/[.,!?]+$/, '');
+  return HA_VERB_RE.test(trimmed) || HA_SET_PCT_RE.test(trimmed) || HA_SET_DEG_RE.test(trimmed);
+}
+
 // The HA skill + its service-call tool. Used to mirror the exact gates
 // executeRoleTool (roles.mjs) enforces for ha_call_service, so this pre-LLM
 // fast-path can't bypass the child-account / disabled-skill / hidden-tool
@@ -70,36 +76,29 @@ const HA_SKILL_ID     = 'role_home_assistant';
 const HA_SERVICE_TOOL = 'ha_call_service';
 
 /**
- * True when this user is barred from the HA service-call tool by the same
- * overrides executeRoleTool applies (child-account, disabled-skill, hidden-
- * tool). Reuses the skill-overrides helpers roles.mjs itself uses, so the
- * "what counts as disabled/hidden" logic stays single-sourced. On a hit the
- * caller falls through to the LLM, whose coordinator re-gates identically (a
- * gated user's coordinator simply lacks the tool) — the service call is never
- * made from the fast-path.
+ * Authorize a pre-LLM shortcut through the same runtime skill boundary as a
+ * normal tool call. Fast-paths otherwise bypass roles.mjs entirely, so this
+ * check must happen before importing a skill executor, consulting a skill's
+ * caches, resolving user data, or performing an external action. Permission
+ * lookup failures are fail-closed; the ordinary LLM path can still explain an
+ * unavailable capability using its already-filtered tool surface.
  *
  * @param {string} userId
- * @param {{ role?: string, allowedSkills?: string[] } | null | undefined} chatUser  profile threaded from chat-dispatch (undefined only if a caller omitted it)
- * @returns {Promise<boolean>}
+ * @param {string} skillId
+ * @param {string} toolName
+ * @returns {Promise<boolean>} true only when the shortcut may execute
  */
-async function haFastpathGated(userId, chatUser) {
-  if (!userId) return false;
-  const { isSkillDisabled, getHiddenTools } = await import('../lib/skill-overrides.mjs');
-  // Service roles are never always_on, so the always_on safety-net arg is false.
-  if (isSkillDisabled(userId, HA_SKILL_ID, false)) return true;
-  if (getHiddenTools(userId, HA_SKILL_ID).includes(HA_SERVICE_TOOL)) return true;
-  // Child accounts must have HA explicitly granted (mirrors the profile.role ===
-  // 'child' + allowedSkills check in roles.mjs executeRoleTool). Read the
-  // profile only if the caller didn't already thread it.
-  let profile = chatUser;
-  if (profile === undefined) {
-    try { const { getUser } = await import('../routes/_helpers.mjs'); profile = getUser(userId); }
-    catch { profile = null; }
+async function fastpathToolAllowed(userId, skillId, toolName) {
+  if (!userId || !skillId || !toolName) return false;
+  try {
+    const { isSkillRuntimeEnabledForUser } = await import('../roles.mjs');
+    if (!isSkillRuntimeEnabledForUser(skillId, userId)) return false;
+    const { getHiddenTools } = await import('../lib/skill-overrides.mjs');
+    return !getHiddenTools(userId, skillId).includes(toolName);
+  } catch (e) {
+    console.warn(`[chat] ${skillId} fast-path authorization failed:`, e.message);
+    return false;
   }
-  if (profile?.role === 'child'
-      && Array.isArray(profile.allowedSkills)
-      && !profile.allowedSkills.includes(HA_SKILL_ID)) return true;
-  return false;
 }
 
 async function resolvePhrase(phrase, userId) {
@@ -247,24 +246,23 @@ async function executeHaIntent(intent) {
  *
  * @returns {Promise<{ handled: true } | null>}
  */
-export async function tryHaFastpath({ userText, userId, agentId, chatUser, onEvent }) {
-  if (!userText) return null;
+export async function tryHaFastpath({ userText, userId, agentId, onEvent }) {
+  if (!userText || !hasHaIntentSyntax(userText)) return null;
   // HA control stays GLOBAL (any agent fast-paths it): a light/lock command is
   // harmless and universal, and short-circuiting it to ~200ms from whatever
   // chat you're in beats falling through to an LLM + escalation. Inbox reading
   // is scoped (see local-intent-fastpath) because dumping mail into a non-email
   // agent's chat is a real leak; toggling the kitchen is not.
   try {
-    const haIntent = await classifyHaIntent(userText, userId);
-    if (!haIntent) return null;
-    // Enforce the SAME gates executeRoleTool applies to ha_call_service before
-    // touching HA — otherwise a child (or a user who disabled/hid the HA skill)
-    // would drive locks/lights straight through this shortcut. On a hit, fall
-    // through so the (identically-gated) LLM path handles the refusal.
-    if (await haFastpathGated(userId, chatUser)) {
-      console.log('[chat] ha-fastpath: gated by skill overrides — falling through to LLM');
+    // Entity classification consults the user's HA aliases and entity cache,
+    // so authorization must precede classifyHaIntent rather than only the
+    // eventual service call.
+    if (!await fastpathToolAllowed(userId, HA_SKILL_ID, HA_SERVICE_TOOL)) {
+      console.log('[chat] ha-fastpath: gated by runtime skill policy — falling through to LLM');
       return null;
     }
+    const haIntent = await classifyHaIntent(userText, userId);
+    if (!haIntent) return null;
     const result = await executeHaIntent(haIntent);
     if (result.error) {
       console.log(`[chat] ha-fastpath miss-then-error: ${result.error} — falling through to LLM`);
@@ -440,6 +438,8 @@ export async function tryVoiceEmptyFastpath({ source, userText, userId, agentId,
  * @returns {Promise<{ handled: true } | null>}
  */
 const TRANSCRIBE_INTENT_RE = /\b(transcribe|transcription|transcript|read (this|it|them|aloud)|read out|tell me what (this|it|they) says?|give me (a |the )?transcript|do a transcript|put (this|it) into text)\b/i;
+const TRANSCRIBE_SKILL_ID = 'transcribe';
+const TRANSCRIBE_TOOL = 'transcribe_file';
 
 const _AT_KIND_MAP = {
   video: 'videos', videos: 'videos',
@@ -447,6 +447,7 @@ const _AT_KIND_MAP = {
   image: 'images', images: 'images', photo: 'images', photos: 'images',
 };
 const _AT_REF_RE = /@(video|audio|image|images|videos|photo|photos|audios)\/([\w.\-]+)/gi;
+const _AT_REF_HINT_RE = /@(video|audio|image|images|videos|photo|photos|audios)\/[\w.\-]+/i;
 
 function _isAudioVideoFolder(folder) { return folder === 'audio' || folder === 'videos'; }
 
@@ -462,6 +463,17 @@ async function _sttAvailable(cfg) {
 
 export async function tryTranscribeAttachmentFastpath(ctx) {
   const { userText, attachment, userId, agentId, onEvent } = ctx;
+  // Avoid a profile-policy read on ordinary text turns. This is only a pure
+  // shape check; authorization still precedes every file/config lookup.
+  const hasReference = !!attachment?.file_id
+    || (ctx.source !== 'voice-device' && _AT_REF_HINT_RE.test(String(userText || '')));
+  if (!hasReference) return null;
+  // This interceptor can upload user audio to an external STT service. Check
+  // the exact skill/tool boundary before resolving any profile path, reading a
+  // file, loading STT configuration, or importing the transcribe executor.
+  if (!await fastpathToolAllowed(userId, TRANSCRIBE_SKILL_ID, TRANSCRIBE_TOOL)) {
+    return null;
+  }
   const fs = await import('node:fs');
   const path = await import('node:path');
   const { USERS_DIR } = await import('../lib/paths.mjs');
@@ -617,10 +629,18 @@ export async function tryTranscribeAttachmentFastpath(ctx) {
 const _calendarCtx = new Map();  // sessionKey -> { ts, seq }
 const _calendarSeq = new Map();  // sessionKey -> counter
 const CALENDAR_FOLLOWUP_TTL_MS = 120_000;
+const CALENDAR_SKILL_ID = 'gcal';
+const CALENDAR_READ_TOOL = 'calendar_snapshot';
 
 export async function tryCalendarFastpath({ source, userText, userId, agentId, onEvent }) {
   if (!userText) return null;
   try {
+    // The calendar module reads/synchronizes the user's private mirror during
+    // classification/execution. Authorize before importing it or advancing the
+    // contextual follow-up sequence.
+    if (!await fastpathToolAllowed(userId, CALENDAR_SKILL_ID, CALENDAR_READ_TOOL)) {
+      return null;
+    }
     const { classifyCalendarIntent, classifyCalendarFollowup, executeCalendarIntent } = await import('../lib/calendar-fastpath.mjs');
     const sessionKey = `${userId}_${agentId}`;
     const seq = (_calendarSeq.get(sessionKey) || 0) + 1;

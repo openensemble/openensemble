@@ -19,6 +19,7 @@
  * module-private state — every concurrency concern goes through this surface.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { clearStreamBuffer, writeStreamBuffer } from '../sessions.mjs';
 
 // Track active AbortControllers so in-progress runs can be cancelled.
@@ -33,6 +34,140 @@ const activeStreams = new Map(); // `${userId}_${agentId}` → authoritative rec
 // Track in-flight work per agent (WS *and* delegate) so ask_agent can queue
 // behind an active run instead of colliding with it.
 const busyPromises = new Map(); // agentId → Promise (resolves when current run ends)
+
+// Per-user topology admission gate. Interactive turns are readers; a mode
+// switch or destructive agent mutation is a writer. Unlike a snapshot of
+// activeStreams, acquisition is synchronous, so a new turn cannot slip
+// between "is anyone active?" and the policy write.
+//
+// A chat turn may upgrade its own read lease when it is the ONLY reader. The
+// upgraded writer stays held through the terminal event; its deferred roster
+// broadcast runs from lease.release(), after the confirmation is visible.
+const userTopology = new Map(); // userId → { readers:Set<lease>, writer:lease|null }
+const userTopologyContext = new AsyncLocalStorage();
+
+function topologyState(userId) {
+  let state = userTopology.get(userId);
+  if (!state) {
+    state = { readers: new Set(), writer: null };
+    userTopology.set(userId, state);
+  }
+  return state;
+}
+
+function pruneTopologyState(userId, state) {
+  if (!state.writer && state.readers.size === 0) userTopology.delete(userId);
+}
+
+function createTopologyLease(userId, mode, { allowUpgrade = false, label = mode } = {}) {
+  const deferred = [];
+  let released = false;
+  const lease = {
+    userId,
+    mode,
+    allowUpgrade,
+    label,
+    get released() { return released; },
+    deferUntilRelease(fn) {
+      if (typeof fn !== 'function') return;
+      if (released) { try { fn(); } catch {} return; }
+      deferred.push(fn);
+    },
+    downgradeToRead() {
+      if (released || lease.mode !== 'write') return false;
+      const state = topologyState(userId);
+      if (state.writer !== lease) return false;
+      state.writer = null;
+      state.readers.add(lease);
+      lease.mode = 'read';
+      return true;
+    },
+    release() {
+      if (released) return false;
+      released = true;
+      const state = topologyState(userId);
+      if (state.writer === lease) state.writer = null;
+      state.readers.delete(lease);
+      pruneTopologyState(userId, state);
+      for (const fn of deferred.splice(0)) {
+        try { fn(); } catch (e) { console.warn('[slot-registry] deferred topology callback failed:', e?.message || e); }
+      }
+      return true;
+    },
+  };
+  return lease;
+}
+
+/** Acquire a read lease for an interactive/autonomous turn, or null while a topology write is active. */
+export function tryAcquireUserTurnLease(userId, { allowUpgrade = false, label = 'turn' } = {}) {
+  if (!userId) return null;
+  const state = topologyState(userId);
+  if (state.writer) return null;
+  const lease = createTopologyLease(userId, 'read', { allowUpgrade, label });
+  state.readers.add(lease);
+  return lease;
+}
+
+/** Run an async subtree with a lease visible to policy mutation services. */
+export function runWithUserTopologyLease(lease, fn) {
+  return userTopologyContext.run(lease ?? null, fn);
+}
+
+export function getCurrentUserTopologyLease() {
+  return userTopologyContext.getStore() ?? null;
+}
+
+/**
+ * Try to acquire exclusive topology ownership. If the ambient interactive
+ * lease belongs to this user, upgrade it only when it is the sole reader.
+ * Returns a handle used by the policy service to commit or roll back.
+ */
+export function tryAcquireUserTopologyTransition(userId) {
+  if (!userId) return null;
+  const state = topologyState(userId);
+  const ambient = getCurrentUserTopologyLease();
+  if (ambient?.userId === userId && !ambient.released) {
+    if (state.writer === ambient && ambient.mode === 'write') {
+      return { lease: ambient, external: false, upgradedNow: false };
+    }
+    if (ambient.mode !== 'read' || !ambient.allowUpgrade
+        || state.writer || state.readers.size !== 1 || !state.readers.has(ambient)) {
+      return null;
+    }
+    state.readers.delete(ambient);
+    state.writer = ambient;
+    ambient.mode = 'write';
+    return { lease: ambient, external: false, upgradedNow: true };
+  }
+  if (state.writer || state.readers.size > 0) return null;
+  const lease = createTopologyLease(userId, 'write', { label: 'topology-transition' });
+  state.writer = lease;
+  return { lease, external: true, upgradedNow: false };
+}
+
+/** Roll back only the ownership acquired by this transition attempt. */
+export function rollbackUserTopologyTransition(handle) {
+  if (!handle?.lease) return;
+  if (handle.external) handle.lease.release();
+  else if (handle.upgradedNow) handle.lease.downgradeToRead();
+}
+
+/** Release/downgrade after an immediate (non-deferred) successful mutation. */
+export function finishUserTopologyTransition(handle) {
+  if (!handle?.lease) return;
+  if (handle.external) handle.lease.release();
+  else if (handle.upgradedNow) handle.lease.downgradeToRead();
+}
+
+export function isUserTopologyTransitioning(userId) {
+  return !!userTopology.get(userId)?.writer;
+}
+
+// Test/debug snapshot: counts only, never exposes live lease objects.
+export function getUserTopologyState(userId) {
+  const state = userTopology.get(userId);
+  return { readers: state?.readers.size ?? 0, writer: !!state?.writer };
+}
 
 export function isAgentBusy(agentId) {
   return busyPromises.has(agentId);

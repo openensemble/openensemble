@@ -6,6 +6,14 @@ function updateAgentPill() {
   $('agentPillName').textContent  = a.name;
 }
 
+function isPendingSingleAssistantOnboarding() {
+  const policy = _currentUser?.orchestration;
+  return agents.length === 0
+    && policy?.mode === 'single'
+    && policy?.pendingPrimary === true
+    && !policy?.primaryAgentId;
+}
+
 // ── Agent tabs (mobile) + drawer list ─────────────────────────────────────────
 function checkEmptyState() {
   const empty = agents.length === 0;
@@ -19,6 +27,17 @@ function checkEmptyState() {
   const noProvAdmin = $('emptyStateNoProviders');
   const noProvUser  = $('emptyStateNoProvidersUser');
   const noAgents    = $('emptyStateNoAgents');
+  const pendingSingle = isPendingSingleAssistantOnboarding();
+  const noAgentsTitle = $('emptyStateNoAgentsTitle');
+  const noAgentsDescription = $('emptyStateNoAgentsDescription');
+  const noAgentsAction = $('emptyStateNoAgentsAction');
+  if (noAgentsTitle) noAgentsTitle.textContent = pendingSingle ? 'Name your assistant' : 'Welcome!';
+  if (noAgentsDescription) {
+    noAgentsDescription.textContent = pendingSingle
+      ? 'Choose the name and personality for your one assistant. It will handle every enabled skill for you.'
+      : 'Create your first agent to get started. Give it a name, description, and role.';
+  }
+  if (noAgentsAction) noAgentsAction.textContent = pendingSingle ? 'Create Your Assistant' : 'Create Your Agent';
   if (!hasProviders && isAdmin) {
     noProvAdmin.style.display = '';
     noProvUser.style.display  = 'none';
@@ -33,7 +52,7 @@ function checkEmptyState() {
     noProvAdmin.style.display = 'none';
     noProvUser.style.display  = 'none';
     noAgents.style.display    = '';
-    $('input').placeholder = 'Create an agent to start chatting…';
+    $('input').placeholder = pendingSingle ? 'Create your assistant to start chatting…' : 'Create an agent to start chatting…';
   }
   if (typeof lucide !== 'undefined') lucide.createIcons();
 }
@@ -267,9 +286,12 @@ async function openNewAgentModal(agent = null) {
   loadFireworksModels().then(refresh).catch(() => {});
   loadAnthropicModels().then(refresh).catch(() => {});
   loadGrokModels().then(refresh).catch(() => {});
+  const pendingSingle = !agent && isPendingSingleAssistantOnboarding();
   editingAgentId = agent?.id ?? null;
-  $('newAgentModalTitle').innerHTML = agent ? `${icon('pencil', 16)} Edit ${escHtml(agent.name)}` : `${icon('sparkles', 16)} New Agent`;
-  $('btnCreateAgent').textContent = agent ? 'Save Changes' : 'Create Agent';
+  $('newAgentModalTitle').innerHTML = agent
+    ? `${icon('pencil', 16)} Edit ${escHtml(agent.name)}`
+    : `${icon('sparkles', 16)} ${pendingSingle ? 'Your Assistant' : 'New Agent'}`;
+  $('btnCreateAgent').textContent = agent ? 'Save Changes' : (pendingSingle ? 'Create Assistant' : 'Create Agent');
   $('aName').value   = agent?.name    ?? '';
   $('aEmoji').value  = agent?.emoji   ?? '🤖';
   $('aDesc').value   = agent?.description ?? '';
@@ -283,8 +305,9 @@ async function openNewAgentModal(agent = null) {
   // same effect as assigning it later via Settings → Skills.
   const roleLabel = $('aRoleLabel');
   const roleSel = $('aRole');
-  if (agent) {
+  if (agent || pendingSingle) {
     roleLabel.style.display = 'none';
+    roleSel.value = '';
   } else {
     roleLabel.style.display = '';
     roleSel.innerHTML = '<option value="">— General Assistant —</option>';
@@ -345,7 +368,8 @@ $('btnCreateAgent').addEventListener('click', async () => {
   const desc = $('aDesc').value.trim();
   if (!name) { $('aName').focus(); return; }
   const [model, provider] = $('aModel').value.split('||');
-  const selectedRole = !editingAgentId ? ($('aRole').value || null) : null;
+  const pendingSingle = !editingAgentId && isPendingSingleAssistantOnboarding();
+  const selectedRole = (!editingAgentId && !pendingSingle) ? ($('aRole').value || null) : null;
   const maxTokensRaw = parseInt($('aMaxTokens').value, 10);
   const maxTokens = maxTokensRaw >= 256 ? maxTokensRaw : null;
   const contextSizeRaw = parseInt($('aContextSize').value, 10);
@@ -359,26 +383,66 @@ $('btnCreateAgent').addEventListener('click', async () => {
   payload.contextSize = contextSize;
   payload.reasoningEffort = $('aReasoningEffort')?.value || 'auto';
 
-  if (editingAgentId) {
-    await fetch(`/api/agents/${editingAgentId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-    });
-  } else {
-    const res = await fetch('/api/agents', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-    });
-    const created = await res.json();
-    activeAgent = created.id;
-    // If a role was selected, try to assign it (succeeds for admins; silently skipped for regular users)
-    if (selectedRole) {
-      fetch('/api/roles/assign', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ skillId: selectedRole, agentId: created.id }),
-      }).catch(() => {});
+  const button = $('btnCreateAgent');
+  const idleLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = editingAgentId ? 'Saving…' : 'Creating…';
+  try {
+    if (editingAgentId) {
+      const response = await fetch(`/api/agents/${editingAgentId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `Could not save agent (HTTP ${response.status})`);
+    } else {
+      const response = await fetch('/api/agents', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      const created = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(created.error || `Could not create agent (HTTP ${response.status})`);
+      if (!created?.id) throw new Error('The server created an invalid agent record.');
+
+      // The server already receives skillCategory in the create payload. Keep
+      // this compatibility request for older servers without making creation
+      // success depend on the best-effort follow-up.
+      if (selectedRole) {
+        fetch('/api/roles/assign', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ skillId: selectedRole, agentId: created.id }),
+        }).catch(() => {});
+      }
+
+      // Choose the active tab from the projected roster. A new non-primary
+      // agent is parked in single mode, so its raw id must never become the
+      // browser's active (invisible) agent.
+      try {
+        const projected = await fetch('/api/agents', { cache: 'no-store' });
+        if (projected.ok) {
+          agents = await projected.json();
+          if (agents.some(item => item.id === created.id)) activeAgent = created.id;
+          else if (!agents.some(item => item.id === activeAgent)) activeAgent = agents[0]?.id ?? null;
+          buildTabs();
+          buildAgentDrawer();
+        } else {
+          showToast('Agent created. Waiting for the roster to refresh…');
+        }
+      } catch {
+        // Creation already committed. The server's agent_list broadcast will
+        // repair the roster without encouraging a duplicate retry.
+        showToast('Agent created. Waiting for the roster to refresh…');
+      }
+      if (pendingSingle && _currentUser) {
+        _currentUser.orchestration = { mode: 'single', primaryAgentId: created.id };
+      }
+      if (typeof loadOrchestrationSettings === 'function') loadOrchestrationSettings();
     }
+    closeAllDrawers();
+  } catch (e) {
+    showToast(e?.message || 'Could not save agent');
+  } finally {
+    button.disabled = false;
+    button.textContent = idleLabel;
   }
-  closeAllDrawers();
-  // agent_list broadcast will refresh
 });
 
 async function deleteAgent(id, name) {

@@ -254,9 +254,9 @@
           </div>
           <div class="empty-state-card" id="emptyStateNoAgents" style="display:none">
             <div style="font-size:52px"><i data-lucide="bot" style="width:52px;height:52px;stroke-width:1.5"></i></div>
-            <h2>Welcome!</h2>
-            <p>Create your first agent to get started. Give it a name, description, and role.</p>
-            <button class="btn-create-agent" data-action="openNewAgentModal"><i data-lucide="sparkles" style="width:14px;height:14px"></i> Create Your Agent</button>
+            <h2 id="emptyStateNoAgentsTitle">Welcome!</h2>
+            <p id="emptyStateNoAgentsDescription">Create your first agent to get started. Give it a name, description, and role.</p>
+            <button class="btn-create-agent" data-action="openNewAgentModal"><i data-lucide="sparkles" style="width:14px;height:14px"></i> <span id="emptyStateNoAgentsAction">Create Your Agent</span></button>
           </div>
         </div>
         <div class="typing" id="typing"><span></span><span></span><span></span></div>
@@ -818,6 +818,24 @@
 
         <!-- ── Agents tab ── -->
         <div class="stab-panel active" id="stab-panel-agents">
+          <div id="orchestrationModeCard" style="padding:12px;margin-bottom:14px;background:var(--bg3);border:1px solid var(--border);border-radius:10px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Agent setup</div>
+            <div id="orchestrationModeDescription" style="font-size:11px;color:var(--muted);line-height:1.45;margin-bottom:10px">Loading your setup…</div>
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+              <label style="font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:4px;min-width:180px">Mode
+                <select id="orchestrationModeSelect" data-change-action="saveOrchestrationMode" data-change-args='["$value"]'
+                  style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 9px;font-size:12px">
+                  <option value="single">Single assistant</option>
+                  <option value="ensemble">Agent ensemble</option>
+                </select>
+              </label>
+              <label id="orchestrationPrimaryRow" style="font-size:11px;color:var(--muted);display:none;flex-direction:column;gap:4px;min-width:210px">Primary assistant
+                <select id="orchestrationPrimarySelect" data-change-action="saveOrchestrationPrimary" data-change-args='["$value"]'
+                  style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 9px;font-size:12px"></select>
+              </label>
+            </div>
+            <div id="orchestrationModeStatus" style="font-size:11px;color:var(--muted);margin-top:7px"></div>
+          </div>
           <div class="models-header-row">
             <span style="font-size:12px;color:var(--muted)">Assign a model to each agent</span>
             <button class="models-refresh" id="btnRefreshModels">↻ Refresh</button>

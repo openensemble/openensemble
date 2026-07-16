@@ -199,6 +199,162 @@ const COMPAT_OPTGROUP_LABELS = {
   zai:           'Z.AI ⚡',
 };
 
+let _orchestrationSettings = null;
+let _orchestrationSaving = false;
+let _orchestrationLoadError = null;
+
+function renderOrchestrationSettings() {
+  const modeSel = $('orchestrationModeSelect');
+  const primarySel = $('orchestrationPrimarySelect');
+  const primaryRow = $('orchestrationPrimaryRow');
+  const desc = $('orchestrationModeDescription');
+  const status = $('orchestrationModeStatus');
+  if (!modeSel || !primarySel || !primaryRow || !desc || !status) return;
+
+  const data = _orchestrationSettings;
+  if (!data) {
+    modeSel.disabled = true;
+    primarySel.disabled = true;
+    desc.textContent = _orchestrationLoadError ? 'Agent setup is temporarily unavailable.' : 'Loading your setup…';
+    status.textContent = _orchestrationLoadError || '';
+    return;
+  }
+  const available = Array.isArray(data.availableAgents) ? data.availableAgents : [];
+  const managed = data.managed === true || _currentUser?.role === 'child';
+  const pendingPrimary = available.length === 0
+    && (_currentUser?.orchestration?.pendingPrimary === true || data.pendingPrimary === true);
+  const displayedMode = pendingPrimary || data.mode === 'single' ? 'single' : 'ensemble';
+  modeSel.value = displayedMode;
+  const singleOption = [...modeSel.options].find(option => option.value === 'single');
+  if (singleOption) singleOption.disabled = available.length === 0;
+  modeSel.disabled = managed || _orchestrationSaving;
+  const preferredPrimary = data.primaryAgentId || data.recommendedPrimaryAgentId || null;
+  primarySel.innerHTML = available.map(agent =>
+    `<option value="${escHtml(agent.id)}"${agent.id === preferredPrimary ? ' selected' : ''}>${escHtml(agent.emoji || '')} ${escHtml(agent.name || agent.id)}</option>`
+  ).join('');
+  primarySel.disabled = managed || _orchestrationSaving || available.length < 2;
+  primaryRow.style.display = displayedMode === 'single' && available.length ? 'flex' : 'none';
+
+  if (pendingPrimary) {
+    desc.textContent = 'Single-assistant setup is ready. Create and name the first assistant to finish setup.';
+  } else if (managed) {
+    desc.textContent = 'Your parent or administrator manages whether this account uses one assistant or an ensemble.';
+  } else if (data.mode === 'single') {
+    desc.textContent = 'One primary assistant handles every enabled skill. Your other agents, assignments, and histories stay parked and return unchanged if you switch back.';
+  } else {
+    desc.textContent = 'Your classic ensemble is active: separate agents keep their assigned roles and delegate work between them.';
+  }
+  status.textContent = _orchestrationSaving
+    ? 'Saving…'
+    : (pendingPrimary
+      ? 'The first assistant becomes the primary automatically.'
+      : (available.length === 0 ? 'Create an agent before enabling single-assistant mode.' : 'Changes apply to the next message.'));
+}
+
+async function loadOrchestrationSettings() {
+  const userId = getCurrentUserId();
+  if (!userId) return;
+  try {
+    const response = await fetch(`/api/users/${encodeURIComponent(userId)}/orchestration`, {
+      credentials: 'same-origin', cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    _orchestrationSettings = await response.json();
+    if (_currentUser && Object.prototype.hasOwnProperty.call(_orchestrationSettings, 'pendingPrimary')) {
+      _currentUser.orchestration = _orchestrationSettings.pendingPrimary === true
+        ? { mode: 'single', pendingPrimary: true }
+        : {
+            mode: _orchestrationSettings.mode === 'single' ? 'single' : 'ensemble',
+            ...(_orchestrationSettings.primaryAgentId
+              ? { primaryAgentId: _orchestrationSettings.primaryAgentId }
+              : {}),
+          };
+    } else if (_currentUser?.orchestration?.pendingPrimary === true) {
+      if ((_orchestrationSettings.availableAgents || []).length > 0) {
+        _currentUser.orchestration = {
+          mode: _orchestrationSettings.mode === 'single' ? 'single' : 'ensemble',
+          ...(_orchestrationSettings.primaryAgentId
+            ? { primaryAgentId: _orchestrationSettings.primaryAgentId }
+            : {}),
+        };
+      } else {
+        // Backward-compatible fallback for servers that predate the explicit
+        // pendingPrimary response field. The profile route exposes the raw
+        // onboarding marker to its owner.
+        const profileResponse = await fetch(`/api/users/${encodeURIComponent(userId)}`, { cache: 'no-store' });
+        if (profileResponse.ok) {
+          const profile = await profileResponse.json();
+          if (profile?.orchestration) _currentUser.orchestration = profile.orchestration;
+        }
+      }
+    }
+    _orchestrationLoadError = null;
+  } catch (e) {
+    _orchestrationSettings = null;
+    _orchestrationLoadError = `Couldn't load agent setup (${e.message}).`;
+  }
+  renderOrchestrationSettings();
+}
+
+async function _saveOrchestration(mode, primaryAgentId = null) {
+  const userId = getCurrentUserId();
+  if (!userId || _orchestrationSaving) return;
+  if (typeof streaming !== 'undefined' && streaming) {
+    showToast('Wait for the active reply to finish (or stop it) before switching modes.');
+    renderOrchestrationSettings();
+    return;
+  }
+  _orchestrationSaving = true;
+  renderOrchestrationSettings();
+  try {
+    const response = await fetch(`/api/users/${encodeURIComponent(userId)}/orchestration`, {
+      method: 'PUT', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, ...(primaryAgentId ? { primaryAgentId } : {}) }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    const availableAgents = _orchestrationSettings?.availableAgents || [];
+    _orchestrationSettings = {
+      ...body,
+      availableAgents,
+      managed: _orchestrationSettings?.managed === true,
+      recommendedPrimaryAgentId: body.recommendedPrimaryAgentId
+        || _orchestrationSettings?.recommendedPrimaryAgentId
+        || null,
+    };
+    if (_currentUser) _currentUser.orchestration = { mode: body.mode, primaryAgentId: body.primaryAgentId ?? null };
+    const projected = await fetch('/api/agents', { credentials: 'same-origin', cache: 'no-store' });
+    if (projected.ok) {
+      agents = await projected.json();
+      if (typeof buildTabs === 'function') buildTabs();
+      if (typeof buildAgentDrawer === 'function') buildAgentDrawer();
+      renderAgentModelRows();
+    }
+    showToast(body.mode === 'single' ? 'Single-assistant mode enabled' : 'Agent ensemble restored');
+  } catch (e) {
+    showToast(e.message || 'Could not change agent setup');
+  } finally {
+    _orchestrationSaving = false;
+    await loadOrchestrationSettings();
+  }
+}
+
+async function saveOrchestrationMode(mode) {
+  const normalized = mode === 'single' ? 'single' : 'ensemble';
+  const primary = normalized === 'single'
+    ? (_orchestrationSettings?.primaryAgentId || _orchestrationSettings?.recommendedPrimaryAgentId
+      || $('orchestrationPrimarySelect')?.value
+      || _orchestrationSettings?.availableAgents?.[0]?.id || null)
+    : null;
+  await _saveOrchestration(normalized, primary);
+}
+
+async function saveOrchestrationPrimary(primaryAgentId) {
+  if (_orchestrationSettings?.mode !== 'single' || !primaryAgentId) return;
+  await _saveOrchestration('single', primaryAgentId);
+}
+
 function renderAgentModelRows() {
   const models = allAvailableModels();
   if (!agents.length) { $('agentModelRows').innerHTML = '<div style="color:var(--muted)">No agents loaded.</div>'; return; }
@@ -856,6 +1012,7 @@ function switchSettingsTab(name) {
   document.querySelectorAll('.stab-panel').forEach(p => p.classList.remove('active'));
   $(`stab-${name}`)?.classList.add('active');
   $(`stab-panel-${name}`)?.classList.add('active');
+  if (name === 'agents') loadOrchestrationSettings();
   if (name === 'profile') { loadOAuthStatus(); loadActiveSessions(); if (typeof loadTelegramUser === 'function') loadTelegramUser(); if (typeof renderAvatarPicker === 'function') renderAvatarPicker($('avatarPickerContainer')); if (typeof renderMirrorStatus === 'function') renderMirrorStatus(); if (typeof loadBraveApiKeyStatus === 'function') loadBraveApiKeyStatus(); }
   if (name === 'skills') loadSkillsList();
   if (name === 'plugins') renderDrawersSettings();

@@ -23,7 +23,7 @@ import {
 // straight from the submodule (see routes/_helpers/auth-sessions.mjs).
 import { uaFromReq } from './_helpers/auth-sessions.mjs';
 import { getDefaultRoles, listAllRoles } from '../roles.mjs';
-import { NEW_ACCOUNT_DEFAULT_MODE } from '../lib/orchestration-policy.mjs';
+import { newAccountOrchestrationPolicy } from '../lib/orchestration-policy.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
 import { listTurnTrees, getTurnDetail } from '../lib/turn-trace-reader.mjs';
 import { computeTurnMetrics } from '../lib/turn-metrics.mjs';
@@ -539,7 +539,18 @@ export async function handle(req, res) {
       const id = 'user_' + randomBytes(8).toString('hex');
       const passwordHash = await hashPassword(password);
       const pinHash = pin ? await hashPassword(pin) : undefined;
-      const newUser = { id, name: name.trim(), emoji, color: '#' + randomBytes(3).toString('hex'), role: invite.role, orchestration: { mode: NEW_ACCOUNT_DEFAULT_MODE }, passwordHash, skills: getDefaultRoles(), skillsLocked: false, allowedSkills: invite.allowedSkills?.length ? invite.allowedSkills : undefined, agentOverrides: {}, createdAt: new Date().toISOString() };
+      const invitedAllowedSkills = invite.role === 'user' || invite.role === 'child'
+        ? (Array.isArray(invite.allowedSkills) ? invite.allowedSkills : [])
+        : undefined;
+      const newUser = {
+        id, name: name.trim(), emoji, color: '#' + randomBytes(3).toString('hex'),
+        role: invite.role,
+        ...(invite.role === 'user' || invite.role === 'child' ? { parentId: invite.createdBy } : {}),
+        orchestration: newAccountOrchestrationPolicy(), passwordHash,
+        skills: getDefaultRoles(), skillsLocked: false,
+        allowedSkills: invitedAllowedSkills, agentOverrides: {},
+        createdAt: new Date().toISOString(),
+      };
       if (pinHash) newUser.pinHash = pinHash;
       await modifyUsers(list => { list.push(newUser); });
       await modifyInvites(invites => { const i = invites.findIndex(x => x.token === token); if (i !== -1) invites.splice(i, 1); });

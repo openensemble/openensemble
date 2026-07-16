@@ -902,7 +902,7 @@ loadPersistedSessions();
 // pre-encryption build of OE. Idempotent — no-op once everything is
 // encrypted. Uses users/_system/.master-key (in OE backups) so reinstall +
 // restore works without manual key handling.
-(async () => {
+await (async () => {
   try {
     const { bootstrapEncryption, bootstrapProfileEncryption } = await import('./lib/config-secrets.mjs');
     const { atomicWriteSync } = await import('./routes/_helpers/io-lock.mjs');
@@ -935,7 +935,7 @@ loadPersistedSessions();
   try {
     const { stampOrchestrationDefaults } = await import('./lib/orchestration-policy.mjs');
     const stamped = await stampOrchestrationDefaults();
-    if (stamped > 0) console.log(`[orchestration] stamped ensemble mode onto ${stamped} existing profile(s)`);
+    if (stamped > 0) console.log(`[orchestration] normalized policy on ${stamped} profile(s)`);
   } catch (e) {
     console.warn('[orchestration] default stamping failed:', e.message);
   }

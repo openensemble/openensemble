@@ -21,6 +21,7 @@ import {
 import {
   markAgentBusy, openTurn, finalizeTurn, recordStreamEvent,
   isAgentBusy, waitForAgentIdle, getActiveStreams, getActiveStream, abortChat, abortAllChats,
+  tryAcquireUserTurnLease, runWithUserTopologyLease,
 } from './chat-dispatch/slot-registry.mjs';
 // Re-export the slot-registry surface so external importers
 // (ws-handler, routes/telegram, skills/delegate, server) keep working
@@ -76,7 +77,7 @@ const _ambientRestoreTimers = new Map();
 import { buildVoiceSystemAddition } from './lib/voice-context.mjs';
 import {
   loadConfig, getAgentsForUser,
-  getUser, getUserCoordinatorAgentId, recordActivity,
+  getUser, getUserCoordinatorAgentId, resolveRuntimeAgentId, recordActivity,
   isUserTimeBlocked,
 } from './routes/_helpers.mjs';
 
@@ -468,7 +469,27 @@ export async function handleChatMessage({
     if (deviceDefault) agentId = deviceDefault;
   }
   userId = effectiveUserId;
-  agentId = agentId ?? getUserCoordinatorAgentId(userId);
+  const topologyLease = tryAcquireUserTurnLease(userId, {
+    allowUpgrade: !_hiddenUser && !_isBackgroundContinuation && !_isolatedTaskRun && !_readOnlyTurn,
+    label: source === 'voice-device' ? 'voice-turn' : 'chat-turn',
+  });
+  if (!topologyLease) {
+    onEvent({
+      type: 'error',
+      code: 'orchestration_busy',
+      retryable: true,
+      agent: agentId ?? 'system',
+      message: 'Your agent setup is changing. Wait a moment, then send that again.',
+    });
+    return;
+  }
+  try {
+  const requestedAgentId = agentId ?? getUserCoordinatorAgentId(userId);
+  // Stored browser/device/task references may name an agent parked by a mode
+  // switch. Single mode redirects those references to the current primary;
+  // ensemble keeps invalid explicit ids invalid so normal error handling and
+  // isolation semantics are unchanged.
+  agentId = resolveRuntimeAgentId(userId, requestedAgentId, { fallbackUnknown: !!deviceId }) ?? requestedAgentId;
 
   const toolPlan = normalizeToolPlan(rawToolPlan);
   const documentRequest = normalizeDocumentRequest(rawDocumentRequest);
@@ -493,7 +514,7 @@ export async function handleChatMessage({
   // also lets a routine-followup re-entry (await handleChatMessage below) nest as
   // a child turn and unwind without corrupting this one. beginTurn/recorders
   // fail-open, so nothing here can break a turn.
-  return turnTraceContext.run(undefined, async () => {
+  return await runWithUserTopologyLease(topologyLease, () => turnTraceContext.run(undefined, async () => {
   const turnStore = beginTurn({
     userId,
     agentId,
@@ -1507,7 +1528,13 @@ export async function handleChatMessage({
       finalizeTurnOnce();
     }
   }
-  });
+  }));
+  } finally {
+    // If this turn upgraded itself to a topology writer, release also runs its
+    // deferred roster broadcast. This is deliberately after the terminal event
+    // and every durable finalizer above.
+    topologyLease.release();
+  }
 }
 
 // ── Interceptor adapters ──────────────────────────────────────────────────────

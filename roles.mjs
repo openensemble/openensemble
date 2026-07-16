@@ -49,6 +49,8 @@ import {
   isListStyleTool as _ephemIsListTool,
 } from './lib/ephemeral-tool-cache.mjs';
 import { log } from './logger.mjs';
+import { listAgents } from './agents.mjs';
+import { normalizeOrchestrationPolicy } from './lib/orchestration-policy-core.mjs';
 
 // Resolve the agent id we should attribute background-task surfaces to
 // (chip, session injection) when the caller didn't pass one. Uses the
@@ -311,22 +313,14 @@ export function loadRoleManifests() {
   // framework so installs without it (none today) still boot cleanly.
   try {
     import('./lib/skill-alias-framework.mjs').then(async (fw) => {
-      const allManifests = [..._manifests.values()].map(v => v.manifest);
-      const importerFor = (skillId) => {
-        const entry = [..._manifests.values()].find(v => v.manifest.id === skillId);
+      const allManifests = [..._manifests.values()]
+        .map(v => ({ ...v.manifest, userScope: v.userId }));
+      const importerFor = (skillId, declaredScope, catalogUserId) => {
+        const entry = declaredScope
+          ? _manifests.get(userKey(declaredScope, skillId))
+          : _manifests.get(globalKey(skillId));
         if (!entry) return Promise.resolve({});
-        // Reuse getExecutorByKey so we hit the same executor cache the
-        // dispatcher uses; ensures exported_function catalog sources see
-        // the same fresh code as live tool dispatches.
-        const key = entry.userId ? userKey(entry.userId, skillId) : globalKey(skillId);
-        return getExecutorByKey(key).then(execFn => {
-          // execFn IS the skill's executeSkillTool. We need the WHOLE module
-          // export object so exported_function can find named exports. Open
-          // the file path and dynamic-import directly.
-          const filePath = path.join(entry.dir, 'execute.mjs');
-          return import(pathToFileURL(filePath).href + `?bust=${_executorBust.get(key) || 0}`)
-            .catch(() => ({}));
-        });
+        return importAliasCatalogModule(entry, catalogUserId);
       };
       fw.registerFromManifests(allManifests, importerFor);
 
@@ -553,6 +547,7 @@ export function listRoles(userId = null) {
   const out = [];
   for (const wrap of _manifests.values()) {
     if (wrap.userId === null || wrap.userId === userId) {
+      if (userId && !isSkillAllowedForUser(wrap.manifest.id, userId)) continue;
       // Phase-10: user can disable any non-always_on skill. The override is
       // read at runtime from disk — manifests stay immutable in the cache.
       if (userId && isSkillDisabled(userId, wrap.manifest.id, !!wrap.manifest.always_on)) continue;
@@ -580,26 +575,32 @@ export function getRoleManifest(id, userId = null) {
 /** Add or replace a manifest. If `userId` is given, stores as a per-user skill. */
 export function addRoleManifest(manifest, userId = null) {
   const id = manifest.id;
+  const key = userId ? userKey(userId, id) : globalKey(id);
+  const previousAliasKind = _manifests.get(key)?.manifest?.alias_catalog?.entity_kind ?? null;
   let dir;
   if (userId) {
     dir = path.join(userSkillsDir(userId), id);
-    _manifests.set(userKey(userId, id), { manifest, userId, dir });
+    _manifests.set(key, { manifest, userId, dir });
   } else {
     dir = path.join(SKILLS_DIR, id);
-    _manifests.set(globalKey(id), { manifest, userId: null, dir });
+    _manifests.set(key, { manifest, userId: null, dir });
   }
   // Register the alias catalog if this manifest declares one. Mirrors the
   // boot-time registration in loadRoleManifests so newly-created skills
   // (via skill-builder skill_create) pick up alias support immediately.
-  if (manifest.alias_catalog) {
+  if (previousAliasKind || manifest.alias_catalog) {
     import('./lib/skill-alias-framework.mjs').then(fw => {
-      const filePath = path.join(dir, 'execute.mjs');
-      const key = userId ? userKey(userId, id) : globalKey(id);
-      const importer = () => import(pathToFileURL(filePath).href + `?bust=${_executorBust.get(key) || 0}`).catch(() => ({}));
-      // Unregister first in case this is a replace (skill_update_code) — the
-      // entity_kind may have changed, or the catalog source may differ.
-      try { fw.unregisterAliasCatalog(manifest.alias_catalog.entity_kind); } catch {}
-      fw.registerAliasCatalog(manifest.alias_catalog, importer);
+      const wrap = _manifests.get(key);
+      const importer = (catalogUserId) => importAliasCatalogModule(wrap, catalogUserId);
+      // Remove the old registration before considering the replacement. An
+      // update may change entity_kind or remove alias_catalog entirely.
+      if (previousAliasKind) {
+        try { fw.unregisterAliasCatalog(previousAliasKind, userId); } catch {}
+      }
+      if (manifest.alias_catalog) {
+        try { fw.unregisterAliasCatalog(manifest.alias_catalog.entity_kind, userId); } catch {}
+        fw.registerAliasCatalog(manifest.alias_catalog, importer, { userScope: userId, skillId: id });
+      }
     }).catch(e => console.warn('[roles] alias-framework register failed:', e.message));
   }
 }
@@ -614,7 +615,7 @@ export function removeRoleManifest(id, userId = null) {
   // every chat turn and logs a noisy file-not-found.
   if (entry?.manifest?.alias_catalog?.entity_kind) {
     import('./lib/skill-alias-framework.mjs')
-      .then(fw => fw.unregisterAliasCatalog(entry.manifest.alias_catalog.entity_kind))
+      .then(fw => fw.unregisterAliasCatalog(entry.manifest.alias_catalog.entity_kind, userId))
       .catch(() => {});
   }
   _manifests.delete(key);
@@ -631,7 +632,10 @@ export function clearExecutorCache(skillId, userId = null) {
 }
 
 export function getRoleTools(id, userId = null) {
-  const tools = getRoleManifest(id, userId)?.tools ?? [];
+  if (userId && !isSkillAllowedForUser(id, userId)) return [];
+  const manifest = getRoleManifest(id, userId);
+  if (userId && manifest && isSkillDisabled(userId, id, !!manifest.always_on)) return [];
+  const tools = manifest?.tools ?? [];
   // Phase-10: per-user hidden-tools filter. Removes any tool whose
   // function.name appears in users/<id>/skill-overrides.json[id].hiddenTools.
   if (userId && tools.length) {
@@ -649,23 +653,47 @@ export function getToolsForRoleIds(roleIds, userId = null) {
 }
 
 // ── Role Assignments ──────────────────────────────────────────────────────────
-// Owner/admin assignments live in config.json; non-owner users have their own
-// assignments stored in their users.json record under `skillAssignments`.
-function _isPrivilegedUserRole(role) { return role === 'owner' || role === 'admin'; }
+// The installation owner keeps the legacy global assignment map in config.json.
+// Every other account is per-profile. Admins created by older builds may still
+// rely on the global map, so reads merge it as a fallback until that admin has
+// its own overrides; new writes always go to the admin profile. This prevents
+// one admin's first-assistant onboarding from replacing the owner's coordinator.
+function _isOwnerRole(role) { return role === 'owner'; }
+
+function _readGlobalAssignments() {
+  try { return JSON.parse(readFileSync(CFG_PATH, 'utf8')).skillAssignments ?? {}; }
+  catch { return {}; }
+}
+
+// null = unrestricted; Set = the complete account-level capability ceiling.
+// Missing/unreadable profiles are fail-closed. Children require an explicit
+// array. Regular users retain legacy unrestricted behavior only when the field
+// is null/absent; once an array is present it is authoritative, including [].
+function _allowedSkillIdsForProfile(user) {
+  if (!user) return new Set();
+  if (user.role === 'owner' || user.role === 'admin') return null;
+  if (Array.isArray(user.allowedSkills)) return new Set(user.allowedSkills);
+  if (user.role === 'child') return new Set();
+  return user.allowedSkills == null ? null : new Set();
+}
 
 export function getRoleAssignments(userId) {
-  let user = null;
-  if (userId) {
-    try {
-      const userPath = path.join(USERS_DIR, userId, 'profile.json');
-      if (existsSync(userPath)) user = JSON.parse(readFileSync(userPath, 'utf8'));
-    } catch {}
-  }
+  const user = userId ? _readUserProfile(userId) : null;
   let raw;
-  if (user && !_isPrivilegedUserRole(user.role)) {
-    raw = user.skillAssignments ?? {};
+  if (_isOwnerRole(user?.role) || !userId) {
+    raw = _readGlobalAssignments();
+  } else if (user?.role === 'admin') {
+    raw = { ..._readGlobalAssignments(), ...(user.skillAssignments ?? {}) };
   } else {
-    try { raw = JSON.parse(readFileSync(CFG_PATH, 'utf8')).skillAssignments ?? {}; } catch { raw = {}; }
+    raw = user?.skillAssignments ?? {};
+  }
+  const allowed = userId ? _allowedSkillIdsForProfile(user) : null;
+  if (allowed) {
+    // An assignment is ownership metadata, never a second capability grant.
+    // Keep the coordinator pointer solely for routing; tool resolution still
+    // requires the coordinator skill itself before exposing its schemas.
+    raw = Object.fromEntries(Object.entries(raw).filter(([skillId]) =>
+      skillId === 'coordinator' || allowed.has(skillId)));
   }
   return _projectAssignmentsForOrchestration(user, raw);
 }
@@ -684,22 +712,33 @@ export function getRoleAssignments(userId) {
  * parsed profile, and roles.mjs sits below that module in the import graph.
  */
 function _projectAssignmentsForOrchestration(user, raw) {
-  const orch = user?.orchestration;
-  const primary = typeof orch?.primaryAgentId === 'string' && orch.primaryAgentId ? orch.primaryAgentId : null;
-  if (orch?.mode !== 'single' || !primary) return raw;
+  const ownedAgents = user?.id ? listAgents().filter(agent => agent.ownerId === user.id) : [];
+  const orch = normalizeOrchestrationPolicy(user?.orchestration, ownedAgents);
+  const primary = orch.primaryAgentId;
+  if (orch.mode !== 'single' || !primary) return raw;
   const projected = {};
-  for (const skillId of Object.keys(raw)) projected[skillId] = primary;
+  // A child profile's allowedSkills is the permission boundary, including for
+  // stale/admin-written assignments. An assignment describes ownership; it is
+  // not a second way to grant a capability. Keep the synthetic coordinator
+  // assignment below for internal routing, but tool resolution independently
+  // requires the coordinator skill itself to be allowed before exposing any of
+  // its schemas.
+  const allowed = _allowedSkillIdsForProfile(user);
+  for (const skillId of Object.keys(raw)) {
+    if (skillId !== 'coordinator' && (!allowed || allowed.has(skillId))) projected[skillId] = primary;
+  }
   // Enabled skills expand onto the primary, but never beyond the account's
-  // allowedSkills scope (child accounts, plan D7): enabled_by_default skills
-  // are backfilled into `skills` for everyone, and without this intersection
-  // a restricted account's primary would receive schemas in single mode that
-  // no agent carried in ensemble mode. Explicit raw assignments above are
-  // kept as-is — they're admin-configured and already exposed in ensemble.
-  const allowed = Array.isArray(user.allowedSkills) ? new Set(user.allowedSkills) : null;
-  if (Array.isArray(user.skills)) {
-    for (const skillId of user.skills) {
-      if (!allowed || allowed.has(skillId)) projected[skillId] = primary;
-    }
+  // allowedSkills scope. enabled_by_default skills are backfilled into
+  // `skills` for everyone, and without this intersection a restricted
+  // account's primary would receive schemas that no ensemble agent carried.
+  const enabledSkills = new Set([
+    ...getDefaultRoles(),
+    ...(Array.isArray(user.skills) ? user.skills : []),
+  ]);
+  for (const skillId of enabledSkills) {
+    const manifest = getRoleManifest(skillId, user?.id);
+    const runtimeEnabled = !manifest || isSkillRuntimeEnabledForUser(skillId, user?.id);
+    if (runtimeEnabled && (!allowed || allowed.has(skillId))) projected[skillId] = primary;
   }
   projected.coordinator = primary;
   return projected;
@@ -722,7 +761,7 @@ export function getAgentRoles(agentId, userId) {
   for (const [roleId, assignedAgentId] of Object.entries(assignments)) {
     if (assignedAgentId !== bare) continue;
     const manifest = getRoleManifest(roleId, userId);
-    if (manifest?.service) out.push(roleId);
+    if (manifest?.service && isSkillRuntimeEnabledForUser(roleId, userId)) out.push(roleId);
   }
   return out;
 }
@@ -739,7 +778,14 @@ export function getAgentAssignedSkills(agentId, userId) {
   if (!agentId) return [];
   const bare = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
   const assignments = getRoleAssignments(userId);
-  return Object.entries(assignments).filter(([, a]) => a === bare).map(([id]) => id);
+  return Object.entries(assignments)
+    .filter(([id, assigned]) => {
+      if (assigned !== bare) return false;
+      // Preserve legacy/dangling custom scopes for reversible storage, but a
+      // known disabled skill must not grant memory or fastpath authority.
+      return !getRoleManifest(id, userId) || isSkillRuntimeEnabledForUser(id, userId);
+    })
+    .map(([id]) => id);
 }
 
 /**
@@ -769,7 +815,9 @@ export function agentCanFastpathSkill(agentId, skillId, userId) {
  */
 export function isScopableSkill(skillId, userId) {
   if (!skillId) return false;
-  if (getRoleManifest(skillId, userId)?.service) return true;
+  const manifest = getRoleManifest(skillId, userId);
+  if (manifest && !isSkillRuntimeEnabledForUser(skillId, userId)) return false;
+  if (manifest?.service) return true;
   return Object.prototype.hasOwnProperty.call(getRoleAssignments(userId), skillId);
 }
 
@@ -803,23 +851,29 @@ function syncDrawerForRoleAssignment(userId, roleId, agentId) {
 
 export function setRoleAssignment(roleId, agentId, userId) {
   if (userId) {
-    try {
+    // A caller that names an account is asking to mutate that account. Never
+    // turn an unreadable/malformed profile into an installation-wide write:
+    // doing so lets a transient profile failure overwrite the owner's legacy
+    // assignments. Only a positively identified owner may use the global map.
+    const user = _readUserProfile(userId);
+    if (!user) {
+      throw new Error(`Cannot update role assignment for unknown or unreadable user: ${userId}`);
+    }
+    if (!_isOwnerRole(user.role)) {
       const userPath = path.join(USERS_DIR, userId, 'profile.json');
-      if (existsSync(userPath)) {
-        const user = JSON.parse(readFileSync(userPath, 'utf8'));
-        if (user && !_isPrivilegedUserRole(user.role)) {
-          user.skillAssignments = user.skillAssignments ?? {};
-          if (agentId) user.skillAssignments[roleId] = agentId;
-          else delete user.skillAssignments[roleId];
-          writeFileSync(userPath, JSON.stringify(user, null, 2));
-          syncDrawerForRoleAssignment(userId, roleId, agentId);
-          return;
-        }
-      }
-    } catch {}
+      user.skillAssignments = user.skillAssignments ?? {};
+      if (agentId) user.skillAssignments[roleId] = agentId;
+      else delete user.skillAssignments[roleId];
+      writeFileSync(userPath, JSON.stringify(user, null, 2));
+      syncDrawerForRoleAssignment(userId, roleId, agentId);
+      return;
+    }
   }
   let cfg = {};
-  try { cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8')); } catch {}
+  if (existsSync(CFG_PATH)) cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    throw new Error('Cannot update role assignment: invalid global configuration');
+  }
   cfg.skillAssignments = cfg.skillAssignments ?? {};
   if (agentId) cfg.skillAssignments[roleId] = agentId;
   else delete cfg.skillAssignments[roleId];
@@ -827,6 +881,56 @@ export function setRoleAssignment(roleId, agentId, userId) {
   // Privileged users (owner/admin) also get per-user pluginPrefs synced so the
   // drawer toggle reflects the role they just assigned.
   syncDrawerForRoleAssignment(userId, roleId, agentId);
+}
+
+/**
+ * Remove every stored assignment that points at a deleted agent. This reads
+ * the unprojected storage record deliberately: using getRoleAssignments in
+ * single mode would make every projected skill appear to belong to the
+ * primary and destructively erase the user's parked ensemble layout.
+ */
+export function clearRoleAssignmentsForAgent(agentId, userId) {
+  if (!agentId) return 0;
+
+  /** Remove exact references from one persisted assignment container. */
+  const clearContainer = (container, targetPath) => {
+    const assignments = container.skillAssignments ?? {};
+    let removed = 0;
+    for (const [skillId, assignedAgentId] of Object.entries(assignments)) {
+      if (assignedAgentId !== agentId) continue;
+      delete assignments[skillId];
+      removed++;
+    }
+    if (removed) {
+      container.skillAssignments = assignments;
+      writeFileSync(targetPath, JSON.stringify(container, null, 2));
+    }
+    return removed;
+  };
+
+  const clearGlobal = () => {
+    let cfg = {};
+    if (existsSync(CFG_PATH)) cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+      throw new Error('Cannot clear role assignments: invalid global configuration');
+    }
+    return clearContainer(cfg, CFG_PATH);
+  };
+
+  if (!userId) return clearGlobal();
+
+  const user = _readUserProfile(userId);
+  if (!user) {
+    throw new Error(`Cannot clear role assignments for unknown or unreadable user: ${userId}`);
+  }
+  if (_isOwnerRole(user.role)) return clearGlobal();
+
+  const userPath = path.join(USERS_DIR, userId, 'profile.json');
+  const profileRemoved = clearContainer(user, userPath);
+  // Older admins could have stored their assignments in the legacy global
+  // map. Clean both locations during deletion while regular users remain
+  // strictly profile-local.
+  return profileRemoved + (user.role === 'admin' ? clearGlobal() : 0);
 }
 
 /**
@@ -845,9 +949,11 @@ export function reconcileRoleDrawers() {
     if (!existsSync(userPath)) continue;
     let user;
     try { user = JSON.parse(readFileSync(userPath, 'utf8')); } catch { continue; }
-    const assignments = _isPrivilegedUserRole(user?.role)
+    const assignments = _isOwnerRole(user?.role)
       ? globalAssignments
-      : (user?.skillAssignments ?? {});
+      : (user?.role === 'admin'
+          ? { ...globalAssignments, ...(user?.skillAssignments ?? {}) }
+          : (user?.skillAssignments ?? {}));
     for (const [roleId, agentId] of Object.entries(assignments)) {
       if (ROLE_DRAWER_AUTO_ENABLE[roleId] && agentId) {
         syncDrawerForRoleAssignment(userId, roleId, agentId);
@@ -858,14 +964,65 @@ export function reconcileRoleDrawers() {
 
 // ── Tool resolution ───────────────────────────────────────────────────────────
 
+/**
+ * Account-level skill authorization. Restricted accounts are fail-closed and
+ * an explicit allowedSkills array is authoritative for regular users too.
+ * Owner/admin accounts remain unrestricted. Missing/unreadable profiles deny.
+ */
+export function isSkillAllowedForUser(skillId, userId) {
+  if (!skillId || !userId) return true;
+  const profile = _readUserProfile(userId);
+  const allowed = _allowedSkillIdsForProfile(profile);
+  return allowed === null || allowed.has(skillId);
+}
+
+/**
+ * Runtime authorization shared by tool, alias, lifecycle, and watcher seams.
+ * `profile.skills` is one activation source, not the only one: hidden
+ * delegate tools are orchestration infrastructure, role bundles ride with an
+ * enabled parent role, and an agent's primary role remains its capability.
+ */
+export function isSkillRuntimeEnabledForUser(skillId, userId, agentId = null) {
+  if (!skillId || !userId || !isSkillAllowedForUser(skillId, userId)) return false;
+  const key = resolveKey(skillId, userId);
+  const wrap = key ? _manifests.get(key) : null;
+  if (!wrap) return false;
+  if (isSkillDisabled(userId, skillId, !!wrap.manifest?.always_on)) return false;
+  if (wrap.manifest?.always_on === true) return true;
+  const profile = _readUserProfile(userId);
+  if (!profile) return false;
+  const enabled = new Set([
+    ...getDefaultRoles(),
+    ...(Array.isArray(profile.skills) ? profile.skills : []),
+    ...(!Array.isArray(profile.skills) && profile.emailProvider === 'gmail' ? ['gmail'] : []),
+  ]);
+  if (enabled.has(skillId)) return true;
+  if (wrap.manifest?.category === 'delegate') return true;
+  if (wrap.manifest?.bundled_with_role && enabled.has(wrap.manifest.bundled_with_role)) return true;
+  if (agentId) {
+    const prefix = `${userId}_`;
+    const bare = String(agentId).startsWith(prefix) ? String(agentId).slice(prefix.length) : String(agentId);
+    const agent = listAgents().find(candidate => candidate.ownerId === userId && candidate.id === bare);
+    if (agent?.skillCategory === skillId) return true;
+  }
+  return false;
+}
+
+function accountAllowedSkillIds(userId) {
+  if (!userId) return null;
+  const profile = _readUserProfile(userId);
+  return _allowedSkillIdsForProfile(profile);
+}
+
 // Tools from always_on skills — injected into every agent regardless of category.
 // Intentionally global-only: a user's custom always_on: true skill should NOT leak
 // into other users' sessions. This is an isolation tradeoff — user custom skills
 // must be explicitly enabled via user.skills rather than auto-injected.
-function getAlwaysOnTools() {
+function getAlwaysOnTools(allowedSkillIds = null) {
   const tools = [];
   for (const wrap of _manifests.values()) {
     if (wrap.userId !== null) continue;
+    if (allowedSkillIds && !allowedSkillIds.has(wrap.manifest.id)) continue;
     if (wrap.manifest.always_on) tools.push(...(wrap.manifest.tools ?? []));
   }
   return tools;
@@ -877,12 +1034,14 @@ function getAlwaysOnTools() {
 // only at its primary skillCategory silently drops bundles for every secondary
 // role. Treat every assigned role as owned; bundles remain inherent to their
 // role rather than separately assignable (and stay hidden in Settings).
-function getBundledRoleTools(roleIds) {
+function getBundledRoleTools(roleIds, allowedSkillIds = null, userId = null) {
   const owned = new Set(Array.isArray(roleIds) ? roleIds : [roleIds].filter(Boolean));
   if (!owned.size) return [];
   const tools = [];
   for (const wrap of _manifests.values()) {
     if (wrap.userId !== null) continue;
+    if (allowedSkillIds && !allowedSkillIds.has(wrap.manifest.id)) continue;
+    if (userId && isSkillDisabled(userId, wrap.manifest.id, !!wrap.manifest.always_on)) continue;
     if (owned.has(wrap.manifest.bundled_with_role)) {
       tools.push(...(wrap.manifest.tools ?? []));
     }
@@ -892,9 +1051,16 @@ function getBundledRoleTools(roleIds) {
 
 // Resolve what tools an agent gets based on its skillCategory and the user's enabled roles
 export function resolveAgentTools(skillCategory, userSkills, agentId = null, userId = null) {
+  const allowedSkillIds = accountAllowedSkillIds(userId);
+  // getUserEnabledSkills backfills enabled_by_default skills for historical
+  // profiles. For a child that storage convenience must never widen the
+  // runtime capability surface beyond the parent-managed allowedSkills list.
+  userSkills = Array.isArray(userSkills)
+    ? userSkills.filter(skillId => !allowedSkillIds || allowedSkillIds.has(skillId))
+    : [];
   const assignments = getRoleAssignments(userId);
   const coordinatorId = assignments['coordinator'] ?? null;
-  const alwaysOn = getAlwaysOnTools();
+  const alwaysOn = getAlwaysOnTools(allowedSkillIds);
 
   // Resolve assignment: supports literal agent IDs and the special "coordinator" alias
   function isAssignedTo(skillId) {
@@ -923,7 +1089,9 @@ export function resolveAgentTools(skillCategory, userSkills, agentId = null, use
 
   // Always include the agent's primary role tools (even if not in userSkills).
   // Primary role is always a global skill category (coder, email, etc.).
-  const primaryTools = skillCategory ? (getRoleManifest(skillCategory)?.tools ?? []) : [];
+  const primaryTools = skillCategory && (!allowedSkillIds || allowedSkillIds.has(skillCategory))
+    ? getRoleTools(skillCategory, userId)
+    : [];
 
   // Bundles follow every role this agent owns, not only its primary role.
   // This matters when one Jarvis coordinator owns coordinator + coder + email
@@ -935,7 +1103,7 @@ export function resolveAgentTools(skillCategory, userSkills, agentId = null, use
     skillCategory,
     ...Object.keys(assignments).filter(roleId => enabledSkills.has(roleId) && isAssignedTo(roleId)),
   ].filter(Boolean);
-  const bundledTools = getBundledRoleTools(ownedRoleIds);
+  const bundledTools = getBundledRoleTools(ownedRoleIds, allowedSkillIds, userId);
 
   const dedup = tools => {
     const seen = new Set();
@@ -955,6 +1123,7 @@ export function resolveAgentTools(skillCategory, userSkills, agentId = null, use
   const delegateTools = [];
   for (const wrap of _manifests.values()) {
     if (wrap.userId !== null) continue;
+    if (allowedSkillIds && !allowedSkillIds.has(wrap.manifest.id)) continue;
     if (wrap.manifest.category === 'delegate') delegateTools.push(...(wrap.manifest.tools ?? []));
   }
   if (skillCategory === 'general' || skillCategory === 'web') {
@@ -977,6 +1146,37 @@ export function getDefaultRoles() {
 // Cache the full module per skill so we can read named exports
 // (watcherHandlers, etc.) in addition to the default executor function.
 const _modules = new Map(); // internalKey -> imported module
+
+async function importAliasCatalogModule(wrap, catalogUserId) {
+  if (!wrap?.manifest?.id || !catalogUserId) return {};
+  const skillId = wrap.manifest.id;
+  if (wrap.userId && wrap.userId !== catalogUserId) return {};
+  // Alias resolution runs before an agent/tool is selected, so it needs its
+  // own account boundary. Denied or disabled skills return an empty module
+  // without evaluating execute.mjs.
+  if (!isSkillRuntimeEnabledForUser(skillId, catalogUserId)) return {};
+
+  const functionName = wrap.manifest.alias_catalog?.catalog_source?.function;
+  if (wrap.userId && shouldSandboxSkill(wrap)) {
+    if (!functionName) return {};
+    return {
+      [functionName]: async () => {
+        const { runCustomSkillExportedFunctionSandboxed } = await import('./lib/skill-subprocess.mjs');
+        return runCustomSkillExportedFunctionSandboxed({
+          userId: catalogUserId,
+          skillId,
+          functionName,
+          net: skillDeclaresNetwork(catalogUserId, skillId),
+        });
+      },
+    };
+  }
+
+  const key = wrap.userId ? userKey(wrap.userId, skillId) : globalKey(skillId);
+  const filePath = path.join(wrap.dir, 'execute.mjs');
+  return import(pathToFileURL(filePath).href + `?bust=${_executorBust.get(key) || 0}`)
+    .catch(() => ({}));
+}
 
 // Load executor lazily. `internalKey` identifies the wrapper; `dir` comes from it.
 async function getExecutorByKey(internalKey) {
@@ -1006,6 +1206,8 @@ async function getExecutorByKey(internalKey) {
 export async function getWatcherHandler(skillId, userId, kind) {
   const key = resolveKey(skillId, userId);
   if (!key) return null;
+  const wrap = _manifests.get(key);
+  if (!isSkillRuntimeEnabledForUser(skillId, userId) || shouldSandboxSkill(wrap)) return null;
   // Trigger lazy load to populate _modules.
   await getExecutorByKey(key);
   const mod = _modules.get(key);
@@ -1047,7 +1249,7 @@ export async function validateSkills() {
     // each tool with {__validate:true}. The authoring-time smoke test (which
     // runs in the bwrap jail) covers custom skills; the boot probe keeps its
     // value for global (repo-shipped, first-party) skills only.
-    if (shouldSandboxSkill(wrap)) continue;
+    if (wrap.userId !== null) continue;
     const exec = await getExecutorByKey(internalKey);
     if (!exec) continue;
     const toolNames = (manifest.tools ?? []).map(t => t.function?.name).filter(Boolean);
@@ -1074,6 +1276,11 @@ export async function onRoleEnabled(roleId, userId) {
   const key = resolveKey(roleId, userId);
   if (!key) return;
   const wrap = _manifests.get(key);
+  if (!isSkillRuntimeEnabledForUser(roleId, userId)) return;
+  // Custom lifecycle hooks are not part of the sandbox RPC contract. Refuse
+  // them instead of importing user-authored code into the server process;
+  // repo-shipped global hooks retain the existing behavior.
+  if (wrap.userId !== null) return;
   const execPath = path.join(wrap.dir, 'execute.mjs');
   if (!existsSync(execPath)) return;
   try {
@@ -1379,6 +1586,11 @@ async function buildCtx(userId, agentId, skillId = null) {
 // Flag-gated (config.skillSandbox.enabled, default off) until exercised live.
 function shouldSandboxSkill(wrap) {
   if (!wrap || wrap.userId == null) return false; // global = first-party = trusted
+  const ownerProfile = _readUserProfile(wrap.userId);
+  // Missing/unreadable ownership data and child-owned custom code are always
+  // isolated. A manifest is untrusted input and cannot opt itself out of the
+  // account boundary.
+  if (!ownerProfile || ownerProfile.role === 'child') return true;
   // Manifest self-declaration (set by skill_create): the portable default — new custom
   // skills ship with sandbox.isolate:true and travel sandboxed without a config edit.
   // Explicit isolate:false is a trust opt-out, still overridable by the operator config.
@@ -1435,12 +1647,10 @@ async function executeRoleToolForSkillInternal(
     return `Tool "${name}" is not declared by skill "${skillId}".`;
   }
   if (userId) {
-    const profile = _readUserProfile(userId);
-    if (profile?.role === 'child' && Array.isArray(profile.allowedSkills)
-      && !profile.allowedSkills.includes(skillId)) {
+    if (!isSkillAllowedForUser(skillId, userId)) {
       return `Tool "${name}" is not permitted for this account.`;
     }
-    if (isSkillDisabled(userId, skillId, !!wrap.manifest?.always_on)) {
+    if (!isSkillRuntimeEnabledForUser(skillId, userId, agentId)) {
       return `Tool "${name}" is from a disabled skill.`;
     }
     if (getHiddenTools(userId, skillId).includes(name)) {
@@ -1526,11 +1736,10 @@ export async function executeRoleTool(name, args, userId = 'default', agentId = 
       // matched a localIntent of a non-allowed skill ran the tool ungated,
       // and disabled-skill / hidden-tool overrides didn't apply here.
       if (userId) {
-        const profile = _readUserProfile(userId);
-        if (profile?.role === 'child' && Array.isArray(profile.allowedSkills) && !profile.allowedSkills.includes(skillId)) {
+        if (!isSkillAllowedForUser(skillId, userId)) {
           return `Tool "${name}" is not permitted for this account.`;
         }
-        if (isSkillDisabled(userId, skillId, !!wrap.manifest?.always_on)) {
+        if (!isSkillRuntimeEnabledForUser(skillId, userId, agentId)) {
           return `Tool "${name}" is from a disabled skill.`;
         }
         if (getHiddenTools(userId, skillId).includes(name)) {
@@ -1578,7 +1787,10 @@ function _readUserProfile(userId) {
   try {
     const p = path.join(USERS_DIR, userId, 'profile.json');
     if (!existsSync(p)) return null;
-    return JSON.parse(readFileSync(p, 'utf8'));
+    const profile = JSON.parse(readFileSync(p, 'utf8'));
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return null;
+    if (profile.id !== userId || !['owner', 'admin', 'user', 'child'].includes(profile.role)) return null;
+    return profile;
   } catch { return null; }
 }
 
@@ -1608,7 +1820,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     }
   }
 
-  let skillExec = null;
+  let owningKey = null;
   let owningSkillId = null;
   let owningWrap = null;
   // MCP-namespaced server tools (mcp_<server>__<tool>) route to skills/mcp/.
@@ -1621,58 +1833,37 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   if (resolvedName.startsWith('mcp_') && resolvedName.includes('__')) {
     for (const [key, wrap] of visibleEntries(userId)) {
       if (wrap.manifest.id === 'mcp') {
+        owningKey = key;
         owningSkillId = 'mcp';
         owningWrap = wrap;
-        skillExec = await getExecutorByKey(key);
         break;
       }
     }
   }
-  if (!skillExec) {
+  if (!owningWrap) {
     for (const [key, wrap] of visibleEntries(userId)) {
       if (wrap.manifest.tools?.some(t => t.function?.name === resolvedName)) {
+        owningKey = key;
         owningSkillId = wrap.manifest.id;
         owningWrap = wrap;
-        skillExec = await getExecutorByKey(key);
         break;
       }
     }
   }
 
-  if (!skillExec) { yield { type: 'result', text: `Unknown tool: ${name}` }; return; }
-
-  // Custom (user-authored) skills run sandboxed: swap the in-process executor for
-  // a jail-backed wrapper with the SAME (name, args, …) → value contract, so the
-  // streaming dispatch below is untouched. Global skills keep skillExec as-is.
-  if (shouldSandboxSkill(owningWrap)) {
-    const _sandboxedSkillId = owningSkillId;
-    skillExec = (n, a) => runCustomSkillValue({ userId, agentId, skillId: _sandboxedSkillId, name: n, args: a });
-  }
-
-  // Memory scoping: note when a *scopable* skill's tool runs, so a fact
-  // remembered later this turn scopes to that skill (see pinFact). Scopable =
-  // service roles + custom specialist skills assigned to an agent; utility
-  // skills (self-mgmt, web, delegate, tasks…) aren't assigned, so they never
-  // become a fact's scope. Keyed to the tool's owning skill, NOT the calling
-  // agent, so a node fact the coordinator learns via node_* tools scopes to
-  // 'nodes' (→ Chuck), and a youtube fact scopes to youtube-downloader (→ its
-  // specialist) — both regardless of who ran the tool.
-  if (owningSkillId) {
-    try { if (isScopableSkill(owningSkillId, userId)) recordDomainSkill(owningSkillId); }
-    catch { /* lookup best-effort */ }
+  if (!owningWrap || !owningKey || !owningSkillId) {
+    yield { type: 'result', text: `Unknown tool: ${name}` };
+    return;
   }
 
   // Child-account allowedSkills enforcement — blocks tool calls that the model
   // hallucinated or that arrived via a delegation/prompt-injection path where
-  // the tool schema wasn't normally offered. This is the *last* gate before
-  // execution, so it catches paths that bypass the UI/roster filters.
-  const profile = _readUserProfile(userId);
-  if (profile?.role === 'child' && owningSkillId) {
-    const allowed = profile.allowedSkills;
-    if (Array.isArray(allowed) && !allowed.includes(owningSkillId)) {
-      yield { type: 'result', text: `Tool "${name}" is not permitted for this account.` };
-      return;
-    }
+  // tool schema wasn't normally offered. Authorization happens before executor
+  // loading: importing a custom execute.mjs evaluates its top-level code, so a
+  // denied skill must never reach getExecutorByKey in the first place.
+  if (!isSkillAllowedForUser(owningSkillId, userId)) {
+    yield { type: 'result', text: `Tool "${name}" is not permitted for this account.` };
+    return;
   }
 
   // Phase-10: defense-in-depth. listRoles/getRoleTools already filter the
@@ -1680,8 +1871,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // request_tools, or a delegated turn that pre-resolved its toolset, we
   // still want disabled-skill/hidden-tool overrides to win at the gate.
   if (userId && owningSkillId) {
-    const owningManifest = _manifests.get(resolveKey(owningSkillId, userId))?.manifest;
-    if (isSkillDisabled(userId, owningSkillId, !!owningManifest?.always_on)) {
+    if (!isSkillRuntimeEnabledForUser(owningSkillId, userId, agentId)) {
       yield { type: 'result', text: `Tool "${name}" is from a disabled skill.` };
       return;
     }
@@ -1690,6 +1880,25 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       return;
     }
   }
+
+  // Choose the isolation path before loading any executor code. Sandboxed
+  // custom skills are never imported into the OE process; their execute.mjs is
+  // evaluated only by the jailed subprocess. Trusted/global executors load
+  // in-process after all account and per-tool authorization gates pass.
+  let skillExec = null;
+  if (shouldSandboxSkill(owningWrap)) {
+    const sandboxedSkillId = owningSkillId;
+    skillExec = (n, a) => runCustomSkillValue({ userId, agentId, skillId: sandboxedSkillId, name: n, args: a });
+  } else {
+    skillExec = await getExecutorByKey(owningKey);
+  }
+  if (!skillExec) { yield { type: 'result', text: `Unknown tool: ${name}` }; return; }
+
+  // Memory scoping is recorded only after authorization succeeds. Scopable =
+  // service roles + custom specialist skills assigned to an agent; utility
+  // skills (self-mgmt, web, delegate, tasks…) stay shared.
+  try { if (isScopableSkill(owningSkillId, userId)) recordDomainSkill(owningSkillId); }
+  catch { /* lookup best-effort */ }
   // Use resolvedName for actual execution
   name = resolvedName;
 

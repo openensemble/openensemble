@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { existsSync } from 'fs';
+import { mayImportCustomCodeInProcess } from './lib/custom-code-policy.mjs';
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 export const PLUGINS_DIR = path.join(__dirname, 'plugins');
@@ -107,8 +108,15 @@ export function getDrawersForUser(user) {
 export async function delegateDrawerRequest(req, res, cfg) {
   const reqUserId = cfg?.userId ?? null;
   for (const [id, manifest] of _manifests) {
-    if (manifest?.custom === true && manifest.createdBy && manifest.createdBy !== reqUserId) {
-      continue;
+    if (manifest?.custom === true) {
+      // A custom drawer without a valid owner is never globally reachable.
+      // Re-check on every request (including cache hits) so revocation or an
+      // account-role change immediately prevents both import and execution.
+      if (!manifest.createdBy || manifest.createdBy !== reqUserId
+          || !mayImportCustomCodeInProcess(manifest.createdBy, manifest.skillId)) {
+        _handlers.delete(id);
+        continue;
+      }
     }
     // Lazy-load each plugin's server.mjs handler
     if (!_handlers.has(id)) {

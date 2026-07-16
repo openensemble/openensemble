@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { USERS_DIR } from './lib/paths.mjs';
@@ -60,6 +60,13 @@ beforeAll(() => {
 beforeEach(async () => {
   vi.mocked(streamChat).mockClear();
   vi.mocked(interceptScheduling).mockClear();
+  await clearSession(`${USER_ID}_${agentId}`);
+});
+
+// handleChatMessage intentionally flushes the crash-recovery stream buffer in
+// the background. Queue one awaited session mutation behind those writes so
+// the Vitest worker cannot exit while still owning the cross-process lock.
+afterEach(async () => {
   await clearSession(`${USER_ID}_${agentId}`);
 });
 

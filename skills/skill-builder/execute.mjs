@@ -4,6 +4,7 @@ import path from 'path';
 import { randomBytes } from 'crypto';
 import { SKILLS_DIR, USERS_DIR, userSkillsDir } from '../../lib/paths.mjs';
 import { PLUGINS_DIR, registerDrawerManifest, unregisterDrawerManifest } from '../../plugins.mjs';
+import { mayImportCustomCodeInProcess } from '../../lib/custom-code-policy.mjs';
 
 const BLUEPRINT = path.join(SKILLS_DIR, 'SKILL_BLUEPRINT.md');
 const CAPABILITIES = path.join(SKILLS_DIR, 'skill-builder', 'CAPABILITIES.md');
@@ -216,10 +217,18 @@ function drawerDomIdFor(pluginId) { return 'drawer_' + safeDomSuffix(pluginId); 
 function drawerBtnIdFor(pluginId) { return 'sbtn_'   + safeDomSuffix(pluginId); }
 
 // Build and persist a drawer plugin. Returns null on success, or an error string.
-async function createDrawerForSkill(pluginId, skillName, skillIcon, userId, skillId, drawer) {
+export async function createDrawerForSkill(pluginId, skillName, skillIcon, userId, skillId, drawer) {
   if (!drawer || typeof drawer !== 'object') return null;
   const { name, icon, lucideIcon, html, initJs, serverCode } = drawer;
   if (!html?.trim()) return 'drawer.html is required when a drawer is provided.';
+
+  // Drawer server modules do not have a subprocess protocol today. Until
+  // they do, never write or sanity-import one for an account that is not
+  // authorized to run this custom skill in-process. Static HTML/JS drawers
+  // remain available; only serverCode is refused.
+  if (serverCode?.trim() && !mayImportCustomCodeInProcess(userId, skillId)) {
+    return 'drawer.serverCode is unavailable for child, restricted, or unreadable accounts because drawer server modules run in the main OE process. Create a static drawer instead.';
+  }
 
   const pluginDir = path.join(PLUGINS_DIR, pluginId);
   if (existsSync(pluginDir)) {

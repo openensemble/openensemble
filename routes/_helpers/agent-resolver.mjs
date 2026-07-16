@@ -16,13 +16,16 @@ import { userRoleRulesPath } from '../../lib/paths.mjs';
 import { listAgents } from '../../agents.mjs';
 import {
   resolveAgentTools, getDefaultRoles, listRoles, getRoleAssignments, getRoleManifest,
-  getAgentRoles,
+  getAgentRoles, isSkillAllowedForUser, isSkillRuntimeEnabledForUser,
 } from '../../roles.mjs';
 import { getUser, modifyUser } from '../_helpers.mjs';
 import { getOrchestrationPolicy } from '../../lib/orchestration-policy.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import { composeSkillSpaBlock } from '../../lib/skill-prompt-composer.mjs';
-import { getCachedMcpToolDefsForAgent } from '../../lib/mcp-tools.mjs';
+import {
+  getCachedMcpToolDefsForAgent,
+  getCachedMcpToolDefsForAgents,
+} from '../../lib/mcp-tools.mjs';
 import { modelCapabilityPrompt } from '../../lib/model-capabilities.mjs';
 import { applyRequestToolsRosterPolicy } from '../../lib/request-tools-schema.mjs';
 
@@ -100,11 +103,18 @@ function buildToolOwnerIndex(userId) {
 
 export function getAgentsForUser(userId) {
   const userSkills = getUserEnabledSkills(userId);
-  const enabledSkillIds = new Set(userSkills);
+  const runtimeVisibleSkills = new Set(listRoles(userId).map(skill => skill.id));
+  const enabledSkillIds = new Set(userSkills.filter(skillId =>
+    !getRoleManifest(skillId, userId) || runtimeVisibleSkills.has(skillId)));
   let overrides = {}, userRole = 'user';
   let currentUser = null;
   if (userId) {
     currentUser = getUser(userId);
+    // A missing or unreadable profile has no capability authority. Do not
+    // synthesize the legacy default skill set or expose an owned roster while
+    // account state is unavailable.
+    if (!currentUser || typeof currentUser !== 'object' || currentUser.id !== userId
+        || !['owner', 'admin', 'user', 'child'].includes(currentUser.role)) return [];
     overrides = currentUser?.agentOverrides ?? {};
     userRole = currentUser?.role ?? 'user';
   }
@@ -112,6 +122,7 @@ export function getAgentsForUser(userId) {
   // Every user — including owner/admin — only sees agents they own. No sharing,
   // no allowlist, no ownerless fallthrough.
   let visibleBase = listAgents().filter(a => a.ownerId === userId);
+  const ownedAgentIds = visibleBase.map(a => a.id);
   // Orchestration projection (single-agent-mode plan §3.1): in single mode
   // the roster the rest of the system sees is JUST the stored primary agent.
   // The other agents stay on disk untouched (dormant, restored exactly on
@@ -252,6 +263,17 @@ export function getAgentsForUser(userId) {
         return out;
       })();
       const bundledRoleTools = new Set(bundledForCategory);
+      // Global always_on skills are platform invariants, not optional parts of
+      // a role's curated defaultToolIds surface. resolveAgentTools adds them to
+      // every agent; preserve that contract through this second-stage filter.
+      // Use the global catalog (listRoles without a user id) so a user-authored
+      // custom manifest cannot promote itself into every agent's surface.
+      const globalAlwaysOnToolNames = new Set(
+        listRoles()
+          .filter(m => m.always_on === true)
+          .flatMap(m => (m.tools ?? []).map(t => t.function?.name))
+          .filter(Boolean)
+      );
       // Delegate-category tools (ask_agent) bypass the defaultToolIds filter
       // unconditionally. Every agent — coordinator or specialist — gets to
       // call ask_agent now: coordinators route to any specialist, specialists
@@ -275,6 +297,7 @@ export function getAgentsForUser(userId) {
           || assignedSkillToolNames.has(name)
           || heldRoleTools.has(name)
           || bundledRoleTools.has(name)
+          || globalAlwaysOnToolNames.has(name)
           || delegateToolNames.has(name);
       });
     }
@@ -284,7 +307,11 @@ export function getAgentsForUser(userId) {
     // boot by lib/mcp-tools.warmAllUsersAtBoot, and refreshed when the
     // user edits their mcp.json. They're namespaced `mcp_<server>_<tool>`
     // and routed at dispatch time to skills/mcp/execute.mjs.
-    const mcpToolDefs = getCachedMcpToolDefsForAgent(userId, a.id);
+    const mcpToolDefs = isSkillRuntimeEnabledForUser('mcp', userId)
+      ? (rosterSolo
+          ? getCachedMcpToolDefsForAgents(userId, ownedAgentIds)
+          : getCachedMcpToolDefsForAgent(userId, a.id))
+      : [];
     if (mcpToolDefs.length) {
       tools = [...tools, ...mcpToolDefs];
     }
@@ -295,6 +322,25 @@ export function getAgentsForUser(userId) {
     // Filtering the resolved full surface also prevents request_tools from
     // resurrecting ask_agent later in the same turn.
     if (rosterSolo) tools = tools.filter(tool => tool.function?.name !== 'ask_agent');
+
+    // Final account boundary over the fully assembled schema list. Explicit
+    // Account ceilings apply to every fully assembled static/custom tool.
+    // Enabled-state filtering happens at each composition source above: the
+    // profile's enabled skills, deliberate role bundles, primary-role tools,
+    // and orchestration's delegate tools are distinct activation mechanisms.
+    // Dynamic MCP tools are additionally gated by runtime-enabled state at
+    // their cache-composition seam above.
+    // This runs after MCP + compatibility composition so no later source can
+    // bypass the earlier per-skill filters.
+    if (userId) {
+      tools = tools.filter(tool => {
+        const name = tool?.function?.name;
+        if (!name) return false;
+        const owner = toolOwnerIndex[name]
+          ?? (name.startsWith('mcp_') && name.includes('__') ? 'mcp' : null);
+        return !!owner && isSkillAllowedForUser(owner, userId);
+      });
+    }
 
     // Tool-presence SPA injection lives in lib/skill-prompt-composer.mjs so
     // chat.mjs can re-compose after per-turn tool trimming. See module
@@ -459,9 +505,11 @@ export function getAgentsForUser(userId) {
       // systemPrompt and ignore the tiers field.
       _promptTiers,
     };
-    // Child containment: never let agents cross-read each other's sessions.
-    // Amplifies jailbreak persistence if enabled.
-    if (isChild) result.crossAgentRead = null;
+    // Child containment and single-mode memory isolation: a singleton builds
+    // its own episodic history while parked agents' histories remain dormant.
+    // Explicit crossAgentRead links would otherwise union those old sessions
+    // back into the primary despite the non-destructive/dormant policy.
+    if (isChild || rosterSolo) result.crossAgentRead = null;
     return result;
   });
 }
@@ -472,6 +520,38 @@ export function getAgentsForUser(userId) {
 export function getAgentForUser(agentId, userId) {
   const list = getAgentsForUser(userId);
   return list.find(a => a.id === agentId) ?? null;
+}
+
+/**
+ * Resolve a persisted/runtime agent reference through the current
+ * orchestration projection. In ensemble mode an invalid explicit id remains an
+ * error. In single mode a reference to a parked agent is redirected to the
+ * primary, which keeps browsers, voice defaults, schedules, and watchers
+ * operational without rewriting their saved agent ids (switch-back restores
+ * the original targets).
+ */
+export function resolveRuntimeAgentForUser(userId, requestedAgentId = null, { fallbackUnknown = false } = {}) {
+  const roster = getAgentsForUser(userId);
+  if (!roster.length) return null;
+  const prefix = `${userId}_`;
+  const raw = typeof requestedAgentId === 'string' && requestedAgentId.startsWith(prefix)
+    ? requestedAgentId.slice(prefix.length)
+    : requestedAgentId;
+  if (raw) {
+    const exact = roster.find(agent => agent.id === raw);
+    if (exact) return exact;
+    const owned = listAgents().some(agent => agent.ownerId === userId && agent.id === raw);
+    // Only a real, currently-owned parked agent is redirected automatically.
+    // Foreign/deleted/garbage ids remain invalid unless a transport such as a
+    // voice device explicitly asks for coordinator fallback.
+    if (!(owned && getOrchestrationPolicy(userId).mode === 'single') && !fallbackUnknown) return null;
+  }
+  const coordinatorId = getRoleAssignments(userId).coordinator ?? null;
+  return roster.find(agent => agent.id === coordinatorId) ?? roster[0] ?? null;
+}
+
+export function resolveRuntimeAgentId(userId, requestedAgentId = null, options = {}) {
+  return resolveRuntimeAgentForUser(userId, requestedAgentId, options)?.id ?? null;
 }
 
 export async function saveUserAgentOverride(userId, agentId, changes) {

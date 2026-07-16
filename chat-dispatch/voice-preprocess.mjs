@@ -72,6 +72,34 @@ import {
 } from '../skills/tasks/execute.mjs';
 
 /**
+ * Re-check the account and per-tool permission boundary at approval time.
+ *
+ * A destructive operation can sit in the pending store for several minutes.
+ * The account's allowed-skills ceiling, disabled-skill state, or hidden-tools
+ * override may change during that window, so authorization at stage time is
+ * not sufficient. Keep this import lazy: roles.mjs loads the skill executors,
+ * and importing it at module evaluation time would create a cycle.
+ *
+ * The automation helper deliberately fails closed for malformed override
+ * storage. Any failure here cancels the staged approval instead of letting a
+ * stale grant reach an executor.
+ */
+async function isPendingApprovalAuthorized(userId, skillId, toolName) {
+  if (!userId || !skillId || !toolName) return false;
+  try {
+    const [roles, overrides] = await Promise.all([
+      import('../roles.mjs'),
+      import('../lib/skill-overrides.mjs'),
+    ]);
+    return roles.isSkillRuntimeEnabledForUser(skillId, userId) === true
+      && overrides.assertSkillToolAutomationAllowed(userId, skillId, toolName) === true;
+  } catch (e) {
+    console.warn(`[approval] authorization re-check failed for ${skillId}.${toolName}:`, e?.message ?? e);
+    return false;
+  }
+}
+
+/**
  * Fast-path regex router for voice-device control intents. Runs BEFORE the
  * full LLM dispatch so common commands like "volume up" / "pause" / "stop"
  * complete in ~1 ms with no token cost.
@@ -473,10 +501,33 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
     // "APPROVE WATCHER OP": staged cross-agent watcher cancel/update the
     // coordinator deferred when a specialist asked it to touch a watcher
     // owned by a different agent — see canActOnWatcher in skills/tasks.
-    { phrase: 'CONFIRM DELETION',   get: getPendingDelete,    clear: clearPendingDelete,    run: executePendingDelete },
-    { phrase: 'APPROVE PURGE',      get: getPendingEmail,     clear: clearPendingEmail,     run: executePendingEmail },
-    { phrase: 'APPROVE PROVEN',     get: getPendingProven,    clear: clearPendingProven,    run: executePendingProven },
-    { phrase: 'APPROVE WATCHER OP', get: getPendingWatcherOp, clear: clearPendingWatcherOp, run: executePendingWatcherOp },
+    {
+      phrase: 'CONFIRM DELETION', skillId: 'expenses',
+      toolName: pending => ({
+        expense_delete: 'expense_delete',
+        expense_delete_batch: 'expense_delete_batch',
+        expense_delete_all: 'expense_delete_all',
+      })[pending?.name] ?? null,
+      get: getPendingDelete, clear: clearPendingDelete, run: executePendingDelete,
+    },
+    {
+      phrase: 'APPROVE PURGE', skillId: 'email',
+      toolName: pending => ({
+        email_purge_sender: 'email_purge_sender',
+        email_batch_trash: 'email_batch_trash',
+      })[pending?.name] ?? null,
+      get: getPendingEmail, clear: clearPendingEmail, run: executePendingEmail,
+    },
+    {
+      phrase: 'APPROVE PROVEN', skillId: 'profiles',
+      toolName: () => 'profile_set_trust_state',
+      get: getPendingProven, clear: clearPendingProven, run: executePendingProven,
+    },
+    {
+      phrase: 'APPROVE WATCHER OP', skillId: 'tasks',
+      toolName: pending => ({ cancel: 'cancel_watch', update: 'update_watch' })[pending?.action] ?? null,
+      get: getPendingWatcherOp, clear: clearPendingWatcherOp, run: executePendingWatcherOp,
+    },
   ];
 
   // Approval-card Cancel buttons use a targeted phrase rather than the old
@@ -504,6 +555,18 @@ export async function tryApprovalIntercept({ userText, userId, agentId, onEvent 
       return finish('⚠️ That approval card is stale — a newer operation of the same type is now pending in this chat. Nothing was executed and the newer operation is still staged; review its approval card before confirming.');
     }
     if (pending) {
+      // Revalidate immediately before handing control to the side-effecting
+      // executor. A staged approval is not a durable capability grant: if the
+      // skill/tool was revoked after staging, compare-and-clear this exact op
+      // and refuse it. Never clear a concurrently staged replacement.
+      const toolName = matched.toolName(pending);
+      const authorized = await isPendingApprovalAuthorized(userId, matched.skillId, toolName);
+      if (!authorized) {
+        const cleared = matched.clear(userId, agentId, pending.opId ?? opId);
+        return finish(cleared
+          ? `That approval was cancelled because "${toolName ?? 'the requested action'}" is no longer permitted for this account. Nothing was executed.`
+          : 'That approval changed while its permissions were being checked. Nothing was executed; review the current approval before trying again.');
+      }
       // executors return either a string or an object with optional .text
       // The expected id is validated and consumed in ONE store transaction.
       // The pre-read above exists only for a clearer stale-card message; it is

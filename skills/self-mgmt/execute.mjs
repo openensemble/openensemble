@@ -353,7 +353,14 @@ export default async function execute(name, args, userId, agentId) {
         }
       }
     }
-    const applied = await setOrchestrationPolicy(userId, { mode, ...(primaryAgentId ? { primaryAgentId } : {}) });
+    // Hold the projected-roster broadcast until the current chat turn has
+    // emitted its terminal event. Otherwise the browser switches away from
+    // the caller mid-reply and hides the confirmation that this tool returns.
+    const applied = await setOrchestrationPolicy(
+      userId,
+      { mode, ...(primaryAgentId ? { primaryAgentId } : {}) },
+      { deferBroadcast: true },
+    );
     if (applied.mode === 'single') {
       const { listAgents } = await import('../../agents.mjs');
       const primary = listAgents().find(a => a.id === applied.primaryAgentId);

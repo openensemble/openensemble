@@ -724,6 +724,7 @@ function renderVisionModelSelect(currentProvider, currentModel) {
 async function openSettingsDrawer(openIt = true) {
   if (openIt) toggleDrawer('drawerSettings', 'sbtnSettings');
   const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+  if (typeof loadOrchestrationSettings === 'function') loadOrchestrationSettings();
 
   // Show/hide admin-only tabs
   const usersTabBtn = $('stab-users');

@@ -4,6 +4,7 @@
 // password the server rejects, and an admin could create an account that the
 // (stricter) reset flow then can't set a new password for.
 const MIN_PASSWORD_LEN = 8;
+const _adminOrchestrationSaving = new Set();
 
 async function loadUserManagement() {
   const el = $('manageUsersList');
@@ -21,12 +22,31 @@ async function loadUserManagement() {
     const allFeatures = drawers.filter(p => p.drawer);
     const myId = getCurrentUserId();
     const myRole = _currentUser?.role;
+    const canManageOrchestration = (u) => u.id !== myId && (
+      myRole === 'owner'
+      || (myRole === 'admin'
+        && (u.role === 'user' || u.role === 'child')
+        && u.parentId === myId)
+    );
+    const orchestrationByUser = new Map(await Promise.all(
+      users.filter(canManageOrchestration).map(async (u) => {
+        try {
+          const response = await fetch(`/api/users/${encodeURIComponent(u.id)}/orchestration`, { cache: 'no-store' });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+          return [u.id, body];
+        } catch (e) {
+          return [u.id, { error: e?.message || 'Could not load agent setup' }];
+        }
+      }),
+    ));
     el.innerHTML = '';
     for (const u of users) {
       const roleLabel = { owner: '👑 Owner', admin: '🔑 Admin', user: '👤 User', child: '🧒 Child' }[u.role] ?? '👤 User';
       const roleColor = { owner: 'var(--accent)', admin: '#f5a623', user: 'var(--muted)', child: '#43b89c' }[u.role] ?? 'var(--muted)';
       const isSelf = u.id === myId;
       const isOwner = u.role === 'owner';
+      const canManageUserOrchestration = canManageOrchestration(u);
       // Roles + Skills checkboxes split — checked = granted access; null = unrestricted (all checked)
       const allowedSkills = u.allowedSkills ?? null;
       // Filter to globals only. User-scoped custom skills (userScope = creator's id)
@@ -161,6 +181,50 @@ async function loadUserManagement() {
           ${u.accessSchedule ? `<div style="font-size:10px;color:var(--muted);margin-top:4px">Currently blocked ${u.accessSchedule.blockedFrom} – ${u.accessSchedule.blockedUntil}</div>` : ''}
         </details>` : '';
 
+      let orchestrationSection = '';
+      if (canManageUserOrchestration) {
+        const orchestration = orchestrationByUser.get(u.id);
+        if (orchestration?.error) {
+          orchestrationSection = `
+            <details style="margin-bottom:6px">
+              <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">🤖 Agent setup</summary>
+              <div style="font-size:11px;color:var(--red,#e05c5c);padding:6px">${escHtml(orchestration.error)}</div>
+            </details>`;
+        } else if (orchestration) {
+          const available = Array.isArray(orchestration.availableAgents) ? orchestration.availableAgents : [];
+          const pendingPrimary = available.length === 0
+            && (u.orchestration?.pendingPrimary === true || orchestration.pendingPrimary === true);
+          const displayedMode = pendingPrimary || orchestration.mode === 'single' ? 'single' : 'ensemble';
+          const preferredPrimary = orchestration.primaryAgentId
+            || orchestration.recommendedPrimaryAgentId
+            || available[0]?.id
+            || '';
+          const primaryOptions = available.length
+            ? available.map(agent => `<option value="${escHtml(agent.id)}"${agent.id === preferredPrimary ? ' selected' : ''}>${escHtml(agent.emoji || '')} ${escHtml(agent.name || agent.id)}</option>`).join('')
+            : '<option value="">No assistants yet</option>';
+          const modeArgs = JSON.stringify([u.id, '$value']).replace(/'/g, '&#39;');
+          const primaryArgs = JSON.stringify([u.id, '$value']).replace(/'/g, '&#39;');
+          orchestrationSection = `
+            <details style="margin-bottom:6px">
+              <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">🤖 Agent setup</summary>
+              <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:7px;padding:6px">
+                <label style="font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:4px">Mode
+                  <select id="adminOrchestrationMode_${u.id}" data-change-action="adminSetOrchestrationMode" data-change-args='${modeArgs}'
+                    style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 7px;font-size:11px">
+                    <option value="single" ${displayedMode === 'single' ? 'selected' : ''} ${available.length ? '' : 'disabled'}>Single assistant</option>
+                    <option value="ensemble" ${displayedMode !== 'single' ? 'selected' : ''}>Agent ensemble</option>
+                  </select>
+                </label>
+                <label style="font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:4px">Primary assistant
+                  <select id="adminOrchestrationPrimary_${u.id}" data-change-action="adminSetOrchestrationPrimary" data-change-args='${primaryArgs}' ${available.length ? '' : 'disabled'}
+                    style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 7px;font-size:11px">${primaryOptions}</select>
+                </label>
+                <span style="font-size:10px;color:var(--muted)">${available.length ? 'Other agents stay parked in single mode.' : (pendingPrimary ? 'Single mode activates when the user creates their first assistant.' : 'The user must create an assistant first.')}</span>
+              </div>
+            </details>`;
+        }
+      }
+
       // Parent link display
       const parentInfo = u.parentId ? (() => {
         const parent = users.find(p => p.id === u.parentId);
@@ -168,6 +232,8 @@ async function loadUserManagement() {
       })() : '';
 
       const card = document.createElement('details');
+      card.id = `adminUserCard_${u.id}`;
+      card.dataset.userRole = u.role;
       card.style.cssText = 'background:var(--bg3);border-radius:10px;padding:0';
       card.innerHTML = `
         <summary style="list-style:none;cursor:pointer;user-select:none;padding:10px 12px;display:flex;align-items:center;gap:8px">
@@ -197,6 +263,7 @@ async function loadUserManagement() {
         ${allowedOAuthSection}
         ${allowedModelsSection}
         ${accessScheduleSection}
+        ${orchestrationSection}
         ${childSafetySection}
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;margin-top:8px">
           <input type="checkbox" ${lockChecked} id="lockToolsChk_${u.id}"
@@ -231,6 +298,48 @@ async function loadUserManagement() {
   }
 }
 
+async function _adminSaveOrchestration(userId, mode, primaryAgentId) {
+  if (_adminOrchestrationSaving.has(userId)) return;
+  if (mode === 'single' && !primaryAgentId) {
+    showToast('This account needs an assistant before single mode can be enabled.');
+    await loadUserManagement();
+    return;
+  }
+  _adminOrchestrationSaving.add(userId);
+  const modeSelect = document.getElementById(`adminOrchestrationMode_${userId}`);
+  const primarySelect = document.getElementById(`adminOrchestrationPrimary_${userId}`);
+  if (modeSelect) modeSelect.disabled = true;
+  if (primarySelect) primarySelect.disabled = true;
+  try {
+    const response = await fetch(`/api/users/${encodeURIComponent(userId)}/orchestration`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, ...(primaryAgentId ? { primaryAgentId } : {}) }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    showToast(body.mode === 'single' ? 'Single-assistant mode enabled' : 'Agent ensemble restored', 2000);
+  } catch (e) {
+    showToast(e?.message || 'Could not change agent setup');
+  } finally {
+    _adminOrchestrationSaving.delete(userId);
+    await loadUserManagement();
+  }
+}
+
+async function adminSetOrchestrationMode(userId, mode) {
+  const primary = document.getElementById(`adminOrchestrationPrimary_${userId}`)?.value || null;
+  await _adminSaveOrchestration(userId, mode === 'single' ? 'single' : 'ensemble', primary);
+}
+
+async function adminSetOrchestrationPrimary(userId, primaryAgentId) {
+  if (!primaryAgentId) return;
+  const mode = document.getElementById(`adminOrchestrationMode_${userId}`)?.value === 'single'
+    ? 'single'
+    : 'ensemble';
+  await _adminSaveOrchestration(userId, mode, primaryAgentId);
+}
+
 
 // Single save handler — collects every editable section in the user card and
 // PATCHes them in one request. Sections that don't exist for this user's role
@@ -248,7 +357,12 @@ async function adminSaveUser(userId) {
     const allSkills = skillGrid ? [...skillGrid.querySelectorAll('.skill-allow-chk')].map(el => el.dataset.skillid) : [];
     const checked = [...checkedRoles, ...checkedSkills];
     const all     = [...allRoles, ...allSkills];
-    body.allowedSkills = checked.length === all.length ? null : checked;
+    const targetRole = document.getElementById(`adminUserCard_${userId}`)?.dataset.userRole;
+    // Children are always explicit/fail-closed. `null` means legacy
+    // unrestricted for ordinary users and must never be written for a child.
+    body.allowedSkills = targetRole === 'child'
+      ? checked
+      : (checked.length === all.length ? null : checked);
     body.skills = checked;
   }
 
@@ -563,4 +677,3 @@ async function switchToUser(targetId) {
     if (e.message) showToast(e.message);
   }
 }
-

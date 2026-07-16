@@ -5,14 +5,14 @@
 
 import { readFileSync, readdirSync, unlinkSync, mkdirSync, existsSync } from 'fs';
 import path from 'path';
-import { getAgent } from './agents.mjs';
 import { streamChat } from './chat.mjs';
 import { appendToSession } from './sessions.mjs';
-import { withLock, atomicWriteSync, getAgentsForUser, getUser, isUserTimeBlocked, loadConfig } from './routes/_helpers.mjs';
+import { withLock, atomicWriteSync, resolveRuntimeAgentForUser, getUser, isUserTimeBlocked, loadConfig } from './routes/_helpers.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { log } from './logger.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
 import { appendTaskRun } from './lib/task-runs.mjs';
+import { tryAcquireUserTurnLease } from './chat-dispatch/slot-registry.mjs';
 
 // Run-history is only meaningful for user-owned tasks — system tasks (owned
 // by the 'system' pseudo-owner) live outside any user's directory and have
@@ -412,6 +412,7 @@ async function runTask(task, broadcast, opts = {}) {
   const manual = opts.manual === true;
   console.log(`[scheduler] Running task "${task.label}"${manual ? ' (manual)' : ''}`);
   const startedAt = Date.now();
+  let topologyLease = null;
   log.info('scheduler', 'task start', { taskId: task.id, label: task.label, ownerId: task.ownerId, type: task.type, manual });
 
   try {
@@ -483,11 +484,21 @@ async function runTask(task, broadcast, opts = {}) {
 
     const userId = task.ownerId ?? 'default';
 
-    // Resolve agent the same way the interactive path does — includes tools and overrides.
-    // Children have no registry fallback: task.agent must resolve against their own roster or fail.
-    const isChild = getUser(userId)?.role === 'child';
-    const resolved = getAgentsForUser(userId).find(a => a.id === task.agent)
-      ?? (isChild ? null : getAgent(task.agent));
+    // Scheduled agent runs are topology readers. A brief settings/deletion
+    // writer wins admission; retry locally so a timer fire is not lost merely
+    // because the user changed mode at the same instant.
+    for (let attempt = 0; attempt < 80 && !topologyLease; attempt++) {
+      topologyLease = tryAcquireUserTurnLease(userId, { label: `scheduled:${task.id}` });
+      if (!topologyLease) await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (!topologyLease) {
+      throw new Error('Account setup is changing; scheduled run could not acquire a stable agent roster.');
+    }
+
+    // Resolve only through the user's owned runtime roster. In single mode a
+    // real parked id redirects to the primary; stale/foreign ids never fall
+    // through to the global registry.
+    const resolved = resolveRuntimeAgentForUser(userId, task.agent);
     if (!resolved) {
       // Stamp + disable instead of silently returning — the task used to
       // stay "enabled" forever with no lastRun/lastError (a zombie the user
@@ -676,6 +687,8 @@ async function runTask(task, broadcast, opts = {}) {
     } catch (stampErr) {
       console.warn('[scheduler] Failed to stamp task failure after throw:', stampErr?.message || stampErr);
     }
+  } finally {
+    topologyLease?.release();
   }
 }
 
@@ -722,6 +735,11 @@ async function finalizeScheduledTask(task, {
   succeeded, output, lastError, manual, sessionKey, broadcast,
   briefingAcknowledgements = [], briefingUserId = task.ownerId,
 }) {
+  const completionUserId = task.ownerId ?? 'default';
+  const completionAgent = resolveRuntimeAgentForUser(completionUserId, task.agent)?.id ?? task.agent;
+  const completionSessionKey = completionAgent
+    ? `${completionUserId}_${completionAgent}`
+    : sessionKey;
   if (succeeded && briefingAcknowledgements.length) {
     try {
       const { acknowledgeBriefingSection } = await import('./lib/personalization/reflect.mjs');
@@ -737,7 +755,7 @@ async function finalizeScheduledTask(task, {
   // drawer's lastError covers it). Silent tasks skip it by contract.
   if (!succeeded && !task.silent && !manual) {
     try {
-      appendToSession(sessionKey, {
+      appendToSession(completionSessionKey, {
         role: 'assistant',
         content: `⚠️ Scheduled task failed. Last error: ${lastError || 'unknown'}.\n\nThe task is still scheduled and will retry on its next run.`,
         scheduled: true,
@@ -782,7 +800,7 @@ async function finalizeScheduledTask(task, {
         patch.disabledReason = `auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires; last error: ${lastError || 'unknown'}`;
         if (!task.silent) {
           try {
-            appendToSession(sessionKey, {
+            appendToSession(completionSessionKey, {
               role: 'assistant',
               content: `⛔ Scheduled task "${task.label}" auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failed fires. Last error: ${lastError || 'unknown'}.\n\nRe-enable it from the tasks drawer once the underlying issue is fixed.`,
               scheduled: true,
@@ -806,7 +824,7 @@ async function finalizeScheduledTask(task, {
     await updateTask(task.id, patch, task.ownerId);
   }
 
-  if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent });
+  if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: completionAgent });
 }
 
 // Track pending timers so we can cancel them on shutdown

@@ -17,7 +17,13 @@ import {
 // straight from the submodule (see routes/_helpers/auth-sessions.mjs).
 import { uaFromReq } from './_helpers/auth-sessions.mjs';
 import { migrateSharedCortexToUser } from '../memory.mjs';
-import { NEW_ACCOUNT_DEFAULT_MODE, getOrchestrationPolicy, setOrchestrationPolicy } from '../lib/orchestration-policy.mjs';
+import {
+  newAccountOrchestrationPolicy,
+  getOrchestrationPolicy,
+  getRequestedOrchestrationPolicy,
+  setOrchestrationPolicy,
+} from '../lib/orchestration-policy.mjs';
+import { listAgents } from '../agents.mjs';
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SHARING_PATH = path.join(BASE_DIR, 'sharing.json');
@@ -125,7 +131,7 @@ export async function handle(req, res) {
         // Orchestration mode is written EXPLICITLY at creation (integration
         // plan D4) — never left absent for later inference. primaryAgentId is
         // set by the single-mode onboarding/switch flow once an agent exists.
-        user = { id, name: name.trim(), emoji, color: color ?? COLORS[list.length % COLORS.length], newsDefaultTopic: 0, emailProvider: 'none', role, orchestration: { mode: NEW_ACCOUNT_DEFAULT_MODE }, ...freshUserDefaults, ...childDefaults, ...featureOverride, ...parentLink, ...tierOverrides, passwordHash, createdAt: new Date().toISOString() };
+        user = { id, name: name.trim(), emoji, color: color ?? COLORS[list.length % COLORS.length], newsDefaultTopic: 0, emailProvider: 'none', role, orchestration: newAccountOrchestrationPolicy(), ...freshUserDefaults, ...childDefaults, ...featureOverride, ...parentLink, ...tierOverrides, passwordHash, createdAt: new Date().toISOString() };
         isFirst = list.length === 0;
         list.push(user);
       });
@@ -166,7 +172,8 @@ export async function handle(req, res) {
     const target = loadUsers().find(u => u.id === targetId);
     if (!target) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
     // Admins manage only their own child/user accounts (same scope as PATCH).
-    if (authRole === 'admin' && authId !== targetId && target.parentId !== authId) {
+    if (authRole === 'admin' && authId !== targetId
+        && (!(target.role === 'user' || target.role === 'child') || target.parentId !== authId)) {
       res.writeHead(403); res.end(JSON.stringify({ error: 'You can only manage your own child/user accounts' })); return true;
     }
     // Children never reconfigure their own orchestration; a parent/admin can.
@@ -182,14 +189,42 @@ export async function handle(req, res) {
       const applied = await setOrchestrationPolicy(targetId, { mode, ...(primary ? { primaryAgentId: primary } : {}) });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(applied));
-    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    } catch (e) {
+      res.writeHead(e?.code === 'ORCHESTRATION_BUSY' ? 409 : 400);
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return true;
   }
   if (orchMatch && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    if (!isPrivileged(authId) && authId !== orchMatch[1]) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true; }
+    const targetId = orchMatch[1];
+    const target = loadUsers().find(u => u.id === targetId);
+    if (!target) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    const authRole = getUserRole(authId);
+    const adminCanManage = authRole === 'admin'
+      && (target.role === 'user' || target.role === 'child')
+      && target.parentId === authId;
+    if (authId !== targetId && authRole !== 'owner' && !adminCanManage) {
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true;
+    }
+    const policy = getOrchestrationPolicy(targetId);
+    const availableAgents = listAgents()
+      .filter(agent => agent.ownerId === targetId)
+      .map(agent => ({ id: agent.id, name: agent.name, emoji: agent.emoji ?? '' }));
+    const ownedIds = new Set(availableAgents.map(agent => agent.id));
+    const coordinatorId = getUserCoordinatorAgentId(targetId);
+    const recommendedPrimaryAgentId = policy.primaryAgentId
+      ?? (ownedIds.has(coordinatorId) ? coordinatorId : null)
+      ?? availableAgents[0]?.id
+      ?? null;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(getOrchestrationPolicy(orchMatch[1])));
+    res.end(JSON.stringify({
+      ...policy,
+      pendingPrimary: getRequestedOrchestrationPolicy(targetId).pendingPrimary === true,
+      availableAgents,
+      recommendedPrimaryAgentId,
+      managed: target.role === 'child' && authId === targetId,
+    }));
     return true;
   }
 
@@ -256,8 +291,22 @@ export async function handle(req, res) {
         if (isAuthRateLimited(`pw:${ip}:${targetId}`)) {
           res.writeHead(429, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Too many attempts. Try again in a minute.' }));
-          return true;
+        return true;
+      }
+      const effectiveTargetRole = changes.role ?? snap[snapIdx].role;
+      if (effectiveTargetRole === 'child') {
+        // Child permissions are always an explicit capability ceiling. Legacy
+        // null/missing values canonicalize to deny-all instead of inheriting
+        // the regular-user meaning of null (unrestricted).
+        if (!Array.isArray(changes.allowedSkills)) {
+          changes.allowedSkills = Array.isArray(snap[snapIdx].allowedSkills)
+            ? snap[snapIdx].allowedSkills
+            : [];
         }
+      } else if (changes.allowedSkills !== undefined
+          && changes.allowedSkills !== null && !Array.isArray(changes.allowedSkills)) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'allowedSkills must be an array or null' })); return true;
+      }
         const pwErr = validatePassword(changes.newPassword);
         if (pwErr) { res.writeHead(400); res.end(JSON.stringify({ error: pwErr })); return true; }
         if (authId === targetId) {

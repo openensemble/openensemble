@@ -349,7 +349,16 @@ function renderTaskRow(t) {
 
   // Expanded detail / editor. Reminder tasks don't have an agent or prompt;
   // agent tasks expose those fields.
-  const agentOptions = agents.map(a => `<option value="${escHtml(a.id)}"${a.id===t.agent?' selected':''}>${escHtml(a.emoji||'')} ${escHtml(a.name)}</option>`).join('');
+  // Single mode projects parked specialists out of `agents`, but the saved
+  // runner must remain selected. Otherwise editing only the label/time makes
+  // the browser silently rewrite task.agent to the visible primary and loses
+  // exact switch-back behavior.
+  const savedRunnerVisible = agents.some(a => a.id === t.agent);
+  const parkedRunnerOption = (!isReminder && t.agent && !savedRunnerVisible)
+    ? `<option value="${escHtml(t.agent)}" selected>${escHtml(t.agent)} (parked — preserved)</option>`
+    : '';
+  const agentOptions = parkedRunnerOption
+    + agents.map(a => `<option value="${escHtml(a.id)}"${a.id===t.agent?' selected':''}>${escHtml(a.emoji||'')} ${escHtml(a.name)}</option>`).join('');
   const timeField = t.repeat === 'once'
     ? `<label>When<input type="datetime-local" id="te-dt-${escHtml(t.id)}" value="${_toLocalInputValue(t.datetime)}"></label>`
     : t.repeat === 'interval'

@@ -426,12 +426,12 @@ function execDeleteResearch(documentId, userId) {
 // Build the restricted tool list for research workers. Excludes ask_agent
 // (prevents recursive delegation), deep_research_parallel (prevents self-loops),
 // and save_research/list_research/get_research (only the synthesizer saves).
-async function buildWorkerTools(userId) {
-  const { getRoleManifest, loadRoleManifests } = await import('../../roles.mjs');
+export async function buildWorkerTools(userId) {
+  const { getRoleTools, loadRoleManifests } = await import('../../roles.mjs');
   const allow = new Set(['research_search', 'web_search', 'fetch_url']);
   let pools = [
-    getRoleManifest('deep_research', userId)?.tools ?? [],
-    getRoleManifest('web', userId)?.tools ?? [],
+    getRoleTools('deep_research', userId),
+    getRoleTools('web', userId),
   ];
   // Defensive: if manifests aren't loaded (e.g. called from a standalone script
   // or before server init), load them now. No-op if already loaded.
@@ -439,8 +439,8 @@ async function buildWorkerTools(userId) {
     try {
       await loadRoleManifests();
       pools = [
-        getRoleManifest('deep_research', userId)?.tools ?? [],
-        getRoleManifest('web', userId)?.tools ?? [],
+        getRoleTools('deep_research', userId),
+        getRoleTools('web', userId),
       ];
     } catch (e) {
       console.warn('[deep_research_parallel] loadRoleManifests failed:', e.message);

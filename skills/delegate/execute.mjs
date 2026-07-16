@@ -49,6 +49,14 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   // The owner is the STABLE agent behind whatever session is calling — strip the
   // ephemeral/direct-chat wrapper so every incarnation resolves the same workers.
   const { effectiveAgentId: ownerKey } = _parseCallerSession(callerAgentId);
+  const agents = getAgentsForUser(userId);
+  const singleMode = agents.length === 1 && agents[0]?._rosterSolo === true;
+  const liveWorkers = () => singleMode
+    ? bg.listWorkersForUser(userId)
+    : bg.listWorkersForOwner(userId, ownerKey);
+  const recentWorkers = () => singleMode
+    ? bg.listRecentWorkersForUser(userId)
+    : bg.listRecentWorkersForOwner(userId, ownerKey);
 
   // A worker posting its own milestone note ("Batch 3 done: 200 labeled, ~600
   // left"). It finds its own task via the task_proxy ALS context that
@@ -67,8 +75,8 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   }
 
   if (name === 'check_workers') {
-    const workers = bg.listWorkersForOwner(userId, ownerKey);
-    const recent = bg.listRecentWorkersForOwner(userId, ownerKey);
+    const workers = liveWorkers();
+    const recent = recentWorkers();
     // Background DELEGATIONS (coordinator→specialist tasks) are user-level work
     // tracked separately from owned workers. Surface them here too, so "is Gina
     // still working?" resolves directly — no matter which agent the user asks —
@@ -150,7 +158,7 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   if (name === 'stop_worker') {
     const id = args.worker_id;
     if (!id) { yield { type: 'result', text: 'Missing worker_id (get it from check_workers).' }; return; }
-    const r = bg.stopWorker(userId, id, ownerKey);
+    const r = bg.stopWorker(userId, id, singleMode ? null : ownerKey);
     yield { type: 'result', text: r.ok ? `Stopping ${r.name} (${id}).` : `Couldn't stop ${id}: ${r.reason}.` };
     return;
   }
@@ -163,11 +171,10 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   const task = args.task;
   if (!task) { yield { type: 'result', text: 'Missing task — describe the complete job for the worker.' }; return; }
 
-  const agents = getAgentsForUser(userId);
   const ownerAgent = agents.find(a => a.id === ownerKey);
   if (!ownerAgent) { yield { type: 'result', text: `Couldn't resolve your own agent record (${ownerKey}) to staff a worker.` }; return; }
 
-  const running = bg.listWorkersForOwner(userId, ownerKey).length;
+  const running = liveWorkers().length;
   if (running >= MAX_WORKERS_PER_AGENT) {
     yield { type: 'result', text: `You already have ${running} workers running (max ${MAX_WORKERS_PER_AGENT}). Wait for one to finish or stop one with stop_worker before hiring another.` };
     return;
