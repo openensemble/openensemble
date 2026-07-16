@@ -654,16 +654,44 @@ export function getToolsForRoleIds(roleIds, userId = null) {
 function _isPrivilegedUserRole(role) { return role === 'owner' || role === 'admin'; }
 
 export function getRoleAssignments(userId) {
+  let user = null;
   if (userId) {
     try {
       const userPath = path.join(USERS_DIR, userId, 'profile.json');
-      if (existsSync(userPath)) {
-        const user = JSON.parse(readFileSync(userPath, 'utf8'));
-        if (user && !_isPrivilegedUserRole(user.role)) return user.skillAssignments ?? {};
-      }
+      if (existsSync(userPath)) user = JSON.parse(readFileSync(userPath, 'utf8'));
     } catch {}
   }
-  try { return JSON.parse(readFileSync(CFG_PATH, 'utf8')).skillAssignments ?? {}; } catch { return {}; }
+  let raw;
+  if (user && !_isPrivilegedUserRole(user.role)) {
+    raw = user.skillAssignments ?? {};
+  } else {
+    try { raw = JSON.parse(readFileSync(CFG_PATH, 'utf8')).skillAssignments ?? {}; } catch { raw = {}; }
+  }
+  return _projectAssignmentsForOrchestration(user, raw);
+}
+
+/**
+ * Read-time orchestration projection (single-agent-mode plan §3.1/D5): when a
+ * user's stored policy is single mode, every consumer of role assignments —
+ * tool resolution, memory scoping (getAgentAssignedSkills), fastpath rights,
+ * coordinator lookup — sees every assigned AND enabled skill as belonging to
+ * the primary agent. The stored assignments are never rewritten, so switching
+ * back to ensemble restores the exact previous layout.
+ *
+ * Policy semantics (missing/malformed → no projection) mirror
+ * lib/orchestration-policy.mjs, which is canonical. Duplicated inline rather
+ * than imported because this is a hot synchronous path already holding the
+ * parsed profile, and roles.mjs sits below that module in the import graph.
+ */
+function _projectAssignmentsForOrchestration(user, raw) {
+  const orch = user?.orchestration;
+  const primary = typeof orch?.primaryAgentId === 'string' && orch.primaryAgentId ? orch.primaryAgentId : null;
+  if (orch?.mode !== 'single' || !primary) return raw;
+  const projected = {};
+  for (const skillId of Object.keys(raw)) projected[skillId] = primary;
+  if (Array.isArray(user.skills)) for (const skillId of user.skills) projected[skillId] = primary;
+  projected.coordinator = primary;
+  return projected;
 }
 
 export function getRoleAssignment(roleId, userId) {

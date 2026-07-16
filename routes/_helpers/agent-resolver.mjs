@@ -19,6 +19,7 @@ import {
   getAgentRoles,
 } from '../../roles.mjs';
 import { getUser, modifyUser } from '../_helpers.mjs';
+import { getOrchestrationPolicy } from '../../lib/orchestration-policy.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import { composeSkillSpaBlock } from '../../lib/skill-prompt-composer.mjs';
 import { getCachedMcpToolDefsForAgent } from '../../lib/mcp-tools.mjs';
@@ -108,7 +109,27 @@ export function getAgentsForUser(userId) {
   const isChild = userRole === 'child';
   // Every user — including owner/admin — only sees agents they own. No sharing,
   // no allowlist, no ownerless fallthrough.
-  const visibleBase = listAgents().filter(a => a.ownerId === userId);
+  let visibleBase = listAgents().filter(a => a.ownerId === userId);
+  // Orchestration projection (single-agent-mode plan §3.1): in single mode
+  // the roster the rest of the system sees is JUST the stored primary agent.
+  // The other agents stay on disk untouched (dormant, restored exactly on
+  // switch-back); getRoleAssignments projects every enabled skill onto the
+  // primary so tool resolution, memory scoping, and fastpath follow. The
+  // mode comes from the stored policy ONLY — roster shape never decides it.
+  const orchestration = getOrchestrationPolicy(userId);
+  let rosterSolo = false;
+  if (orchestration.mode === 'single') {
+    const primary = visibleBase.find(a => a.id === orchestration.primaryAgentId);
+    if (primary) {
+      visibleBase = [primary];
+      rosterSolo = true;
+    } else {
+      // Primary deleted out from under the policy (the DELETE cascade rewrites
+      // the profile, but a request can land in between). Serve the full
+      // ensemble roster rather than an empty one.
+      console.warn(`[agent-resolver] single mode for ${userId} but primary ${orchestration.primaryAgentId} not found — serving ensemble roster`);
+    }
+  }
   // Build a summary of delegatable agents (all non-general agents) for the ask_agent tool description.
   // Compute each agent's effective skillCategory the same way the main return does, so agents
   // whose skillCategory is implicit (derived from role assignments, not stored on the raw record)
@@ -117,7 +138,13 @@ export function getAgentsForUser(userId) {
   const skillAssignmentsForDesc = getRoleAssignments(userId);
   const effectiveSkillCategory = (a) => {
     const assigned = Object.entries(skillAssignmentsForDesc).filter(([, v]) => v === a.id).map(([k]) => k);
-    const roleSkillId = assigned.find(id => getRoleManifest(id, userId)?.service) ?? assigned[0];
+    // A multi-role agent holding coordinator IS the coordinator regardless of
+    // assignment key order — otherwise a coder assignment placed first would
+    // silently turn it into a specialist and disable coordinator routing.
+    // (Single mode relies on this: the primary holds every enabled skill.)
+    const roleSkillId = assigned.includes('coordinator')
+      ? 'coordinator'
+      : (assigned.find(id => getRoleManifest(id, userId)?.service) ?? assigned[0]);
     return roleSkillId ?? a.skillCategory ?? TOOL_SETS_COMPAT[a.toolSet ?? 'web'];
   };
   // Compact format: `<id>=<name>(<role>)`. Cut from "'agent_x' (Name 📬) handles:
@@ -137,7 +164,10 @@ export function getAgentsForUser(userId) {
   return visibleBase.map(a => {
     const withOverrides = overrides[a.id] ? { ...a, ...overrides[a.id] } : a;
     const assignedSkillIds = Object.entries(skillAssignments).filter(([, v]) => v === a.id).map(([k]) => k);
-    const roleSkillId = assignedSkillIds.find(id => getRoleManifest(id, userId)?.service) ?? assignedSkillIds[0];
+    // Coordinator wins over key order — see effectiveSkillCategory above.
+    const roleSkillId = assignedSkillIds.includes('coordinator')
+      ? 'coordinator'
+      : (assignedSkillIds.find(id => getRoleManifest(id, userId)?.service) ?? assignedSkillIds[0]);
     const skillCategory = roleSkillId ?? withOverrides.skillCategory ?? TOOL_SETS_COMPAT[withOverrides.toolSet ?? 'web'];
 
     // Resolve tools FIRST so we can key SPA injection off actual tool presence
@@ -258,7 +288,9 @@ export function getAgentsForUser(userId) {
     const agentEmoji = withOverrides.emoji ?? a.emoji ?? '';
     const serverIp = getLanAddress();
     const emailNoConfirm = currentUser?.emailSendWithoutConfirm === true;
-    const composerInputs = { userId, userName, agentName, agentEmoji, serverIp, emailNoConfirm };
+    // rosterSolo rides in composerInputs so chat.mjs's post-trim SPA
+    // recompose (which spreads agent._composerInputs) inherits it unchanged.
+    const composerInputs = { userId, userName, agentName, agentEmoji, serverIp, emailNoConfirm, rosterSolo };
     const skillPromptAdditions = composeSkillSpaBlock({ tools, ...composerInputs });
     // Same expander composeSkillSpaBlock uses internally — needed below for
     // the agent's own raw systemPrompt (with {{USER_NAME}} etc).
@@ -401,7 +433,7 @@ export function getAgentsForUser(userId) {
       // chat.mjs uses these to recompose the SPA block after tool trimming.
       // Underscored to signal "internal — not for clients of the agent
       // record." Safe to omit from JSON serialization to the UI if needed.
-      _systemPromptShell, _composerInputs: composerInputs,
+      _systemPromptShell, _composerInputs: composerInputs, _rosterSolo: rosterSolo,
       // Three-tier prompt for cache_control-aware providers (Anthropic).
       // Other providers concatenate stable+context+volatile into
       // systemPrompt and ignore the tiers field.
