@@ -311,6 +311,7 @@ function showAddImapModal() {
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer"><input type="checkbox" id="imapTls" checked> TLS</label>
       </div>
       <input id="imapUsername" placeholder="Username / email" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
+      <input id="imapSmtpFrom" type="email" placeholder="SMTP From email (optional; defaults to username)" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
       <input id="imapPassword" type="password" placeholder="Password or app password" style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;font-size:12px;color:var(--text);width:100%;box-sizing:border-box">
       <div id="imapError" style="color:var(--red,#e05c5c);font-size:11px;display:none"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -327,6 +328,7 @@ async function submitImapAccount() {
   const port     = parseInt($('imapPort')?.value ?? '993', 10);
   const tls      = $('imapTls')?.checked !== false;
   const username = $('imapUsername')?.value.trim();
+  const smtpFrom = $('imapSmtpFrom')?.value.trim();
   const password = $('imapPassword')?.value;
   const errEl    = $('imapError');
   const btn      = $('imapSubmitBtn');
@@ -347,6 +349,7 @@ async function submitImapAccount() {
       payload.smtpPort = preset.smtpPort;
       payload.smtpTls  = preset.smtpTls;
     }
+    if (smtpFrom) payload.smtpFrom = smtpFrom;
     const res = await fetch('/api/email-accounts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

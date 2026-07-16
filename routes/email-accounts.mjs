@@ -113,7 +113,7 @@ export async function handle(req, res) {
     }
 
     const { provider, label, host, port, tls, username, password,
-            smtpHost, smtpPort, smtpTls, smtpUsername } = body;
+            smtpHost, smtpPort, smtpTls, smtpUsername, smtpFrom } = body;
     if (!provider || !label) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'provider and label required' }));
@@ -159,6 +159,17 @@ export async function handle(req, res) {
         account.smtpPort     = smtpPort ?? 587;
         account.smtpTls      = smtpTls !== false;
         account.smtpUsername = smtpUsername || username;
+        if (smtpFrom != null && smtpFrom !== '') {
+          const normalizedFrom = typeof smtpFrom === 'string' ? smtpFrom.trim() : '';
+          if (!normalizedFrom || normalizedFrom.length > 320
+              || /[\r\n]/.test(normalizedFrom)
+              || !/^[^\s@<>]+@[^\s@<>]+$/.test(normalizedFrom)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'smtpFrom must be a valid email address' }));
+            return true;
+          }
+          account.smtpFrom = normalizedFrom;
+        }
       }
     }
     // For gmail/microsoft, just store the shell; OAuth handled separately

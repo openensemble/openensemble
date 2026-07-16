@@ -4,6 +4,7 @@
  */
 
 import { readFileSync, readdirSync, unlinkSync, mkdirSync, existsSync } from 'fs';
+import { randomUUID } from 'crypto';
 import path from 'path';
 import { streamChat } from './chat.mjs';
 import { appendToSession, appendSessionReportOnce } from './sessions.mjs';
@@ -31,6 +32,20 @@ const TASKS_LOCK_KEY = path.join(BASE_DIR, 'tasks.lock');
 // failures = 15 attempts before we stop. Tasks are re-enabled by the user
 // from the tasks drawer once they've fixed whatever was wrong.
 const MAX_CONSECUTIVE_FAILURES = 5;
+
+/**
+ * Correlate one hidden scheduled reaction with its durable occurrence while
+ * still minting a fresh execution attempt. If the same occurrence is replayed
+ * after an ambiguous provider boundary, email's scope ledger sees the stable
+ * root plus a different attempt and fails closed on a changed resend.
+ */
+export function scheduledReactionTraceOptions(scheduledCtx) {
+  const rootTaskId = String(scheduledCtx?.runId || '').trim() || null;
+  return {
+    _rootTaskId: rootTaskId,
+    _sideEffectAttemptId: `scheduled_reaction_${randomUUID().replaceAll('-', '')}`,
+  };
+}
 
 // ── Task storage ──────────────────────────────────────────────────────────────
 
@@ -412,6 +427,15 @@ async function runTask(task, broadcast, opts = {}) {
   const manual = opts.manual === true;
   console.log(`[scheduler] Running task "${task.label}"${manual ? ' (manual)' : ''}`);
   const startedAt = Date.now();
+  // One stable identity per authorized occurrence. Provider retries and any
+  // nested agent/tool work must reuse it so durable side-effect guards cannot
+  // interpret a replay as a fresh send. Timer-fired callers pass the logical
+  // due time (stable across an in-process retry and scheduler rehydration);
+  // each explicit Run-now click is intentionally a new authorization.
+  const occurrenceId = String(opts.occurrenceId || (manual
+    ? `manual_${startedAt}_${Math.random().toString(36).slice(2, 8)}`
+    : task.datetime || task.nextRunAt || `fire_${startedAt}`));
+  const scheduledRunRootId = `scheduled:${task.id}:${occurrenceId}`;
   let topologyLease = null;
   log.info('scheduler', 'task start', { taskId: task.id, label: task.label, ownerId: task.ownerId, type: task.type, manual });
 
@@ -473,7 +497,11 @@ async function runTask(task, broadcast, opts = {}) {
         await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: `Error: no handler "${task.handler}"`, enabled: false }, task.ownerId);
         return;
       }
-      const output = await handler(task);
+      // Builtins can perform real-world side effects without going through an
+      // agent turn. Give them the same stable per-occurrence identity used by
+      // scheduled agent retries so they can bind those effects durably before
+      // provider dispatch. Existing one-argument handlers ignore this object.
+      const output = await handler(task, { occurrenceId, scheduledRunRootId, manual });
       console.log(`[scheduler] Task "${task.label}" complete: ${output}`);
       log.info('scheduler', 'builtin task complete', { taskId: task.id, label: task.label, handler: task.handler, durationMs: Date.now() - startedAt });
       if (task.repeat === 'once' && !manual) await removeTask(task.id, task.ownerId);
@@ -593,7 +621,7 @@ async function runTask(task, broadcast, opts = {}) {
       originTaskAgent: task.agent,
       // Per-fire nonce for the child barrier — overlapping fires of the same
       // recurring task must not share a barrier group (see keyFor).
-      runId: `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      runId: scheduledRunRootId,
       scheduledNote,
       manual,
     };
@@ -614,6 +642,8 @@ async function runTask(task, broadcast, opts = {}) {
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
       originTaskRunId: scheduledCtx.runId,
+      rootTaskId: scheduledCtx.runId,
+      traceSource: 'scheduled',
     });
 
     if (!succeeded) console.error(`[scheduler] Task "${task.label}" main turn failed after ${MAX_ATTEMPTS} attempts`);
@@ -725,6 +755,7 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
     _hiddenUser: true,
     _isBackgroundContinuation: true,
     _isolatedTaskRun: true,
+    ...scheduledReactionTraceOptions(scheduledCtx),
   }));
 }
 
@@ -924,7 +955,7 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
   // Clear any existing timer for this task before scheduling a new one
   if (_timers.has(task.id)) { clearTimeout(_timers.get(task.id)); _timers.delete(task.id); }
 
-  let delay, label;
+  let delay, label, occurrenceAt;
   let isLateOnce = false, lateByMs = 0;
   if (task.repeat === 'once') {
     if (!task.datetime) return;
@@ -936,6 +967,7 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
     // can log + record it without changing when it actually fires.
     const rawDelay = new Date(task.datetime).getTime() - Date.now();
     delay = Math.max(rawDelay, 0);
+    occurrenceAt = new Date(task.datetime).toISOString();
     isLateOnce = rawDelay < 0;
     lateByMs = isLateOnce ? -rawDelay : 0;
     label = new Date(task.datetime).toLocaleString();
@@ -959,7 +991,9 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
     // delay≈0 and a double-fire every cycle. Boot/PATCH callers pass nothing
     // and fall back to the persisted lastRun.
     const anchor = Number.isFinite(fireAnchorTs) ? fireAnchorTs : (Date.parse(task.lastRun || '') || 0);
-    delay = anchor ? Math.max(0, (anchor + interval) - Date.now()) : interval;
+    const dueAt = anchor ? anchor + interval : Date.now() + interval;
+    delay = Math.max(0, dueAt - Date.now());
+    occurrenceAt = new Date(dueAt).toISOString();
     label = `every ${formatInterval(interval)}`;
   } else {
     // Guard, don't throw: a task with a missing/malformed time must not kill
@@ -977,6 +1011,7 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
   }
 
   const eta = new Date(Date.now() + delay);
+  occurrenceAt ||= eta.toISOString();
   console.log(`[scheduler] "${task.label}" scheduled for ${label} (runs at: ${eta.toLocaleString()})`);
   // Persist so the drawer / API can show "next run" instead of only the
   // console log. Fire-and-forget: scheduleTask is called synchronously from
@@ -1013,7 +1048,7 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
           log.warn('scheduler', 'one-shot task armed past its due time — firing immediately', { taskId: task.id, label: task.label, lateByMs });
           recordTaskRun(current, { scheduledFor: current.datetime ?? null, firedAt, status: 'late', lateByMs });
         }
-        await runTask(current, broadcast);
+        await runTask(current, broadcast, { occurrenceId: occurrenceAt });
       }
     } catch (e) {
       const err = e?.message || String(e);

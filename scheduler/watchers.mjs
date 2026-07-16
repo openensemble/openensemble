@@ -1914,6 +1914,20 @@ async function deliverManagedPreferenceUpdate(record, value, { dispatchApproved 
 // "user_<uid>_coordinator"). We need the unscoped registry id to resolve
 // the agent, then re-scope for streaming. The systemNote pattern mirrors
 // scheduler.mjs's [SCHEDULED RUN] note — same constraint (no human present).
+function watcherEmailIdempotencyScope(record) {
+  const eventKey = String(record?._emailIdempotencyEventKey || '').trim();
+  if (eventKey) {
+    // A retained collection event may be retried on a later supervisor tick
+    // after an ambiguous provider boundary. Bind it to the durable event, not
+    // record.ticks, so that replay fails closed across ticks and restarts.
+    const eventDigest = createHash('sha256').update(eventKey).digest('hex').slice(0, 24);
+    return `watcher:${record.id}:event:${eventDigest}`;
+  }
+  const slot = String(record?._emailIdempotencySlot || 'on-fire');
+  const slotDigest = createHash('sha256').update(slot).digest('hex').slice(0, 24);
+  return `watcher:${record.id}:tick:${Number(record.ticks) || 0}:slot:${slotDigest}`;
+}
+
 async function executeOnFire(record) {
   // Safe-auto informational monitors are permanently clamped at the final
   // delivery boundary. A handler-supplied override can never reach an agent
@@ -1970,6 +1984,7 @@ async function executeOnFire(record) {
         // Untrusted skills may only email the account owner (self) — ignore a
         // skill-supplied recipient, else onFire is a data-exfiltration channel.
         subject, body, html, to: untrusted ? undefined : cfg.to, account: cfg.account,
+        idempotencyScope: watcherEmailIdempotencyScope(record),
       });
       if (!r.ok) log.warn('watchers', 'email onFire failed', { id: record.id, err: r.message });
       else log.info('watchers', 'email onFire sent', { id: record.id, to: cfg.to || '(self)' });
@@ -2095,6 +2110,11 @@ async function executeOnFire(record) {
     scopedAgent, userText: userPrompt, systemNote: watcherNote, userId, streamChat,
     maxAttempts: 1,
     context: 'watchers',
+    // A finalized watcher persists endedAt before onFire is dispatched. Reuse
+    // that durable occurrence identity if this action is resumed/replayed;
+    // active helper-fired watchers fall back to their last persisted change.
+    rootTaskId: `watcher:${record.id}:${record.endedAt || record.lastChangeAt || record.createdAt || 'current'}`,
+    traceSource: 'watcher',
     });
 
     if (!succeeded) {
@@ -2249,6 +2269,7 @@ export function handlerHelpers(record, { signal = null } = {}) {
   // fetcher (Best Buy stock pages, sites without RSS / public APIs, etc.).
   // Lazy-imported so watchers that don't touch the browser pay nothing.
   let _browserCache = null;
+  let emailFireSequence = 0;
   async function getBrowser() {
     if (_browserCache) return _browserCache;
     const { buildBrowserHelpers } = await import('../lib/browser-helper.mjs');
@@ -2311,6 +2332,10 @@ export function handlerHelpers(record, { signal = null } = {}) {
     agentId: runtimeWatcherAgentRef(record),
     watcherId: record.id,
     signal,
+    // System collection handlers need to choose between the lightweight WS
+    // notification helper and fire(), which owns email/Telegram/agent
+    // delivery. Keep the persisted server-side choice out of skill state.
+    deliveryMode: record.onFire?.type || null,
     // Per-skill encrypted secret store — same accessor as ctx.credentials, so a
     // skill's watcher handler reads the same config its tools stored.
     credentials: exposedCredentials,
@@ -2414,7 +2439,7 @@ export function handlerHelpers(record, { signal = null } = {}) {
       }
       const ts = Date.now();
       const fromName = opts.from || record.label || record.kind;
-      _sendNotificationFn?.(record.userId, {
+      const delivered = Number(_sendNotificationFn?.(record.userId, {
         type: 'agent_notification',
         agent: runtimeWatcherAgentRef(record),
         content,
@@ -2422,7 +2447,8 @@ export function handlerHelpers(record, { signal = null } = {}) {
         event: opts.event || record.kind,
         data: opts.data || {},
         ts,
-      });
+      })) || 0;
+      return delivered > 0;
     },
     // Trigger this watcher's onFire delivery WITHOUT finalising the watcher.
     // Use when the watcher should keep polling after delivering a notification
@@ -2434,7 +2460,8 @@ export function handlerHelpers(record, { signal = null } = {}) {
     //
     // Two call shapes:
     //   fire('message string')   — legacy, watcher-level onFire only.
-    //   fire({ message, subject, html, telegramPrefix, itemKey, deliver })
+    //   fire({ message, subject, html, telegramPrefix, itemKey, deliver,
+    //          eventKey })
     //                            — object form. For deliver='email', `html`
     //                            sends a rich HTML body (multipart/alternative;
     //                            `message` becomes the plain-text part, or it's
@@ -2458,6 +2485,7 @@ export function handlerHelpers(record, { signal = null } = {}) {
       const html       = isObj ? arg.html           : null;
       const tgPrefix   = isObj ? arg.telegramPrefix : null;
       const itemKey    = isObj ? arg.itemKey        : null;
+      const eventKey   = isObj ? arg.eventKey       : null;
       let   forceDeliv = isObj ? arg.deliver        : null;
 
       if (isManagedPreferenceWatcher(record)) {
@@ -2483,6 +2511,14 @@ export function handlerHelpers(record, { signal = null } = {}) {
       const baseCfg = forceDeliv ? _onFireForDeliver(forceDeliv, record) : record.onFire;
       if (!baseCfg?.type) return false;
 
+      // record.ticks advances only after the handler result is committed.
+      // Pairing it with an item id (or deterministic call ordinal) makes one
+      // fire stable across a crash/replayed tick while keeping distinct fires
+      // in the same tick independent.
+      const emailSlot = baseCfg.type === 'email'
+        ? (itemKey != null ? `item:${String(itemKey)}` : `call:${emailFireSequence++}`)
+        : null;
+
       let tempCfg = baseCfg;
       if (message) {
         if (baseCfg.type === 'agent')         tempCfg = { ...baseCfg, prompt: message };
@@ -2495,7 +2531,14 @@ export function handlerHelpers(record, { signal = null } = {}) {
       if (baseCfg.type === 'email' && (html || subject)) {
         tempCfg = { ...tempCfg, ...(subject ? { subject } : {}), ...(html ? { _html: html } : {}) };
       }
-      const synth = { ...record, onFire: tempCfg };
+      const synth = {
+        ...record,
+        onFire: tempCfg,
+        ...(emailSlot ? { _emailIdempotencySlot: emailSlot } : {}),
+        ...(eventKey != null && String(eventKey).trim()
+          ? { _emailIdempotencyEventKey: String(eventKey).trim().slice(0, 256) }
+          : {}),
+      };
       // executeOnFire's email/telegram branches read lastStatusText for the
       // body; surface the override through there so the handler doesn't have
       // to mutate persisted state.
@@ -2505,7 +2548,10 @@ export function handlerHelpers(record, { signal = null } = {}) {
         synth.lastStatusText = stripHtml(html);
       }
       try {
-        return await executeOnFire(synth);
+        // Preserve the delivery result. In particular, an email transport
+        // failure must stay false so collection watchers retain pendingEvent
+        // and retry instead of recording a notification that never arrived.
+        return (await executeOnFire(synth)) === true;
       } catch (e) {
         log.warn('watchers', 'fire threw', { id: record.id, err: e.message });
         return false;

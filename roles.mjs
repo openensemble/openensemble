@@ -137,6 +137,11 @@ async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, res
       onNotify: () => {},
       _hiddenUser: true,
       _isBackgroundContinuation: true,
+      // This turn exists only to interpret already-finished command output.
+      // Enforce the prompt's "do not take further actions" rule structurally
+      // so a model cannot turn a report-back into an uncorrelated side effect.
+      toolPlan: { mode: 'none' },
+      _readOnlyTurn: true,
     });
   } catch (e) {
     log.warn('tool', 'auto-bg continuation failed', { tool: toolName, userId, agentId: targetAgentId, err: e?.message || String(e) });

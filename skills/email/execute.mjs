@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadEmailAttachments, attachmentResolutionError } from '../../lib/email-attachments.mjs';
 import { resolveBodyDoc, deleteBodyDoc } from '../../lib/email-body-doc.mjs';
+import { sendEmailIdempotently } from '../../lib/email-idempotency.mjs';
 import { isVoiceSource } from '../../lib/voice-context.mjs';
 import {
   stagePending as stagePendingApproval,
@@ -18,15 +19,15 @@ import {
   clearPendingFor as clearPendingApproval,
 } from '../../lib/pending-approvals.mjs';
 import { emailLabelsEnabled, recordLabelings, recordCorrection, removeCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
+import { USERS_DIR } from '../../lib/paths.mjs';
 
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
-const BASE_DIR  = path.resolve(SKILL_DIR, '../..');
 const GMAIL_CLI = path.join(SKILL_DIR, 'gmail.mjs');
 
 // ── Account resolution ────────────────────────────────────────────────────────
 
 function loadAccounts(userId) {
-  const p = path.join(BASE_DIR, 'users', userId, 'email-accounts.json');
+  const p = path.join(USERS_DIR, userId, 'email-accounts.json');
   try { if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) {}
   return [];
 }
@@ -45,7 +46,7 @@ function requestedAccount(args = {}) {
 
 // ── Gmail compose with attachments (direct API, no CLI) ───────────────────────
 
-async function gmailComposeWithAttachments(args, userId, accountId) {
+export async function gmailComposeWithAttachments(args, userId, accountId, markDispatchStarted = () => {}) {
   const { getAccessToken } = await import('../../lib/google-auth.mjs');
   const token    = await getAccessToken('gmail', userId, accountId);
   const boundary = `boundary_${Date.now().toString(36)}`;
@@ -115,6 +116,7 @@ async function gmailComposeWithAttachments(args, userId, accountId) {
   }
 
   const encoded = Buffer.from(rawEmail).toString('base64url');
+  markDispatchStarted();
   const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -129,6 +131,56 @@ async function gmailComposeWithAttachments(args, userId, accountId) {
     ? ` with ${attachments.length} attachment(s): ${attachments.map(a => a.filename).join(', ')}`
     : '';
   return `Email sent${attachNote}. Message ID: ${sent.id}`;
+}
+
+function gmailHeader(headers, name) {
+  return headers.find(header => String(header?.name || '').toLowerCase() === name.toLowerCase())?.value || '';
+}
+
+export async function gmailReply(args, userId, accountId, markDispatchStarted = () => {}) {
+  const { getAccessToken } = await import('../../lib/google-auth.mjs');
+  const token = await getAccessToken('gmail', userId, accountId);
+  const headerNames = ['From', 'Reply-To', 'Subject', 'Message-ID', 'References'];
+  const qs = headerNames.map(name => `metadataHeaders=${encodeURIComponent(name)}`).join('&');
+  const originalRes = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(args.messageId)}?format=metadata&${qs}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!originalRes.ok) {
+    const error = await originalRes.text();
+    throw new Error(`Gmail API error ${originalRes.status}: ${error}`);
+  }
+  const original = await originalRes.json();
+  const headers = original.payload?.headers || [];
+  const replyTo = gmailHeader(headers, 'Reply-To');
+  const from = gmailHeader(headers, 'From');
+  const to = String(replyTo || from).replace(/[\r\n]+/g, ' ').trim();
+  if (!to) return `Could not determine a reply address for message ${args.messageId}.`;
+  const originalSubject = String(gmailHeader(headers, 'Subject')).replace(/[\r\n]+/g, ' ').trim();
+  const subject = /^Re:/i.test(originalSubject) ? originalSubject : `Re: ${originalSubject}`;
+  const providerMessageId = String(gmailHeader(headers, 'Message-ID')).replace(/[\r\n]+/g, ' ').trim();
+  const references = String(gmailHeader(headers, 'References')).replace(/[\r\n]+/g, ' ').trim();
+  const replyHeaders = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    providerMessageId ? `In-Reply-To: ${providerMessageId}` : null,
+    providerMessageId ? `References: ${references ? `${references} ` : ''}${providerMessageId}` : null,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=utf-8',
+  ].filter(Boolean);
+  const raw = [...replyHeaders, '', String(args.body)].join('\r\n');
+  markDispatchStarted();
+  const sentRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw: Buffer.from(raw).toString('base64url'), threadId: original.threadId }),
+  });
+  if (!sentRes.ok) {
+    const error = await sentRes.text();
+    throw new Error(`Gmail API error ${sentRes.status}: ${error}`);
+  }
+  const sent = await sentRes.json();
+  return `Reply sent to ${to}. Message ID: ${sent.id}`;
 }
 
 // Strip HTML tags AND drop style/script/head block contents so CSS rules don't
@@ -304,7 +356,7 @@ function maybeLearnLabelQuery(userId, accountId, query, addLabels, preFetchedMet
   })();
 }
 
-async function execGmail(name, args, userId, accountId) {
+async function execGmail(name, args, userId, accountId, markDispatchStarted = () => {}) {
   switch (name) {
     case 'email_list':
       return spawnGmail(['list', args.query || 'in:inbox', String(args.maxResults || 10)], userId, accountId);
@@ -313,9 +365,9 @@ async function execGmail(name, args, userId, accountId) {
     case 'email_thread':
       return spawnGmail(['thread', args.threadId], userId, accountId);
     case 'email_reply':
-      return spawnGmail(['reply', args.messageId, args.body], userId, accountId);
+      return gmailReply(args, userId, accountId, markDispatchStarted);
     case 'email_compose':
-      return gmailComposeWithAttachments(promoteHtmlBody(args), userId, accountId);
+      return gmailComposeWithAttachments(promoteHtmlBody(args), userId, accountId, markDispatchStarted);
     case 'email_trash':
       return spawnGmail(['trash', args.messageId], userId, accountId);
     case 'email_batch_trash': {
@@ -462,7 +514,7 @@ async function execGmail(name, args, userId, accountId) {
 
 // ── Microsoft Graph dispatch ──────────────────────────────────────────────────
 
-async function execMicrosoft(name, args, userId, accountId) {
+async function execMicrosoft(name, args, userId, accountId, markDispatchStarted = () => {}) {
   // Lazy import to avoid loading ms-graph on every tool call
   const ms = await import('../../lib/ms-graph.mjs');
   switch (name) {
@@ -483,9 +535,9 @@ async function execMicrosoft(name, args, userId, accountId) {
         msgs.map(m => `From: ${m.from}\nDate: ${m.date}\n${m.body}`).join('\n\n---\n\n')
       );
     case 'email_reply':
-      return ms.replyMsMessage(userId, accountId, args.messageId, args.body);
+      return ms.replyMsMessage(userId, accountId, args.messageId, args.body, markDispatchStarted);
     case 'email_compose':
-      return ms.composeMsMessage(userId, accountId, promoteHtmlBody(args));
+      return ms.composeMsMessage(userId, accountId, promoteHtmlBody(args), markDispatchStarted);
     case 'email_trash':
       return ms.trashMsMessage(userId, accountId, args.messageId);
     case 'email_batch_trash': {
@@ -516,7 +568,7 @@ async function execMicrosoft(name, args, userId, accountId) {
 
 // ── IMAP dispatch (read-only) ─────────────────────────────────────────────────
 
-async function execImap(name, args, account, userId) {
+export async function execImap(name, args, account, userId, markDispatchStarted = () => {}, replyHeaders = null) {
   const { fetchInboxPage, fetchImapMessageBody, deleteImapMessages, markImapMessages, fetchImapReplyHeaders, purgeImapBySender, fetchImapInboxStats } = await import('../../lib/imap-client.mjs');
 
   if (name === 'email_compose') {
@@ -527,7 +579,7 @@ async function execImap(name, args, account, userId) {
     const resolveErr = attachmentResolutionError(args.attachment_doc_ids, errors);
     if (resolveErr) return resolveErr;
     const { sendSmtpEmail } = await import('../../lib/smtp-client.mjs');
-    return sendSmtpEmail(userId, account, { to: args.to, subject: args.subject, body: args.body, html: args.html_body, attachments });
+    return sendSmtpEmail(userId, account, { to: args.to, subject: args.subject, body: args.body, html: args.html_body, attachments }, markDispatchStarted);
   }
 
   if (name === 'email_reply') {
@@ -535,7 +587,7 @@ async function execImap(name, args, account, userId) {
       return `"${account.label}" has no SMTP configured — cannot send replies. Re-add the account with SMTP settings.`;
     }
     if (!args.messageId || !args.body) return 'messageId and body are required.';
-    const headers = await fetchImapReplyHeaders(userId, account, args.messageId);
+    const headers = replyHeaders ?? await fetchImapReplyHeaders(userId, account, args.messageId);
     if (!headers?.replyTo) return `Could not find message ${args.messageId} to reply to.`;
     const subject = headers.subject.startsWith('Re:') ? headers.subject : `Re: ${headers.subject}`;
     const { sendSmtpEmail } = await import('../../lib/smtp-client.mjs');
@@ -545,7 +597,7 @@ async function execImap(name, args, account, userId) {
       body: args.body,
       inReplyTo: headers.messageId,
       references: headers.references,
-    });
+    }, markDispatchStarted);
   }
 
   if (name === 'email_trash') {
@@ -584,7 +636,9 @@ async function execImap(name, args, account, userId) {
   }
   switch (name) {
     case 'email_list': {
-      const { emails } = await fetchInboxPage(userId, account, null, args.maxResults || 10);
+      const { emails } = await fetchInboxPage(
+        userId, account, null, args.maxResults || 10, args.query,
+      );
       if (!emails.length) return 'No messages found.';
       return emails.map(e => `[${e.id}] From: ${e.from}\nSubject: ${e.subject}\nDate: ${e.date}\n${e.snippet}`).join('\n\n---\n\n');
     }
@@ -780,46 +834,93 @@ async function _executeInner(name, args, userId) {
   const account = resolveAccount(accounts, requestedAccount(args));
   if (!account) return 'Could not find a matching email account.';
 
-  // body_doc_id: forward a large pre-written body by reference instead of having
-  // the model regenerate it token-by-token. Resolve the doc into body/html_body
-  // once, here, so every provider path (gmail/microsoft/imap) sees a normal
-  // body. The handoff doc is a transient buffer — delete it after a confirmed
-  // send (below). body_doc_id supersedes any literal `body` the caller passed.
-  let bodyDocCleanup = null;
+  // Validate before taking the idempotency claim. body_doc_id is resolved only
+  // by the winning dispatch callback below: duplicate/replayed calls must be
+  // able to return the stored result even after a successful first send deleted
+  // its transient handoff doc.
   if (name === 'email_compose') {
     const ref = args.body_doc_id || args.html_body_doc_id;
-    if (ref) {
-      const r = resolveBodyDoc(ref, userId);
-      if (r.error) return r.error;
-      args = { ...args, body: r.body, html_body: r.htmlBody ?? args.html_body ?? null };
-      delete args.body_doc_id;
-      delete args.html_body_doc_id;
-      bodyDocCleanup = r.cleanup;
-    }
-    if (!args.body && !args.html_body) {
+    if (!ref && !args.body && !args.html_body) {
       return 'email_compose needs a body: pass `body` (plain text), `html_body`, or `body_doc_id` (a research/documents doc whose text becomes the inline body).';
     }
   }
+  if (name === 'email_reply' && (!args.messageId || !args.body)) {
+    return 'email_reply requires both messageId and body.';
+  }
 
   try {
-    let result;
-    switch (account.provider) {
-      case 'gmail':
-        result = await execGmail(name, args, userId, account.id); break;
-      case 'microsoft':
-        result = await execMicrosoft(name, args, userId, account.id); break;
-      case 'imap':
-        result = await execImap(name, args, account, userId); break;
-      default:
-        return `Unknown provider: ${account.provider}`;
+    // IMAP exposes both mailbox UIDs and RFC Message-IDs for one message. Do a
+    // read-only header preflight before taking the send claim, then bind the
+    // idempotency payload to the canonical header identity so changing aliases
+    // on Retry cannot dispatch the same reply twice.
+    let imapReplyHeaders = null;
+    let canonicalReplyId = null;
+    if (name === 'email_reply' && account.provider === 'imap') {
+      const imap = await import('../../lib/imap-client.mjs');
+      imapReplyHeaders = await imap.fetchImapReplyHeaders(userId, account, args.messageId);
+      if (!imapReplyHeaders?.replyTo) return `Could not find message ${args.messageId} to reply to.`;
+      canonicalReplyId = imap.canonicalImapReplyIdentity(imapReplyHeaders);
+      if (!canonicalReplyId) return `Could not determine a stable identity for message ${args.messageId}.`;
     }
-    // Transient handoff doc: delete only after a confirmed send (every provider
-    // returns "...sent..." on success). Keep it on failure so the user can retry.
-    if (bodyDocCleanup && typeof result === 'string' && /\bsent\b/i.test(result) && !/^error/i.test(result)) {
-      if (deleteBodyDoc(bodyDocCleanup, userId)) result += ' (Handoff doc deleted.)';
+
+    const dispatch = async (markDispatchStarted = () => {}) => {
+      let dispatchArgs = args;
+      let bodyDocCleanup = null;
+      if (name === 'email_compose') {
+        const ref = args.body_doc_id || args.html_body_doc_id;
+        if (ref) {
+          const r = resolveBodyDoc(ref, userId);
+          if (r.error) return r.error;
+          dispatchArgs = { ...args, body: r.body, html_body: r.htmlBody ?? args.html_body ?? null };
+          delete dispatchArgs.body_doc_id;
+          delete dispatchArgs.html_body_doc_id;
+          bodyDocCleanup = r.cleanup;
+        }
+      }
+
+      let result;
+      switch (account.provider) {
+        case 'gmail':
+          result = await execGmail(name, dispatchArgs, userId, account.id, markDispatchStarted); break;
+        case 'microsoft':
+          result = await execMicrosoft(name, dispatchArgs, userId, account.id, markDispatchStarted); break;
+        case 'imap':
+          result = await execImap(name, dispatchArgs, account, userId, markDispatchStarted, imapReplyHeaders); break;
+        default:
+          return `Unknown provider: ${account.provider}`;
+      }
+      // Transient handoff doc: delete only after a confirmed send (every
+      // provider returns "...sent..." on success). Keep it on failure so the
+      // user can retry with corrected account/arguments.
+      if (bodyDocCleanup && typeof result === 'string' && /^Email sent\b/i.test(result.trim())) {
+        if (deleteBodyDoc(bodyDocCleanup, userId)) result += ' (Handoff doc deleted.)';
+      }
+      return result;
+    };
+
+    if (name === 'email_compose' || name === 'email_reply') {
+      // canonicalReplyId is server-owned preflight output, never a public tool
+      // argument. Drop any model-supplied lookalike before adding the trusted
+      // value below so unrecognized JSON fields cannot split the send key.
+      const idempotencyArgs = { ...args };
+      delete idempotencyArgs.canonicalReplyId;
+      return await sendEmailIdempotently({
+        userId,
+        payload: {
+          ...idempotencyArgs,
+          action: name === 'email_reply' ? 'reply' : 'compose',
+          accountId: account.id,
+          provider: account.provider,
+          ...(canonicalReplyId ? { canonicalReplyId } : {}),
+        },
+        send: dispatch,
+      });
     }
-    return result;
+    return await dispatch();
   } catch (e) {
-    return `Error (${account.label}): ${e.message}`;
+    // Use the dispatcher's unambiguous failure prefix. Historical builds used
+    // `Error (<account>): ...`, which looked like a normal string to the tool
+    // loop and let a model narrate success after a failed IMAP read.
+    return `Tool error: Email operation failed for "${account.label}": ${e.message}`;
   }
 }

@@ -61,6 +61,7 @@ import { getRoleAssignments, listRoles } from './roles.mjs';
 import { getDevice, getSlotAssignment } from './lib/voice-devices.mjs';
 import { log } from './logger.mjs';
 import { turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTurnAgent } from './lib/turn-trace-context.mjs';
+import { resolveDispatchTurnCorrelation } from './lib/turn-correlation.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
 import { normalizeAttachments } from './chat/providers/_shared.mjs';
@@ -402,6 +403,9 @@ function normalizeToolPlan(plan) {
  * @param {string|null} [opts.turnId]                external correlation id (voice/legacy clients)
  * @param {string|null} [opts.messageId]             logical browser message id (stable across explicit retries)
  * @param {string|null} [opts.attemptId]             idempotency key for one execution attempt
+ * @param {string|null} [opts._rootTaskId]           stable internal background/scheduled operation root
+ * @param {string|null} [opts._sideEffectMessageId]  logical authorization message for a hidden continuation
+ * @param {string|null} [opts._sideEffectAttemptId]  authorization attempt decoupled from the fresh wire turn id
  * @returns {Promise<void>}
  */
 export async function handleChatMessage({
@@ -439,6 +443,9 @@ export async function handleChatMessage({
   turnId = null,
   messageId = null,
   attemptId = null,
+  _rootTaskId = null,
+  _sideEffectMessageId = null,
+  _sideEffectAttemptId = null,
 }) {
   // Wake-slot routing — household-shared voice device.
   //
@@ -520,9 +527,14 @@ export async function handleChatMessage({
     userId,
     agentId,
     source: source ?? 'web',
-    turnId: attemptId ?? turnId,
-    messageId,
-    attemptId: attemptId ?? turnId,
+    ...resolveDispatchTurnCorrelation({
+      turnId,
+      messageId,
+      attemptId,
+      rootTaskId: _rootTaskId,
+      sideEffectMessageId: _sideEffectMessageId,
+      sideEffectAttemptId: _sideEffectAttemptId,
+    }),
   });
   recordRouting({ toolPlan: toolPlan?.mode || 'auto' });
 

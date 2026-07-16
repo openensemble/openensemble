@@ -609,8 +609,12 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
   }
   root.children.delete(taskId);
   if (!root.rootWatcherId) {
-    if (root.children.size === 0 && root.pendingCompletion) {
-      _fireDeferredVoiceCompletion(root.pendingCompletion);
+    if (root.children.size === 0) {
+      if (root.pendingCompletion) _fireDeferredVoiceCompletion(root.pendingCompletion);
+      // Scheduled/background correlation roots can be deliberately invisible
+      // (the scheduled-child barrier owns their UI lifecycle). Retire that
+      // graph when its last child finishes even when there is no root watcher
+      // or deferred completion, otherwise one entry leaks per scheduled fire.
       rootTaskGraphs.delete(rec.rootTaskId);
     }
     return;
@@ -858,12 +862,18 @@ function impliesEmailDelivery(text = '') {
 // is a deterministic system notice from the failure path; never model-written
 // content, never a stale document substitute. One notice per scheduled task
 // per day.
-const _failureEmailSentKeys = new Set();
-async function sendScheduledFailureEmail({ userId, taskId, originScheduledTaskId, pipeName, originalTask, reason }) {
+export function scheduledFailureEmailScope(originScheduledRunId, originScheduledTaskId, taskId, day) {
+  // Prefer the scheduler's logical occurrence id. It survives process restart
+  // and does not change when the same run crosses UTC midnight while failing.
+  // Older/legacy callers have no run id, so retain the historical task/day
+  // boundary as the safest bounded fallback.
+  return originScheduledRunId
+    ? `scheduled-failure-run:${originScheduledRunId}`
+    : `scheduled-failure:${originScheduledTaskId || taskId}:${day}`;
+}
+
+export async function sendScheduledFailureEmail({ userId, taskId, originScheduledTaskId, originScheduledRunId, pipeName, originalTask, reason }) {
   const day = new Date().toISOString().slice(0, 10);
-  const key = `${originScheduledTaskId || taskId}:${day}`;
-  if (_failureEmailSentKeys.has(key)) return;
-  _failureEmailSentKeys.add(key);
   const subject = `Scheduled task failed - ${day}`;
   const body = [
     'OpenEnsemble ran a scheduled task, but the run failed before the requested email could be produced.',
@@ -877,9 +887,25 @@ async function sendScheduledFailureEmail({ userId, taskId, originScheduledTaskId
     'OpenEnsemble itself is running — this was a task failure, not an installation outage.',
   ].join('\n');
   try {
-    const mod = await import('./skills/email-send/execute.mjs');
-    const res = await mod.default('email_user', { subject, body }, userId);
-    console.log('[background-tasks] scheduled failure notice emailed:', String(res).slice(0, 120));
+    const { sendEmailToUser } = await import('./lib/email-delivery.mjs');
+    const delivery = await sendEmailToUser(userId, {
+      subject,
+      body,
+      // The scheduler occurrence is the logical notification event. The
+      // durable store is the source of truth so restart and concurrent failure
+      // paths keep one boundary.
+      idempotencyScope: scheduledFailureEmailScope(
+        originScheduledRunId,
+        originScheduledTaskId,
+        taskId,
+        day,
+      ),
+    });
+    if (delivery.ok) {
+      console.log('[background-tasks] scheduled failure notice emailed:', String(delivery.message).slice(0, 120));
+    } else {
+      console.warn('[background-tasks] scheduled failure email failed:', delivery.message);
+    }
   } catch (e) {
     console.warn('[background-tasks] scheduled failure email failed:', e.message);
   }
@@ -933,7 +959,7 @@ setInterval(() => {
  * @param {string} coordinatorAgentId - scoped id of the coordinator
  * @param {string} agentName - display name for notifications
  * @param {string} agentEmoji - emoji icon (e.g. "📧")
- * @param {{autoContinue?: boolean, extraSystemNote?: string | null, routeText?: string | null}} [opts]
+ * @param {{autoContinue?: boolean, extraSystemNote?: string | null, routeText?: string | null, rootTaskId?: string|null, sourceMessageId?: string|null, sourceAttemptId?: string|null, sourceSessionKey?: string|null, sourceSessionEpoch?: string|null}} [opts]
  */
 export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId, agentName, agentEmoji = '🤖', opts = {}) {
   const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -954,7 +980,10 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     ? [...new Set([_stableAgentRef(userId, handoff.agent.id)].filter(Boolean))]
     : [];
   const pipeName = handoff ? `${agentName} → ${handoff.name || handoff.agent.name || 'Agent'}` : agentName;
-  const rootTaskId = opts?.rootTaskId || taskId;
+  // Scheduled builtins/agent retries already carry one logical run id. Do
+  // not reset it to a random bg_* id when ask_agent detaches, or provider
+  // acceptance followed by a scheduler replay can resend external effects.
+  const rootTaskId = resolveBackgroundRootTaskId(taskId, opts, scheduledCtx);
   const parentTaskId = opts?.parentTaskId || null;
   const parentWatcherId = opts?.parentWatcherId || null;
   const visibleAgentId = opts?.visibleAgentId || coordinatorAgentId;
@@ -971,6 +1000,10 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     parentWatcherId,
     rootWatcherId,
     spanId,
+    sourceMessageId: opts?.sourceMessageId || null,
+    sourceAttemptId: opts?.sourceAttemptId || null,
+    sourceSessionKey: opts?.sourceSessionKey || null,
+    sourceSessionEpoch: opts?.sourceSessionEpoch || null,
     aliases: [taskId, scopedAgent.id].filter(Boolean),
     plannedAgentRefs,
     // Mark this as a coordinator→specialist DELEGATION (distinct from a worker
@@ -1090,7 +1123,12 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         const artifacts = [];
         const images = [];
         const bodyDocIds = [];
-        for await (const ev of streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, { toolPlan: stagePlan, routeText: stageRoute, isolatedTaskRun: true, rootTaskId: taskCtx.rootTaskId, traceSource: scheduledNote ? 'scheduled' : 'background' })) {
+        for await (const ev of streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, {
+          toolPlan: stagePlan,
+          routeText: stageRoute,
+          isolatedTaskRun: true,
+          ...backgroundRunTraceOptions(rec, scheduledNote ? 'scheduled' : 'background'),
+        })) {
           if (ev.type === 'token') text += ev.text;
           else if (ev.type === 'replace') text = String(ev.text || '');
           else if (ev.type === '__content') text = String(ev.content || '');
@@ -1234,6 +1272,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         await sendScheduledFailureEmail({
           userId, taskId,
           originScheduledTaskId: activeTasks.get(taskId)?.originScheduledTaskId,
+          originScheduledRunId: activeTasks.get(taskId)?.originScheduledRunId,
           pipeName, originalTask: task, reason: failMsg,
         });
       }
@@ -1471,7 +1510,7 @@ async function _publishWorkerCompletion({
 
 async function _runContinuation({
   taskId, userId, coordinatorAgentId, targetAgentId, agentName, result, errorMsg,
-  originalTask, scheduledCtx = null, isWorker = false,
+  originalTask, scheduledCtx = null, traceOptions = null, isWorker = false,
   reportImages = [], persistedImages = [],
 }) {
   if (!isWorker && (errorMsg || !result)) return false;
@@ -1518,6 +1557,14 @@ async function _runContinuation({
     _hiddenUser: true,
     _isBackgroundContinuation: true,
     _isolatedTaskRun: !!scheduledCtx?.originTaskId,
+    _readOnlyTurn: false,
+    _rootTaskId: traceOptions?.rootTaskId || null,
+    // Keep the continuation's wire turn fresh so the browser renders it, but
+    // retain the originating authorization inside the turn trace used by the
+    // side-effect ledger. Reusing the terminal browser attempt as turn_id makes
+    // the frontend correctly discard every late continuation frame.
+    _sideEffectMessageId: traceOptions?.messageId || null,
+    _sideEffectAttemptId: traceOptions?.attemptId || null,
   });
   if (scheduledCtx?.originTaskId) {
     const { scheduledContext } = await import('./lib/scheduled-context.mjs');
@@ -1858,6 +1905,7 @@ async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentE
         result,
         errorMsg,
         originalTask: rec?.originalTask || originalTask || rec?.summary || '',
+        traceOptions: backgroundRunTraceOptions(rec, 'background'),
         isWorker: rec.isWorker === true,
         reportImages,
         persistedImages,

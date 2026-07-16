@@ -534,6 +534,11 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       const m = await import('../../lib/task-proxy-context.mjs');
       taskCtx = m.currentTaskContext?.() || null;
     } catch { /* no root task context */ }
+    let sourceTurn = null;
+    try {
+      const m = await import('../../lib/turn-trace-context.mjs');
+      sourceTurn = m.getTurn?.() || null;
+    } catch { /* direct non-turn caller */ }
     const autoContinue = callerIsCoordinator;
     const handoffName = handoffTarget ? (handoffTarget.name ?? handoffTo) : null;
     // Stage-1 insulation for a backgrounded pipeline — same server-authored
@@ -552,6 +557,14 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       parentWatcherId: taskCtx?.watcherId || null,
       rootWatcherId: taskCtx?.rootWatcherId || taskCtx?.watcherId || null,
       visibleAgentId: taskCtx?.visibleAgentId || taskCtx?.agentId || null,
+      // Browser Retry keeps messageId but mints a new attemptId. The detached
+      // run must retain both so the durable email authorization ledger allows
+      // all sends from the original attempt, then rejects new/changed sends
+      // from a replay of that same user message.
+      sourceMessageId: sourceTurn?.messageId || null,
+      sourceAttemptId: sourceTurn?.attemptId || null,
+      sourceSessionKey: sourceTurn?.sessionKey || null,
+      sourceSessionEpoch: sourceTurn?.sessionEpoch || null,
       handoff: doHandoff ? {
         agent: handoffTarget,
         name: handoffName,

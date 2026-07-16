@@ -13,10 +13,11 @@ import path from 'path';
 import { runAgentWithRetry } from '../lib/run-agent-with-retry.mjs';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { log } from '../logger.mjs';
-import { registerBuiltin, startScheduler, stopScheduler } from '../scheduler.mjs';
+import { registerBuiltin, runTaskNow, scheduledReactionTraceOptions, startScheduler, stopScheduler } from '../scheduler.mjs';
 
 const USER = 'user_schedfail_test';
 const REARM_USER = 'user_scheduler_rearm_test';
+const BUILTIN_CONTEXT_USER = 'user_scheduler_builtin_context_test';
 
 // Fake agent shape — runAgentWithRetry passes the whole record through to
 // streamChat without inspecting it. We feed a plain object.
@@ -37,11 +38,13 @@ afterEach(() => {
     restoreLogInfo = null;
   }
   cleanupUser(REARM_USER);
+  cleanupUser(BUILTIN_CONTEXT_USER);
 });
 
 afterAll(() => {
   cleanupUser(USER);
   cleanupUser(REARM_USER);
+  cleanupUser(BUILTIN_CONTEXT_USER);
 });
 
 describe('runAgentWithRetry — failure classification', () => {
@@ -206,6 +209,46 @@ describe('scheduler — interval rearm hardening', () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(starts).toBe(2);
+  });
+});
+
+describe('scheduler — builtin side-effect identity', () => {
+  it('passes a unique stable run identity to each manual builtin occurrence', async () => {
+    const contexts = [];
+    registerBuiltin('captureBuiltinRunContext', async (_task, context) => {
+      contexts.push(context);
+      return 'ok';
+    });
+    const task = {
+      id: 'builtin_context_regression',
+      enabled: true,
+      label: 'Builtin context regression',
+      repeat: 'daily',
+      time: '12:00',
+      ownerId: BUILTIN_CONTEXT_USER,
+      type: 'builtin',
+      handler: 'captureBuiltinRunContext',
+    };
+    fs.mkdirSync(path.join(USERS_DIR, BUILTIN_CONTEXT_USER), { recursive: true });
+    fs.writeFileSync(path.join(USERS_DIR, BUILTIN_CONTEXT_USER, 'tasks.json'), JSON.stringify([task], null, 2));
+
+    await runTaskNow(task.id, BUILTIN_CONTEXT_USER);
+    await runTaskNow(task.id, BUILTIN_CONTEXT_USER);
+
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]).toMatchObject({ manual: true });
+    expect(contexts[0].scheduledRunRootId).toBe(`scheduled:${task.id}:${contexts[0].occurrenceId}`);
+    expect(contexts[1].scheduledRunRootId).toBe(`scheduled:${task.id}:${contexts[1].occurrenceId}`);
+    expect(contexts[1].occurrenceId).not.toBe(contexts[0].occurrenceId);
+  });
+
+  it('keeps a stable scheduled reaction root while minting a fresh replay attempt', () => {
+    const scheduledCtx = { runId: 'scheduled:task-11:2026-07-13T12:00:00.000Z' };
+    const first = scheduledReactionTraceOptions(scheduledCtx);
+    const replay = scheduledReactionTraceOptions(scheduledCtx);
+    expect(first._rootTaskId).toBe(scheduledCtx.runId);
+    expect(replay._rootTaskId).toBe(scheduledCtx.runId);
+    expect(first._sideEffectAttemptId).not.toBe(replay._sideEffectAttemptId);
   });
 });
 

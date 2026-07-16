@@ -192,7 +192,7 @@ describe('server structured-data executor', () => {
     const spec = await priceSpec({ cadenceSec: 300 });
     let state = { schema: 1, items: [spec] };
     let price = '500';
-    const notify = vi.fn();
+    const notify = vi.fn(async () => true);
     const fetchImpl = async () => new Response(
       `<meta property="product:price:amount" content="${price}">`
       + '<meta property="product:price:currency" content="USD">',
@@ -212,6 +212,28 @@ describe('server structured-data executor', () => {
     expect(notify).toHaveBeenCalledOnce();
     expect(notify.mock.calls[0][0]).toMatch(/Mower price: USD 500.*USD 450/);
     expect(result.newState.items[0].pendingEvent).toBeNull();
+  });
+
+  it('keeps a pending event when no notification client accepted it', async () => {
+    const spec = await priceSpec({ cadenceSec: 300 });
+    spec.nextDueAt = Number.MAX_SAFE_INTEGER;
+    spec.pendingEvent = {
+      id: 'offline-event',
+      label: spec.label,
+      previous: { value: 500, currency: 'USD' },
+      current: { value: 450, currency: 'USD', signature: 'usd-450' },
+    };
+    const notify = vi.fn(async () => false);
+
+    const result = await browserFieldWatchHandler(
+      { schema: 1, items: [spec] },
+      { notify },
+      { now: 1_000 },
+    );
+
+    expect(notify).toHaveBeenCalledOnce();
+    expect(result.newState.items[0].pendingEvent).toEqual(spec.pendingEvent);
+    expect(result.newState.items[0].lastNotified).toBeNull();
   });
 });
 

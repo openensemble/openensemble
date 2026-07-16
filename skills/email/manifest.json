@@ -167,7 +167,9 @@
               "description": "Optional search filter. Omit for recent inbox (works on all providers). Gmail accepts Gmail search syntax (e.g. 'from:uber is:unread'). Microsoft accepts free-text/KQL (e.g. 'from:uber subject:receipt'). IMAP runs a substring search over subject/from/body. Do NOT pass Gmail-only tokens like 'in:inbox' to non-Gmail accounts — they will return zero matches."
             },
             "maxResults": {
-              "type": "number",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
               "description": "Max messages to return. Default 10."
             }
           },
@@ -179,7 +181,7 @@
       "type": "function",
       "function": {
         "name": "email_read",
-        "description": "Read the full content of an email by message ID.",
+        "description": "Read the full content of an email by its provider message ID. For IMAP, use the numeric UID from email_list; an RFC Message-ID returned by SMTP is also accepted and resolved to its INBOX UID.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -189,7 +191,7 @@
             },
             "messageId": {
               "type": "string",
-              "description": "The message ID from email_list."
+              "description": "The provider message ID from email_list. On IMAP this is normally the numeric UID (e.g. '3'); an SMTP RFC Message-ID such as '<abc@example.com>' is also accepted."
             }
           },
           "required": [
@@ -225,7 +227,7 @@
       "type": "function",
       "function": {
         "name": "email_reply",
-        "description": "Reply to an email. Not available for IMAP accounts.",
+        "description": "Reply to an email. IMAP accounts require SMTP. Identical replies in one logical user message, including explicit retries, are executed once.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -253,7 +255,7 @@
       "type": "function",
       "function": {
         "name": "email_compose",
-        "description": "Compose and send a new email. IMAP accounts require SMTP to be configured.",
+        "description": "Compose and send a new email. IMAP accounts require SMTP to be configured. Identical sends in one logical turn are executed once and return the original result on duplicate calls.",
         "parameters": {
           "type": "object",
           "properties": {

@@ -48,6 +48,9 @@ export default async function execute(name, args, userId) {
     ...(args.body ? { body: String(args.body) } : {}),
     ...(args.html_body ? { html_body: String(args.html_body) } : {}),
     ...(args.body_doc_id ? { body_doc_id: String(args.body_doc_id) } : {}),
+    ...(Array.isArray(args.attachment_doc_ids)
+      ? { attachment_doc_ids: args.attachment_doc_ids.map(id => String(id)) }
+      : {}),
     ...(args.account ? { account: String(args.account) } : {}),
   };
 
