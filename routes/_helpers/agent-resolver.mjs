@@ -24,6 +24,7 @@ import { getLanAddress } from '../../discovery.mjs';
 import { composeSkillSpaBlock } from '../../lib/skill-prompt-composer.mjs';
 import { getCachedMcpToolDefsForAgent } from '../../lib/mcp-tools.mjs';
 import { modelCapabilityPrompt } from '../../lib/model-capabilities.mjs';
+import { applyRequestToolsRosterPolicy } from '../../lib/request-tools-schema.mjs';
 
 const TOOL_SETS_COMPAT = {
   web: 'general', general: 'general', gmail: 'email', email: 'email', none: 'none',
@@ -445,13 +446,7 @@ export function getAgentsForUser(userId) {
           agent_id: { type: 'string', description: askAgentDesc }
         }}}};
       }
-      if (rosterSolo && t.function?.name === 'request_tools') {
-        return { ...t, function: {
-          ...t.function,
-          description: 'Expand your own tool surface mid-turn. Your initial list was trimmed, but the server retains your full permission-scoped surface. If a needed tool is absent, call request_tools and continue the task yourself. Use spawn_worker only for genuinely long or parallel work. The cost is one extra model round-trip, so call only when the needed tool is missing.',
-        }};
-      }
-      return t;
+      return applyRequestToolsRosterPolicy(t, { rosterSolo });
     });
     const result = {
       ...withOverrides, systemPrompt, tools, skillCategory,
