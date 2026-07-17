@@ -260,7 +260,6 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
           preview: compactDocumentToolPreview(t.name, t.preview),
           progressPreview: String(t.progressPreview ?? '').slice(-1200),
           delegated: t.delegated === true,
-          native: t.native === true,
           agentName: t.agentName || null,
           targetAgentId: t.targetAgentId || null,
           ...(resultIndex != null ? { resultIndex } : {}),
