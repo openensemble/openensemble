@@ -293,6 +293,10 @@ export async function runSpecialistRoute({
       await runWithTurnContext({
         signal: ac.signal, deviceId, conversationMode, suppressLearning, verifierAllowedTools,
         verifierLeaseRequired, verifierLeaseToken,
+        // A selected plan is an exact foreground execution boundary. Keep
+        // dependent steps inline instead of replacing a slow selected tool
+        // with a separately owned synthetic background result.
+        awaitSlowTools: toolPlan?.mode === 'selected',
       }, async () => {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
         // The routed specialist is ephemeral, so its terminal event is only an
@@ -568,6 +572,7 @@ export async function runLlmTurn({
     return runWithTurnContext({
       signal: ac.signal, deviceId, conversationMode, suppressLearning, verifierAllowedTools,
       verifierLeaseRequired, verifierLeaseToken,
+      awaitSlowTools: toolPlan?.mode === 'selected',
     }, async () => {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
       if (e.type === 'tool_call') toolInvoked = true;

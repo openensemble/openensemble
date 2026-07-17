@@ -72,6 +72,50 @@ describe('lab verifier specialist non-learning contract', () => {
     for (const mock of Object.values(mocks)) mock.mockClear();
   });
 
+  it('keeps selected specialist and coordinator plans attached to their slow tools', async () => {
+    const selectedPlan = { mode: 'selected', selectedTools: ['email_list'], source: 'test' };
+    await runSpecialistRoute({
+      userText: 'Show my captured email.',
+      userId: 'plan-user',
+      agentId: 'coordinator-agent',
+      source: 'web',
+      deviceId: null,
+      attachment: null,
+      attachments: [],
+      toolPlan: selectedPlan,
+      ac: new AbortController(),
+      onEvent: vi.fn(),
+      onNotify: vi.fn(),
+    });
+    expect(mocks.runWithTurnContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ awaitSlowTools: true }),
+      expect.any(Function),
+    );
+
+    mocks.runWithTurnContext.mockClear();
+    await runLlmTurn({
+      userId: 'plan-user',
+      agentId: 'coordinator-agent',
+      scopedAgent: {
+        id: 'coordinator-agent', name: 'Coordinator', provider: 'openai',
+        model: 'test-model', tools: [],
+      },
+      scopedSessionKey: 'plan-user_coordinator-agent',
+      userText: 'Use the selected tool.',
+      toolPlan: selectedPlan,
+      schedulerNote: '',
+      source: 'web',
+      deviceId: null,
+      ac: new AbortController(),
+      onEvent: vi.fn(),
+      onNotify: vi.fn(),
+    });
+    expect(mocks.runWithTurnContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ awaitSlowTools: true }),
+      expect.any(Function),
+    );
+  });
+
   it('keeps specialist routing and persistence while suppressing route, alias, and intent learning', async () => {
     const events = [];
     const result = await runSpecialistRoute({
