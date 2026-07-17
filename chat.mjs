@@ -277,7 +277,9 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
           mimeType: img.mimeType || 'image/png',
           ...(img.filename ? { filename: img.filename } : {}),
           ...(img.savedPath ? { savedPath: img.savedPath } : {}),
-          ...(img.base64 && !img.savedPath && !img.filename ? { base64: img.base64 } : {}),
+          // A filename is only a label; without a durable savedPath the inline
+          // bytes remain the sole renderable copy after reload.
+          ...(img.base64 && !img.savedPath ? { base64: img.base64 } : {}),
         },
         content: `[Image: ${img.filename || 'generated image'}]`,
         ts: Date.now(),
@@ -2279,9 +2281,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       : (assistantContent || 'Provider turn errored');
     recordRunTrace(userId, { ..._traceBase, status: 'error', error: traceError });
     _emitTurnTrace(traceError);
-    // A provider can fail after update_document already committed. Preserve the
-    // successful artifact even though there is no final narration to persist.
-    if (!silent && turnOpts?.documentRequest && findDocumentMutation(toolsUsed)) {
+    // A provider can fail after a tool already committed a side effect or
+    // emitted media. Persist every completed tool result and collected image
+    // even without final narration. The durable result tells a later retry
+    // what already happened so it cannot blindly repeat the effect.
+    const hasDurableEffects = toolsUsed.length > 0 || (turnImages?.length ?? 0) > 0;
+    if (!silent && hasDurableEffects) {
       try {
         await persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
           withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
@@ -2293,7 +2298,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         });
       } catch (e) {
         console.warn('[chat] error-path persist failed:', e.message);
-        yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The document action may have completed, but its chat record could not be saved. Do not retry automatically.' };
+        yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'A tool or media action may have completed, but its chat record could not be saved. Do not retry automatically.' };
       }
     }
     return;
