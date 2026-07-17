@@ -35,6 +35,9 @@ vi.mock('../../routes/_helpers.mjs', () => ({
   getAgentsForUser: mocks.getAgentsForUser,
   getUser: mocks.getUser,
 }));
+vi.mock('../../lib/execution-model-policy.mjs', () => ({
+  validateExecutionModelAccess: vi.fn(async () => ({ ok: true, reason: 'available', status: 200 })),
+}));
 vi.mock('../../routes/_helpers/broadcast.mjs', () => ({ broadcastToUsers: vi.fn() }));
 
 import execute from './execute.mjs';

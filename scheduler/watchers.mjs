@@ -1914,8 +1914,8 @@ async function deliverManagedPreferenceUpdate(record, value, { dispatchApproved 
 // "user_<uid>_coordinator"). We need the unscoped registry id to resolve
 // the agent, then re-scope for streaming. The systemNote pattern mirrors
 // scheduler.mjs's [SCHEDULED RUN] note — same constraint (no human present).
-function watcherEmailIdempotencyScope(record) {
-  const eventKey = String(record?._emailIdempotencyEventKey || '').trim();
+function watcherDeliveryIdempotencyScope(record) {
+  const eventKey = String(record?._deliveryIdempotencyEventKey || record?._emailIdempotencyEventKey || '').trim();
   if (eventKey) {
     // A retained collection event may be retried on a later supervisor tick
     // after an ambiguous provider boundary. Bind it to the durable event, not
@@ -1923,10 +1923,12 @@ function watcherEmailIdempotencyScope(record) {
     const eventDigest = createHash('sha256').update(eventKey).digest('hex').slice(0, 24);
     return `watcher:${record.id}:event:${eventDigest}`;
   }
-  const slot = String(record?._emailIdempotencySlot || 'on-fire');
+  const slot = String(record?._deliveryIdempotencySlot || record?._emailIdempotencySlot || 'on-fire');
   const slotDigest = createHash('sha256').update(slot).digest('hex').slice(0, 24);
   return `watcher:${record.id}:tick:${Number(record.ticks) || 0}:slot:${slotDigest}`;
 }
+
+const watcherEmailIdempotencyScope = watcherDeliveryIdempotencyScope;
 
 async function executeOnFire(record) {
   // Safe-auto informational monitors are permanently clamped at the final
@@ -2004,7 +2006,9 @@ async function executeOnFire(record) {
       const body = record.lastStatusText || `Your monitor "${record.label}" fired.`;
       const text = cfg.prefix ? `${cfg.prefix}\n\n${body}` : body;
       if (!(await finalPreferenceAuthorization())) return false;
-      const ok = await sendTelegramToUser(record.userId, text);
+      const ok = await sendTelegramToUser(record.userId, text, {
+        idempotencyScope: watcherDeliveryIdempotencyScope(record),
+      });
       if (!ok) log.warn('watchers', 'telegram onFire failed', { id: record.id });
       else log.info('watchers', 'telegram onFire sent', { id: record.id });
       return !!ok;
@@ -2283,7 +2287,7 @@ export function handlerHelpers(record, { signal = null } = {}) {
   // fetcher (Best Buy stock pages, sites without RSS / public APIs, etc.).
   // Lazy-imported so watchers that don't touch the browser pay nothing.
   let _browserCache = null;
-  let emailFireSequence = 0;
+  let deliveryFireSequence = 0;
   async function getBrowser() {
     if (_browserCache) return _browserCache;
     const { buildBrowserHelpers } = await import('../lib/browser-helper.mjs');
@@ -2529,8 +2533,8 @@ export function handlerHelpers(record, { signal = null } = {}) {
       // Pairing it with an item id (or deterministic call ordinal) makes one
       // fire stable across a crash/replayed tick while keeping distinct fires
       // in the same tick independent.
-      const emailSlot = baseCfg.type === 'email'
-        ? (itemKey != null ? `item:${String(itemKey)}` : `call:${emailFireSequence++}`)
+      const deliverySlot = baseCfg.type === 'email' || baseCfg.type === 'telegram'
+        ? (itemKey != null ? `item:${String(itemKey)}` : `call:${deliveryFireSequence++}`)
         : null;
 
       let tempCfg = baseCfg;
@@ -2548,9 +2552,9 @@ export function handlerHelpers(record, { signal = null } = {}) {
       const synth = {
         ...record,
         onFire: tempCfg,
-        ...(emailSlot ? { _emailIdempotencySlot: emailSlot } : {}),
+        ...(deliverySlot ? { _deliveryIdempotencySlot: deliverySlot } : {}),
         ...(eventKey != null && String(eventKey).trim()
-          ? { _emailIdempotencyEventKey: String(eventKey).trim().slice(0, 256) }
+          ? { _deliveryIdempotencyEventKey: String(eventKey).trim().slice(0, 256) }
           : {}),
       };
       // executeOnFire's email/telegram branches read lastStatusText for the

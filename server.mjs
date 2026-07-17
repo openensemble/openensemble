@@ -83,6 +83,7 @@ import { handle as handleMcpOutbound }    from './lib/mcp-outbound.mjs';
 import { handle as handleRunInspector }   from './routes/run-inspector.mjs';
 import { handle as handleSkillPermissions } from './routes/skill-permissions.mjs';
 import { sendTelegramToUser, reregisterAllWebhooks as reregisterTelegramWebhooks } from './routes/telegram.mjs';
+import { scheduledTelegramDeliveryScope } from './lib/telegram-delivery-idempotency.mjs';
 import { speakReminder, pickReminderDevices } from './lib/voice-reminder.mjs';
 import { registerAlarm, getCachedAlarmTts, sendAlarmArm } from './lib/alarms.mjs';
 import { formatDurationAdj } from './lib/voice-timer.mjs';
@@ -644,7 +645,9 @@ registerBuiltin('fireReminder', async (task, runContext = {}) => {
 
   if (wantTg) {
     try {
-      const ok = await sendTelegramToUser(task.ownerId, `⏰ Reminder: ${task.label}`);
+      const ok = await sendTelegramToUser(task.ownerId, `⏰ Reminder: ${task.label}`, {
+        idempotencyScope: scheduledTelegramDeliveryScope('fire-reminder', task, runContext),
+      });
       if (ok) delivered.push('telegram');
     } catch (e) { console.warn('[reminder] telegram delivery failed:', e.message); }
   }
@@ -717,7 +720,7 @@ registerBuiltin('fireReminder', async (task, runContext = {}) => {
 });
 
 // ── Builtin task: tutor daily nudge ──────────────────────────────────────────
-registerBuiltin('tutorNudge', async (task) => {
+registerBuiltin('tutorNudge', async (task, runContext = {}) => {
   const { getUser } = await import('./routes/_helpers.mjs');
   const { loadTutorStats, getUserLocalDate, getUserLocalHour } = await import('./lib/tutor-stats.mjs');
 
@@ -764,7 +767,9 @@ registerBuiltin('tutorNudge', async (task) => {
   if (prefs.channel === 'websocket') {
     delivered = sendToUser(task.ownerId, nudgePayload);
   } else if (prefs.channel === 'telegram') {
-    const ok = await sendTelegramToUser(task.ownerId, line);
+    const ok = await sendTelegramToUser(task.ownerId, line, {
+      idempotencyScope: scheduledTelegramDeliveryScope('tutor-nudge', task, runContext),
+    });
     delivered = ok ? 1 : 0;
     // Fallback to websocket if Telegram unavailable
     if (!ok) {
@@ -775,7 +780,9 @@ registerBuiltin('tutorNudge', async (task) => {
     // Email delivery falls back to Telegram then websocket if unavailable.
     // Full SMTP integration requires the user's linked email account — defer
     // to phase 2.5 follow-up; for now, try Telegram then websocket.
-    const ok = await sendTelegramToUser(task.ownerId, line);
+    const ok = await sendTelegramToUser(task.ownerId, line, {
+      idempotencyScope: scheduledTelegramDeliveryScope('tutor-nudge', task, runContext),
+    });
     delivered = ok ? 1 : 0;
     if (!ok) delivered = sendToUser(task.ownerId, nudgePayload);
   }

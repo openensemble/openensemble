@@ -25,7 +25,7 @@ import {
   setSkillExecutionOverride,
 } from '../lib/skill-overrides.mjs';
 import { isExecutionTextModel } from '../lib/skill-execution.mjs';
-import { listOpenAIOAuthModels } from '../lib/openai-codex-models.mjs';
+import { validateExecutionModelAccess } from '../lib/execution-model-policy.mjs';
 import {
   tryAcquireUserTopologyTransition,
   runWithUserTopologyLease,
@@ -80,24 +80,9 @@ async function validateSkillExecution(userId, skillId, body) {
     return { status: 400, error: 'Invalid reasoning effort' };
   }
 
-  const user = getUser(userId);
-  if (model != null && Array.isArray(user?.allowedModels) && !user.allowedModels.includes(model)) {
-    return { status: 403, error: `Model "${model}" is not available for this account` };
-  }
-  if (provider === 'openai-oauth' && !isPrivileged(userId)
-      && (!Array.isArray(user?.allowedOAuthProviders) || !user.allowedOAuthProviders.includes(provider))) {
-    return { status: 403, error: 'OpenAI login models are not enabled for this account' };
-  }
-
-  const cfg = loadConfig();
-  if (provider != null && cfg.enabledProviders?.[provider] === false) {
-    return { status: 400, error: `Provider "${provider}" is disabled` };
-  }
-  if (provider === 'openai-oauth') {
-    const available = await listOpenAIOAuthModels(userId);
-    if (!available.some(item => (item.id ?? item.name) === model)) {
-      return { status: 400, error: `Model "${model}" is not available from the connected OpenAI account` };
-    }
+  if (provider != null) {
+    const access = await validateExecutionModelAccess(userId, provider, model, { refreshCatalog: true });
+    if (!access.ok) return { status: access.status ?? 400, error: access.error };
   }
 
   if (reasoningEffort != null) {
@@ -587,6 +572,10 @@ export async function handle(req, res) {
       ...s,
       enabled: userSkills.includes(s.id),
       assignment: assignments[s.id] ?? null,
+      // The server resolves an unassigned skill through the coordinator (then
+      // roster fallback), not whichever chat tab happens to be active. Surface
+      // that exact answer so effort capability options match save validation.
+      inheritedAgentId: inheritedAgentForSkill(authId, s.id)?.id ?? null,
       execution: getSkillExecutionOverride(authId, s.id),
     }));
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(roles)); return true;

@@ -64,10 +64,16 @@ vi.mock('../lib/skill-execution.mjs', () => ({
   isExecutionTextModel: vi.fn(() => true),
 }));
 
-vi.mock('../lib/openai-codex-models.mjs', () => ({
-  listOpenAIOAuthModels: vi.fn(async () => [
-    { id: 'gpt-5.4-mini' }, { id: 'gpt-5.6-sol' },
-  ]),
+vi.mock('../lib/execution-model-policy.mjs', () => ({
+  validateExecutionModelAccess: vi.fn(async (_userId, _provider, model) => {
+    if (model === 'forged-model') {
+      return { ok: false, status: 400, error: `Model "${model}" is not available from provider` };
+    }
+    if (Array.isArray(mocks.user.allowedModels) && !mocks.user.allowedModels.includes(model)) {
+      return { ok: false, status: 403, error: `Model "${model}" is not available for this account` };
+    }
+    return { ok: true, status: 200 };
+  }),
 }));
 
 import { handle } from './agents.mjs';
@@ -128,6 +134,17 @@ describe('role and skill execution settings API', () => {
     }, res);
     expect(res.writeHead).toHaveBeenCalledWith(403, { 'Content-Type': 'application/json' });
     expect(jsonBody(res).error).toMatch(/not available/);
+    expect(mocks.setSkillExecutionOverride).not.toHaveBeenCalled();
+  });
+
+  it('rejects a structurally valid non-OAuth pair absent from its provider catalog', async () => {
+    const res = response();
+    await handle({
+      method: 'PATCH', url: '/api/roles/coder/execution',
+      body: JSON.stringify({ provider: 'anthropic', model: 'forged-model', reasoningEffort: 'high' }),
+    }, res);
+    expect(res.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'application/json' });
+    expect(jsonBody(res).error).toMatch(/not available from provider/);
     expect(mocks.setSkillExecutionOverride).not.toHaveBeenCalled();
   });
 });

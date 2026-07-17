@@ -28,6 +28,9 @@ const provider = vi.hoisted(() => ({
 
 vi.mock('./sessions.mjs', () => sessions);
 vi.mock('./chat/providers/ollama.mjs', () => ({ streamOllama: provider.streamOllama }));
+vi.mock('./lib/execution-model-policy.mjs', () => ({
+  validateExecutionModelAccess: vi.fn(async () => ({ ok: true, reason: 'available', status: 200 })),
+}));
 
 const { streamChat } = await import('./chat.mjs');
 const { USERS_DIR } = await import('./lib/paths.mjs');

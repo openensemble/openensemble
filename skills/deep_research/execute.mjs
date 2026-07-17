@@ -577,8 +577,8 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
   // transiently routed parent agent. Reapply the Deep Research profile so its
   // planner, workers, and synthesizer use one coherent model/effort choice.
   try {
-    const { resolveSkillExecutionForTurn } = await import('../../lib/skill-execution.mjs');
-    const execution = resolveSkillExecutionForTurn({
+    const { resolveValidatedSkillExecutionForTurn } = await import('../../lib/skill-execution.mjs');
+    const execution = await resolveValidatedSkillExecutionForTurn({
       userId,
       baseAgent: caller,
       selectedSkillIds: ['deep_research'],

@@ -452,8 +452,8 @@ function _skillExecutionInheritedAgent(skill, allAgents) {
   const roster = (allAgents ?? []).filter(agent => !agent.archived);
   const assigned = skill.assignment ? roster.find(agent => agent.id === skill.assignment) : null;
   if (assigned) return assigned;
-  const activeId = typeof activeAgent === 'string' ? activeAgent : null;
-  return roster.find(agent => agent.id === activeId) || roster[0] || null;
+  const inheritedId = typeof skill.inheritedAgentId === 'string' ? skill.inheritedAgentId : null;
+  return roster.find(agent => agent.id === inheritedId) || roster[0] || null;
 }
 
 function _renderSkillExecutionControls(skill, allAgents) {

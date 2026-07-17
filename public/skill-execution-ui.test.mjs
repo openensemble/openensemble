@@ -108,4 +108,16 @@ describe('role and skill execution settings UI', () => {
     expect(html).toContain('gpt-5.6-sol · High');
     expect(html).toContain('Local shortcuts and tool execution may not call a model.');
   });
+
+  it('inherits an unassigned skill from the server-resolved coordinator, not the active tab', () => {
+    const ui = loadExecutionUi();
+    ui.activeAgent = 'specialist';
+    const inherited = ui._skillExecutionInheritedAgent({
+      id: 'calendar', assignment: null, inheritedAgentId: 'jarvis',
+    }, [
+      { id: 'specialist', provider: 'anthropic', model: 'claude-specialist' },
+      { id: 'jarvis', provider: 'openai-oauth', model: 'gpt-coordinator' },
+    ]);
+    expect(inherited).toMatchObject({ id: 'jarvis', model: 'gpt-coordinator' });
+  });
 });

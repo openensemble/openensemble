@@ -39,7 +39,7 @@ import {
 import { looksLikeToolError } from './lib/tool-error.mjs';
 import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
 import { getSelectedPlanKeepTools, listRoles } from './roles.mjs';
-import { resolveSkillExecutionForTurn } from './lib/skill-execution.mjs';
+import { resolveValidatedSkillExecutionForTurn } from './lib/skill-execution.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 import { recordRunTrace, redactArgsForTrace, redactTextForTrace } from './lib/run-inspector.mjs';
@@ -1361,7 +1361,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         && !executionSkillIds.includes(agent.skillCategory)) {
       executionSkillIds.push(agent.skillCategory);
     }
-    _executionResolution = resolveSkillExecutionForTurn({
+    _executionResolution = await resolveValidatedSkillExecutionForTurn({
       userId,
       baseAgent: agent,
       selectedSkillIds: executionSkillIds,
