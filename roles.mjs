@@ -247,7 +247,7 @@ export function normalizeAutoBgCompletion(value, displayName = 'Tool') {
   };
 }
 
-function _registerScheduledAutoBgChild({ scheduledCtx, userId, watcherId, label, kind = 'tool' }) {
+function _registerScheduledAutoBgChild({ scheduledCtx, userId, watcherId, label, kind = 'tool', cancel = null }) {
   if (!scheduledCtx?.originTaskId || !watcherId) return null;
   return registerScheduledChild({
     userId,
@@ -255,6 +255,7 @@ function _registerScheduledAutoBgChild({ scheduledCtx, userId, watcherId, label,
     childId: _autoBgChildId(watcherId),
     label,
     kind,
+    cancel,
   });
 }
 
@@ -2416,6 +2417,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             ? null
             : `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
           let freshOwnerRegistered = false;
+          let cancelBackgroundOwner = null;
           try {
             watchersMod = await import('./scheduler/watchers.mjs');
             const taskGraph = await import('./background-tasks.mjs');
@@ -2462,6 +2464,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               freshOwnerRegistered = true;
             }
             backgrounded = true;
+            cancelBackgroundOwner = reason => taskGraph.cancelTask(
+              userId,
+              freshTaskId || delegatedMeta?.chipTaskId || watcherId,
+              reason,
+            );
             taskGraph.registerTaskRoot({
               userId,
               rootTaskId: watcherId,
@@ -2524,6 +2531,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               toolSignal: toolAbort.signal,
               disposeToolSignal: toolAbort.dispose,
               scheduledCtx: getScheduledContext(),
+              cancel: cancelBackgroundOwner,
               rootTaskId: watcherId,
               rootWatcherId: watcherId,
             };
@@ -2551,6 +2559,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               watcherId: captured.watcherId,
               label: `${captured.displayName || captured.name}: ${captured.name}`,
               kind: captured.owningSkillId === 'delegate' ? 'delegate-tool' : 'tool',
+              cancel: captured.cancel,
             });
             (async () => {
               let finalCompletion = null;
@@ -2997,6 +3006,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         let scheduledCtx;
         let wid;
         let ownerRegistered = false;
+        let cancelBackgroundOwner = null;
         const autoBgTaskId = `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         try {
           watchersMod = await import('./scheduler/watchers.mjs');
@@ -3040,6 +3050,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             throw new Error('slow-tool owner registration failed');
           }
           ownerRegistered = true;
+          cancelBackgroundOwner = reason => bg.cancelTask(userId, autoBgTaskId, reason);
         } catch (error) {
           // The promise is already running. If ownership registration fails,
           // keep this turn attached and await the real result; throwing here
@@ -3062,6 +3073,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           watcherId: wid,
           label: name,
           kind: 'tool',
+          cancel: cancelBackgroundOwner,
         });
         yield { type: 'result', text: `\`${name}\` is running in the background (task ${wid}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
         yield { type: '__hide_turn', reason: 'bg_chip', taskId: wid };

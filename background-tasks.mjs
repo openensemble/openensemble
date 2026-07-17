@@ -1114,6 +1114,10 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       childId: taskId,
       label: `${agentName || 'Agent'}: ${summary}`,
       kind: 'delegate',
+      // The barrier must own the actual execution, not only its bookkeeping
+      // row. cancelTask claims cancellation state before aborting the detached
+      // turn, so a racing provider success cannot be published as success.
+      cancel: reason => cancelTask(userId, taskId, reason),
     });
   }
 
@@ -2568,6 +2572,7 @@ export function spawnWorker({
       childId: taskId,
       label: `${workerName}: ${summary}`,
       kind: 'worker',
+      cancel: reason => cancelTask(userId, taskId, reason),
     });
   }
 
