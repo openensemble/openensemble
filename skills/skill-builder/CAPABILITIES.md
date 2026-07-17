@@ -432,10 +432,12 @@ email) — declare it at the manifest top level:
 "selected_plan_keep": ["myskill_save_result"]
 ```
 
-Those tools then survive recipe trimming for any agent that holds the
-skill. Declare ONLY genuinely terminal tools: every entry ships its
-schema on every plan-constrained turn, so listing read/query tools here
-wastes tokens and defeats the trimming.
+Those tools then survive recipe trimming for a traditional scoped agent that
+holds the skill. A rosterless single-agent coordinator holds every skill, so
+its plan keeps are limited to manifests represented by actually available
+selected tools. Declare ONLY genuinely terminal tools: each retained entry
+costs schema tokens on affected plan-constrained turns, so listing read/query
+tools defeats the trimming.
 
 **Audio-source guidance for the skill:**
 

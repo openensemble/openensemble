@@ -1,7 +1,7 @@
 {
   "id": "active-agents",
   "name": "Active Agents",
-  "description": "Lets the coordinator see what other agents are doing right now — background ask_agent dispatches, root task trees, child spans, task summaries, and elapsed time.",
+  "description": "Lets the coordinator see all background work right now — agents, workers, generic slow tools, task trees, child spans, task summaries, and elapsed time.",
   "icon": "🛰️",
   "category": "service",
   "hidden": true,
@@ -26,7 +26,7 @@
       "type": "function",
       "function": {
         "name": "list_active_agents",
-        "description": "Returns the list of currently-running background agent tasks across the user's session: which agent is working, what task it was given, how long it has been running, and any root/parent/span ids tying nested delegations together. Use this when the user asks 'what is X doing', 'is X still working', 'how's the background job', 'who's busy right now', or similar status-check intents — never guess; always call this tool. If a task has children, report the root id plus the running child status. For deeper inspection of a specific task (full progress history), call get_task_log with the watcherId.",
+        "description": "Returns all currently-running background work across the user's session: detached agents/workers and generic slow-tool task_proxy watchers, how long each has run, and any root/parent/span ids tying nested work together. Use this when the user asks 'what is X doing', 'is X still working', 'how's the background job', 'who's busy right now', or similar status-check intents — never guess; always call this tool. If a task has children, report the root id plus the running child status. For deeper inspection of a specific task (full progress history), call get_task_log with the watcherId.",
         "parameters": { "type": "object", "properties": {}, "required": [] }
       }
     },
