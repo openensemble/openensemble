@@ -36,4 +36,3 @@ describe('built-in skill cooperative cancellation', () => {
     )).rejects.toBe(reason);
   });
 });
-

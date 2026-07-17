@@ -177,4 +177,3 @@ describe('chat progress feedback', () => {
     expect(websocketSource).toContain('_activeTaskSnapshot: true');
   });
 });
-

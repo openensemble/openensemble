@@ -63,4 +63,3 @@ describe('active-agents background ownership view', () => {
     expect((result.match(/Jarvis worker/g) || [])).toHaveLength(1);
   });
 });
-
