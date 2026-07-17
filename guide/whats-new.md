@@ -6,6 +6,38 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-07-17
+
+**One assistant or a full agent team — switch whenever you want**
+Single-assistant mode is now built into OpenEnsemble. Go to **Settings → Agents → Agent setup** and choose **Single assistant** for one primary assistant that handles every enabled skill, or **Agent ensemble** for the classic team of specialists. You can also say “switch me to single-agent mode” in chat. Existing accounts stay in ensemble mode until you change them; new accounts start with one assistant. Owners and admins can manage each account separately from **Settings → Users**.
+
+**Switching modes never deletes your setup**
+Moving to one assistant parks the other agents instead of removing them. Their roles, custom-skill assignments, personalities, histories, model choices, and memories remain intact and return unchanged when you restore the ensemble. Changes apply to the next message; if an assistant is currently replying, finish or stop that reply before switching.
+
+**Watchers follow the active setup and return home afterwards**
+Your existing watchers keep their original saved targets. In single-assistant mode they resolve through the primary assistant so alerts continue arriving; switch back to the ensemble and each watcher resumes using its original specialist. Updating, cancelling, counting, and delivering watcher results all use the same live projection, so a mode change cannot strand a watcher on a parked agent.
+
+**Delegation now fits the mode you're using**
+In ensemble mode, agents can use `ask_agent` to hand work to the right specialist. In single-assistant mode that tool disappears—the primary already owns the full skill set—but it can still launch bounded background workers for slow or parallel work. Switching back restores normal agent-to-agent delegation automatically. Account permissions continue to apply in either mode.
+
+**Pick a model and reasoning effort for each role or skill**
+Every built-in role and custom skill now has an **Execution** section in **Settings → Skills**. Leave it inherited, or choose a specific configured model and reasoning effort for that kind of work. The choice is validated against the account's providers and model access before every turn, and Deep Research carries its selected profile through planning, parallel research, and final synthesis instead of silently falling back partway through.
+
+**Background jobs finish—and stop—when the real work does**
+Long tasks now carry ownership through nested delegations, workers, scheduled children, MCP calls, and Deep Research. A parent no longer reports “done” while a child is still running, and Stop or timeout cancellation follows the chain to the process actually doing the work. Late completions are rejected after cancellation, while results that were already delivered remain recorded.
+
+**Email and Telegram retries no longer create duplicate effects**
+Telegram updates are durably deduplicated before processing, and outgoing deliveries use an at-most-once ledger so a retry cannot send the same result twice. Email replies preserve their real message identity, distinguish the sending address from account identity, and correlate automatic notifications so a recovered or retried turn does not quietly repeat a send.
+
+**Requests reach the right tool more consistently**
+The router now distinguishes “send this email” from “search my mailbox,” keeps official-source lookups on the web path instead of accidentally opening coding or deep-research workflows, and avoids triggering custom skills from quoted payloads or message bodies. Weather, calendar, task, TV, video, and research phrasing also received tighter conflict guards. Local shortcuts are recorded only after the chat turn itself is safely saved.
+
+**Run Inspector shows the routing decision, not a reconstruction**
+Admins can now see the exact matched skills, authoritative turn source, requested reasoning effort, effort actually sent to the provider, and separate local versus provider-reported tool evidence. Structured tool-call history also preserves parallel and multi-round call identities, making failed or uncertain actions diagnosable without exposing credentials or pretending a provider attested to data it never returned.
+
+**Completed work survives a later model failure**
+If a tool succeeds and the provider fails afterwards, OpenEnsemble now keeps the completed tool, media, and delivery evidence instead of making the whole turn look empty. Uncertain external effects are marked as possibly completed so recovery will not blindly retry them, and OAuth-backed connections surface their automatic-renewal state more clearly.
+
 ## 2026-07-07
 
 **Give your agents a personality**
