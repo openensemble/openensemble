@@ -137,6 +137,17 @@ async function handleCallbackRequest(req, res) {
 
 // ── Main-server routes (port 3737) ───────────────────────────────────────────
 
+/** Secret-free connection metadata for the settings UI. */
+export function buildOpenAIOAuthStatus(token, connected) {
+  return {
+    connected: connected === true,
+    accountId: token?.account_id ?? null,
+    plan: token?.plan_type ?? null,
+    expiresAt: token?.expires_at ?? null,
+    autoRenews: Boolean(token?.refresh_token),
+  };
+}
+
 export async function handle(req, res) {
   const url = new URL(req.url, 'http://x');
 
@@ -173,12 +184,7 @@ export async function handle(req, res) {
     const userId = requireAuth(req, res); if (!userId) return true;
     const token = readToken(userId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      connected: isConnected(userId),
-      accountId: token?.account_id ?? null,
-      plan:      token?.plan_type ?? null,
-      expiresAt: token?.expires_at ?? null,
-    }));
+    res.end(JSON.stringify(buildOpenAIOAuthStatus(token, isConnected(userId))));
     return true;
   }
 

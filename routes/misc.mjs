@@ -366,11 +366,13 @@ export async function handle(req, res) {
         res.end(JSON.stringify({ ok: true, cancelled: true, taskId: cancelled.taskId }));
         return true;
       }
-      if (cancelled.reason === 'not cancellable') {
-        res.writeHead(409, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'not cancellable' }));
-        return true;
-      }
+      // An active task_proxy is not an ordinary dismissible watcher. If its
+      // execution owner cannot accept cancellation (including because terminal
+      // finalization already won), keep the chip visible and let that owner
+      // publish the authoritative terminal state.
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: cancelled.reason || 'cancellation unavailable' }));
+      return true;
     }
     const ok = unregisterWatcher(authId, wMatch[1], 'cancelled');
     res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });

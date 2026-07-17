@@ -608,6 +608,26 @@ async function disconnectOpenAIOAuth() {
   }
 }
 
+function formatOpenAIOAuthConnectionStatus(status, formatDate = value => new Date(value).toLocaleDateString()) {
+  const s = status && typeof status === 'object' ? status : {};
+  const plan = s.plan ? ` (${s.plan})` : '';
+  const acct = s.accountId ? ` · account ${String(s.accountId).slice(0, 8)}…` : '';
+  const hasExpiry = s.expiresAt !== null && s.expiresAt !== undefined && s.expiresAt !== '';
+  const expiryDate = hasExpiry ? formatDate(s.expiresAt) : '';
+  if (s.autoRenews === true) {
+    return {
+      text: `Connected${plan}${acct} · auto-renews.`,
+      title: hasExpiry
+        ? `The current access token expires ${expiryDate}; OpenEnsemble refreshes it automatically.`
+        : 'OpenEnsemble refreshes this login automatically.',
+    };
+  }
+  return {
+    text: `Connected${plan}${acct}${hasExpiry ? ` · access token valid until ${expiryDate}` : ''}.`,
+    title: '',
+  };
+}
+
 async function refreshOpenAIOAuthStatus() {
   const box = document.getElementById('providerStatus_openai-oauth');
   if (!box) return;
@@ -618,10 +638,9 @@ async function refreshOpenAIOAuthStatus() {
   try {
     const s = await fetch('/api/oauth/openai/status').then(r => r.json());
     if (s.connected) {
-      const plan = s.plan ? ` (${s.plan})` : '';
-      const acct = s.accountId ? ` · account ${s.accountId.slice(0, 8)}…` : '';
-      const exp  = s.expiresAt ? ` · token valid until ${new Date(s.expiresAt).toLocaleDateString()}` : '';
-      box.textContent = `Connected${plan}${acct}${exp}.`;
+      const rendered = formatOpenAIOAuthConnectionStatus(s);
+      box.textContent = rendered.text;
+      box.title = rendered.title;
       if (connectBtn)    connectBtn.style.display    = 'none';
       if (disconnectBtn) disconnectBtn.style.display = '';
       if (refreshBtn)    refreshBtn.style.display    = '';
@@ -629,12 +648,14 @@ async function refreshOpenAIOAuthStatus() {
       loadCompatProviderModels('openai-oauth').catch(() => {});
     } else {
       box.textContent = 'Not connected.';
+      box.title = '';
       if (connectBtn)    connectBtn.style.display    = '';
       if (disconnectBtn) disconnectBtn.style.display = 'none';
       if (refreshBtn)    refreshBtn.style.display    = 'none';
     }
   } catch {
     box.textContent = 'Status check failed.';
+    box.title = '';
     if (connectBtn)    connectBtn.style.display    = '';
     if (disconnectBtn) disconnectBtn.style.display = 'none';
     if (refreshBtn)    refreshBtn.style.display    = 'none';
