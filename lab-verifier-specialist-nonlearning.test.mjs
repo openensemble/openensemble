@@ -6,11 +6,13 @@ const mocks = vi.hoisted(() => ({
     yield { type: 'done' };
   }),
   appendToSession: vi.fn(async () => {}),
+  failPendingTurn: vi.fn(async () => true),
   logRoutingFire: vi.fn(async () => {}),
   buildContextHints: vi.fn(async () => ({ hints: '<resolved />', resolutions: [] })),
   captureFromTurn: vi.fn(async () => {}),
   recordActivity: vi.fn(),
   recordRouting: vi.fn(),
+  loadConfig: vi.fn(() => ({})),
   runWithTurnContext: vi.fn(async (_ctx, fn) => fn()),
 }));
 
@@ -18,7 +20,7 @@ vi.mock('./chat.mjs', () => ({ streamChat: mocks.streamChat }));
 vi.mock('./sessions.mjs', () => ({
   appendToSession: mocks.appendToSession,
   loadSession: vi.fn(async () => []),
-  failPendingTurn: vi.fn(async () => true),
+  failPendingTurn: mocks.failPendingTurn,
 }));
 vi.mock('./roles.mjs', () => ({
   getRoleAssignments: vi.fn(() => ({ coordinator: 'coordinator-agent' })),
@@ -32,7 +34,7 @@ vi.mock('./lib/routing-overrides.mjs', () => ({
   logFire: mocks.logRoutingFire,
 }));
 vi.mock('./routes/_helpers.mjs', () => ({
-  loadConfig: vi.fn(() => ({})),
+  loadConfig: mocks.loadConfig,
   getAgentsForUser: vi.fn(() => [{
     id: 'email-agent', name: 'Email Specialist', provider: 'ollama', model: 'test',
     systemPrompt: 'email specialist', tools: [],
@@ -63,7 +65,7 @@ vi.mock('./lib/intent-learner.mjs', () => ({
   captureFromTurn: mocks.captureFromTurn,
 }));
 
-const { runSpecialistRoute } = await import('./chat-dispatch/llm-loop.mjs');
+const { runLlmTurn, runSpecialistRoute } = await import('./chat-dispatch/llm-loop.mjs');
 
 describe('lab verifier specialist non-learning contract', () => {
   afterEach(() => {
@@ -114,5 +116,123 @@ describe('lab verifier specialist non-learning contract', () => {
     );
     expect(mocks.logRoutingFire).not.toHaveBeenCalled();
     expect(mocks.captureFromTurn).not.toHaveBeenCalled();
+  });
+
+  it('drains a yielded terminal error so streamChat can persist its failed-turn trace', async () => {
+    let finalizedAfterError = false;
+    const onNotify = vi.fn();
+    mocks.streamChat.mockImplementationOnce(async function* () {
+      yield { type: 'tool_call', name: 'generate_image', args: { prompt: 'test' } };
+      yield { type: 'error', message: 'tool-loop request budget ended', retryable: false };
+      yield { type: '__usage', inputTokens: 12, outputTokens: 3, provider: 'test', model: 'test-model' };
+      yield { type: '__notify', message: 'must stay internal' };
+      yield { type: 'tool_call', name: 'email_user', args: { subject: 'must not run' } };
+      yield { type: 'token', text: 'must not escape' };
+      yield { type: 'done' };
+      finalizedAfterError = true;
+    });
+    const events = [];
+    await runLlmTurn({
+      userId: 'lab-user',
+      agentId: 'coordinator-agent',
+      scopedAgent: {
+        id: 'coordinator-agent', name: 'Coordinator', provider: 'openai-oauth',
+        model: 'test-model', tools: [],
+      },
+      scopedSessionKey: 'lab-user_coordinator-agent',
+      userText: 'generate an image',
+      toolPlan: { mode: 'auto', source: 'lab-verifier', maxProviderRequests: 3 },
+      schedulerNote: '',
+      source: 'web',
+      deviceId: null,
+      ac: new AbortController(),
+      onEvent: event => events.push(event),
+      onNotify,
+      suppressLearning: true,
+      verifierAllowedTools: ['generate_image'],
+      verifierLeaseRequired: true,
+      verifierLeaseToken: 'b'.repeat(64),
+    });
+
+    expect(finalizedAfterError).toBe(true);
+    expect(onNotify).not.toHaveBeenCalled();
+    expect(mocks.failPendingTurn).toHaveBeenCalledOnce();
+    expect(mocks.failPendingTurn).toHaveBeenCalledWith(
+      'lab-user_coordinator-agent',
+      'tool-loop request budget ended',
+      expect.objectContaining({ status: 'failed', retryable: false }),
+    );
+    expect(events.filter(event => event.type === 'error')).toEqual([
+      expect.objectContaining({
+        message: 'tool-loop request budget ended', code: 'turn_failed', retryable: false,
+      }),
+    ]);
+    expect(events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'email_user' }),
+      expect.objectContaining({ text: 'must not escape' }),
+      expect.objectContaining({ type: 'done' }),
+    ]));
+  });
+
+  it('preserves no-tool provider failover while draining a retriable primary error', async () => {
+    let primaryFinalized = false;
+    const onNotify = vi.fn();
+    mocks.loadConfig.mockReturnValueOnce({
+      providerFailover: {
+        enabled: true,
+        fallbackProvider: 'fallback-provider',
+        fallbackModel: 'fallback-model',
+      },
+    });
+    mocks.streamChat
+      .mockImplementationOnce(async function* () {
+        yield { type: 'error', message: 'provider timeout', retryable: true };
+        yield { type: '__notify', message: 'must stay internal' };
+        yield { type: 'tool_call', name: 'email_user', args: { subject: 'must not run' } };
+        yield { type: 'token', text: 'must not escape' };
+        yield { type: 'done' };
+        primaryFinalized = true;
+      })
+      .mockImplementationOnce(async function* () {
+        yield { type: 'token', text: 'fallback reply' };
+        yield { type: 'done' };
+      });
+    const events = [];
+
+    await runLlmTurn({
+      userId: 'lab-user',
+      agentId: 'coordinator-agent',
+      scopedAgent: {
+        id: 'coordinator-agent', name: 'Coordinator', provider: 'primary-provider',
+        model: 'primary-model', tools: [],
+      },
+      scopedSessionKey: 'lab-user_coordinator-agent',
+      userText: 'retry this request',
+      toolPlan: { mode: 'auto', source: 'lab-verifier', maxProviderRequests: 2 },
+      schedulerNote: '',
+      source: 'web',
+      deviceId: null,
+      ac: new AbortController(),
+      onEvent: event => events.push(event),
+      onNotify,
+      suppressLearning: true,
+    });
+
+    expect(primaryFinalized).toBe(true);
+    expect(mocks.streamChat).toHaveBeenCalledTimes(2);
+    expect(mocks.streamChat.mock.calls[1][0]).toEqual(expect.objectContaining({
+      provider: 'fallback-provider', model: 'fallback-model',
+    }));
+    expect(onNotify).not.toHaveBeenCalled();
+    expect(mocks.failPendingTurn).not.toHaveBeenCalled();
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'token', text: 'fallback reply' }),
+      expect.objectContaining({ type: 'done' }),
+    ]));
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'email_user' }),
+      expect.objectContaining({ text: 'must not escape' }),
+    ]));
   });
 });

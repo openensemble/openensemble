@@ -558,6 +558,7 @@ export async function runLlmTurn({
 
   async function runStream(agentObj) {
     callbackError = null;
+    let streamError = null;
     // runWithTurnContext: skill executors reached from this stream's tool loop
     // (notably ask_agent's sync delegations) link their own AbortControllers
     // to this turn's signal via getTurnSignal() — without it, a user stop
@@ -576,17 +577,23 @@ export async function runLlmTurn({
       toolPlan, documentRequest, hiddenUser, isolatedTaskRun,
       readOnlyTurn, sessionUserText,
     })) {
-      if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
+      // Retain the first terminal error, but keep draining streamChat. Its
+      // errored path persists the provider span/run-inspector record only after
+      // the error yield resumes; returning here closed the generator early and
+      // erased request/token evidence for failed turns. Nothing after a
+      // terminal error is exposed outward or allowed to mutate turn state;
+      // only internal usage accounting and generator finalizers still run.
+      if (event.type === 'error') { streamError ??= { ...event }; continue; }
+      if (streamError) continue;
+      if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
       if (event.type === 'tool_call') toolInvoked = true;
-      // All terminal errors are returned to the owner so it can persist a
-      // failed status BEFORE exposing the error/Retry UI.
-      if (event.type === 'error') return event;
       // Accumulate stream content for persistence buffer
       if (event.type === 'token')   streamBuf += event.text;
       if (event.type === 'replace') streamBuf = event.text;
       onEvent({ ...event, agent: agentId });
     }
+    if (streamError) return streamError;
     if (callbackError) { const error = callbackError; callbackError = null; return error; }
     return null; // success
     });
