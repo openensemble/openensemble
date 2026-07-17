@@ -147,6 +147,8 @@ async function loadInboxPreview(accountId) {
   // resolveAccount's "Account ${id} not found". Coerce to null when the
   // caller didn't supply a real account id string.
   if (typeof accountId !== 'string') accountId = null;
+  // Invalidate any in-flight detail body fetch so it cannot paint into the list.
+  _emailDetailGen++;
   // Load tabs if stale or empty
   if (!_inboxAccounts.length || Date.now() - _inboxAccountsLoadedAt > 300000) {
     await loadEmailAccountTabs();
@@ -261,10 +263,16 @@ let _activeInboxAccountId = null;
 let _activeInboxQuery = null;
 let _inboxAccountsLoadedAt = 0;
 
+// Generation counter so a slow body fetch for message A cannot overwrite the
+// iframe after the user has already opened message B (or gone back to the list).
+let _emailDetailGen = 0;
+
 async function openEmailDetail(msgId) {
   const meta = _inboxEmailMeta[msgId];
   if (!meta) return;
   const el = $('inboxPreview');
+  const detailGen = ++_emailDetailGen;
+  const accountIdAtOpen = _activeInboxAccountId;
   // Lock the drawer body so the iframe can fill it with height:100%
   const drawerBody = el.closest('.desk-drawer-body');
   // Remove infinite scroll listener while viewing detail
@@ -282,6 +290,8 @@ async function openEmailDetail(msgId) {
       _inboxEmailActions = emailSkill?.actions ?? [];
     } catch {}
   }
+  // User navigated away while skills were loading.
+  if (detailGen !== _emailDetailGen) return;
 
   const fromDisplay = meta.from.replace(/<[^>]+>/, '').replace(/"/g, '').trim() || meta.from;
   const dateDisplay = meta.date ? new Date(meta.date).toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
@@ -317,18 +327,35 @@ async function openEmailDetail(msgId) {
     ${_inboxEmailActions.length ? `<div class="email-action-bar">${actionBtns}</div>` : ''}
   </div>`;
 
-  // Fetch HTML with auth token, inject via srcdoc
+  const frame = $('emailFrame');
+  if (frame) {
+    frame.srcdoc = `<p style="font-family:sans-serif;color:#888;padding:16px">Loading message…</p>`;
+  }
+
+  // Fetch HTML with auth token, inject via srcdoc. Ignore the response if the
+  // user has already opened another message or returned to the list.
   try {
-    const acctQs = _activeInboxAccountId ? `?accountId=${encodeURIComponent(_activeInboxAccountId)}` : '';
-    let html = await fetch(`/api/inbox/${encodeURIComponent(msgId)}${acctQs}`).then(r => r.text());
+    const acctQs = accountIdAtOpen ? `?accountId=${encodeURIComponent(accountIdAtOpen)}` : '';
+    const resp = await fetch(`/api/inbox/${encodeURIComponent(msgId)}${acctQs}`, { cache: 'no-store' });
+    if (detailGen !== _emailDetailGen) return;
+    let html = await resp.text();
+    if (detailGen !== _emailDetailGen) return;
+    if (!resp.ok) {
+      const errFrame = $('emailFrame');
+      if (errFrame && detailGen === _emailDetailGen) {
+        errFrame.srcdoc = `<p style="font-family:sans-serif;color:red;padding:16px">Failed to load: ${escHtml(html.replace(/<[^>]+>/g, '').slice(0, 200) || resp.statusText)}</p>`;
+      }
+      return;
+    }
     // Make all links open in a new browser tab
     html = html.replace(/<head([^>]*)>/i, '<head$1><base target="_blank" rel="noopener">');
     if (!/<head/i.test(html)) html = '<base target="_blank" rel="noopener">' + html;
-    const frame = $('emailFrame');
-    if (frame) frame.srcdoc = html;
+    const liveFrame = $('emailFrame');
+    if (liveFrame && detailGen === _emailDetailGen) liveFrame.srcdoc = html;
   } catch (e) {
-    const frame = $('emailFrame');
-    if (frame) frame.srcdoc = `<p style="font-family:sans-serif;color:red">Failed to load: ${e.message}</p>`;
+    if (detailGen !== _emailDetailGen) return;
+    const errFrame = $('emailFrame');
+    if (errFrame) errFrame.srcdoc = `<p style="font-family:sans-serif;color:red;padding:16px">Failed to load: ${escHtml(e.message)}</p>`;
   }
 }
 
