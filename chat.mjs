@@ -251,6 +251,9 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
         return {
           name: t.name,
           ...(t.toolCallId ? { toolCallId: t.toolCallId } : {}),
+          ...(isProviderCallOrdinal(t.providerCallOrdinal)
+            ? { providerCallOrdinal: t.providerCallOrdinal }
+            : {}),
           ...(t.native === true ? { native: true } : {}),
           args: t.args ? compactDocumentToolArgs(t.name, redactArgsForTrace(t.args)) : null,
           status: t.status ?? 'done',
@@ -521,6 +524,10 @@ function optionalSafeCount(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+function isProviderCallOrdinal(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
 function canonicalProviderToolCallId(value) {
   if (typeof value !== 'string' || !value || value !== value.trim()
       || value.length > 512 || /[\r\n\0]/.test(value)) {
@@ -596,7 +603,10 @@ export function mergeProviderUsage(first, second) {
 }
 
 // Exported so internal event retention can be tested without a live provider.
-export async function* consumeProvider(providerGen, { suppressText = false } = {}) {
+export async function* consumeProvider(providerGen, {
+  suppressText = false,
+  providerCallOrdinalOffset = 0,
+} = {}) {
   let assistantContent = '';
   let errored = false;
   // Phase-14 chip-replaces-turn: tools may yield `__hide_turn` to indicate
@@ -616,6 +626,16 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
   let _lastCallArgsByName = Object.create(null);
   let _pendingToolEventsByName = Object.create(null);
   const _providerToolCallsById = new Map();
+  // Each provider generator starts its own round counter. Chat-level recovery
+  // can create a second generator for the same durable turn, so callers pass
+  // the number of model calls already observed and we continue the canonical,
+  // turn-wide ordinal instead of colliding with the first attempt's rounds.
+  const _providerCallOffset = Number.isSafeInteger(providerCallOrdinalOffset)
+    && providerCallOrdinalOffset >= 0
+    ? providerCallOrdinalOffset
+    : 0;
+  let _providerCallCount = 0;
+  let _providerCallOrdinal = null;
   // Capture the provider's end-of-turn token usage for the turn trace. The
   // event is still yielded onward (llm-loop records it for billing); we just
   // also stash it so streamChat can attach it to its span without re-plumbing
@@ -629,8 +649,12 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       : canonicalProviderToolCallId(event.toolCallId);
     if (event.type === '__content') { assistantContent = event.content; continue; }
     if (event.type === '__model_call') {
+      _providerCallCount += 1;
+      const nextOrdinal = _providerCallOffset + _providerCallCount;
+      _providerCallOrdinal = isProviderCallOrdinal(nextOrdinal) ? nextOrdinal : null;
       const router = toolRouterContext.getStore();
       modelCalls.push({
+        ...(_providerCallOrdinal ? { ordinal: _providerCallOrdinal } : {}),
         provider: event.provider ?? null,
         model: event.model ?? null,
         requestedReasoningEffort: event.requestedReasoningEffort ?? null,
@@ -715,6 +739,7 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       const rec = {
         name: event.name,
         ...(providerToolCallId ? { toolCallId: providerToolCallId } : {}),
+        ...(_providerCallOrdinal ? { providerCallOrdinal: _providerCallOrdinal } : {}),
         args: event.args ?? null,
         startedAt: Date.now(),
         status: 'running',
@@ -750,7 +775,16 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
         _nativeSearchRecorded = true;
         const now = Date.now();
         toolsUsed.push({ name: 'web_search', text: 'provider-hosted web search', args: null, native: true });
-        toolEvents.push({ name: 'web_search', args: null, startedAt: now, endedAt: now, durationMs: 0, status: 'done', native: true });
+        toolEvents.push({
+          name: 'web_search',
+          ...(_providerCallOrdinal ? { providerCallOrdinal: _providerCallOrdinal } : {}),
+          args: null,
+          startedAt: now,
+          endedAt: now,
+          durationMs: 0,
+          status: 'done',
+          native: true,
+        });
       }
     }
     if (event.type === 'tool_result' && event.name) {
@@ -801,6 +835,7 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
         toolEvents.push({
           name: event.name,
           ...(providerToolCallId ? { toolCallId: providerToolCallId } : {}),
+          ...(_providerCallOrdinal ? { providerCallOrdinal: _providerCallOrdinal } : {}),
           args: _lastCallArgsByName[event.name] ?? null,
           status: _toolStatus,
           startedAt: Date.now(),
@@ -1086,7 +1121,7 @@ function stripLegacyToolProvenanceProse(value) {
     .trimEnd();
 }
 
-function persistedToolCalls(row, rowIndex, keepFullResult) {
+function persistedToolCallBatches(row, rowIndex, keepFullResult) {
   const results = Array.isArray(row?.toolResults)
     ? row.toolResults.filter(r => r && HISTORY_TOOL_NAME_RE.test(String(r.name || '')))
     : [];
@@ -1134,6 +1169,9 @@ function persistedToolCalls(row, rowIndex, keepFullResult) {
         name: event.name,
         args: historyToolArgs(event.args),
         status: event.status,
+        providerCallOrdinal: isProviderCallOrdinal(event.providerCallOrdinal)
+          ? event.providerCallOrdinal
+          : null,
         // Modern rows carry an exact resultIndex. Never guess by name when it
         // is absent: repeated same-name calls can otherwise receive each
         // other's outputs. Older toolEvent rows retained their own `text`
@@ -1151,10 +1189,15 @@ function persistedToolCalls(row, rowIndex, keepFullResult) {
     records = row.toolsUsed
       .map(parsePersistedToolSummary)
       .filter(Boolean)
-      .map(call => ({ ...call, status: 'done', result: takeResult(call.name) }));
+      .map(call => ({
+        ...call,
+        status: 'done',
+        providerCallOrdinal: null,
+        result: takeResult(call.name),
+      }));
   }
 
-  return records.map((record, callIndex) => {
+  const calls = records.map((record, callIndex) => {
     const retained = record.result == null ? null : String(record.result.text ?? '');
     const output = keepFullResult
       ? (retained || MISSING_TOOL_RESULT)
@@ -1164,8 +1207,27 @@ function persistedToolCalls(row, rowIndex, keepFullResult) {
       name: record.name,
       arguments: safeToolArguments(record.args),
       output: applyRedactions(output),
+      providerCallOrdinal: record.providerCallOrdinal,
     };
   });
+
+  if (!calls.length) return [];
+  // Ordinals were added after structured history first shipped. If even one
+  // retained local call lacks the new metadata, keep the legacy behavior and
+  // replay the entire turn as one parallel batch. Guessing boundaries from
+  // call/result order would invent dependencies that were never observed.
+  if (!calls.every(call => isProviderCallOrdinal(call.providerCallOrdinal))) {
+    return [calls];
+  }
+
+  const byOrdinal = new Map();
+  for (const call of calls) {
+    if (!byOrdinal.has(call.providerCallOrdinal)) byOrdinal.set(call.providerCallOrdinal, []);
+    byOrdinal.get(call.providerCallOrdinal).push(call);
+  }
+  return [...byOrdinal.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, batch]) => batch);
 }
 
 /**
@@ -1198,24 +1260,26 @@ export function buildLlmHistory(sessionRows) {
     }
 
     if (role === 'assistant') {
-      const calls = persistedToolCalls(row, rowIndex, fullResultIndexes.has(rowIndex));
-      if (calls.length) {
-        history.push({
-          role: 'assistant',
-          content: null,
-          tool_calls: calls.map(call => ({
-            id: call.id,
-            type: 'function',
-            function: { name: call.name, arguments: call.arguments },
-          })),
-        });
-        for (const call of calls) {
+      const callBatches = persistedToolCallBatches(row, rowIndex, fullResultIndexes.has(rowIndex));
+      if (callBatches.length) {
+        for (const calls of callBatches) {
           history.push({
-            role: 'tool',
-            tool_call_id: call.id,
-            name: call.name,
-            content: call.output,
+            role: 'assistant',
+            content: null,
+            tool_calls: calls.map(call => ({
+              id: call.id,
+              type: 'function',
+              function: { name: call.name, arguments: call.arguments },
+            })),
           });
+          for (const call of calls) {
+            history.push({
+              role: 'tool',
+              tool_call_id: call.id,
+              name: call.name,
+              content: call.output,
+            });
+          }
         }
         if (typeof body === 'string' && body.length) history.push({ role: 'assistant', content: body });
         continue;
@@ -2326,7 +2390,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         // the device speaks it — then the corrected reply streams live after it.
         yield { type: 'token', text: `\n\n${MISSING_TOOL_NOTICE}\n\n` };
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-        { const _priorUsage = usage, _priorModelCalls = modelCalls; const _r = yield* bindToolRouterContext(consumeProvider(providerGen, { suppressText: false }), _routerStore); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
+        {
+          const _priorUsage = usage;
+          const _priorModelCalls = modelCalls;
+          const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
+            suppressText: false,
+            providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
+          }), _routerStore);
+          ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r);
+          usage = mergeProviderUsage(_priorUsage, _r.usage);
+          modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
+          turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
+        }
       }
     }
   }
@@ -2365,7 +2440,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // Preserve the first attempt's tool events/uses so persist() records them
       // (the destructure would otherwise replace them with the recovery run's).
       const _priorToolsUsed = toolsUsed, _priorToolEvents = toolEvents, _priorUsage = usage, _priorModelCalls = modelCalls;
-      { const _r = yield* bindToolRouterContext(consumeProvider(providerGen, { suppressText: false }), _routerStore); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])]; toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])]; }
+      {
+        const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
+          suppressText: false,
+          providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
+        }), _routerStore);
+        ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r);
+        usage = mergeProviderUsage(_priorUsage, _r.usage);
+        modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
+        turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
+        toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])];
+        toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])];
+      }
       recoveredProgressClaim = true;
     } catch (e) {
       log.warn('chat', 'in-progress claim recovery failed', { err: e.message });

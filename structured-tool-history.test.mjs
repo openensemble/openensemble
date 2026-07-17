@@ -69,6 +69,78 @@ describe('structured persisted tool history', () => {
     ]));
   });
 
+  it('replays sequential provider rounds as separate call/result boundaries', () => {
+    const history = buildLlmHistory([modernToolTurn({
+      content: 'I opened the message selected by the search.',
+      toolsUsed: ['email_search', 'email_read'],
+      toolResults: [
+        { name: 'email_search', text: 'message id: msg-17', toolCallId: 'provider-search' },
+        { name: 'email_read', text: 'body: sequential result', toolCallId: 'provider-read' },
+      ],
+      toolEvents: [
+        {
+          name: 'email_search', args: { query: 'newest' }, status: 'done',
+          toolCallId: 'provider-search', providerCallOrdinal: 1, resultIndex: 0,
+        },
+        {
+          name: 'email_read', args: { messageId: 'msg-17' }, status: 'done',
+          toolCallId: 'provider-read', providerCallOrdinal: 2, resultIndex: 1,
+        },
+      ],
+    })]);
+
+    expect(history.map(row => row.role)).toEqual([
+      'assistant', 'tool', 'assistant', 'tool', 'assistant',
+    ]);
+    expect(history[0].tool_calls.map(call => call.function.name)).toEqual(['email_search']);
+    expect(history[1]).toMatchObject({
+      tool_call_id: 'call_hist_0_0',
+      content: 'message id: msg-17',
+    });
+    expect(history[2].tool_calls.map(call => call.function)).toEqual([{
+      name: 'email_read',
+      arguments: '{"messageId":"msg-17"}',
+    }]);
+    expect(history[3]).toMatchObject({
+      tool_call_id: 'call_hist_0_1',
+      content: 'body: sequential result',
+    });
+
+    expect(toResponsesInput(history).map(item => item.type)).toEqual([
+      'function_call', 'function_call_output',
+      'function_call', 'function_call_output', 'message',
+    ]);
+  });
+
+  it('keeps parallel calls from the same provider round in one batch', () => {
+    const history = buildLlmHistory([modernToolTurn({
+      content: 'Both checks completed.',
+      toolsUsed: ['weather_now', 'calendar_today'],
+      toolResults: [
+        { name: 'weather_now', text: 'sunny' },
+        { name: 'calendar_today', text: 'two meetings' },
+      ],
+      toolEvents: [
+        {
+          name: 'weather_now', args: { city: 'Raleigh' }, status: 'done',
+          providerCallOrdinal: 7, resultIndex: 0,
+        },
+        {
+          name: 'calendar_today', args: {}, status: 'done',
+          providerCallOrdinal: 7, resultIndex: 1,
+        },
+      ],
+    })]);
+
+    expect(history.map(row => row.role)).toEqual(['assistant', 'tool', 'tool', 'assistant']);
+    expect(history[0].tool_calls.map(call => call.function.name)).toEqual([
+      'weather_now', 'calendar_today',
+    ]);
+    expect(history.slice(1, 3).map(row => row.tool_call_id)).toEqual([
+      'call_hist_0_0', 'call_hist_0_1',
+    ]);
+  });
+
   it('keeps full outputs for only the two newest tool turns', () => {
     const history = buildLlmHistory([
       { role: 'user', content: 'first' },
@@ -128,6 +200,8 @@ describe('structured persisted tool history', () => {
       },
     ]);
     const calls = history[0].tool_calls;
+    expect(calls).toHaveLength(2);
+    expect(history.filter(row => Array.isArray(row.tool_calls))).toHaveLength(1);
     expect(calls[0].function).toEqual({
       name: 'email_send',
       arguments: '{"to":"capture@example.test"}',
@@ -185,6 +259,9 @@ describe('structured persisted tool history', () => {
       '[Tool completed, but no textual result was retained.]',
       'second result only',
     ]);
+    // These rows predate providerCallOrdinal. Keep the safe historical
+    // single-batch behavior instead of guessing a sequential dependency.
+    expect(history.filter(row => Array.isArray(row.tool_calls))).toHaveLength(1);
   });
 
   it('uses call-local legacy toolEvent text when result indexes predate the row', () => {
@@ -250,6 +327,46 @@ describe('structured persisted tool history', () => {
       { role: 'assistant', content: 'The newest message says hello.' },
     ]);
     expect(history.some(row => row.role === 'tool' || row.tool_calls)).toBe(false);
+  });
+
+  it('preserves sequential round boundaries in Anthropic and Ollama history', () => {
+    const canonical = buildLlmHistory([modernToolTurn({
+      content: 'Finished in order.',
+      toolsUsed: ['first_step', 'second_step'],
+      toolResults: [
+        { name: 'first_step', text: 'handle: h-1' },
+        { name: 'second_step', text: 'used h-1' },
+      ],
+      toolEvents: [
+        {
+          name: 'first_step', args: {}, status: 'done',
+          providerCallOrdinal: 1, resultIndex: 0,
+        },
+        {
+          name: 'second_step', args: { handle: 'h-1' }, status: 'done',
+          providerCallOrdinal: 2, resultIndex: 1,
+        },
+      ],
+    })]);
+
+    const anthropic = adaptLlmHistoryForProvider(canonical, 'anthropic');
+    expect(anthropic.map(row => row.role)).toEqual([
+      'assistant', 'user', 'assistant', 'user', 'assistant',
+    ]);
+    expect(anthropic[0].content).toEqual([
+      expect.objectContaining({ type: 'tool_use', name: 'first_step' }),
+    ]);
+    expect(anthropic[2].content).toEqual([
+      expect.objectContaining({ type: 'tool_use', name: 'second_step', input: { handle: 'h-1' } }),
+    ]);
+
+    const ollama = adaptLlmHistoryForProvider(canonical, 'ollama');
+    expect(ollama.map(row => row.role)).toEqual([
+      'assistant', 'tool', 'assistant', 'tool', 'assistant',
+    ]);
+    expect(ollama[0].tool_calls).toHaveLength(1);
+    expect(ollama[2].tool_calls).toHaveLength(1);
+    expect(ollama[2].tool_calls[0].function.arguments).toEqual({ handle: 'h-1' });
   });
 
   it('renders Ollama object arguments and name-paired tool results', () => {

@@ -7,6 +7,11 @@ const sessionMocks = vi.hoisted(() => ({
 }));
 const providerMocks = vi.hoisted(() => ({
   streamOllama: vi.fn(async function* () {
+    yield {
+      type: '__model_call', provider: 'ollama', model: 'test-model',
+      phase: 'dispatch_planned', round: 1, toolsPresent: true,
+      toolNames: ['email_send'], toolCount: 1,
+    };
     yield { type: 'tool_call', name: 'email_send', args: { recipient: 'capture@example.test' } };
     yield { type: 'tool_result', name: 'email_send', text: 'Message accepted as msg-123' };
     yield { type: 'image', filename: 'receipt.png', mimeType: 'image/png', base64: 'inline-pixels' };
@@ -56,6 +61,9 @@ describe('provider-error effect durability', () => {
     expect(assistantRow).toMatchObject({
       role: 'assistant', content: '',
       toolResults: [{ name: 'email_send', text: 'Message accepted as msg-123' }],
+      toolEvents: [expect.objectContaining({
+        name: 'email_send', providerCallOrdinal: 1, resultIndex: 0,
+      })],
     });
     expect(assistantRow.toolsUsed[0]).toContain('email_send');
   });

@@ -18,11 +18,11 @@ async function collectWithReturn(generator) {
   }
 }
 
-async function consumeEvents(events) {
+async function consumeEvents(events, options = {}) {
   async function* provider() {
     for (const event of events) yield event;
   }
-  return collectWithReturn(consumeProvider(provider()));
+  return collectWithReturn(consumeProvider(provider(), options));
 }
 
 describe('provider internal evidence consumption', () => {
@@ -155,6 +155,23 @@ describe('provider internal evidence consumption', () => {
       usageCount: 1,
       usageComplete: false,
     });
+  });
+
+  it('stamps tool events with a canonical model-call ordinal and honors recovery offsets', async () => {
+    const events = [
+      modelCallTraceEvent({ provider: 'test', model: 'test', round: 41, tools: [] }),
+      { type: 'tool_call', name: 'first', args: {}, toolCallId: 'call-first' },
+      { type: 'tool_result', name: 'first', text: 'first result', toolCallId: 'call-first' },
+      modelCallTraceEvent({ provider: 'test', model: 'test', round: 99, tools: [] }),
+      { type: 'tool_call', name: 'second', args: {}, toolCallId: 'call-second' },
+      { type: 'tool_result', name: 'second', text: 'second result', toolCallId: 'call-second' },
+    ];
+
+    const { result } = await consumeEvents(events, { providerCallOrdinalOffset: 3 });
+
+    expect(result.modelCalls.map(call => call.ordinal)).toEqual([4, 5]);
+    expect(result.modelCalls.map(call => call.providerRound)).toEqual([41, 99]);
+    expect(result.toolEvents.map(event => event.providerCallOrdinal)).toEqual([4, 5]);
   });
 
   it('correlates out-of-order parallel same-name progress and results by provider identity', async () => {
