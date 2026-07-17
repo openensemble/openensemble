@@ -19,8 +19,14 @@ const sessionMocks = vi.hoisted(() => ({
 
 const providerMocks = vi.hoisted(() => ({
   streamOllama: vi.fn(async function* () {
-    yield { type: 'tool_call', name: 'read_live_data', args: {} };
-    yield { type: 'tool_result', name: 'read_live_data', text: 'live value: 391' };
+    yield {
+      type: 'tool_call', name: 'read_live_data', args: {},
+      toolCallId: 'provider-call-live-391', providerNative: true,
+    };
+    yield {
+      type: 'tool_result', name: 'read_live_data', text: 'live value: 391',
+      toolCallId: 'provider-call-live-391', providerNative: true,
+    };
     yield { type: 'token', text: '391' };
     yield {
       type: '__usage', inputTokens: 100, outputTokens: 1,
@@ -141,6 +147,16 @@ describe('lab verifier non-learning contract', () => {
     ]));
     const persistedAssistant = sessionMocks.appendToSession.mock.calls[0].at(-1);
     expect(persistedAssistant.toolsUsed).toEqual(['read_live_data({})']);
+    expect(persistedAssistant.toolResults).toEqual([{
+      name: 'read_live_data', text: 'live value: 391',
+      toolCallId: 'provider-call-live-391', native: true,
+    }]);
+    expect(persistedAssistant.toolEvents).toEqual([
+      expect.objectContaining({
+        name: 'read_live_data', toolCallId: 'provider-call-live-391',
+        native: true, status: 'done', resultIndex: 0,
+      }),
+    ]);
     expect(emitted).toEqual([]);
   });
 

@@ -144,9 +144,9 @@ export async function drainToolWithEvents(name, args, userId, agentId, allowedTo
       if (chunk.type === 'token')              toolResult += chunk.text;
       if (chunk.type === 'permission_request') events.push(chunk);
       if (chunk.type === '__hide_turn')         events.push({ type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId });
-      if (chunk.type === 'tool_call')          events.push({ type: 'tool_call', name: chunk.name, args: chunk.args });
-      if (chunk.type === 'tool_progress')      events.push({ type: 'tool_progress', name: chunk.name, text: chunk.text });
-      if (chunk.type === 'tool_result')        events.push({ type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) });
+      if (chunk.type === 'tool_call')          events.push({ type: 'tool_call', name: chunk.name, args: chunk.args, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}) });
+      if (chunk.type === 'tool_progress')      events.push({ type: 'tool_progress', name: chunk.name, text: chunk.text, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}) });
+      if (chunk.type === 'tool_result')        events.push({ type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text), ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}) });
       if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') events.push(chunk);
       if (chunk.type === 'result') {
         toolResult = chunk.text;

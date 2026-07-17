@@ -213,16 +213,32 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   // mapper below as `[prior-turn tool results]` appended to the assistant
   // body. Doesn't render in the chat UI (only the assistant content does).
   const toolResults = toolsUsed.length
-    ? toolsUsed.map(t => ({ name: t.name, text: compactDocumentToolResult(t.name, t.text) }))
+    ? toolsUsed.map(t => ({
+        name: t.name,
+        text: compactDocumentToolResult(t.name, t.text),
+        ...(t.toolCallId ? { toolCallId: t.toolCallId } : {}),
+        ...(t.native === true ? { native: true } : {}),
+      }))
         .filter(r => r.text.length > 0)
     : null;
   const resultCursorByName = new Map();
-  const nextToolResultIndex = (name) => {
+  const claimedToolResultIndexes = new Set();
+  const nextToolResultIndex = (name, toolCallId = null) => {
     if (!toolResults?.length) return null;
+    if (toolCallId) {
+      const exactIndex = toolResults.findIndex((result, index) =>
+        !claimedToolResultIndexes.has(index)
+        && result?.name === name
+        && result?.toolCallId === toolCallId);
+      if (exactIndex < 0) return null;
+      claimedToolResultIndexes.add(exactIndex);
+      return exactIndex;
+    }
     const start = resultCursorByName.get(name) ?? 0;
     for (let i = start; i < toolResults.length; i++) {
-      if (toolResults[i]?.name === name) {
+      if (toolResults[i]?.name === name && !claimedToolResultIndexes.has(i)) {
         resultCursorByName.set(name, i + 1);
+        claimedToolResultIndexes.add(i);
         return i;
       }
     }
@@ -230,9 +246,11 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   };
   const compactToolEvents = Array.isArray(toolEvents) && toolEvents.length
     ? toolEvents.map(t => {
-        const resultIndex = t.text ? nextToolResultIndex(t.name) : null;
+        const resultIndex = t.text ? nextToolResultIndex(t.name, t.toolCallId) : null;
         return {
           name: t.name,
+          ...(t.toolCallId ? { toolCallId: t.toolCallId } : {}),
+          ...(t.native === true ? { native: true } : {}),
           args: t.args ? compactDocumentToolArgs(t.name, redactArgsForTrace(t.args)) : null,
           status: t.status ?? 'done',
           startedAt: t.startedAt ?? null,
@@ -502,6 +520,14 @@ function optionalSafeCount(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+function canonicalProviderToolCallId(value) {
+  if (typeof value !== 'string' || !value || value !== value.trim()
+      || value.length > 512 || /[\r\n\0]/.test(value)) {
+    throw new Error('provider supplied an invalid tool call identity');
+  }
+  return value;
+}
+
 function sumKnown(a, b) {
   const values = [a, b].filter(value => Number.isSafeInteger(value) && value >= 0);
   if (!values.length) return null;
@@ -588,6 +614,7 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
   // downstream proposers (routine-proposer) can inspect what the LLM passed.
   let _lastCallArgsByName = Object.create(null);
   let _pendingToolEventsByName = Object.create(null);
+  const _providerToolCallsById = new Map();
   // Capture the provider's end-of-turn token usage for the turn trace. The
   // event is still yielded onward (llm-loop records it for billing); we just
   // also stash it so streamChat can attach it to its span without re-plumbing
@@ -596,6 +623,9 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
   let usage = null;
   try {
   for await (const event of providerGen) {
+    const providerToolCallId = event?.toolCallId == null
+      ? null
+      : canonicalProviderToolCallId(event.toolCallId);
     if (event.type === '__content') { assistantContent = event.content; continue; }
     if (event.type === '__model_call') {
       const router = toolRouterContext.getStore();
@@ -673,9 +703,17 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       });
     }
     if (event.type === 'tool_call' && event.name) {
+      if (providerToolCallId) {
+        const priorName = _providerToolCallsById.get(providerToolCallId);
+        if (priorName) {
+          throw new Error(`provider repeated tool call identity ${providerToolCallId} for ${event.name} (already used by ${priorName})`);
+        }
+        _providerToolCallsById.set(providerToolCallId, event.name);
+      }
       _lastCallArgsByName[event.name] = event.args ?? null;
       const rec = {
         name: event.name,
+        ...(providerToolCallId ? { toolCallId: providerToolCallId } : {}),
         args: event.args ?? null,
         startedAt: Date.now(),
         status: 'running',
@@ -689,11 +727,18 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       toolEvents.push(rec);
     }
     if (event.type === 'tool_progress' && event.name) {
-      const pending = _pendingToolEventsByName[event.name]?.[0];
+      const pendingForName = _pendingToolEventsByName[event.name] ?? [];
+      const pending = providerToolCallId
+        ? pendingForName.find(item => item.toolCallId === providerToolCallId)
+        : pendingForName[0];
+      if (providerToolCallId && !pending) {
+        throw new Error(`tool progress carried an unknown call identity for ${event.name}`);
+      }
       if (pending) {
         const clean = String(event.text ?? '').slice(-1200);
         pending.progressPreview = clean;
         pending.updatedAt = Date.now();
+        if (event.providerNative === true || event.native === true) pending.native = true;
       } else if (event.name === 'web_search' && !_nativeSearchRecorded) {
         // Provider-hosted web search emits ONLY this progress event — no local
         // tool_call/tool_result pair — so without a synthetic record hosted
@@ -708,15 +753,28 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       }
     }
     if (event.type === 'tool_result' && event.name) {
-      // Take args from the matching pending record (FIFO per name), not the
-      // by-name map — parallel same-name calls clobbered the map, so the
-      // first result carried the SECOND call's args in traces/recipes.
-      const _matched = _pendingToolEventsByName[event.name]?.[0] ?? null;
+      // Match canonical provider identities when available. Legacy providers
+      // that omit identities retain FIFO-by-name correlation.
+      const pendingForName = _pendingToolEventsByName[event.name] ?? [];
+      const exactMatchIndex = providerToolCallId
+        ? pendingForName.findIndex(item => item.toolCallId === providerToolCallId)
+        : -1;
+      if (providerToolCallId && exactMatchIndex < 0) {
+        throw new Error(`tool result carried an unknown or duplicate call identity for ${event.name}`);
+      }
+      const matchedIndex = providerToolCallId
+        ? exactMatchIndex
+        : (pendingForName.length ? 0 : -1);
+      const _matched = matchedIndex >= 0 ? pendingForName[matchedIndex] : null;
+      const _providerNative = _matched?.native === true
+        || event.providerNative === true
+        || event.native === true;
       toolsUsed.push({
         name: event.name,
         text: event.text || '',
         args: (_matched?.args ?? _lastCallArgsByName[event.name]) ?? null,
-        ...((_matched?.native === true || event.providerNative === true || event.native === true) ? { native: true } : {}),
+        ...(providerToolCallId ? { toolCallId: providerToolCallId } : {}),
+        ...(_providerNative ? { native: true } : {}),
       });
       // A tool that caught its own error and returned an error string (or one
       // the dispatcher caught and emitted as "Tool error (…)") completes the
@@ -725,7 +783,9 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       // lib/tool-error.mjs.
       const _toolErrored = looksLikeToolError(event.text);
       const _toolStatus = _toolErrored ? 'error' : 'done';
-      const pending = _pendingToolEventsByName[event.name]?.shift();
+      const pending = matchedIndex >= 0
+        ? _pendingToolEventsByName[event.name]?.splice(matchedIndex, 1)?.[0]
+        : null;
       if (pending) {
         pending.status = _toolStatus;
         pending.endedAt = Date.now();
@@ -735,9 +795,11 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
         pending.delegated = pending.delegated || event.delegated === true;
         pending.agentName = pending.agentName || event.agentName || null;
         pending.targetAgentId = pending.targetAgentId || event.targetAgentId || null;
+        if (_providerNative) pending.native = true;
       } else {
         toolEvents.push({
           name: event.name,
+          ...(providerToolCallId ? { toolCallId: providerToolCallId } : {}),
           args: _lastCallArgsByName[event.name] ?? null,
           status: _toolStatus,
           startedAt: Date.now(),
@@ -2128,6 +2190,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         })),
         toolCalls: (toolEvents ?? []).map(t => ({
           name: t.name,
+          ...(t.toolCallId ? { toolCallId: t.toolCallId } : {}),
+          ...(t.native === true ? { providerNative: true } : {}),
           ok: t.status === 'done',
           ms: t.durationMs ?? null,
           ...(t.delegated ? { delegated: true } : {}),
@@ -2250,6 +2314,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       usedNames: toolsUsed.map(t => t.name),
       used: toolsUsed.map(t => ({
         name: t.name,
+        ...(t.toolCallId ? { toolCallId: t.toolCallId } : {}),
+        ...(t.native === true ? { providerNative: true } : {}),
         argsPreview: t.args
           ? JSON.stringify(compactDocumentToolArgs(t.name, redactArgsForTrace(t.args))).slice(0, 500)
           : '',
@@ -2257,6 +2323,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       })),
       events: toolEvents.map(t => ({
         name: t.name,
+        ...(t.toolCallId ? { toolCallId: t.toolCallId } : {}),
         ...(t.native === true ? { providerNative: true } : {}),
         status: t.status,
         durationMs: t.durationMs ?? null,

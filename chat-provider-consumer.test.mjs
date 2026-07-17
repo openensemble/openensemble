@@ -18,6 +18,13 @@ async function collectWithReturn(generator) {
   }
 }
 
+async function consumeEvents(events) {
+  async function* provider() {
+    for (const event of events) yield event;
+  }
+  return collectWithReturn(consumeProvider(provider()));
+}
+
 describe('provider internal evidence consumption', () => {
   it('retains per-round routing snapshots without exposing internal events', async () => {
     const store = {
@@ -148,5 +155,105 @@ describe('provider internal evidence consumption', () => {
       usageCount: 1,
       usageComplete: false,
     });
+  });
+
+  it('correlates out-of-order parallel same-name progress and results by provider identity', async () => {
+    const { result } = await consumeEvents([
+      { type: 'tool_call', name: 'probe', args: { slot: 'a' }, toolCallId: 'call-a' },
+      {
+        type: 'tool_call', name: 'probe', args: { slot: 'b' },
+        toolCallId: 'call-b', providerNative: true,
+      },
+      {
+        type: 'tool_progress', name: 'probe', text: 'working on b',
+        toolCallId: 'call-b', providerNative: true,
+      },
+      {
+        type: 'tool_result', name: 'probe', text: 'result-b',
+        toolCallId: 'call-b', providerNative: true,
+      },
+      { type: 'tool_result', name: 'probe', text: 'result-a', toolCallId: 'call-a' },
+      { type: '__content', content: 'complete' },
+    ]);
+
+    expect(result.errored).toBe(false);
+    expect(result.toolsUsed).toEqual([
+      {
+        name: 'probe', text: 'result-b', args: { slot: 'b' },
+        toolCallId: 'call-b', native: true,
+      },
+      { name: 'probe', text: 'result-a', args: { slot: 'a' }, toolCallId: 'call-a' },
+    ]);
+    expect(result.toolEvents).toEqual([
+      expect.objectContaining({
+        name: 'probe', args: { slot: 'a' }, toolCallId: 'call-a',
+        status: 'done', text: 'result-a',
+      }),
+      expect.objectContaining({
+        name: 'probe', args: { slot: 'b' }, toolCallId: 'call-b',
+        status: 'done', text: 'result-b', progressPreview: 'working on b', native: true,
+      }),
+    ]);
+  });
+
+  it('rejects a provider identity reused by another call', async () => {
+    const { events, result } = await consumeEvents([
+      { type: 'tool_call', name: 'first', args: {}, toolCallId: 'call-reused' },
+      { type: 'tool_call', name: 'second', args: {}, toolCallId: 'call-reused' },
+    ]);
+
+    expect(result.errored).toBe(true);
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('provider repeated tool call identity call-reused'),
+    });
+  });
+
+  it.each([
+    ['progress', { type: 'tool_progress', name: 'probe', text: 'still working', toolCallId: 'call-unknown' }],
+    ['result', { type: 'tool_result', name: 'probe', text: 'late', toolCallId: 'call-unknown' }],
+  ])('rejects an unknown identity on a tool %s', async (_kind, unknownEvent) => {
+    const { events, result } = await consumeEvents([
+      { type: 'tool_call', name: 'probe', args: {}, toolCallId: 'call-known' },
+      unknownEvent,
+    ]);
+
+    expect(result.errored).toBe(true);
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('unknown'),
+    });
+  });
+
+  it('rejects a duplicate result identity after its call already completed', async () => {
+    const { events, result } = await consumeEvents([
+      { type: 'tool_call', name: 'probe', args: {}, toolCallId: 'call-once' },
+      { type: 'tool_result', name: 'probe', text: 'first', toolCallId: 'call-once' },
+      { type: 'tool_result', name: 'probe', text: 'second', toolCallId: 'call-once' },
+    ]);
+
+    expect(result.errored).toBe(true);
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('unknown or duplicate call identity'),
+    });
+  });
+
+  it.each([
+    ['empty', ''],
+    ['surrounding whitespace', ' call-spaced '],
+    ['newline', 'call\nbroken'],
+    ['nul', 'call\0broken'],
+    ['overlong', 'x'.repeat(513)],
+    ['non-string', 42],
+  ])('rejects a provider tool call identity that is %s', async (_kind, toolCallId) => {
+    const { events, result } = await consumeEvents([
+      { type: 'tool_call', name: 'probe', args: {}, toolCallId },
+    ]);
+
+    expect(result.errored).toBe(true);
+    expect(events).toEqual([{
+      type: 'error', message: 'provider supplied an invalid tool call identity',
+    }]);
   });
 });
