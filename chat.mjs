@@ -43,6 +43,7 @@ import { resolveValidatedSkillExecutionForTurn } from './lib/skill-execution.mjs
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 import { recordRunTrace, redactArgsForTrace, redactTextForTrace } from './lib/run-inspector.mjs';
+import { applyRedactions } from './lib/credentials.mjs';
 import { listDesktops, sendDesktopCommand } from './lib/desktop-bus.mjs';
 import {
   buildWorkerStandingMemoryContext,
@@ -210,8 +211,8 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   // paths / urls from the prior tool return, which the assistant's prose
   // summary doesn't usually echo. The 10 KB cap + session prune keep
   // long-term file size bounded. Loaded back to the LLM via the history
-  // mapper below as `[prior-turn tool results]` appended to the assistant
-  // body. Doesn't render in the chat UI (only the assistant content does).
+  // mapper below as a structured tool result paired with its original call.
+  // Doesn't render in the chat UI (only the assistant content does).
   const toolResults = toolsUsed.length
     ? toolsUsed.map(t => ({
         name: t.name,
@@ -259,6 +260,7 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
           preview: compactDocumentToolPreview(t.name, t.preview),
           progressPreview: String(t.progressPreview ?? '').slice(-1200),
           delegated: t.delegated === true,
+          native: t.native === true,
           agentName: t.agentName || null,
           targetAgentId: t.targetAgentId || null,
           ...(resultIndex != null ? { resultIndex } : {}),
@@ -1040,6 +1042,268 @@ export function buildCurrentUserTurn(agent, userText, attachments) {
   return buildImageUserMessage(agent.provider, imageParts, userText || 'What is in this image?');
 }
 
+// Durable sessions keep one visible assistant row per turn, plus compact
+// toolEvents/toolResults metadata. Provider APIs, however, distinguish an
+// assistant's function call from the tool's output. Replaying that metadata as
+// ordinary assistant prose made it possible for a model to copy strings such
+// as "[tools used this turn: ...]" and falsely present them as a fresh call.
+// Rebuild the original protocol boundary instead: assistant tool_calls, tool
+// results, then the assistant's user-facing answer.
+const HISTORY_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const OMITTED_TOOL_RESULT = '[Tool result omitted from older conversation context.]';
+const MISSING_TOOL_RESULT = '[Tool completed, but no textual result was retained.]';
+
+function historyToolArgs(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value;
+}
+
+function parsePersistedToolSummary(value) {
+  if (typeof value !== 'string') return null;
+  const match = value.trim().match(/^([A-Za-z0-9_-]{1,64})([\s\S]*)$/);
+  if (!match) return null;
+  const suffix = match[2];
+  if (suffix && !suffix.startsWith('(')) return null;
+  let args = {};
+  if (suffix) {
+    const raw = suffix.endsWith(')') ? suffix.slice(1, -1) : suffix.slice(1);
+    try { args = historyToolArgs(JSON.parse(raw)); } catch { /* truncated legacy preview */ }
+  }
+  return { name: match[1], args };
+}
+
+function safeToolArguments(value) {
+  try { return JSON.stringify(historyToolArgs(value)); }
+  catch { return '{}'; }
+}
+
+function stripLegacyToolProvenanceProse(value) {
+  if (typeof value !== 'string') return value;
+  return value
+    // The compact call summary was always one line.
+    .replace(/(^|\r?\n)[ \t]*\[tools used this turn:[^\r\n]*\][ \t]*(?=\r?\n|$)/gi, '$1')
+    // Full results were always the final appendix on an assistant message.
+    .replace(/(?:\r?\n)?[ \t]*\[prior-turn tool results\][\s\S]*$/i, '')
+    .trimEnd();
+}
+
+function persistedToolCalls(row, rowIndex, keepFullResult) {
+  const results = Array.isArray(row?.toolResults)
+    ? row.toolResults.filter(r => r && HISTORY_TOOL_NAME_RE.test(String(r.name || '')))
+    : [];
+  const usedResults = new Set();
+  const takeResult = (name, requestedIndex = null, allowNameFallback = true) => {
+    if (Number.isInteger(requestedIndex)
+        && requestedIndex >= 0
+        && requestedIndex < results.length
+        && results[requestedIndex]?.name === name
+        && !usedResults.has(requestedIndex)) {
+      usedResults.add(requestedIndex);
+      return results[requestedIndex];
+    }
+    if (!allowNameFallback) return null;
+    const idx = results.findIndex((r, i) => r.name === name && !usedResults.has(i));
+    if (idx === -1) return null;
+    usedResults.add(idx);
+    return results[idx];
+  };
+
+  let records = [];
+  if (Array.isArray(row?.toolEvents) && row.toolEvents.length) {
+    // toolEvents are authoritative for modern rows: they retain exact (but
+    // redacted) arguments and resultIndex preserves same-name FIFO pairing.
+    // Pending calls never produced a result and must not be reconstructed as
+    // completed work. Provider-hosted searches are also not local function
+    // calls, so keep their answer in assistant prose without fabricating one.
+    records = row.toolEvents
+      .filter(event => {
+        if (!event || !HISTORY_TOOL_NAME_RE.test(String(event.name || ''))) return false;
+        // Nested specialist events are observations of delegated work, not
+        // coordinator-local calls. The enclosing ask_agent event/result is the
+        // coordinator's real protocol boundary and remains in history.
+        if (event.delegated === true) return false;
+        if (event.native === true) return false;
+        // Compatibility for native-search rows written before `native` was
+        // persisted explicitly.
+        if (event.name === 'web_search'
+            && event.args == null
+            && !Number.isInteger(event.resultIndex)
+            && results.some(r => r.name === 'web_search' && r.text === 'provider-hosted web search')) return false;
+        return event.status === 'done' || event.status === 'error' || Number.isInteger(event.resultIndex);
+      })
+      .map(event => ({
+        name: event.name,
+        args: historyToolArgs(event.args),
+        status: event.status,
+        // Modern rows carry an exact resultIndex. Never guess by name when it
+        // is absent: repeated same-name calls can otherwise receive each
+        // other's outputs. Older toolEvent rows retained their own `text`
+        // before resultIndex existed, so use that call-local value when
+        // present. FIFO fallback is reserved for legacy toolsUsed summaries.
+        result: takeResult(event.name, event.resultIndex, false)
+          ?? (typeof event.text === 'string' && event.text.length
+            ? { name: event.name, text: event.text }
+            : null),
+      }));
+  } else if (Array.isArray(row?.toolsUsed)) {
+    // Pre-toolEvents sessions retain `name({args preview})`. Parse complete
+    // previews when possible; a truncated preview safely degrades to {} while
+    // preserving the fact that the call really occurred.
+    records = row.toolsUsed
+      .map(parsePersistedToolSummary)
+      .filter(Boolean)
+      .map(call => ({ ...call, status: 'done', result: takeResult(call.name) }));
+  }
+
+  return records.map((record, callIndex) => {
+    const retained = record.result == null ? null : String(record.result.text ?? '');
+    const output = keepFullResult
+      ? (retained || MISSING_TOOL_RESULT)
+      : OMITTED_TOOL_RESULT;
+    return {
+      id: `call_hist_${rowIndex}_${callIndex}`,
+      name: record.name,
+      arguments: safeToolArguments(record.args),
+      output: applyRedactions(output),
+    };
+  });
+}
+
+/**
+ * Convert durable session rows into provider-neutral OpenAI-style history.
+ * Recent tool outputs remain available for pronoun follow-ups; older calls
+ * retain a small structured completion marker instead of their full payload.
+ */
+export function buildLlmHistory(sessionRows) {
+  const rows = Array.isArray(sessionRows) ? sessionRows : [];
+  const fullResultIndexes = new Set();
+  for (let i = rows.length - 1; i >= 0 && fullResultIndexes.size < 2; i--) {
+    if (rows[i]?.role === 'assistant'
+        && Array.isArray(rows[i]?.toolResults)
+        && rows[i].toolResults.length) fullResultIndexes.add(i);
+  }
+
+  const history = [];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex] || {};
+    const { role, content, name, via, viaName } = row;
+    // Old mapper-generated appendices and model-imitated copies are reserved
+    // protocol text, never part of the assistant's semantic answer. Strip
+    // them from model context while leaving the durable/UI row untouched.
+    let body = role === 'assistant' ? stripLegacyToolProvenanceProse(content) : content;
+    if (role === 'assistant' && via) {
+      body = `${body || ''}\n[note: this reply was produced by the ${viaName ?? via} specialist via the pre-LLM router — you (the coordinator) did not run a turn]`;
+    }
+
+    if (role === 'assistant') {
+      const calls = persistedToolCalls(row, rowIndex, fullResultIndexes.has(rowIndex));
+      if (calls.length) {
+        history.push({
+          role: 'assistant',
+          content: null,
+          tool_calls: calls.map(call => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: call.arguments },
+          })),
+        });
+        for (const call of calls) {
+          history.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            name: call.name,
+            content: call.output,
+          });
+        }
+        if (typeof body === 'string' && body.length) history.push({ role: 'assistant', content: body });
+        continue;
+      }
+    }
+
+    // A marker-only fabricated/legacy appendix strips to an empty string.
+    // Omit that row instead of sending a strict provider an empty assistant
+    // message with neither text nor a structured call.
+    if (role === 'assistant' && (body == null || body === '')) continue;
+    history.push(name ? { role, content: body, name } : { role, content: body });
+  }
+  return history;
+}
+
+function parsedToolArguments(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try { return historyToolArgs(JSON.parse(value)); } catch { return {}; }
+}
+
+/** Convert canonical structured history only where a provider wire format differs. */
+export function adaptLlmHistoryForProvider(messages, provider) {
+  const rows = Array.isArray(messages) ? messages : [];
+  if (provider === 'anthropic') {
+    const out = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (row?.role === 'assistant' && Array.isArray(row.tool_calls) && row.tool_calls.length) {
+        const blocks = [];
+        if (typeof row.content === 'string' && row.content.trim()) blocks.push({ type: 'text', text: row.content });
+        for (const call of row.tool_calls) {
+          blocks.push({
+            type: 'tool_use',
+            id: call.id,
+            name: call.function?.name ?? call.name,
+            input: parsedToolArguments(call.function?.arguments ?? call.arguments),
+          });
+        }
+        out.push({ role: 'assistant', content: blocks });
+        const resultBlocks = [];
+        while (rows[i + 1]?.role === 'tool') {
+          const result = rows[++i];
+          resultBlocks.push({
+            type: 'tool_result',
+            tool_use_id: result.tool_call_id,
+            content: String(result.content ?? ''),
+          });
+        }
+        if (resultBlocks.length) out.push({ role: 'user', content: resultBlocks });
+        continue;
+      }
+      // Pair-safe trimming below prevents an orphan, but fail closed if a
+      // malformed legacy row somehow supplies one.
+      if (row?.role === 'tool') continue;
+      out.push(row);
+    }
+    return out;
+  }
+
+  if (provider === 'ollama') {
+    return rows.map(row => {
+      if (row?.role === 'assistant' && Array.isArray(row.tool_calls)) {
+        return {
+          ...row,
+          tool_calls: row.tool_calls.map(call => ({
+            ...call,
+            function: {
+              ...call.function,
+              arguments: parsedToolArguments(call.function?.arguments),
+            },
+          })),
+        };
+      }
+      // Ollama pairs by function name and does not use OpenAI's call id.
+      if (row?.role === 'tool') {
+        return { role: 'tool', name: row.name, content: row.content };
+      }
+      return row;
+    });
+  }
+
+  return rows;
+}
+
+function historyMessageChars(message) {
+  try { return JSON.stringify(message).length; }
+  catch { return String(message?.content ?? '').length; }
+}
+
 // ── Main chat generator ───────────────────────────────────────────────────────
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
   // `attachment` is a legacy name kept for the many positional callers that
@@ -1562,49 +1826,15 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // `notification`. Providers (OpenAI especially) reject unknown roles with
   // a 400, and these entries carry no LLM-actionable content anyway.
   //
-  // Assistant entries persisted with `toolsUsed: [...]` (from persist()
-  // above) get a compact "[tools: …]" suffix so the next turn's LLM can
-  // see which side-effects happened in the prior turn, not just the prose
-  // it wrote. Same idea for `via:` on router-routed turns — the coordinator
-  // needs to know the prior reply came from a specialist, not its own run.
+  // Assistant entries persisted with tool metadata are reconstructed as real
+  // protocol messages by buildLlmHistory(): assistant tool_calls, matching
+  // tool outputs, then the visible answer. This keeps provenance out of
+  // ordinary assistant prose while retaining handles needed by follow-ups.
+  // `via:` remains a coordinator-routing note because it is not a tool call.
   const LLM_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
   const _histSrc = isolatedTaskRun ? [] : (await loadSession(agent.id)).filter(m =>
     LLM_ROLES.has(m.role) && m.excludeFromModel !== true);
-  // Full tool-result bodies are inlined ONLY for the last two assistant
-  // turns that carry them. Follow-ups ("delete it", "reply to that", "open
-  // the second one") reference recent handles — while re-inflating EVERY
-  // older turn's results (up to 10 KB per tool) freights the whole history
-  // window with stale payloads, evicts real conversation at the trim, and
-  // churns the provider prompt cache. Older turns keep the compact
-  // "[tools used this turn: …]" suffix.
-  const _fullResultIdx = new Set();
-  for (let i = _histSrc.length - 1; i >= 0 && _fullResultIdx.size < 2; i--) {
-    const m = _histSrc[i];
-    if (m.role === 'assistant' && Array.isArray(m.toolResults) && m.toolResults.length) _fullResultIdx.add(i);
-  }
-  const history = _histSrc
-    .map(({ role, content, name, toolsUsed, toolResults, via, viaName }, _idx) => {
-      let body = content;
-      if (role === 'assistant' && via) {
-        body = `${body || ''}\n[note: this reply was produced by the ${viaName ?? via} specialist via the pre-LLM router — you (the coordinator) did not run a turn]`;
-      }
-      if (role === 'assistant' && Array.isArray(toolsUsed) && toolsUsed.length) {
-        body = `${body || ''}\n[tools used this turn: ${toolsUsed.join(', ')}]`;
-      }
-      // Append the raw tool result bodies persisted by chat.mjs:persist()
-      // (capped at 10 KB each at save time). Lets the LLM read message ids,
-      // file paths, urls, etc. from prior tool returns — required for
-      // follow-ups like "delete it" / "reply to that" / "open the second
-      // one" to work without the assistant's user-facing prose having to
-      // echo those handles back to the user. Recent-turns-only, see above.
-      if (role === 'assistant' && _fullResultIdx.has(_idx) && Array.isArray(toolResults) && toolResults.length) {
-        const formatted = toolResults
-          .map(r => `${r.name} →\n${r.text}`)
-          .join('\n\n---\n\n');
-        body = `${body || ''}\n\n[prior-turn tool results]\n${formatted}`;
-      }
-      return name ? { role, content: body, name } : { role, content: body };
-    });
+  const history = buildLlmHistory(_histSrc);
 
   // For session storage, store text only (no base64 — too large and not replayable).
   // For audio/video attachments, also surface the on-disk path so the LLM's
@@ -1656,7 +1886,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   let trimmed = [...history];
   let approxTokens = (systemPrompt.length + userText.length) / 4;
   for (let i = trimmed.length - 1; i >= 0; i--) {
-    approxTokens += (trimmed[i].content?.length ?? 0) / 4;
+    approxTokens += historyMessageChars(trimmed[i]) / 4;
     if (approxTokens > TOKEN_BUDGET) { trimmed = trimmed.slice(i + 1); break; }
   }
   // Anthropic requires the first message to be role:user; an arbitrary trim
@@ -1666,6 +1896,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (trimmed.length < history.length) {
     while (trimmed.length && trimmed[0].role !== 'user') trimmed.shift();
   }
+  const droppedFromHistory = Math.max(0, history.length - trimmed.length);
+  // Canonical OpenAI-style messages keep trimming pair-safe (`tool` can never
+  // become a leading user turn). Adapt only after trimming: Anthropic uses a
+  // user/tool_result block and Ollama requires object-valued arguments.
+  trimmed = adaptLlmHistoryForProvider(trimmed, agent.provider);
 
   // Pre-LLM size snapshot — measurement-only, surfaced on the
   // "llm turn complete" log line so we can audit prompt/tools/history
@@ -1676,8 +1911,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     toolsBytes,
     toolCount: agent.tools?.length ?? 0,
     historyMsgs: trimmed.length,
-    historyBytes: trimmed.reduce((n, m) => n + (m.content?.length ?? 0), 0),
-    droppedFromHistory: Math.max(0, history.length - trimmed.length),
+    historyBytes: trimmed.reduce((n, m) => n + historyMessageChars(m), 0),
+    droppedFromHistory,
     userTextChars: userText.length,
   };
 
