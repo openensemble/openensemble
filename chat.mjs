@@ -1244,7 +1244,7 @@ export function buildLlmHistory(sessionRows) {
         && rows[i].toolResults.length
         // Hosted/native-only rows are telemetry, not replayable local calls.
         // Do not let one consume either of the two recent full-output slots.
-        && persistedToolCalls(rows[i], i, false).length) fullResultIndexes.add(i);
+        && persistedToolCallBatches(rows[i], i, false).length) fullResultIndexes.add(i);
   }
 
   const history = [];
