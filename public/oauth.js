@@ -787,9 +787,9 @@ async function openSettingsDrawer(openIt = true) {
     await Promise.all([loadModels(), ...adminOnlyLoads]);
     renderModelBrowser(); renderAgentModelRows(); renderDrawersSettings();
     if (isPriv) { renderCortexModelRows(); renderPlanModelRows(); checkCortexHealth().then(renderCortexModelRows); }
-    loadFireworksModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); }).catch(() => {});
-    loadAnthropicModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); }).catch(() => {});
-    loadGrokModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); }).catch(() => {});
+    loadFireworksModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); refreshSkillExecutionModelSelects?.(); }).catch(() => {});
+    loadAnthropicModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); refreshSkillExecutionModelSelects?.(); }).catch(() => {});
+    loadGrokModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); refreshSkillExecutionModelSelects?.(); }).catch(() => {});
   } catch(e) {
     console.error('Failed to load models:', e);
   }
@@ -988,7 +988,7 @@ async function loadCompatProviderModels(providerId, refresh = false) {
     // Stash the list so the agent model picker can use it
     window._compatProviderModels = window._compatProviderModels || {};
     window._compatProviderModels[providerId] = models;
-    renderModelBrowser?.(); renderAgentModelRows?.();
+    renderModelBrowser?.(); renderAgentModelRows?.(); refreshSkillExecutionModelSelects?.();
     if (typeof checkEmptyState === 'function') checkEmptyState();
   } catch (e) {
     if (box) box.textContent = `Error: ${e.message}`;
@@ -1212,7 +1212,7 @@ async function loadProviderConfig() {
       if (cfg[`${p.id}KeySet`] || p.id === 'openai-oauth') loadCompatProviderModels(p.id).catch(() => {});
     }
 
-    if (cfg.openrouterKeySet && typeof loadOpenRouterModels === 'function') loadOpenRouterModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); });
+    if (cfg.openrouterKeySet && typeof loadOpenRouterModels === 'function') loadOpenRouterModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); refreshSkillExecutionModelSelects?.(); });
     // Apply provider toggle states (default: all enabled)
     _enabledProviders = cfg.enabledProviders ?? {};
     // Mirror the *KeySet booleans into a global so _hasAnyProviderConfigured()
@@ -1399,6 +1399,7 @@ async function saveProvider(provider) {
       await loadModels();
       renderModelBrowser?.();
       renderAgentModelRows?.();
+      refreshSkillExecutionModelSelects?.();
     }
   } catch { showToast('Failed to save'); }
 }

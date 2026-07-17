@@ -14,7 +14,11 @@ import { loadConfig } from '../../routes/_helpers.mjs';
  * bundle prepared for one logical model round. The consumer records the
  * ordered names and hash without forwarding this event to clients.
  */
-export function modelCallTraceEvent({ provider, model, tools, round = null }) {
+export function modelCallTraceEvent({
+  provider, model, tools, round = null,
+  requestedReasoningEffort = null,
+  wireReasoningEffort = null,
+}) {
   try {
     const toolsPresent = Array.isArray(tools);
     const exactTools = toolsPresent ? tools : [];
@@ -34,6 +38,8 @@ export function modelCallTraceEvent({ provider, model, tools, round = null }) {
       model: model ?? null,
       phase: 'dispatch_planned',
       round: Number.isSafeInteger(round) ? round : null,
+      ...(requestedReasoningEffort == null ? {} : { requestedReasoningEffort: String(requestedReasoningEffort).slice(0, 40) }),
+      ...(wireReasoningEffort == null ? {} : { wireReasoningEffort: String(wireReasoningEffort).slice(0, 40) }),
       toolsPresent,
       toolNames,
       toolCount: toolNames.length,

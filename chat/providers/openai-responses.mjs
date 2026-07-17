@@ -428,6 +428,8 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     console.log(`[${tag}] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}${body.prompt_cache_key ? ` cache_key=${body.prompt_cache_key}` : ''}`);
     yield modelCallTraceEvent({
       provider: tag, model: agent.model, tools: body.tools, round: guard.count,
+      requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
+      wireReasoningEffort: body.reasoning?.effort ?? null,
     });
     // The Codex backend occasionally drops connections at handshake time
     // (manifests as Node fetch's TypeError "fetch failed"). One quick retry

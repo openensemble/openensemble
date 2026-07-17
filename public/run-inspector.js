@@ -212,6 +212,7 @@ function renderRunInspectorDetail(t) {
     <div class="run-section">
       <div class="run-section-title">Flags</div>
       <pre>${escHtml(JSON.stringify({
+        execution: meta.execution || null,
         attachment: t.attachment || null,
         silent: Boolean(meta.silent),
         ephemeral: Boolean(meta.ephemeral),

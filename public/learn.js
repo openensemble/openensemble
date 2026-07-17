@@ -753,10 +753,14 @@ function _renderSkillOverridesSection(overrides) {
       const hidden = o.hiddenTools?.length
         ? `<span style="color:var(--muted);font-size:11px">· ${o.hiddenTools.length} tool${o.hiddenTools.length === 1 ? '' : 's'} hidden</span>`
         : '';
+      const execution = o.execution
+        ? `<span style="color:var(--muted);font-size:11px">· ${escHtml(o.execution.model || 'agent model')} / ${escHtml(o.execution.reasoningEffort || 'agent effort')}</span>`
+        : '';
       return `<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px">
         <code style="font-size:11px;background:var(--bg1);padding:1px 5px;border-radius:3px">${escHtml(o.skillId)}</code>
         ${disabled}
         ${hidden}
+        ${execution}
         <button class="btn-small" data-action="learnRevokeSkillOverride" data-args='${args}' style="margin-left:auto;background:transparent;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer">Clear</button>
       </div>`;
     }).join('');

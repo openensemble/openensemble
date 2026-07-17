@@ -465,6 +465,7 @@ function makeEphemeralWorker(caller, angle, workerTools) {
     name: `Researcher — ${angle.title.slice(0, 40)}`,
     provider: caller.provider,
     model: caller.model,
+    reasoningEffort: caller.reasoningEffort,
     contextSize: caller.contextSize,
     skillCategory: 'web',
     skills: ['deep_research', 'web'],
@@ -494,6 +495,7 @@ function makeEphemeralPlanner(caller) {
     name: 'Planner',
     provider: caller.provider,
     model: caller.model,
+    reasoningEffort: caller.reasoningEffort,
     contextSize: caller.contextSize,
     skillCategory: 'general',
     skills: [],
@@ -521,7 +523,9 @@ function makeEphemeralSynthesizer(caller) {
     skills: [],
     tools: [], // synthesizer writes markdown directly, no tool calls
     ephemeral: true,
-    reasoningEffort: 'medium', // merging pre-researched sub-reports doesn't need deep reasoning — cuts latency roughly in half
+    // Preserve the historical medium-cost synthesis default unless the user
+    // explicitly routed Deep Research to a skill execution profile.
+    reasoningEffort: caller._skillExecutionApplied ? caller.reasoningEffort : 'medium',
     systemPrompt: [
       `You merge multiple parallel research sub-reports into a single cohesive markdown document.`,
       `Preserve distinct findings from each angle. Deduplicate sources. Remove redundancy.`,
@@ -558,15 +562,44 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
   // Load caller agent for provider/model inheritance. The agentId passed to
   // skill executors is scoped (e.g. "user_abc_coordinator") but getAgentsForUser
   // returns agents with short ids ("coordinator"), so match on either form.
-  const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+  const { getAgentsForUser, getUser } = await import('../../routes/_helpers.mjs');
   const agents = getAgentsForUser(userId);
-  const caller =
+  let caller =
     agents.find(a => a.id === callerAgentId) ??
     agents.find(a => callerAgentId?.endsWith?.('_' + a.id)) ??
     agents[0];
   if (!caller) {
     yield { type: 'result', text: 'deep_research_parallel: no caller agent available.' };
     return;
+  }
+
+  // This workflow reloads its durable caller rather than receiving the
+  // transiently routed parent agent. Reapply the Deep Research profile so its
+  // planner, workers, and synthesizer use one coherent model/effort choice.
+  try {
+    const { resolveSkillExecutionForTurn } = await import('../../lib/skill-execution.mjs');
+    const execution = resolveSkillExecutionForTurn({
+      userId,
+      baseAgent: caller,
+      selectedSkillIds: ['deep_research'],
+      allowedModels: getUser(userId)?.allowedModels ?? null,
+    });
+    if (execution.applied) {
+      const providerOrModelChanged = execution.effective.provider !== caller.provider
+        || execution.effective.model !== caller.model;
+      caller = {
+        ...caller,
+        provider: execution.effective.provider,
+        model: execution.effective.model,
+        ...(Object.hasOwn(execution.effective, 'reasoningEffort')
+          ? { reasoningEffort: execution.effective.reasoningEffort }
+          : {}),
+        ...(providerOrModelChanged ? { contextSize: null } : {}),
+        _skillExecutionApplied: true,
+      };
+    }
+  } catch (error) {
+    console.warn('[deep_research_parallel] execution profile resolution failed:', error?.message || error);
   }
 
   // Phase 1: Plan

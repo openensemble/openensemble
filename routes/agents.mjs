@@ -18,7 +18,14 @@ import {
   onRoleEnabled, getRoleAssignments, setRoleAssignment, clearRoleAssignmentsForAgent,
   getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools,
 } from '../roles.mjs';
-import { normalizeReasoningEffort, reasoningEffortOptions } from '../lib/reasoning-effort.mjs';
+import { EFFORT_VALUES, normalizeReasoningEffort, reasoningEffortOptions } from '../lib/reasoning-effort.mjs';
+import {
+  clearSkillOverride,
+  getSkillExecutionOverride,
+  setSkillExecutionOverride,
+} from '../lib/skill-overrides.mjs';
+import { isExecutionTextModel } from '../lib/skill-execution.mjs';
+import { listOpenAIOAuthModels } from '../lib/openai-codex-models.mjs';
 import {
   tryAcquireUserTopologyTransition,
   runWithUserTopologyLease,
@@ -28,6 +35,91 @@ import {
 
 function setRoleAssignmentForUser(roleId, agentId, userId) {
   return setRoleAssignment(roleId, agentId || null, userId);
+}
+
+function visibleRoleForUser(userId, skillId) {
+  const role = listRoles(userId).find(item => item.id === skillId && !item.hidden);
+  if (!role) return null;
+  const user = getUser(userId);
+  if (!isPrivileged(userId) && Array.isArray(user?.allowedSkills)
+      && !user.allowedSkills.includes(skillId)) return null;
+  return role;
+}
+
+function inheritedAgentForSkill(userId, skillId) {
+  const agents = getAgentsForUser(userId);
+  const assignments = getRoleAssignments(userId);
+  const assignedId = assignments[skillId];
+  const assigned = assignedId ? agents.find(agent => agent.id === assignedId) : null;
+  if (assigned) return assigned;
+  const coordinatorId = assignments.coordinator;
+  return agents.find(agent => agent.id === coordinatorId) ?? agents[0] ?? null;
+}
+
+function cleanOptionalExecutionValue(value) {
+  if (value == null || value === '') return null;
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+async function validateSkillExecution(userId, skillId, body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { status: 400, error: 'Execution setting must be an object' };
+  }
+  const provider = cleanOptionalExecutionValue(body.provider);
+  const model = cleanOptionalExecutionValue(body.model);
+  const rawEffort = cleanOptionalExecutionValue(body.reasoningEffort);
+  const reasoningEffort = typeof rawEffort === 'string' ? rawEffort.toLowerCase() : rawEffort;
+
+  if ((provider == null) !== (model == null)) {
+    return { status: 400, error: 'Provider and model must be selected or inherited together' };
+  }
+  if (provider != null && !isExecutionTextModel(provider, model)) {
+    return { status: 400, error: 'That provider/model is not a valid text model' };
+  }
+  if (reasoningEffort != null && !EFFORT_VALUES.includes(reasoningEffort)) {
+    return { status: 400, error: 'Invalid reasoning effort' };
+  }
+
+  const user = getUser(userId);
+  if (model != null && Array.isArray(user?.allowedModels) && !user.allowedModels.includes(model)) {
+    return { status: 403, error: `Model "${model}" is not available for this account` };
+  }
+  if (provider === 'openai-oauth' && !isPrivileged(userId)
+      && (!Array.isArray(user?.allowedOAuthProviders) || !user.allowedOAuthProviders.includes(provider))) {
+    return { status: 403, error: 'OpenAI login models are not enabled for this account' };
+  }
+
+  const cfg = loadConfig();
+  if (provider != null && cfg.enabledProviders?.[provider] === false) {
+    return { status: 400, error: `Provider "${provider}" is disabled` };
+  }
+  if (provider === 'openai-oauth') {
+    const available = await listOpenAIOAuthModels(userId);
+    if (!available.some(item => (item.id ?? item.name) === model)) {
+      return { status: 400, error: `Model "${model}" is not available from the connected OpenAI account` };
+    }
+  }
+
+  if (reasoningEffort != null) {
+    const inherited = inheritedAgentForSkill(userId, skillId);
+    const effectiveProvider = provider ?? inherited?.provider ?? '';
+    const effectiveModel = model ?? inherited?.model ?? '';
+    const supported = new Set(reasoningEffortOptions(effectiveProvider, effectiveModel).map(option => option.value));
+    if (!supported.has(reasoningEffort)) {
+      return {
+        status: 400,
+        error: `Reasoning effort "${reasoningEffort}" is not supported by ${effectiveModel || 'the inherited model'}`,
+      };
+    }
+  }
+
+  if (provider == null && reasoningEffort == null) return { execution: null };
+  return {
+    execution: {
+      ...(provider == null ? {} : { provider, model }),
+      ...(reasoningEffort == null ? {} : { reasoningEffort }),
+    },
+  };
 }
 
 export async function handle(req, res) {
@@ -491,8 +583,46 @@ export async function handle(req, res) {
         roleList = roleList.filter(s => currentUser.allowedSkills.includes(s.id));
       }
     }
-    const roles = roleList.map(s => ({ ...s, enabled: userSkills.includes(s.id), assignment: assignments[s.id] ?? null }));
+    const roles = roleList.map(s => ({
+      ...s,
+      enabled: userSkills.includes(s.id),
+      assignment: assignments[s.id] ?? null,
+      execution: getSkillExecutionOverride(authId, s.id),
+    }));
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(roles)); return true;
+  }
+
+  const roleExecutionMatch = req.url.match(/^\/api\/roles\/([^/?]+)\/execution$/);
+  if (roleExecutionMatch && req.method === 'PATCH') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const skillId = decodeURIComponent(roleExecutionMatch[1]);
+    if (!visibleRoleForUser(authId, skillId)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Role or skill not found' }));
+      return true;
+    }
+    try {
+      const body = JSON.parse(await readBody(req));
+      const validated = await validateSkillExecution(authId, skillId, body);
+      if (validated.error) {
+        res.writeHead(validated.status ?? 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: validated.error }));
+        return true;
+      }
+      const result = await setSkillExecutionOverride(authId, skillId, validated.execution);
+      if (!result.ok) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: result.error || 'Could not save execution setting' }));
+        return true;
+      }
+      const execution = getSkillExecutionOverride(authId, skillId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, execution }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return true;
   }
 
   if (req.url === '/api/roles/assign' && req.method === 'POST') {
@@ -594,6 +724,7 @@ export async function handle(req, res) {
           if (u.skillAssignments && id in u.skillAssignments) {
             await modifyUser(u.id, p => { if (p.skillAssignments) delete p.skillAssignments[id]; });
           }
+          await clearSkillOverride(u.id, id).catch(() => {});
         }
       } catch (e) { console.warn('[roles] per-user assignment cascade failed:', e.message); }
       broadcastAgentList();

@@ -326,6 +326,287 @@ async function saveNewsPreference() {
   await saveNewsTopicPref(idx);
 }
 
+// Per-role/per-skill execution overrides. These are account-scoped server
+// settings; the manifest itself stays immutable. Empty values mean "inherit
+// the agent that is handling this request", while explicit `auto` remains a
+// real effort choice rather than being overloaded as inheritance.
+const _SKILL_EXECUTION_EFFORT_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'off', label: 'Off' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+];
+const _skillExecutionSaved = new Map();
+const _skillExecutionEffortRequests = new Map();
+
+function _normalizeSkillExecution(execution) {
+  const raw = execution && typeof execution === 'object' ? execution : {};
+  const provider = typeof raw.provider === 'string' && raw.provider.trim() ? raw.provider.trim() : null;
+  const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : null;
+  const reasoningEffort = typeof raw.reasoningEffort === 'string' && raw.reasoningEffort.trim()
+    ? raw.reasoningEffort.trim().toLowerCase()
+    : null;
+  return {
+    provider: provider && model ? provider : null,
+    model: provider && model ? model : null,
+    reasoningEffort,
+  };
+}
+
+function _skillExecutionTextCapableModel(model) {
+  if (!model || model.provider === 'fireworks') return false;
+  if ((model.provider === 'grok' || model.provider === 'xai')
+      && /^grok-imagine-(?:image|video)/i.test(String(model.name || ''))) return false;
+  return true;
+}
+
+function _skillExecutionModelValue(provider, model) {
+  return provider && model ? JSON.stringify([provider, model]) : '';
+}
+
+function _parseSkillExecutionModelValue(value) {
+  if (!value) return { provider: null, model: null };
+  try {
+    const pair = JSON.parse(value);
+    if (!Array.isArray(pair) || pair.length !== 2
+        || typeof pair[0] !== 'string' || !pair[0]
+        || typeof pair[1] !== 'string' || !pair[1]) throw new Error('invalid model selection');
+    return { provider: pair[0], model: pair[1] };
+  } catch {
+    return { provider: null, model: null };
+  }
+}
+
+function _skillExecutionProviderLabel(provider) {
+  const labels = {
+    anthropic: 'Anthropic', openai: 'OpenAI', 'openai-oauth': 'OpenAI (ChatGPT login)',
+    gemini: 'Google Gemini', deepseek: 'DeepSeek', mistral: 'Mistral AI', groq: 'Groq',
+    together: 'Together AI', perplexity: 'Perplexity', ollama: 'Ollama',
+    lmstudio: 'LM Studio', grok: 'xAI Grok', xai: 'xAI Grok',
+    openrouter: 'OpenRouter', zai: 'Z.AI',
+  };
+  if (labels[provider]) return labels[provider];
+  const dynamic = typeof window.getCompatProviderMeta === 'function'
+    ? window.getCompatProviderMeta().find(p => p.id === provider)
+    : null;
+  return dynamic?.label || dynamic?.displayName || provider;
+}
+
+function _skillExecutionModels() {
+  const models = typeof allAvailableModels === 'function' ? allAvailableModels() : [];
+  return models.filter(_skillExecutionTextCapableModel);
+}
+
+function _skillExecutionModelOptionsHtml(execution) {
+  const current = _normalizeSkillExecution(execution);
+  const currentValue = _skillExecutionModelValue(current.provider, current.model);
+  const groups = new Map();
+  let currentAvailable = !currentValue;
+  for (const model of _skillExecutionModels()) {
+    if (!model?.provider || !model?.name) continue;
+    const value = _skillExecutionModelValue(model.provider, model.name);
+    if (value === currentValue) currentAvailable = true;
+    if (!groups.has(model.provider)) groups.set(model.provider, []);
+    groups.get(model.provider).push({ ...model, value });
+  }
+  let html = `<option value=""${!currentValue ? ' selected' : ''}>Inherit requesting agent</option>`;
+  if (currentValue && !currentAvailable) {
+    html += `<option value="${escHtml(currentValue)}" selected>${escHtml(current.model)} (unavailable)</option>`;
+  }
+  for (const [provider, models] of groups) {
+    html += `<optgroup label="${escHtml(_skillExecutionProviderLabel(provider))}">`;
+    html += models.map(model => `<option value="${escHtml(model.value)}"${model.value === currentValue ? ' selected' : ''}>${escHtml(model.displayName ?? model.name)}</option>`).join('');
+    html += '</optgroup>';
+  }
+  return html;
+}
+
+function _skillExecutionEffortOptionsHtml(current, supported = _SKILL_EXECUTION_EFFORT_OPTIONS) {
+  const selected = typeof current === 'string' && current ? current : null;
+  const seen = new Set();
+  const options = [];
+  for (const option of Array.isArray(supported) ? supported : []) {
+    const value = typeof option?.value === 'string' ? option.value.toLowerCase() : '';
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    options.push({ value, label: option.label || value });
+  }
+  if (selected && !seen.has(selected)) {
+    options.push({ value: selected, label: `${selected[0].toUpperCase()}${selected.slice(1)} (not supported for this model)` });
+  }
+  return `<option value=""${selected ? '' : ' selected'}>Inherit requesting agent</option>`
+    + options.map(option => `<option value="${escHtml(option.value)}"${option.value === selected ? ' selected' : ''}>${escHtml(option.label)}</option>`).join('');
+}
+
+function _skillExecutionSummary(execution) {
+  const value = _normalizeSkillExecution(execution);
+  if (!value.model && !value.reasoningEffort) return 'Inherit agent';
+  const effort = value.reasoningEffort
+    ? `${value.reasoningEffort[0].toUpperCase()}${value.reasoningEffort.slice(1)}`
+    : 'Agent effort';
+  return `${value.model || 'Agent model'} · ${effort}`;
+}
+
+function _skillExecutionInheritedAgent(skill, allAgents) {
+  const roster = (allAgents ?? []).filter(agent => !agent.archived);
+  const assigned = skill.assignment ? roster.find(agent => agent.id === skill.assignment) : null;
+  if (assigned) return assigned;
+  const activeId = typeof activeAgent === 'string' ? activeAgent : null;
+  return roster.find(agent => agent.id === activeId) || roster[0] || null;
+}
+
+function _renderSkillExecutionControls(skill, allAgents) {
+  const execution = _normalizeSkillExecution(skill.execution);
+  _skillExecutionSaved.set(skill.id, execution);
+  const inheritedAgent = _skillExecutionInheritedAgent(skill, allAgents);
+  const inheritedModel = _skillExecutionModelValue(inheritedAgent?.provider, inheritedAgent?.model);
+  const args = escHtml(JSON.stringify([skill.id]));
+  return `<details class="skill-execution-settings" data-skill-id="${escHtml(skill.id)}" data-inherited-model="${escHtml(inheritedModel)}"
+      data-toggle-action="refreshSkillExecutionEfforts" data-toggle-args='${args}'>
+    <summary class="skill-execution-summary">
+      <span>Execution</span>
+      <span class="skill-execution-current">${escHtml(_skillExecutionSummary(execution))}</span>
+    </summary>
+    <div class="skill-execution-body">
+      <div class="skill-execution-grid">
+        <label>Model
+          <select class="skill-execution-model" data-change-action="saveSkillExecution" data-change-args='${args}'>
+            ${_skillExecutionModelOptionsHtml(execution)}
+          </select>
+        </label>
+        <label>Reasoning effort
+          <select class="skill-execution-effort" data-change-action="saveSkillExecution" data-change-args='${args}'>
+            ${_skillExecutionEffortOptionsHtml(execution.reasoningEffort)}
+          </select>
+        </label>
+      </div>
+      <div class="skill-execution-hint">Applies to model calls routed to this role or skill. A multi-skill turn freezes one profile: strongest effort, with the model from the strongest model-specific match. Local shortcuts and tool execution may not call a model.</div>
+      <div class="skill-execution-status" role="status" aria-live="polite"></div>
+    </div>
+  </details>`;
+}
+
+function _skillExecutionCard(skillId, event) {
+  const fromEvent = event?.target?.closest?.('.skill-execution-settings');
+  if (fromEvent?.dataset?.skillId === String(skillId)) return fromEvent;
+  return [...document.querySelectorAll('.skill-execution-settings')]
+    .find(card => card.dataset.skillId === String(skillId)) || null;
+}
+
+function _setSkillExecutionStatus(card, state, text) {
+  const status = card?.querySelector('.skill-execution-status');
+  if (!status) return;
+  status.dataset.state = state || '';
+  status.textContent = text || '';
+}
+
+function _setSkillExecutionDisabled(card, disabled) {
+  card?.querySelectorAll('select').forEach(select => { select.disabled = disabled; });
+}
+
+function _applySkillExecutionToCard(card, execution) {
+  if (!card) return;
+  const normalized = _normalizeSkillExecution(execution);
+  const modelSelect = card.querySelector('.skill-execution-model');
+  const effortSelect = card.querySelector('.skill-execution-effort');
+  if (modelSelect) modelSelect.innerHTML = _skillExecutionModelOptionsHtml(normalized);
+  if (effortSelect) {
+    effortSelect.innerHTML = _skillExecutionEffortOptionsHtml(
+      normalized.reasoningEffort,
+      card._supportedExecutionEfforts || _SKILL_EXECUTION_EFFORT_OPTIONS,
+    );
+  }
+  const summary = card.querySelector('.skill-execution-current');
+  if (summary) summary.textContent = _skillExecutionSummary(normalized);
+}
+
+function _skillExecutionPayloadFromCard(card) {
+  const pair = _parseSkillExecutionModelValue(card?.querySelector('.skill-execution-model')?.value || '');
+  const effort = card?.querySelector('.skill-execution-effort')?.value || null;
+  return { provider: pair.provider, model: pair.model, reasoningEffort: effort };
+}
+
+async function _reloadSkillExecution(skillId) {
+  const response = await fetch('/api/roles');
+  if (!response.ok) throw new Error('Could not reload execution setting');
+  const skills = await response.json();
+  const skill = Array.isArray(skills) ? skills.find(item => item.id === skillId) : null;
+  if (!skill) throw new Error('Role or skill is no longer available');
+  return _normalizeSkillExecution(skill.execution);
+}
+
+async function saveSkillExecution(skillId, event) {
+  const card = _skillExecutionCard(skillId, event);
+  if (!card) return;
+  const prior = _skillExecutionSaved.get(skillId) || _normalizeSkillExecution(null);
+  const changedModel = event?.target?.classList?.contains('skill-execution-model');
+  const payload = _skillExecutionPayloadFromCard(card);
+  _setSkillExecutionDisabled(card, true);
+  _setSkillExecutionStatus(card, 'saving', 'Saving…');
+  try {
+    const response = await fetch(`/api/roles/${encodeURIComponent(skillId)}/execution`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || 'Save failed');
+    const saved = _normalizeSkillExecution(result.execution);
+    _skillExecutionSaved.set(skillId, saved);
+    _applySkillExecutionToCard(card, saved);
+    _setSkillExecutionStatus(card, 'saved', 'Saved');
+    if (changedModel) refreshSkillExecutionEfforts(skillId, { target: card });
+    setTimeout(() => {
+      const status = card.querySelector('.skill-execution-status');
+      if (status?.dataset.state === 'saved') _setSkillExecutionStatus(card, '', '');
+    }, 1800);
+  } catch (error) {
+    _setSkillExecutionStatus(card, 'saving', 'Save failed — restoring…');
+    let restored = prior;
+    try { restored = await _reloadSkillExecution(skillId); } catch {}
+    _skillExecutionSaved.set(skillId, restored);
+    _applySkillExecutionToCard(card, restored);
+    _setSkillExecutionStatus(card, 'error', `Failed: ${error.message || 'save failed'}`);
+  } finally {
+    _setSkillExecutionDisabled(card, false);
+  }
+}
+
+async function refreshSkillExecutionEfforts(skillId, event) {
+  const card = _skillExecutionCard(skillId, event);
+  if (!card) return;
+  if (event?.type === 'toggle' && !event.target?.open) return;
+  const selected = card.querySelector('.skill-execution-model')?.value || card.dataset.inheritedModel || '';
+  const { provider, model } = _parseSkillExecutionModelValue(selected);
+  if (!provider || !model) return;
+  const effortSelect = card.querySelector('.skill-execution-effort');
+  const current = effortSelect?.value || null;
+  const requestId = (_skillExecutionEffortRequests.get(skillId) || 0) + 1;
+  _skillExecutionEffortRequests.set(skillId, requestId);
+  effortSelect?.setAttribute('aria-busy', 'true');
+  try {
+    const params = new URLSearchParams({ provider, model });
+    const response = await fetch(`/api/reasoning-efforts?${params}`);
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !Array.isArray(result.options)) return;
+    if (_skillExecutionEffortRequests.get(skillId) !== requestId) return;
+    card._supportedExecutionEfforts = result.options;
+    if (effortSelect) effortSelect.innerHTML = _skillExecutionEffortOptionsHtml(current, result.options);
+  } catch {
+    // The generic list remains usable if capability discovery is temporarily unavailable.
+  } finally {
+    if (_skillExecutionEffortRequests.get(skillId) === requestId) effortSelect?.removeAttribute('aria-busy');
+  }
+}
+
+function refreshSkillExecutionModelSelects() {
+  document.querySelectorAll('.skill-execution-settings').forEach(card => {
+    const saved = _skillExecutionSaved.get(card.dataset.skillId) || _normalizeSkillExecution(null);
+    _applySkillExecutionToCard(card, saved);
+  });
+}
+
 async function loadSkillsList() {
   const rolesEl = $('rolesList');
   const skillsEl = $('skillsList');
@@ -359,8 +640,8 @@ async function loadSkillsList() {
              class="role-delete-btn"
              style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:4px 2px;flex-shrink:0;line-height:1">✕</button>`
         : '';
-      return `<div>
-        <div style="display:flex;align-items:flex-start;gap:12px;background:var(--bg3);border-radius:8px;padding:10px 12px">
+      return `<div class="skill-settings-card">
+        <div class="skill-settings-card-head">
           <span style="font-size:20px;flex-shrink:0;margin-top:1px">${s.icon ?? '🎯'}</span>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:var(--text)">${escHtml(s.name)}</div>
@@ -369,18 +650,20 @@ async function loadSkillsList() {
           </div>
           ${deleteBtn}
         </div>
+        ${_renderSkillExecutionControls(s, allAgents)}
       </div>`;
     }
 
     function toolCard(s) {
-      return `<div style="background:var(--bg3);border-radius:8px;padding:10px 12px">
-        <div style="display:flex;align-items:center;gap:12px">
+      return `<div class="skill-settings-card">
+        <div class="skill-settings-card-head">
           <span style="font-size:18px;flex-shrink:0">${s.icon ?? '🔧'}</span>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:var(--text)">${escHtml(s.name)}</div>
             ${s.description ? `<div style="font-size:11px;color:var(--muted)">${escHtml(s.description)}</div>` : ''}
           </div>
         </div>
+        ${_renderSkillExecutionControls(s, allAgents)}
       </div>`;
     }
 
@@ -393,8 +676,8 @@ async function loadSkillsList() {
         .concat(assignableAgents.map(a =>
           `<option value="${escHtml(a.id)}"${a.id === s.assignment ? ' selected' : ''}>${escHtml(a.emoji ?? '')} ${escHtml(a.name)}</option>`
         )).join('');
-      return `<div style="background:var(--bg3);border-radius:8px;padding:10px 12px">
-        <div style="display:flex;align-items:flex-start;gap:12px">
+      return `<div class="skill-settings-card">
+        <div class="skill-settings-card-head">
           <span style="font-size:18px;flex-shrink:0;margin-top:1px">${s.icon ?? '🧩'}</span>
           <div style="flex:1;min-width:0">
             <div style="font-size:13px;font-weight:600;color:var(--text)">${escHtml(s.name)}</div>
@@ -408,6 +691,7 @@ async function loadSkillsList() {
             </div>
           </div>
         </div>
+        ${_renderSkillExecutionControls(s, allAgents)}
       </div>`;
     }
 

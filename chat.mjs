@@ -22,14 +22,14 @@ import path from 'path';
 import { buildAgentContext, formatContext, addToSessionBuffer, processSignals } from './memory.mjs';
 import { trackFriction } from './memory/signals.mjs';
 import { loadSession, appendToSession, loadCrossAgentContext } from './sessions.mjs';
-import { getUserFilesDir } from './lib/paths.mjs';
+import { getUserFilesDir, USERS_DIR } from './lib/paths.mjs';
 import {
   detectProactiveNegativeFeedback,
   handleProactiveNegativeFeedback,
 } from './lib/personalization/negative-feedback.mjs';
 import { log } from './logger.mjs';
 import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills, shouldUseProviderHostedImageBackend } from './lib/tool-router.mjs';
-import { toolRouterContext } from './lib/tool-router-context.mjs';
+import { bindToolRouterContext, toolRouterContext } from './lib/tool-router-context.mjs';
 import { beginMemoryScope } from './lib/memory-scope-context.mjs';
 import { getTurnContext } from './lib/turn-abort-context.mjs';
 import {
@@ -38,7 +38,8 @@ import {
 } from './lib/turn-trace-context.mjs';
 import { looksLikeToolError } from './lib/tool-error.mjs';
 import { learnToolPlanFromTurn } from './lib/tool-plan-memory.mjs';
-import { getSelectedPlanKeepTools } from './roles.mjs';
+import { getSelectedPlanKeepTools, listRoles } from './roles.mjs';
+import { resolveSkillExecutionForTurn } from './lib/skill-execution.mjs';
 import { voiceContext } from './lib/voice-context.mjs';
 import { composeSkillSpaBlock } from './lib/skill-prompt-composer.mjs';
 import { recordRunTrace, redactArgsForTrace, redactTextForTrace } from './lib/run-inspector.mjs';
@@ -599,6 +600,8 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       modelCalls.push({
         provider: event.provider ?? null,
         model: event.model ?? null,
+        requestedReasoningEffort: event.requestedReasoningEffort ?? null,
+        wireReasoningEffort: event.wireReasoningEffort ?? null,
         estimated: event.estimated === true,
         phase: event.phase === 'dispatch_planned' ? event.phase : 'unknown',
         providerRound: Number.isSafeInteger(event.round) ? event.round : null,
@@ -866,6 +869,59 @@ export function applyUserToolPlan(agent, plan) {
   return { mode: 'selected', before, after: agent.tools.length, selected: effectiveSelected, fullTools };
 }
 
+function executionSkillsForSelectedTools(userId, toolNames) {
+  const selected = new Set(Array.isArray(toolNames) ? toolNames : []);
+  if (!selected.size) return [];
+  const out = [];
+  try {
+    for (const manifest of listRoles(userId)) {
+      if ((manifest.tools ?? []).some(tool => selected.has(tool?.function?.name ?? tool?.name))) {
+        out.push(manifest.id);
+      }
+    }
+  } catch { /* routing remains on the agent default if the registry is unavailable */ }
+  return out;
+}
+
+function userAllowedExecutionModels(userId) {
+  if (!userId || userId === 'default') return null;
+  try {
+    const profile = JSON.parse(readFileSync(path.join(USERS_DIR, userId, 'profile.json'), 'utf8'));
+    return Array.isArray(profile?.allowedModels) ? profile.allowedModels : null;
+  } catch {
+    // Missing/corrupt account policy must not unlock a restricted override.
+    return [];
+  }
+}
+
+function skillExecutionTraceSummary(resolution) {
+  if (!resolution) return null;
+  const shape = value => ({
+    provider: value?.provider ?? null,
+    model: value?.model ?? null,
+    reasoningEffort: value?.reasoningEffort ?? null,
+  });
+  return {
+    applied: resolution.applied === true,
+    reason: resolution.reason ?? null,
+    baseline: shape(resolution.baseline),
+    effective: shape(resolution.effective),
+    sourceSkillIds: {
+      model: resolution.sourceSkillIds?.model ?? null,
+      reasoningEffort: resolution.sourceSkillIds?.reasoningEffort ?? null,
+    },
+    reasoningEffortInherited: resolution.reasoningEffortInherited === true,
+    contenders: (resolution.contenders ?? []).slice(0, 32).map(candidate => ({
+      skillId: candidate.skillId ?? null,
+      provider: candidate.provider ?? null,
+      model: candidate.model ?? null,
+      reasoningEffort: candidate.reasoningEffort ?? null,
+      eligible: candidate.eligible === true,
+      reason: candidate.reason ?? null,
+    })),
+  };
+}
+
 export function buildUserToolPlanSystemBlock(agent, userToolPlanResult) {
   if (!userToolPlanResult) return '';
   const rosterSolo = agent?._rosterSolo === true;
@@ -1018,8 +1074,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (voiceCtx) {
     voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
   }
-  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>, labVerifierForeground?: boolean, labProviderRequestCap?: number} | null} */
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, matchedSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>, labVerifierForeground?: boolean, labProviderRequestCap?: number} | null} */
   let _routerStore = null;
+  let _executionResolution = null;
   // A task must never create a task. On any autonomous run strip the task /
   // reminder / alarm creators BEFORE tool routing, so they're absent from the
   // recoverable set too (request_tools can't pull them back, and the reaction
@@ -1043,11 +1100,13 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // add" and the missing-tool backstop never arms. fullTools holds the
     // pre-plan toolset, so recovery can pull a dropped compose/send tool back.
     if (agent.tools.some(t => t.function?.name === 'request_tools')) {
+      const matchedSkills = new Set(executionSkillsForSelectedTools(userId, userToolPlanResult.selected));
       _routerStore = {
         agent,
         fullTools: userToolPlanResult.fullTools,
         initiallyIncludedSkills: new Set(),
         keptSkills: new Set(),
+        matchedSkills,
         addedSkills: new Set(),
         recoveryLoads: [],
         initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
@@ -1263,6 +1322,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // The skills actually kept this turn — for telemetry/learning, which
       // must NOT see the deliberately-empty recovery set above.
       keptSkills: _trim.skillsKept || _trim.initiallyIncludedSkills,
+      // Execution profiles activate from positive intent, not merely from a
+      // skill being always-on or shipped with this agent.
+      matchedSkills: _trim.matchedSkills || new Set(),
       addedSkills: new Set(),
       recoveryLoads: [],
       initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
@@ -1282,6 +1344,57 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       agent.systemPrompt += '\n\nTool visibility: you hold more tools than are shown this turn. If a tool you need is missing, call request_tools to load it — do not conclude a capability is unavailable, and do not delegate to another agent just to reach a tool you likely own.';
     }
     log.info('chat', 'tool-router trim', { userId, agentId: agent.id, category: agent.skillCategory, kept: _trim.trimmedTools.length, full: _trim.fullTools.length, notes: _trim.routerNotes, spChars: agent.systemPrompt.length });
+  }
+
+  // Freeze one provider/model/effort profile after routing. Later
+  // request_tools recovery may add schemas, but never changes models midway
+  // through a provider continuation.
+  try {
+    const planExecutionSkills = userToolPlanResult?.mode === 'selected'
+      ? executionSkillsForSelectedTools(userId, userToolPlanResult.selected)
+      : [];
+    const executionSkillIds = [...new Set([
+      ...(_routerStore?.matchedSkills ?? _trim?.matchedSkills ?? []),
+      ...planExecutionSkills,
+    ])];
+    if (agent.skillCategory && agent.skillCategory !== 'general'
+        && !executionSkillIds.includes(agent.skillCategory)) {
+      executionSkillIds.push(agent.skillCategory);
+    }
+    _executionResolution = resolveSkillExecutionForTurn({
+      userId,
+      baseAgent: agent,
+      selectedSkillIds: executionSkillIds,
+      allowedModels: userAllowedExecutionModels(userId),
+    });
+    if (_executionResolution.applied) {
+      const providerOrModelChanged = _executionResolution.effective.provider !== agent.provider
+        || _executionResolution.effective.model !== agent.model;
+      agent = {
+        ...agent,
+        provider: _executionResolution.effective.provider,
+        model: _executionResolution.effective.model,
+        ...(Object.hasOwn(_executionResolution.effective, 'reasoningEffort')
+          ? { reasoningEffort: _executionResolution.effective.reasoningEffort }
+          : {}),
+        ...(providerOrModelChanged ? { contextSize: null } : {}),
+      };
+      if (_routerStore) _routerStore.agent = agent;
+      log.info('chat', 'skill execution override applied', {
+        userId,
+        agentId: agent.id,
+        selectedSkills: executionSkillIds,
+        modelSkill: _executionResolution.sourceSkillIds.model,
+        effortSkill: _executionResolution.sourceSkillIds.reasoningEffort,
+        provider: agent.provider,
+        model: agent.model,
+        reasoningEffort: agent.reasoningEffort ?? 'auto',
+      });
+    }
+  } catch (error) {
+    log.warn('chat', 'skill execution override resolution failed; using agent defaults', {
+      userId, agentId: agent.id, error: error?.message || String(error),
+    });
   }
 
   // Provider-hosted image generation is an implementation swap, never an
@@ -1855,7 +1968,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // replaced with the corrected reply. `canRecover` only gates whether the
   // recovery passes run — it no longer suppresses streaming.
   const canRecover = Boolean(_routerStore);
-  let { assistantContent, errored, toolsUsed, toolEvents, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* consumeProvider(providerGen, { suppressText: false });
+  let { assistantContent, errored, toolsUsed, toolEvents, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* bindToolRouterContext(
+    consumeProvider(providerGen, { suppressText: false }),
+    _routerStore,
+  );
   let recoveredMissingTools = false;
   if (!errored && canRecover && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
     const missingSkills = inferMissingToolSkills({ userText: routeText, assistantText: assistantContent, userId });
@@ -1897,7 +2013,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         // the device speaks it — then the corrected reply streams live after it.
         yield { type: 'token', text: `\n\n${MISSING_TOOL_NOTICE}\n\n` };
         ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
-        { const _priorUsage = usage, _priorModelCalls = modelCalls; const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
+        { const _priorUsage = usage, _priorModelCalls = modelCalls; const _r = yield* bindToolRouterContext(consumeProvider(providerGen, { suppressText: false }), _routerStore); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; }
       }
     }
   }
@@ -1936,7 +2052,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // Preserve the first attempt's tool events/uses so persist() records them
       // (the destructure would otherwise replace them with the recovery run's).
       const _priorToolsUsed = toolsUsed, _priorToolEvents = toolEvents, _priorUsage = usage, _priorModelCalls = modelCalls;
-      { const _r = yield* consumeProvider(providerGen, { suppressText: false }); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])]; toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])]; }
+      { const _r = yield* bindToolRouterContext(consumeProvider(providerGen, { suppressText: false }), _routerStore); ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r); usage = mergeProviderUsage(_priorUsage, _r.usage); modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])]; turnImages = [...(turnImages || []), ...(_r.turnImages || [])]; toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])]; toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])]; }
       recoveredProgressClaim = true;
     } catch (e) {
       log.warn('chat', 'in-progress claim recovery failed', { err: e.message });
@@ -2033,6 +2149,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     provider: agent.provider,
     model: agent.model,
     reasoningEffort: agent.reasoningEffort ?? 'auto',
+    executionProfile: _executionResolution?.applied ? {
+      modelSkill: _executionResolution.sourceSkillIds?.model ?? null,
+      effortSkill: _executionResolution.sourceSkillIds?.reasoningEffort ?? null,
+    } : null,
     durationMs: Date.now() - _llmStart,
     // Time from streamChat entry to first provider dispatch — the serial
     // pre-LLM assembly cost (router trim, cortex recall, trigger nudge,
@@ -2083,6 +2203,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     } : null,
     routing: _routerStore ? {
       initialSkills: [...(_routerStore.keptSkills ?? _routerStore.initiallyIncludedSkills)],
+      matchedSkills: [...(_routerStore.matchedSkills ?? [])],
       addedSkills: [..._routerStore.addedSkills],
       recoveredMissingTools,
       fullToolCount: _routerStore.fullTools?.length ?? null,
@@ -2130,6 +2251,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     meta: {
       silent,
       ephemeral: Boolean(agent.ephemeral),
+      execution: skillExecutionTraceSummary(_executionResolution),
       hideTurn: Boolean(hideTurn),
       hideTaskId: hideTaskId ?? null,
       skippedSignals: Boolean(skipSignals),
