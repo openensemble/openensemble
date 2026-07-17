@@ -1179,7 +1179,10 @@ export function buildLlmHistory(sessionRows) {
   for (let i = rows.length - 1; i >= 0 && fullResultIndexes.size < 2; i--) {
     if (rows[i]?.role === 'assistant'
         && Array.isArray(rows[i]?.toolResults)
-        && rows[i].toolResults.length) fullResultIndexes.add(i);
+        && rows[i].toolResults.length
+        // Hosted/native-only rows are telemetry, not replayable local calls.
+        // Do not let one consume either of the two recent full-output slots.
+        && persistedToolCalls(rows[i], i, false).length) fullResultIndexes.add(i);
   }
 
   const history = [];
@@ -2580,13 +2583,13 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     const traceError = turnOpts?.documentRequest
       ? (compactDocumentFallback(assistantContent) || 'Provider turn errored')
       : (assistantContent || 'Provider turn errored');
-    recordRunTrace(userId, { ..._traceBase, status: 'error', error: traceError });
     _emitTurnTrace(traceError);
     // A provider can fail after a tool already committed a side effect or
     // emitted media. Persist every completed tool result and collected image
     // even without final narration. The durable result tells a later retry
     // what already happened so it cannot blindly repeat the effect.
     const hasDurableEffects = toolsUsed.length > 0 || (turnImages?.length ?? 0) > 0;
+    let persistenceError = null;
     if (!silent && hasDurableEffects) {
       try {
         await persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
@@ -2599,13 +2602,18 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         });
       } catch (e) {
         console.warn('[chat] error-path persist failed:', e.message);
+        persistenceError = `Session persistence failed: ${String(e?.message || e || 'unknown error').slice(0, 500)}`;
         yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'A tool or media action may have completed, but its chat record could not be saved. Do not retry automatically.' };
       }
     }
+    recordRunTrace(userId, {
+      ..._traceBase,
+      status: 'error',
+      error: persistenceError ? `${traceError}; ${persistenceError}` : traceError,
+    });
     return;
   }
   log.info('chat', 'llm turn complete', _llmMeta);
-  recordRunTrace(userId, { ..._traceBase, status: 'complete' });
   if (_routerStore && !workerMemoryOwnerId && !suppressLearning) {
     // Hosted provider tools are execution telemetry, not local tools the
     // router can select on a future turn.
@@ -2672,10 +2680,19 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       });
     } catch (e) {
       console.warn('[chat] persist failed:', e.message);
+      recordRunTrace(userId, {
+        ..._traceBase,
+        status: 'error',
+        error: `Session persistence failed: ${String(e?.message || e || 'unknown error').slice(0, 500)}`,
+      });
       yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The reply finished, but the chat turn could not be saved. Reload before trying again.' };
       return;
     }
   }
+  // A completed Run Inspector record is a durable claim that the visible turn
+  // committed. Write it only after the awaited session append succeeds; a
+  // storage failure above records an error instead of leaving a false green.
+  recordRunTrace(userId, { ..._traceBase, status: 'complete' });
   // Phase-14 chip-replaces-turn: emit __content only when we're NOT hiding
   // the turn. Silent/internal consumers retain the pre-existing event shape.
   if ((assistantContent || turnOpts?.documentRequest) && !hideTurn) {

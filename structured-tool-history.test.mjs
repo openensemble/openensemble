@@ -87,6 +87,31 @@ describe('structured persisted tool history', () => {
     expect(JSON.stringify(history)).not.toContain('old-secret-handle');
   });
 
+  it('does not let a newer native-only row evict replayable local outputs', () => {
+    const history = buildLlmHistory([
+      modernToolTurn({
+        content: 'first local result',
+        toolResults: [{ name: 'email_read', text: 'first-local-handle' }],
+      }),
+      modernToolTurn({
+        content: 'second local result',
+        toolResults: [{ name: 'email_read', text: 'second-local-handle' }],
+      }),
+      modernToolTurn({
+        content: 'hosted search result',
+        toolsUsed: ['web_search'],
+        toolResults: [{ name: 'web_search', text: 'provider-hosted web search' }],
+        toolEvents: [{ name: 'web_search', args: null, status: 'done', native: true }],
+      }),
+    ]);
+
+    expect(history.filter(row => row.role === 'tool').map(row => row.content)).toEqual([
+      'first-local-handle',
+      'second-local-handle',
+    ]);
+    expect(JSON.stringify(history)).not.toContain('provider-hosted web search');
+  });
+
   it('falls back to legacy call summaries and degrades truncated args to an empty object', () => {
     const history = buildLlmHistory([
       {
