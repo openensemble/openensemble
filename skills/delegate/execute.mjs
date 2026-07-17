@@ -3,8 +3,10 @@
  * Uses dynamic imports to avoid circular dependency: chat.mjs → roles.mjs → here → chat.mjs
  */
 
-import { currentTaskContext } from '../../lib/task-proxy-context.mjs';
+import { currentTaskContext, iterateInTaskContext } from '../../lib/task-proxy-context.mjs';
+import { iterateUntilAbort } from '../../lib/abortable-async-iterator.mjs';
 import { getScheduledContext } from '../../lib/scheduled-context.mjs';
+import { getTurnContext, iterateInTurnContext } from '../../lib/turn-abort-context.mjs';
 
 // Max nested delegation depth. user→A→coordinator→B = 2 hops, which is
 // the deepest useful chain (specialist escalates to coordinator who then
@@ -431,6 +433,9 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const FOREGROUND_INTENT_RE = /\b(?:wait(?:ing)?(?:\s+for\s+it)?|while\s+i\s+wait|right\s+here|in\s+this\s+(?:turn|reply|message)|foreground|synchronously|sync|do(?:\s+not|n't)\s+background|no\s+background)\b/i;
   const wantsForeground = args.background === false && FOREGROUND_INTENT_RE.test(`${rawTask || ''}\n${directive || ''}`);
   let background;
+  const enclosingTaskOwner = currentTaskContext();
+  const scheduledOwner = getScheduledContext();
+  const mustAwaitOwnedTask = enclosingTaskOwner != null && !scheduledOwner?.originTaskId;
   if (doHandoff) {
     // A declared forward pipeline is by construction long (produce, then
     // consume) — run it DETACHED by default so the coordinator stays free to
@@ -456,6 +461,11 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   } else {
     background = false;                            // specialist → coordinator escalation: stream live
   }
+  // A non-scheduled task_proxy/MCP/proposal/watcher owner has no scheduled
+  // child barrier. Even an explicit background:true or parallel hint must be
+  // resolved synchronously inside that owner, otherwise the parent can report
+  // success while its admitted child is still running.
+  if (mustAwaitOwnedTask) background = false;
 
   // Every coordinator delegation is ephemeral: a fresh session per call with no
   // prior history loaded and nothing persisted back. Prevents cross-task context
@@ -481,6 +491,133 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   const agentName   = agent.name  ?? agent_id;
   const agentEmoji  = agent.emoji ?? '🤖';
   const taskSummary = (task || '').slice(0, 120);
+
+  // Establish synchronous ownership before any potentially slow hint/document
+  // enrichment. roles.mjs can cross its 10-second UX boundary while waiting
+  // for this generator's next value; the early progress frame lets it adopt
+  // this exact chip instead of creating a duplicate generic watcher.
+  const runSynchronously = mustAwaitOwnedTask || (!background && !_parallel);
+  const syncAbort = new AbortController();
+  const parentTaskCtx = currentTaskContext();
+  const syncWatcherTaskId = `deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  let syncWatcherId = null;
+  let syncWatchers = null;
+  let syncHandle = null;
+  let unlinkParentAbort = null;
+  const syncVisibleAgentId = callerAgentId ?? `${userId}_${callerEffectiveId || agent_id}`;
+  const syncTaskCtx = {
+    taskId: syncWatcherTaskId,
+    watcherId: null,
+    userId,
+    agentId: scopedAgent.id,
+    rootTaskId: parentTaskCtx?.rootTaskId || parentTaskCtx?.taskId || syncWatcherTaskId,
+    parentTaskId: parentTaskCtx?.taskId || null,
+    parentWatcherId: parentTaskCtx?.watcherId || null,
+    rootWatcherId: parentTaskCtx?.rootWatcherId || parentTaskCtx?.watcherId || null,
+    visibleAgentId: parentTaskCtx?.visibleAgentId || parentTaskCtx?.agentId || syncVisibleAgentId,
+    spanId: `${parentTaskCtx?.rootTaskId || parentTaskCtx?.taskId || syncWatcherTaskId}:delegation:${syncWatcherTaskId}`,
+  };
+
+  // Single finalization point for the sync chip + registry entry. Define it
+  // before the first progress yield so a consumer that closes the generator
+  // on that frame cannot strand the owner or its durable journal record.
+  let _syncFinished = false;
+  const finishSync = (outcome, finalText, finalReportPreview = '') => {
+    if (_syncFinished) return;
+    _syncFinished = true;
+    unlinkParentAbort?.();
+    unlinkParentAbort = null;
+    if (syncHandle) {
+      syncHandle.complete({ outcome, finalText, finalReportPreview });
+    } else if (syncWatcherId) {
+      const status = (outcome === 'stopped') ? 'cancelled' : (outcome === 'error' ? 'error' : 'done');
+      if (finalReportPreview) {
+        syncWatchers.pushWatcherStatus(userId, syncWatcherId, finalText, { status, phase: status, currentTool: null, canCancel: false, finalReportPreview });
+      }
+      syncWatchers.completeWatcher(userId, syncWatcherId, { status, finalText });
+    }
+  };
+
+  let syncExecutionEntered = false;
+  let noConfirmNote = null;
+  try {
+  if (runSynchronously) {
+    const parentSignal = getTurnContext()?.signal || null;
+    if (parentSignal) {
+      if (parentSignal.aborted) {
+        syncAbort.abort(parentSignal.reason);
+      } else {
+        const onParentAbort = () => syncAbort.abort(parentSignal.reason);
+        parentSignal.addEventListener('abort', onParentAbort, { once: true });
+        unlinkParentAbort = () => parentSignal.removeEventListener('abort', onParentAbort);
+      }
+    }
+    try {
+      syncWatchers = await import('../../scheduler/watchers.mjs');
+      syncWatcherId = syncWatchers.registerWatcher({
+        userId,
+        agentId: syncVisibleAgentId,
+        kind: 'task_proxy',
+        label: `${agentEmoji} ${agentName}: ${taskSummary}`,
+        state: {
+          taskId: syncWatcherTaskId,
+          status: 'running',
+          targetAgentId: scopedAgent.id,
+          targetAgentName: agentName,
+          targetAgentEmoji: agentEmoji,
+          summary: taskSummary,
+          startedAt: Date.now(),
+          lastActivityAt: Date.now(),
+          phase: 'queued',
+          toolsUsed: 0,
+          currentTool: null,
+          canCancel: true,
+        },
+        cadenceSec: 30,
+        expiresAt: null,
+      });
+      syncTaskCtx.watcherId = syncWatcherId;
+      syncTaskCtx.rootWatcherId = syncTaskCtx.rootWatcherId || syncWatcherId;
+      syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Delegating to ${agentName}: ${taskSummary}`, {
+        phase: 'queued',
+        canCancel: true,
+      });
+    } catch (e) {
+      console.warn('[delegate] sync task_proxy watcher registration failed:', e.message);
+    }
+    try {
+      const bgMod = await import('../../background-tasks.mjs');
+      syncHandle = bgMod.registerSyncDelegation({
+        taskId: syncWatcherTaskId,
+        userId,
+        agentId: scopedAgent.id,
+        agentName,
+        agentEmoji,
+        summary: taskSummary,
+        watcherId: syncWatcherId,
+        visibleAgentId: syncVisibleAgentId,
+        abort: () => syncAbort.abort('delegation stopped'),
+        rootTaskId: syncTaskCtx.rootTaskId,
+        parentTaskId: syncTaskCtx.parentTaskId,
+        parentWatcherId: syncTaskCtx.parentWatcherId,
+        rootWatcherId: syncTaskCtx.rootWatcherId,
+      });
+    } catch (e) {
+      console.warn('[delegate] sync delegation registration failed:', e.message);
+    }
+    yield {
+      type: 'tool_progress',
+      name: 'ask_agent',
+      text: `Delegating to ${agentName}`,
+      sourceLabel: `${agentEmoji} ${agentName}`,
+      delegated: true,
+      agentName,
+      agentEmoji,
+      targetAgentId: scopedAgent.id,
+      ...(syncWatcherId ? { chipWatcherId: syncWatcherId } : {}),
+      chipTaskId: syncWatcherTaskId,
+    };
+  }
 
   // Enrich system prompt with date context (mirrors server.mjs WS handler enrichment)
   // Without this, finance agents don't get date ranges and can't resolve "this month" etc.
@@ -543,14 +680,14 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // user explicitly authorized the action in the triggering message
   // ("just send it", "no need to confirm"). This must apply to both sync and
   // background delegations; scheduled/direct-send tasks commonly detach.
-  const noConfirmNote = no_confirm
+  noConfirmNote = no_confirm
     ? `[DELEGATION OVERRIDE — NO CONFIRM] The coordinator has authorized this delegation as a direct send. The user's original message in the coordinator chat IS the confirmation. Do NOT show a draft, do NOT ask "are you sure?", do NOT wait for "send it" — call the action tool directly with reasonable defaults for anything unspecified, then report what you did. This overrides any "show draft and wait for approval" rule from your role's prompt for this single delegation only.`
     : null;
 
   // Background mode: fire and forget, return immediately.
   // Triggered either by explicit background:true from the model, or by _parallel:true injected
   // by chat.mjs when multiple ask_agent calls are detected in a single response.
-  if (background || _parallel) {
+  if (!mustAwaitOwnedTask && (background || _parallel)) {
     const { dispatchBackground } = await import('../../background-tasks.mjs');
     let taskCtx = null;
     try {
@@ -621,104 +758,15 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
     return;
   }
 
-  // Sync delegations are abortable too: the chip's Stop button (DELETE
-  // /api/watchers/<id> → cancelTask) finds this delegation in the shared
-  // activeTasks registry via its watcherId and fires this controller, which
-  // kills the in-flight streamChat for whichever stage is running.
-  const syncAbort = new AbortController();
-  // ALSO linked to the calling TURN's abort signal (voice/browser "stop",
-  // device disconnect, shutdown — anything that fires the turn's controller
-  // via abortChat). Field bug: "stop" during a coordinator→specialist
-  // delegation killed the coordinator but the specialist ran to completion.
-  // The signal rides AsyncLocalStorage from the llm-loop (see
-  // lib/turn-abort-context.mjs); absent for background/scheduled callers,
-  // whose delegations deliberately outlive any single turn.
-  try {
-    const { getTurnSignal } = await import('../../lib/turn-abort-context.mjs');
-    const parentSignal = getTurnSignal();
-    if (parentSignal) {
-      if (parentSignal.aborted) syncAbort.abort();
-      else parentSignal.addEventListener('abort', () => syncAbort.abort(), { once: true });
-    }
-  } catch { /* best-effort — delegation still chip-stoppable */ }
-  const syncWatcherTaskId = `deleg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  let syncWatcherId = null;
-  let syncWatchers = null;
-  let syncHandle = null;
-  try {
-    syncWatchers = await import('../../scheduler/watchers.mjs');
-    syncWatcherId = syncWatchers.registerWatcher({
-      userId,
-      agentId: callerAgentId ?? `${userId}_${callerEffectiveId || agent_id}`,
-      kind: 'task_proxy',
-      label: `${agentEmoji} ${agentName}: ${taskSummary}`,
-      state: {
-        taskId: syncWatcherTaskId,
-        status: 'running',
-        targetAgentId: scopedAgent.id,
-        targetAgentName: agentName,
-        targetAgentEmoji: agentEmoji,
-        summary: taskSummary,
-        startedAt: Date.now(),
-        lastActivityAt: Date.now(),
-        phase: 'queued',
-        toolsUsed: 0,
-        currentTool: null,
-        canCancel: true,
-      },
-      cadenceSec: 30,
-      expiresAt: null,
-    });
-    syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Delegating to ${agentName}: ${taskSummary}`, {
-      phase: 'queued',
-      canCancel: true,
-    });
+  syncExecutionEntered = true;
   } catch (e) {
-    console.warn('[delegate] sync task_proxy watcher registration failed:', e.message);
-  }
-  try {
-    const bgMod = await import('../../background-tasks.mjs');
-    let taskCtx0 = null;
-    try {
-      const m = await import('../../lib/task-proxy-context.mjs');
-      taskCtx0 = m.currentTaskContext?.() || null;
-    } catch { /* not inside a task */ }
-    syncHandle = bgMod.registerSyncDelegation({
-      taskId: syncWatcherTaskId,
-      userId,
-      agentId: scopedAgent.id,
-      agentName,
-      agentEmoji,
-      summary: taskSummary,
-      watcherId: syncWatcherId,
-      visibleAgentId: callerAgentId ?? `${userId}_${callerEffectiveId || agent_id}`,
-      abort: () => syncAbort.abort(),
-      rootTaskId: taskCtx0?.rootTaskId || null,
-      parentTaskId: taskCtx0?.taskId || null,
-      parentWatcherId: taskCtx0?.watcherId || null,
-      rootWatcherId: taskCtx0?.rootWatcherId || taskCtx0?.watcherId || null,
-    });
-  } catch (e) {
-    console.warn('[delegate] sync delegation registration failed:', e.message);
-  }
-
-  // Single finalization point for the sync chip + registry entry — EVERY exit
-  // path below must pass through here exactly once, or the delegation leaks in
-  // activeTasks (check_workers would report it running forever).
-  let _syncFinished = false;
-  const finishSync = (outcome, finalText, finalReportPreview = '') => {
-    if (_syncFinished) return;
-    _syncFinished = true;
-    if (syncHandle) {
-      syncHandle.complete({ outcome, finalText, finalReportPreview });
-    } else if (syncWatcherId) {
-      const status = (outcome === 'stopped') ? 'cancelled' : (outcome === 'error' ? 'error' : 'done');
-      if (finalReportPreview) {
-        syncWatchers.pushWatcherStatus(userId, syncWatcherId, finalText, { status, phase: status, currentTool: null, canCancel: false, finalReportPreview });
-      }
-      syncWatchers.completeWatcher(userId, syncWatcherId, { status, finalText });
+    if (runSynchronously) finishSync('error', `⚠ ${agentName} failed: ${e?.message || e}`);
+    throw e;
+  } finally {
+    if (runSynchronously && !syncExecutionEntered) {
+      finishSync('stopped', `■ ${agentName} interrupted — the turn ended before the delegation started`);
     }
-  };
+  }
 
   // Abandonment net. If the consumer tears down this generator mid-yield
   // (turn aborted / Stop / WS teardown — roles.mjs finalizes the skill
@@ -835,7 +883,32 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       // crosses 10s, instead of registering a second chip for the same work.
       const chipIds = { chipWatcherId: syncWatcherId, chipTaskId: syncWatcherTaskId };
       try {
-        for await (const event of streamChat(stageAgent, stageTask, syncAbort.signal, null, userId, null, sNote, false, null, { toolPlan: sToolPlan, routeText: sRouteText || undefined })) {
+        // The delegation has its own task_proxy from the first model event.
+        // Keep the child model loop in that context even while this generator
+        // yields progress to a foreground coordinator. The outer ask_agent
+        // call may still cross roles.mjs's 10-second boundary and adopt this
+        // one chip; tools *inside* the delegated stage must not detach again.
+        const inheritedTurnContext = getTurnContext() || {};
+        const ownedStageStream = iterateInTurnContext(
+          { ...inheritedTurnContext, signal: syncAbort.signal },
+          () => iterateInTaskContext(syncTaskCtx, () => iterateUntilAbort(
+            streamChat(
+              stageAgent,
+              stageTask,
+              syncAbort.signal,
+              null,
+              userId,
+              null,
+              sNote,
+              false,
+              null,
+              { toolPlan: sToolPlan, routeText: sRouteText || undefined },
+            ),
+            syncAbort.signal,
+            `${sName} delegation stopped`,
+          )),
+        );
+        for await (const event of ownedStageStream) {
           if (event.type === 'token') {
             cap.fullText += event.text;
             yield { type: 'tool_progress', name: 'ask_agent', text: event.text, sourceLabel: sLabel, delegated: true, agentName: sName, agentEmoji: sEmoji, targetAgentId: stageAgent.id, ...chipIds };
