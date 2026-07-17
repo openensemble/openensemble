@@ -141,6 +141,7 @@ function renderRunInspectorDetail(t) {
         <div class="run-section-title">Routing</div>
         <pre>${escHtml(JSON.stringify({
           initialSkills: routing.initialSkills || [],
+          matchedSkills: routing.matchedSkills || [],
           addedSkills: routing.addedSkills || [],
           recoveredMissingTools: Boolean(routing.recoveredMissingTools),
           fullToolCount: routing.fullToolCount ?? null,
@@ -160,6 +161,8 @@ function renderRunInspectorDetail(t) {
           <summary>Round ${escHtml(call.ordinal)} · ${escHtml(call.toolCount ?? 0)} tools · ~${escHtml(call.schemaTokEst ?? 0)} schema tokens</summary>
           <div class="run-tool-label">Provider / model</div>
           <pre>${escHtml(`${call.provider || '—'} / ${call.model || '—'}`)}</pre>
+          <div class="run-tool-label">Reasoning effort (requested / provider wire)</div>
+          <pre>${escHtml(`${call.requestedReasoningEffort || '—'} / ${call.wireReasoningEffort || 'omitted'}`)}</pre>
           <div class="run-tool-label">Selected skills</div>
           <pre>${escHtml(JSON.stringify({ selected: call.selectedSkills || [], added: call.addedSkills || [], recoveryLoads: call.recoveryLoads || [] }, null, 2))}</pre>
           <div class="run-tool-label">Schema attestation</div>

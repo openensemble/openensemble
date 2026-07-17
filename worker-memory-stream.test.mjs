@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
   routinePropose: vi.fn(async () => {}),
   recordRunTrace: vi.fn(),
   turn: null,
+  modelCallEvidence: 'complete',
 }));
 
 const tool = name => ({
@@ -77,7 +78,9 @@ vi.mock('./lib/run-inspector.mjs', async importOriginal => ({
 
 vi.mock('./lib/turn-trace-context.mjs', () => ({
   getTurn: vi.fn(() => state.turn),
-  beginTurn: vi.fn(input => { state.turn = { turnId: 'worker-turn', rootId: input.rootId }; }),
+  beginTurn: vi.fn(input => {
+    state.turn = { turnId: 'worker-turn', rootId: input.rootId, source: input.source };
+  }),
   recordSpan: vi.fn(),
   recordError: vi.fn(),
   finishTurn: vi.fn(() => { state.turn = null; return null; }),
@@ -94,6 +97,25 @@ vi.mock('./chat/providers/ollama.mjs', () => ({
     state.providerTools = agent.tools.map(t => t.function.name);
     const { getToolRouterContext } = await import('./lib/tool-router-context.mjs');
     state.recoverableTools = (getToolRouterContext()?.fullTools ?? []).map(t => t.function.name);
+    const providerToolNames = [...state.providerTools, 'provider_native_search'];
+    if (state.modelCallEvidence === 'complete') {
+      yield {
+        type: '__model_call', provider: 'ollama', model: 'test-model',
+        phase: 'dispatch_planned', round: 1, toolsPresent: true,
+        toolNames: providerToolNames, toolCount: providerToolNames.length,
+        toolSchemaBytes: 2, schemaTokEst: 1, schemaHash: 'a'.repeat(64),
+      };
+    } else if (state.modelCallEvidence === 'errored') {
+      yield {
+        type: '__model_call', provider: 'ollama', model: 'test-model',
+        phase: 'dispatch_planned', round: 1, toolsPresent: true,
+        // Even a plausible partial count is not attested when the adapter
+        // marks the trace event errored.
+        toolNames: providerToolNames, toolCount: providerToolNames.length,
+        toolSchemaBytes: null, schemaTokEst: null, schemaHash: null,
+        traceError: true,
+      };
+    }
     yield { type: 'token', text: 'worker complete' };
     yield { type: '__content', content: 'worker complete' };
   }),
@@ -114,6 +136,7 @@ describe('validated worker stream contract', () => {
     state.recoverableTools = [];
     state.trimInputTools = [];
     state.turn = null;
+    state.modelCallEvidence = 'complete';
     for (const value of Object.values(state)) {
       if (typeof value?.mockClear === 'function') value.mockClear();
     }
@@ -173,6 +196,16 @@ describe('validated worker stream contract', () => {
     // Operational traces remain, but no worker session, Cortex, proposal, or
     // routing-recipe state may be written from this detached prompt.
     expect(state.recordRunTrace).toHaveBeenCalledOnce();
+    expect(state.recordRunTrace).toHaveBeenCalledWith(
+      'worker-contract-user',
+      expect.objectContaining({
+        source: 'background',
+        sizes: expect.objectContaining({
+          toolCount: retained.length + 1,
+          localToolCount: retained.length,
+        }),
+      }),
+    );
     expect(state.appendToSession).not.toHaveBeenCalled();
     expect(state.trackFriction).not.toHaveBeenCalled();
     expect(state.routineFlush).not.toHaveBeenCalled();
@@ -181,5 +214,49 @@ describe('validated worker stream contract', () => {
     expect(state.processSignals).not.toHaveBeenCalled();
     expect(state.recordTurnRouting).not.toHaveBeenCalled();
     expect(state.learnToolPlanFromTurn).not.toHaveBeenCalled();
+  });
+
+  it.each(['absent', 'errored'])('keeps provider tool count unknown when model-call evidence is %s', async evidence => {
+    state.modelCallEvidence = evidence;
+    const retained = ['report_progress', 'request_tools'];
+    const agent = {
+      id: `ephemeral_worker_${evidence}_trace_test`,
+      workerOwnerId: 'jarvis',
+      ephemeral: true,
+      name: 'Task Worker',
+      provider: 'ollama',
+      model: 'test-model',
+      systemPrompt: 'Complete only the assigned task.',
+      tools: retained.map(tool),
+    };
+
+    await collect(streamChat(
+      agent,
+      'Complete the bounded task.',
+      null,
+      null,
+      'worker-contract-user',
+      null,
+      null,
+      false,
+      null,
+      {
+        isolatedTaskRun: true,
+        workerMemoryAgentId: 'jarvis',
+        rootTaskId: `worker-${evidence}-root`,
+        traceSource: 'background',
+      },
+    ));
+
+    expect(state.recordRunTrace).toHaveBeenCalledOnce();
+    expect(state.recordRunTrace).toHaveBeenCalledWith(
+      'worker-contract-user',
+      expect.objectContaining({
+        sizes: expect.objectContaining({
+          toolCount: null,
+          localToolCount: retained.length,
+        }),
+      }),
+    );
   });
 });

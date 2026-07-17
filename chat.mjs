@@ -2573,6 +2573,20 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // generator. This ordinal is canonical across the whole agent span.
     ordinal: index + 1,
   }));
+  const _firstModelCall = _modelCallTrace[0] ?? null;
+  // `toolCount` below means the provider-native surface actually attested for
+  // the first logical request. Never substitute the local schema count when
+  // wire evidence is absent or malformed: hosted tools can make those counts
+  // differ, and an unknown provider surface must remain visibly unknown.
+  const _providerShippedToolCount = _firstModelCall
+    && _firstModelCall.traceError !== true
+    && _firstModelCall.phase === 'dispatch_planned'
+    && Array.isArray(_firstModelCall.toolNames)
+    && Number.isSafeInteger(_firstModelCall.toolCount)
+    && _firstModelCall.toolCount >= 0
+    && _firstModelCall.toolCount === _firstModelCall.toolNames.length
+    ? _firstModelCall.toolCount
+    : null;
   const _emitTurnTrace = (errInfo = null) => {
     try {
       const selectedTools = _routerStore?.initialToolNames
@@ -2668,7 +2682,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // prompt/tool/history bloat from app.log without re-running the turn.
     spChars: _sizes.spChars,
     toolsBytes: _sizes.toolsBytes,
-    toolCount: _sizes.toolCount,
+    toolCount: _providerShippedToolCount,
+    localToolCount: _sizes.toolCount,
     historyMsgs: _sizes.historyMsgs,
     historyBytes: _sizes.historyBytes,
     droppedFromHistory: _sizes.droppedFromHistory,
@@ -2692,7 +2707,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     provider: agent.provider,
     model: agent.model,
     modelExpected: true,
-    source: voiceCtx?.source ?? 'web',
+    // Detached workers and scheduled runs mint an authoritative turn source.
+    // Prefer it to the optional voice context so background work cannot be
+    // mislabeled as an ordinary web or inherited voice turn.
+    source: _turnIdentity?.source ?? voiceCtx?.source ?? 'web',
     durationMs: _llmMeta.durationMs,
     input: sessionUserText,
     output: _observableAssistantContent,
@@ -2728,7 +2746,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     sizes: {
       systemPromptChars: _sizes.spChars,
       toolsBytes: _sizes.toolsBytes,
-      toolCount: _sizes.toolCount,
+      toolCount: _providerShippedToolCount,
+      localToolCount: _sizes.toolCount,
       historyMessages: _sizes.historyMsgs,
       historyBytes: _sizes.historyBytes,
       droppedFromHistory: _sizes.droppedFromHistory,
