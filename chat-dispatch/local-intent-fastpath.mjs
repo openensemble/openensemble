@@ -17,6 +17,7 @@
 import { appendToSession, failPendingTurn } from '../sessions.mjs';
 import { localTierEnabled, dispatch, runIntent } from '../lib/local-label.mjs';
 import { recordToolObservation } from '../lib/personalization/recorder.mjs';
+import { recordToolInvocations } from '../lib/skill-telemetry.mjs';
 import { looksLikeToolError } from '../lib/tool-error.mjs';
 import { isStandaloneRoutingRequest } from '../lib/routing-clauses.mjs';
 
@@ -42,6 +43,7 @@ export async function tryLocalIntentFastpath({ userText, userId, agentId, onEven
   // A local intent owns the whole turn. Do not let a matched first lookup
   // swallow the remaining steps of an explicit compound workflow.
   if (!isStandaloneRoutingRequest(userText)) return null;
+  const startedAt = Date.now();
   try {
     const match = await dispatch(userText, userId, { agentId });
     if (!match) return null;
@@ -55,12 +57,20 @@ export async function tryLocalIntentFastpath({ userText, userId, agentId, onEven
     }
 
     const text = await normalizeResult(await runIntent(match, userId, agentId));
+    const toolFailed = looksLikeToolError(text);
+    const trace = {
+      name: match.tool,
+      args: match.args || {},
+      result: text,
+      status: toolFailed ? 'error' : 'done',
+      durationMs: Date.now() - startedAt,
+    };
     // The normal roles.mjs dispatcher mirrors completed tools into the
     // personalization observation stream, but this no-LLM executor bypasses
     // that hook. Record only a successful invocation and deliberately omit
     // result content: recordToolObservation will retain the tool/skill plus a
     // shape-only view of args, never a grocery result body or query value.
-    if (!looksLikeToolError(text)) {
+    if (!toolFailed) {
       try {
         recordToolObservation({
           userId,
@@ -82,12 +92,25 @@ export async function tryLocalIntentFastpath({ userText, userId, agentId, onEven
       console.warn('[local-label] persist failed:', e.message);
       await failPendingTurn(`${userId}_${agentId}`, 'Persistence failed after the local action', { retryable: false }).catch(() => {});
       onEvent({ type: 'error', code: 'persistence_failed', retryable: false, message: 'The local action finished, but the chat record could not be saved. Do not retry it automatically.', agent: agentId });
-      return { handled: true };
+      return { handled: true, trace };
+    }
+    // Normal model-backed turns reach this counter/event stream through
+    // chat.mjs persist(). This pre-model executor bypasses that hook, so mirror
+    // the completed tool call here after the session is safely on disk. The
+    // recorder is intentionally fire-and-forget; a telemetry failure must
+    // never turn a completed local action into an LLM retry.
+    try {
+      recordToolInvocations({
+        userId,
+        toolsUsed: [{ name: match.tool, args: match.args || {}, text }],
+      });
+    } catch (e) {
+      console.warn('[local-label] invocation telemetry failed:', e.message);
     }
     onEvent({ type: 'token', text, agent: agentId });
     onEvent({ type: 'done', agent: agentId });
     console.log(`[local-label] dispatch handled ${match.skillId}/${match.intentId} via ${match.via} (no LLM)`);
-    return { handled: true };
+    return { handled: true, trace };
   } catch (e) {
     console.warn('[local-label] fastpath threw, falling through:', e.message);
     return null;
