@@ -12,6 +12,7 @@
  */
 import { getServerById } from '../../lib/mcp-config.mjs';
 import { callTool } from '../../lib/mcp-client.mjs';
+import { abortError } from '../../lib/abort-utils.mjs';
 
 // Split an MCP result into:
 //   - text:   the LLM-facing string (truncated previews + resource links;
@@ -97,7 +98,9 @@ export async function* executeSkillTool(name, args, userId, agentId, ctx) {
     return;
   }
   try {
-    const result = await callTool(userId, cfg, bareTool, args ?? {});
+    const result = await callTool(userId, cfg, bareTool, args ?? {}, {
+      signal: ctx?.signal ?? null,
+    });
     const { text, images } = formatToolResult(result, serverId, bareTool);
     // Push each image to the user via ctx.showImage — the WS sendToUser
     // path forwards it as a top-level `image` event which the client
@@ -113,6 +116,9 @@ export async function* executeSkillTool(name, args, userId, agentId, ctx) {
     }
     yield { type: 'result', text };
   } catch (e) {
+    if (ctx?.signal?.aborted || e?.name === 'AbortError') {
+      throw abortError(ctx?.signal, `MCP call ${serverId}/${bareTool} cancelled`);
+    }
     console.warn(`[mcp] callTool failed: server=${serverId} tool=${bareTool}:`, e.message);
     yield { type: 'result', text: `MCP call failed (${serverId}/${bareTool}): ${e.message}` };
   }

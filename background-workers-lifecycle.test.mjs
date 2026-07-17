@@ -105,7 +105,7 @@ const bg = await import('./background-tasks.mjs');
 const { buildCompoundWorkflowContract } = await import('./lib/compound-workflow-contract.mjs');
 const { BASE_DIR } = await import('./lib/paths.mjs');
 const { getTurnContext, runWithTurnContext } = await import('./lib/turn-abort-context.mjs');
-const { toolRouterContext } = await import('./lib/tool-router-context.mjs');
+const { getToolRouterContext, toolRouterContext } = await import('./lib/tool-router-context.mjs');
 const JOURNAL_PATH = path.join(BASE_DIR, 'background-task-journal.json');
 const originalJournal = fs.existsSync(JOURNAL_PATH) ? fs.readFileSync(JOURNAL_PATH) : null;
 const originalLab = process.env.OPENENSEMBLE_LAB;
@@ -207,6 +207,42 @@ afterAll(() => {
 });
 
 describe('private durable worker lifecycle', () => {
+  it('gives a detached delegation its own ambient abort and clears foreground routing context', async () => {
+    const parent = new AbortController();
+    let observed = null;
+    mocks.workerScenarios.push(async function* (...args) {
+      observed = {
+        argumentSignal: args[2],
+        ambientSignal: getTurnContext()?.signal,
+        routerContext: getToolRouterContext(),
+      };
+      await new Promise(() => {});
+    });
+    const userId = `delegation-context-${Date.now()}`;
+    const taskId = runWithTurnContext({ signal: parent.signal }, () => toolRouterContext.run(
+      { requestId: 'stale-foreground-router' },
+      () => bg.dispatchBackground(
+        { id: 'ephemeral_deleg_test', name: 'Specialist', ephemeral: true, tools: [] },
+        'Run a detached specialist task.',
+        userId,
+        `${userId}_jarvis`,
+        'Specialist',
+        'S',
+        { autoContinue: false },
+      ),
+    ));
+
+    await waitFor(() => observed !== null);
+    expect(observed.argumentSignal).toBe(observed.ambientSignal);
+    expect(observed.ambientSignal).not.toBe(parent.signal);
+    expect(observed.routerContext).toBeNull();
+    parent.abort('browser turn ended');
+    expect(bg.isTaskActive(taskId)).toBe(true);
+
+    expect(bg.cancelTask(userId, taskId, 'test stop').ok).toBe(true);
+    await waitFor(() => !bg.isTaskActive(taskId));
+  });
+
   it('starts no producer when durable journal registration fails', () => {
     const userId = `worker-journal-${Date.now()}`;
     const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {

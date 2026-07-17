@@ -1282,7 +1282,18 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       pushTaskProgress(taskId, `${agentName} started working`, { phase: 'running' });
       let finalText = '';
       const reportImages = [];
-      await runInTaskContext(taskCtx, async () => {
+      // This detached run owns its cancellation signal from the first stage.
+      // Replace inherited browser/router contexts so Stop reaches nested tools
+      // and an old foreground abort or verifier request cap cannot leak into
+      // the background task.
+      await runWithTurnContext({
+        signal: ac.signal,
+        deviceId: rec?.voiceDeviceId ?? null,
+        conversationMode: !!rec?.voiceConversation,
+        suppressLearning: rec?.suppressLearning === true,
+        verifierAllowedTools: rec?.verifierAllowedTools ?? null,
+        verifierLeaseToken: rec?.verifierLeaseToken ?? null,
+      }, () => toolRouterContext.run(null, () => runInTaskContext(taskCtx, async () => {
         const stage1 = await runBgStage(scopedAgent, task, agentName, combinedNote, routeText, rememberedPlan);
         finalText = stage1.text;
         if (stage1.images?.length) reportImages.push(...stage1.images);
@@ -1336,7 +1347,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
           finalText = stage2.text;
           if (stage2.images?.length) reportImages.push(...stage2.images);
         }
-      });
+      })));
       await _onComplete(taskId, userId, coordinatorAgentId, pipeName, agentEmoji, finalText.trim() || `${pipeName} completed the task.`, null, null, toolEvents, scopedAgent.id, task, { images: reportImages });
     } catch (err) {
       console.error('[background-tasks] error in task', taskId, err.message);

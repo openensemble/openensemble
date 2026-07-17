@@ -12,6 +12,7 @@ import { randomBytes } from 'crypto';
 import { mkdirSync, appendFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { shouldDetachNodeExec } from './background-policy.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -327,10 +328,11 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     // sets background:true explicitly, OR the command matches a long-running
     // pattern (package managers, builds, downloads). Sync mode is kept as
     // the default so quick reads still work inline.
-    const LONG_CMD_RE = /\b(apt|apt-get|dnf|yum)\s+(install|upgrade|update|dist-upgrade|full-upgrade|autoremove)\b|\b(npm|pip|pip3|cargo|gem|composer|brew)\s+(install|upgrade|update)\b|\b(make|cmake|cargo\s+build|go\s+build|mvn|gradle)\b|\b(docker)\s+(pull|build|run|compose)\b|\bcurl\s.+\|\s*(sudo\s+)?(sh|bash)\b|\b(git\s+clone|wget|rsync)\b|\bsystemctl\s+(restart|reload)\b|\b(snap|flatpak)\s+(install|update|refresh)\b/i;
-    const wantBackground = typeof args.background === 'boolean'
-      ? args.background
-      : (LONG_CMD_RE.test(command) || timeout > 60);
+    const wantBackground = shouldDetachNodeExec({
+      background: args.background,
+      command,
+      timeout,
+    });
 
     if (wantBackground) {
       const { registerWatcher, pushWatcherStatus, completeWatcher } = await import('../../scheduler/watchers.mjs');
