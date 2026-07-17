@@ -194,6 +194,7 @@ describe('provider internal evidence consumption', () => {
     ]);
 
     expect(result.errored).toBe(false);
+    expect(result.toolIdentityAnomalies).toEqual([]);
     expect(result.toolsUsed).toEqual([
       {
         name: 'probe', text: 'result-b', args: { slot: 'b' },
@@ -240,6 +241,15 @@ describe('provider internal evidence consumption', () => {
       type: 'error',
       message: expect.stringContaining('unknown'),
     });
+    expect(result.toolIdentityAnomalies).toEqual(_kind === 'result'
+      ? [expect.objectContaining({
+          kind: 'tool_result_identity_anomaly',
+          name: 'probe',
+          reason: 'unknown_result_identity',
+          toolCallId: 'call-unknown',
+          resultPreview: 'late',
+        })]
+      : []);
   });
 
   it('rejects a duplicate result identity after its call already completed', async () => {
@@ -253,6 +263,50 @@ describe('provider internal evidence consumption', () => {
     expect(events.at(-1)).toMatchObject({
       type: 'error',
       message: expect.stringContaining('unknown or duplicate call identity'),
+    });
+    expect(result.toolsUsed).toEqual([
+      expect.objectContaining({ name: 'probe', text: 'first', toolCallId: 'call-once' }),
+    ]);
+    expect(result.toolIdentityAnomalies).toEqual([
+      expect.objectContaining({
+        kind: 'tool_result_identity_anomaly',
+        name: 'probe',
+        reason: 'duplicate_result_identity',
+        toolCallId: 'call-once',
+        resultPreview: 'second',
+      }),
+    ]);
+  });
+
+  it('quarantines completion evidence carried by a malformed result identity', async () => {
+    const { events, result } = await consumeEvents([
+      { type: 'tool_call', name: 'probe', args: { action: 'send' }, toolCallId: 'call-known' },
+      {
+        type: 'tool_result', name: 'probe', text: 'accepted as message 17',
+        toolCallId: ' malformed-result-id ',
+      },
+    ]);
+
+    expect(result.errored).toBe(true);
+    expect(result.toolsUsed).toEqual([]);
+    expect(result.toolEvents).toEqual([
+      expect.objectContaining({
+        name: 'probe', toolCallId: 'call-known', status: 'running',
+      }),
+    ]);
+    expect(result.toolIdentityAnomalies).toEqual([
+      expect.objectContaining({
+        kind: 'tool_result_identity_anomaly',
+        name: 'probe',
+        reason: 'invalid_result_identity',
+        identityType: 'string',
+        identityLength: 21,
+        resultPreview: 'accepted as message 17',
+      }),
+    ]);
+    expect(result.toolIdentityAnomalies[0]).not.toHaveProperty('toolCallId');
+    expect(events.at(-1)).toEqual({
+      type: 'error', message: 'provider supplied an invalid tool call identity',
     });
   });
 

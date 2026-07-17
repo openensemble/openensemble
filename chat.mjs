@@ -167,12 +167,62 @@ function documentArtifactContent(request, artifact, fallback = '') {
   return `[Document ${artifact.action}: ${artifact.filename || request?.filename || 'document'}${artifact.version ? ` (v${artifact.version})` : ''}]`;
 }
 
+const TOOL_IDENTITY_ANOMALY_REASONS = new Set([
+  'invalid_result_identity',
+  'unknown_result_identity',
+  'duplicate_result_identity',
+]);
+const MAX_TOOL_IDENTITY_ANOMALIES = 32;
+
+function compactToolIdentityAnomaly(value) {
+  const rawName = String(value?.name ?? 'unknown_tool')
+    .replace(/[\r\n\0]/g, ' ')
+    .trim()
+    .replace(/[^A-Za-z0-9_.:-]/g, '_');
+  const toolCallId = typeof value?.toolCallId === 'string'
+      && value.toolCallId
+      && value.toolCallId === value.toolCallId.trim()
+      && value.toolCallId.length <= 512
+      && !/[\r\n\0]/.test(value.toolCallId)
+    ? value.toolCallId
+    : null;
+  const identityLength = Number.isSafeInteger(value?.identityLength) && value.identityLength >= 0
+    ? value.identityLength
+    : null;
+  return {
+    kind: 'tool_result_identity_anomaly',
+    name: (rawName || 'unknown_tool').slice(0, 80),
+    reason: TOOL_IDENTITY_ANOMALY_REASONS.has(value?.reason)
+      ? value.reason
+      : 'unknown_result_identity',
+    ...(toolCallId ? { toolCallId } : {}),
+    identityType: String(value?.identityType ?? 'unknown').slice(0, 40),
+    ...(identityLength != null ? { identityLength } : {}),
+    ...(value?.providerNative === true ? { providerNative: true } : {}),
+    ...(value?.delegated === true ? { delegated: true } : {}),
+    resultPreview: redactTextForTrace(value?.resultPreview ?? '').slice(0, 500),
+    observedAt: Number.isFinite(value?.observedAt) ? value.observedAt : Date.now(),
+  };
+}
+
+function toolIdentityDurabilityWarning(anomalies) {
+  const compact = (Array.isArray(anomalies) ? anomalies : [])
+    .slice(0, MAX_TOOL_IDENTITY_ANOMALIES)
+    .map(compactToolIdentityAnomaly);
+  if (!compact.length) return '';
+  const names = [...new Set(compact.map(item => item.name))].slice(0, 4);
+  const subject = names.length === 1
+    ? `tool "${names[0]}"`
+    : `tools ${names.map(name => `"${name}"`).join(', ')}`;
+  return `[Server durability warning: The action may already have completed. Do not automatically retry it. Completion evidence from ${subject} could not be matched to a verified provider tool-call identity; verify the outcome first or ask the user before trying again.]`;
+}
+
 // async since the durability fix: the session write is awaited so callers can
 // hold the terminal `done` until the turn is actually on disk. Everything
 // after the write (friction/proposers/signals) stays fire-and-forget on normal
 // turns. An authenticated verifier preserves the real session/tool path but
 // stops here before any delayed learning work can cross the terminal boundary.
-async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, suppressLearning = false, workerLeafRun = false } = {}) {
+async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], toolIdentityAnomalies = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, suppressLearning = false, workerLeafRun = false } = {}) {
   // Detached task workers are deliberately non-learning. Their completed
   // report is persisted by the owner-continuation path; writing a second
   // ephemeral session here is unnecessary, and proceeding below would also
@@ -181,7 +231,14 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   if (workerLeafRun) return;
   const safeDocumentRequest = normalizeDocumentRequest(documentRequest);
   const documentArtifact = safeDocumentRequest ? findDocumentMutation(toolsUsed) : null;
-  const persistedAssistantContent = documentArtifactContent(safeDocumentRequest, documentArtifact, assistantContent);
+  const compactToolIdentityAnomalies = (Array.isArray(toolIdentityAnomalies) ? toolIdentityAnomalies : [])
+    .slice(0, MAX_TOOL_IDENTITY_ANOMALIES)
+    .map(compactToolIdentityAnomaly);
+  const identityDurabilityWarning = toolIdentityDurabilityWarning(compactToolIdentityAnomalies);
+  const baseAssistantContent = documentArtifactContent(safeDocumentRequest, documentArtifact, assistantContent);
+  const persistedAssistantContent = identityDurabilityWarning
+    ? [baseAssistantContent, identityDurabilityWarning].filter(Boolean).join('\n\n')
+    : baseAssistantContent;
   // From here on, tool data is headed to durable/observational stores. The raw
   // document body stays only inside the provider's current tool loop.
   toolsUsed = toolsUsed.map(t => ({
@@ -273,14 +330,18 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   // tool whose chip IS the visible reply, mark the assistant entry as
   // hidden so renderSession skips it on reload. The chip's own session
   // entry (status role) remains visible.
-  const assistantEntry = toolsSummary
-    ? {
-        role: 'assistant', content: persistedAssistantContent, ts: Date.now(),
-        toolsUsed: toolsSummary,
-        ...(toolResults && toolResults.length ? { toolResults } : {}),
-        ...(compactToolEvents && compactToolEvents.length ? { toolEvents: compactToolEvents } : {}),
-      }
-    : { role: 'assistant', content: persistedAssistantContent, ts: Date.now() };
+  const assistantEntry = {
+    role: 'assistant', content: persistedAssistantContent, ts: Date.now(),
+    ...(toolsSummary ? { toolsUsed: toolsSummary } : {}),
+    ...(toolResults && toolResults.length ? { toolResults } : {}),
+    ...((toolsSummary || compactToolIdentityAnomalies.length)
+        && compactToolEvents && compactToolEvents.length
+      ? { toolEvents: compactToolEvents }
+      : {}),
+    ...(compactToolIdentityAnomalies.length
+      ? { toolIdentityAnomalies: compactToolIdentityAnomalies }
+      : {}),
+  };
   if (hideTurn) assistantEntry.hidden = true;
   if (hideTaskId) assistantEntry.hideTaskId = hideTaskId;
   if (safeDocumentRequest?.requestId) assistantEntry.documentRequestId = safeDocumentRequest.requestId;
@@ -500,7 +561,7 @@ async function persist(agent, sessionText, assistantContent, userId, emit, skipS
   // statements. Running the signals head on the user message would routinely
   // misclassify "i need to drink water in 5 minutes" or "send X to telegram"
   // as a durable fact/preference. Episodes still write above for context recall.
-  if (toolsUsed.length) return;
+  if (toolsUsed.length || compactToolIdentityAnomalies.length) return;
   const runSignals = withSignalWordsGate
     ? (!skipEpisodes || SIGNAL_WORDS_RE.test(sessionText))
     : true;
@@ -616,6 +677,7 @@ export async function* consumeProvider(providerGen, {
   let hideTaskId = null;
   const toolsUsed = [];
   const toolEvents = [];
+  const toolIdentityAnomalies = [];
   const modelCalls = [];
   const turnImages = [];
   // One synthetic web_search record per turn when the provider's hosted search
@@ -636,6 +698,20 @@ export async function* consumeProvider(providerGen, {
     : 0;
   let _providerCallCount = 0;
   let _providerCallOrdinal = null;
+  const quarantineToolResultIdentity = (event, reason, providerToolCallId = null) => {
+    const suppliedIdentity = event?.toolCallId;
+    toolIdentityAnomalies.push(compactToolIdentityAnomaly({
+      name: event?.name,
+      reason,
+      ...(providerToolCallId ? { toolCallId: providerToolCallId } : {}),
+      identityType: typeof suppliedIdentity,
+      ...(typeof suppliedIdentity === 'string' ? { identityLength: suppliedIdentity.length } : {}),
+      providerNative: event?.providerNative === true || event?.native === true,
+      delegated: event?.delegated === true,
+      resultPreview: compactDocumentToolResult(event?.name, event?.text ?? ''),
+      observedAt: Date.now(),
+    }));
+  };
   // Capture the provider's end-of-turn token usage for the turn trace. The
   // event is still yielded onward (llm-loop records it for billing); we just
   // also stash it so streamChat can attach it to its span without re-plumbing
@@ -644,9 +720,17 @@ export async function* consumeProvider(providerGen, {
   let usage = null;
   try {
   for await (const event of providerGen) {
-    const providerToolCallId = event?.toolCallId == null
-      ? null
-      : canonicalProviderToolCallId(event.toolCallId);
+    let providerToolCallId = null;
+    if (event?.toolCallId != null) {
+      try {
+        providerToolCallId = canonicalProviderToolCallId(event.toolCallId);
+      } catch (error) {
+        if (event?.type === 'tool_result') {
+          quarantineToolResultIdentity(event, 'invalid_result_identity');
+        }
+        throw error;
+      }
+    }
     if (event.type === '__content') { assistantContent = event.content; continue; }
     if (event.type === '__model_call') {
       _providerCallCount += 1;
@@ -795,6 +879,12 @@ export async function* consumeProvider(providerGen, {
         ? pendingForName.findIndex(item => item.toolCallId === providerToolCallId)
         : -1;
       if (providerToolCallId && exactMatchIndex < 0) {
+        const priorName = _providerToolCallsById.get(providerToolCallId);
+        quarantineToolResultIdentity(
+          event,
+          priorName === event.name ? 'duplicate_result_identity' : 'unknown_result_identity',
+          providerToolCallId,
+        );
         throw new Error(`tool result carried an unknown or duplicate call identity for ${event.name}`);
       }
       const matchedIndex = providerToolCallId
@@ -871,8 +961,8 @@ export async function* consumeProvider(providerGen, {
     }
   }
   return errored
-    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
-    : { assistantContent, errored: false, toolsUsed, toolEvents, modelCalls, hideTurn, hideTaskId, usage, turnImages };
+    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
+    : { assistantContent, errored: false, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages };
 }
 
 const MISSING_TOOL_REPLY_RE = /\b(?:i\s+(?:can(?:not|'t)|do\s+not|don't)\s+(?:have|see|access|use)|i\s+(?:can(?:not|'t))\s+(?:do|access|read|open|control|check)|no\s+(?:tool|access|browser|permission)|(?:not|isn't)\s+available\s+to\s+me|i\s+don'?t\s+have\s+access)\b/i;
@@ -2345,7 +2435,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // replaced with the corrected reply. `canRecover` only gates whether the
   // recovery passes run — it no longer suppresses streaming.
   const canRecover = Boolean(_routerStore);
-  let { assistantContent, errored, toolsUsed, toolEvents, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* bindToolRouterContext(
+  let { assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* bindToolRouterContext(
     consumeProvider(providerGen, { suppressText: false }),
     _routerStore,
   );
@@ -2393,14 +2483,19 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         {
           const _priorUsage = usage;
           const _priorModelCalls = modelCalls;
+          const _priorToolIdentityAnomalies = toolIdentityAnomalies;
           const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
             suppressText: false,
             providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
           }), _routerStore);
-          ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r);
+          ({ assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
           usage = mergeProviderUsage(_priorUsage, _r.usage);
           modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
           turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
+          toolIdentityAnomalies = [
+            ...(_priorToolIdentityAnomalies || []),
+            ...(toolIdentityAnomalies || []),
+          ];
         }
       }
     }
@@ -2439,18 +2534,26 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
       // Preserve the first attempt's tool events/uses so persist() records them
       // (the destructure would otherwise replace them with the recovery run's).
-      const _priorToolsUsed = toolsUsed, _priorToolEvents = toolEvents, _priorUsage = usage, _priorModelCalls = modelCalls;
+      const _priorToolsUsed = toolsUsed;
+      const _priorToolEvents = toolEvents;
+      const _priorToolIdentityAnomalies = toolIdentityAnomalies;
+      const _priorUsage = usage;
+      const _priorModelCalls = modelCalls;
       {
         const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
           suppressText: false,
           providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
         }), _routerStore);
-        ({ assistantContent, errored, toolsUsed, toolEvents, hideTurn, hideTaskId } = _r);
+        ({ assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
         usage = mergeProviderUsage(_priorUsage, _r.usage);
         modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
         turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
         toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])];
         toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])];
+        toolIdentityAnomalies = [
+          ...(_priorToolIdentityAnomalies || []),
+          ...(toolIdentityAnomalies || []),
+        ];
       }
       recoveredProgressClaim = true;
     } catch (e) {
@@ -2652,6 +2755,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         durationMs: t.durationMs ?? null,
         preview: redactTextForTrace(compactDocumentToolPreview(t.name, t.preview ?? t.progressPreview)).slice(0, 500),
       })),
+      identityAnomalies: (toolIdentityAnomalies || []).map(compactToolIdentityAnomaly),
     },
     meta: {
       silent,
@@ -2666,20 +2770,26 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   };
   if (errored) {
     log.error('chat', 'llm turn errored', _llmMeta);
-    const traceError = turnOpts?.documentRequest
+    const baseTraceError = turnOpts?.documentRequest
       ? (compactDocumentFallback(assistantContent) || 'Provider turn errored')
       : (assistantContent || 'Provider turn errored');
+    const identityDurabilityWarning = toolIdentityDurabilityWarning(toolIdentityAnomalies);
+    const traceError = identityDurabilityWarning
+      ? `${baseTraceError} ${identityDurabilityWarning}`
+      : baseTraceError;
     _emitTurnTrace(traceError);
     // A provider can fail after a tool already committed a side effect or
     // emitted media. Persist every completed tool result and collected image
     // even without final narration. The durable result tells a later retry
     // what already happened so it cannot blindly repeat the effect.
-    const hasDurableEffects = toolsUsed.length > 0 || (turnImages?.length ?? 0) > 0;
+    const hasDurableEffects = toolsUsed.length > 0
+      || (turnImages?.length ?? 0) > 0
+      || (toolIdentityAnomalies?.length ?? 0) > 0;
     let persistenceError = null;
     if (!silent && hasDurableEffects) {
       try {
         await persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
-          withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
+          withSignalWordsGate, toolsUsed, toolEvents, toolIdentityAnomalies, voiceCtx, hideTurn, hideTaskId,
           hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
           readOnlyTurn,
           suppressLearning,
@@ -2759,7 +2869,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // with a non-retryable storage error; the dispatcher then records failure.
     try {
       await persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
-        withSignalWordsGate, toolsUsed, toolEvents, voiceCtx, hideTurn, hideTaskId,
+        withSignalWordsGate, toolsUsed, toolEvents, toolIdentityAnomalies, voiceCtx, hideTurn, hideTaskId,
         hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
         readOnlyTurn,
         suppressLearning,
