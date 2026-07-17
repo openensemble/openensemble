@@ -547,6 +547,11 @@ function speakAnnouncement(ws, devicePrefs, entry) {
       bufferedAmount: () => ws.bufferedAmount ?? 0,
       cfg, refPath, voice: presetVoice, log,
       turnId: null,   // announcements belong to no turn; fw accepts untagged
+      // The turnless PCM stream carries no text; attach it to the first
+      // tts_audio_begin so the TV can render the announcement card (the ESP
+      // speakers ignore the extra field). Without this, pocket-tts announcements
+      // play audio but show no on-screen card.
+      beginText: entry.text,
     });
     // Own the slot while speaking so a wake/stop during the announcement
     // interacts with it exactly like a reply (new chat aborts it, etc.).

@@ -140,6 +140,20 @@ function classifyVoiceIntent(text, { ambientActive = false, conversationEnabled 
     return { type: 'stop' };
   }
 
+  // Explicit playback-target reference: a control phrase that names the TV (or
+  // "what I was watching") must reach the LLM so tv_media_control routes to
+  // THAT device. Fast-pathing below acts on the ORIGINATING device, so
+  // "pause the tv" / "mute the tv" / "resume what I was watching" spoken to a
+  // kitchen speaker would (wrongly) pause/mute/resume the speaker and never
+  // touch the TV. Bare control words with no named target still fast-path to
+  // the speaking device. (The loose barge/ambient "stop" above already returned
+  // — that safety path is intentionally not gated; and bare "stop the tv" never
+  // matched the anchored stop regex below, so it already falls through to the
+  // LLM.)
+  if (/\b(tv|telly|television)\b|\bwhat\s+i(?:\s+was|'?d\s+been|\s+am)?\s+watching\b/.test(t)) {
+    return null;
+  }
+
   // Absolute "volume N%" / "set volume to N" — match before the bare
   // up/down regex so "volume 50" doesn't get swallowed as "volume … up".
   const setM = t.match(/^(?:set\s+)?volume(?:\s+to)?\s+(\d{1,3})\s*%?$/);
