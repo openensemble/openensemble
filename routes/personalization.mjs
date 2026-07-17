@@ -61,7 +61,7 @@ const MEMORY_ID_RE = /^[a-zA-Z0-9_-]{3,120}$/;
 const OPAQUE_ID_RE = /^[a-zA-Z0-9_-]{3,160}$/;
 const PROFILE_TYPES = new Set(['pattern', 'fact', 'relationship', 'preference', 'constraint', 'goal', 'routine']);
 const PUBLIC_CONFIG_FIELDS = new Set([
-  'enabled', 'setupComplete', 'model', 'retentionDays', 'proactivity',
+  'enabled', 'setupComplete', 'model', 'retentionDays', 'engagement', 'proactivity',
   'initiativeMode', 'deliveryMode', 'timezone', 'quietHours', 'sources',
 ]);
 const SOURCE_FIELDS = new Set(['tools', 'calendar', 'sessions']);
@@ -298,6 +298,10 @@ function validatePublicConfigPatch(body) {
     && (!Number.isInteger(body.retentionDays) || body.retentionDays < 1 || body.retentionDays > 365)) {
     return 'retentionDays must be an integer from 1 to 365';
   }
+  if ('engagement' in body && !['quiet', 'helpful', 'proactive', 'companion'].includes(body.engagement)) {
+    return 'engagement must be quiet, helpful, or proactive';
+  }
+  // Legacy clients may still send proactivity; map is applied in saveConfig.
   if ('proactivity' in body && !['quiet', 'balanced', 'proactive'].includes(body.proactivity)) {
     return 'proactivity must be quiet, balanced, or proactive';
   }

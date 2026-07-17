@@ -473,11 +473,11 @@ function _pzSetupHtml(cfg, groups) {
     ${_pzModelSelectHtml(cfg, groups)}
     ${_pzProviderErrorHtml()}
     <div class="pz-hint">${escHtml(_pzModelHintText(cfg, groups))}</div>
-    <div class="settings-section-title pz-section-gap">How proactive</div>
-    <select id="pzSetupProactivity" class="pz-select" ${_pzMutation ? 'disabled' : ''} data-change-action="setPersonalizationProactivity" data-change-args='["$value"]'>
-      <option value="quiet" ${cfg.proactivity === 'quiet' ? 'selected' : ''}>Quiet — no proactive pings, fewer suggestions</option>
-      <option value="balanced" ${!cfg.proactivity || cfg.proactivity === 'balanced' ? 'selected' : ''}>Balanced — at most two pings a day</option>
-      <option value="proactive" ${cfg.proactivity === 'proactive' ? 'selected' : ''}>Proactive — up to four pings a day</option>
+    <div class="settings-section-title pz-section-gap">Engagement</div>
+    <select id="pzSetupEngagement" class="pz-select" ${_pzMutation ? 'disabled' : ''} data-change-action="setPersonalizationEngagement" data-change-args='["$value"]'>
+      <option value="quiet" ${_pzEngagement(cfg) === 'quiet' ? 'selected' : ''}>Quiet — learn for context only, no unsolicited offers</option>
+      <option value="helpful" ${_pzEngagement(cfg) === 'helpful' ? 'selected' : ''}>Helpful — careful assistant; ask before standing watches</option>
+      <option value="proactive" ${_pzEngagement(cfg) === 'proactive' ? 'selected' : ''}>Proactive — notice patterns, soft-confirm likes, engage when things change</option>
     </select>
     <div class="settings-section-title pz-section-gap">Safe initiative</div>
     <select id="pzSetupInitiative" class="pz-select" ${_pzMutation ? 'disabled' : ''}>
@@ -504,9 +504,12 @@ function _pzRenderPanelHtml() {
     <div style="font-size:11px;color:var(--muted);margin-bottom:14px">
       The coordinator quietly learns from your activity — tool results, calendar, and session
       history — then reflects every 6 hours to notice patterns, remember facts, and offer to help.
-      Ask-first suggestions appear in chat and run only after you approve them. If you enable
-      Safe initiative, only reviewed, private, informational, exactly reversible monitors may
-      start automatically; each one explains why it appeared and includes a receipt with Stop/Undo.
+      <b>Engagement</b> chooses the relationship style: Quiet (context only), Helpful (careful
+      assistant), or Proactive (notices repeated interest, soft-confirms preferences, and can
+      propose standing watches). Ask-first suggestions appear in chat and run only after you
+      approve them. If you enable Safe initiative, only reviewed, private, informational,
+      exactly reversible monitors may start automatically; each one explains why it appeared
+      and includes a receipt with Stop/Undo.
     </div>
 
     <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:16px">
@@ -538,10 +541,10 @@ function _pzRenderPanelHtml() {
 
     <div class="pz-settings-grid">
       <label><span>Keep activity summaries</span><select class="pz-select" ${disabled} data-change-action="setPersonalizationRetention" data-change-args='["$value"]'>${_pzRetentionHtml(cfg)}</select></label>
-      <label><span>Proactivity</span><select class="pz-select" ${disabled} data-change-action="setPersonalizationProactivity" data-change-args='["$value"]'>
-        <option value="quiet" ${cfg.proactivity === 'quiet' ? 'selected' : ''}>Quiet</option>
-        <option value="balanced" ${!cfg.proactivity || cfg.proactivity === 'balanced' ? 'selected' : ''}>Balanced</option>
-        <option value="proactive" ${cfg.proactivity === 'proactive' ? 'selected' : ''}>Proactive</option>
+      <label><span>Engagement</span><select class="pz-select" ${disabled} data-change-action="setPersonalizationEngagement" data-change-args='["$value"]'>
+        <option value="quiet" ${_pzEngagement(cfg) === 'quiet' ? 'selected' : ''}>Quiet</option>
+        <option value="helpful" ${_pzEngagement(cfg) === 'helpful' ? 'selected' : ''}>Helpful</option>
+        <option value="proactive" ${_pzEngagement(cfg) === 'proactive' ? 'selected' : ''}>Proactive</option>
       </select></label>
       <label><span>Safe initiative</span><select class="pz-select" ${disabled} data-change-action="setPersonalizationInitiative" data-change-args='["$value"]'>
         <option value="suggest" ${cfg.initiativeMode !== 'safe_auto' ? 'selected' : ''}>Suggest first</option>
@@ -552,7 +555,10 @@ function _pzRenderPanelHtml() {
         <option value="briefing" ${cfg.deliveryMode === 'briefing' ? 'selected' : ''}>Hold for briefing / activity</option>
       </select></label>
     </div>
-    <div class="pz-hint"><b>Safe initiative</b> may start only a reviewed, informational, exactly reversible private monitor, then shows why it appeared and creates a durable Stop/Undo receipt. <b>Ask-first</b> suggestions—including unreviewed or modified skills, purchases, messages, calendar changes, destructive operations, and anything without a verified undo path—wait for your approval in chat.</div>
+    <div class="pz-settings-hint">
+      <div><b>Engagement</b> — Quiet: context only. Helpful: careful assistant. Proactive: soft-confirm repeated interests and prefer standing watches once you confirm.</div>
+      <div><b>Safe initiative</b> — may start only a reviewed, informational, exactly reversible private monitor (with Stop/Undo). Everything else stays ask-first.</div>
+    </div>
 
     <div class="settings-section-title pz-section-heading">Quiet hours</div>
     <div class="pz-quiet-row">
@@ -680,10 +686,10 @@ async function completePersonalizationSetup() {
     showToast('Choose an available text model before turning on personalization');
     return;
   }
-  const proactivity = $('pzSetupProactivity')?.value || 'balanced';
+  const engagement = $('pzSetupEngagement')?.value || 'helpful';
   const initiativeMode = $('pzSetupInitiative')?.value || 'suggest';
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
-  const ok = await _pzPatchConfig({ setupComplete: true, enabled: true, model, proactivity, initiativeMode, timezone }, 'Setup failed');
+  const ok = await _pzPatchConfig({ setupComplete: true, enabled: true, model, engagement, initiativeMode, timezone }, 'Setup failed');
   if (ok) showToast('Personalization is ready');
 }
 
@@ -705,9 +711,29 @@ async function setPersonalizationRetention(value) {
   await _pzPatchConfig({ retentionDays }, 'Failed to update retention');
 }
 
+function _pzEngagement(cfg) {
+  if (cfg?.engagement === 'quiet' || cfg?.engagement === 'helpful' || cfg?.engagement === 'proactive') {
+    return cfg.engagement;
+  }
+  if (cfg?.engagement === 'companion') return 'proactive';
+  if (cfg?.proactivity === 'quiet') return 'quiet';
+  // Old volume-only "proactive" was not friend-mode; map to Helpful.
+  if (cfg?.proactivity === 'proactive') return 'helpful';
+  return 'helpful';
+}
+
+async function setPersonalizationEngagement(engagement) {
+  if (engagement === 'companion') engagement = 'proactive';
+  if (!['quiet', 'helpful', 'proactive'].includes(engagement)) return;
+  await _pzPatchConfig({ engagement }, 'Failed to update engagement');
+}
+
+/** @deprecated legacy name kept for any stale UI bindings */
 async function setPersonalizationProactivity(proactivity) {
-  if (!['quiet', 'balanced', 'proactive'].includes(proactivity)) return;
-  await _pzPatchConfig({ proactivity }, 'Failed to update proactivity');
+  const map = { quiet: 'quiet', balanced: 'helpful', proactive: 'helpful' };
+  const engagement = map[proactivity];
+  if (!engagement) return;
+  await setPersonalizationEngagement(engagement);
 }
 
 async function setPersonalizationInitiative(initiativeMode) {

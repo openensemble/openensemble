@@ -838,7 +838,16 @@
 .tutor-prefs-row select, .tutor-prefs-row input[type="time"] { background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
 
 /* ── Personalization ────────────────────────────────────────────────────── */
-.pz-hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; min-height: 14px; }
+.pz-hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; min-height: 14px; overflow-wrap: anywhere; }
+.pz-settings-hint {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 11px; color: var(--muted); line-height: 1.45;
+  margin: 12px 0 0; padding: 10px 11px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+  overflow-wrap: anywhere; position: relative; z-index: 0;
+}
+.pz-settings-hint + .pz-section-heading,
+.pz-settings-hint + .settings-section-title { clear: both; position: relative; z-index: 0; }
 .pz-notice { font-size: 11px; color: #f0b84d; background: rgba(249,199,79,.12); border: 1px solid rgba(249,199,79,.3);
   border-radius: 6px; padding: 6px 9px; margin-top: 6px; line-height: 1.4; }
 .pz-health { margin-top: 12px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 8px;
@@ -885,8 +894,11 @@
 .pz-control-row span { display: flex; flex-direction: column; gap: 2px; }
 .pz-control-row small { color: var(--muted); font-size: 10px; line-height: 1.35; }
 .pz-control-row input { accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 auto; }
-.pz-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-top: 12px; }
-.pz-settings-grid label { color: var(--muted); font-size: 10px; display: flex; flex-direction: column; gap: 4px; }
+/* 2×2 so Delivery is not a lonely third-row cell under a 3-col grid (that
+ * layout made the following Quiet hours block appear to collide with the
+ * engagement/safe-initiative controls and their help text). */
+.pz-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px 12px; margin-top: 12px; margin-bottom: 0; }
+.pz-settings-grid label { color: var(--muted); font-size: 10px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .pz-quiet-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
 .pz-quiet-row input { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 6px; }
 .pz-row-detail { color: var(--muted); font-size: 11px; line-height: 1.4; margin-top: 3px; overflow-wrap: anywhere; }

@@ -6,7 +6,7 @@ OpenEnsemble can quietly learn from how you use it — the questions you ask, wh
 
 Consequential actions start ask-first. Learning happens passively in the background; purchases, messages, calendar changes, destructive operations, external delivery, and anything without an exact undo path always appear as a suggestion first. If you enable **Safe initiative**, a reviewed skill may start a private informational watcher automatically—but only through a validated, exactly stoppable contract, with a durable receipt and **Undo / Stop updates** controls. Unreviewed or modified skill code falls back to a suggestion even when its manifest labels itself informational.
 
-Set it up in **Settings → Personalization** (sources, privacy, model, proactivity, and reset controls). Review what it has actually learned in the **Learn** drawer, under **About you**.
+Set it up in **Settings → Personalization** (sources, privacy, model, engagement style, and reset controls). Review what it has actually learned in the **Learn** drawer, under **About you**.
 
 ## First-time setup
 
@@ -14,7 +14,7 @@ The first time you open Personalization, OpenEnsemble asks you to acknowledge wh
 
 - which sources may contribute: tool activity, calendar patterns, and conversation summaries;
 - which local or cloud model performs reflection; and
-- how proactive it should be.
+- engagement style: Quiet, Helpful, or Proactive.
 
 Choose **Not now** to complete the acknowledgement with Personalization off. Nothing is locked in: every choice remains available in **Settings → Personalization**.
 
@@ -128,13 +128,15 @@ that again,” to stop it and mute that exact behavior. The underlying preferenc
 is kept—for example, stopping Publix alerts does not make OpenEnsemble forget
 that you like Honeycrisp apples.
 
-## Proactivity, delivery, and quiet hours
+## Engagement, delivery, and quiet hours
 
-Settings provides three presets:
+Settings provides three **engagement** styles. This is a relationship posture, not only a volume knob:
 
-- **Quiet** — at most one offer per reflection and no unsolicited pings; durable updates stay in **Proactive activity**, and lead results can also wait for a briefing.
-- **Balanced** — the default: up to two offers per reflection and two unsolicited pings per day.
-- **Proactive** — up to four offers and four pings per day.
+- **Quiet** — learn for context only. No unsolicited preference-monitor discovery or soft-confirm cards; durable updates stay in **Proactive activity**, and lead results can wait for a briefing.
+- **Helpful** — the default careful assistant: up to two offers per reflection and two unsolicited pings per day. One-off lookups stay weak interest; monitors still need a confirmed preference and an ask (or Safe initiative).
+- **Proactive** — friend-like noticing: after repeated interactive interest on the same skill topic (for example two Publix chicken lookups), OE may soft-confirm “Remember that you like chicken?” and, once you accept, skill-scoped preferences can open standing watches even when the skill author never listed that exact subject keyword. Higher default offer/ping budget (four each).
+
+Older installs that used volume-only **Balanced** / **Proactive** map to **Helpful** (the old higher volume is kept). A brief intermediate **Companion** value migrates to **Proactive**. The friendlier Proactive engagement mode is never applied automatically — choose it explicitly.
 
 The independent **Safe initiative** control determines whether the system may
 do a narrowly safe action or must suggest it first:
@@ -144,14 +146,15 @@ do a narrowly safe action or must suggest it first:
   reversible skill monitors may start automatically. Everything consequential remains
   ask-first.
 
-In **Balanced** or **Proactive**, an installed skill may declare that it can use
+In **Helpful** or **Proactive**, an installed skill may declare that it can use
 a matching **confirmed** preference for an ongoing service (for example,
 watching a store's deals for foods you like). Personalization can suggest
 turning that service on, or—when both the user and skill opt into the restricted
 Safe initiative contract—start it with a reversible receipt. The skill receives
 only bounded positive confirmed preferences matching its own declaration;
-contradicted and negative rows are excluded. **Quiet** suppresses both activation
-suggestions and safe automatic starts.
+contradicted and negative rows are excluded. **Proactive** can also soft-confirm
+repeated interests and match skill-scoped confirmed subjects beyond static
+keywords. **Quiet** suppresses both activation suggestions and safe automatic starts.
 
 Choose whether unsolicited websocket updates arrive immediately or are held. Held lead results fold into the next scheduled briefing; automatic-action receipts remain visible in **Proactive activity** for review. If no briefing is scheduled, durable items do not disappear. Quiet hours and daily limits use the timezone captured during setup; lead results and automatic-action receipts wait rather than interrupting during that window. Every immediate receipt shares the same daily ping budget as lead updates. Upgraded installs and travelers can choose **Use this browser’s timezone** beside the quiet-hours controls at any time.
 

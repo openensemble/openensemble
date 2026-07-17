@@ -334,7 +334,7 @@ ask-first. A skill's label is a safety promise, not a way to bypass consent.
 
 The runtime revalidates the live manifest, confirmed preference match, master
 Personalization switch, skill availability, exact tool/args, and absence of an
-active matching watcher at activation time. Quiet proactivity emits no new
+active matching watcher at activation time. Quiet engagement emits no new
 activation cards or safe-auto starts. Ask-first cards do not graduate to
 unattended watcher activation; the separate Safe initiative setting and
 `informational` contract are the only first-activation path.

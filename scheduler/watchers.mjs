@@ -1653,7 +1653,10 @@ async function managedPreferenceDeliveryAllowed(record, { immediate = false } = 
       import('../lib/personalization/graduation.mjs'),
     ]);
     const cfg = await configModule.getConfig(record.userId);
-    if (cfg.enabled !== true || cfg.setupComplete !== true || cfg.proactivity === 'quiet') return false;
+    if (cfg.enabled !== true || cfg.setupComplete !== true
+      || (typeof configModule.isQuietEngagement === 'function'
+        ? configModule.isQuietEngagement(cfg)
+        : cfg.proactivity === 'quiet' || cfg.engagement === 'quiet')) return false;
     if (await policy.isKindSuppressed(record.userId, record.personalizationOrigin.offerKind)) return false;
     if (isSafeInformationalWatcher(record)
       && (cfg.initiativeMode !== 'safe_auto'
