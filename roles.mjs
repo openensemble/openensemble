@@ -590,16 +590,38 @@ function migrateLegacyUserSkills() {
  * Tools a remembered "selected" tool plan may never drop, as declared by skill
  * manifests (`"selected_plan_keep": ["save_research", ...]`). Lets a skill
  * protect its role-critical tools from stale recipes without a chat.mjs edit.
- * Union across ALL loaded manifests is safe: the plan filter only KEEPS tools
- * the agent already holds, so a declaration from a skill an agent lacks (or
- * another user's custom skill) is a no-op for that agent.
+ *
+ * When `selectedToolNames` is supplied, only declarations from manifests that
+ * own at least one selected tool are returned. That distinction matters for a
+ * singleton coordinator: it holds every user's tools, so a global union would
+ * preserve unrelated actions on every remembered plan. Traditional scoped
+ * agents retain the legacy all-manifest union by omitting the first argument.
  */
-export function getSelectedPlanKeepTools() {
+export function getSelectedPlanKeepTools(selectedToolNames = null, userId = null) {
+  const selected = selectedToolNames == null
+    ? null
+    : new Set(Array.from(selectedToolNames).filter(t => typeof t === 'string' && t));
+  const visible = [..._manifests.values()]
+    .filter(wrap => !userId || wrap?.userId === null || wrap?.userId === userId);
+  // Execution and schema assembly resolve duplicate names by registry order.
+  // Mirror that first-owner rule so a later custom manifest cannot expand the
+  // retained terminal surface merely by repeating a selected tool name.
+  const eligible = selected
+    ? [...selected].map(name => visible.find(wrap =>
+        (Array.isArray(wrap?.manifest?.tools) ? wrap.manifest.tools : [])
+          .some(tool => (tool?.function?.name ?? tool?.name) === name)))
+        .filter(Boolean)
+    : visible;
   const keep = new Set();
-  for (const wrap of _manifests.values()) {
-    const arr = wrap?.manifest?.selected_plan_keep;
+  for (const wrap of new Set(eligible)) {
+    const manifest = wrap?.manifest;
+    const manifestToolNames = new Set((Array.isArray(manifest?.tools) ? manifest.tools : [])
+      .map(tool => tool?.function?.name ?? tool?.name).filter(Boolean));
+    const arr = manifest?.selected_plan_keep;
     if (Array.isArray(arr)) {
-      for (const t of arr) if (typeof t === 'string' && t) keep.add(t);
+      for (const t of arr) {
+        if (typeof t === 'string' && t && manifestToolNames.has(t)) keep.add(t);
+      }
     }
   }
   return keep;

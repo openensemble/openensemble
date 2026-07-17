@@ -842,7 +842,7 @@ function recomposeAgentPromptForTools(agent) {
   }
 }
 
-export function applyUserToolPlan(agent, plan) {
+export function applyUserToolPlan(agent, plan, userId = null) {
   const clean = sanitizeToolPlanForStream(plan);
   if (!clean || !Array.isArray(agent.tools)) return null;
   const before = agent.tools.length;
@@ -859,7 +859,12 @@ export function applyUserToolPlan(agent, plan) {
   const effectiveSelected = clean.selectedTools.filter(name => availableNames.has(name));
   const selected = new Set(effectiveSelected);
   const controlTools = new Set(SELECTED_PLAN_CONTROL_TOOLS);
-  try { for (const t of getSelectedPlanKeepTools()) controlTools.add(t); } catch { /* registry not loaded yet — base set still applies */ }
+  try {
+    const manifestKeeps = agent._rosterSolo === true
+      ? getSelectedPlanKeepTools(selected, userId)
+      : getSelectedPlanKeepTools(null, userId);
+    for (const t of manifestKeeps) controlTools.add(t);
+  } catch { /* registry not loaded yet — base set still applies */ }
   if ((agent.skillCategory === 'coordinator' || selected.size === 0)
       && agent._rosterSolo !== true) controlTools.add('ask_agent');
   agent.tools = agent.tools.filter(t => {
@@ -1090,7 +1095,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       log.info('chat', 'stripped autonomous/control-plane tools on isolated run', { agentId: agent.id, removed: before - agent.tools.length });
     }
   }
-  const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan);
+  const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan, userId);
   if (userToolPlanResult) {
     recomposeAgentPromptForTools(agent);
     // Populate the router store for ANY agent that still carries request_tools
