@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { sendTelegramApiMessage } from './telegram.mjs';
+import { claimTelegramUpdate } from '../lib/telegram-update-ledger.mjs';
+import { deliverTelegramChatResponse, sendTelegramApiMessage } from './telegram.mjs';
+
+function unique(prefix) {
+  return `${prefix}_${process.pid}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -33,5 +38,50 @@ describe('Telegram outbound delivery', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } })));
     await expect(sendTelegramApiMessage('bot-token', 'chat-1', 'hello'))
       .rejects.toThrow('without a message id');
+  });
+
+  it('awaits rejected terminal sends and leaves a durable fail-closed tombstone', async () => {
+    const userId = unique('telegram_terminal_reject');
+    const updateId = Math.floor(Date.now() / 10) + Math.floor(Math.random() * 1_000);
+    expect(await claimTelegramUpdate(userId, updateId)).toBe(true);
+    const dispatch = async ({ onEvent }) => {
+      onEvent({ type: 'token', text: 'answer' });
+      onEvent({ type: 'done' });
+    };
+    const rejectedSend = vi.fn(async () => { throw new Error('provider rejected terminal'); });
+    const unhandled = [];
+    const onUnhandled = reason => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(deliverTelegramChatResponse({
+        userId,
+        updateId,
+        botToken: 'bot-token',
+        chatId: 'chat-1',
+        agentId: 'jarvis',
+        text: 'hello',
+        dispatch,
+        sendApi: rejectedSend,
+      })).rejects.toThrow('provider rejected terminal');
+      await new Promise(resolve => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+      expect(rejectedSend).toHaveBeenCalledOnce();
+      expect(await claimTelegramUpdate(userId, updateId)).toBe(false);
+
+      const retrySend = vi.fn(async () => [501]);
+      await expect(deliverTelegramChatResponse({
+        userId,
+        updateId,
+        botToken: 'bot-token',
+        chatId: 'chat-1',
+        agentId: 'jarvis',
+        text: 'hello',
+        dispatch,
+        sendApi: retrySend,
+      })).rejects.toThrow('prior Telegram dispatch may already have crossed');
+      expect(retrySend).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });
