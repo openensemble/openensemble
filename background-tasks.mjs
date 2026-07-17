@@ -17,6 +17,11 @@ import { learnToolPlanFromToolEvents, matchToolPlan } from './lib/tool-plan-memo
 import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-child-barrier.mjs';
 import { appendTaskOutcome, loadTaskOutcomes } from './lib/task-outcomes.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
+import { looksLikeToolError, looksLikeToolRefusal } from './lib/tool-error.mjs';
+import {
+  evaluateCompoundWorkflowContract,
+  formatCompoundContractFailure,
+} from './lib/compound-workflow-contract.mjs';
 import { getOrchestrationPolicy } from './lib/orchestration-policy.mjs';
 import { withFileLockSync } from './lib/file-lock.mjs';
 import { assertActiveLabVerifierLeaseToken } from './lib/lab-verifier-lease.mjs';
@@ -719,21 +724,55 @@ function pushTaskProgress(taskId, text, extra = {}) {
   return pushed;
 }
 
+function nextToolEventSeq(events) {
+  const next = (Number(events?._rawEventSeq) || 0) + 1;
+  try {
+    Object.defineProperty(events, '_rawEventSeq', {
+      value: next, writable: true, configurable: true, enumerable: false,
+    });
+  } catch { /* evidence rows still carry their own sequence */ }
+  return next;
+}
+
+function eventToolCallId(ev) {
+  const value = ev?.toolCallId ?? ev?.tool_call_id ?? ev?.callId ?? ev?.call_id;
+  return value == null ? null : String(value).trim() || null;
+}
+
+// The generic slow-tool handoff returns progress, not proof that the requested
+// operation completed. Keep it out of the completion-success ledger.
+function looksLikePendingBackgroundResult(text) {
+  return /\b(?:is|still)\s+running in the background\b[\s\S]{0,600}\btask\s+(?:wkr_\d+_[a-z0-9]+|[0-9a-f]{8}-[0-9a-f-]{27,})\b/i
+    .test(String(text || ''));
+}
+
 function trackToolEvent(events, ev, agentId = null) {
   if (!Array.isArray(events) || !ev?.name) return;
+  const seq = nextToolEventSeq(events);
+  const toolCallId = eventToolCallId(ev);
   if (ev.type === 'tool_call') {
     events.push({
       name: ev.name,
+      ...(toolCallId ? { toolCallId } : {}),
       args: ev.args || null,
       startedAt: Date.now(),
       status: 'running',
+      callObserved: true,
+      callSeq: seq,
+      ...((ev.providerNative === true || ev.native === true) ? { native: true } : {}),
       agentId: ev.agentId || agentId || null,
     });
     return;
   }
-  const rec = [...events].reverse().find(e => e.name === ev.name && e.status !== 'done');
+  // Exact provider identity wins. Legacy providers pair same-name calls FIFO;
+  // LIFO can attach parallel results to the wrong invocation.
+  const candidates = events.filter(e => e.name === ev.name && e.status === 'running');
+  const rec = toolCallId
+    ? candidates.find(e => e.toolCallId === toolCallId)
+    : candidates[0];
   if (ev.type === 'tool_progress' && rec) {
     rec.progressPreview = String(ev.text || '').slice(-1000);
+    rec.updatedSeq = seq;
     return;
   }
   // Provider-hosted web search never emits a local tool_call — only a transient
@@ -748,19 +787,38 @@ function trackToolEvent(events, ev, agentId = null) {
       events.push({
         name: 'web_search', args: null, startedAt: Date.now(), endedAt: Date.now(),
         durationMs: 0, status: 'done', native: true, agentId: aid,
+        callObserved: true, resultObserved: true,
+        callSeq: seq, resultSeq: seq, syntheticHosted: true,
+        completionEvidence: 'provider-progress',
         preview: 'provider-hosted web search',
       });
     }
     return;
   }
   if (ev.type === 'tool_result') {
-    const target = rec || { name: ev.name, args: null, startedAt: Date.now(), status: 'running' };
+    const now = Date.now();
+    const text = String(ev.text || '');
+    const target = rec || {
+      name: ev.name, args: null, startedAt: now, status: 'running',
+      callObserved: false,
+      callSeq: null,
+      ...(toolCallId ? { toolCallId } : {}),
+      ...((ev.providerNative === true || ev.native === true) ? { native: true } : {}),
+      agentId: ev.agentId || agentId || null,
+    };
     if (!rec) events.push(target);
-    target.endedAt = Date.now();
+    target.endedAt = now;
     target.durationMs = target.endedAt - target.startedAt;
-    target.status = 'done';
-    target.preview = ev.preview || String(ev.text || '').split('\n').find(l => l.trim()) || '';
-    target.text = String(ev.text || '').slice(0, 10000);
+    target.resultObserved = true;
+    target.resultSeq = seq;
+    const errored = ev.isError === true || ev.status === 'error'
+      || looksLikeToolError(text) || looksLikeToolRefusal(text);
+    target.status = errored
+      ? 'error'
+      : (looksLikePendingBackgroundResult(text) ? 'pending' : 'done');
+    target.preview = ev.preview || text.split('\n').find(l => l.trim()) || '';
+    target.text = text.slice(0, 10000);
+    if (ev.providerNative === true || ev.native === true) target.native = true;
   }
 }
 
@@ -2399,7 +2457,8 @@ export function recordWorkerProgress(taskId, note) {
  * Hire a background worker owned by a specific agent.
  * @param {object} a
  * @param {object} a.workerAgent  - ephemeral agent (clone of the owner's role)
- * @param {string} a.task         - self-contained job for the worker
+ * @param {string} a.task         - original user-visible job identity
+ * @param {string} [a.executionTask] - optional execution-only model prompt
  * @param {string} a.userId
  * @param {string} a.chipOwnerId  - scoped session id of the owner's chat (chip + report target)
  * @param {string} a.ownerKey     - stable agent id of the owner (for check_workers lookup)
@@ -2408,7 +2467,7 @@ export function recordWorkerProgress(taskId, note) {
  * @returns {string} taskId
  */
 export function spawnWorker({
-  workerAgent, task, userId, chipOwnerId, ownerKey,
+  workerAgent, task, executionTask = null, userId, chipOwnerId, ownerKey,
   workerName = 'Worker', emoji = '🤖',
   originalTask: requestedOriginalTask = null,
   rootTaskId: requestedRootTaskId = null,
@@ -2416,9 +2475,14 @@ export function spawnWorker({
   sourceAttemptId = null,
   sourceSessionKey = null,
   sourceSessionEpoch = null,
+  completionContract = null,
 }) {
   const taskId = `wkr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const summary = (task || '').slice(0, 120);
+  const originalTask = String(requestedOriginalTask || task || '');
+  const modelTask = typeof executionTask === 'string' && executionTask.trim()
+    ? executionTask
+    : originalTask;
+  const summary = originalTask.slice(0, 120);
   const ac = new AbortController();
   // Scheduled-task barrier linkage — read the SAME AsyncLocalStorage signal
   // dispatchBackground uses (getScheduledContext()). spawn_worker is invoked
@@ -2450,7 +2514,7 @@ export function spawnWorker({
     // knows which chat to notify when this worker dies with the process.
     visibleAgentId: chipOwnerId,
     coordinatorAgentId: chipOwnerId,
-    originalTask: requestedOriginalTask || task,
+    originalTask,
     autoContinue: true,
     rootTaskId,
     sourceMessageId,
@@ -2527,6 +2591,9 @@ export function spawnWorker({
   }
 
   (async () => {
+    let fullText = '';
+    const toolEvents = [];
+    const reportImages = [];
     const { isUserTimeBlocked } = await import('./routes/_helpers.mjs');
     if (isUserTimeBlocked(userId)) {
       await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, null, 'Access is restricted at this time — worker not started.');
@@ -2536,11 +2603,22 @@ export function spawnWorker({
       const { streamChat } = await import('./chat.mjs');
       const { getScheduledNote } = await import('./lib/scheduled-context.mjs');
       const scheduledNote = getScheduledNote();
-      let fullText = '';
-      const toolEvents = [];
-      const reportImages = [];
-      const rememberedPlan = matchToolPlan(userId, { agentId: workerAgent.id, phrase: task });
-      const taskCtx = { taskId, watcherId, userId, agentId: workerAgent.id };
+      // Admission already selected every required capability for a contract
+      // worker. A remembered plan could silently remove one of them.
+      const rememberedPlan = completionContract
+        ? null
+        : matchToolPlan(userId, { agentId: workerAgent.id, phrase: originalTask });
+      const workerRec = activeTasks.get(taskId);
+      const taskCtx = {
+        taskId,
+        watcherId,
+        userId,
+        agentId: workerAgent.id,
+        rootTaskId: workerRec?.rootTaskId || taskId,
+        rootWatcherId: workerRec?.rootWatcherId || watcherId,
+        visibleAgentId: workerRec?.visibleAgentId || chipOwnerId,
+        spanId: workerRec?.spanId || `${workerRec?.rootTaskId || taskId}:worker:${taskId}`,
+      };
       pushTaskProgress(taskId, `${workerName} started working`, { phase: 'running' });
       await runWithTurnContext({
         signal: ac.signal,
@@ -2554,8 +2632,9 @@ export function spawnWorker({
         verifierLeaseToken,
       }, () => toolRouterContext.run(null, () => runInTaskContext(taskCtx, async () => {
         const rec = activeTasks.get(taskId);
-        for await (const ev of iterateUntilAbort(streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, {
+        for await (const ev of iterateUntilAbort(streamChat(workerAgent, modelTask, ac.signal, null, userId, null, scheduledNote, false, null, {
           toolPlan: rememberedPlan,
+          routeText: originalTask,
           isolatedTaskRun: true,
           workerMemoryAgentId: ownerKey,
           ...backgroundRunTraceOptions(rec, scheduledNote ? 'scheduled' : 'background'),
@@ -2597,12 +2676,41 @@ export function spawnWorker({
           if (ev.type === 'error') throw new Error(ev.message);
         }
       })));
-      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`, null, null, toolEvents, workerAgent.id, task, { images: reportImages });
+      if (completionContract) {
+        let audit;
+        try {
+          audit = evaluateCompoundWorkflowContract(completionContract, toolEvents);
+        } catch (error) {
+          audit = {
+            ok: false,
+            code: 'completion_contract_unverifiable',
+            completed: [], missing: [], failed: [], pending: [], running: [],
+            outOfOrder: [], overInvoked: [],
+            unverifiable: [{ reason: error?.message || String(error) }],
+            stepCount: Array.isArray(completionContract?.steps) ? completionContract.steps.length : 0,
+          };
+        }
+        if (!audit?.ok) {
+          let message;
+          try { message = formatCompoundContractFailure(audit); }
+          catch {
+            message = 'Background workflow incomplete: required completion evidence could not be verified. No missing or failed step was retried automatically.';
+          }
+          await _onComplete(
+            taskId, userId, chipOwnerId, workerName, emoji,
+            fullText.trim() || null, message, 'error', toolEvents,
+            workerAgent.id, originalTask, { images: reportImages },
+          );
+          return;
+        }
+      }
+      await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, fullText.trim() || `${workerName} finished the job.`, null, null, toolEvents, workerAgent.id, originalTask, { images: reportImages });
     } catch (err) {
       const stopped = ac.signal.aborted;
       await _onComplete(taskId, userId, chipOwnerId, workerName, emoji, null,
         stopped ? 'Worker stopped by its manager.' : err.message,
-        stopped ? 'cancelled' : 'error');
+        stopped ? 'cancelled' : 'error', toolEvents, workerAgent.id, originalTask,
+        { images: reportImages });
     }
   })();
 

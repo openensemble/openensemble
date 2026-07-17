@@ -194,6 +194,53 @@ export function saveImageGenerationResult(userId, item) {
   return { base64, mimeType: image.mimeType, filename, savedPath };
 }
 
+// A hosted tool can finish in the same provider response as an OE function
+// call. Discover attachment consumers from their schema so a newly-created
+// artifact is never silently omitted from a dependent delivery call.
+function attachmentArgumentNames(agent, toolName) {
+  const definition = agent.tools?.find(tool => (tool.function?.name ?? tool.name) === toolName);
+  const parameters = definition?.function?.parameters ?? definition?.parameters;
+  const properties = parameters?.properties;
+  if (!properties || typeof properties !== 'object') return [];
+  return Object.keys(properties).filter(name => {
+    const normalized = name.replace(/[^a-z0-9]+/gi, '_').toLowerCase();
+    return normalized === 'attachments'
+      || normalized === 'attachment'
+      || normalized.startsWith('attachment_')
+      || normalized.endsWith('_attachments');
+  });
+}
+
+function attachmentArgsReferenceAnyArtifact(args, argumentNames, artifactIds) {
+  if (!argumentNames.length || !artifactIds.length || !args || typeof args !== 'object') return false;
+  const attachmentValues = argumentNames
+    .filter(name => Object.prototype.hasOwnProperty.call(args, name))
+    .map(name => args[name]);
+  let serialized;
+  try { serialized = JSON.stringify(attachmentValues); } catch { return false; }
+  return artifactIds.some(id => serialized.includes(id));
+}
+
+function deferredArtifactConsumerResult(toolName, argumentNames, artifactIds) {
+  return '[server coordination] NOT EXECUTED. Generated file IDs became available only after this call\'s arguments were produced. '
+    + `Re-read the original user request before calling ${toolName} again. `
+    + `If the user asked to include the generated file, pass the appropriate ID in ${argumentNames.join(' or ')}; `
+    + 'if they did not, reissue the call without adding it. Do not claim this tool succeeded because it has not run. '
+    + `Available generated file IDs: ${artifactIds.join(', ')}`;
+}
+
+function toolResultWithAttachmentEvidence(result, toolName, args, agent, generatedArtifactIds) {
+  const argumentNames = attachmentArgumentNames(agent, toolName);
+  if (!argumentNames.length || !generatedArtifactIds.length) return applyRedactions(result);
+  const included = generatedArtifactIds.filter(id => (
+    attachmentArgsReferenceAnyArtifact(args, argumentNames, [id])
+  ));
+  const evidence = included.length
+    ? `Generated attachment IDs included in the executed call: ${included.join(', ')}.`
+    : 'Generated attachment IDs included in the executed call: none. Do not claim that a generated file was delivered by this call.';
+  return `${applyRedactions(result)}\n\n[server attachment evidence] ${evidence}`;
+}
+
 async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAttempt = null } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
@@ -356,6 +403,10 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   // later iterations simply don't offer the tool.
   const NATIVE_IMAGE_GEN_CAP = 3;
   let nativeImagesThisTurn = 0;
+  const generatedArtifactIdsThisTurn = [];
+  const nativeImageToolCallsStarted = new Set();
+  const nativeImageToolCallsCompleted = new Set();
+  let activeNativeImageToolCallId = null;
 
   try {
     while (guard.tick()) {
@@ -570,18 +621,50 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       imageGenerationItemStatus.set(key, 'valid');
       generatedImages.push(image);
       nativeImagesThisTurn++;
-      // Hand the MODEL the artifact id immediately. The human-facing
-      // "Saved to:" note lands only at end-of-turn, so mid-turn the model
-      // otherwise has no handle to the file it just produced — a delegated
-      // "generate then attach" task then hunts the filesystem and
-      // regenerates. This note rides the continuation input of any further
-      // rounds in this turn; if the turn ends here it's harmlessly unused.
+      generatedArtifactIdsThisTurn.push(`images:${image.filename}`);
+      return image;
+    };
+    // Append this only after any function_call/function_call_output pairs from
+    // the response, preserving Responses protocol ordering for the next round.
+    const appendGeneratedImageContinuation = () => {
+      if (!generatedImages.length) return;
+      const ids = generatedImages.map(image => `images:${image.filename}`);
       working.push({
         role: 'user',
-        content: `[server note] Image generated and saved — attachment id: images:${image.filename}. Use exactly this id wherever a file or attachment reference is needed; do not search for the file.`
+        content: `[server note] Image generated and saved — attachment ${ids.length === 1 ? 'id' : 'ids'}: ${ids.join(', ')}. Use these exact IDs wherever the original request requires a file or attachment reference; do not search for the file. Do not attach a generated image unless the original request asked you to include it.`
           + (nativeImagesThisTurn >= NATIVE_IMAGE_GEN_CAP ? ' Image-generation limit for this turn reached — do not generate more images.' : ''),
       });
-      return image;
+    };
+    const beginNativeImageTool = (item = null) => {
+      const callId = String(item?.call_id ?? item?.id ?? activeNativeImageToolCallId
+        ?? `provider_image_generation_${nativeImagesThisTurn + 1}`);
+      activeNativeImageToolCallId = callId;
+      if (nativeImageToolCallsStarted.has(callId)) return { callId, event: null };
+      nativeImageToolCallsStarted.add(callId);
+      return {
+        callId,
+        event: {
+          type: 'tool_call', name: 'image_generation', args: null,
+          toolCallId: callId, providerNative: true,
+        },
+      };
+    };
+    const completeNativeImageTool = (item, image) => {
+      const { callId, event: startEvent } = beginNativeImageTool(item);
+      if (nativeImageToolCallsCompleted.has(callId)) return { startEvent, resultEvent: null };
+      nativeImageToolCallsCompleted.add(callId);
+      if (activeNativeImageToolCallId === callId) activeNativeImageToolCallId = null;
+      const attachmentId = image?.savedPath ? `images:${image.filename}` : null;
+      return {
+        startEvent,
+        resultEvent: {
+          type: 'tool_result', name: 'image_generation', toolCallId: callId,
+          providerNative: true,
+          text: attachmentId
+            ? `Generated image and saved attachment ${attachmentId}.`
+            : 'Generated image; no saved attachment ID is available.',
+        },
+      };
     };
     // call_id → { id (same as call_id), name, argsJson, done }
     const toolCalls  = new Map();
@@ -641,7 +724,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           if (item.id && item.id !== callId) indexToCallId.set(item.id, callId);
         }
         if (item.type === 'image_generation_call') {
-          yield { type: 'tool_progress', name: 'image_generation', text: 'Generating image...' };
+          const { callId, event: startEvent } = beginNativeImageTool(item);
+          if (startEvent) yield startEvent;
+          yield {
+            type: 'tool_progress', name: 'image_generation', text: 'Generating image...',
+            toolCallId: callId, providerNative: true,
+          };
         }
         continue;
       }
@@ -673,12 +761,24 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         }
         if (item.type === 'image_generation_call') {
           const image = recordGeneratedImage(item, `output-item:${ev.output_index ?? 'unknown'}`);
-          if (image) yield { type: 'image', ...image, prompt: '' };
+          if (image) {
+            const { startEvent, resultEvent } = completeNativeImageTool(item, image);
+            if (startEvent) yield startEvent;
+            yield { type: 'image', ...image, prompt: '' };
+            if (resultEvent) yield resultEvent;
+          }
         }
         continue;
       }
       if (t === 'response.image_generation_call.in_progress' || t === 'response.image_generation_call.generating') {
-        yield { type: 'tool_progress', name: 'image_generation', text: 'Generating image...' };
+        const { callId, event: startEvent } = beginNativeImageTool({
+          call_id: ev.call_id ?? ev.item_id ?? activeNativeImageToolCallId,
+        });
+        if (startEvent) yield startEvent;
+        yield {
+          type: 'tool_progress', name: 'image_generation', text: 'Generating image...',
+          toolCallId: callId, providerNative: true,
+        };
         continue;
       }
       if (t === 'response.web_search_call.in_progress') {
@@ -695,7 +795,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         for (const [outputIndex, item] of (ev.response?.output ?? []).entries()) {
           if (item?.type === 'image_generation_call') {
             const image = recordGeneratedImage(item, `response-output:${outputIndex}`);
-            if (image) yield { type: 'image', ...image, prompt: '' };
+            if (image) {
+              const { startEvent, resultEvent } = completeNativeImageTool(item, image);
+              if (startEvent) yield startEvent;
+              yield { type: 'image', ...image, prompt: '' };
+              if (resultEvent) yield resultEvent;
+            }
           }
         }
         const usage = ev.response?.usage;
@@ -819,6 +924,88 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         return;
       }
 
+      // A function call composed beside a hosted image cannot reference the
+      // artifact because its ID did not exist when the arguments were written.
+      // Give it a protocol-valid non-executed result and let the next model
+      // round retry with the server-issued ID; unrelated sibling calls run now.
+      const generatedIdsThisResponse = generatedImages.map(image => `images:${image.filename}`);
+      const deferredConsumers = new Map();
+      if (generatedIdsThisResponse.length) {
+        for (const { block, toolArgs } of blocks) {
+          const argumentNames = attachmentArgumentNames(agent, block.name);
+          if (argumentNames.length
+              && !attachmentArgsReferenceAnyArtifact(toolArgs, argumentNames, generatedIdsThisResponse)) {
+            deferredConsumers.set(block.id, deferredArtifactConsumerResult(
+              block.name, argumentNames, generatedIdsThisResponse,
+            ));
+          }
+        }
+      }
+
+      if (deferredConsumers.size) {
+        const assistantToolCalls = blocks.map(({ block }) => ({
+          id: block.id,
+          type: 'function',
+          function: { name: block.name, arguments: block.argsJson },
+        }));
+        working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
+
+        for (const { block, toolArgs } of blocks) {
+          if (!deferredConsumers.has(block.id)) {
+            yield { type: 'tool_call', name: block.name, args: toolArgs, toolCallId: block.id };
+          }
+        }
+        const results = await Promise.all(blocks.map(async ({ block, toolArgs }) => {
+          const deferred = deferredConsumers.get(block.id);
+          if (deferred) {
+            return {
+              block, toolArgs, result: deferred, _notify: null, _images: null,
+              events: [], deferred: true,
+            };
+          }
+          const drained = await drainToolWithEvents(
+            block.name, toolArgs, userId, agent.id,
+            agent.tools?.map(tool => tool.function?.name).filter(Boolean),
+          );
+          return {
+            block, toolArgs, result: drained.text, _notify: drained._notify,
+            _images: drained._images, events: drained.events, deferred: false,
+          };
+        }));
+
+        for (const row of results) {
+          const { block, toolArgs, result, _notify, events, deferred } = row;
+          if (!deferred) {
+            for (const event of events) yield event;
+            yield {
+              type: 'tool_result', name: block.name, text: result,
+              preview: summarizeToolResult(block.name, result), toolCallId: block.id,
+            };
+            if (_notify) yield { type: '__notify', name: block.name, ..._notify };
+          }
+          const modelResult = deferred
+            ? result
+            : toolResultWithAttachmentEvidence(
+              result, block.name, toolArgs, agent, generatedArtifactIdsThisTurn,
+            );
+          working.push({ role: 'tool', tool_call_id: block.id, content: modelResult });
+        }
+        for (const { block, _images, deferred } of results) {
+          if (!deferred && _images?.length) {
+            working.push(buildImageUserMessage(
+              'openai-oauth', _images, `[attached: image(s) returned by ${block.name}]`,
+            ));
+          }
+        }
+        appendGeneratedImageContinuation();
+        { const sc = guard.check(
+          results.map(row => ({ name: row.block.name, args: row.block.argsJson })),
+          results.map(row => row.result),
+        );
+          if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; awaitingPostToolAnswer = false; yield { type: 'token', text: assistantContent }; break; } }
+        continue;
+      }
+
       if (blocks.length > 1) {
         // Multiple tool calls in one assistant turn — run in parallel.
         // All tools run via executeToolStreaming (blocking per-tool, full
@@ -834,11 +1021,17 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         }));
         const assistantToolCalls = results.map(({ block }) => ({ id: block.id, type: 'function', function: { name: block.name, arguments: block.argsJson } }));
         working.push({ role: 'assistant', content: null, tool_calls: assistantToolCalls });
-        for (const { block, result, _notify, events } of results) {
+        for (const { block, toolArgs, result, _notify, events } of results) {
           for (const ev of events) yield ev;
           yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-          working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
+          working.push({
+            role: 'tool',
+            tool_call_id: block.id,
+            content: toolResultWithAttachmentEvidence(
+              result, block.name, toolArgs, agent, generatedArtifactIdsThisTurn,
+            ),
+          });
         }
         // Vision attachments: append a synthesized user message carrying
         // any image data tools returned, so the model can SEE the pixels
@@ -849,6 +1042,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
             working.push(buildImageUserMessage('openai-oauth', _images, `[attached: image(s) returned by ${block.name}]`));
           }
         }
+        appendGeneratedImageContinuation();
         { const sc = guard.check(results.map(r => ({ name: r.block.name, args: r.block.argsJson })), results.map(r => r.result));
           if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; awaitingPostToolAnswer = false; yield { type: 'token', text: assistantContent }; break; } }
         continue;
@@ -887,7 +1081,13 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         if (effectiveImages?.length) _imagesByBlockId.set(block.id, { name: block.name, images: effectiveImages });
         yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
-        working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
+        working.push({
+          role: 'tool',
+          tool_call_id: block.id,
+          content: toolResultWithAttachmentEvidence(
+            result, block.name, args, agent, generatedArtifactIdsThisTurn,
+          ),
+        });
         seqResults.push({ name: block.name, args: block.argsJson, result });
       }
       // Vision attachments: append a synthesized user message per tool
@@ -896,6 +1096,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       for (const [, payload] of _imagesByBlockId) {
         working.push(buildImageUserMessage('openai-oauth', payload.images, `[attached: image(s) returned by ${payload.name}]`));
       }
+      appendGeneratedImageContinuation();
       { const sc = guard.check(seqResults.map(r => ({ name: r.name, args: r.args })), seqResults.map(r => r.result));
         if (sc.stalled) { console.warn(`[openai-oauth] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; awaitingPostToolAnswer = false; yield { type: 'token', text: assistantContent }; break; } }
       if (_terminalReply != null) {

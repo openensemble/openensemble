@@ -102,6 +102,7 @@ vi.mock('./chat.mjs', () => ({
 }));
 
 const bg = await import('./background-tasks.mjs');
+const { buildCompoundWorkflowContract } = await import('./lib/compound-workflow-contract.mjs');
 const { BASE_DIR } = await import('./lib/paths.mjs');
 const { getTurnContext, runWithTurnContext } = await import('./lib/turn-abort-context.mjs');
 const { toolRouterContext } = await import('./lib/tool-router-context.mjs');
@@ -136,7 +137,7 @@ function restoreVerifierEnv() {
   else process.env.OE_LAB_VERIFIER_LEASE_PATH = originalLeasePath;
 }
 
-function spawn(userId, task = 'Inspect the background queue.', ownerKey = 'jarvis') {
+function spawn(userId, task = 'Inspect the background queue.', ownerKey = 'jarvis', options = {}) {
   return bg.spawnWorker({
     workerAgent: {
       id: `ephemeral_worker_${userId}_${Date.now()}_${ownerKey}`,
@@ -152,6 +153,23 @@ function spawn(userId, task = 'Inspect the background queue.', ownerKey = 'jarvi
     ownerKey,
     workerName: 'Private worker',
     emoji: 'J',
+    ...options,
+  });
+}
+
+function twoStepContract() {
+  return buildCompoundWorkflowContract({
+    clauses: ['Research the topic', 'Email the report'],
+    matchedSteps: [
+      {
+        clause: 'Research the topic', toolName: 'research_tool', capability: 'research',
+        traits: { longRunning: true },
+      },
+      {
+        clause: 'Email the report', toolName: 'delivery_tool', capability: 'delivery',
+        traits: { delivery: true, sideEffecting: true },
+      },
+    ],
   });
 }
 
@@ -246,6 +264,56 @@ describe('private durable worker lifecycle', () => {
     expect(mocks.sendToUser.mock.calls.some(([, event]) => event?.type === 'agent_report')).toBe(false);
     expect(mocks.sendToUser.mock.calls.filter(([, event]) => event?.type === 'assistant_notification')).toHaveLength(1);
     expect(readJournal()[taskId]).toBeUndefined();
+  });
+
+  it('completes a compound worker only after every required result is causally observed', async () => {
+    const seenTasks = [];
+    mocks.workerScenarios.push(async function* (_agent, task) {
+      seenTasks.push(task);
+      yield { type: 'tool_call', name: 'research_tool', args: {}, toolCallId: 'research-1' };
+      yield { type: 'tool_result', name: 'research_tool', text: 'Research complete.', toolCallId: 'research-1' };
+      yield { type: 'tool_call', name: 'delivery_tool', args: {}, toolCallId: 'delivery-1' };
+      yield { type: 'tool_result', name: 'delivery_tool', text: 'Email sent.', toolCallId: 'delivery-1' };
+      yield { type: 'token', text: 'Workflow complete.' };
+    });
+    const userId = `worker-contract-ok-${Date.now()}`;
+    const taskId = spawn(userId, 'Research and email the report.', 'jarvis', {
+      executionTask: 'Execute the server-owned workflow without delegating it.',
+      completionContract: twoStepContract(),
+    });
+    await waitFor(() => !bg.isTaskActive(taskId));
+
+    expect(seenTasks).toEqual(['Execute the server-owned workflow without delegating it.']);
+    expect(bg.listRecentWorkersForOwner(userId, 'jarvis'))
+      .toContainEqual(expect.objectContaining({ taskId, outcome: 'done' }));
+    expect(rowsForTask(taskId).filter(row => row.reportId === taskId))
+      .toEqual([expect.objectContaining({ status: 'done', hidden: true })]);
+  });
+
+  it('fails a compound worker when a required tool only reports background admission', async () => {
+    mocks.workerScenarios.push(async function* () {
+      yield { type: 'tool_call', name: 'research_tool', args: {}, toolCallId: 'research-1' };
+      yield {
+        type: 'tool_result', name: 'research_tool', toolCallId: 'research-1',
+        text: 'Research is running in the background (task 123e4567-e89b-12d3-a456-426614174000).',
+      };
+      yield { type: 'tool_call', name: 'delivery_tool', args: {}, toolCallId: 'delivery-1' };
+      yield { type: 'tool_result', name: 'delivery_tool', text: 'Email sent.', toolCallId: 'delivery-1' };
+      yield { type: 'token', text: 'Model claimed success.' };
+    });
+    const userId = `worker-contract-pending-${Date.now()}`;
+    const taskId = spawn(userId, 'Research and email the report.', 'jarvis', {
+      completionContract: twoStepContract(),
+    });
+    await waitFor(() => !bg.isTaskActive(taskId));
+
+    expect(bg.listRecentWorkersForOwner(userId, 'jarvis'))
+      .toContainEqual(expect.objectContaining({
+        taskId, outcome: 'error',
+        finalText: expect.stringMatching(/workflow incomplete|required research_tool is still pending/i),
+      }));
+    expect(rowsForTask(taskId).filter(row => row.reportId === taskId))
+      .toEqual([expect.objectContaining({ status: 'error', hidden: true })]);
   });
 
   it('keeps a verifier lease capability memory-only and revalidates it for one tool-less completion call', async () => {

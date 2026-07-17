@@ -98,6 +98,50 @@ function indexedToolResponse(index, { input = 5, output = 2 } = {}) {
   ]);
 }
 
+function namedToolResponse(name, args, index = 1) {
+  const item = {
+    type: 'function_call',
+    id: `fc_named_${index}`,
+    call_id: `call_named_${index}`,
+    name,
+    arguments: JSON.stringify(args),
+  };
+  return responseSse([
+    { type: 'response.output_item.added', output_index: 0, item },
+    { type: 'response.output_item.done', output_index: 0, item },
+    completion(),
+  ]);
+}
+
+function nativeImageAndToolResponse(name, args) {
+  const image = {
+    type: 'image_generation_call',
+    id: 'ig_same_response_test',
+    // Valid bounded 1x1 PNG. The adapter intentionally rejects arbitrary
+    // base64 so this test exercises the real artifact lifecycle.
+    result: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  };
+  const call = {
+    type: 'function_call',
+    id: 'fc_same_response_test',
+    call_id: 'call_same_response_test',
+    name,
+    arguments: JSON.stringify(args),
+  };
+  const terminal = completion({ input: 8, output: 3 });
+  terminal.response.output = [image, call];
+  return responseSse([
+    {
+      type: 'response.output_item.added', output_index: 0,
+      item: { type: 'image_generation_call', id: image.id },
+    },
+    { type: 'response.output_item.done', output_index: 0, item: image },
+    { type: 'response.output_item.added', output_index: 1, item: call },
+    { type: 'response.output_item.done', output_index: 1, item: call },
+    terminal,
+  ]);
+}
+
 async function collect(generator) {
   const events = [];
   for await (const event of generator) events.push(event);
@@ -112,6 +156,31 @@ const tool = {
     parameters: {
       type: 'object',
       properties: { value: { type: 'number' } },
+    },
+  },
+};
+
+const generateImageTool = {
+  type: 'function',
+  function: {
+    name: 'generate_image',
+    description: 'authorized image capability',
+    parameters: { type: 'object', properties: { prompt: { type: 'string' } } },
+  },
+};
+
+const attachmentTool = {
+  type: 'function',
+  function: {
+    name: 'email_user',
+    description: 'send an email',
+    parameters: {
+      type: 'object',
+      properties: {
+        subject: { type: 'string' },
+        body: { type: 'string' },
+        attachment_doc_ids: { type: 'array', items: { type: 'string' } },
+      },
     },
   },
 };
@@ -189,6 +258,73 @@ describe('Responses provider usage cardinality', () => {
       completionCount: 1,
       usageCount: 1,
       usageComplete: true,
+    });
+  });
+
+  it('emits hosted-image lifecycle evidence and defers delivery until the artifact ID exists', async () => {
+    const bodies = [];
+    let artifactId = '';
+    vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
+      const body = JSON.parse(options.body);
+      bodies.push(body);
+      if (bodies.length === 1) {
+        return nativeImageAndToolResponse('email_user', {
+          subject: 'Image report', body: 'Generated image report.', attachment_doc_ids: [],
+        });
+      }
+      if (bodies.length === 2) {
+        const input = body.input;
+        artifactId = JSON.stringify(input).match(/images:[^"\\]+\.png/)?.[0] ?? '';
+        expect(artifactId).toMatch(/^images:ig_same_response_test_\d+\.png$/);
+        const functionIndex = input.findIndex(item => item.type === 'function_call'
+          && item.call_id === 'call_same_response_test');
+        const outputIndex = input.findIndex(item => item.type === 'function_call_output'
+          && item.call_id === 'call_same_response_test');
+        const noteIndex = input.findIndex(item => item.type === 'message'
+          && JSON.stringify(item).includes('[server note] Image generated and saved'));
+        expect(outputIndex).toBeGreaterThan(functionIndex);
+        expect(noteIndex).toBeGreaterThan(outputIndex);
+        expect(input[outputIndex].output).toContain('NOT EXECUTED');
+        expect(roleMocks.executeToolStreaming).not.toHaveBeenCalled();
+        return namedToolResponse('email_user', {
+          subject: 'Image report', body: 'Generated image report.',
+          attachment_doc_ids: [artifactId],
+        }, 2);
+      }
+      expect(JSON.stringify(body.input)).toContain(
+        `[server attachment evidence] Generated attachment IDs included in the executed call: ${artifactId}.`,
+      );
+      return textResponse('sent with attachment');
+    }));
+
+    const events = await collect(streamOpenAIResponses(
+      agent({
+        provider: 'openai-oauth', model: 'gpt-5.4',
+        tools: [generateImageTool, attachmentTool],
+        _providerHostedImageBackend: true,
+        maxToolLoops: 5,
+      }),
+      'test prompt',
+      [{ role: 'user', content: 'generate an image and email it' }],
+      AbortSignal.timeout(5_000),
+      'responses-usage-user',
+    ));
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(roleMocks.executeToolStreaming).toHaveBeenCalledTimes(1);
+    expect(roleMocks.executeToolStreaming).toHaveBeenCalledWith(
+      'email_user', expect.objectContaining({ attachment_doc_ids: [artifactId] }),
+      'responses-usage-user', 'responses-usage-agent',
+      ['generate_image', 'email_user'],
+    );
+    expect(events.filter(event => event.type === 'tool_call'
+      && event.name === 'image_generation')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'tool_result'
+      && event.name === 'image_generation')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'tool_call'
+      && event.name === 'email_user')).toHaveLength(1);
+    expect(usageEvent(events)).toMatchObject({
+      reqCount: 3, completionCount: 3, usageCount: 3, usageComplete: true,
     });
   });
 

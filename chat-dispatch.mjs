@@ -51,6 +51,7 @@ import {
   buildSchedulerNote,
   runLlmTurn,
 } from './chat-dispatch/llm-loop.mjs';
+import { trySingletonCompoundBackground } from './chat-dispatch/compound-background.mjs';
 import {
   tryNewsPrefIntercept,
   tryRenameIntercept,
@@ -1316,6 +1317,57 @@ export async function handleChatMessage({
     }
   })();
   const schedulerNote = await _schedulerNotePromise;
+
+  // A singleton coordinator owns every capability itself. For an explicit,
+  // self-contained multi-capability workflow that is long enough to leave the
+  // foreground, admit one ordinary detached worker before starting a model
+  // round. A scheduler match already owns its outcome, so it is never replayed
+  // through this path.
+  if (!schedulerNote?.includes('<scheduler_result>')) {
+    let background = null;
+    try {
+      background = await trySingletonCompoundBackground({
+        userId,
+        agentId,
+        agent,
+        userText: ctx.userText,
+        source,
+        attachments: ctx.attachments,
+        toolPlan: ctx.toolPlan,
+        documentRequest: ctx.documentRequest,
+        hiddenUser: _hiddenUser,
+        backgroundContinuation: _isBackgroundContinuation,
+        isolatedTaskRun: _isolatedTaskRun,
+        readOnlyTurn: _readOnlyTurn,
+        labVerifierTurn,
+        signal: ac.signal,
+        onEvent,
+      });
+    } catch (error) {
+      // Classification is conservative and must fail open to the ordinary
+      // foreground path if a manifest or plugin surprises it.
+      log.warn('chat', 'compound background policy failed; keeping foreground', {
+        err: error?.message || String(error),
+      });
+    }
+    if (background?.handled) {
+      // Once admission begins, a stopped foreground turn must not fall through
+      // and execute the same side effects a second time.
+      if (!background.aborted && !ac.signal.aborted) {
+        fastPathEvidence = background.trace || null;
+        recordRouting({
+          mode: 'fastpath',
+          fastPath: 'singletonCompoundBackground',
+          localHandler: 'singletonCompoundBackground',
+          llmAvoided: true,
+          cloudCall: false,
+          background: true,
+        });
+      }
+      return;
+    }
+  }
+
   let resolvedNote = schedulerNote;
   const _hints = await _hintsPromise;
   if (_hints) resolvedNote = resolvedNote ? `${resolvedNote}\n${_hints}` : _hints;

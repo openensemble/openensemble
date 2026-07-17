@@ -3,6 +3,9 @@
  * Uses dynamic imports to avoid circular dependency: chat.mjs → roles.mjs → here → chat.mjs
  */
 
+import { currentTaskContext } from '../../lib/task-proxy-context.mjs';
+import { getScheduledContext } from '../../lib/scheduled-context.mjs';
+
 // Max nested delegation depth. user→A→coordinator→B = 2 hops, which is
 // the deepest useful chain (specialist escalates to coordinator who then
 // re-dispatches). Anything deeper is almost certainly a loop or the LLM
@@ -43,7 +46,7 @@ function _parseCallerSession(callerAgentId) {
 // asking "how's your work going"). Workers are LEAVES: they cannot hire workers.
 const MAX_WORKERS_PER_AGENT = 5;
 
-async function* _workerTool(name, args, userId, callerAgentId) {
+async function* _workerTool(name, args, userId, callerAgentId, internalOptions = null) {
   const bg = await import('../../background-tasks.mjs');
   const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
   // The owner is the STABLE agent behind whatever session is calling — strip the
@@ -164,6 +167,16 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   }
 
   // name === 'spawn_worker' — leaf rule: a worker can't hire workers.
+  // An unattended non-scheduled task already has one completion owner and no
+  // child barrier. Refuse a second detached owner so the current task returns
+  // the real work result instead of a premature worker acknowledgement.
+  if (currentTaskContext() && !getScheduledContext()?.originTaskId) {
+    yield {
+      type: 'result',
+      text: 'This unattended task already has a completion owner, so it cannot start another detached worker. Do the job directly with the tools in this task and return the real result.',
+    };
+    return;
+  }
   if (String(callerAgentId || '').startsWith('ephemeral_worker_')) {
     yield { type: 'result', text: 'Workers are individual contributors and cannot hire their own workers. Do the job directly, then report back to whoever assigned it.' };
     return;
@@ -179,9 +192,14 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   const label = args.label || (task.length > 56 ? task.slice(0, 56) + '…' : task);
   const workerId = `ephemeral_worker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
   const workerAgent = { ...ownerAgent, id: workerId, ephemeral: true, workerOwnerId: ownerKey };
-  // No human is watching the worker's session — make it run to completion on its
-  // own and finish with a concise report.
-  const workerTask = `${task}\n\n[You are a background worker running detached from the chat. Work autonomously to completion — do NOT ask for confirmation or wait for approval; the user is not watching this session. Use your tools directly. When finished, reply with a short summary of what you did and anything that needs a human.]`;
+  // No human is watching the worker's session. A server-owned fast path may
+  // provide execution-only guidance with already-satisfied orchestration
+  // removed; model-controlled tool arguments can never set that override.
+  const trustedExecutionTask = typeof internalOptions?.executionTask === 'string'
+    && internalOptions.executionTask.trim()
+    ? internalOptions.executionTask.trim()
+    : task;
+  const workerTask = `${trustedExecutionTask}\n\n[You are a background worker running detached from the chat. Work autonomously to completion — do NOT ask for confirmation or wait for approval; the user is not watching this session. Use your tools directly. When finished, reply with a short summary of what you did and anything that needs a human.]`;
   const chipOwnerId = `${userId}_${ownerKey}`;   // owner's direct-chat session: chip + completion report land here
   let sourceTurn = null;
   try {
@@ -203,7 +221,9 @@ async function* _workerTool(name, args, userId, callerAgentId) {
         throw Object.assign(new Error(capacityMessage(current)), { code: 'WORKER_CAPACITY' });
       },
       spawn: () => bg.spawnWorker({
-        workerAgent, task: workerTask, userId, chipOwnerId, ownerKey,
+        // Keep the user's task as the durable display/idempotency identity;
+        // detached-autonomy guidance is only the model execution input.
+        workerAgent, task, executionTask: workerTask, userId, chipOwnerId, ownerKey,
         originalTask: task,
         workerName: `${ownerAgent.name} worker`, emoji: ownerAgent.emoji || '🤖',
         rootTaskId: sourceTurn?.rootId || null,
@@ -211,6 +231,9 @@ async function* _workerTool(name, args, userId, callerAgentId) {
         sourceAttemptId: sourceTurn?.attemptId || null,
         sourceSessionKey: sourceTurn?.sessionKey || null,
         sourceSessionEpoch: sourceTurn?.sessionEpoch || null,
+        // Only the server-owned fifth executeSkillTool argument reaches this
+        // field. args.completionContract/args.executionTask are ignored.
+        completionContract: internalOptions?.completionContract || null,
       }),
     });
   } catch (error) {
@@ -228,9 +251,9 @@ async function* _workerTool(name, args, userId, callerAgentId) {
   yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}. It's running now — I can check on it anytime with check_workers, and its report will land here when it's done.` };
 }
 
-export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null) {
+export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null, internalOptions = null) {
   if (name === 'spawn_worker' || name === 'check_workers' || name === 'stop_worker' || name === 'report_progress') {
-    yield* _workerTool(name, args, userId, callerAgentId);
+    yield* _workerTool(name, args, userId, callerAgentId, internalOptions);
     return;
   }
   if (name !== 'ask_agent') { yield { type: 'result', text: null }; return; }

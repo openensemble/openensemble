@@ -18,6 +18,7 @@ import { appendToSession, failPendingTurn } from '../sessions.mjs';
 import { localTierEnabled, dispatch, runIntent } from '../lib/local-label.mjs';
 import { recordToolObservation } from '../lib/personalization/recorder.mjs';
 import { looksLikeToolError } from '../lib/tool-error.mjs';
+import { isStandaloneRoutingRequest } from '../lib/routing-clauses.mjs';
 
 // executeRoleTool can return a string, an object with `.text`, or an async
 // generator (streaming skills). Normalize all three to a single string.
@@ -38,6 +39,9 @@ async function normalizeResult(result) {
 export async function tryLocalIntentFastpath({ userText, userId, agentId, onEvent }) {
   if (!userText) return null;
   if (!localTierEnabled()) return null;
+  // A local intent owns the whole turn. Do not let a matched first lookup
+  // swallow the remaining steps of an explicit compound workflow.
+  if (!isStandaloneRoutingRequest(userText)) return null;
   try {
     const match = await dispatch(userText, userId, { agentId });
     if (!match) return null;

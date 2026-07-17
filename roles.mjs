@@ -2268,7 +2268,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         // First time crossing 10s: register chip, yield deferred result,
         // hand the iterator to a detached worker, and return. But never while a
         // user prompt is pending (consent/credential) — don't hurdle the wait.
-        if (AUTO_BG_ENABLED && !backgrounded && Date.now() - startedAt >= AUTO_BG_MS && !hasPendingPrompt(userId)) {
+        if (AUTO_BG_ENABLED && !backgrounded
+            && Date.now() - startedAt >= AUTO_BG_MS
+            && !hasPendingPrompt(userId)) {
           const displayName = delegatedMeta?.agentName || name;
           const displayEmoji = delegatedMeta?.agentEmoji || (delegatedMeta ? '' : '⏵');
           const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
@@ -2635,6 +2637,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       // backgrounds normally on the next tick.
       let winner;
       if (!AUTO_BG_ENABLED) {
+        // A parent task chip is already the background surface. Await the
+        // actual value so dependent workflow steps receive real evidence,
+        // while still honoring cancellation owned by that task.
         winner = await raceWithAbort(racePromise, toolSignal, `Tool ${name} cancelled`);
       } else {
         do {
