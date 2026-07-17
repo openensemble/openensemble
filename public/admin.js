@@ -102,6 +102,7 @@ async function loadUserManagement() {
       if ((u.role === 'child' || u.role === 'user') && !isSelf) {
         const OAUTH_PROVIDERS = [
           { id: 'openai-oauth', label: 'OpenAI (ChatGPT login)', icon: '🔐' },
+          { id: 'xai-oauth', label: 'xAI Grok (SuperGrok login)', icon: '⚡' },
         ];
         const allowedOAuth = Array.isArray(u.allowedOAuthProviders) ? u.allowedOAuthProviders : [];
         const oauthChecks = OAUTH_PROVIDERS.map(p => {
@@ -123,8 +124,8 @@ async function loadUserManagement() {
       // Allowed models (for child and user accounts) — grouped by provider
       let allowedModelsSection = '';
       if ((u.role === 'child' || u.role === 'user') && !isSelf) {
-        const providerOrder = ['anthropic', 'openai-oauth', 'ollama-local', 'ollama-cloud', 'lmstudio', 'fireworks', 'grok'];
-        const provLabels = { anthropic: 'Anthropic', 'openai-oauth': 'OpenAI (ChatGPT login)', 'ollama-local': 'Ollama (local)', 'ollama-cloud': 'Ollama (cloud)', lmstudio: 'LM Studio', fireworks: 'Fireworks', grok: 'Grok' };
+        const providerOrder = ['anthropic', 'openai-oauth', 'xai-oauth', 'ollama-local', 'ollama-cloud', 'lmstudio', 'fireworks', 'grok'];
+        const provLabels = { anthropic: 'Anthropic', 'openai-oauth': 'OpenAI (ChatGPT login)', 'xai-oauth': 'xAI Grok (SuperGrok)', 'ollama-local': 'Ollama (local)', 'ollama-cloud': 'Ollama (cloud)', lmstudio: 'LM Studio', fireworks: 'Fireworks', grok: 'Grok' };
         const grouped = {};
         for (const m of masterModels) {
           // Bundled core models (embedding, reasoning) are always-on for every

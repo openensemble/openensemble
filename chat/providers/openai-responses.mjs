@@ -13,6 +13,12 @@ import { executeToolStreaming } from '../../roles.mjs';
 import { writeFileSync } from 'fs';
 import path from 'path';
 import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth.mjs';
+import {
+  ensureFreshToken as ensureFreshXaiToken,
+  forceRefreshToken as forceRefreshXaiToken,
+  GROK_CLI_PROXY_BASE,
+  GROK_CLI_HEADERS,
+} from '../../lib/xai-oauth-auth.mjs';
 import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS, capabilityNotice, modelCallTraceEvent } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -260,22 +266,27 @@ async function postWithRetry(url, init, { attempts = 2, backoffMs = 1000, onAtte
 }
 
 export async function* streamOpenAIResponses(agent, systemPrompt, messages, signal, userId = 'default') {
-  // This adapter serves BOTH Responses-API providers: ChatGPT Codex
-  // (openai-oauth, per-user OAuth token) and xAI grok (api.x.ai/v1/responses,
-  // bearer API key). They share the Responses wire shape — identical SSE events,
-  // tool/function-call format, and `instructions`/`input` request shape (all
-  // live-verified for grok) — so the entire tool loop below is shared; only
-  // auth, endpoint, headers, and the native-search provider slug differ.
-  const isCodex     = agent.provider !== 'grok' && agent.provider !== 'xai';
-  const wsProvider  = isCodex ? 'openai-oauth' : 'xai';
-  const tag         = isCodex ? 'openai-oauth' : 'grok';
-  const displayName = isCodex ? 'OpenAI Codex' : 'xAI Grok';
+  // This adapter serves Responses-API providers:
+  //   - ChatGPT Codex (openai-oauth, per-user OAuth → chatgpt.com/.../codex)
+  //   - xAI SuperGrok OAuth (xai-oauth → cli-chat-proxy.grok.com)
+  //   - xAI Grok API key (grok/xai → api.x.ai/v1)
+  // They share the Responses wire shape — identical SSE events, tool format,
+  // and instructions/input — so the tool loop is shared; only auth, endpoint,
+  // headers, and the native-search provider slug differ.
+  const isXaiOauth  = agent.provider === 'xai-oauth';
+  const isXaiKey    = agent.provider === 'grok' || agent.provider === 'xai';
+  const isCodex     = !isXaiOauth && !isXaiKey;
+  const wsProvider  = isCodex ? 'openai-oauth' : (isXaiOauth ? 'xai-oauth' : 'xai');
+  const tag         = isCodex ? 'openai-oauth' : (isXaiOauth ? 'xai-oauth' : 'grok');
+  const displayName = isCodex ? 'OpenAI Codex' : (isXaiOauth ? 'xAI Grok (SuperGrok)' : 'xAI Grok');
   const labCodexRelay = isCodex
     && process.env.OPENENSEMBLE_LAB === '1'
     && process.env.OE_LAB_CODEX_RELAY === '1';
   const endpoint    = isCodex
     ? `${OPENAI_OAUTH_BASE}/responses`
-    : `${OPENAI_COMPAT_PROVIDERS['xai'].baseUrl.replace(/\/$/, '')}/responses`;
+    : isXaiOauth
+      ? `${GROK_CLI_PROXY_BASE.replace(/\/$/, '')}/responses`
+      : `${OPENAI_COMPAT_PROVIDERS['xai'].baseUrl.replace(/\/$/, '')}/responses`;
 
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0, totalCachedTokens = 0;
@@ -355,6 +366,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     } catch (e) {
       yield usageTelemetry();
       yield { type: 'error', message: `OpenAI Codex OAuth: ${e.message}` };
+      return;
+    }
+  } else if (isXaiOauth) {
+    try {
+      auth = await ensureFreshXaiToken(userId);
+    } catch (e) {
+      yield usageTelemetry();
+      yield { type: 'error', message: `xAI SuperGrok OAuth: ${e.message}` };
       return;
     }
   } else {
@@ -468,12 +487,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       'Authorization': `Bearer ${auth.access_token}`,
     };
     // Codex backend needs these to accept the experimental Responses endpoint;
-    // xAI's /v1/responses is a standard bearer-auth endpoint and rejects unknown
-    // headers on some paths, so only send them for Codex.
+    // api.x.ai rejects unknown headers on some paths; the SuperGrok CLI proxy
+    // requires its own identity headers instead.
     if (isCodex) {
       headers['OpenAI-Beta'] = 'responses=experimental';
       headers['Originator']  = 'codex_cli_rs';
       if (auth.account_id) headers['chatgpt-account-id'] = auth.account_id;
+    } else if (isXaiOauth) {
+      Object.assign(headers, GROK_CLI_HEADERS);
     }
 
     console.log(`[${tag}] POST /responses model=${agent.model} tools=${responsesTools?.length ?? 0} input_items=${body.input.length}${body.prompt_cache_key ? ` cache_key=${body.prompt_cache_key}` : ''}`);
@@ -578,6 +599,54 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
             yield usageTelemetry();
             yield { type: 'error', message: `OpenAI Codex error ${res.status} after token refresh: ${retryErr}` };
           }
+          return;
+        }
+      } else if (isXaiOauth && res.status === 401) {
+        const REAUTH_MSG = "Your coordinator's provider needs to be reauthenticated. Please reconnect it in Settings.";
+        console.warn(`[xai-oauth] 401 — forcing SuperGrok token refresh and retrying once`);
+        try {
+          auth = await forceRefreshXaiToken(userId);
+        } catch (e) {
+          console.warn(`[xai-oauth] refresh failed for user=${userId}: ${e.message}`);
+          yield usageTelemetry();
+          yield {
+            type: 'error',
+            message: e.entitlement
+              ? e.message
+              : REAUTH_MSG,
+          };
+          return;
+        }
+        { const notice = capabilityNotice('xai-oauth', `token_refresh:${userId}`, 'Refreshed the SuperGrok login token automatically.');
+          if (notice) yield notice; }
+        headers.Authorization = `Bearer ${auth.access_token}`;
+        Object.assign(headers, GROK_CLI_HEADERS);
+        try {
+          usageCardinalityValid = false;
+          res = await postWithRetry(endpoint, {
+            method: 'POST', signal, headers, body: JSON.stringify(body),
+          }, {
+            attempts: process.env.OPENENSEMBLE_LAB === '1' || paidHostedImageOffered ? 1 : 2,
+            onAttempt: noteProviderAttempt,
+          });
+        } catch (e) {
+          if (e?.name === 'AbortError') throw e;
+          yield usageTelemetry();
+          yield { type: 'error', message: `xAI SuperGrok: ${e.message}` };
+          return;
+        }
+        if (!res.ok) {
+          const retryErr = await res.text();
+          console.error(`[xai-oauth] 401 retry still failed ${res.status}: ${retryErr.slice(0, 500)}`);
+          yield usageTelemetry();
+          yield {
+            type: 'error',
+            message: res.status === 401 || res.status === 403
+              ? (res.status === 403
+                ? 'xAI rejected this SuperGrok login for API access (tier/entitlement). Use a console API key or upgrade the subscription.'
+                : REAUTH_MSG)
+              : `xAI SuperGrok error ${res.status} after token refresh: ${retryErr}`,
+          };
           return;
         }
       } else if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {

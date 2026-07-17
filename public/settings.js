@@ -190,6 +190,7 @@ function renderModelBrowser() {
 const COMPAT_OPTGROUP_LABELS = {
   openai:        'OpenAI ✨',
   'openai-oauth':'OpenAI (ChatGPT login) 🔐',
+  'xai-oauth':   'xAI Grok (SuperGrok) 🔐',
   gemini:        'Google Gemini 💎',
   deepseek:      'DeepSeek 🧠',
   mistral:       'Mistral AI 🌬',

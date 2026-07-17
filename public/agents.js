@@ -265,6 +265,7 @@ function _populateAgentModelSelect(agent, { preserveCurrent = false } = {}) {
     ['Anthropic',                  byProv('anthropic')],
     ['OpenAI ✨',                   byProv('openai')],
     ['OpenAI (ChatGPT login) 🔐',  byProv('openai-oauth')],
+    ['xAI Grok (SuperGrok) 🔐',    byProv('xai-oauth')],
     ['Google Gemini 💎',           byProv('gemini')],
     ['DeepSeek 🧠',                byProv('deepseek')],
     ['Mistral AI 🌬',              byProv('mistral')],

@@ -30,6 +30,7 @@ async function init() {
       'gcal':         'Google Calendar',
       'gmail':        'Gmail',
       'openai-codex': 'OpenAI (ChatGPT login)',
+      'xai-oauth': 'xAI Grok (SuperGrok login)',
     };
     const label = SERVICE_LABELS[service] ?? 'Account';
     if (oauthParam === 'success') {

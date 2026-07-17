@@ -15,6 +15,7 @@ import { loadAllTasksForScheduler, isSchedulerRunning } from '../scheduler.mjs';
 import { isWatcherRunning } from '../gmail-autolabel.mjs';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
 import { readToken as readOpenAIOAuthToken } from '../lib/openai-codex-auth.mjs';
+import { readToken as readXaiOAuthToken } from '../lib/xai-oauth-auth.mjs';
 import { getCachedState as getUpdateState } from '../lib/update.mjs';
 import { readEncryptedJsonFile } from '../lib/encrypted-file.mjs';
 
@@ -66,13 +67,25 @@ async function checkBearerKey(url, apiKey) {
   return checkProvider(url, 4000, { Authorization: `Bearer ${apiKey}` });
 }
 
-// Any user has a non-expired OpenAI OAuth token (or a refresh token to mint one).
+// Any user has a non-expired OpenAI/xAI OAuth token (or a refresh token to mint one).
 // Returns { configured, ok }. We don't hit the network — the OAuth helper
 // auto-refreshes on real use, so a present-and-refreshable token is "healthy".
 function openAIOAuthStatus(users) {
   let anyToken = false, anyOk = false;
   for (const u of users) {
     const t = readOpenAIOAuthToken(u.id);
+    if (!t) continue;
+    anyToken = true;
+    const expired = t.expires_at ? Date.now() > t.expires_at : true;
+    if (!expired || t.refresh_token) { anyOk = true; break; }
+  }
+  return { configured: anyToken, ok: anyOk };
+}
+
+function xaiOAuthStatus(users) {
+  let anyToken = false, anyOk = false;
+  for (const u of users) {
+    const t = readXaiOAuthToken(u.id);
     if (!t) continue;
     anyToken = true;
     const expired = t.expires_at ? Date.now() > t.expires_at : true;
@@ -212,9 +225,11 @@ async function buildFullHealth() {
   // Perplexity has no /models endpoint — treat "key present" as configured+ok.
   if (cfg.perplexityApiKey && isEnabled('perplexity')) providers.perplexity = true;
 
-  // OpenAI OAuth (ChatGPT login) — per-user tokens, no global API key.
+  // OpenAI / xAI OAuth logins — per-user tokens, no global API key.
   const oauthStatus = openAIOAuthStatus(users);
   if (oauthStatus.configured && isEnabled('openai-oauth')) providers['openai-oauth'] = oauthStatus.ok;
+  const xaiOauthStatus = xaiOAuthStatus(users);
+  if (xaiOauthStatus.configured && isEnabled('xai-oauth')) providers['xai-oauth'] = xaiOauthStatus.ok;
 
   // Cortex health. Embed and reason both have a built-in tier (nomic ONNX +
   // our llama.cpp adapter) that runs in-process, so we check those first

@@ -2108,7 +2108,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // web_search stay on the /chat/completions (openai-compat) path below.
     const grokNativeSearch = (agentObj.provider === 'grok' || agentObj.provider === 'xai')
       && agentObj.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
-    if (agentObj.provider === 'openai-oauth' || grokNativeSearch) {
+    // SuperGrok OAuth always uses the Responses adapter (CLI chat proxy).
+    // API-key Grok only switches when native web_search is needed.
+    if (agentObj.provider === 'openai-oauth' || agentObj.provider === 'xai-oauth' || grokNativeSearch) {
       return { providerGen: streamOpenAIResponses(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
     if (OPENAI_COMPAT_PROVIDERS[compatProviderKey]) {

@@ -55,6 +55,7 @@ import { handle as handleHealth, setRuntimeMetricsFn } from './routes/health.mjs
 import { handle as handleOAuth }         from './routes/oauth.mjs';
 import { handle as handleMsOAuth }       from './routes/ms-oauth.mjs';
 import { handle as handleOpenAIOAuth }   from './routes/openai-oauth.mjs';
+import { handle as handleXaiOAuth }      from './routes/xai-oauth.mjs';
 import { handle as handleEmailAccounts } from './routes/email-accounts.mjs';
 import { handle as handleTelegram }      from './routes/telegram.mjs';
 import { handle as handleTunnel }        from './routes/tunnel.mjs';
@@ -282,6 +283,7 @@ const routeHandlers = [
   handleOAuth,          // /api/oauth/google/* — per-user Google OAuth flow
   handleMsOAuth,        // /api/oauth/microsoft/* — Microsoft OAuth flow
   handleOpenAIOAuth,    // /api/oauth/openai/*    — ChatGPT (Codex) OAuth flow
+  handleXaiOAuth,       // /api/oauth/xai/*       — SuperGrok / X Premium+ OAuth flow
   handleEmailAccounts,  // /api/email-accounts, /api/inbox
   handleGmail,          // /api/gmail/autolabel*
   handleConfig,
@@ -1092,11 +1094,11 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     catch (e) { log.warn('snapshot-pruner', 'daily prune failed', { err: e.message }); }
   }, 24 * 60 * 60 * 1000).unref?.();
 
-  // OpenAI ChatGPT (Codex) OAuth token keep-alive: the provider only refreshes
-  // a user's token when THAT user makes a call, so an account nobody chats as
-  // would let its token (and eventually its refresh_token) lapse and get
-  // revoked for inactivity — forcing a manual reconnect. Roll any near-expiry
-  // token at boot and daily, regardless of activity.
+  // OpenAI ChatGPT (Codex) + xAI SuperGrok OAuth token keep-alive: the provider
+  // only refreshes a user's token when THAT user makes a call, so an account
+  // nobody chats as would let its token (and eventually its refresh_token)
+  // lapse and get revoked for inactivity — forcing a manual reconnect. Roll
+  // any near-expiry token at boot and daily, regardless of activity.
   (async () => {
     const keepAlive = async (when) => {
       try {
@@ -1104,6 +1106,13 @@ httpServer.listen(PORT, '0.0.0.0', () => {
         const r = await refreshExpiringCodexTokens();
         if (r.refreshed || r.failed) log.info('openai-oauth', `${when} codex token keep-alive`, r);
       } catch (e) { log.warn('openai-oauth', `${when} codex keep-alive failed`, { err: e.message }); }
+      try {
+        const { refreshExpiringXaiTokens } = await import('./lib/xai-oauth-auth.mjs');
+        // xAI device-code access tokens are often ~15m; refresh anything
+        // expiring within 12h so the daily job still covers them with margin.
+        const r = await refreshExpiringXaiTokens({ withinMs: 12 * 60 * 60 * 1000 });
+        if (r.refreshed || r.failed) log.info('xai-oauth', `${when} grok token keep-alive`, r);
+      } catch (e) { log.warn('xai-oauth', `${when} grok keep-alive failed`, { err: e.message }); }
     };
     await keepAlive('boot');
     setInterval(() => { keepAlive('daily'); }, 24 * 60 * 60 * 1000).unref?.();

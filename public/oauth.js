@@ -551,7 +551,8 @@ async function submitOpenAIPasteCallback() {
 // already get the full card under Settings > Providers, so we skip rendering
 // here for them to avoid duplicate DOM IDs.
 const AI_OAUTH_PROVIDER_META = [
-  { id: 'openai-oauth', label: 'OpenAI (ChatGPT login)', icon: 'log-in', blurb: 'Sign in with your ChatGPT Plus/Pro account to use Codex models via OAuth.' },
+  { id: 'openai-oauth', label: 'OpenAI (ChatGPT login)', icon: 'log-in', blurb: 'Sign in with your ChatGPT Plus/Pro account to use Codex models via OAuth.', connectLabel: 'Connect ChatGPT account', connectAction: 'connectOpenAIOAuth', refreshAction: 'refreshOpenAIOAuthToken', disconnectAction: 'disconnectOpenAIOAuth', statusAction: 'refreshOpenAIOAuthStatus' },
+  { id: 'xai-oauth', label: 'xAI Grok (SuperGrok login)', icon: 'zap', blurb: 'Sign in with SuperGrok or X Premium+ to use Grok without a console API key.', connectLabel: 'Connect SuperGrok account', connectAction: 'connectXaiOAuth', refreshAction: 'refreshXaiOAuthToken', disconnectAction: 'disconnectXaiOAuth', statusAction: 'refreshXaiOAuthStatus' },
 ];
 
 function loadAiProviderLogins() {
@@ -570,26 +571,33 @@ function loadAiProviderLogins() {
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${p.blurb}</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button id="oauthConnect_${p.id}" data-action="connectOpenAIOAuth"
-          style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Connect ChatGPT account</button>
-        <button id="oauthRefresh_${p.id}" data-action="refreshOpenAIOAuthToken"
+        <button id="oauthConnect_${p.id}" data-action="${p.connectAction}"
+          style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">${p.connectLabel}</button>
+        <button id="oauthRefresh_${p.id}" data-action="${p.refreshAction}"
           title="Renew the login token without reconnecting"
           style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Refresh token</button>
-        <button id="oauthDisconnect_${p.id}" data-action="disconnectOpenAIOAuth"
+        <button id="oauthDisconnect_${p.id}" data-action="${p.disconnectAction}"
           style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Disconnect</button>
-        <button data-action="refreshOpenAIOAuthStatus"
+        <button data-action="${p.statusAction}"
           style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">Check status</button>
       </div>
       <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px">Checking…</div>
+      ${p.id === 'openai-oauth' ? `
       <div id="providerPaste_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">If the ChatGPT page ended on a "could not connect" screen (URL starts with <code>http://localhost:1455/auth/callback?code=…</code>), paste that full URL here.</div>
         <input type="text" id="providerPasteInput_${p.id}" placeholder="http://localhost:1455/auth/callback?code=…"
           style="width:100%;box-sizing:border-box;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px">
         <div id="providerPasteMsg_${p.id}" style="font-size:11px;color:var(--red,#e05c5c);margin-top:6px"></div>
-      </div>
+      </div>` : `
+      <div id="providerDevice_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Open the verification link, sign in with SuperGrok / X Premium+, then approve access. Waiting for approval…</div>
+        <div id="providerDeviceCode_${p.id}" style="font-family:monospace;font-size:16px;font-weight:700;letter-spacing:0.08em;color:var(--text);margin-bottom:6px"></div>
+        <a id="providerDeviceLink_${p.id}" href="#" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent)">Open verification page</a>
+      </div>`}
     </div>`).join('');
   if (window.lucide?.createIcons) try { window.lucide.createIcons(); } catch {}
   refreshOpenAIOAuthStatus().catch(() => {});
+  refreshXaiOAuthStatus().catch(() => {});
 }
 
 async function disconnectOpenAIOAuth() {
@@ -688,6 +696,176 @@ async function refreshOpenAIOAuthToken() {
   }
 }
 
+// ── xAI SuperGrok OAuth (device code) ───────────────────────────────────────
+let _xaiOAuthPollTimer = null;
+
+function showXaiDevicePanel(userCode, verificationUriComplete) {
+  const box = document.getElementById('providerDevice_xai-oauth');
+  const codeEl = document.getElementById('providerDeviceCode_xai-oauth');
+  const linkEl = document.getElementById('providerDeviceLink_xai-oauth');
+  if (box) box.style.display = 'block';
+  if (codeEl) codeEl.textContent = userCode || '';
+  if (linkEl && verificationUriComplete) {
+    linkEl.href = verificationUriComplete;
+    linkEl.style.display = '';
+  }
+}
+
+function hideXaiDevicePanel() {
+  const box = document.getElementById('providerDevice_xai-oauth');
+  if (box) box.style.display = 'none';
+}
+
+async function connectXaiOAuth() {
+  try {
+    const res = await fetch('/api/oauth/xai/connect');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data.error || 'Failed to start SuperGrok authorization.');
+      return;
+    }
+    showXaiDevicePanel(data.userCode, data.verificationUriComplete);
+    if (data.verificationUriComplete) {
+      window.open(data.verificationUriComplete, '_blank', 'noopener');
+    }
+    const statusBox = document.getElementById('providerStatus_xai-oauth');
+    if (statusBox) {
+      statusBox.textContent = `Waiting for approval… code ${data.userCode || ''}`.trim();
+    }
+    // Server polls xAI in the background; we just watch /status until connected.
+    if (_xaiOAuthPollTimer) clearInterval(_xaiOAuthPollTimer);
+    let tries = 0;
+    _xaiOAuthPollTimer = setInterval(async () => {
+      if (++tries > 120) { // ~10 min at 5s
+        clearInterval(_xaiOAuthPollTimer);
+        _xaiOAuthPollTimer = null;
+        return;
+      }
+      try {
+        const s = await fetch('/api/oauth/xai/status').then(r => r.json());
+        if (s.connected) {
+          clearInterval(_xaiOAuthPollTimer);
+          _xaiOAuthPollTimer = null;
+          hideXaiDevicePanel();
+          if (typeof showToast === 'function') showToast('SuperGrok account connected', 'success');
+          refreshXaiOAuthStatus();
+          return;
+        }
+        if (s.pendingError) {
+          clearInterval(_xaiOAuthPollTimer);
+          _xaiOAuthPollTimer = null;
+          const box = document.getElementById('providerStatus_xai-oauth');
+          if (box) box.textContent = s.pendingError;
+        } else if (s.pending && s.userCode) {
+          showXaiDevicePanel(s.userCode, s.verificationUriComplete);
+        }
+      } catch { /* keep polling */ }
+    }, 5000);
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+async function disconnectXaiOAuth() {
+  if (!confirm('Disconnect your SuperGrok account? You will need to reconnect to use Grok OAuth models.')) return;
+  const box = document.getElementById('providerStatus_xai-oauth');
+  if (box) box.textContent = 'Disconnecting…';
+  try {
+    const r = await fetch('/api/oauth/xai', { method: 'DELETE' });
+    if (!r.ok) {
+      if (box) box.textContent = `Disconnect failed (${r.status}).`;
+      return;
+    }
+    hideXaiDevicePanel();
+    await refreshXaiOAuthStatus();
+  } catch (e) {
+    if (box) box.textContent = `Disconnect failed: ${e.message}`;
+  }
+}
+
+function formatXaiOAuthConnectionStatus(status, formatDate = value => new Date(value).toLocaleDateString()) {
+  const s = status && typeof status === 'object' ? status : {};
+  const who = s.email || s.name || null;
+  const whoPart = who ? ` · ${who}` : '';
+  const hasExpiry = s.expiresAt !== null && s.expiresAt !== undefined && s.expiresAt !== '';
+  const expiryDate = hasExpiry ? formatDate(s.expiresAt) : '';
+  if (s.autoRenews === true) {
+    return {
+      text: `Connected${whoPart} · auto-renews.`,
+      title: hasExpiry ? `Access token expires ${expiryDate} (refreshed automatically).` : 'Connected with refresh token.',
+    };
+  }
+  if (hasExpiry) {
+    return { text: `Connected${whoPart} · expires ${expiryDate}.`, title: '' };
+  }
+  return { text: `Connected${whoPart}.`, title: '' };
+}
+
+async function refreshXaiOAuthStatus() {
+  const box = document.getElementById('providerStatus_xai-oauth');
+  if (!box) return;
+  const connectBtn = document.getElementById('oauthConnect_xai-oauth');
+  const disconnectBtn = document.getElementById('oauthDisconnect_xai-oauth');
+  const refreshBtn = document.getElementById('oauthRefresh_xai-oauth');
+  try {
+    const s = await fetch('/api/oauth/xai/status').then(r => r.json());
+    if (s.connected) {
+      const rendered = formatXaiOAuthConnectionStatus(s);
+      box.textContent = rendered.text;
+      box.title = rendered.title || '';
+      if (connectBtn) connectBtn.style.display = 'none';
+      if (disconnectBtn) disconnectBtn.style.display = '';
+      if (refreshBtn) refreshBtn.style.display = '';
+      hideXaiDevicePanel();
+      loadCompatProviderModels('xai-oauth').catch(() => {});
+    } else if (s.pending) {
+      box.textContent = `Waiting for approval… code ${s.userCode || ''}`.trim();
+      box.title = '';
+      showXaiDevicePanel(s.userCode, s.verificationUriComplete);
+      if (connectBtn) connectBtn.style.display = '';
+      if (disconnectBtn) disconnectBtn.style.display = 'none';
+      if (refreshBtn) refreshBtn.style.display = 'none';
+    } else {
+      box.textContent = s.pendingError
+        ? s.pendingError
+        : 'Not connected. Click Connect to sign in with SuperGrok / X Premium+.';
+      box.title = '';
+      if (connectBtn) connectBtn.style.display = '';
+      if (disconnectBtn) disconnectBtn.style.display = 'none';
+      if (refreshBtn) refreshBtn.style.display = 'none';
+    }
+  } catch {
+    box.textContent = 'Status check failed.';
+    box.title = '';
+    if (connectBtn) connectBtn.style.display = '';
+    if (disconnectBtn) disconnectBtn.style.display = 'none';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+  }
+}
+
+async function refreshXaiOAuthToken() {
+  const box = document.getElementById('providerStatus_xai-oauth');
+  const btn = document.getElementById('oauthRefresh_xai-oauth');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  if (box) box.textContent = 'Refreshing login token…';
+  try {
+    const res = await fetch('/api/oauth/xai/refresh', { method: 'POST' });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok) {
+      if (typeof showToast === 'function') showToast('SuperGrok login token refreshed', 'success');
+    } else if (d.needsReconnect) {
+      if (typeof showToast === 'function') showToast(d.error || 'Refresh failed — please reconnect.', 'error');
+    } else {
+      if (typeof showToast === 'function') showToast(d.error || 'Refresh failed.', 'error');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') showToast(`Refresh failed: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh token'; }
+    refreshXaiOAuthStatus().catch(() => {});
+  }
+}
+
 async function disconnectGoogle(service) {
   const label = service === 'gcal' ? 'Google Calendar' : 'Gmail';
   if (!confirm(`Disconnect ${label}? You will need to reconnect to use it again.`)) return;
@@ -714,6 +892,7 @@ function renderVisionModelSelect(currentProvider, currentModel) {
     if (m.provider === 'lmstudio') return 'LM Studio (local)';
     if (m.provider === 'anthropic')return 'Anthropic';
     if (m.provider === 'openai-oauth') return 'ChatGPT (OAuth)';
+    if (m.provider === 'xai-oauth') return 'Grok (SuperGrok)';
     if (m.provider === 'openai')   return 'OpenAI';
     if (m.provider === 'openrouter') return 'OpenRouter';
     if (m.provider === 'fireworks') return 'Fireworks';
@@ -828,7 +1007,8 @@ let _providerKeyStatus = {};
 // odd one out — it uses an OAuth connect flow rather than an API-key input.
 const COMPAT_BUILTIN_META = {
   openai:        { icon: 'sparkles', placeholder: 'sk-…',    blurb: 'API key for OpenAI models (GPT-5, GPT-4.1, o-series, etc.).' },
-  'openai-oauth':{ icon: 'log-in',   connectMode: 'oauth',   blurb: 'Sign in with your ChatGPT Plus/Pro account to use Codex models via OAuth.' },
+  'openai-oauth':{ icon: 'log-in',   connectMode: 'oauth',   oauthKind: 'openai', blurb: 'Sign in with your ChatGPT Plus/Pro account to use Codex models via OAuth.' },
+  'xai-oauth':   { icon: 'zap',      connectMode: 'oauth',   oauthKind: 'xai',    blurb: 'Sign in with SuperGrok or X Premium+ to use Grok without a console API key. Keep the API-key Grok card for pay-as-you-go billing.' },
   gemini:        { icon: 'gem',      placeholder: 'AIza…',   blurb: 'API key for Google Gemini via the OpenAI-compat endpoint.' },
   deepseek:      { icon: 'brain',    placeholder: 'sk-…',    blurb: 'API key for DeepSeek (deepseek-chat, deepseek-reasoner).' },
   mistral:       { icon: 'wind',     placeholder: 'API key', blurb: 'API key for Mistral AI (Mistral Large, Codestral, etc.).' },
@@ -860,6 +1040,15 @@ const COMPAT_VIRTUAL_PROVIDERS = [
     keyField: null,
     source: 'virtual',
     insertAfter: 'openai',
+  },
+  {
+    id: 'xai-oauth',
+    displayName: 'xAI Grok (SuperGrok login)',
+    keyField: null,
+    source: 'virtual',
+    // Sit near the API-key Grok card conceptually; if "grok" isn't in the
+    // compat list (it's a dedicated card), append after openai-oauth.
+    insertAfter: 'openai-oauth',
   },
 ];
 
@@ -897,6 +1086,7 @@ function buildCompatProviderMeta(compatProviders) {
       icon: built.icon || 'globe',
       placeholder: built.placeholder || 'API key',
       connectMode: built.connectMode || null,
+      oauthKind: built.oauthKind || null,
       blurb: built.blurb || `Custom OpenAI-compatible provider added via OE Admin (${p.baseUrl}).`,
     };
   });
@@ -919,29 +1109,45 @@ function renderCompatProviderCards(cfg) {
         <label class="provider-toggle"><input type="checkbox" id="providerToggle_${p.id}" ${cfg.enabledProviders?.[p.id] !== false ? 'checked' : ''} data-change-action="toggleProvider" data-change-args='${JSON.stringify([p.id, "$checked"]).replace(/'/g, "&#39;")}'><span class="provider-toggle-slider"></span></label>
       </div>`;
     if (p.connectMode === 'oauth') {
+      const isXai = p.oauthKind === 'xai' || p.id === 'xai-oauth';
+      const connectAction = isXai ? 'connectXaiOAuth' : 'connectOpenAIOAuth';
+      const disconnectAction = isXai ? 'disconnectXaiOAuth' : 'disconnectOpenAIOAuth';
+      const statusAction = isXai ? 'refreshXaiOAuthStatus' : 'refreshOpenAIOAuthStatus';
+      const refreshAction = isXai ? 'refreshXaiOAuthToken' : 'refreshOpenAIOAuthToken';
+      const connectLabel = isXai ? 'Connect SuperGrok account' : 'Connect ChatGPT account';
+      const extra = isXai ? `
+            <div id="providerDevice_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Open the verification link, sign in with SuperGrok / X Premium+, then approve access. Waiting for approval…</div>
+              <div id="providerDeviceCode_${p.id}" style="font-family:monospace;font-size:16px;font-weight:700;letter-spacing:0.08em;color:var(--text);margin-bottom:6px"></div>
+              <a id="providerDeviceLink_${p.id}" href="#" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent)">Open verification page</a>
+            </div>` : `
+            <div id="providerPaste_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">If the ChatGPT page ended on a "could not connect" screen (URL starts with <code>http://localhost:1455/auth/callback?code=…</code>), paste that full URL here.</div>
+              <input type="text" id="providerPasteInput_${p.id}" placeholder="http://localhost:1455/auth/callback?code=…"
+                style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;font-family:monospace">
+              <div id="providerPasteMsg_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+            </div>`;
       return `
         <div class="provider-card" style="margin-bottom:16px" id="providerCard_${p.id}">
           ${header}
           <div id="providerBody_${p.id}">
             <div class="settings-section-desc" style="margin-bottom:8px">${p.blurb}</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button id="oauthConnect_${p.id}" data-action="connectOpenAIOAuth"
-                style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">Connect ChatGPT account</button>
-              <button id="oauthDisconnect_${p.id}" data-action="disconnectOpenAIOAuth"
+              <button id="oauthConnect_${p.id}" data-action="${connectAction}"
+                style="background:var(--accent);border:none;color:#fff;border-radius:8px;padding:8px 14px;font-size:12px;cursor:pointer;font-weight:600">${connectLabel}</button>
+              <button id="oauthRefresh_${p.id}" data-action="${refreshAction}"
+                title="Renew the login token without reconnecting"
+                style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Refresh token</button>
+              <button id="oauthDisconnect_${p.id}" data-action="${disconnectAction}"
                 style="display:none;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Disconnect</button>
-              <button data-action="refreshOpenAIOAuthStatus"
+              <button data-action="${statusAction}"
                 style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Check status</button>
               <button data-action="loadCompatProviderModels" data-args='${JSON.stringify([p.id, true]).replace(/'/g, "&#39;")}'
                 style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Fetch models</button>
             </div>
             <div id="providerStatus_${p.id}" style="font-size:11px;color:var(--muted);margin-top:4px">Checking…</div>
             <div id="providerModels_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px;max-height:140px;overflow-y:auto"></div>
-            <div id="providerPaste_${p.id}" style="display:none;margin-top:10px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
-              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">If the ChatGPT page ended on a "could not connect" screen (URL starts with <code>http://localhost:1455/auth/callback?code=…</code>), paste that full URL here.</div>
-              <input type="text" id="providerPasteInput_${p.id}" placeholder="http://localhost:1455/auth/callback?code=…"
-                style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;font-family:monospace">
-              <div id="providerPasteMsg_${p.id}" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
-            </div>
+            ${extra}
           </div>
         </div>`;
     }
@@ -965,7 +1171,9 @@ function renderCompatProviderCards(cfg) {
   }).join('');
   // Kick off an OAuth status refresh for every oauth-mode provider
   for (const p of COMPAT_PROVIDER_META) {
-    if (p.connectMode === 'oauth') refreshOpenAIOAuthStatus().catch(() => {});
+    if (p.connectMode !== 'oauth') continue;
+    if (p.oauthKind === 'xai' || p.id === 'xai-oauth') refreshXaiOAuthStatus().catch(() => {});
+    else refreshOpenAIOAuthStatus().catch(() => {});
   }
   if (window.lucide?.createIcons) window.lucide.createIcons();
 }
@@ -1227,10 +1435,12 @@ async function loadProviderConfig() {
     const _isPrivCfg = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
     if (_isPrivCfg) renderCompatProviderCards(cfg);
     for (const p of COMPAT_PROVIDER_META) {
-      // openai-oauth has a static model list (no API key needed) — always load it
-      // so admins can whitelist Codex models for users before anyone has connected,
+      // OAuth providers have no API key — always load (live or fallback catalog)
+      // so admins can whitelist models for users before anyone has connected,
       // and so users granted the OAuth provider see those models in pickers.
-      if (cfg[`${p.id}KeySet`] || p.id === 'openai-oauth') loadCompatProviderModels(p.id).catch(() => {});
+      if (cfg[`${p.id}KeySet`] || p.id === 'openai-oauth' || p.id === 'xai-oauth') {
+        loadCompatProviderModels(p.id).catch(() => {});
+      }
     }
 
     if (cfg.openrouterKeySet && typeof loadOpenRouterModels === 'function') loadOpenRouterModels().then(() => { renderModelBrowser?.(); renderAgentModelRows?.(); refreshSkillExecutionModelSelects?.(); });

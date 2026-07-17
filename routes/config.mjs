@@ -23,6 +23,7 @@ import {
 import { ambientFilePath } from '../lib/routines.mjs';
 import { supportsImageGeneration, supportsVision } from '../lib/model-capabilities.mjs';
 import { listOpenAIOAuthModels } from '../lib/openai-codex-models.mjs';
+import { listXaiOAuthModels } from '../lib/xai-oauth-models.mjs';
 import {
   probePiperAvailable,
   probeKittenttsAvailable,
@@ -1138,6 +1139,12 @@ export async function handle(req, res) {
     // when connected; fall back inside the helper for disconnected setup/admin UI.
     if (prov === 'openai-oauth') {
       const annotated = await listOpenAIOAuthModels(authId, { refresh: urlObj.searchParams.get('refresh') === '1' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(annotated));
+      return true;
+    }
+    if (prov === 'xai-oauth') {
+      const annotated = await listXaiOAuthModels(authId, { refresh: urlObj.searchParams.get('refresh') === '1' });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(annotated));
       return true;

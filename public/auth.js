@@ -380,7 +380,7 @@ function _parseSkillExecutionModelValue(value) {
 
 function _skillExecutionProviderLabel(provider) {
   const labels = {
-    anthropic: 'Anthropic', openai: 'OpenAI', 'openai-oauth': 'OpenAI (ChatGPT login)',
+    anthropic: 'Anthropic', openai: 'OpenAI', 'openai-oauth': 'OpenAI (ChatGPT login)', 'xai-oauth': 'xAI Grok (SuperGrok)',
     gemini: 'Google Gemini', deepseek: 'DeepSeek', mistral: 'Mistral AI', groq: 'Groq',
     together: 'Together AI', perplexity: 'Perplexity', ollama: 'Ollama',
     lmstudio: 'LM Studio', grok: 'xAI Grok', xai: 'xAI Grok',

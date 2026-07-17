@@ -54,6 +54,7 @@ async function loadDashboard() {
                 lmstudio: 'LM Studio',
                 openai: 'OpenAI',
                 'openai-oauth': 'OpenAI (ChatGPT login)',
+                'xai-oauth': 'xAI Grok (SuperGrok)',
                 gemini: 'Google Gemini',
                 deepseek: 'DeepSeek',
                 groq: 'Groq',

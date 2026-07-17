@@ -14,7 +14,7 @@ OpenEnsemble doesn't ship with a default model — you bring your own. Providers
 |---|---|---|
 | **Anthropic** (Claude) | Reasoning, tool use, coding | API key from console.anthropic.com |
 | **OpenAI** | All-around, vision | API key, *or* sign in with your ChatGPT account (uses your Plus/Pro entitlements) |
-| **xAI Grok** | Real-time web context, X integrations | API key from x.ai |
+| **xAI Grok** | Real-time web context, coding, X tools | API key from console.x.ai, *or* sign in with SuperGrok / X Premium+ (subscription entitlements, no console key) |
 | **Gemini** (Google) | Long context, vision | API key from aistudio.google.com |
 | **DeepSeek** | Cheap reasoning models | API key |
 | **Mistral** | Open-weight family, EU host | API key |
@@ -76,6 +76,28 @@ The variables OE recognises:
 - **Brave Search** — needed by the `web` skill. API key from brave.com/search/api.
 - **Vision** — set `OE_VISION_PROVIDER` and `OE_VISION_MODEL` if you want a specific model used for image analysis (`OE_VISION_PROVIDER=openai`, `OE_VISION_MODEL=gpt-4o`, etc.). Easier path: pick from the dropdown under **Settings → Profile → Vision model**, which filters every enabled provider's catalog down to models that actually accept image input. The same `supportsVision` annotation flows through every model-list endpoint, so future agent-side vision pickers reuse it.
 - **Text-to-Speech** — toggleable in **Settings → Providers**, used by the Tutor and read-aloud features.
+
+## Subscription logins (ChatGPT / SuperGrok)
+
+Some providers let you **sign in with a consumer subscription** instead of (or in addition to) a console API key:
+
+| Login | Where | Uses |
+|---|---|---|
+| **OpenAI (ChatGPT login)** | Settings → Providers | Your ChatGPT Plus/Pro entitlements via Codex OAuth |
+| **xAI Grok (SuperGrok login)** | Settings → Providers | SuperGrok or X Premium+ via device-code OAuth |
+
+How SuperGrok login works:
+
+1. Click **Connect SuperGrok account**.
+2. OE shows a short code and opens (or links to) the xAI verification page.
+3. Sign in with the account that has SuperGrok or X Premium+, approve access.
+4. OE stores a per-user refreshable token and lists Grok models under **xAI Grok (SuperGrok)**.
+
+Notes:
+
+- SuperGrok OAuth and the console **API key** are separate paths. Keep the API-key card for pay-as-you-go; use SuperGrok login to spend subscription quota.
+- xAI decides which subscription tiers can use the OAuth API surface. If login succeeds but chat returns 403/402, fall back to a console API key or check your plan at [x.ai/grok](https://x.ai/grok).
+- Non-admin users need an admin to grant **OAuth logins** for their account (same grant list as ChatGPT login).
 
 ## Choosing what to enable first
 
