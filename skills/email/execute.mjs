@@ -46,74 +46,101 @@ function requestedAccount(args = {}) {
 
 // ── Gmail compose with attachments (direct API, no CLI) ───────────────────────
 
+/** Build one RFC 2046 MIME message with alternatives nested under mixed. */
+export function buildGmailRawMessage(args, attachments = [], {
+  boundary = `boundary_${Date.now().toString(36)}`,
+  alternativeBoundary = `${boundary}_alternative`,
+} = {}) {
+  const plainBody = String(args?.body ?? '');
+  const htmlBody = typeof args?.html_body === 'string' && args.html_body
+    ? args.html_body
+    : null;
+  const headers = [
+    `To: ${args?.to ?? ''}`,
+    `Subject: ${args?.subject ?? ''}`,
+    'MIME-Version: 1.0',
+  ];
+
+  if (!attachments.length) {
+    if (!htmlBody) {
+      return [...headers, 'Content-Type: text/plain; charset=utf-8', '', plainBody].join('\r\n');
+    }
+    return [
+      ...headers,
+      `Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`,
+      '',
+      `--${alternativeBoundary}`,
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      plainBody,
+      '',
+      `--${alternativeBoundary}`,
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      htmlBody,
+      '',
+      `--${alternativeBoundary}--`,
+    ].join('\r\n');
+  }
+
+  const parts = [];
+  if (htmlBody) {
+    parts.push(
+      `--${boundary}`,
+      `Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`,
+      '',
+      `--${alternativeBoundary}`,
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      plainBody,
+      '',
+      `--${alternativeBoundary}`,
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      htmlBody,
+      '',
+      `--${alternativeBoundary}--`,
+      '',
+    );
+  } else {
+    parts.push(
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      plainBody,
+      '',
+    );
+  }
+  for (const att of attachments) {
+    const b64 = att.data.toString('base64');
+    parts.push(
+      `--${boundary}`,
+      `Content-Type: ${att.mimeType}; name="${att.filename}"`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; filename="${att.filename}"`,
+      '',
+      (b64.match(/.{1,76}/g) || []).join('\r\n'),
+      '',
+    );
+  }
+  parts.push(`--${boundary}--`);
+  return [
+    ...headers,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    '',
+    ...parts,
+  ].join('\r\n');
+}
+
 export async function gmailComposeWithAttachments(args, userId, accountId, markDispatchStarted = () => {}) {
   const { getAccessToken } = await import('../../lib/google-auth.mjs');
-  const token    = await getAccessToken('gmail', userId, accountId);
-  const boundary = `boundary_${Date.now().toString(36)}`;
+  const token = await getAccessToken('gmail', userId, accountId);
 
   const { attachments, errors } = loadEmailAttachments(args.attachment_doc_ids, userId);
   const resolveErr = attachmentResolutionError(args.attachment_doc_ids, errors);
   if (resolveErr) return resolveErr;
 
-  let rawEmail;
-  const htmlBody = args.html_body ?? null;
-  const bodyParts = htmlBody
-    ? [
-        `--${boundary}`,
-        `Content-Type: text/plain; charset=utf-8`,
-        ``,
-        args.body,
-        ``,
-        `--${boundary}`,
-        `Content-Type: text/html; charset=utf-8`,
-        ``,
-        htmlBody,
-        ``,
-      ]
-    : [
-        `--${boundary}`,
-        `Content-Type: text/plain; charset=utf-8`,
-        ``,
-        args.body,
-        ``,
-      ];
-
-  if (!attachments.length) {
-    rawEmail = [
-      `To: ${args.to}`,
-      `Subject: ${args.subject}`,
-      `MIME-Version: 1.0`,
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-      ``,
-      ...bodyParts,
-      `--${boundary}--`,
-    ].join('\r\n');
-  } else {
-    // multipart/mixed: body part(s) + file attachments
-    const parts = [...bodyParts];
-    for (const att of attachments) {
-      const b64 = att.data.toString('base64');
-      parts.push(
-        `--${boundary}`,
-        `Content-Type: ${att.mimeType}; name="${att.filename}"`,
-        `Content-Transfer-Encoding: base64`,
-        `Content-Disposition: attachment; filename="${att.filename}"`,
-        ``,
-        (b64.match(/.{1,76}/g) || []).join('\r\n'),
-        ``,
-      );
-    }
-    parts.push(`--${boundary}--`);
-
-    rawEmail = [
-      `To: ${args.to}`,
-      `Subject: ${args.subject}`,
-      `MIME-Version: 1.0`,
-      `Content-Type: multipart/mixed; boundary="${boundary}"`,
-      ``,
-      ...parts,
-    ].join('\r\n');
-  }
+  const rawEmail = buildGmailRawMessage(args, attachments);
 
   const encoded = Buffer.from(rawEmail).toString('base64url');
   markDispatchStarted();

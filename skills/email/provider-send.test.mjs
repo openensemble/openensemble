@@ -6,7 +6,7 @@ vi.mock('../../lib/google-auth.mjs', () => ({
   getAccessToken: mocks.getAccessToken,
 }));
 
-import { gmailComposeWithAttachments, gmailReply } from './execute.mjs';
+import { buildGmailRawMessage, gmailComposeWithAttachments, gmailReply } from './execute.mjs';
 
 beforeEach(() => {
   mocks.getAccessToken.mockReset();
@@ -15,6 +15,47 @@ beforeEach(() => {
 });
 
 describe('Gmail outbound dispatch boundary', () => {
+  it('nests plain and HTML alternatives inside mixed mail so clients render the body once', () => {
+    const raw = buildGmailRawMessage({
+      to: 'person@example.test',
+      subject: 'Cat and weather',
+      body: 'Plain weather body',
+      html_body: '<p>HTML weather body</p>',
+    }, [{
+      filename: 'cat.png',
+      mimeType: 'image/png',
+      data: Buffer.from('cat image bytes'),
+    }], {
+      boundary: 'outer_test',
+      alternativeBoundary: 'alternative_test',
+    });
+
+    expect(raw).toContain('Content-Type: multipart/mixed; boundary="outer_test"');
+    expect(raw).toContain([
+      '--outer_test',
+      'Content-Type: multipart/alternative; boundary="alternative_test"',
+      '',
+      '--alternative_test',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'Plain weather body',
+      '',
+      '--alternative_test',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      '<p>HTML weather body</p>',
+      '',
+      '--alternative_test--',
+      '',
+      '--outer_test',
+      'Content-Type: image/png; name="cat.png"',
+    ].join('\r\n'));
+    expect(raw).not.toContain('--outer_test\r\nContent-Type: text/plain');
+    expect(raw).not.toContain('--outer_test\r\nContent-Type: text/html');
+    expect(raw.match(/Plain weather body/g)).toHaveLength(1);
+    expect(raw.match(/HTML weather body/g)).toHaveLength(1);
+  });
+
   it('marks immediately before the compose send request', async () => {
     const events = [];
     const fetch = vi.fn(async () => {
