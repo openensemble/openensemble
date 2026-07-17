@@ -2334,6 +2334,7 @@ export function registerSyncDelegation({ taskId, userId, agentId, agentName, age
  * @param {object} [opts]
  * @param {(tokenText:string)=>void} [opts.onProgress] - per-token callback (for UI streaming)
  * @param {string} [opts.agentEmoji] - icon (default 🔎)
+ * @param {AbortSignal} [opts.signal] - owner cancellation propagated into the ephemeral turn
  * @returns {Promise<string>} final concatenated text
  */
 export async function dispatchEphemeral(agent, task, userId, opts = {}) {

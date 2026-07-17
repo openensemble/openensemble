@@ -10,9 +10,24 @@ import { isUrlSafe as _isUrlSafe } from '../../lib/url-guard.mjs';
 import { saveResearchVersion, researchAudience } from '../../lib/doc-store.mjs';
 import { BASE_DIR } from '../../lib/paths.mjs';
 import { broadcastToUsers } from '../../routes/_helpers/broadcast.mjs';
+import { abortError, isAbortError, raceWithAbort } from '../../lib/abort-utils.mjs';
 
 const CFG_PATH = path.join(BASE_DIR, 'config.json');
 const USERS_DIR = path.join(BASE_DIR, 'users');
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError(signal, 'Deep research cancelled');
+}
+
+function rethrowCancellation(error, signal) {
+  if (signal?.aborted) throw abortError(signal, 'Deep research cancelled');
+  if (isAbortError(error)) throw error;
+}
+
+function requestSignal(ownerSignal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return ownerSignal ? AbortSignal.any([ownerSignal, timeout]) : timeout;
+}
 
 // ── Child safety ─────────────────────────────────────────────────────────────
 const BLOCKED_TOPICS_RE = /\b(porn(?:ography)?|xxx|hentai|nsfw|sex\s*(?:positions?|acts?|toys?|stories|videos?)|explicit\s*(?:content|images?|videos?)|nude(?:s|ity)?|naked|erotic(?:a|ism)?|gore|snuff|torture\s*(?:porn|videos?)|self[.\-\s]?harm\s*(?:method|how|ways?)|suicide\s*(?:method|how|ways?)|how\s*to\s*(?:kill|harm)\s*(?:yourself|myself|someone)|child\s*(?:porn|exploitation|abuse\s*images?)|bestiality|incest)\b/i;
@@ -54,29 +69,64 @@ function getBraveKey() {
 const BRAVE_MAX_CONCURRENT = 4;
 let _braveActive = 0;
 const _braveWaiters = [];
-async function acquireBraveSlot() {
+async function acquireBraveSlot(signal = null) {
+  throwIfAborted(signal);
   if (_braveActive < BRAVE_MAX_CONCURRENT) { _braveActive++; return; }
-  await new Promise(resolve => _braveWaiters.push(resolve));
-  _braveActive++;
+  await new Promise((resolve, reject) => {
+    let queued = true;
+    const cleanup = () => signal?.removeEventListener?.('abort', onAbort);
+    const waiter = {
+      grant() {
+        if (!queued) return false;
+        queued = false;
+        cleanup();
+        // releaseBraveSlot transfers the active permit directly. Keeping the
+        // counter unchanged here avoids a transient undercount that could let
+        // more than BRAVE_MAX_CONCURRENT requests through.
+        resolve();
+        return true;
+      },
+    };
+    const onAbort = () => {
+      if (!queued) return;
+      const index = _braveWaiters.indexOf(waiter);
+      if (index === -1) return;
+      _braveWaiters.splice(index, 1);
+      queued = false;
+      cleanup();
+      reject(abortError(signal, 'Deep research search cancelled'));
+    };
+    _braveWaiters.push(waiter);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    // Close the check/listener race for an owner cancelled while it queued.
+    if (signal?.aborted) onAbort();
+  });
 }
 function releaseBraveSlot() {
+  let next;
+  while ((next = _braveWaiters.shift())) {
+    if (next.grant()) return;
+  }
   _braveActive--;
-  const next = _braveWaiters.shift();
-  if (next) next();
 }
 
-async function braveSearch(query, count = 5) {
+async function braveSearch(query, count = 5, signal = null) {
+  throwIfAborted(signal);
   const key = getBraveKey();
   if (!key) return { error: 'Brave API key not configured' };
   const n = Math.min(count || 5, 10);
   const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${n}`;
-  await acquireBraveSlot();
+  await acquireBraveSlot(signal);
   try {
-    const res = await fetch(url, {
+    throwIfAborted(signal);
+    const res = await raceWithAbort(fetch(url, {
       headers: { 'Accept': 'application/json', 'X-Subscription-Token': key },
-    });
+      signal: signal ?? undefined,
+    }), signal, 'Deep research search cancelled');
+    throwIfAborted(signal);
     if (!res.ok) return { error: `Brave Search error ${res.status}` };
-    const data = await res.json();
+    const data = await raceWithAbort(res.json(), signal, 'Deep research search cancelled');
+    throwIfAborted(signal);
     return {
       results: (data.web?.results ?? []).map(r => ({
         title: r.title,
@@ -85,38 +135,45 @@ async function braveSearch(query, count = 5) {
       })),
     };
   } catch (e) {
+    rethrowCancellation(e, signal);
     return { error: `Search error: ${e.message}` };
   } finally {
     releaseBraveSlot();
   }
 }
 
-async function fetchPageText(url, maxChars = 4000) {
+async function fetchPageText(url, maxChars = 4000, signal = null) {
+  throwIfAborted(signal);
   try {
-    const safety = await _isUrlSafe(url);
+    const safety = await raceWithAbort(_isUrlSafe(url), signal, 'Deep research fetch cancelled');
+    throwIfAborted(signal);
     if (!safety.ok) {
       console.warn('[deep_research] SSRF blocked:', url, '-', safety.reason);
       return null;
     }
-    const res = await fetch(url, {
+    const fetchSignal = requestSignal(signal, 10_000);
+    const res = await raceWithAbort(fetch(url, {
       redirect: 'follow',
-      signal: AbortSignal.timeout(10000),
+      signal: fetchSignal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
-    });
+    }), fetchSignal, 'Deep research fetch timed out');
+    throwIfAborted(signal);
     if (!res.ok) return null;
     // Re-check after redirects: the final URL may resolve to a private IP
     // even if the origin URL didn't (DNS rebinding / redirect-based SSRF).
     if (res.url && res.url !== url) {
-      const redirectSafety = await _isUrlSafe(res.url);
+      const redirectSafety = await raceWithAbort(_isUrlSafe(res.url), signal, 'Deep research fetch cancelled');
+      throwIfAborted(signal);
       if (!redirectSafety.ok) {
         console.warn('[deep_research] SSRF blocked after redirect:', res.url, '-', redirectSafety.reason);
         return null;
       }
     }
-    const text = await res.text();
+    const text = await raceWithAbort(res.text(), fetchSignal, 'Deep research fetch timed out');
+    throwIfAborted(signal);
     const stripped = text
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -125,7 +182,10 @@ async function fetchPageText(url, maxChars = 4000) {
       .replace(/&gt;/g, '>').replace(/&quot;/g, '"')
       .replace(/\s{2,}/g, ' ').trim();
     return stripped.slice(0, maxChars);
-  } catch { return null; }
+  } catch (e) {
+    rethrowCancellation(e, signal);
+    return null;
+  }
 }
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -156,7 +216,8 @@ function generateSubQueries(topic, depth) {
 }
 
 // ── research_search (generator — streams progress to UI) ─────────────────────
-async function* execResearchSearch(topic, depth = 'standard', urls = [], userId) {
+async function* execResearchSearch(topic, depth = 'standard', urls = [], userId, signal = null) {
+  throwIfAborted(signal);
   // Child safety check
   const blocked = checkChildSafety(userId, topic);
   if (blocked) { yield { type: 'result', text: blocked }; return; }
@@ -169,11 +230,14 @@ async function* execResearchSearch(topic, depth = 'standard', urls = [], userId)
   // Phase 1: Fetch user-provided URLs in parallel
   if (urls.length) {
     yield { type: 'token', text: `\n🔗 Fetching ${urls.length} provided URL${urls.length > 1 ? 's' : ''} in parallel...\n` };
-    const fetched = await Promise.allSettled(
-      urls.map(url => fetchPageText(url, 4000).then(text => ({ url, text })))
-    );
+    const fetched = await raceWithAbort(Promise.allSettled(
+      urls.map(url => fetchPageText(url, 4000, signal).then(text => ({ url, text })))
+    ), signal, 'Deep research fetch cancelled');
+    throwIfAborted(signal);
     for (const r of fetched) {
+      throwIfAborted(signal);
       if (r.status !== 'fulfilled') {
+        rethrowCancellation(r.reason, signal);
         yield { type: 'token', text: `  ✗ fetch error: ${r.reason}\n` };
         continue;
       }
@@ -190,12 +254,16 @@ async function* execResearchSearch(topic, depth = 'standard', urls = [], userId)
   }
 
   // Phase 2: Run search queries in parallel
+  throwIfAborted(signal);
   yield { type: 'token', text: `\n🔍 Searching in parallel (${depth} depth — ${queries.length} queries)...\n` };
-  const searchOutcomes = await Promise.allSettled(
-    queries.map(q => braveSearch(q, 5).then(r => ({ query: q, ...r })))
-  );
+  const searchOutcomes = await raceWithAbort(Promise.allSettled(
+    queries.map(q => braveSearch(q, 5, signal).then(r => ({ query: q, ...r })))
+  ), signal, 'Deep research search cancelled');
+  throwIfAborted(signal);
   for (const outcome of searchOutcomes) {
+    throwIfAborted(signal);
     if (outcome.status !== 'fulfilled') {
+      rethrowCancellation(outcome.reason, signal);
       allResults.push({ query: '(unknown)', error: String(outcome.reason) });
       yield { type: 'token', text: `  ⚠ query failed: ${outcome.reason}\n` };
       continue;
@@ -214,15 +282,19 @@ async function* execResearchSearch(topic, depth = 'standard', urls = [], userId)
   }
 
   // Phase 3: Deep mode — fetch top pages in parallel
+  throwIfAborted(signal);
   if (depth === 'deep') {
     const topUrls = [...seenUrls].filter(u => !fetchedPages.some(p => p.url === u)).slice(0, 5);
     if (topUrls.length) {
       yield { type: 'token', text: `\n📄 Fetching top ${topUrls.length} pages in parallel for deeper analysis...\n` };
-      const pageResults = await Promise.allSettled(
-        topUrls.map(u => fetchPageText(u, 3000).then(text => ({ url: u, text })))
-      );
+      const pageResults = await raceWithAbort(Promise.allSettled(
+        topUrls.map(u => fetchPageText(u, 3000, signal).then(text => ({ url: u, text })))
+      ), signal, 'Deep research fetch cancelled');
+      throwIfAborted(signal);
       for (const p of pageResults) {
+        throwIfAborted(signal);
         if (p.status !== 'fulfilled') {
+          rethrowCancellation(p.reason, signal);
           yield { type: 'token', text: `  ✗ fetch error: ${p.reason}\n` };
           continue;
         }
@@ -238,6 +310,7 @@ async function* execResearchSearch(topic, depth = 'standard', urls = [], userId)
     }
   }
 
+  throwIfAborted(signal);
   yield { type: 'token', text: `\n✅ Research complete — ${seenUrls.size} unique sources gathered. Synthesizing...\n\n` };
 
   // Build structured output for the model
@@ -281,6 +354,7 @@ async function* execResearchSearch(topic, depth = 'standard', urls = [], userId)
   // Cap output to prevent context blowup
   if (output.length > 20000) output = output.slice(0, 20000) + '\n\n[... output truncated for context window]';
 
+  throwIfAborted(signal);
   yield { type: 'result', text: output };
 }
 
@@ -535,11 +609,17 @@ function makeEphemeralSynthesizer(caller) {
   };
 }
 
-async function planAngles(topic, caller, userId) {
+async function planAngles(topic, caller, userId, signal = null) {
+  throwIfAborted(signal);
   const { dispatchEphemeral } = await import('../../background-tasks.mjs');
+  throwIfAborted(signal);
   const planner = makeEphemeralPlanner(caller);
   try {
-    const raw = await dispatchEphemeral(planner, `Topic: ${topic}\n\nReturn JSON.`, userId, { agentEmoji: '🧭' });
+    const raw = await dispatchEphemeral(planner, `Topic: ${topic}\n\nReturn JSON.`, userId, {
+      agentEmoji: '🧭',
+      signal,
+    });
+    throwIfAborted(signal);
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) return null;
     const parsed = JSON.parse(match[0]);
@@ -549,12 +629,14 @@ async function planAngles(topic, caller, userId) {
       .filter(a => a && typeof a.title === 'string' && typeof a.query === 'string')
       .slice(0, 7);
   } catch (e) {
+    rethrowCancellation(e, signal);
     console.warn('[deep_research_parallel] planner failed:', e.message);
     return null;
   }
 }
 
-async function* execResearchParallel(topic, depth, userId, callerAgentId) {
+async function* execResearchParallel(topic, depth, userId, callerAgentId, signal = null) {
+  throwIfAborted(signal);
   // Child safety check
   const blocked = checkChildSafety(userId, topic);
   if (blocked) { yield { type: 'result', text: blocked }; return; }
@@ -563,6 +645,7 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
   // skill executors is scoped (e.g. "user_abc_coordinator") but getAgentsForUser
   // returns agents with short ids ("coordinator"), so match on either form.
   const { getAgentsForUser, getUser } = await import('../../routes/_helpers.mjs');
+  throwIfAborted(signal);
   const agents = getAgentsForUser(userId);
   let caller =
     agents.find(a => a.id === callerAgentId) ??
@@ -578,12 +661,14 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
   // planner, workers, and synthesizer use one coherent model/effort choice.
   try {
     const { resolveValidatedSkillExecutionForTurn } = await import('../../lib/skill-execution.mjs');
-    const execution = await resolveValidatedSkillExecutionForTurn({
+    throwIfAborted(signal);
+    const execution = await raceWithAbort(resolveValidatedSkillExecutionForTurn({
       userId,
       baseAgent: caller,
       selectedSkillIds: ['deep_research'],
       allowedModels: getUser(userId)?.allowedModels ?? null,
-    });
+    }), signal, 'Deep research execution profile resolution cancelled');
+    throwIfAborted(signal);
     if (execution.applied) {
       const providerOrModelChanged = execution.effective.provider !== caller.provider
         || execution.effective.model !== caller.model;
@@ -599,48 +684,74 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
       };
     }
   } catch (error) {
+    rethrowCancellation(error, signal);
     console.warn('[deep_research_parallel] execution profile resolution failed:', error?.message || error);
   }
 
   // Phase 1: Plan
+  throwIfAborted(signal);
   yield { type: 'token', text: `\n🧭 Planning research angles for "${topic}"...\n` };
-  const angles = await planAngles(topic, caller, userId);
+  throwIfAborted(signal);
+  const angles = await planAngles(topic, caller, userId, signal);
+  throwIfAborted(signal);
 
   // Phase 2: Decide
   if (!angles || angles.length < 3) {
     yield { type: 'token', text: `Topic is narrow (${angles?.length ?? 0} angles) — falling through to single-pass research.\n\n` };
-    for await (const chunk of execResearchSearch(topic, depth ?? 'deep', [], userId)) yield chunk;
+    for await (const chunk of execResearchSearch(topic, depth ?? 'deep', [], userId, signal)) {
+      throwIfAborted(signal);
+      yield chunk;
+    }
     return;
   }
 
   yield { type: 'token', text: `\nIdentified ${angles.length} angles:\n` };
   for (const [i, a] of angles.entries()) {
+    throwIfAborted(signal);
     yield { type: 'token', text: `  ${i + 1}. ${a.title}\n` };
   }
 
   // Phase 3: Spawn workers in parallel
+  throwIfAborted(signal);
   yield { type: 'token', text: `\n🚀 Spawning ${angles.length} research workers in parallel...\n` };
-  const workerTools = await buildWorkerTools(userId);
+  throwIfAborted(signal);
+  const workerTools = await raceWithAbort(buildWorkerTools(userId), signal, 'Deep research cancelled');
+  throwIfAborted(signal);
   const { dispatchEphemeral } = await import('../../background-tasks.mjs');
+  throwIfAborted(signal);
   const workerStart = Date.now();
 
   const workerPromises = angles.map(angle => (async () => {
     const worker = makeEphemeralWorker(caller, angle, workerTools);
     try {
-      const subReport = await dispatchEphemeral(worker, angle.query, userId, { agentEmoji: '🔎' });
+      const subReport = await dispatchEphemeral(worker, angle.query, userId, {
+        agentEmoji: '🔎',
+        signal,
+      });
+      throwIfAborted(signal);
       return { angle, report: subReport, status: 'ok' };
     } catch (e) {
+      rethrowCancellation(e, signal);
       return { angle, error: e.message, status: 'err' };
     }
   })());
 
-  const settled = await Promise.allSettled(workerPromises);
+  const settled = await raceWithAbort(
+    Promise.allSettled(workerPromises),
+    signal,
+    'Deep research workers cancelled',
+  );
+  throwIfAborted(signal);
+  for (const outcome of settled) {
+    if (outcome.status === 'rejected') rethrowCancellation(outcome.reason, signal);
+  }
   const workerOutputs = settled.map((s, i) =>
     s.status === 'fulfilled' ? s.value : { angle: angles[i], error: String(s.reason), status: 'err' }
   );
 
   const workerMs = Date.now() - workerStart;
   for (const w of workerOutputs) {
+    throwIfAborted(signal);
     if (w.status === 'ok') {
       yield { type: 'token', text: `  ✓ ${w.angle.title} — ${w.report.length} chars\n` };
     } else {
@@ -650,15 +761,18 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
   yield { type: 'token', text: `\n(${workerOutputs.filter(w => w.status === 'ok').length}/${angles.length} workers succeeded in ${(workerMs / 1000).toFixed(1)}s)\n` };
 
   // Phase 4: Synthesize
+  throwIfAborted(signal);
   const successes = workerOutputs.filter(w => w.status === 'ok');
   const failures = workerOutputs.filter(w => w.status === 'err');
 
   if (successes.length < 2) {
+    throwIfAborted(signal);
     const fallback = successes.map(w => `## ${w.angle.title}\n\n${w.report}`).join('\n\n');
     yield { type: 'result', text: `Only ${successes.length} worker(s) returned — not enough for synthesis.\n\n${fallback}` };
     return;
   }
 
+  throwIfAborted(signal);
   yield { type: 'token', text: `\n✍️  Synthesizing ${successes.length} sub-reports into final document...\n` };
 
   const synthesizer = makeEphemeralSynthesizer(caller);
@@ -672,13 +786,22 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
 
   let finalDoc;
   try {
-    finalDoc = await dispatchEphemeral(synthesizer, synthTask, userId, { agentEmoji: '✍️' });
+    finalDoc = await dispatchEphemeral(synthesizer, synthTask, userId, {
+      agentEmoji: '✍️',
+      signal,
+    });
+    throwIfAborted(signal);
   } catch (e) {
+    rethrowCancellation(e, signal);
     // Synthesis failed — fall back to raw concatenation so the user at least gets the data
     finalDoc = `# Deep Research: ${topic}\n\n_Auto-synthesis failed (${e.message}) — raw sub-reports follow._\n\n${synthSections}`;
   }
 
   // Phase 5: Auto-save
+  // This is the final mutation boundary. A provider that ignores abort may
+  // still return after the owner was cancelled; never persist that abandoned
+  // result or emit a misleading completion frame.
+  throwIfAborted(signal);
   const title = `Deep Research: ${topic.slice(0, 100)}`;
   const tags = topic.toLowerCase().split(/\s+/).filter(w => w.length > 3).slice(0, 5);
   const saveResult = execSaveResearch(title, finalDoc, tags, userId);
@@ -689,21 +812,26 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId) {
 
   // Return the synthesized doc as the result, capped at 20k chars to protect coordinator context.
   const capped = finalDoc.length > 20000 ? finalDoc.slice(0, 20000) + '\n\n[...truncated — see saved document]' : finalDoc;
+  throwIfAborted(signal);
   yield { type: 'result', text: `Deep research complete on "${topic}". ${successes.length} parallel workers synthesized into document ${docId ?? '(save failed)'}.\n\n${capped}` };
 }
 
 // ── Main executor ────────────────────────────────────────────────────────────
 // Uses async generator so get_research can stream document content directly to the UI
-export default async function* execute(name, args, userId = 'default', agentId = null) {
+export default async function* execute(name, args, userId = 'default', agentId = null, ctx = null) {
+  const signal = ctx?.signal ?? null;
+  throwIfAborted(signal);
   switch (name) {
     case 'research_search': {
-      for await (const chunk of execResearchSearch(args.topic, args.depth, args.urls, userId)) {
+      for await (const chunk of execResearchSearch(args.topic, args.depth, args.urls, userId, signal)) {
+        throwIfAborted(signal);
         yield chunk;
       }
       return;
     }
     case 'deep_research_parallel': {
-      for await (const chunk of execResearchParallel(args.topic, args.depth, userId, agentId)) {
+      for await (const chunk of execResearchParallel(args.topic, args.depth, userId, agentId, signal)) {
+        throwIfAborted(signal);
         yield chunk;
       }
       return;
