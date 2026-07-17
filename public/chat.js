@@ -1398,7 +1398,7 @@ function appendUserBubble(text, ts = Date.now(), scroll = true, attachments = nu
 }
 function appendAssistantBubble(content, ts = Date.now(), scroll = true) {
   const el = msgEl('assistant');
-  el.querySelector('.msg-bubble').innerHTML = renderMarkdown(content);
+  applyMarkdown(el.querySelector('.msg-bubble'), content);
   addTimestamp(el, ts); insertBefore(el);
   if (scroll) scrollToBottom();
   return el;
@@ -3133,7 +3133,7 @@ function openToolModal(name, text) {
   // include; if a tool emits raw output that markdown would mangle, the
   // tool can wrap its result in ``` code fences. renderMarkdown is the
   // same HTML-escaping renderer used everywhere else in chat.
-  body.innerHTML = renderMarkdown(text ?? '');
+  applyMarkdown(body, text ?? '');
   backdrop.classList.add('open');
 }
 function sessionMessageKey(m) {
@@ -3389,8 +3389,9 @@ function _renderAgentReportEl({ agentName, agentEmoji, content, displayContent =
       <span class="agent-report-who">${escHtml(agentEmoji ?? '')} <strong>${escHtml(agentName)}</strong></span>
       <span class="agent-report-time">${timeStr}</span>
     </div>
-    <div class="agent-report-body msg-bubble">${renderMarkdown(bodyContent ?? '')}</div>
+    <div class="agent-report-body msg-bubble"></div>
   `;
+  applyMarkdown(el.querySelector('.agent-report-body'), bodyContent ?? '');
   insertBefore(el);
   if (Array.isArray(toolEvents) && toolEvents.length) {
     appendToolRun(toolEvents, ts ?? Date.now(), false, {

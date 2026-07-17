@@ -102,6 +102,136 @@
 .msg-bubble th,.msg-bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 .msg-bubble th { background: var(--bg2); }
 
+/* ── HTML document preview (chat code fences + docs viewer) ── */
+.html-preview-card {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg2);
+}
+.html-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.html-preview-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.html-preview-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.html-preview-btn {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.html-preview-btn:hover { border-color: var(--accent); color: var(--accent); }
+.html-preview-src-wrap pre {
+  margin: 0;
+  max-height: min(40vh, 40dvh);
+  border: none;
+  border-radius: 0;
+}
+.html-preview-frame {
+  display: block;
+  width: 100%;
+  height: min(56vh, 480px);
+  border: none;
+  background: #fff;
+}
+.html-preview-modal-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  background: rgba(0, 0, 0, 0.65);
+  align-items: stretch;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.html-preview-modal-shell {
+  display: flex;
+  flex-direction: column;
+  width: min(1100px, 100%);
+  height: 100%;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.html-preview-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+.html-preview-modal-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+.doc-html-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 50vh;
+  background: var(--bg2);
+}
+.doc-html-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg3);
+  flex-shrink: 0;
+}
+.doc-html-toolbar-label {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.doc-html-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+  min-height: 0;
+}
+.doc-html-source {
+  flex: 1;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  font-family: 'Fira Code', ui-monospace, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 0;
+}
+
 /* ── Pronunciation button ── */
 .pronounce-btn { display: inline-flex; align-items: center; gap: 4px; background: var(--bg2); border: 1px solid var(--accent);
   color: var(--accent); border-radius: 16px; padding: 2px 10px 2px 6px; font-size: 13px; cursor: pointer;

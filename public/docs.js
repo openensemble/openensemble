@@ -687,6 +687,7 @@ function openDocViewer(id, filename, mimeType, source, compareVersion = null) {
   const isVideo  = mimeType.startsWith('video/');
   const isAudio  = mimeType.startsWith('audio/');
   const isPdf    = mimeType.includes('pdf') || /\.pdf$/i.test(filename);
+  const isHtml   = /\.html?$/i.test(filename) || /text\/html/i.test(mimeType);
   const isText   = _isDocTextEditable(filename, mimeType, source);
 
   // Reset the stage after an iframe/media viewer changed its spacing.
@@ -705,6 +706,20 @@ function openDocViewer(id, filename, mimeType, source, compareVersion = null) {
   } else if (isPdf) {
     content.style.padding = '0';
     content.innerHTML = `<iframe src="${viewUrl}" title="${escHtml(filename)}" style="width:100%;height:100%;border:none;display:block"></iframe>`;
+  } else if (isHtml) {
+    // Never load HTML via /view URL (server forces attachment for XSS safety).
+    // Fetch text content and render in a sandboxed iframe (no scripts).
+    content.style.padding = '0';
+    content.innerHTML = `
+      <div class="doc-html-viewer" data-doc-html-mode="preview">
+        <div class="doc-html-toolbar">
+          <span class="doc-html-toolbar-label">HTML preview (scripts disabled)</span>
+          <button type="button" class="html-preview-btn" data-action="toggleDocHtmlMode" data-doc-html-toggle>Show source</button>
+        </div>
+        <iframe class="doc-html-frame" sandbox="" referrerpolicy="no-referrer" title="${escHtml(filename)}"></iframe>
+        <pre class="doc-html-source" hidden></pre>
+      </div>`;
+    _loadDocHtmlContent(id);
   } else if (source === 'research' || isText) {
     _loadDocTextContent(id);
   } else if (source === 'code') {
@@ -734,6 +749,12 @@ function closeDocViewer() {
   // Pause any playing video before clearing
   const vid = $('docViewContent').querySelector('video');
   if (vid) { vid.pause(); vid.src = ''; }
+  // Drop sandboxed HTML previews so srcdoc doesn't linger
+  const htmlFrame = $('docViewContent').querySelector('.doc-html-frame');
+  if (htmlFrame) {
+    htmlFrame.removeAttribute('srcdoc');
+    htmlFrame.src = 'about:blank';
+  }
   $('docViewContent').innerHTML = '';
   const histPanel = $('docViewHistory');
   if (histPanel) { histPanel.style.display = 'none'; histPanel.innerHTML = ''; }
@@ -1763,6 +1784,56 @@ function _loadDocTextContent(id) {
     if (_docViewId !== id || renderSeq !== _docViewRenderSeq) return;
     content.innerHTML = `<pre class="doc-current-page">${escHtml(data.text ?? '')}</pre>`;
   }).catch(() => { if (renderSeq === _docViewRenderSeq) content.innerHTML = '<div class="doc-view-loading error">Failed to load</div>'; });
+}
+
+/** Load HTML doc body into sandboxed iframe + optional source pane. */
+function _loadDocHtmlContent(id) {
+  const renderSeq = ++_docViewRenderSeq;
+  const content = $('docViewContent');
+  const viewer = content.querySelector('.doc-html-viewer');
+  const frame = content.querySelector('.doc-html-frame');
+  const source = content.querySelector('.doc-html-source');
+  if (!viewer || !frame || !source) {
+    content.innerHTML = '<div class="doc-view-loading error">HTML viewer failed to initialize</div>';
+    return;
+  }
+  source.textContent = 'Loading…';
+  const url = _docViewSource === 'research'
+    ? `/api/research/${id}`
+    : `/api/shared-docs/${id}/content`;
+  fetch(url).then(r => r.json()).then(data => {
+    if (_docViewId !== id || renderSeq !== _docViewRenderSeq) return;
+    const text = _docViewSource === 'research'
+      ? String(data.content ?? data.text ?? '')
+      : String(data.text ?? data.content ?? '');
+    source.textContent = text;
+    frame.srcdoc = text;
+  }).catch(() => {
+    if (renderSeq !== _docViewRenderSeq) return;
+    source.textContent = 'Failed to load document.';
+    frame.removeAttribute('srcdoc');
+  });
+}
+
+function toggleDocHtmlMode() {
+  const content = $('docViewContent');
+  const viewer = content?.querySelector('.doc-html-viewer');
+  if (!viewer) return;
+  const frame = viewer.querySelector('.doc-html-frame');
+  const source = viewer.querySelector('.doc-html-source');
+  const btn = viewer.querySelector('[data-doc-html-toggle]');
+  const showingSource = viewer.dataset.docHtmlMode === 'source';
+  if (showingSource) {
+    viewer.dataset.docHtmlMode = 'preview';
+    if (frame) frame.hidden = false;
+    if (source) source.hidden = true;
+    if (btn) btn.textContent = 'Show source';
+  } else {
+    viewer.dataset.docHtmlMode = 'source';
+    if (frame) frame.hidden = true;
+    if (source) source.hidden = false;
+    if (btn) btn.textContent = 'Show preview';
+  }
 }
 
 async function _loadDocVersionsUI(id) {

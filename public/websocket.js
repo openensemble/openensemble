@@ -322,7 +322,7 @@ function projectAgentStreamState(agent) {
   streamBuf = state.hidden ? '' : (state.buf || '');
   if (!state.hidden) {
     streamEl = appendStreamingBubble();
-    if (streamBuf) streamEl.innerHTML = renderMarkdown(streamBuf);
+    if (streamBuf) applyMarkdown(streamEl, streamBuf);
   }
   if (typeof restoreToolRun === 'function') restoreToolRun(state.toolEvents || []);
   setStreaming(true);
@@ -485,13 +485,13 @@ function scheduleStreamRender() {
   _streamRAF = requestAnimationFrame(() => {
     _streamRAF = 0;
     if (!streamEl) return; // turn ended/committed while the frame was queued
-    streamEl.innerHTML = renderMarkdown(streamBuf);
+    applyMarkdown(streamEl, streamBuf);
     scrollToBottom();
   });
 }
 function flushStreamRender() {
   if (_streamRAF) { cancelAnimationFrame(_streamRAF); _streamRAF = 0; }
-  if (streamEl) streamEl.innerHTML = renderMarkdown(streamBuf);
+  if (streamEl) applyMarkdown(streamEl, streamBuf);
 }
 
 function finishDocumentStreamUi(agentId) {
@@ -813,7 +813,7 @@ function handleServerMessage(msg) {
         if (!msg.text) {
           if (streamBuf.trim()) {
             // Commit streamed text as a finished bubble rather than erasing it
-            streamEl.innerHTML = renderMarkdown(streamBuf);
+            applyMarkdown(streamEl, streamBuf);
             streamEl = null;
           } else {
             streamEl.closest('.msg')?.remove();
@@ -821,7 +821,7 @@ function handleServerMessage(msg) {
           }
         } else {
           streamBuf = msg.text;
-          streamEl.innerHTML = renderMarkdown(streamBuf);
+          applyMarkdown(streamEl, streamBuf);
           scrollToBottom();
         }
       }

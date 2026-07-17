@@ -32,6 +32,178 @@ function renderMarkdown(text) {
   return renderTutorWidgets(renderPronounceButtons(wrapTables(DOMPurify.sanitize(marked.parse(text)))));
 }
 
+/**
+ * Set markdown on an element, then wrap HTML code blocks with a sandboxed
+ * Preview / source toggle (so "show me an HTML document" is viewable in chat).
+ */
+function applyMarkdown(el, text) {
+  if (!el) return;
+  el.innerHTML = renderMarkdown(text ?? '');
+  decorateHtmlPreviews(el);
+}
+
+function looksLikeHtmlDocument(text) {
+  const t = String(text || '').trim();
+  return /^<!doctype\s+html\b/i.test(t) || /^<html[\s>]/i.test(t);
+}
+
+function isHtmlLanguageClass(className) {
+  return /\blanguage-html?\b/i.test(String(className || ''))
+    || /\blanguage-htm\b/i.test(String(className || ''));
+}
+
+/**
+ * After markdown render: turn ```html fences (and bare full HTML documents in
+ * <pre><code>) into cards with a sandboxed iframe preview.
+ * Scripts are never allowed (sandbox without allow-scripts).
+ */
+function decorateHtmlPreviews(root) {
+  if (!root?.querySelectorAll) return;
+  const codes = root.querySelectorAll('pre > code');
+  for (const code of codes) {
+    if (code.closest('.html-preview-card')) continue;
+    const text = code.textContent || '';
+    const isLang = isHtmlLanguageClass(code.className);
+    const isDoc = looksLikeHtmlDocument(text);
+    // Explicit language-html always gets a card. Bare pre/code only when it
+    // looks like a full document (avoids wrapping random HTML snippets).
+    if (!isLang && !isDoc) continue;
+    if (!isLang && text.length < 80) continue;
+    const pre = code.parentElement;
+    if (!pre || pre.tagName !== 'PRE') continue;
+    // Only open preview by default once the document looks complete enough
+    // that a partial stream won't flash a broken iframe on every token.
+    const complete = /<\/html\s*>/i.test(text);
+    buildHtmlPreviewCard(pre, { defaultPreview: isDoc && complete });
+  }
+}
+
+function buildHtmlPreviewCard(pre, { defaultPreview = false } = {}) {
+  const card = document.createElement('div');
+  card.className = 'html-preview-card';
+  const id = 'hp_' + Math.random().toString(36).slice(2, 10);
+  card.dataset.htmlPreviewId = id;
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'html-preview-toolbar';
+  toolbar.innerHTML = `
+    <span class="html-preview-label">HTML document</span>
+    <div class="html-preview-actions">
+      <button type="button" class="html-preview-btn" data-action="toggleHtmlPreview"
+        data-args='${JSON.stringify([id]).replace(/'/g, '&#39;')}' data-html-preview-toggle>Preview</button>
+      <button type="button" class="html-preview-btn" data-action="openHtmlPreviewModal"
+        data-args='${JSON.stringify([id]).replace(/'/g, '&#39;')}'>Expand</button>
+    </div>`;
+
+  const srcWrap = document.createElement('div');
+  srcWrap.className = 'html-preview-src-wrap';
+
+  const frame = document.createElement('iframe');
+  frame.className = 'html-preview-frame';
+  // Empty sandbox: unique opaque origin, no scripts, no forms, no same-origin.
+  // CSS/layout still render; external images may load depending on browser CSP.
+  frame.setAttribute('sandbox', '');
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  frame.setAttribute('title', 'HTML preview');
+  frame.hidden = true;
+
+  pre.replaceWith(card);
+  srcWrap.appendChild(pre);
+  card.appendChild(toolbar);
+  card.appendChild(srcWrap);
+  card.appendChild(frame);
+
+  setHtmlPreviewMode(card, defaultPreview === true);
+}
+
+function findHtmlPreviewCard(id) {
+  if (!id) return null;
+  try {
+    return document.querySelector(`.html-preview-card[data-html-preview-id="${CSS.escape(String(id))}"]`);
+  } catch {
+    return document.querySelector(`.html-preview-card[data-html-preview-id="${String(id).replace(/"/g, '')}"]`);
+  }
+}
+
+function setHtmlPreviewMode(card, showPreview) {
+  if (!card) return;
+  const frame = card.querySelector('.html-preview-frame');
+  const srcWrap = card.querySelector('.html-preview-src-wrap');
+  const toggleBtn = card.querySelector('[data-html-preview-toggle]');
+  if (!frame) return;
+  if (showPreview) {
+    const code = card.querySelector('pre > code') || card.querySelector('code');
+    frame.srcdoc = code?.textContent || '';
+    frame.hidden = false;
+    if (srcWrap) srcWrap.hidden = true;
+    if (toggleBtn) toggleBtn.textContent = 'Show source';
+    card.dataset.previewing = '1';
+  } else {
+    frame.hidden = true;
+    frame.removeAttribute('srcdoc');
+    if (srcWrap) srcWrap.hidden = false;
+    if (toggleBtn) toggleBtn.textContent = 'Preview';
+    card.dataset.previewing = '0';
+  }
+}
+
+function toggleHtmlPreview(id) {
+  const card = findHtmlPreviewCard(id);
+  if (!card) return;
+  setHtmlPreviewMode(card, card.dataset.previewing !== '1');
+}
+
+function openHtmlPreviewModal(id) {
+  const card = findHtmlPreviewCard(id);
+  if (!card) return;
+  const html = (card.querySelector('pre > code') || card.querySelector('code'))?.textContent || '';
+  let modal = document.getElementById('htmlPreviewModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'htmlPreviewModal';
+    modal.className = 'html-preview-modal-backdrop';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'HTML document preview');
+    modal.innerHTML = `
+      <div class="html-preview-modal-shell">
+        <header class="html-preview-modal-header">
+          <span>HTML preview</span>
+          <button type="button" class="html-preview-btn" data-action="closeHtmlPreviewModal" aria-label="Close">Close</button>
+        </header>
+        <iframe class="html-preview-modal-frame" sandbox="" referrerpolicy="no-referrer" title="HTML document"></iframe>
+      </div>`;
+    // Backdrop click closes (only when clicking the backdrop itself).
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeHtmlPreviewModal();
+    });
+    document.body.appendChild(modal);
+  }
+  const frame = modal.querySelector('.html-preview-modal-frame');
+  if (frame) frame.srcdoc = html;
+  modal.style.display = 'flex';
+  document.addEventListener('keydown', _htmlPreviewModalEsc, true);
+}
+
+function closeHtmlPreviewModal() {
+  const modal = document.getElementById('htmlPreviewModal');
+  if (!modal) return;
+  const frame = modal.querySelector('.html-preview-modal-frame');
+  if (frame) {
+    frame.removeAttribute('srcdoc');
+    frame.src = 'about:blank';
+  }
+  modal.style.display = 'none';
+  document.removeEventListener('keydown', _htmlPreviewModalEsc, true);
+}
+
+function _htmlPreviewModalEsc(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeHtmlPreviewModal();
+  }
+}
+
 function wrapTables(html) {
   return html.replace(/<table(\s[^>]*)?>([\s\S]*?)<\/table>/g, (m) => `<div class="table-wrap">${m}</div>`);
 }
