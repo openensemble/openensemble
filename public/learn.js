@@ -91,7 +91,7 @@ function _renderLearnDrawer() {
   _learnFactRefs = new Map();
   const L = _learnState.learnings || {};
   body.innerHTML = [
-    _renderLearningSettingsSection(L.learningPolicy || {}),
+    _renderLearningSettingsSection(L.learningPolicy || {}, L.salienceStatus || []),
     _renderPendingSection(_learnState.pending),
     _renderLedgerSection(_learnState.ledger),
     _renderRulesSection(L.rules || []),
@@ -118,7 +118,55 @@ function _renderEmptyHint(text) {
 
 // ── Learning settings ──────────────────────────────────────────────────────
 
-function _renderLearningSettingsSection(policy) {
+function _learnKindTitle(kind) {
+  return String(kind || 'learning').replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function _renderSalienceSummary(statuses) {
+  const targetRows = [];
+  const categoryRows = [];
+
+  for (const status of Array.isArray(statuses) ? statuses : []) {
+    if (status?.scope === 'offer-kind' && status.reason === 'personalization-own-gates') {
+      continue;
+    }
+
+    if (status?.scope === 'target') {
+      for (const paused of Array.isArray(status.pausedTargets) ? status.pausedTargets : []) {
+        const label = paused?.target?.label || 'specific target';
+        const detail = paused.blocked > 0
+          ? `You chose “Don't propose again” for this target.`
+          : `${paused.dismissed || 0} dismissals in the last 30 days.`;
+        targetRows.push(`<div style="padding:7px 12px;border-bottom:1px solid var(--border);font-size:11px;line-height:1.4">
+          <div><b>${escHtml(_learnKindTitle(status.kind))}</b> · ${escHtml(label)}</div>
+          <div style="color:var(--muted)">${escHtml(detail)} This suppression applies only to this target; it does not suppress other ${escHtml(_learnKindTitle(status.kind).toLowerCase())} targets.</div>
+        </div>`);
+      }
+      continue;
+    }
+
+    if (status?.allow !== false) continue;
+    const negative = (status.dismissed || 0) + (status.blocked || 0);
+    const detail = status.reason === 'dismiss-paused'
+      ? `${negative} of ${status.measured || 0} were dismissed or blocked in the last 30 days.`
+      : status.reason === 'paused'
+        ? `${status.improved || 0} of ${status.measured || 0} measurements showed improvement.`
+        : 'Recent feedback crossed the category pause threshold.';
+    const args = escHtml(JSON.stringify([status.kind]));
+    const resumeLabel = escHtml(`Resume ${_learnKindTitle(status.kind)} suggestions for 7 days`);
+    categoryRows.push(`<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:11px;line-height:1.4">
+      <div style="flex:1"><div><b>${escHtml(_learnKindTitle(status.kind))}</b> · category paused</div><div style="color:var(--muted)">${escHtml(detail)}</div></div>
+      <button type="button" aria-label="${resumeLabel}" data-action="learnResetSalience" data-args='${args}' style="font-size:10px;background:transparent;border:1px solid var(--border);border-radius:3px;padding:2px 6px;color:var(--muted);cursor:pointer">Resume 7d</button>
+    </div>`);
+  }
+
+  const categories = categoryRows.length > 1
+    ? `<details style="border-bottom:1px solid var(--border)"><summary style="padding:7px 12px;font-size:11px;color:var(--muted);cursor:pointer">${categoryRows.length} suggestion categories paused</summary>${categoryRows.join('')}</details>`
+    : categoryRows.join('');
+  return targetRows.join('') + categories;
+}
+
+function _renderLearningSettingsSection(policy, salienceStatuses = []) {
   const enabled = policy?.enabled !== false;
   const disabled = _learnState.policyBusy ? 'disabled' : '';
   const checked = enabled ? 'checked' : '';
@@ -129,7 +177,7 @@ function _renderLearningSettingsSection(policy) {
       <input type="checkbox" ${checked} ${disabled} data-change-action="learnToggleSuggestions" data-change-args='${args}' style="width:16px;height:16px;accent-color:var(--accent,#4f82ff);cursor:pointer">
       <span style="flex:1">Learning suggestions</span>
       <span style="font-size:11px;color:var(--muted)">${stateLabel}</span>
-    </label>`;
+    </label>` + _renderSalienceSummary(salienceStatuses);
 }
 
 async function learnToggleSuggestions(enabled) {
@@ -823,8 +871,6 @@ function _renderRecentSection(recent) {
 function _renderOutcomeSummary(byKind) {
   const measured = (byKind || []).filter(k => k.measured > 0);
   if (!measured.length) return '';
-  const salience = _learnState.learnings?.salienceStatus || [];
-  const kindStatus = (k) => salience.find(s => s.kind === k) || { allow: true };
   const items = measured.map(k => {
     const ratio = `${k.improved} of ${k.measured}`;
     const semantic = k.semantic || 'lower-better';
@@ -832,22 +878,18 @@ function _renderOutcomeSummary(byKind) {
     const dir = (semantic === 'higher-better') ? (isGood ? '↑' : '↓') : (isGood ? '↓' : '↑');
     const color = isGood ? 'var(--green,#3a7)' : 'var(--orange,#c80)';
     const measurerHint = k.usesMeasurer ? '' : '*';
-    const status = kindStatus(k.kind);
-    const pausedBadge = !status.allow
-      ? ` <span style="color:var(--orange,#c80);font-weight:600;font-size:10px"> · paused</span> <button data-action="learnResetSalience" data-args='${JSON.stringify([k.kind]).replace(/"/g, '&quot;')}' style="font-size:10px;background:transparent;border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--muted);cursor:pointer">resume</button>`
-      : '';
-    return `<span style="white-space:nowrap"><code style="font-size:11px;background:var(--bg1);padding:0 4px;border-radius:3px">${escHtml(k.kind)}${measurerHint}</code> <span style="color:${color}">${dir}</span> on ${ratio}${pausedBadge}</span>`;
+    return `<span style="white-space:nowrap"><code style="font-size:11px;background:var(--bg1);padding:0 4px;border-radius:3px">${escHtml(k.kind)}${measurerHint}</code> <span style="color:${color}">${dir}</span> on ${ratio}</span>`;
   }).join(' &nbsp;·&nbsp; ');
   const footnote = measured.some(k => !k.usesMeasurer)
-    ? `<span style="color:var(--muted);font-size:10px"> · * = coarse signal (per-kind measurer pending)</span>`
+    ? `<span style="color:var(--muted);font-size:10px"> · * = coarse total-proposal volume, not action success (7d windows may overlap)</span>`
     : '';
   return `<div style="padding:6px 12px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--border);line-height:1.6">
-    Friction after acceptance (30d): ${items}${footnote}
+    Outcome after acceptance (30d): ${items}${footnote}
   </div>`;
 }
 
 async function learnResetSalience(kind) {
-  if (!confirm(`Resume emitting "${kind}" proposals? It'll re-evaluate from outcome data after 7 days.`)) return;
+  if (!confirm(`Resume emitting "${kind}" proposals? It'll re-evaluate recent signals after 7 days.`)) return;
   try {
     const r = await fetch(`/api/learnings/salience/${encodeURIComponent(kind)}/reset`, { method: 'POST' });
     if (!r.ok) {
