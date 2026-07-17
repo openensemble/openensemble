@@ -2603,7 +2603,6 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       } catch (e) {
         console.warn('[chat] error-path persist failed:', e.message);
         persistenceError = `Session persistence failed: ${String(e?.message || e || 'unknown error').slice(0, 500)}`;
-        yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'A tool or media action may have completed, but its chat record could not be saved. Do not retry automatically.' };
       }
     }
     recordRunTrace(userId, {
@@ -2611,6 +2610,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       status: 'error',
       error: persistenceError ? `${traceError}; ${persistenceError}` : traceError,
     });
+    if (persistenceError) {
+      yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'A tool or media action may have completed, but its chat record could not be saved. Do not retry automatically.' };
+    }
     return;
   }
   log.info('chat', 'llm turn complete', _llmMeta);
