@@ -14,7 +14,7 @@ describe('email_user', () => {
 
   it('passes attachment_doc_ids through the shared email_compose path', async () => {
     const result = await execute('email_user', {
-      to: 'shawn@lab.local',
+      to: 'alex@example.com',
       subject: 'Generated image',
       body: 'Attached.',
       attachment_doc_ids: ['images:generated.png'],
@@ -23,7 +23,7 @@ describe('email_user', () => {
     expect(result).toContain('Email sent');
     expect(mocks.compose).toHaveBeenCalledTimes(1);
     expect(mocks.compose).toHaveBeenCalledWith('email_compose', {
-      to: 'shawn@lab.local',
+      to: 'alex@example.com',
       subject: 'Generated image',
       body: 'Attached.',
       attachment_doc_ids: ['images:generated.png'],

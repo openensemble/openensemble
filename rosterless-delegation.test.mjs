@@ -60,7 +60,7 @@ afterEach(() => {
 describe('rosterless ask_agent redirect', () => {
   it('redirects a hallucinated specialist id to direct action / spawn_worker', async () => {
     const chunks = await runAskAgent(
-      { agent_id: 'email', task: 'send the report to shawn' },
+      { agent_id: 'email', task: 'send the report to alex' },
       'user_roster_test_jarvis_lab',
     );
     expect(chunks).toHaveLength(1);
@@ -150,7 +150,7 @@ describe('rosterless delegate SPA variant', () => {
   const compose = (extra = {}) => composeSkillSpaBlock({
     tools: [{ type: 'function', function: { name: 'spawn_worker' } }],
     userId: 'user_roster_test',
-    userName: 'Shawn',
+    userName: 'Alex',
     agentName: 'Jarvis',
     agentEmoji: '',
     serverIp: '127.0.0.1',
@@ -184,7 +184,7 @@ describe('rosterless delegate SPA variant', () => {
     const spa = composeSkillSpaBlock({
       tools: [{ type: 'function', function: { name: 'nosolo_fixture_tool' } }],
       userId: 'user_roster_test',
-      userName: 'Shawn',
+      userName: 'Alex',
       agentName: 'Jarvis',
       agentEmoji: '',
       serverIp: '127.0.0.1',

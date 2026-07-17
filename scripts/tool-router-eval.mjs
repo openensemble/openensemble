@@ -173,7 +173,7 @@ const additionalPromptCases = [
   { prompt: 'Proofread my resume and tighten the wording', required: ['documents'] },
   { prompt: 'Email my calendar agenda to me', required: ['email', 'gcal'] },
   { prompt: 'Turn off the kitchen lights and remind me to lock the door at 10 PM', required: ['role_home_assistant', 'tasks'] },
-  { prompt: 'Generate a birthday image and email it to Shawn', required: ['image_generator', 'email'] },
+  { prompt: 'Generate a birthday image and email it to Alex', required: ['image_generator', 'email'] },
   { prompt: 'Research the GPU market and email me the report', required: ['deep_research', 'email'] },
   { prompt: 'Find an affordable flight from Fort Myers to Denver next month', required: ['flight-booker'], userCustom: true },
   { prompt: 'Find a good hotel near Union Square for next weekend', required: ['hotel-booker'], userCustom: true },
