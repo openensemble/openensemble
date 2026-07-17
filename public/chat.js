@@ -1547,6 +1547,9 @@ function taskChipPhase(status) {
   if (phase === 'streaming') return 'streaming';
   if (phase === 'result') return 'reviewing result';
   if (phase === 'backgrounded') return 'background';
+  if (phase === 'waiting_children') return 'waiting on tasks';
+  if (phase === 'finalizing') return 'finishing';
+  if (phase === 'stalled') return 'needs attention';
   return status.final ? 'finished' : 'running';
 }
 

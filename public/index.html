@@ -259,7 +259,12 @@
             <button class="btn-create-agent" data-action="openNewAgentModal"><i data-lucide="sparkles" style="width:14px;height:14px"></i> <span id="emptyStateNoAgentsAction">Create Your Agent</span></button>
           </div>
         </div>
-        <div class="typing" id="typing"><span></span><span></span><span></span></div>
+        <div class="typing" id="typing" role="status" aria-live="polite" aria-label="Working on it">
+          <span class="typing-label">Working on it</span>
+          <span class="typing-dots" aria-hidden="true">
+            <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
+          </span>
+        </div>
       </div>
     </div>
 

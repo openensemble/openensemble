@@ -3,9 +3,11 @@
  * so the coordinator can answer "what is the coder doing?" / "is the email
  * agent still working?" / etc. without guessing.
  *
- * Only background ask_agent dispatches land in this registry (taskId prefix
- * "bg_…"). Synchronous ask_agent calls don't — those block the coordinator's
- * turn so the user already sees them inline.
+ * Background agent/worker dispatches live in background-tasks.mjs. Generic
+ * slow-tool detaches (and a few durable skill jobs) live only as task_proxy
+ * watchers, so list_active_agents merges both sources and de-duplicates by
+ * watcher id. Otherwise the auto-background result tells the model to inspect
+ * a task this tool cannot see.
  */
 
 function fmtElapsed(ms) {
@@ -70,10 +72,31 @@ export async function executeSkillTool(name, args, userId) {
   if (name !== 'list_active_agents') return null;
   try {
     const { getActiveTasks } = await import('../../background-tasks.mjs');
+    const { listWatchers } = await import('../../scheduler/watchers.mjs');
     const all = getActiveTasks();
     // Filter to this user's tasks — getActiveTasks returns every user's;
     // we only want to expose this user's in-flight work to their coordinator.
     const mine = all.filter(t => t.userId === userId);
+    const knownWatcherIds = new Set(mine.map(t => t.watcherId).filter(Boolean));
+    const watcherOnly = (listWatchers(userId)?.active || [])
+      .filter(w => w?.kind === 'task_proxy' && !knownWatcherIds.has(w.id))
+      .map(w => ({
+        userId,
+        taskId: w.id,
+        watcherId: w.id,
+        agentName: w.state?.targetAgentName || w.label || w.state?.tool || 'Background tool',
+        agentEmoji: w.state?.targetAgentEmoji || '⏵',
+        summary: w.state?.summary || w.lastStatusText || w.label || '',
+        currentTool: w.state?.currentTool || w.state?.tool || null,
+        toolsUsed: Number(w.state?.toolsUsed || 0),
+        lastResultPreview: w.state?.lastResultPreview || '',
+        rootTaskId: w.state?.rootTaskId || null,
+        parentTaskId: w.state?.parentTaskId || null,
+        spanId: w.state?.spanId || null,
+        startedAt: w.state?.startedAt || w.createdAt || Date.now(),
+        childTasks: Array.isArray(w.state?.childTasks) ? w.state.childTasks : [],
+      }));
+    mine.push(...watcherOnly);
     if (!mine.length) return 'No background agents are running right now.';
     const now = Date.now();
     const lines = mine.map(t => {
@@ -99,7 +122,7 @@ export async function executeSkillTool(name, args, userId) {
         : '';
       return `- ${t.agentEmoji || ''} ${t.agentName} (${t.taskId}) — ${elapsed} elapsed${taskLine}${idLine}${childLine}${tail}`;
     });
-    return `${mine.length} background agent${mine.length === 1 ? '' : 's'} in flight:\n${lines.join('\n')}`;
+    return `${mine.length} background task${mine.length === 1 ? '' : 's'} in flight:\n${lines.join('\n')}`;
   } catch (e) {
     return `Error reading active tasks: ${e?.message || String(e)}`;
   }

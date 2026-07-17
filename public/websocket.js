@@ -127,6 +127,88 @@ function freshAgentTurnState(agent, source = {}) {
   };
 }
 
+function activeBackgroundTaskStatus(task) {
+  if (!task || !task.watcherId) return null;
+  // New servers send a purpose-built state object. The top-level fallbacks
+  // keep rolling restarts compatible with an older server that still sends
+  // its raw (JSON-safe) active-task fields to a freshly loaded browser asset.
+  const state = {
+    taskId: task.taskId || null,
+    rootTaskId: task.rootTaskId || task.taskId || null,
+    rootWatcherId: task.rootWatcherId || task.watcherId,
+    visibleAgentId: task.visibleAgentId || task.coordinatorAgentId || null,
+    status: task.status || 'running',
+    targetAgentId: task.agentId || null,
+    targetAgentName: task.agentName || 'Background task',
+    targetAgentEmoji: task.agentEmoji || '⟳',
+    summary: task.summary || '',
+    startedAt: task.startedAt || null,
+    lastActivityAt: task.lastActivityAt || task.lastUpdateAt || task.startedAt || null,
+    toolsUsed: Number(task.toolsUsed) || 0,
+    currentTool: task.currentTool || null,
+    phase: task.phase || task.status || 'running',
+    canCancel: task.canCancel === true,
+    ...(task.state && typeof task.state === 'object' ? task.state : {}),
+  };
+  return {
+    kind: 'task_proxy',
+    watcherId: task.watcherId,
+    label: task.label || `${task.agentEmoji || '⟳'} ${task.agentName || 'Background task'}`,
+    text: task.text || `${task.agentName || 'Background task'} is working on it…`,
+    final: false,
+    finalStatus: null,
+    awaiting_input: false,
+    pending_question: null,
+    state: {
+      ...state,
+      canCancel: task.canCancel === true && state.canCancel !== false,
+    },
+    recentHistory: [],
+  };
+}
+
+// active_streams is the authoritative reconnect frame. Restore one lightweight
+// task_proxy row per running background job so a reload never turns real work
+// into an unexplained idle screen. Live `status` frames replace these fallback
+// rows as soon as richer progress arrives.
+function reconcileActiveBackgroundTasks(tasks) {
+  let activeAgentChanged = false;
+  for (const [agent, rows] of Object.entries(sessions)) {
+    const filtered = (rows || []).filter(row => row?._activeTaskSnapshot !== true);
+    if (filtered.length !== (rows || []).length) {
+      sessions[agent] = filtered;
+      if (agent === activeAgent) activeAgentChanged = true;
+    }
+  }
+
+  for (const task of (Array.isArray(tasks) ? tasks : [])) {
+    const status = activeBackgroundTaskStatus(task);
+    if (!status) continue;
+    const agent = clientSessionAgentId(
+      task.visibleAgentId || task.state?.visibleAgentId || task.agentId || activeAgent,
+    );
+    if (!agent) continue;
+    if (!sessions[agent]) sessions[agent] = [];
+    const rows = sessions[agent];
+    const existingIdx = rows.findIndex(row =>
+      row?.role === 'status' && row.status?.watcherId === status.watcherId);
+    // A live status frame is newer and more descriptive than this reconnect
+    // fallback. Only replace a prior fallback snapshot.
+    if (existingIdx >= 0 && rows[existingIdx]?._activeTaskSnapshot !== true) continue;
+    const entry = {
+      role: 'status',
+      status,
+      content: `[Status: ${status.text}]`,
+      ts: Number(task.lastActivityAt || task.state?.lastActivityAt || task.startedAt) || Date.now(),
+      _activeTaskSnapshot: true,
+    };
+    if (existingIdx >= 0) rows[existingIdx] = entry;
+    else rows.push(entry);
+    if (agent === activeAgent) activeAgentChanged = true;
+  }
+  return activeAgentChanged;
+}
+
 // Validate the wire envelope before any handler touches DOM globals. Events for
 // an old cleared generation, an old turn on the same agent, or a duplicate seq
 // are dropped uniformly whether the agent is selected or in the background.
@@ -1363,6 +1445,8 @@ function handleServerMessage(msg) {
         // absence claim and must survive until a later authoritative snapshot.
         if ((state.liveRevision || 0) <= snapshotRevision) delete agentStreams[agentId];
       }
+      const taskSnapshotChanged = reconcileActiveBackgroundTasks(msg.tasks);
+      if (taskSnapshotChanged) renderSession();
       projectAgentStreamState(activeAgent);
       buildTabs();
       buildAgentDrawer();

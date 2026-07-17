@@ -31,6 +31,7 @@ const BOOT_ID = randomBytes(8).toString('hex');
 console.log(`[ws] boot_id: ${BOOT_ID}`);
 import { handleChatMessage, abortChat, getActiveStreams, getActiveStream } from './chat-dispatch.mjs';
 import { getActiveTasks as getActiveBgTasks } from './background-tasks.mjs';
+import { projectActiveTasksForWire } from './lib/background-task-wire.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer, getSessionEpoch } from './sessions.mjs';
 import { markAlarmFired, markAlarmAcked } from './lib/alarms.mjs';
 import { handleTvCommandResult, handleTvState } from './lib/tv-commands.mjs';
@@ -1530,8 +1531,11 @@ function onConnection(ws, req) {
         sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts,
       }));
     }
-    // Tell the client which agents are actively streaming and which background tasks are running
-    const tasks = getActiveBgTasks().filter(t => t.userId === ws._userId);
+    // Send a narrow, folded UI snapshot rather than serializing execution
+    // callbacks, private prompts, verifier leases, or ambient contexts.
+    const tasks = projectActiveTasksForWire(
+      getActiveBgTasks().filter(t => t.userId === ws._userId),
+    );
     ws.send(JSON.stringify({ type: 'active_streams', agents: active, tasks, snapshotRevisions: activeSnapshotRevisions }));
   }
 

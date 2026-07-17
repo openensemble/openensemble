@@ -345,10 +345,12 @@
 /* ── Typing indicator ── */
 .typing { display: none; align-self: flex-start; padding: 8px 14px;
   background: var(--bg3); border-radius: var(--radius); border-bottom-left-radius: 4px; }
-.typing.visible { display: flex; gap: 5px; align-items: center; }
-.typing span { width: 7px; height: 7px; background: var(--muted); border-radius: 50%; animation: bounce .9s infinite; }
-.typing span:nth-child(2) { animation-delay: .15s; }
-.typing span:nth-child(3) { animation-delay: .3s; }
+.typing.visible { display: flex; gap: 8px; align-items: center; }
+.typing-label { color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1; }
+.typing-dots { display: flex; gap: 5px; align-items: center; }
+.typing-dot { width: 7px; height: 7px; background: var(--muted); border-radius: 50%; animation: bounce .9s infinite; }
+.typing-dot:nth-child(2) { animation-delay: .15s; }
+.typing-dot:nth-child(3) { animation-delay: .3s; }
 @keyframes bounce { 0%,80%,100%{transform:scale(.8);opacity:.5} 40%{transform:scale(1.1);opacity:1} }
 
 /* ── Slash command menu ── */

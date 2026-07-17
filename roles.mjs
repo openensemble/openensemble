@@ -52,6 +52,11 @@ import { log } from './logger.mjs';
 import { listAgents } from './agents.mjs';
 import { normalizeOrchestrationPolicy } from './lib/orchestration-policy-core.mjs';
 import { getTurnContext } from './lib/turn-abort-context.mjs';
+import { currentTaskContext } from './lib/task-proxy-context.mjs';
+import {
+  abortError,
+  raceWithAbort,
+} from './lib/abort-utils.mjs';
 
 // Resolve the agent id we should attribute background-task surfaces to
 // (chip, session injection) when the caller didn't pass one. Uses the
@@ -151,6 +156,38 @@ async function _runAutoBgToolContinuation({ userId, agentId, toolName, args, res
 
 function _autoBgChildId(watcherId) {
   return watcherId ? `autobg_${watcherId}` : null;
+}
+
+/**
+ * Race one (and only one) async-iterator read against an auto-background
+ * boundary. A timeout returns the original promise so ownership can move to a
+ * detached drain without issuing a second iter.next().
+ */
+export async function racePendingIteratorNext(pendingNext, timeoutMs, signal = null) {
+  let timeoutId;
+  try {
+    return await raceWithAbort(
+      Promise.race([
+        pendingNext.then(
+          next => ({ kind: 'next', next }),
+          error => ({ kind: 'error', error }),
+        ),
+        new Promise(resolve => {
+          timeoutId = setTimeout(() => resolve({ kind: 'timeout', pendingNext }), Math.max(0, timeoutMs));
+        }),
+      ]),
+      signal,
+      'Tool execution cancelled',
+    );
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+/** Do not detach a tool a second time when a durable task already owns it. */
+export function autoBackgroundToolsInCurrentContext() {
+  return currentTaskContext() == null
+    && getTurnContext()?.awaitSlowTools !== true;
 }
 
 function _registerScheduledAutoBgChild({ scheduledCtx, userId, watcherId, label, kind = 'tool' }) {
@@ -1400,7 +1437,7 @@ async function saveDesktopArtifact(userId, { sandbox, filename, base64, url, tim
 
 // Build the per-call context object passed to skill executors as the 5th arg.
 // Skills that don't accept it (4-param signature) ignore it transparently.
-async function buildCtx(userId, agentId, skillId = null) {
+async function buildCtx(userId, agentId, skillId = null, signal = getTurnContext()?.signal ?? null) {
   // Providers pass the scoped `${userId}_${rawAgentId}` here, but the dashboard
   // matches inbound bubbles against the raw agent id. Strip the prefix so
   // ctx.showImage/showVideo land in the right chat thread.
@@ -1408,7 +1445,14 @@ async function buildCtx(userId, agentId, skillId = null) {
     ? agentId.slice(userId.length + 1)
     : agentId;
   const suppressLearning = getTurnContext()?.suppressLearning === true;
-  const ctx = { userId, agentId };
+  const ctx = {
+    userId,
+    agentId,
+    signal,
+    throwIfAborted() {
+      if (signal?.aborted) throw abortError(signal, 'Tool execution cancelled');
+    },
+  };
   // Structured failure signal: `return ctx.toolError('…')` records the tool call
   // as a failure (trace ok:false, flaky-tool proposals, not learned as a recipe)
   // instead of the legacy `return `Error: …`` string the trace can't read. See
@@ -1640,7 +1684,11 @@ async function buildCtx(userId, agentId, skillId = null) {
   ctx.runSandboxed = async (bin, binArgs = [], opts = {}) => {
     const sb = await import('./lib/skill-sandbox.mjs');
     const roDirs = [_skillDir, ...(opts.roDirs || [])].filter(Boolean);
-    return sb.runSandboxed(bin, binArgs, { ...opts, roDirs });
+    return sb.runSandboxed(bin, binArgs, {
+      ...opts,
+      signal: opts.signal ?? signal,
+      roDirs,
+    });
   };
   // Per-user output dir for a skill (creates it). e.g. ctx.userFilesDir('videos').
   ctx.userFilesDir = (sub) => getUserFilesDir(userId, sub);
@@ -1697,15 +1745,19 @@ export function isSandboxedSkill(skillId, userId) {
 // the in-process executor contract so both dispatch seams stay unchanged.
 // Streaming yields are folded into result text for now (live streaming through
 // the jail is a follow-up); failures throw so the normal tool-failure path runs.
-async function runCustomSkillValue({ userId, agentId, skillId, name, args, execSnapshotPath = null }) {
+async function runCustomSkillValue({
+  userId, agentId, skillId, name, args, execSnapshotPath = null,
+  signal = getTurnContext()?.signal ?? null,
+}) {
   const { runCustomSkillSandboxed } = await import('./lib/skill-subprocess.mjs');
   // Default-deny egress: the jail only gets network if the skill's manifest declares
   // `sandbox.network`. An undeclared (or rogue) skill runs with --unshare-net so it
   // can't exfiltrate anything it can read. See lib/skill-net-policy.mjs.
   const net = skillDeclaresNetwork(userId, skillId);
   const r = await runCustomSkillSandboxed({
-    userId, agentId, skillId, toolName: name, args, net, execSnapshotPath,
+    userId, agentId, skillId, toolName: name, args, net, execSnapshotPath, signal,
   });
+  if (signal?.aborted) throw abortError(signal, `custom skill ${skillId}.${name} cancelled`);
   if (!r.ok) throw new Error(/** @type {any} */ (r).error || `custom skill ${skillId}.${name} failed`);
   if (Array.isArray(r.events) && r.events.length) {
     const text = r.events.filter(e => e?.type === 'token').map(e => e.text).join('');
@@ -2092,6 +2144,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // foreground deadline prevents the normal UX auto-background path from
   // detaching learning/report work beyond the terminal frame.
   const AUTO_BG_MS = suppressLearning ? 600_000 : 10_000;
+  const AUTO_BG_ENABLED = autoBackgroundToolsInCurrentContext();
+  const toolSignal = turnContext?.signal ?? null;
 
   // Ephemeral-delegation post-processor for the final `{type:'result'}` yield.
   // Two things happen here, only when agentId is an ephemeral_deleg_* session:
@@ -2153,7 +2207,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     }).catch(err => console.warn('[tool-failures] record failed:', err.message));
   };
   try {
-    const result = skillExec(name, mergedArgs, userId, agentId, await buildCtx(userId, agentId, owningSkillId));
+    if (toolSignal?.aborted) throw abortError(toolSignal, `Tool ${name} cancelled`);
+    const result = skillExec(
+      name,
+      mergedArgs,
+      userId,
+      agentId,
+      await buildCtx(userId, agentId, owningSkillId, toolSignal),
+    );
 
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
       // ── Streaming path ──────────────────────────────────────────────────
@@ -2193,7 +2254,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       try {
       while (true) {
         let next;
-        try { next = await iter.next(); }
+        try { next = await raceWithAbort(iter.next(), toolSignal, `Tool ${name} cancelled`); }
         catch (err) {
           // Tool threw during iteration — bubble up. The outer catch handles
           // background-mode case separately via the detached IIFE below.
@@ -2207,7 +2268,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         // First time crossing 10s: register chip, yield deferred result,
         // hand the iterator to a detached worker, and return. But never while a
         // user prompt is pending (consent/credential) — don't hurdle the wait.
-        if (!backgrounded && Date.now() - startedAt >= AUTO_BG_MS && !hasPendingPrompt(userId)) {
+        if (AUTO_BG_ENABLED && !backgrounded && Date.now() - startedAt >= AUTO_BG_MS && !hasPendingPrompt(userId)) {
           const displayName = delegatedMeta?.agentName || name;
           const displayEmoji = delegatedMeta?.agentEmoji || (delegatedMeta ? '' : '⏵');
           const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
@@ -2573,12 +2634,16 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       // finishes OR no prompt is pending. Once the user answers, the real work
       // backgrounds normally on the next tick.
       let winner;
-      do {
-        winner = await Promise.race([
-          racePromise,
-          new Promise(resolve => setTimeout(() => resolve(TIMER_TOKEN), AUTO_BG_MS)),
-        ]);
-      } while (winner === TIMER_TOKEN && hasPendingPrompt(userId));
+      if (!AUTO_BG_ENABLED) {
+        winner = await raceWithAbort(racePromise, toolSignal, `Tool ${name} cancelled`);
+      } else {
+        do {
+          winner = await raceWithAbort(Promise.race([
+            racePromise,
+            new Promise(resolve => setTimeout(() => resolve(TIMER_TOKEN), AUTO_BG_MS)),
+          ]), toolSignal, `Tool ${name} cancelled`);
+        } while (winner === TIMER_TOKEN && hasPendingPrompt(userId));
+      }
 
       if (winner === TIMER_TOKEN) {
         const watchersMod = await import('./scheduler/watchers.mjs');
@@ -2799,6 +2864,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       _reportToolFailure(_lastErrText);
     }
   } catch (e) {
+    if (toolSignal?.aborted || e?.name === 'AbortError' || e?.code === 'ABORT_ERR') {
+      throw abortError(toolSignal, `Tool ${name} cancelled`);
+    }
     console.error(`[skills] Runtime error in tool "${name}":`, e.message);
     log.error('tool', 'tool threw', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: e.message });
     yield { type: 'result', text: `Tool error (${name}): ${e.message}` };

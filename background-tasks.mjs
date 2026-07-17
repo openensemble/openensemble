@@ -10,7 +10,7 @@ import { getTurnContext, runWithTurnContext } from './lib/turn-abort-context.mjs
 import fs from 'fs';
 import path from 'path';
 import { registerWatcher, pushWatcherStatus, completeWatcher } from './scheduler/watchers.mjs';
-import { runInTaskContext } from './lib/task-proxy-context.mjs';
+import { currentTaskContext, runInTaskContext } from './lib/task-proxy-context.mjs';
 import { toolRouterContext } from './lib/tool-router-context.mjs';
 import { getScheduledContext } from './lib/scheduled-context.mjs';
 import { learnToolPlanFromToolEvents, matchToolPlan } from './lib/tool-plan-memory.mjs';
@@ -20,6 +20,7 @@ import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { getOrchestrationPolicy } from './lib/orchestration-policy.mjs';
 import { withFileLockSync } from './lib/file-lock.mjs';
 import { assertActiveLabVerifierLeaseToken } from './lib/lab-verifier-lease.mjs';
+import { iterateUntilAbort } from './lib/abortable-async-iterator.mjs';
 
 // Background completion is private user state. Never route it through the
 // process-wide browser broadcast: on a household install that discloses one
@@ -1140,12 +1141,12 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         const artifacts = [];
         const images = [];
         const bodyDocIds = [];
-        for await (const ev of streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, {
+        for await (const ev of iterateUntilAbort(streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, {
           toolPlan: stagePlan,
           routeText: stageRoute,
           isolatedTaskRun: true,
           ...backgroundRunTraceOptions(rec, scheduledNote ? 'scheduled' : 'background'),
-        })) {
+        }), ac.signal, `Background task ${taskId} cancelled`)) {
           if (ev.type === 'token') text += ev.text;
           else if (ev.type === 'replace') text = String(ev.text || '');
           else if (ev.type === '__content') text = String(ev.content || '');
@@ -1978,6 +1979,10 @@ export function cancelTask(userId, id, reason = 'cancelled') {
   for (const [taskId, info] of activeTasks) {
     if (info.userId !== userId) continue;
     if (taskId !== id && info.watcherId !== id) continue;
+    if (info._finalizationClaimed || info._terminalMarked
+        || ['done', 'error', 'cancelled', 'finalizing'].includes(info.status)) {
+      return { ok: false, reason: 'already finalizing', taskId, watcherId: info.watcherId };
+    }
     if (typeof info.abort !== 'function') return { ok: false, reason: 'not cancellable' };
     if (info.status === 'cancelling') return { ok: true, taskId, watcherId: info.watcherId, alreadyCancelling: true };
     info.status = 'cancelling';
@@ -2036,6 +2041,75 @@ export function isTaskActive(taskId) {
   return activeTasks.has(taskId);
 }
 
+/** Give a generic slow-tool handoff a real liveness/cancellation owner. */
+export function registerAutoBackgroundTool({
+  taskId, userId, agentId, toolName, watcherId, startedAt = Date.now(), abort = null,
+}) {
+  if (!taskId || !userId || !watcherId || activeTasks.has(taskId)) return null;
+  const rawAgentId = String(agentId || 'jarvis');
+  const scopedAgentId = rawAgentId.startsWith(`${userId}_`)
+    ? rawAgentId
+    : `${userId}_${rawAgentId}`;
+  activeTasks.set(taskId, {
+    agentId: rawAgentId,
+    userId,
+    coordinatorAgentId: scopedAgentId,
+    visibleAgentId: scopedAgentId,
+    agentName: toolName || 'Background tool',
+    agentEmoji: '⏵',
+    startedAt,
+    summary: `${toolName || 'Background tool'} is still running`,
+    originalTask: `${toolName || 'Background tool'} is still running`,
+    phase: 'backgrounded',
+    status: 'running',
+    currentTool: toolName || null,
+    watcherId,
+    rootTaskId: watcherId,
+    rootWatcherId: watcherId,
+    spanId: `${taskId}:tool:${_slug(toolName)}`,
+    aliases: [taskId, watcherId].filter(Boolean),
+    isAutoBgTool: true,
+    abort: typeof abort === 'function' ? abort : null,
+  });
+  _journalAdd(taskId);
+  return { taskId, watcherId };
+}
+
+/** Persist provider settlement before report/session/continuation awaits. */
+export function markAutoBackgroundToolTerminal(taskId, { status = 'done', result = '', error = null } = {}) {
+  const rec = activeTasks.get(taskId);
+  if (!rec?.isAutoBgTool || rec._terminalMarked) return false;
+  const terminal = status === 'cancelled' ? 'cancelled' : (status === 'done' && !error ? 'done' : 'error');
+  rec._terminalMarked = true;
+  rec.abort = null;
+  rec.status = terminal;
+  rec.phase = 'finalizing';
+  rec.currentTool = null;
+  rec.lastUpdateAt = Date.now();
+  _journalMarkCompletion(taskId, {
+    status: terminal,
+    result: terminal === 'done' ? result : '',
+    error: terminal === 'done' ? null : (error || result || 'Background tool failed.'),
+    images: [],
+  });
+  return true;
+}
+
+/** Retire only the generic slow-tool owner; roles.mjs owns user surfaces. */
+export function retireAutoBackgroundTool(taskId) {
+  const rec = activeTasks.get(taskId);
+  if (!rec?.isAutoBgTool || rec._finalizationClaimed) return false;
+  rec._finalizationClaimed = true;
+  if (!rec._terminalMarked) {
+    markAutoBackgroundToolTerminal(taskId, {
+      status: 'error', error: 'Background tool ended without terminal evidence.',
+    });
+  }
+  activeTasks.delete(taskId);
+  _journalRemove(taskId);
+  return true;
+}
+
 // ── Sync (in-turn) delegation tracking ───────────────────────────────────────
 // A sync delegation streams into the caller's open turn, but it is still real
 // background-shaped work: it can outlive the visible turn (the auto-bg net
@@ -2058,7 +2132,9 @@ export function isTaskActive(taskId) {
  */
 export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '', finalReportPreview = '' } = {}) {
   const rec = activeTasks.get(taskId);
-  if (!rec || !rec.isSync) return false;
+  if (!rec || !rec.isSync || rec._finalizationClaimed) return false;
+  rec._finalizationClaimed = true;
+  rec.abort = null;
   const status = (outcome === 'stopped' || outcome === 'cancelled') ? 'cancelled' : (outcome === 'error' ? 'error' : 'done');
   const syncOutcome = status === 'done' ? 'done' : (status === 'cancelled' ? 'stopped' : 'error');
   rec.status = status;
@@ -2195,23 +2271,48 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
   const taskId = `eph_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const agentName = agent.name ?? 'Worker';
   const agentEmoji = opts.agentEmoji ?? '🔎';
-  activeTasks.set(taskId, { agentId: agent.id, userId, agentName, startedAt: Date.now() });
+  const parentTaskCtx = currentTaskContext();
+  const taskCtx = {
+    taskId,
+    watcherId: parentTaskCtx?.watcherId || null,
+    userId,
+    agentId: agent.id,
+    rootTaskId: parentTaskCtx?.rootTaskId || parentTaskCtx?.taskId || taskId,
+    parentTaskId: parentTaskCtx?.taskId || null,
+    parentWatcherId: parentTaskCtx?.watcherId || null,
+    rootWatcherId: parentTaskCtx?.rootWatcherId || parentTaskCtx?.watcherId || null,
+    visibleAgentId: parentTaskCtx?.visibleAgentId || parentTaskCtx?.agentId || null,
+    spanId: `${parentTaskCtx?.rootTaskId || parentTaskCtx?.taskId || taskId}:ephemeral:${taskId}`,
+  };
+  const signal = opts.signal || getTurnContext()?.signal || null;
+  activeTasks.set(taskId, {
+    agentId: agent.id, userId, agentName, startedAt: Date.now(),
+    rootTaskId: taskCtx.rootTaskId,
+    parentTaskId: taskCtx.parentTaskId,
+  });
 
   try {
     const { streamChat } = await import('./chat.mjs');
     let out = '';
-    for await (const ev of streamChat(agent, task, null, null, userId, null, null, false, null, { rootTaskId: taskId, traceSource: 'background' })) {
-      if (ev.type === 'token') {
-        out += ev.text;
-        opts.onProgress?.(ev.text);
-      } else if (ev.type === 'replace') out = String(ev.text || '');
-      else if (ev.type === '__content') out = String(ev.content || '');
-      if (ev.type === 'error') throw new Error(ev.message);
-    }
+    await runInTaskContext(taskCtx, async () => {
+      for await (const ev of iterateUntilAbort(streamChat(agent, task, signal, null, userId, null, null, false, null, {
+        rootTaskId: taskCtx.rootTaskId,
+        traceSource: 'background',
+      }), signal, 'Ephemeral background task cancelled')) {
+        if (ev.type === 'token') {
+          out += ev.text;
+          opts.onProgress?.(ev.text);
+        } else if (ev.type === 'replace') out = String(ev.text || '');
+        else if (ev.type === '__content') out = String(ev.content || '');
+        if (ev.type === 'error') throw new Error(ev.message);
+      }
+      if (signal?.aborted) throw new Error('cancelled');
+    });
     activeTasks.delete(taskId);
     return out.trim();
   } catch (err) {
     activeTasks.delete(taskId);
+    if (signal?.aborted) throw new Error('cancelled');
     throw err;
   }
 }
@@ -2453,12 +2554,12 @@ export function spawnWorker({
         verifierLeaseToken,
       }, () => toolRouterContext.run(null, () => runInTaskContext(taskCtx, async () => {
         const rec = activeTasks.get(taskId);
-        for await (const ev of streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, {
+        for await (const ev of iterateUntilAbort(streamChat(workerAgent, task, ac.signal, null, userId, null, scheduledNote, false, null, {
           toolPlan: rememberedPlan,
           isolatedTaskRun: true,
           workerMemoryAgentId: ownerKey,
           ...backgroundRunTraceOptions(rec, scheduledNote ? 'scheduled' : 'background'),
-        })) {
+        }), ac.signal, `Worker ${taskId} cancelled`)) {
           if (ev.type === 'token') fullText += ev.text;
           else if (ev.type === 'replace') fullText = String(ev.text || '');
           else if (ev.type === '__content') fullText = String(ev.content || '');

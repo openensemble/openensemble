@@ -2106,6 +2106,10 @@ async function executeOnFire(record) {
   // Retry on stream errors, fetch throws, and LoopGuard stalls — all surfaced
   // through the shared helper. Single attempt by default keeps the previous
   // single-shot behavior; bump if a watcher class proves to need more.
+    // The predicate watcher is already finalized. Give its unattended reaction
+    // a distinct no-chip owner so nested tools await real results without
+    // reopening the completed watcher.
+    const runRootTaskId = `watcher:${record.id}:${record.endedAt || record.lastChangeAt || record.createdAt || 'current'}`;
     const { succeeded, lastError } = await runAgentWithRetry({
     scopedAgent, userText: userPrompt, systemNote: watcherNote, userId, streamChat,
     maxAttempts: 1,
@@ -2113,8 +2117,18 @@ async function executeOnFire(record) {
     // A finalized watcher persists endedAt before onFire is dispatched. Reuse
     // that durable occurrence identity if this action is resumed/replayed;
     // active helper-fired watchers fall back to their last persisted change.
-    rootTaskId: `watcher:${record.id}:${record.endedAt || record.lastChangeAt || record.createdAt || 'current'}`,
+    rootTaskId: runRootTaskId,
     traceSource: 'watcher',
+    taskContext: {
+      taskId: runRootTaskId,
+      watcherId: null,
+      userId,
+      agentId: sessionKey,
+      rootTaskId: runRootTaskId,
+      rootWatcherId: null,
+      visibleAgentId: sessionKey,
+      spanId: `${runRootTaskId}:agent`,
+    },
     });
 
     if (!succeeded) {

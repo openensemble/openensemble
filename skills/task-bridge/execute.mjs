@@ -7,8 +7,9 @@
  */
 import { currentTaskContext, awaitUserReply } from '../../lib/task-proxy-context.mjs';
 import { pushWatcherStatus } from '../../scheduler/watchers.mjs';
+import { abortError } from '../../lib/abort-utils.mjs';
 
-export async function* executeSkillTool(name, args, userId = 'default', _agentId = null) {
+export async function* executeSkillTool(name, args, userId = 'default', _agentId = null, toolCtx = null) {
   if (name !== 'ask_user_via_task') { yield { type: 'result', text: null }; return; }
 
   const question = String(args?.question || '').trim();
@@ -45,8 +46,14 @@ export async function* executeSkillTool(name, args, userId = 'default', _agentId
   // problem; long task abandonment is what the watcher's heartbeat catches.
   let reply;
   try {
-    reply = await awaitUserReply(ctx.watcherId, question, { timeoutMs: 24 * 60 * 60 * 1000 });
+    reply = await awaitUserReply(ctx.watcherId, question, {
+      timeoutMs: 24 * 60 * 60 * 1000,
+      signal: toolCtx?.signal ?? null,
+    });
   } catch (e) {
+    if (toolCtx?.signal?.aborted) {
+      throw abortError(toolCtx.signal, 'Background task cancelled while awaiting user input');
+    }
     pushWatcherStatus(userId, ctx.watcherId, `⏱ Question timed out: "${question.slice(0, 60)}"`, {
       awaiting_input: false,
       pending_question: null,

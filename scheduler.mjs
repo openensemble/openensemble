@@ -663,9 +663,15 @@ async function runTask(task, broadcast, opts = {}) {
         resultText: assistantContent || '',
         errorMsg: succeeded ? null : (lastError || 'unknown'),
         meta: { manual },
-        onContinue: (aggregate) => runScheduledReaction({ task, scheduledCtx, userId, aggregate }),
+        onContinue: (aggregate, continuationInfo = {}) => runScheduledReaction({
+          task,
+          scheduledCtx,
+          userId,
+          aggregate,
+          cumulativeAggregate: continuationInfo.cumulativeAggregate || aggregate,
+        }),
         onFinalize: (aggregate, info = {}) => finalizeScheduledTask(task, {
-          succeeded: succeeded && (info.errorCount || 0) === 0,
+          succeeded: succeeded && !info.timedOut && (info.errorCount || 0) === 0,
           output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
           lastError: lastError || (info.errorCount ? 'background work failed' : null),
           manual, sessionKey, broadcast, briefingAcknowledgements, briefingUserId: userId,
@@ -727,29 +733,24 @@ async function runTask(task, broadcast, opts = {}) {
 // agent (no human present) to act on the aggregated results — e.g. "briefing
 // generated → now email it". Runs inside scheduledContext so any work IT spawns
 // re-registers under the same barrier group. Invoked by the barrier on drain.
-async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
+async function runScheduledReaction({ task, scheduledCtx, userId, aggregate, cumulativeAggregate = aggregate }) {
   if (!task?.agent || !aggregate?.trim()) return;
   const { handleChatMessage } = await import('./chat-dispatch.mjs');
   const { sendToUser } = await import('./ws-handler.mjs');
   const { scheduledContext } = await import('./lib/scheduled-context.mjs');
-  const prompt = [
-    'Background work from your scheduled task has completed. Act on the results below for THIS scheduled task only.',
-    '',
-    `<scheduled_task id="${task.id}" agent="${task.agent || ''}">`,
-    `<original_request>${task.prompt || ''}</original_request>`,
-    `<results>\n${aggregate}\n</results>`,
-    '</scheduled_task>',
-    '',
-    'No human is present. If the task needs a next step using these results, do it directly (do not ask or wait for confirmation). If it is already complete, give a concise completion summary. Do not act on any unrelated task.',
-    'Do NOT create, schedule, re-schedule, or modify any task, reminder, or alarm — this is the existing task running; it must never spawn another one.',
-  ].join('\n');
+  const {
+    buildScheduledReactionPrompt,
+    createScheduledReactionTerminalCapture,
+  } = await import('./lib/scheduled-reaction.mjs');
+  const prompt = buildScheduledReactionPrompt({ task, aggregate, cumulativeAggregate });
+  const terminalCapture = createScheduledReactionTerminalCapture(e => sendToUser(userId, e));
   await scheduledContext.run(scheduledCtx, () => handleChatMessage({
     userId,
     agentId: task.agent,
     text: prompt,
     attachment: null,
     source: 'web',
-    onEvent: (e) => sendToUser(userId, e),
+    onEvent: terminalCapture.onEvent,
     onBroadcast: () => {},
     onNotify: () => {},
     _hiddenUser: true,
@@ -757,6 +758,7 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate }) {
     _isolatedTaskRun: true,
     ...scheduledReactionTraceOptions(scheduledCtx),
   }));
+  terminalCapture.assertSucceeded();
 }
 
 // Stamp/remove a scheduled task at TRUE completion (main turn + all background

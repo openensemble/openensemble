@@ -31,6 +31,25 @@ import { getUserFilesDir, USER_FILE_KINDS } from '../../lib/paths.mjs';
 export const MAX_BYTES = 500 * 1024 * 1024;
 export const AUDIO_EXTS = new Set(['.wav', '.mp3', '.flac', '.ogg', '.oga', '.m4a', '.aac', '.opus']);
 export const VIDEO_EXTS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.mpg', '.mpeg', '.wmv']);
+const PROCESS_TERM_GRACE_MS = 2000;
+
+function cancellationError(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error('Transcription cancelled.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancellationError(signal);
+}
+
+function signalProcessTree(child, detached, processSignal) {
+  if (detached && Number.isInteger(child?.pid)) {
+    try { process.kill(-child.pid, processSignal); return; } catch {}
+  }
+  try { child?.kill(processSignal); } catch {}
+}
 
 export function isAllowedPath(absPath, userId) {
   if (!absPath || typeof absPath !== 'string') return false;
@@ -51,24 +70,74 @@ export function isAllowedPath(absPath, userId) {
   return false;
 }
 
-export async function extractAudio(videoPath) {
+export async function extractAudio(videoPath, signal = null) {
+  throwIfCancelled(signal);
   // ffmpeg → 16 kHz mono wav (matches Whisper's native input rate).
   // Output goes to a tmpfile we delete after upload.
   const out = path.join(os.tmpdir(), `oe-transcribe-${Date.now()}-${process.pid}.wav`);
-  await new Promise((resolve, reject) => {
-    const ff = spawn('ffmpeg', [
-      '-y', '-loglevel', 'error',
-      '-i', videoPath,
-      '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav',
-      out,
-    ]);
-    ff.on('error', reject);
-    ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
-  });
-  return out;
+  try {
+    await new Promise((resolve, reject) => {
+      const detached = process.platform !== 'win32';
+      const ff = spawn('ffmpeg', [
+        '-y', '-loglevel', 'error',
+        '-i', videoPath,
+        '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav',
+        out,
+      ], {
+        detached,
+        ...(signal ? { signal } : {}),
+      });
+      let settled = false;
+      let cancelled = false;
+      let killTimer = null;
+      const terminate = () => {
+        signalProcessTree(ff, detached, 'SIGTERM');
+        if (killTimer) return;
+        killTimer = setTimeout(
+          () => signalProcessTree(ff, detached, 'SIGKILL'),
+          PROCESS_TERM_GRACE_MS,
+        );
+      };
+      const onAbort = () => {
+        cancelled = true;
+        terminate();
+      };
+      const finish = (error = null) => {
+        if (settled) return;
+        settled = true;
+        if (killTimer) clearTimeout(killTimer);
+        signal?.removeEventListener('abort', onAbort);
+        if (error) reject(error);
+        else resolve();
+      };
+      ff.on('error', error => {
+        // AbortSignal emits AbortError before close. Keep the escalation timer
+        // alive until close so a TERM-ignoring ffmpeg cannot survive Stop.
+        if (signal?.aborted || error?.name === 'AbortError') {
+          cancelled = true;
+          terminate();
+          return;
+        }
+        finish(error);
+      });
+      ff.on('close', code => {
+        if (cancelled) { finish(cancellationError(signal)); return; }
+        finish(code === 0 ? null : new Error(`ffmpeg exited ${code}`));
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      // Close the small race between the pre-spawn check and listener install.
+      if (signal?.aborted) onAbort();
+    });
+    return out;
+  } catch (error) {
+    // ffmpeg may leave a partial wav when it is cancelled or fails.
+    try { fs.unlinkSync(out); } catch {}
+    throw error;
+  }
 }
 
-export async function sttUpload(filePath, language) {
+export async function sttUpload(filePath, language, signal = null) {
+  throwIfCancelled(signal);
   const cfg = loadConfig();
   const isLocal = cfg.sttMode === 'local';
   const sttUrl = isLocal
@@ -77,7 +146,10 @@ export async function sttUpload(filePath, language) {
   const sttKey = isLocal ? 'local' : cfg.sttApiKey;
   if (!sttUrl) throw new Error('STT is not configured');
 
-  const buf = fs.readFileSync(filePath);
+  // fs.promises.readFile honors AbortSignal, which matters for inputs near the
+  // 500 MB limit where a synchronous read could pin a cancelled worker.
+  const buf = await fs.promises.readFile(filePath, signal ? { signal } : undefined);
+  throwIfCancelled(signal);
   const form = new FormData();
   form.append('file', new Blob([buf], { type: 'audio/wav' }), path.basename(filePath));
   form.append('model', cfg.sttModel || 'whisper-1');
@@ -85,19 +157,23 @@ export async function sttUpload(filePath, language) {
 
   // 5 minutes — long audio can take a while even on GPU. faster-whisper local
   // is fast; remote may need every second.
+  const timeoutSignal = AbortSignal.timeout(300000);
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const r = await fetch(sttUrl, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${sttKey || 'placeholder'}` },
     body: form,
-    signal: AbortSignal.timeout(300000),
+    signal: requestSignal,
   });
   if (!r.ok) throw new Error(`STT returned ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return r.json();
 }
 
-export async function executeSkillTool(name, args, userId) {
+export async function executeSkillTool(name, args, userId, _agentId, ctx) {
   if (args?.__validate) return '';
   if (name !== 'transcribe_file') return `unknown tool: ${name}`;
+  const signal = ctx?.signal ?? null;
+  throwIfCancelled(signal);
 
   const rawPath = String(args?.path || '').trim();
   if (!rawPath) return 'Missing required argument: path';
@@ -125,16 +201,17 @@ export async function executeSkillTool(name, args, userId) {
   let extractedAudio = null;
   if (isVideo) {
     try {
-      extractedAudio = await extractAudio(abs);
+      extractedAudio = await extractAudio(abs, signal);
       uploadPath = extractedAudio;
     } catch (e) {
+      if (signal?.aborted || e?.name === 'AbortError') throw cancellationError(signal);
       return `Failed to extract audio from video (${e.message}). Is ffmpeg installed?`;
     }
   }
 
   try {
     const started = Date.now();
-    const result = await sttUpload(uploadPath, args.language);
+    const result = await sttUpload(uploadPath, args.language, signal);
     const elapsedSec = ((Date.now() - started) / 1000).toFixed(1);
     const text = result.text ?? result.transcript ?? '';
     return JSON.stringify({
@@ -145,6 +222,7 @@ export async function executeSkillTool(name, args, userId) {
       language: result.language ?? args.language ?? null,
     });
   } catch (e) {
+    if (signal?.aborted || e?.name === 'AbortError') throw cancellationError(signal);
     return `Transcription failed: ${e.message}`;
   } finally {
     if (extractedAudio) { try { fs.unlinkSync(extractedAudio); } catch {} }

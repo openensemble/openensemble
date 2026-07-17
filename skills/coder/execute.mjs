@@ -41,6 +41,26 @@ const SANDBOX_PATH = NEEDS_NODE_BIND
   ? `${NODE_BIN_DIR}:/usr/local/bin:/usr/bin:/bin`
   : '/usr/local/bin:/usr/bin:/bin';
 
+const PROCESS_TERM_GRACE_MS = 2000;
+
+function cancellationError(signal, fallback = 'Coder operation cancelled.') {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error(fallback);
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancellationError(signal);
+}
+
+function signalProcessTree(child, detached, processSignal) {
+  if (detached && Number.isInteger(child?.pid)) {
+    try { process.kill(-child.pid, processSignal); return; } catch {}
+  }
+  try { child?.kill(processSignal); } catch {}
+}
+
 function buildSandboxArgs(projectDir, command) {
   const args = [
     '--ro-bind', '/usr', '/usr',
@@ -459,7 +479,8 @@ async function deleteProjectFile(filePath, userId) {
 
 // Streaming shell executor: yields `{type:'token'}` chunks live and a final
 // `{type:'result'}` event with the full (capped) output for the tool loop.
-async function* runCommand(command, timeout, userId) {
+async function* runCommand(command, timeout, userId, signal = null) {
+  throwIfCancelled(signal);
   let dir;
   try { dir = getProjectDir(userId); }
   catch (e) { yield { type: 'result', text: `Error: ${e.message}` }; return; }
@@ -477,8 +498,11 @@ async function* runCommand(command, timeout, userId) {
     yield { type: 'result', text: 'Shell execution unavailable: sandbox (bwrap) not installed on server. Install bubblewrap (e.g. `sudo apt install bubblewrap`) or disable the coder shell tool.' };
     return;
   }
+  const detached = process.platform !== 'win32';
   const proc = spawn(BWRAP_BIN, buildSandboxArgs(dir, command), {
     env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: dir, LANG: 'C.UTF-8', TERM: 'xterm-256color' },
+    detached,
+    ...(signal ? { signal } : {}),
   });
 
   let full = '';
@@ -499,22 +523,57 @@ async function* runCommand(command, timeout, userId) {
   let done = false;
   let exitCode = null;
   let timedOut = false;
+  let cancelled = false;
   let errored = null;
+  let killTimer = null;
 
   const wake = () => { if (resolveWait) { resolveWait(); resolveWait = null; } };
   const wait = () => new Promise(r => { resolveWait = r; });
+  const terminate = () => {
+    if (done) return;
+    signalProcessTree(proc, detached, 'SIGTERM');
+    if (killTimer) return;
+    killTimer = setTimeout(() => {
+      if (!done) signalProcessTree(proc, detached, 'SIGKILL');
+    }, PROCESS_TERM_GRACE_MS);
+  };
+  const onAbort = () => {
+    cancelled = true;
+    if (!done) terminate();
+    wake();
+  };
 
   proc.stdout.setEncoding('utf8');
   proc.stderr.setEncoding('utf8');
   proc.stdout.on('data', (chunk) => { append(chunk); queue.push({ type: 'token', text: chunk }); wake(); });
   proc.stderr.on('data', (chunk) => { append(chunk); queue.push({ type: 'token', text: chunk }); wake(); });
-  proc.on('error', (e) => { errored = e; done = true; wake(); });
-  proc.on('close', (code) => { exitCode = code; done = true; wake(); });
+  proc.on('error', (e) => {
+    // ChildProcess emits AbortError as soon as its signal fires. Keep waiting
+    // for close so the bounded SIGKILL fallback remains armed if TERM is ignored.
+    if (signal?.aborted || e?.name === 'AbortError') {
+      cancelled = true;
+      terminate();
+      wake();
+      return;
+    }
+    errored = e;
+    done = true;
+    wake();
+  });
+  proc.on('close', (code) => {
+    exitCode = code;
+    done = true;
+    if (killTimer) { clearTimeout(killTimer); killTimer = null; }
+    wake();
+  });
+  signal?.addEventListener('abort', onAbort, { once: true });
+  // Close the small race between the pre-spawn check and listener install.
+  if (signal?.aborted) onAbort();
 
   const timer = setTimeout(() => {
+    if (done) return;
     timedOut = true;
-    try { proc.kill('SIGTERM'); } catch {}
-    setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 2000);
+    terminate();
   }, timeoutMs);
 
   try {
@@ -525,7 +584,14 @@ async function* runCommand(command, timeout, userId) {
     }
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+    // iterator.return() is also a cancellation boundary. If the consumer stops
+    // reading without an AbortSignal, do not leave the command running unseen.
+    if (!done) terminate();
+    else if (killTimer) { clearTimeout(killTimer); killTimer = null; }
   }
+
+  if (cancelled) throw cancellationError(signal);
 
   const finalCode = errored ? 1 : (timedOut ? 124 : (exitCode ?? 0));
   const tail = [
@@ -571,7 +637,11 @@ function clearServerState(projectDir) {
   }
 }
 
-async function startServer(command, port, userId) {
+async function startServer(command, port, userId, signal = null) {
+  // Admission is cancellable, but the persistent child is deliberately not
+  // wired to the task signal. Once spawned it is project-owned and remains up
+  // until coder_stop_server, even if the launching turn later gets cancelled.
+  throwIfCancelled(signal);
   const dir = getProjectDir(userId);
   if (!BWRAP_BIN) {
     throw new Error('Shell execution unavailable: sandbox (bwrap) not installed on server.');
@@ -769,17 +839,19 @@ async function todoRead(userId) {
   return _renderTodos(_readTodos(userId));
 }
 
-async function listFiles(directory, pattern, userId) {
+async function listFiles(directory, pattern, userId, signal = null) {
+  throwIfCancelled(signal);
   const dir = getProjectDir(userId);
   const base = directory ? safePath(dir, directory) : dir;
   if (!existsSync(base)) throw new Error(`Directory not found: ${directory ?? '.'}`);
 
   if (pattern) {
     // Use find with glob-like pattern
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       execFile('/usr/bin/find', [base, '-name', pattern, '-type', 'f', '-not', '-path', '*/.git/*'],
-        { timeout: 10000, maxBuffer: 512 * 1024 },
+        { timeout: 10000, maxBuffer: 512 * 1024, ...(signal ? { signal } : {}) },
         (err, stdout) => {
+          if (signal?.aborted || err?.name === 'AbortError') return reject(cancellationError(signal));
           if (!stdout?.trim()) return resolve('No files matched.');
           const lines = stdout.trim().split('\n').map(f => path.relative(dir, f)).sort();
           resolve(lines.join('\n'));
@@ -790,9 +862,11 @@ async function listFiles(directory, pattern, userId) {
   // Recursive listing (skip .git, node_modules)
   const results = [];
   async function walk(d, depth = 0) {
+    throwIfCancelled(signal);
     if (depth > 8) return;
     const entries = await readdir(d, { withFileTypes: true });
     for (const e of entries) {
+      throwIfCancelled(signal);
       if (e.name === '.git' || e.name === 'node_modules') continue;
       const rel = path.relative(dir, path.join(d, e.name));
       if (e.isDirectory()) {
@@ -807,7 +881,8 @@ async function listFiles(directory, pattern, userId) {
   return results.length ? results.join('\n') : 'Empty directory.';
 }
 
-async function searchFiles(pattern, searchPath, glob, userId) {
+async function searchFiles(pattern, searchPath, glob, userId, signal = null) {
+  throwIfCancelled(signal);
   const dir = getProjectDir(userId);
   const base = searchPath ? safePath(dir, searchPath) : dir;
 
@@ -815,8 +890,13 @@ async function searchFiles(pattern, searchPath, glob, userId) {
   if (glob) args.push('--glob', glob);
   args.push(base);
 
-  return new Promise((resolve) => {
-    execFile('rg', args, { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+  return new Promise((resolve, reject) => {
+    execFile('rg', args, {
+      timeout: 15000,
+      maxBuffer: 1024 * 1024,
+      ...(signal ? { signal } : {}),
+    }, (err, stdout) => {
+      if (signal?.aborted || err?.name === 'AbortError') return reject(cancellationError(signal));
       if (!stdout?.trim()) return resolve('No matches found.');
       // Make paths relative to project
       const lines = stdout.trim().split('\n').map(l => {
@@ -835,9 +915,10 @@ async function searchFiles(pattern, searchPath, glob, userId) {
 // single `{type:'result'}` event. Plain async tools are wrapped into one final
 // `{type:'result'}` event so the caller (`roles.mjs::executeToolStreaming`)
 // can relay them uniformly.
-export async function* executeSkillTool(name, args, userId = 'default') {
+export async function* executeSkillTool(name, args, userId = 'default', _agentId, ctx) {
+  const signal = ctx?.signal ?? null;
   if (name === 'coder_run_command') {
-    yield* runCommand(args.command, args.timeout, userId);
+    yield* runCommand(args.command, args.timeout, userId, signal);
     return;
   }
   let text;
@@ -852,16 +933,17 @@ export async function* executeSkillTool(name, args, userId = 'default') {
       case 'coder_edit_file':      text = await editProjectFile(args.path, args.old_string, args.new_string, userId); break;
       case 'coder_multi_edit':     text = await multiEditProjectFile(args.file_path, args.edits, userId); break;
       case 'coder_delete_file':    text = await deleteProjectFile(args.path, userId); break;
-      case 'coder_list_files':     text = await listFiles(args.directory, args.pattern, userId); break;
-      case 'coder_search':         text = await searchFiles(args.pattern, args.path, args.glob, userId); break;
+      case 'coder_list_files':     text = await listFiles(args.directory, args.pattern, userId, signal); break;
+      case 'coder_search':         text = await searchFiles(args.pattern, args.path, args.glob, userId, signal); break;
       case 'coder_todo_write':     text = await todoWrite(args.todos, userId); break;
       case 'coder_todo_read':      text = await todoRead(userId); break;
-      case 'coder_start_server':   text = await startServer(args.command, args.port, userId); break;
+      case 'coder_start_server':   text = await startServer(args.command, args.port, userId, signal); break;
       case 'coder_stop_server':    text = await stopServer(userId); break;
       case 'coder_server_status':  text = await serverStatus(userId, args.lines); break;
       default: text = null;
     }
   } catch (e) {
+    if (signal?.aborted || e?.name === 'AbortError') throw cancellationError(signal);
     text = `Error: ${e.message}`;
   }
   yield { type: 'result', text: String(text ?? '') };
