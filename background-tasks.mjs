@@ -2140,7 +2140,13 @@ export function registerAutoBackgroundTool({
     isAutoBgTool: true,
     abort: typeof abort === 'function' ? abort : null,
   });
-  _journalAdd(taskId);
+  // Admission is complete only when the restart journal owns the execution.
+  // Callers still hold the foreground promise/iterator when this returns null,
+  // so failing closed here avoids an unjournaled detached side effect.
+  if (!_journalAdd(taskId)) {
+    activeTasks.delete(taskId);
+    return null;
+  }
   return { taskId, watcherId };
 }
 
@@ -2149,18 +2155,21 @@ export function markAutoBackgroundToolTerminal(taskId, { status = 'done', result
   const rec = activeTasks.get(taskId);
   if (!rec?.isAutoBgTool || rec._terminalMarked) return false;
   const terminal = status === 'cancelled' ? 'cancelled' : (status === 'done' && !error ? 'done' : 'error');
+  // Persist provider settlement first. User-facing completion delivery is
+  // allowed only after this succeeds, so a crash can recover the real terminal
+  // result instead of relabelling completed work as interrupted.
+  if (!_journalMarkCompletion(taskId, {
+    status: terminal,
+    result: terminal === 'done' ? result : '',
+    error: terminal === 'done' ? null : (error || result || 'Background tool failed.'),
+    images: [],
+  })) return false;
   rec._terminalMarked = true;
   rec.abort = null;
   rec.status = terminal;
   rec.phase = 'finalizing';
   rec.currentTool = null;
   rec.lastUpdateAt = Date.now();
-  _journalMarkCompletion(taskId, {
-    status: terminal,
-    result: terminal === 'done' ? result : '',
-    error: terminal === 'done' ? null : (error || result || 'Background tool failed.'),
-    images: [],
-  });
   return true;
 }
 
@@ -2168,12 +2177,13 @@ export function markAutoBackgroundToolTerminal(taskId, { status = 'done', result
 export function retireAutoBackgroundTool(taskId) {
   const rec = activeTasks.get(taskId);
   if (!rec?.isAutoBgTool || rec._finalizationClaimed) return false;
-  rec._finalizationClaimed = true;
   if (!rec._terminalMarked) {
-    markAutoBackgroundToolTerminal(taskId, {
+    const marked = markAutoBackgroundToolTerminal(taskId, {
       status: 'error', error: 'Background tool ended without terminal evidence.',
     });
+    if (!marked) return false;
   }
+  rec._finalizationClaimed = true;
   activeTasks.delete(taskId);
   _journalRemove(taskId);
   return true;

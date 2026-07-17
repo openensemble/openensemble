@@ -52,9 +52,11 @@ import { log } from './logger.mjs';
 import { listAgents } from './agents.mjs';
 import { normalizeOrchestrationPolicy } from './lib/orchestration-policy-core.mjs';
 import { getTurnContext } from './lib/turn-abort-context.mjs';
-import { currentTaskContext } from './lib/task-proxy-context.mjs';
+import { currentTaskContext, runInTaskContext } from './lib/task-proxy-context.mjs';
 import {
   abortError,
+  createLinkedAbortController,
+  isAbortError,
   raceWithAbort,
 } from './lib/abort-utils.mjs';
 
@@ -188,6 +190,61 @@ export async function racePendingIteratorNext(pendingNext, timeoutMs, signal = n
 export function autoBackgroundToolsInCurrentContext() {
   return currentTaskContext() == null
     && getTurnContext()?.awaitSlowTools !== true;
+}
+
+let _autoBackgroundDelayForTest = null;
+
+/** Narrow deterministic seam for slow-tool ownership tests. */
+export function setAutoBackgroundDelayForTest(delayMs = null) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('auto-background delay test seam is unavailable');
+  }
+  _autoBackgroundDelayForTest = delayMs == null
+    ? null
+    : Math.max(1, Number(delayMs) || 1);
+}
+
+function _autoBackgroundDelayMs(suppressLearning) {
+  if (_autoBackgroundDelayForTest != null) return _autoBackgroundDelayForTest;
+  return suppressLearning ? 600_000 : 10_000;
+}
+
+const AUTO_BG_REPORT_TEXT_MAX = 4_000;
+const AUTO_BG_WATCHER_TEXT_MAX = 1_200;
+
+/**
+ * Classify a detached completion once so every durable and live surface uses
+ * the same terminal status. In particular, ctx.toolError() and legacy
+ * `Error: ...` results must never be journaled or displayed as success.
+ */
+export function normalizeAutoBgCompletion(value, displayName = 'Tool') {
+  const structured = value && typeof value === 'object' && typeof value.text === 'string';
+  const normalized = normalizeToolResult(structured ? value.text : String(value ?? ''));
+  const isError = value?.isError === true || normalized.isError;
+  const text = String(normalized.text ?? '').slice(0, AUTO_BG_REPORT_TEXT_MAX);
+  const content = text || (isError ? 'Tool error: Tool failed' : `${displayName} completed.`);
+  const status = isError ? 'error' : 'done';
+  return {
+    text,
+    content,
+    isError,
+    status,
+    watcherFinalText: isError
+      ? `⚠ ${displayName} failed: ${content.slice(0, AUTO_BG_WATCHER_TEXT_MAX)}`
+      : `✓ ${displayName} done${text ? `: ${text.slice(-AUTO_BG_WATCHER_TEXT_MAX)}` : ''}`,
+    observation: { resultText: text, ok: !isError },
+    report: { content, status },
+    scheduled: {
+      resultText: isError ? '' : content,
+      errorMsg: isError ? content : null,
+    },
+    continuation: {
+      resultText: isError ? '' : content,
+      errorMsg: isError ? content : null,
+    },
+    images: structured && Array.isArray(value._images) ? value._images : null,
+    notify: structured && value._notify ? value._notify : null,
+  };
 }
 
 function _registerScheduledAutoBgChild({ scheduledCtx, userId, watcherId, label, kind = 'tool' }) {
@@ -2091,7 +2148,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   let skillExec = null;
   if (shouldSandboxSkill(owningWrap)) {
     const sandboxedSkillId = owningSkillId;
-    skillExec = (n, a) => runCustomSkillValue({ userId, agentId, skillId: sandboxedSkillId, name: n, args: a });
+    skillExec = (n, a, _u, _a, ctx) => runCustomSkillValue({
+      userId,
+      agentId,
+      skillId: sandboxedSkillId,
+      name: n,
+      args: a,
+      signal: ctx?.signal ?? getTurnContext()?.signal ?? null,
+    });
   } else {
     skillExec = await getExecutorByKey(owningKey);
   }
@@ -2165,9 +2229,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // A verifier-owned tool must remain inside its correlated turn. A generous
   // foreground deadline prevents the normal UX auto-background path from
   // detaching learning/report work beyond the terminal frame.
-  const AUTO_BG_MS = suppressLearning ? 600_000 : 10_000;
+  const AUTO_BG_MS = _autoBackgroundDelayMs(suppressLearning);
   const AUTO_BG_ENABLED = autoBackgroundToolsInCurrentContext();
-  const toolSignal = turnContext?.signal ?? null;
 
   // Ephemeral-delegation post-processor for the final `{type:'result'}` yield.
   // Two things happen here, only when agentId is an ephemeral_deleg_* session:
@@ -2228,14 +2291,25 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       }
     }).catch(err => console.warn('[tool-failures] record failed:', err.message));
   };
+  // Every invocation owns a distinct controller. The surrounding worker,
+  // delegation, scheduled run, or foreground turn is the parent owner; aborting
+  // it reaches the skill immediately through ctx.signal. A distinct controller
+  // also gives an execution that is later transferred to a task_proxy a stable
+  // per-tool cancellation identity.
+  const toolAbort = createLinkedAbortController(
+    turnContext?.signal ?? null,
+    `Tool ${name} cancelled by its owner`,
+  );
+  let toolExecutionSettled = false;
+  let toolExecutionTransferred = false;
   try {
-    if (toolSignal?.aborted) throw abortError(toolSignal, `Tool ${name} cancelled`);
+    if (toolAbort.signal.aborted) throw abortError(toolAbort.signal, `Tool ${name} cancelled`);
     const result = skillExec(
       name,
       mergedArgs,
       userId,
       agentId,
-      await buildCtx(userId, agentId, owningSkillId, toolSignal),
+      await buildCtx(userId, agentId, owningSkillId, toolAbort.signal),
     );
 
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
@@ -2273,30 +2347,75 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       };
 
       let iterFinished = false;
+      /**
+       * Keep exactly one iterator read in flight. If the 10-second boundary
+       * wins, this same promise is transferred to the detached drain; calling
+       * iter.next() again there would skip a boundary value (or strand its
+       * rejection as an unhandled promise).
+       * @type {Promise<IteratorResult<any>> | null}
+       */
+      let pendingNext = null;
+      let autoBgDeadline = startedAt + AUTO_BG_MS;
       try {
       while (true) {
-        let next;
-        try { next = await raceWithAbort(iter.next(), toolSignal, `Tool ${name} cancelled`); }
-        catch (err) {
-          // Tool threw during iteration — bubble up. The outer catch handles
-          // background-mode case separately via the detached IIFE below.
-          iterFinished = true; // the iterator is already done after a throw
-          throw err;
-        }
-        if (next.done) { iterFinished = true; break; }
-        const value = next.value;
-        rememberDelegationMeta(value);
+        if (!pendingNext) pendingNext = Promise.resolve().then(() => iter.next());
+        const timeoutMs = Math.max(0, autoBgDeadline - Date.now());
+        // A detached task_proxy must retain ownership until its tool really
+        // settles. Only foreground turns race the read against the UX timer.
+        const outcome = AUTO_BG_ENABLED
+          ? await racePendingIteratorNext(pendingNext, timeoutMs, toolAbort.signal)
+          : await raceWithAbort(
+              pendingNext.then(
+                next => ({ kind: 'next', next }),
+                error => ({ kind: 'error', error }),
+              ),
+              toolAbort.signal,
+              `Tool ${name} cancelled`,
+            );
 
-        // First time crossing 10s: register chip, yield deferred result,
-        // hand the iterator to a detached worker, and return. But never while a
-        // user prompt is pending (consent/credential) — don't hurdle the wait.
-        if (AUTO_BG_ENABLED && !backgrounded
-            && Date.now() - startedAt >= AUTO_BG_MS
-            && !hasPendingPrompt(userId)) {
+        let value;
+        const boundaryTimedOut = outcome.kind === 'timeout';
+        if (!boundaryTimedOut) {
+          // The pending promise settled in the foreground. Clear it only now;
+          // on a timeout the detached path must inherit this exact read.
+          pendingNext = null;
+          if (outcome.kind === 'error') {
+            // Tool threw during iteration — bubble up. The outer catch handles
+            // background-mode errors separately once ownership is detached.
+            iterFinished = true;
+            toolExecutionSettled = true;
+            throw outcome.error;
+          }
+          const next = outcome.next;
+          if (next.done) {
+            iterFinished = true;
+            toolExecutionSettled = true;
+            break;
+          }
+          if (toolAbort.signal.aborted) throw abortError(toolAbort.signal, `Tool ${name} cancelled`);
+          value = next.value;
+          rememberDelegationMeta(value);
+        } else if (hasPendingPrompt(userId)) {
+          // Consent/credential prompts remain foreground-owned. Keep the same
+          // pending iterator read and re-arm the boundary without busy-looping.
+          autoBgDeadline = Date.now() + AUTO_BG_MS;
+          continue;
+        }
+
+        // First time crossing 10s: register chip, yield deferred result, and
+        // hand the still-pending iterator read to a detached worker. Racing
+        // the read itself is essential for a stream that emits nothing for
+        // longer than the boundary; checking elapsed time only after next()
+        // resolves leaves that stream stuck in the foreground indefinitely.
+        if (!backgrounded && boundaryTimedOut) {
           const displayName = delegatedMeta?.agentName || name;
           const displayEmoji = delegatedMeta?.agentEmoji || (delegatedMeta ? '' : '⏵');
           const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
           const adoptedChipId = delegatedMeta?.chipWatcherId || null;
+          const freshTaskId = adoptedChipId
+            ? null
+            : `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          let freshOwnerRegistered = false;
           try {
             watchersMod = await import('./scheduler/watchers.mjs');
             const taskGraph = await import('./background-tasks.mjs');
@@ -2314,7 +2433,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 kind: 'task_proxy',
                 label,
                 state: {
-                  taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                  taskId: freshTaskId,
                   status: 'running',
                   targetAgentName: displayName,
                   targetAgentEmoji: displayEmoji || '⏵',
@@ -2324,11 +2443,23 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   summary: `${displayName} is still running`,
                   startedAt,
                   lastActivityAt: Date.now(),
-                  canCancel: false,
+                  canCancel: true,
                 },
                 cadenceSec: 30,
                 expiresAt: null,
               });
+              if (!taskGraph.registerAutoBackgroundTool({
+                taskId: freshTaskId,
+                userId,
+                agentId: rootAgentId,
+                toolName: name,
+                watcherId,
+                startedAt,
+                abort: reason => toolAbort.abort(reason),
+              })) {
+                throw new Error('slow-tool owner registration failed');
+              }
+              freshOwnerRegistered = true;
             }
             backgrounded = true;
             taskGraph.registerTaskRoot({
@@ -2342,14 +2473,28 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               rootTaskId: watcherId,
               phase: 'backgrounded',
               currentTool: name,
-              // An adopted delegation chip keeps its Stop button (the sync
-              // registry entry is abortable); a fresh auto-bg chip has no
-              // abort handle, so it stays non-cancellable.
-              ...(adoptedChipId ? {} : { canCancel: false }),
+              canCancel: true,
             });
           } catch (e) {
             console.warn('[auto-bg] watcher register failed; staying foreground:', e.message);
-            // If we can't register the watcher, fall through to normal yield
+            if (!adoptedChipId && watcherId) {
+              if (freshOwnerRegistered) {
+                try {
+                  const bg = await import('./background-tasks.mjs');
+                  bg.markAutoBackgroundToolTerminal(freshTaskId, {
+                    status: 'error', error: 'Slow-tool ownership handoff failed.',
+                  });
+                  bg.retireAutoBackgroundTool(freshTaskId);
+                  bg.clearTaskRoot(watcherId);
+                } catch { /* foreground still owns the exact pending iterator read */ }
+                freshOwnerRegistered = false;
+              }
+              try { watchersMod?.unregisterWatcher?.(userId, watcherId, 'handoff_failed'); }
+              catch { /* foreground still owns the exact pending iterator read */ }
+              watcherId = null;
+            }
+            // Keep ownership of the SAME pending read and retry the boundary
+            // later instead of spinning or issuing a concurrent iter.next().
           }
 
           if (backgrounded) {
@@ -2373,7 +2518,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               targetAgentId: delegatedMeta?.targetAgentId || null,
               adopted: !!adoptedChipId,
               chipTaskId: delegatedMeta?.chipTaskId || null,
+              taskId: freshTaskId,
               args: mergedArgs,
+              pendingNext,
+              toolSignal: toolAbort.signal,
+              disposeToolSignal: toolAbort.dispose,
               scheduledCtx: getScheduledContext(),
               rootTaskId: watcherId,
               rootWatcherId: watcherId,
@@ -2404,13 +2553,30 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               kind: captured.owningSkillId === 'delegate' ? 'delegate-tool' : 'tool',
             });
             (async () => {
-              let finalText = '';
-              let finalImages = null;
+              let finalCompletion = null;
+              const finalImages = [];
               let finalNotify = null;
+              let ownerTerminal = {
+                status: 'error', result: '', error: `${captured.name} ended without terminal evidence`,
+              };
+              let ownerMarked = false;
+              const appendFinalImage = (image) => {
+                if (!image || (!image.filename && !image.base64 && !image.savedPath)) return;
+                const normalized = {
+                  ...(image.base64 ? { base64: image.base64 } : {}),
+                  mimeType: image.mimeType || image.mediaType || 'image/png',
+                  ...(image.filename ? { filename: image.filename } : {}),
+                  ...(image.savedPath ? { savedPath: image.savedPath } : {}),
+                };
+                const key = normalized.savedPath || normalized.filename || normalized.base64?.slice(0, 64);
+                if (!finalImages.some(existing => (existing.savedPath || existing.filename || existing.base64?.slice(0, 64)) === key)) {
+                  finalImages.push(normalized);
+                }
+              };
               try {
                 const { runInTaskContext } = await import('./lib/task-proxy-context.mjs');
                 await runInTaskContext({
-                  taskId: _autoBgChildId(captured.watcherId),
+                  taskId: captured.taskId || captured.chipTaskId || _autoBgChildId(captured.watcherId),
                   watcherId: captured.watcherId,
                   userId: captured.userId,
                   agentId: captured.agentId,
@@ -2419,70 +2585,119 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   visibleAgentId: captured.visibleAgentId,
                   spanId: `${captured.rootTaskId}:${captured.name}`,
                 }, async () => {
-                  await drainIteratorIncludingBoundary(iter, value, async (rawValue) => {
-                    const v = await _postProcessResult(rawValue);
+                  // Start with the exact iter.next() that lost the foreground
+                  // race. Its first value, done marker, or rejection belongs
+                  // to this drain and must not be skipped at the handoff.
+                  let nextPromise = captured.pendingNext;
+                  while (true) {
+                    const r = await raceWithAbort(
+                      nextPromise,
+                      captured.toolSignal,
+                      `Tool ${captured.name} cancelled`,
+                    );
+                    if (r.done) break;
+                    const v = r.value;
                     rememberDelegationMeta(v);
                     if (v?.type === 'tool_progress' && v.text) {
                       watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, String(v.text).slice(-1200), {
                         rootTaskId: captured.rootTaskId,
                         phase: 'streaming',
                         currentTool: captured.name,
-                        canCancel: false,
+                        canCancel: true,
                       });
+                    } else if (v?.type === 'image') {
+                      // Media is a first-class stream event. Collect it for the
+                      // durable/live report directly rather than smuggling it
+                      // through a later result._images payload.
+                      appendFinalImage(v);
                     } else if (v?.type === 'result') {
-                      finalText = String(v.text || '');
-                      if (Array.isArray(v._images)) finalImages = v._images;
+                      // Run the same normalization/error classification as a
+                      // foreground result. Once any final result is an error,
+                      // a later stray result must not turn the detached job
+                      // back into success.
+                      const processed = await _postProcessResult(v);
+                      const completion = normalizeAutoBgCompletion(processed, captured.displayName);
+                      if (!finalCompletion?.isError || completion.isError) finalCompletion = completion;
+                      // Keep compatibility with older structured-result tools;
+                      // new streaming tools should emit type:'image' instead.
+                      if (Array.isArray(v._images)) v._images.forEach(appendFinalImage);
                       if (v._notify) finalNotify = v._notify;
-                      const preview = finalText.split('\n').find(l => l.trim()) || '';
+                      const preview = completion.text.split('\n').find(l => l.trim()) || '';
                       if (preview) {
                         watchersMod.pushWatcherStatus(captured.userId, captured.watcherId, `${captured.displayName}: ${preview.slice(0, 240)}`, {
                           rootTaskId: captured.rootTaskId,
                           phase: 'result',
                           currentTool: null,
-                          canCancel: false,
+                          canCancel: true,
                         });
                       }
                     }
-                  });
-                  if (_resultWasError) throw new Error(_lastErrText || finalText || `${captured.name} failed`);
+                    nextPromise = Promise.resolve().then(() => iter.next());
+                  }
                 });
                 const bg = await import('./background-tasks.mjs');
-                const finalReportImages = Array.isArray(finalImages) ? finalImages : null;
+                const completion = finalCompletion ?? normalizeAutoBgCompletion('', captured.displayName);
+                ownerTerminal = {
+                  status: completion.status,
+                  result: completion.isError ? '' : completion.content,
+                  error: completion.isError ? completion.content : null,
+                };
+                if (captured.taskId) {
+                  ownerMarked = bg.markAutoBackgroundToolTerminal(captured.taskId, ownerTerminal);
+                  if (!ownerMarked) throw new Error('slow-tool terminal journal update failed');
+                }
+                const finalReportImages = finalImages.length ? finalImages : null;
                 // Personalization mirror: this result lands after the turn
                 // ends, so the primary hook (executeToolStreaming's common
                 // completion path) never sees it — record it here instead.
                 if (!suppressLearning) try {
                   recordToolObservation({
                     userId: captured.userId, agentId: captured.agentId, toolName: captured.name,
-                    skillId: captured.owningSkillId, args: captured.args, resultText: finalText, ok: true,
+                    skillId: captured.owningSkillId, args: captured.args,
+                    resultText: completion.observation.resultText, ok: completion.observation.ok,
                     // Drain runs after the turn's async context is gone — derive
                     // origin from the scheduledContext captured at dispatch time.
                     origin: captured.scheduledCtx?.originTaskId ? 'automation' : 'interactive',
                   });
                 } catch { /* never block auto-bg finalization */ }
+                if (completion.isError) _reportToolFailure(completion.text);
                 if (captured.adopted) {
                   // Chip + root-graph finalization belong to the delegate
                   // skill's sync-delegation handle (children-aware, already ran
-                  // when the generator finished). This drain only delivers the
-                  // result to the session/UI below.
+                  // when the generator finished). A returned tool error is the
+                  // exception: explicitly correct the adopted handle so it can
+                  // never remain finalized as a successful delegation.
+                  if (completion.isError) {
+                    if (captured.chipTaskId) {
+                      bg.completeSyncDelegation(captured.chipTaskId, {
+                        outcome: 'error',
+                        finalText: completion.watcherFinalText,
+                        finalReportPreview: completion.content.slice(0, 800),
+                      });
+                    }
+                    watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                      status: completion.status,
+                      finalText: completion.watcherFinalText,
+                    });
+                  }
                 } else {
                   const deferred = !captured.scheduledCtx?.originTaskId && bg.deferRootCompletion({
                     userId: captured.userId,
                     rootTaskId: captured.rootTaskId,
                     rootWatcherId: captured.rootWatcherId,
-                    status: 'done',
-                    finalText: `✓ ${captured.displayName} done`,
-                    finalReportPreview: finalText.slice(0, 800),
+                    status: completion.status,
+                    finalText: completion.watcherFinalText,
+                    finalReportPreview: completion.content.slice(0, 800),
                   });
                   if (deferred) {
                     log.info('tool', 'auto-bg root waiting for delegated children', { tool: captured.name, watcherId: captured.watcherId, userId: captured.userId });
-                    return;
+                  } else {
+                    bg.clearTaskRoot(captured.rootTaskId);
+                    watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                      status: completion.status,
+                      finalText: completion.watcherFinalText,
+                    });
                   }
-                  bg.clearTaskRoot(captured.rootTaskId);
-                  watchersMod.completeWatcher(captured.userId, captured.watcherId, {
-                    status: 'done',
-                    finalText: `✓ ${captured.displayName} done${finalText ? `: ${finalText.slice(-1200)}` : ''}`,
-                  });
                 }
                 // Append the result into the agent session so the next LLM
                 // turn has context. Best-effort; chip is the primary surface.
@@ -2502,16 +2717,16 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                       agentName: captured.displayName,
                       agentEmoji: captured.displayEmoji || '⏵',
                       ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
-                      content: (finalText || `${captured.displayName} completed.`).slice(0, 4000),
+                      content: completion.report.content,
                       taskId: `autobg_${captured.watcherId}`,
                       watcherId: captured.watcherId,
                       rootWatcherId: captured.rootWatcherId || captured.watcherId,
                       tool: captured.name,
-                      status: 'done',
+                      status: completion.report.status,
                       // Durable rows strip inline base64 (multi-MB per image,
-                      // re-shipped on every session_loaded) — the saved file
-                      // reference renders instead. Live broadcast below keeps
-                      // the pixels for immediate display.
+                      // re-shipped on every session_loaded) only when a stable
+                      // savedPath can render instead. Live broadcast below
+                      // always keeps the pixels for immediate display.
                       ...(finalReportImages ? { images: finalReportImages.map(bg.persistedReportImage).filter(Boolean) } : {}),
                       ...(finalNotify ? { notify: finalNotify } : {}),
                       ts: Date.now(),
@@ -2531,12 +2746,12 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     agentName: captured.displayName,
                     agentEmoji: captured.displayEmoji || '⏵',
                     ...(captured.targetAgentId ? { targetAgentId: captured.targetAgentId } : {}),
-                    content: finalText || `${captured.displayName} completed.`,
+                    content: completion.report.content,
                     taskId: `autobg_${captured.watcherId}`,
                     watcherId: captured.watcherId,
                     rootWatcherId: captured.rootWatcherId || captured.watcherId,
                     tool: captured.name,
-                    status: 'done',
+                    status: completion.report.status,
                     ...(finalReportImages ? { images: finalReportImages } : {}),
                     ...(finalNotify ? { notify: finalNotify } : {}),
                     ts: Date.now(),
@@ -2550,7 +2765,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     const { enqueueVoiceAnnouncement, announcementLine } = await import('./lib/voice-announcements.mjs');
                     enqueueVoiceAnnouncement(
                       captured.voiceDeviceId,
-                      announcementLine(captured.displayName || captured.name, finalText, captured.args?.task || ''),
+                      announcementLine(captured.displayName || captured.name, completion.content, captured.args?.task || ''),
                       { kind: 'auto-bg' }
                     );
                   } catch (e) { console.warn('[auto-bg] voice announce enqueue failed:', e.message); }
@@ -2560,7 +2775,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   scheduledCtx: captured.scheduledCtx,
                   userId: captured.userId,
                   watcherId: captured.watcherId,
-                  resultText: finalText || `${captured.displayName} completed.`,
+                  resultText: completion.scheduled.resultText,
+                  errorMsg: completion.scheduled.errorMsg,
                 });
                 // Scheduled runs react+finalize via the barrier; only a direct
                 // (non-scheduled, non-delegated) chat gets the inline report-back.
@@ -2570,24 +2786,87 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     agentId: captured.agentId,
                     toolName: captured.name,
                     args: captured.args,
-                    resultText: finalText || `${captured.displayName} completed.`,
+                    resultText: completion.continuation.resultText,
+                    errorMsg: completion.continuation.errorMsg,
                   });
                 }
-                log.info('tool', 'auto-bg tool complete', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, durationMs: Date.now() - captured.startedAt });
+                const completionLog = { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, durationMs: Date.now() - captured.startedAt };
+                if (completion.isError) log.warn('tool', 'auto-bg tool returned error', { ...completionLog, err: completion.text.slice(0, 200) });
+                else log.info('tool', 'auto-bg tool complete', completionLog);
               } catch (err) {
+                const cancelled = isAbortError(err, captured.toolSignal);
+                const terminalError = cancelled
+                  ? abortError(captured.toolSignal, `${captured.name} cancelled`).message
+                  : (err?.message || String(err));
+                ownerTerminal = {
+                  status: cancelled ? 'cancelled' : 'error',
+                  result: '',
+                  error: terminalError,
+                };
+                if (captured.taskId && !ownerMarked) {
+                  try {
+                    const bg = await import('./background-tasks.mjs');
+                    ownerMarked = bg.markAutoBackgroundToolTerminal(captured.taskId, ownerTerminal);
+                  } catch { /* journal remains as in-flight for restart recovery */ }
+                }
+                if (captured.taskId && !ownerMarked) {
+                  log.error('tool', 'auto-bg terminal journal update failed', {
+                    tool: captured.name, userId: captured.userId,
+                  });
+                  return;
+                }
                 // If the delegate skill died before finalizing its registry
                 // entry, clean it up here — a leaked entry reads as "still
                 // running" to check_workers until the 24h reaper.
                 try {
                   if (captured.chipTaskId) {
                     const bg = await import('./background-tasks.mjs');
-                    bg.completeSyncDelegation(captured.chipTaskId, { outcome: 'error', finalText: `⚠ ${captured.displayName} failed: ${err.message}` });
+                    bg.completeSyncDelegation(captured.chipTaskId, {
+                      outcome: cancelled ? 'stopped' : 'error',
+                      finalText: cancelled
+                        ? `■ ${captured.displayName} cancelled`
+                        : `⚠ ${captured.displayName} failed: ${terminalError}`,
+                    });
                   }
                 } catch { /* best-effort */ }
-                watchersMod.completeWatcher(captured.userId, captured.watcherId, {
-                  status: 'error',
-                  finalText: `⚠ ${captured.name} failed: ${err.message}`,
-                });
+                if (captured.adopted) {
+                  watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                    status: cancelled ? 'cancelled' : 'error',
+                    finalText: cancelled
+                      ? `■ ${captured.name} cancelled`
+                      : `⚠ ${captured.name} failed: ${terminalError}`,
+                  });
+                } else {
+                  try {
+                    const bg = await import('./background-tasks.mjs');
+                    const deferred = !captured.scheduledCtx?.originTaskId && bg.deferRootCompletion({
+                      userId: captured.userId,
+                      rootTaskId: captured.rootTaskId,
+                      rootWatcherId: captured.rootWatcherId,
+                      status: cancelled ? 'cancelled' : 'error',
+                      finalText: cancelled
+                        ? `■ ${captured.name} cancelled`
+                        : `⚠ ${captured.name} failed: ${terminalError}`,
+                      finalReportPreview: terminalError.slice(0, 800),
+                    });
+                    if (!deferred) {
+                      bg.clearTaskRoot(captured.rootTaskId);
+                      watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                        status: cancelled ? 'cancelled' : 'error',
+                        finalText: cancelled
+                          ? `■ ${captured.name} cancelled`
+                          : `⚠ ${captured.name} failed: ${terminalError}`,
+                      });
+                    }
+                  } catch {
+                    watchersMod.completeWatcher(captured.userId, captured.watcherId, {
+                      status: cancelled ? 'cancelled' : 'error',
+                      finalText: cancelled
+                        ? `■ ${captured.name} cancelled`
+                        : `⚠ ${captured.name} failed: ${terminalError}`,
+                    });
+                  }
+                }
                 await _emitAutoBgToolReport({
                   userId: captured.userId,
                   agentId: captured.agentId,
@@ -2597,15 +2876,17 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                   watcherId: captured.watcherId,
                   rootWatcherId: captured.rootWatcherId || captured.watcherId,
                   targetAgentId: captured.targetAgentId,
-                  content: `${captured.displayName || captured.name} failed: ${err.message}`,
-                  status: 'error',
+                  content: cancelled
+                    ? `${captured.displayName || captured.name} was cancelled.`
+                    : `${captured.displayName || captured.name} failed: ${terminalError}`,
+                  status: cancelled ? 'cancelled' : 'error',
                 });
                 _completeScheduledAutoBgChild({
                   scheduledCtx: captured.scheduledCtx,
                   userId: captured.userId,
                   watcherId: captured.watcherId,
                   resultText: '',
-                  errorMsg: err.message,
+                  errorMsg: terminalError,
                 });
                 if (!suppressLearning && !captured.scheduledCtx?.originTaskId && !captured.targetAgentId) {
                   await _runAutoBgToolContinuation({
@@ -2614,11 +2895,37 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                     toolName: captured.name,
                     args: captured.args,
                     resultText: '',
-                    errorMsg: err.message,
+                    errorMsg: terminalError,
                   });
                 }
-                log.warn('tool', 'auto-bg tool threw', { skill: captured.owningSkillId, tool: captured.name, userId: captured.userId, err: err.message });
+                if (cancelled) {
+                  log.info('tool', 'auto-bg tool cancelled', {
+                    skill: captured.owningSkillId, tool: captured.name, userId: captured.userId,
+                  });
+                } else {
+                  log.warn('tool', 'auto-bg tool threw', {
+                    skill: captured.owningSkillId, tool: captured.name,
+                    userId: captured.userId, err: terminalError,
+                  });
+                }
               } finally {
+                captured.disposeToolSignal?.();
+                // Fresh slow-tool handoffs have a real registry/journal owner;
+                // adopted delegation chips are already owned by their sync
+                // delegation record and must not be retired here.
+                if (captured.taskId) {
+                  try {
+                    const bg = await import('./background-tasks.mjs');
+                    if (!ownerMarked) {
+                      ownerMarked = bg.markAutoBackgroundToolTerminal(captured.taskId, ownerTerminal);
+                    }
+                    if (ownerMarked) bg.retireAutoBackgroundTool(captured.taskId);
+                  } catch (e) {
+                    log.warn('tool', 'auto-bg owner retirement failed', {
+                      tool: captured.name, userId: captured.userId, err: e?.message || String(e),
+                    });
+                  }
+                }
                 // Release the WAITING-ring hold on success AND error paths.
                 if (captured.voiceDeviceId) {
                   import('./ws-handler.mjs')
@@ -2627,9 +2934,13 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 }
               }
             })();
+            toolExecutionTransferred = true;
             return;   // outer generator ends — LLM sees the deferred result + turn finishes
           }
-          // else: fall through to normal yield (registration failed)
+          // Registration failed: stay foreground-owned, keep the same
+          // pending read, and retry after another boundary interval.
+          autoBgDeadline = Date.now() + AUTO_BG_MS;
+          continue;
         }
 
         yield await _postProcessResult(value);
@@ -2659,30 +2970,45 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       // backgrounds normally on the next tick.
       let winner;
       if (!AUTO_BG_ENABLED) {
-        // A parent task chip is already the background surface. Await the
-        // actual value so dependent workflow steps receive real evidence,
-        // while still honoring cancellation owned by that task.
-        winner = await raceWithAbort(racePromise, toolSignal, `Tool ${name} cancelled`);
+        // The parent worker/task chip is already the user's background
+        // surface. Await the real value so the model can perform dependent
+        // tool calls instead of seeing a premature synthetic result.
+        winner = await raceWithAbort(
+          racePromise,
+          toolAbort.signal,
+          `Tool ${name} cancelled`,
+        );
       } else {
         do {
-          winner = await raceWithAbort(Promise.race([
-            racePromise,
-            new Promise(resolve => setTimeout(() => resolve(TIMER_TOKEN), AUTO_BG_MS)),
-          ]), toolSignal, `Tool ${name} cancelled`);
+          winner = await raceWithAbort(
+            Promise.race([
+              racePromise,
+              new Promise(resolve => setTimeout(() => resolve(TIMER_TOKEN), AUTO_BG_MS)),
+            ]),
+            toolAbort.signal,
+            `Tool ${name} cancelled`,
+          );
         } while (winner === TIMER_TOKEN && hasPendingPrompt(userId));
       }
 
-      if (winner === TIMER_TOKEN) {
-        const watchersMod = await import('./scheduler/watchers.mjs');
-        const attribAgentId = await _resolveAttributionAgent(userId, agentId);
-        const scheduledCtx = getScheduledContext();
-        const wid = watchersMod.registerWatcher({
+      promiseAutoBackground: if (winner === TIMER_TOKEN) {
+        let watchersMod;
+        let attribAgentId;
+        let scheduledCtx;
+        let wid;
+        let ownerRegistered = false;
+        const autoBgTaskId = `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        try {
+          watchersMod = await import('./scheduler/watchers.mjs');
+          attribAgentId = await _resolveAttributionAgent(userId, agentId);
+          scheduledCtx = getScheduledContext();
+          wid = watchersMod.registerWatcher({
           userId,
           agentId: attribAgentId,
           kind: 'task_proxy',
           label: `⏵ ${name}`,
           state: {
-            taskId: `autobg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            taskId: autoBgTaskId,
             status: 'running',
             targetAgentName: name,
             targetAgentEmoji: '⏵',
@@ -2691,16 +3017,45 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             summary: `${name} is still running`,
             startedAt: _toolStart,
             lastActivityAt: Date.now(),
-            canCancel: false,
+            canCancel: true,
           },
           cadenceSec: 30,
           expiresAt: null,
-        });
-        watchersMod.pushWatcherStatus(userId, wid, `${name} is still running in the background`, {
-          phase: 'backgrounded',
-          currentTool: name,
-          canCancel: false,
-        });
+          });
+          watchersMod.pushWatcherStatus(userId, wid, `${name} is still running in the background`, {
+            phase: 'backgrounded',
+            currentTool: name,
+            canCancel: true,
+          });
+          const bg = await import('./background-tasks.mjs');
+          if (!bg.registerAutoBackgroundTool({
+            taskId: autoBgTaskId,
+            userId,
+            agentId: attribAgentId,
+            toolName: name,
+            watcherId: wid,
+            startedAt: _toolStart,
+            abort: reason => toolAbort.abort(reason),
+          })) {
+            throw new Error('slow-tool owner registration failed');
+          }
+          ownerRegistered = true;
+        } catch (error) {
+          // The promise is already running. If ownership registration fails,
+          // keep this turn attached and await the real result; throwing here
+          // would orphan a side effect with no watcher or completion report.
+          console.warn('[auto-bg] promise watcher register failed; staying foreground:', error?.message || error);
+          if (wid && !ownerRegistered) {
+            try { watchersMod?.unregisterWatcher?.(userId, wid, 'handoff_failed'); }
+            catch { /* foreground promise remains the execution owner */ }
+          }
+          winner = await raceWithAbort(
+            racePromise,
+            toolAbort.signal,
+            `Tool ${name} cancelled`,
+          );
+          break promiseAutoBackground;
+        }
         _registerScheduledAutoBgChild({
           scheduledCtx,
           userId,
@@ -2711,33 +3066,67 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         yield { type: 'result', text: `\`${name}\` is running in the background (task ${wid}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
         yield { type: '__hide_turn', reason: 'bg_chip', taskId: wid };
 
-        racePromise.then(async (val) => {
+        let ownerTerminal = {
+          status: 'error', result: '', error: `${name} ended without terminal evidence`,
+        };
+        let ownerMarked = false;
+        const promiseOwnerContext = {
+          taskId: autoBgTaskId,
+          watcherId: wid,
+          userId,
+          agentId: attribAgentId,
+          rootTaskId: wid,
+          rootWatcherId: wid,
+          visibleAgentId: attribAgentId,
+          spanId: `${wid}:${name}`,
+        };
+        raceWithAbort(
+          racePromise,
+          toolAbort.signal,
+          `Tool ${name} cancelled`,
+        ).then((val) => runInTaskContext(promiseOwnerContext, async () => {
           // Normalize structured tool results like the inline path does — otherwise
           // a delayed { text, _images, _notify } result becomes the string
           // "[object Object]" and its images/notifications are lost.
           const structured = val && typeof val === 'object' && typeof val.text === 'string';
-          // Strip the tool-error sentinel the inline path also strips, so a
-          // backgrounded failure reads as "Tool error: …", not a raw NUL marker.
-          const text   = normalizeToolResult(structured ? val.text : String(val ?? '')).text;
-          const images = structured && Array.isArray(val._images) ? val._images : null;
-          const notify = structured && val._notify ? val._notify : null;
+          const processed = await _postProcessResult({
+            type: 'result',
+            text: structured ? val.text : String(val ?? ''),
+            ...(structured && Array.isArray(val._images) ? { _images: val._images } : {}),
+            ...(structured && val._notify ? { _notify: val._notify } : {}),
+          });
+          const completion = normalizeAutoBgCompletion(processed, name);
+          ownerTerminal = {
+            status: completion.status,
+            result: completion.isError ? '' : completion.content,
+            error: completion.isError ? completion.content : null,
+          };
+          {
+            const bg = await import('./background-tasks.mjs');
+            ownerMarked = bg.markAutoBackgroundToolTerminal(autoBgTaskId, ownerTerminal);
+            if (!ownerMarked) throw new Error('slow-tool terminal journal update failed');
+          }
+          const images = completion.images;
+          const notify = completion.notify;
           // Personalization mirror: single-promise auto-bg result also lands
           // after the turn ends — same rationale as the streaming-path mirror.
           if (!suppressLearning) try {
             recordToolObservation({
               userId, agentId: attribAgentId, toolName: name, skillId: owningSkillId,
-              args: mergedArgs, resultText: text, ok: true,
+              args: mergedArgs,
+              resultText: completion.observation.resultText, ok: completion.observation.ok,
               // Drain runs after the turn's async context is gone — derive
               // origin from the scheduledContext captured at dispatch time.
               origin: scheduledCtx?.originTaskId ? 'automation' : 'interactive',
             });
           } catch { /* never block auto-bg finalization */ }
+          if (completion.isError) _reportToolFailure(completion.text);
           const key = agentId
             ? (agentId.startsWith(`${userId}_`) ? agentId : `${userId}_${agentId}`)
             : null;
           watchersMod.completeWatcher(userId, wid, {
-            status: 'done',
-            finalText: `✓ ${name} done${text ? `: ${text.slice(-1200)}` : ''}`,
+            status: completion.status,
+            finalText: completion.watcherFinalText,
           });
           if (key) {
             try {
@@ -2748,12 +3137,12 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
                 kind: 'agent_report',
                 agentName: name,
                 agentEmoji: '⏵',
-                content: (text || `${name} completed.`).slice(0, 4000),
+                content: completion.report.content,
                 taskId: `autobg_${wid}`,
                 watcherId: wid,
                 rootWatcherId: wid,
                 tool: name,
-                status: 'done',
+                status: completion.report.status,
                 // Durable rows strip inline base64 — see the streaming path.
                 ...(images ? { images: images.map(persistedReportImage).filter(Boolean) } : {}),
                 ...(notify ? { notify } : {}),
@@ -2768,14 +3157,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               agent: key,
               agentName: name,
               agentEmoji: '⏵',
-              content: text || `${name} completed.`,
+              content: completion.report.content,
               ...(images ? { images } : {}),
               ...(notify ? { notify } : {}),
               taskId: `autobg_${wid}`,
               watcherId: wid,
               rootWatcherId: wid,
               tool: name,
-              status: 'done',
+              status: completion.report.status,
               ts: Date.now(),
             });
           } catch (_) { /* best-effort */ }
@@ -2784,7 +3173,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             scheduledCtx,
             userId,
             watcherId: wid,
-            resultText: text || `${name} completed.`,
+            resultText: completion.scheduled.resultText,
+            errorMsg: completion.scheduled.errorMsg,
           });
           // Scheduled runs react+finalize via the barrier; direct chats get the
           // inline report-back continuation.
@@ -2794,14 +3184,38 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               agentId: attribAgentId,
               toolName: name,
               args: mergedArgs,
-              resultText: text || `${name} completed.`,
+              resultText: completion.continuation.resultText,
+              errorMsg: completion.continuation.errorMsg,
             });
           }
-          log.info('tool', 'auto-bg tool complete', { skill: owningSkillId, tool: name, userId, durationMs: Date.now() - _toolStart });
-        }).catch(async (err) => {
+          const completionLog = { skill: owningSkillId, tool: name, userId, durationMs: Date.now() - _toolStart };
+          if (completion.isError) log.warn('tool', 'auto-bg tool returned error', { ...completionLog, err: completion.text.slice(0, 200) });
+          else log.info('tool', 'auto-bg tool complete', completionLog);
+        })).catch((err) => runInTaskContext(promiseOwnerContext, async () => {
+          const cancelled = isAbortError(err, toolAbort.signal);
+          const terminalError = cancelled
+            ? abortError(toolAbort.signal, `${name} cancelled`).message
+            : (err?.message || String(err));
+          ownerTerminal = {
+            status: cancelled ? 'cancelled' : 'error',
+            result: '',
+            error: terminalError,
+          };
+          if (!ownerMarked) {
+            try {
+              const bg = await import('./background-tasks.mjs');
+              ownerMarked = bg.markAutoBackgroundToolTerminal(autoBgTaskId, ownerTerminal);
+            } catch { /* journal remains in-flight for restart recovery */ }
+          }
+          if (!ownerMarked) {
+            log.error('tool', 'auto-bg terminal journal update failed', { tool: name, userId });
+            return;
+          }
           watchersMod.completeWatcher(userId, wid, {
-            status: 'error',
-            finalText: `⚠ ${name} failed: ${err.message}`,
+            status: cancelled ? 'cancelled' : 'error',
+            finalText: cancelled
+              ? `■ ${name} cancelled`
+              : `⚠ ${name} failed: ${terminalError}`,
           });
           await _emitAutoBgToolReport({
             userId,
@@ -2811,15 +3225,15 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
             displayEmoji: '⏵',
             watcherId: wid,
             rootWatcherId: wid,
-            content: `${name} failed: ${err.message}`,
-            status: 'error',
+            content: cancelled ? `${name} was cancelled.` : `${name} failed: ${terminalError}`,
+            status: cancelled ? 'cancelled' : 'error',
           });
           _completeScheduledAutoBgChild({
             scheduledCtx,
             userId,
             watcherId: wid,
             resultText: '',
-            errorMsg: err.message,
+            errorMsg: terminalError,
           });
           if (!suppressLearning && !scheduledCtx?.originTaskId) {
             await _runAutoBgToolContinuation({
@@ -2828,11 +3242,30 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
               toolName: name,
               args: mergedArgs,
               resultText: '',
-              errorMsg: err.message,
+              errorMsg: terminalError,
             });
           }
-          log.warn('tool', 'auto-bg tool threw', { skill: owningSkillId, tool: name, userId, err: err.message });
+          if (cancelled) log.info('tool', 'auto-bg tool cancelled', { skill: owningSkillId, tool: name, userId });
+          else log.warn('tool', 'auto-bg tool threw', { skill: owningSkillId, tool: name, userId, err: terminalError });
+        })).finally(() => runInTaskContext(promiseOwnerContext, async () => {
+          toolAbort.dispose();
+          try {
+            const bg = await import('./background-tasks.mjs');
+            if (!ownerMarked) {
+              ownerMarked = bg.markAutoBackgroundToolTerminal(autoBgTaskId, ownerTerminal);
+            }
+            if (ownerMarked) bg.retireAutoBackgroundTool(autoBgTaskId);
+          } catch (e) {
+            log.warn('tool', 'auto-bg owner retirement failed', {
+              tool: name, userId, err: e?.message || String(e),
+            });
+          }
+        })).catch(e => {
+          log.warn('tool', 'auto-bg terminal reporting failed', {
+            tool: name, userId, err: e?.message || String(e),
+          });
         });
+        toolExecutionTransferred = true;
         return;
       }
 
@@ -2842,6 +3275,8 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       // existing patterns) so the chat dispatcher can forward them. Plain
       // strings still flow through unchanged.
       const isStructured = winner && typeof winner === 'object' && typeof winner.text === 'string';
+      if (toolAbort.signal.aborted) throw abortError(toolAbort.signal, `Tool ${name} cancelled`);
+      toolExecutionSettled = true;
       yield await _postProcessResult({
         type: 'result',
         text: isStructured ? winner.text : String(winner ?? ''),
@@ -2891,17 +3326,39 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       _reportToolFailure(_lastErrText);
     }
   } catch (e) {
-    if (toolSignal?.aborted || e?.name === 'AbortError' || e?.code === 'ABORT_ERR') {
-      throw abortError(toolSignal, `Tool ${name} cancelled`);
+    if (isAbortError(e, toolAbort.signal)) {
+      const cancellation = abortError(toolAbort.signal, `Tool ${name} cancelled`);
+      log.info('tool', 'tool cancelled', {
+        skill: owningSkillId,
+        tool: name,
+        userId,
+        agentId,
+        durationMs: Date.now() - _toolStart,
+      });
+      // Cancellation belongs to the task/turn lifecycle, not the flaky-tool
+      // learner. Let the model stream owner unwind so it can publish one
+      // cancelled/stopped terminal outcome.
+      throw cancellation;
     }
+    toolExecutionSettled = true;
     console.error(`[skills] Runtime error in tool "${name}":`, e.message);
     log.error('tool', 'tool threw', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: e.message });
-    yield { type: 'result', text: `Tool error (${name}): ${e.message}` };
+    yield { type: 'result', text: `Tool error (${name}): ${e.message}`, isError: true };
 
     // Phase-3: count the failure. Fire-and-forget so the user's bubble lands
     // immediately. On threshold trip we emit a tool_failure proposal (the
     // owning-skill id is captured so the proposer can route the remedy through
     // refine vs a diagnostic). Shared with the caught-and-returned-error path.
     _reportToolFailure(e.message);
+  } finally {
+    if (!toolExecutionTransferred) {
+      // A consumer can abandon a streaming tool at a yield without aborting the
+      // whole turn (provider teardown, policy stop, etc.). Signal the skill's
+      // cleanup path before releasing the parent listener.
+      if (!toolExecutionSettled && !toolAbort.signal.aborted) {
+        toolAbort.abort(`Tool ${name} execution owner stopped`);
+      }
+      toolAbort.dispose();
+    }
   }
 }
