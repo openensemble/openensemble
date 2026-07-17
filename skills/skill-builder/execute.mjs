@@ -520,7 +520,7 @@ function cleanSelectedPlanKeep(selectedPlanKeep, toolNames) {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network, execution_hint } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -660,6 +660,19 @@ async function handleCreate(args, userId) {
   manifest.sandbox = isolate
     ? { isolate: true, network: allow_network === true }
     : { isolate: false };
+
+  // Portable execution hint (tier/effort) — never a concrete model id. Author
+  // may pass execution_hint; otherwise infer from tools/description so custom
+  // skills participate in auto model/effort selection without Settings pins.
+  {
+    const { normalizeExecutionHint, inferExecutionHintFromSpec } = await import('../../lib/execution-auto.mjs');
+    const explicit = normalizeExecutionHint(execution_hint);
+    const inferred = inferExecutionHintFromSpec({
+      name: name.trim(), description: description.trim(), tools, code,
+    });
+    const hint = explicit || inferred;
+    if (hint) manifest.execution_hint = hint;
+  }
 
   // Pre-write gates: LSP type-check + manifest/code structural validator.
   // Both run together so a single fix-and-retry handles both. Strict
@@ -1132,7 +1145,7 @@ async function handleUpdateToolDef(args, userId) {
 // selected_plan_keep, description. Modeled on handleUpdateToolDef — atomic
 // write + re-register so the change is live without a server restart.
 async function handleUpdateManifest(args, userId) {
-  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network } = args;
+  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network, execution_hint } = args;
   if (!id?.trim()) return 'id is required.';
 
   const skillId = id.trim();
@@ -1229,8 +1242,23 @@ async function handleUpdateManifest(args, userId) {
     disk.sandbox = { ...(disk.sandbox || {}), network: allow_network };
     changed.push(`sandbox.network=${allow_network}`);
   }
+  // Portable execution tier/effort. Pass null to clear; omit to leave unchanged.
+  if (execution_hint !== undefined) {
+    if (execution_hint === null) {
+      delete disk.execution_hint;
+      changed.push('execution_hint=cleared');
+    } else {
+      const { normalizeExecutionHint } = await import('../../lib/execution-auto.mjs');
+      const hint = normalizeExecutionHint(execution_hint);
+      if (!hint) {
+        return 'execution_hint must be {tier?: "fast"|"standard"|"strong"|"reasoning", effort?: "off"|"low"|"medium"|"auto"|"high"} (or null to clear).';
+      }
+      disk.execution_hint = hint;
+      changed.push(`execution_hint=${JSON.stringify(hint)}`);
+    }
+  }
   if (!changed.length) {
-    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network.';
+    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network, execution_hint.';
   }
 
   const backupPath = manifestPath + '.bak';

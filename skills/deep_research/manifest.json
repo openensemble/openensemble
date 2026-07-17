@@ -4,6 +4,7 @@
   "description": "Multi-step web research with persistent document storage",
   "icon": "📚",
   "category": "service",
+  "execution_hint": { "tier": "reasoning", "effort": "high" },
   "selected_plan_keep": [
     "save_research",
     "update_research"

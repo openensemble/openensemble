@@ -4,6 +4,7 @@
   "description": "File editing, shell commands, and project management for coding agents",
   "icon": "💻",
   "category": "coding",
+  "execution_hint": { "tier": "strong", "effort": "high" },
   "service": true,
   "always_on": false,
   "enabled_by_default": true,

@@ -4,6 +4,7 @@
   "description": "Create, update, and delete custom skills on demand",
   "icon": "🔩",
   "category": "service",
+  "execution_hint": { "tier": "strong", "effort": "high" },
   "hidden": true,
   "bundled_with_role": "coder",
   "always_on": false,
@@ -200,6 +201,20 @@
                 "auto"
               ],
               "description": "How this custom skill flows to the coordinator agent's tool surface. 'include' (default for custom skills): always available to the coordinator. 'exclude': hidden from the coordinator entirely — useful for heavyweight skills (GPU-pod managers, finance ingestion) that belong on a specialist agent and would otherwise add 10+ KB to every coordinator turn. 'auto': only loaded when the user prompt matches the skill's intent_examples (requires intent_examples to be set). Pick 'exclude' when the skill should only be reachable via ask_agent to a specialist. Pick 'auto' for skills useful sometimes but not every turn."
+            },
+            "execution_hint": {
+              "type": "object",
+              "description": "OPTIONAL portable execution profile for auto model/effort selection. Never a concrete model id — OE maps the tier to the user's enabled catalog at runtime. Omit to auto-infer from tools/description. tier: fast (lookups/CRUD), standard (typical multi-step), strong (coding/careful analysis), reasoning (deep research/hard reasoning). effort: off|low|medium|auto|high.",
+              "properties": {
+                "tier": {
+                  "type": "string",
+                  "enum": ["fast", "standard", "strong", "reasoning"]
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": ["off", "low", "medium", "auto", "high"]
+                }
+              }
             },
             "assign_to": {
               "type": "string",
@@ -508,6 +523,20 @@
               "description": "Replace the manifest-level selected_plan_keep list. Entries must be exact tool names from THIS skill. Use only for terminal save/send/deliver/finalize tools that must survive selected recipe trimming. Pass [] to clear.",
               "items": {
                 "type": "string"
+              }
+            },
+            "execution_hint": {
+              "type": "object",
+              "description": "Replace portable execution tier/effort ({tier, effort}). Never pin a concrete model here — users pin models in Settings → Skills → Execution. Pass null to clear and fall back to structure inference.",
+              "properties": {
+                "tier": {
+                  "type": "string",
+                  "enum": ["fast", "standard", "strong", "reasoning"]
+                },
+                "effort": {
+                  "type": "string",
+                  "enum": ["off", "low", "medium", "auto", "high"]
+                }
               }
             },
             "coordinator_scope": {

@@ -577,6 +577,10 @@ export async function handle(req, res) {
       // that exact answer so effort capability options match save validation.
       inheritedAgentId: inheritedAgentForSkill(authId, s.id)?.id ?? null,
       execution: getSkillExecutionOverride(authId, s.id),
+      // Portable auto tier/effort from the skill manifest (not a model pin).
+      execution_hint: s.execution_hint && typeof s.execution_hint === 'object'
+        ? s.execution_hint
+        : null,
     }));
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(roles)); return true;
   }

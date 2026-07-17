@@ -94,6 +94,25 @@ The validator accepts either a 4-param or 5-param signature. Anything else is re
 - Tool names must be **globally unique** — always prefix them with the skill id (e.g. `ha_turn_on`, not `turn_on`)
 - `category` should be `"utility"` for user-created skills
 
+### Optional: `execution_hint` (auto model / effort)
+
+Portable — **not** a concrete model id. OE maps the tier to the user's enabled providers at runtime when this skill is routed (including single-mode workers):
+
+```json
+"execution_hint": { "tier": "fast", "effort": "low" }
+```
+
+| `tier` | When |
+|--------|------|
+| `fast` | Lookups, list/get, light CRUD |
+| `standard` | Typical multi-step automation |
+| `strong` | Coding, careful analysis, skill authoring |
+| `reasoning` | Deep research / hard multi-hop reasoning |
+
+`effort`: `off` | `low` | `medium` | `auto` | `high`.
+
+`skill_create` infers a hint from tools/description when you omit it. Users can still **pin** a model in Settings → Skills → Execution (pins always win).
+
 ### Mark destructive tools
 
 The skill-builder runs every declared tool through a smoke test after writing the code — with generated args and a stub `ctx`. Crashes, hangs (3s timeout), and wrong-typed returns block the create. This is free safety for read-only tools (weather lookups, listings, searches).

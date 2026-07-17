@@ -410,7 +410,7 @@ function _skillExecutionModelOptionsHtml(execution) {
     if (!groups.has(model.provider)) groups.set(model.provider, []);
     groups.get(model.provider).push({ ...model, value });
   }
-  let html = `<option value=""${!currentValue ? ' selected' : ''}>Inherit requesting agent</option>`;
+  let html = `<option value=""${!currentValue ? ' selected' : ''}>Auto (tier-matched)</option>`;
   if (currentValue && !currentAvailable) {
     html += `<option value="${escHtml(currentValue)}" selected>${escHtml(current.model)} (unavailable)</option>`;
   }
@@ -435,17 +435,31 @@ function _skillExecutionEffortOptionsHtml(current, supported = _SKILL_EXECUTION_
   if (selected && !seen.has(selected)) {
     options.push({ value: selected, label: `${selected[0].toUpperCase()}${selected.slice(1)} (not supported for this model)` });
   }
-  return `<option value=""${selected ? '' : ' selected'}>Inherit requesting agent</option>`
+  return `<option value=""${selected ? '' : ' selected'}>Auto (from skill / task)</option>`
     + options.map(option => `<option value="${escHtml(option.value)}"${option.value === selected ? ' selected' : ''}>${escHtml(option.label)}</option>`).join('');
 }
 
-function _skillExecutionSummary(execution) {
+function _skillExecutionHintSummary(hint) {
+  if (!hint || typeof hint !== 'object') return null;
+  const tier = typeof hint.tier === 'string' && hint.tier ? hint.tier : null;
+  const effort = typeof hint.effort === 'string' && hint.effort ? hint.effort : null;
+  if (!tier && !effort) return null;
+  const parts = [];
+  if (tier) parts.push(tier[0].toUpperCase() + tier.slice(1));
+  if (effort) parts.push(effort[0].toUpperCase() + effort.slice(1));
+  return parts.join(' · ');
+}
+
+function _skillExecutionSummary(execution, hint = null) {
   const value = _normalizeSkillExecution(execution);
-  if (!value.model && !value.reasoningEffort) return 'Inherit agent';
+  if (!value.model && !value.reasoningEffort) {
+    const auto = _skillExecutionHintSummary(hint);
+    return auto ? `Auto · ${auto}` : 'Auto (structure + task)';
+  }
   const effort = value.reasoningEffort
     ? `${value.reasoningEffort[0].toUpperCase()}${value.reasoningEffort.slice(1)}`
     : 'Agent effort';
-  return `${value.model || 'Agent model'} · ${effort}`;
+  return `Pinned · ${value.model || 'Agent model'} · ${effort}`;
 }
 
 function _skillExecutionInheritedAgent(skill, allAgents) {
@@ -461,12 +475,15 @@ function _renderSkillExecutionControls(skill, allAgents) {
   _skillExecutionSaved.set(skill.id, execution);
   const inheritedAgent = _skillExecutionInheritedAgent(skill, allAgents);
   const inheritedModel = _skillExecutionModelValue(inheritedAgent?.provider, inheritedAgent?.model);
+  const hint = skill.execution_hint && typeof skill.execution_hint === 'object' ? skill.execution_hint : null;
   const args = escHtml(JSON.stringify([skill.id]));
+  const autoLabel = _skillExecutionHintSummary(hint) || 'structure + task shape';
   return `<details class="skill-execution-settings" data-skill-id="${escHtml(skill.id)}" data-inherited-model="${escHtml(inheritedModel)}"
+      data-execution-hint="${escHtml(JSON.stringify(hint || {}))}"
       data-toggle-action="refreshSkillExecutionEfforts" data-toggle-args='${args}'>
     <summary class="skill-execution-summary">
       <span>Execution</span>
-      <span class="skill-execution-current">${escHtml(_skillExecutionSummary(execution))}</span>
+      <span class="skill-execution-current">${escHtml(_skillExecutionSummary(execution, hint))}</span>
     </summary>
     <div class="skill-execution-body">
       <div class="skill-execution-grid">
@@ -481,7 +498,7 @@ function _renderSkillExecutionControls(skill, allAgents) {
           </select>
         </label>
       </div>
-      <div class="skill-execution-hint">Applies to model calls routed to this role or skill. A multi-skill turn freezes one profile: strongest effort, with the model from the strongest model-specific match. Local shortcuts and tool execution may not call a model.</div>
+      <div class="skill-execution-hint">Leave model and effort on “Inherit” for <strong>Auto</strong> (${escHtml(autoLabel)}): OE picks a tier-matched model from your enabled providers when this skill is routed (workers included). Pin only when you want a fixed model. Multi-skill turns freeze one profile (strongest wins). Local shortcuts may not call a model.</div>
       <div class="skill-execution-status" role="status" aria-live="polite"></div>
     </div>
   </details>`;
@@ -517,8 +534,11 @@ function _applySkillExecutionToCard(card, execution) {
       card._supportedExecutionEfforts || _SKILL_EXECUTION_EFFORT_OPTIONS,
     );
   }
+  let hint = null;
+  try { hint = JSON.parse(card.dataset.executionHint || '{}'); } catch { hint = null; }
+  if (hint && !hint.tier && !hint.effort) hint = null;
   const summary = card.querySelector('.skill-execution-current');
-  if (summary) summary.textContent = _skillExecutionSummary(normalized);
+  if (summary) summary.textContent = _skillExecutionSummary(normalized, hint);
 }
 
 function _skillExecutionPayloadFromCard(card) {

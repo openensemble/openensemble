@@ -7,6 +7,7 @@
     "email_compose"
   ],
   "category": "email",
+  "execution_hint": { "tier": "fast", "effort": "low" },
   "service": true,
   "enabled_by_default": false,
   "defaultToolIds": [

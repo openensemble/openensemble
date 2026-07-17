@@ -52,14 +52,15 @@ describe('role and skill execution settings UI', () => {
     expect(ui._normalizeSkillExecution(null)).toEqual({
       provider: null, model: null, reasoningEffort: null,
     });
-    expect(ui._skillExecutionSummary(null)).toBe('Inherit agent');
-    expect(ui._skillExecutionSummary({ reasoningEffort: 'auto' })).toBe('Agent model · Auto');
+    expect(ui._skillExecutionSummary(null)).toBe('Auto (structure + task)');
+    expect(ui._skillExecutionSummary(null, { tier: 'strong', effort: 'high' })).toBe('Auto · Strong · High');
+    expect(ui._skillExecutionSummary({ reasoningEffort: 'auto' })).toBe('Pinned · Agent model · Auto');
 
     const html = ui._skillExecutionEffortOptionsHtml('auto', [
       { value: 'auto', label: 'Auto' },
       { value: 'high', label: 'High' },
     ]);
-    expect(html).toContain('<option value="">Inherit requesting agent</option>');
+    expect(html).toContain('<option value="">Auto (from skill / task)</option>');
     expect(html).toContain('<option value="auto" selected>Auto</option>');
   });
 
@@ -78,7 +79,7 @@ describe('role and skill execution settings UI', () => {
       provider: 'openai-oauth', model: 'gpt-5.6-sol', reasoningEffort: 'high',
     });
 
-    expect(html).toContain('Inherit requesting agent');
+    expect(html).toContain('Auto (tier-matched)');
     expect(html).toContain('GPT-5.6 Sol');
     expect(html).toContain('Grok 4');
     expect(html).not.toContain('Flux');
@@ -105,8 +106,8 @@ describe('role and skill execution settings UI', () => {
 
     expect(html).toContain('class="skill-execution-settings"');
     expect(html).toContain('data-change-action="saveSkillExecution"');
-    expect(html).toContain('gpt-5.6-sol · High');
-    expect(html).toContain('Local shortcuts and tool execution may not call a model.');
+    expect(html).toContain('Pinned · gpt-5.6-sol · High');
+    expect(html).toContain('Leave model and effort on “Inherit” for');
   });
 
   it('inherits an unassigned skill from the server-resolved coordinator, not the active tab', () => {

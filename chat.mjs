@@ -1112,12 +1112,18 @@ function skillExecutionTraceSummary(resolution) {
       model: resolution.sourceSkillIds?.model ?? null,
       reasoningEffort: resolution.sourceSkillIds?.reasoningEffort ?? null,
     },
+    sourceKinds: {
+      model: resolution.sourceKinds?.model ?? null,
+      reasoningEffort: resolution.sourceKinds?.reasoningEffort ?? null,
+    },
     reasoningEffortInherited: resolution.reasoningEffortInherited === true,
     contenders: (resolution.contenders ?? []).slice(0, 32).map(candidate => ({
       skillId: candidate.skillId ?? null,
       provider: candidate.provider ?? null,
       model: candidate.model ?? null,
       reasoningEffort: candidate.reasoningEffort ?? null,
+      source: candidate.source ?? null,
+      tier: candidate.tier ?? null,
       eligible: candidate.eligible === true,
       reason: candidate.reason ?? null,
     })),
@@ -1862,6 +1868,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       baseAgent: agent,
       selectedSkillIds: executionSkillIds,
       allowedModels: userAllowedExecutionModels(userId),
+      // Worker and foreground turns both pass the user-facing job text here so
+      // task-shape effort priors apply when no skill supplies effort.
+      routeText: typeof routeText === 'string' ? routeText : (typeof userText === 'string' ? userText : null),
     });
     if (_executionResolution.applied) {
       const providerOrModelChanged = _executionResolution.effective.provider !== agent.provider
@@ -1874,14 +1883,19 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           ? { reasoningEffort: _executionResolution.effective.reasoningEffort }
           : {}),
         ...(providerOrModelChanged ? { contextSize: null } : {}),
+        _skillExecutionApplied: true,
+        _skillExecutionSource: _executionResolution.sourceKinds || null,
       };
       if (_routerStore) _routerStore.agent = agent;
-      log.info('chat', 'skill execution override applied', {
+      log.info('chat', 'skill execution profile applied', {
         userId,
         agentId: agent.id,
         selectedSkills: executionSkillIds,
         modelSkill: _executionResolution.sourceSkillIds.model,
         effortSkill: _executionResolution.sourceSkillIds.reasoningEffort,
+        modelSource: _executionResolution.sourceKinds?.model || null,
+        effortSource: _executionResolution.sourceKinds?.reasoningEffort || null,
+        reason: _executionResolution.reason,
         provider: agent.provider,
         model: agent.model,
         reasoningEffort: agent.reasoningEffort ?? 'auto',

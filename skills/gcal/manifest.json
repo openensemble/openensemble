@@ -9,6 +9,7 @@
     "gcal_update"
   ],
   "category": "utility",
+  "execution_hint": { "tier": "fast", "effort": "low" },
   "service": true,
   "refreshCadence": "daily",
   "enabled_by_default": false,
