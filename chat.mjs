@@ -677,6 +677,7 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
         args: event.args ?? null,
         startedAt: Date.now(),
         status: 'running',
+        ...((event.providerNative === true || event.native === true) ? { native: true } : {}),
         delegated: event.delegated === true,
         agentName: event.agentName || null,
         targetAgentId: event.targetAgentId || null,
@@ -700,7 +701,7 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
         // (image_generation) must not fabricate tool records.
         _nativeSearchRecorded = true;
         const now = Date.now();
-        toolsUsed.push({ name: 'web_search', text: 'provider-hosted web search', args: null });
+        toolsUsed.push({ name: 'web_search', text: 'provider-hosted web search', args: null, native: true });
         toolEvents.push({ name: 'web_search', args: null, startedAt: now, endedAt: now, durationMs: 0, status: 'done', native: true });
       }
     }
@@ -709,7 +710,12 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
       // by-name map — parallel same-name calls clobbered the map, so the
       // first result carried the SECOND call's args in traces/recipes.
       const _matched = _pendingToolEventsByName[event.name]?.[0] ?? null;
-      toolsUsed.push({ name: event.name, text: event.text || '', args: (_matched?.args ?? _lastCallArgsByName[event.name]) ?? null });
+      toolsUsed.push({
+        name: event.name,
+        text: event.text || '',
+        args: (_matched?.args ?? _lastCallArgsByName[event.name]) ?? null,
+        ...((_matched?.native === true || event.providerNative === true || event.native === true) ? { native: true } : {}),
+      });
       // A tool that caught its own error and returned an error string (or one
       // the dispatcher caught and emitted as "Tool error (…)") completes the
       // tool loop normally — without this it would record status:'done' and the
@@ -737,6 +743,7 @@ export async function* consumeProvider(providerGen, { suppressText = false } = {
           durationMs: 0,
           preview: event.preview ?? '',
           text: event.text || '',
+          ...((event.providerNative === true || event.native === true) ? { native: true } : {}),
           delegated: event.delegated === true,
           agentName: event.agentName || null,
           targetAgentId: event.targetAgentId || null,
@@ -2248,6 +2255,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       })),
       events: toolEvents.map(t => ({
         name: t.name,
+        ...(t.native === true ? { providerNative: true } : {}),
         status: t.status,
         durationMs: t.durationMs ?? null,
         preview: redactTextForTrace(compactDocumentToolPreview(t.name, t.preview ?? t.progressPreview)).slice(0, 500),
@@ -2293,6 +2301,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   log.info('chat', 'llm turn complete', _llmMeta);
   recordRunTrace(userId, { ..._traceBase, status: 'complete' });
   if (_routerStore && !workerMemoryOwnerId && !suppressLearning) {
+    // Hosted provider tools are execution telemetry, not local tools the
+    // router can select on a future turn.
+    const learnableToolsUsed = toolsUsed.filter(tool => tool.native !== true);
+    const learnableToolEvents = toolEvents.filter(event => event.native !== true);
     // Telemetry: fire-and-forget, feeds the future learning loop that uses
     // prior {prompt → skill} pairs as extra intent examples. Never blocks.
     recordTurnRouting({
@@ -2307,16 +2319,17 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         const learned = learnToolPlanFromTurn(userId, {
           agentId: agent.id,
           phrase: routeText,
-          usedToolNames: toolsUsed.map(t => t.name),
+          usedToolNames: learnableToolsUsed.map(t => t.name),
           initiallyAvailableToolNames: [...(_routerStore.initialToolNames || [])],
           fullToolNames: (_routerStore.fullTools || []).map(t => t.function?.name).filter(Boolean),
           recoveredMissingTools,
           addedSkills: [...(_routerStore.addedSkills || [])],
+          toolEvents: learnableToolEvents,
           // Don't learn a recipe from a turn that failed at its job: a specialist
           // (non-coordinator) that ended by calling ask_agent punted the work, and
           // an inability/handoff message in the reply means it couldn't finish.
           // For a coordinator, ask_agent is normal delegation, so it's not a punt.
-          escalated: agent.skillCategory !== 'coordinator' && toolsUsed.some(t => t.name === 'ask_agent'),
+          escalated: agent.skillCategory !== 'coordinator' && learnableToolsUsed.some(t => t.name === 'ask_agent'),
           outcomeText: _observableAssistantContent,
           source: silent ? 'auto-scheduled-turn' : 'auto-turn',
         });
