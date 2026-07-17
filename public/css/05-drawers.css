@@ -62,7 +62,8 @@
   background: none; border: 1px dashed var(--border); color: var(--muted);
   border-radius: 8px; cursor: pointer; font-size: 13px; transition: all .15s;
 }
-.btn-new-agent-strip:hover { border-color: var(--accent); color: var(--accent); }
+.btn-new-agent-strip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-new-agent-strip:disabled { opacity: .45; cursor: not-allowed; }
 
 /* ── Drawer: Markets ── */
 .market-row {

@@ -3627,6 +3627,9 @@ function _slashGetItems(val) {
   // top-level commands
   return SLASH_COMMANDS
     .filter(c => c.cmd.startsWith(lo))
+    .filter(c => c.cmd !== '/new-agent'
+      || typeof canCreateAgentForCurrentMode !== 'function'
+      || canCreateAgentForCurrentMode())
     .map(c => ({
       label: c.cmd, desc: c.desc, iconName: c.icon,
       action: c.action || (() => { $('input').value = c.cmd + ' '; updateSlashMenu(); $('input').focus(); })

@@ -126,6 +126,7 @@
   padding: 12px 6px; cursor: pointer; border-radius: 10px; text-align: left;
 }
 .mm-row:active { background: var(--bg3); }
+.mm-row:disabled { opacity: .45; cursor: not-allowed; }
 .mm-row-icon { width: 26px; display: flex; justify-content: center; color: var(--muted); flex-shrink: 0; }
 .mm-row.danger, .mm-row.danger .mm-row-icon { color: var(--red); }
 .mm-row.update, .mm-row.update .mm-row-icon { color: var(--green); }

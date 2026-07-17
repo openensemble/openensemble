@@ -9,7 +9,7 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 ## 2026-07-17
 
 **One assistant or a full agent team — switch whenever you want**
-Single-assistant mode is now built into OpenEnsemble. Go to **Settings → Agents → Agent setup** and choose **Single assistant** for one primary assistant that handles every enabled skill, or **Agent ensemble** for the classic team of specialists. You can also say “switch me to single-agent mode” in chat. Existing accounts stay in ensemble mode until you change them; new accounts start with one assistant. Owners and admins can manage each account separately from **Settings → Users**.
+Single-assistant mode is now built into OpenEnsemble. Go to **Settings → Agents → Agent setup** and choose **Single assistant** for one primary assistant that handles every enabled skill, or **Agent ensemble** for the classic team of specialists. You can also say “switch me to single-agent mode” in chat. Once a single-mode account has its assistant, **New Agent** is disabled; switch back to the ensemble before adding another. Existing accounts stay in ensemble mode until you change them; new accounts start with one assistant. Owners and admins can manage each account separately from **Settings → Users**.
 
 **Switching modes never deletes your setup**
 Moving to one assistant parks the other agents instead of removing them. Their roles, custom-skill assignments, personalities, histories, model choices, and memories remain intact and return unchanged when you restore the ensemble. Changes apply to the next message; if an assistant is currently replying, finish or stop that reply before switching.

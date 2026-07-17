@@ -14,6 +14,27 @@ function isPendingSingleAssistantOnboarding() {
     && !policy?.primaryAgentId;
 }
 
+function agentCreationAllowedForMode(mode, agentCount) {
+  // Mode is explicit: a one-agent ensemble may add another agent, while an
+  // active single-assistant account may only create its first assistant.
+  return mode !== 'single' || agentCount === 0;
+}
+
+function canCreateAgentForCurrentMode() {
+  return agentCreationAllowedForMode(_currentUser?.orchestration?.mode, agents.length);
+}
+
+const SINGLE_MODE_AGENT_CREATION_MESSAGE = 'Switch to Agent ensemble before adding another agent.';
+
+function syncAgentCreationControls() {
+  const allowed = canCreateAgentForCurrentMode();
+  document.querySelectorAll('[data-agent-create-control]').forEach(control => {
+    control.disabled = !allowed;
+    control.title = allowed ? 'Create a new agent' : SINGLE_MODE_AGENT_CREATION_MESSAGE;
+    control.setAttribute('aria-disabled', String(!allowed));
+  });
+}
+
 // ── Agent tabs (mobile) + drawer list ─────────────────────────────────────────
 function checkEmptyState() {
   const empty = agents.length === 0;
@@ -97,6 +118,7 @@ function buildTabs() {
   if (typeof refreshAgentSheetIfOpen === 'function') refreshAgentSheetIfOpen();
   updateAgentPill();
   checkEmptyState();
+  syncAgentCreationControls();
 }
 
 function buildAgentDrawer() {
@@ -123,6 +145,7 @@ function buildAgentDrawer() {
     }
     container.appendChild(item);
   });
+  syncAgentCreationControls();
 }
 
 function switchAgent(id) {
@@ -279,6 +302,10 @@ function _editAgentById(id) {
 }
 
 async function openNewAgentModal(agent = null) {
+  if (!agent && !canCreateAgentForCurrentMode()) {
+    showToast(SINGLE_MODE_AGENT_CREATION_MESSAGE);
+    return;
+  }
   // Refresh provider model lists in the background, then re-populate if already open
   const refresh = () => {
     if ($('newAgentModal').classList.contains('open')) _populateAgentModelSelect(agent, { preserveCurrent: true });
@@ -364,6 +391,10 @@ async function openNewAgentModal(agent = null) {
 }
 
 $('btnCreateAgent').addEventListener('click', async () => {
+  if (!editingAgentId && !canCreateAgentForCurrentMode()) {
+    showToast(SINGLE_MODE_AGENT_CREATION_MESSAGE);
+    return;
+  }
   const name = $('aName').value.trim();
   const desc = $('aDesc').value.trim();
   if (!name) { $('aName').focus(); return; }

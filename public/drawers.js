@@ -150,7 +150,8 @@ function buildMobileMenu() {
     return r;
   };
   addRow('search', 'Search conversations', '_closeDrawerThen', '["openSearch"]');
-  addRow('sparkles', 'New agent', '_closeDrawerThen', '["openNewAgentModal"]');
+  const newAgentRow = addRow('sparkles', 'New agent', '_closeDrawerThen', '["openNewAgentModal"]');
+  newAgentRow.dataset.agentCreateControl = 'true';
   const upd = $('updateBadge');
   if (upd && upd.style.display !== 'none') {
     addRow('download-cloud', 'Update available — install', '_sheetOpenUpdate', null, 'update');
@@ -166,6 +167,7 @@ function buildMobileMenu() {
   }
   addRow('log-out', 'Sign out', '_closeDrawerThen', '["logout"]', 'danger');
   body.appendChild(rows);
+  if (typeof syncAgentCreationControls === 'function') syncAgentCreationControls();
 
   if (typeof lucide !== 'undefined') lucide.createIcons();
 }
@@ -227,9 +229,11 @@ function buildAgentSheet() {
     if (args) r.dataset.args = args;
     rows.appendChild(r);
   };
-  addRow('sparkles', 'New agent', '_closeDrawerThen', '["openNewAgentModal"]');
+  const newAgentRow = addRow('sparkles', 'New agent', '_closeDrawerThen', '["openNewAgentModal"]');
+  newAgentRow.dataset.agentCreateControl = 'true';
   addRow('bot', 'Manage agents', '_closeAndToggleDrawer', '["drawerAgents","sbtnAgents"]');
   body.appendChild(rows);
+  if (typeof syncAgentCreationControls === 'function') syncAgentCreationControls();
 
   if (typeof lucide !== 'undefined') lucide.createIcons();
 }
