@@ -37,6 +37,7 @@ import { broadcastAlarmStop, hasActiveAlarms } from '../lib/alarms.mjs';
 import { abortChat } from './slot-registry.mjs';
 import { stopAmbientOnDevice } from '../lib/ambient-playback.mjs';
 import { getAmbientForDevice } from '../routes/devices.mjs';
+import { classifyRoutineIntent } from '../lib/routines.mjs';
 
 // Per-device "the user just said stop" marker. Used by chat-dispatch's
 // ambient auto-restore so that 3-second restore setTimeouts queued by
@@ -122,6 +123,10 @@ function classifyVoiceIntent(text, { ambientActive = false, conversationEnabled 
   // conversation mode — in normal mode "goodbye" should still reach the LLM
   // for a proper farewell instead of being swallowed by a canned ack. Bare
   // forms only; "that's all the milk we have" must not end anything.
+  //
+  // Note: "good night" is also a common routine trigger. tryVoiceControlIntent
+  // demotes conversation_end → fall-through when the utterance matches a
+  // configured routine so lights/ambient still fire (field 2026-07-18).
   if (conversationEnabled &&
       /^(that('s| is| will be|'ll be)?\s+all(\s+for\s+now)?|(i('m| am)\s+)?(all\s+)?done|we('re| are)\s+done|no\s+than(ks|k you)(,?\s+that('s|s| is)\s+(all|it))?|than(ks|k you),?\s+that('s|s| is)\s+(all|it)|good\s*bye|bye(\s+bye)?|good\s*night)$/.test(t)) {
     return { type: 'conversation_end' };
@@ -430,6 +435,16 @@ export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agent
   const ambientActive = !!(deviceId && getAmbientForDevice(deviceId));
   const intent = classifyVoiceIntent(rawText, { ambientActive, conversationEnabled: conversationMode, bargeIn });
   if (!intent) return null;
+  // User-defined routines beat conversation-mode closers. Without this,
+  // conversation mode on a bedroom device turns "good night" into a canned
+  // "okay." and never reaches tryRoutineFastpath (field: Master Bedroom
+  // 2026-07-18 — goodnight routine: lights off + ambient rain, never ran).
+  // Non-closer control intents (stop / volume / pause) still win over routines
+  // so a bare "stop" mid-ambient isn't swallowed by a mis-bound routine.
+  if (intent.type === 'conversation_end' && userId && classifyRoutineIntent(rawText, userId)) {
+    console.log(`[chat] voice-intent: conversation_end demoted — matches routine for ${userId}`);
+    return null;
+  }
   const { replaces } = executeVoiceIntent(intent, deviceId, userId, agentId, { spareBed: bargeIn || recentReplyStop });
   console.log(`[chat] voice-intent: ${intent.type}${intent.pct != null ? `=${intent.pct}` : ''} device=${deviceId ?? '?'} replaces=${replaces}`);
   if (!replaces) return null;
