@@ -25,7 +25,7 @@ import {
 export async function _resolveAttributionAgent(userId, agentId) {
   if (agentId) return agentId;
   try {
-    const { getUserCoordinatorAgentId } = await import('./routes/_helpers.mjs');
+    const { getUserCoordinatorAgentId } = await import('../routes/_helpers.mjs');
     const coordId = getUserCoordinatorAgentId(userId);
     return coordId ? `${userId}_${coordId}` : userId;
   } catch { return userId; }
@@ -40,7 +40,7 @@ export function _agentIdFromSessionKey(sessionKey, userId) {
 export async function _emitAutoBgNotify(userId, agentId, notify) {
   if (!userId || !agentId || !notify) return;
   try {
-    const { emitAgentNotification } = await import('./ws-handler.mjs');
+    const { emitAgentNotification } = await import('../ws-handler.mjs');
     emitAgentNotification(userId, _agentIdFromSessionKey(agentId, userId), notify);
   } catch (_) { /* best-effort */ }
 }
@@ -89,8 +89,8 @@ export async function _runAutoBgToolContinuation({ userId, agentId, toolName, ar
     'Give the user a concise completion update based on this result, following any guidance in your system instructions for this kind of task. Do not take further actions or make changes unless the user explicitly confirms.',
   ].join('\n');
   try {
-    const { handleChatMessage } = await import('./chat-dispatch.mjs');
-    const { sendToUser } = await import('./ws-handler.mjs');
+    const { handleChatMessage } = await import('../chat-dispatch.mjs');
+    const { sendToUser } = await import('../ws-handler.mjs');
     await handleChatMessage({
       userId,
       agentId: targetAgentId,
@@ -269,12 +269,12 @@ export async function _emitAutoBgToolReport({
   };
   if (key) {
     try {
-      const { appendToSession } = await import('./sessions.mjs');
+      const { appendToSession } = await import('../sessions.mjs');
       await appendToSession(key, report);
     } catch (_) { /* best-effort */ }
   }
   try {
-    const { sendToUser } = await import('./ws-handler.mjs');
+    const { sendToUser } = await import('../ws-handler.mjs');
     sendToUser(userId, {
       type: 'agent_report',
       agent: key || agentId || null,
