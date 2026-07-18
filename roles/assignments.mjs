@@ -13,9 +13,13 @@ import { log } from '../logger.mjs';
 import { _readUserProfile } from './user-profile.mjs';
 
 let getRoleManifest = () => null;
+let getDefaultRoles = () => [];
+let isSkillRuntimeEnabledForUser = () => true;
 
 export function bindAssignmentDeps(deps) {
   if (deps.getRoleManifest !== undefined) getRoleManifest = deps.getRoleManifest;
+  if (deps.getDefaultRoles !== undefined) getDefaultRoles = deps.getDefaultRoles;
+  if (deps.isSkillRuntimeEnabledForUser !== undefined) isSkillRuntimeEnabledForUser = deps.isSkillRuntimeEnabledForUser;
 }
 
 // ── Role Assignments ──────────────────────────────────────────────────────────

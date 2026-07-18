@@ -1433,7 +1433,7 @@ import {
 } from './roles/tool-execution.mjs';
 
 
-bindAssignmentDeps({ getRoleManifest });
+bindAssignmentDeps({ getRoleManifest, getDefaultRoles, isSkillRuntimeEnabledForUser });
 bindToolExecutionDeps({
   resolveKey,
   visibleEntries,
