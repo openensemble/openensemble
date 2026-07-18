@@ -91,6 +91,8 @@ scripts/smoke-plan-*.mjs
 # --- Local handoff/scratch notes (never for the public repo) ---
 *_HANDOFF.md
 /handoffs/
+# Grok Build local notes / handoffs (never commit)
+/grok/
 
 # --- Runtime artifacts ---
 server.pid
