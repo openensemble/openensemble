@@ -4,7 +4,7 @@
 
 OpenEnsemble is a Node.js ES module application. `server.mjs` is the main entry point. Core chat orchestration lives in `chat.mjs`, with provider-specific streaming code under `chat/providers/`. Tool dispatch, roles, and skill loading are centered in `roles.mjs`, `skills/`, and `lib/`. HTTP routes live in `routes/`, browser assets in `public/`, user-facing documentation in `guide/`, and operational scripts in `scripts/`. Local runtime state such as `users/`, `logs/`, `models/`, vector databases, and `node_modules/` is intentionally ignored.
 
-**Tests always live under `tests/` and stay gitignored.** Do not `git add -f` them, track them, or include them in commits/PRs. They are local development only and are not part of CI.
+**Tests always live under `tests/` and stay gitignored.** Do not co-locate `*.test.mjs` next to product code, and do not `git add -f` them, track them, or include them in commits/PRs. They are local development only and are not part of CI. Vitest is configured with `include: ['tests/**/*.test.mjs']`.
 
 ## Build, Test, and Development Commands
 

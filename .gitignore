@@ -82,8 +82,11 @@ scripts/test-task-creation.mjs
 scripts/chat-smoke.mjs
 scripts/smoke-plan-*.mjs
 
-# --- Local tests ---
+# --- Local tests (never commit; see AGENTS.md) ---
 /tests/
+# Block co-located / accidental test commits outside tests/
+*.test.mjs
+*.test.js
 
 # --- Local handoff/scratch notes (never for the public repo) ---
 *_HANDOFF.md

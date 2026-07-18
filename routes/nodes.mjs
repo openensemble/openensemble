@@ -301,7 +301,10 @@ export async function handle(req, res) {
     return true;
   }
 
-  // DELETE /api/nodes/:nodeId — tell the agent to uninstall, then revoke it
+  // DELETE /api/nodes/:nodeId — tell the agent to uninstall, then revoke it.
+  // If the registry entry is already gone but orphan profiles/watchers remain
+  // (the pre-cascade bug), still purge local data so Remove stays the one
+  // control that fully forgets a node.
   const deleteMatch = p.match(/^\/api\/nodes\/([^/]+)$/);
   if (deleteMatch && req.method === 'DELETE') {
     const userId = requireAuth(req, res);
@@ -316,10 +319,26 @@ export async function handle(req, res) {
     // process before we close its WS in removeNode().
     setTimeout(async () => {
       const result = removeNode(nodeId, userId);
-      if (!result.removed) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: result.reason || 'not found' }));
-        return;
+      let cascade = null;
+      try {
+        const { purgeNodeLocalData, safeNodeDataDir } = await import('../lib/node-cleanup.mjs');
+        // Await purge even when removeNode already kicked a fire-and-forget
+        // cascade — idempotent, and guarantees the response means "done".
+        const dir = safeNodeDataDir(userId, nodeId);
+        const hadDir = !!(dir && fs.existsSync(dir));
+        cascade = await purgeNodeLocalData(userId, nodeId);
+        if (!result.removed && !hadDir && !cascade.watchersCancelled && !cascade.dataDeleted) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: result.reason || 'not found' }));
+          return;
+        }
+      } catch (e) {
+        if (!result.removed) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: result.reason || 'not found' }));
+          return;
+        }
+        console.warn('[nodes] cascade cleanup failed:', e?.message || e);
       }
       // Cascade-delete the user's node aliases. routes/* deletions don't go
       // through tool dispatch, so the framework's manifest cascade_on_tools
@@ -330,7 +349,12 @@ export async function handle(req, res) {
         if (removed > 0) console.log(`[nodes] dropped ${removed} alias(es) for "${nodeId}"`);
       } catch (e) { console.warn('[nodes] alias cascade-delete failed:', e.message); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ removed: true, uninstallRequested: true }));
+      res.end(JSON.stringify({
+        removed: true,
+        uninstallRequested: result.removed,
+        orphan: !result.removed,
+        cascade: cascade || undefined,
+      }));
     }, 1000);
     return true;
   }

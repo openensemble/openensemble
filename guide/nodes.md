@@ -118,4 +118,11 @@ Once paired, anything the server-side user can ask, the node will run. Pair only
 
 ## Removing a node
 
-Nodes drawer → hover the node → trash icon. The agent on the node is deactivated; if you want to fully uninstall, also `systemctl disable --now oe-node-agent` on the machine itself.
+Nodes drawer → hover the node → trash icon (confirm). That:
+
+- tells a connected agent to uninstall itself (best-effort if offline);
+- revokes the registration so it cannot reconnect on its own;
+- cancels that node's service health watches; and
+- deletes local profile data under `users/<you>/nodes/<nodeId>/` (profiles, incidents, activity, snapshots).
+
+If you want to fully wipe the agent package on the machine as well, also run `systemctl disable --now oe-node-agent` there when it is still reachable.

@@ -226,6 +226,23 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
     pushGroup('Confirmed preferences: ', globalPrefs, row => row.statement, confirmedProfile);
   }
 
+  // Live setup inventory (skills/watches/tasks/nodes) is not in the ledger.
+  // When personalization is active, inject a compact deterministic summary so
+  // the model does not re-recommend work that is already configured.
+  let setupInventoryText = '';
+  if (profileState.active) {
+    try {
+      const { buildSetupInventory } = await import('../lib/personalization/setup-inventory.mjs');
+      // Reserve room inside the shared userContext budget (chars ≈ tokens * 4).
+      const remaining = Math.max(0, userContextCharBudget - userContextChars);
+      const inv = buildSetupInventory(userId, { maxChars: Math.min(520, remaining) });
+      if (!inv.empty && inv.text) {
+        setupInventoryText = inv.text;
+        pushPart(setupInventoryText);
+      }
+    } catch { /* inventory is advisory — never block cortex */ }
+  }
+
   // The master switch controls use as well as collection. When inactive (or
   // config is unreadable), exclude every ledger-owned row and every orphan
   // carrying a personalization source tag. When active, exclude confirmed
@@ -272,6 +289,7 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
       episodesLoaded: episodes.length,
       userFactsLoaded: semanticFacts.length + confirmedProfile.length,
       immortalCount: immortalParams.length,
+      setupInventory: !!setupInventoryText,
       injectedMemoryIds: [
         ...params.map(m => ({ id: m.id, table: `${agentId}_params`, type: 'params', text: m.text?.slice(0, 160) ?? '' })),
         ...episodes.map(m => ({ id: m.id, table: `${agentId}_episodes`, type: 'episodes', text: m.text?.slice(0, 160) ?? '' })),

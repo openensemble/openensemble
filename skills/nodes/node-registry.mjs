@@ -422,6 +422,11 @@ export function registerNode(ws, userId, info) {
 // User-initiated removal: drops the node from memory, rejects pending commands,
 // closes any live WS, and records the revocation so the agent can't re-register
 // on its own. The agent should uninstall to stop reconnect attempts.
+//
+// Also cascades local state that used to leak after remove: profile_health
+// watchers and users/<uid>/nodes/<nodeId>/ (profiles, incidents, snapshots).
+// Without that cascade the drawer looked clean while orphan monitors kept
+// ticking with "node not found".
 export function removeNode(nodeId, userId) {
   const entry = nodes.get(nodeId);
   if (!entry) return { removed: false, reason: 'not found' };
@@ -439,6 +444,12 @@ export function removeNode(nodeId, userId) {
   rejectPendingForNode(nodeId);
   nodes.delete(nodeId);
   persistNodes();
+
+  // Cascade is best-effort and must not undo the registry removal. Fire and
+  // forget so the DELETE response stays snappy; purge is idempotent.
+  import('../../lib/node-cleanup.mjs')
+    .then(m => m.purgeNodeLocalData(userId, nodeId))
+    .catch(e => console.warn(`[nodes] cascade cleanup failed for ${nodeId}:`, e?.message || e));
 
   broadcastNodeEvent(userId, { type: 'node_removed', nodeId });
   console.log(`[nodes] Removed: ${nodeId} for user ${userId}`);

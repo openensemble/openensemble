@@ -91,7 +91,11 @@ const BACKUP_DATA_FILES = [
   // live bearer tokens) — the tokenHash here is sufficient for secure revival.
   'nodes.json',
 ];
-const BACKUP_MEDIA_DIRS = ['memory-db', 'shared-docs'];
+// Live media only. Per-user Cortex lives under users/<id>/cortex (included via
+// the users/ tree below) — not the legacy install-root memory-db / cortex-lancedb.
+const BACKUP_MEDIA_DIRS = ['shared-docs'];
+// Old archives may still ship install-root memory-db; accept on restore only.
+const LEGACY_RESTORE_MEDIA_DIRS = ['memory-db'];
 
 // Safe, secrets-free subset of config.json to carry through backup/restore.
 // Owner/admin role→agent assignments live in config.skillAssignments; without
@@ -183,7 +187,7 @@ async function performRestore(raw, { clearOwnerConfig = false } = {}) {
       fs.cpSync(usersBackup, path.join(BASE_DIR, 'users'), { recursive: true });
       restored++;
     }
-    for (const dir of BACKUP_MEDIA_DIRS) {
+    for (const dir of [...BACKUP_MEDIA_DIRS, ...LEGACY_RESTORE_MEDIA_DIRS]) {
       const src = path.join(tmpDir, dir);
       if (fs.existsSync(src)) {
         fs.cpSync(src, path.join(BASE_DIR, dir), { recursive: true });

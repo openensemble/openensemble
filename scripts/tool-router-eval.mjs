@@ -397,7 +397,7 @@ for (const skillId of onDemand) {
 
 // 4. Inventory every tool-capable provider loop. This is deliberately labeled
 // structural inspection, not proof: behavioral schema-refresh coverage lives in
-// lib/tool-router.test.mjs and exercises request_tools across these adapters.
+// tests/lib/tool-router.test.mjs and exercises request_tools across these adapters.
 const providerFiles = [
   'chat/providers/anthropic.mjs',
   'chat/providers/openai-compat.mjs',
@@ -411,7 +411,7 @@ const providerLoopInspection = providerFiles.map(file => {
   return {
     file,
     mentionsDynamicAgentTools: /agent\.tools/.test(source),
-    behavioralCoverage: 'lib/tool-router.test.mjs',
+    behavioralCoverage: 'tests/lib/tool-router.test.mjs',
   };
 });
 

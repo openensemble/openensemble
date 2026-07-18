@@ -52,7 +52,7 @@ For anything that touches content that isn't yours to begin with, or that could 
 The model picker in **Settings → Personalization** has three kinds of choice, each with a privacy line so you know exactly what it means:
 
 - **Off** — Stops reflection and any background lead re-checking — nothing gets sent to any model, local or cloud. It does *not* stop activity from being recorded; that's what the **Learn about me** switch above is for. Pick this if you want Personalization to keep its quiet digests without any model reflecting on them yet.
-- **Same as coordinator** (the default) — whatever model your coordinator agent currently uses handles reflection too. If your coordinator runs on a local model, this does too; if it's a cloud model, the same posture carries over.
+- **Same as coordinator** (the default) — whatever model your coordinator agent currently uses handles reflection too. If your coordinator runs on a local model, this does too; if it's a cloud model, the same posture carries over. SuperGrok login (`xai-oauth`) and ChatGPT login (`openai-oauth`) are both supported here — reflection uses the same provider the coordinator is already on, without falling back to a different one.
 - **A specific provider** — pick any provider/model you've already configured under **Settings → Providers**, independent of your coordinator.
   - Loopback providers running on this machine are labeled **"stays on this machine."** A model endpoint on another host is treated as a network boundary, even if it uses a normally-local provider type.
   - Cloud/network reflection receives activity/conversation summaries, declared bounded lookup-interest terms, and coarse calendar labels—not stored raw tool output or private calendar bodies. If you explicitly ask for an automatic follow-up, a secret-redacted excerpt of that lead's later read-only result may also be sent to the chosen model so it can judge whether your question was finally satisfied.
@@ -64,6 +64,8 @@ When provider-backed pattern discovery is paused but **Learn about me** and conv
 The picker only shows text-capable providers available to your account. Local/cloud labeling follows the endpoint the server will actually call, rather than a similarly named model in another catalog.
 
 ## About you
+
+Chat and reflection also receive a compact **Already set up** inventory of your custom skills, active watches, scheduled tasks, live nodes, and orphan node profiles. That list is structural only (names and labels — not secrets or tool output) so the assistant can prefer real gaps over re-recommending work you already finished.
 
 Every fact Personalization infers shows up in a ledger in the **Learn drawer** — plain one-line statements ("usually free Tuesday mornings," "prefers the earlier of two options") each tagged with how sure it is:
 
