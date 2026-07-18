@@ -4,7 +4,7 @@
  * Extracted from roles.mjs — pure move with bindAssignmentDeps.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import path from 'path';
 import { CFG_PATH, USERS_DIR } from '../lib/paths.mjs';
 import { listAgents } from '../agents.mjs';
