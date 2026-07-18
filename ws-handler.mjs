@@ -57,15 +57,6 @@ import { normalizeDocumentRequest } from './lib/document-artifacts.mjs';
 import { getProfileFilePath } from './lib/profile-files.mjs';
 import { getOrchestrationPolicy, getRequestedOrchestrationPolicy } from './lib/orchestration-policy.mjs';
 
-function orchestrationPolicyForClient(userId) {
-  const requested = getRequestedOrchestrationPolicy(userId);
-  if (requested.pendingPrimary) return { mode: 'single', pendingPrimary: true };
-  const effective = getOrchestrationPolicy(userId);
-  return {
-    mode: effective.mode,
-    ...(effective.primaryAgentId ? { primaryAgentId: effective.primaryAgentId } : {}),
-  };
-}
 
 // Backfill ws._deviceId for voice-device sessions that were created before
 // the deviceId was stored on the session record (pre-2026-05-12). Looks up
@@ -105,6 +96,54 @@ function tryRecoverDeviceSession(token) {
   return match;
 }
 import { log } from './logger.mjs';
+import { getMainWss, setMainWss } from './ws-handler/main-wss.mjs';
+import {
+  broadcast,
+  broadcastToUsers,
+  sendToUser,
+  sendToDevice,
+  closeDeviceSockets,
+  armFollowupAfterDrain,
+  isDeviceOnline,
+  getDeviceIdForIp,
+  stampChatEvent,
+  getChatRevision,
+  nextSessionSnapshotSeq,
+  orchestrationPolicyForClient,
+} from './ws-handler/delivery.mjs';
+export {
+  broadcast,
+  broadcastToUsers,
+  sendToUser,
+  sendToDevice,
+  closeDeviceSockets,
+  armFollowupAfterDrain,
+  isDeviceOnline,
+  getDeviceIdForIp,
+} from './ws-handler/delivery.mjs';
+
+/** Sync agent_list push to all browser clients (kept here to use routes/_helpers without a cycle). */
+export function broadcastAgentList() {
+  if (!getMainWss()) return;
+  const cache = new Map();
+  for (const client of getMainWss().clients) {
+    if (client.readyState !== client.OPEN) continue;
+    if (client._deviceId) continue;
+    const uid = client._userId;
+    let data = cache.get(uid);
+    if (!data) {
+      data = JSON.stringify({
+        type: 'agent_list',
+        agents: getAgentsForUser(uid).map(agentToWire),
+        orchestration: orchestrationPolicyForClient(uid),
+      });
+      cache.set(uid, data);
+    }
+    try { client.send(data); } catch {}
+  }
+}
+
+
 
 // maxPayload: cap each frame at 2 MiB so a malicious client can't force the
 // server to buffer arbitrarily large messages. 2 MiB still fits large chat
@@ -128,42 +167,11 @@ const MAX_WS_PER_USER = 20;
 const VOICE_STOP_SUPPRESS_MS = 30_000;
 const VOICE_ERROR_FALLBACK = 'Something went wrong.';
 
-let _wss = null;
 let _nodeWss = null;
 let _termWss = null;
 let _browserExtWss = null;
 let _desktopWss = null;
 let _auxiliaryWsEnabled = true;
-
-// Monotonic per-user/per-agent watermark for live chat/session events. A
-// session load captures this value BEFORE its async disk read; if the browser
-// has already reduced a larger value by the time that response arrives, it
-// knows the snapshot is older and must merge rather than erase those live rows.
-const _chatRevisions = new Map();
-let _sessionSnapshotSeq = 0;
-
-function rawChatAgentId(userId, agentId) {
-  const value = typeof agentId === 'string' ? agentId : '';
-  const prefix = `${userId}_`;
-  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
-}
-
-function chatRevisionKey(userId, agentId) {
-  return `${userId}:${rawChatAgentId(userId, agentId)}`;
-}
-
-function getChatRevision(userId, agentId) {
-  return _chatRevisions.get(chatRevisionKey(userId, agentId)) ?? 0;
-}
-
-function stampChatEvent(userId, event) {
-  if (!event || typeof event !== 'object' || !event.agent) return event;
-  if (Number.isFinite(event.chat_revision)) return event;
-  const key = chatRevisionKey(userId, event.agent);
-  const revision = (_chatRevisions.get(key) ?? 0) + 1;
-  _chatRevisions.set(key, revision);
-  return { ...event, chat_revision: revision };
-}
 
 async function rehydrateChatAttachments(userId, attachments) {
   if (!Array.isArray(attachments)) return attachments;
@@ -199,7 +207,7 @@ function wsClientIp(req) {
 function enforceWsCap(ws) {
   if (!ws._userId) return true;
   let count = 0;
-  for (const c of _wss.clients) {
+  for (const c of getMainWss().clients) {
     if (c === ws) continue;
     if (c.readyState !== c.OPEN && c.readyState !== c.CONNECTING) continue;
     if (c._userId === ws._userId) count++;
@@ -213,9 +221,9 @@ function enforceWsCap(ws) {
 }
 
 function closeOlderDeviceSockets(ws) {
-  if (!_wss || !ws?._deviceId) return 0;
+  if (!getMainWss() || !ws?._deviceId) return 0;
   let closed = 0;
-  for (const c of _wss.clients) {
+  for (const c of getMainWss().clients) {
     if (c === ws) continue;
     if (c._deviceId !== ws._deviceId) continue;
     if (c.readyState !== c.OPEN && c.readyState !== c.CONNECTING) continue;
@@ -390,7 +398,7 @@ function isVoiceOutputSuppressed(ws, turn) {
 
 export function initWs(httpServer, { allowAuxiliary = true } = {}) {
   _auxiliaryWsEnabled = allowAuxiliary;
-  _wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
+  const _wss = setMainWss(new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD }));
   _nodeWss = allowAuxiliary ? initNodeWss() : null;
   _termWss = allowAuxiliary ? initTerminalWss() : null;
   _browserExtWss = allowAuxiliary ? initBrowserExtWss() : null;
@@ -400,7 +408,7 @@ export function initWs(httpServer, { allowAuxiliary = true } = {}) {
 
   // Server-side heartbeat — keeps mobile connections alive across NAT/proxy
   const heartbeat = setInterval(() => {
-    for (const client of _wss.clients) {
+    for (const client of getMainWss().clients) {
       client._missedPongs = (client._missedPongs || 0) + 1;
       if (client._missedPongs >= WS_MAX_MISSED_PONGS) {
         // Server-initiated termination — logged distinctly from a client-side
@@ -413,9 +421,9 @@ export function initWs(httpServer, { allowAuxiliary = true } = {}) {
       client.ping();
     }
   }, WS_PING_INTERVAL);
-  _wss.on('close', () => clearInterval(heartbeat));
+  getMainWss().on('close', () => clearInterval(heartbeat));
 
-  _wss.on('connection', onConnection);
+  getMainWss().on('connection', onConnection);
 
   // Voice announcement drain: every few seconds, look for devices with
   // queued completions (background/delegated work that finished after its
@@ -428,7 +436,7 @@ export function initWs(httpServer, { allowAuxiliary = true } = {}) {
     try { reassertWaitHints(); } catch {}
   }, 1000);
   annDrain.unref?.();
-  _wss.on('close', () => clearInterval(annDrain));
+  getMainWss().on('close', () => clearInterval(annDrain));
 
   // Wire the credential primitive so server-side tools can emit
   // `credential_prompt` frames via the per-user broadcast helper.
@@ -437,7 +445,7 @@ export function initWs(httpServer, { allowAuxiliary = true } = {}) {
   // The server ignores this return value. Embedders and integration tests use
   // the handles to close every noServer WebSocketServer cleanly.
   return {
-    browser: _wss,
+    browser: getMainWss(),
     nodes: _nodeWss,
     terminal: _termWss,
     browserExtension: _browserExtWss,
@@ -490,8 +498,8 @@ function reassertWaitHints() {
 }
 
 function drainVoiceAnnouncements() {
-  if (!_wss) return;
-  for (const ws of _wss.clients) {
+  if (!getMainWss()) return;
+  for (const ws of getMainWss().clients) {
     if (ws.readyState !== ws.OPEN || !ws._deviceId || !ws._authenticated) continue;
     if (!hasVoiceAnnouncements(ws._deviceId)) continue;
     // Idle gate.
@@ -610,7 +618,7 @@ export function attachWsUpgrade(httpServer) {
     } else if (pathname === '/ws/desktop') {
       _desktopWss.handleUpgrade(req, socket, head, ws => _desktopWss.emit('connection', ws, req));
     } else {
-      _wss.handleUpgrade(req, socket, head, ws => _wss.emit('connection', ws, req));
+      getMainWss().handleUpgrade(req, socket, head, ws => getMainWss().emit('connection', ws, req));
     }
   });
 }
@@ -837,7 +845,7 @@ function initBrowserExtWss() {
           cancelPendingCredentialPrompts(ws._userId, { agentId: rawAgentId });
           const sessionEpoch = await clearSession(`${ws._userId}_${rawAgentId}`);
           const cleared = stampChatEvent(ws._userId, { type: 'session_cleared', agent: rawAgentId, sessionEpoch });
-          for (const client of _wss.clients) {
+          for (const client of getMainWss().clients) {
             if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN) continue;
             try { client.send(JSON.stringify(cleared)); } catch {}
           }
@@ -1506,7 +1514,7 @@ function onConnection(ws, req) {
     const sessionLoads = await Promise.all(userAgents.map(async (agent) => {
       const key = sessionKey(ws._userId, agent.id);
       const sessionRevision = getChatRevision(ws._userId, agent.id);
-      const snapshotGeneration = ++_sessionSnapshotSeq;
+      const snapshotGeneration = nextSessionSnapshotSeq();
       return {
         agent,
         messages: await loadSession(key, 60),
@@ -1837,7 +1845,7 @@ function onConnection(ws, req) {
       };
       recordDeviceOtaProgress(ws._userId, ws._deviceId, payload);
       const wire = JSON.stringify(payload);
-      for (const client of _wss.clients) {
+      for (const client of getMainWss().clients) {
         if (client === ws) continue;
         if (client.readyState !== client.OPEN) continue;
         if (client._userId !== ws._userId) continue;
@@ -1870,7 +1878,7 @@ function onConnection(ws, req) {
         cancelPendingCredentialPrompts(ws._userId, { agentId });
         const sessionEpoch = await clearSession(sessionKey(ws._userId, agentId));
         const cleared = stampChatEvent(ws._userId, { type: 'session_cleared', agent: agentId, sessionEpoch });
-        for (const client of _wss.clients) {
+        for (const client of getMainWss().clients) {
           if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN) continue;
           try { client.send(JSON.stringify(cleared)); } catch {}
         }
@@ -2067,7 +2075,7 @@ function onConnection(ws, req) {
       if (agentId) {
         const key = sessionKey(ws._userId, agentId);
         const sessionRevision = getChatRevision(ws._userId, agentId);
-        const snapshotGeneration = ++_sessionSnapshotSeq;
+        const snapshotGeneration = nextSessionSnapshotSeq();
         const messages = await loadSession(key, 60);
         const pendingStream = getStreamBuffer(key);
         const activeStream = getActiveStream(ws._userId, agentId);
@@ -2430,7 +2438,7 @@ function onConnection(ws, req) {
               }
             } catch {}
           }
-          for (const client of _wss.clients) {
+          for (const client of getMainWss().clients) {
             if (client === ws) continue;
             if (client._userId !== effectiveUserId) continue;
             if (client.readyState !== client.OPEN) continue;
@@ -2558,187 +2566,6 @@ function onConnection(ws, req) {
   });
 }
 
-// ── Broadcast helpers ────────────────────────────────────────────────────────
-export function broadcast(msg) {
-  if (!_wss) return;
-  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
-  for (const client of _wss.clients)
-    if (client.readyState === client.OPEN && !client._deviceId) try { client.send(data); } catch {}
-}
-
-export function broadcastAgentList() {
-  if (!_wss) return;
-  const cache = new Map();
-  for (const client of _wss.clients) {
-    if (client.readyState !== client.OPEN) continue;
-    if (client._deviceId) continue;
-    const uid = client._userId;
-    let data = cache.get(uid);
-    if (!data) {
-      data = JSON.stringify({
-        type: 'agent_list',
-        agents: getAgentsForUser(uid).map(agentToWire),
-        orchestration: orchestrationPolicyForClient(uid),
-      });
-      cache.set(uid, data);
-    }
-    try { client.send(data); } catch {}
-  }
-}
-
-export function broadcastToUsers(userIds, msg) {
-  if (!_wss) return;
-  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
-  const idSet = new Set(userIds);
-  for (const client of _wss.clients)
-    if (client.readyState === client.OPEN && !client._deviceId && idSet.has(client._userId)) try { client.send(data); } catch {}
-}
-
-/** Send a message to every tab the given user has open. Returns delivery count. */
-export function sendToUser(userId, msg) {
-  if (!_wss) return 0;
-  const stamped = typeof msg === 'string' ? msg : stampChatEvent(userId, msg);
-  const data = typeof stamped === 'string' ? stamped : JSON.stringify(stamped);
-  let delivered = 0;
-  for (const client of _wss.clients) {
-    if (client.readyState === client.OPEN && !client._deviceId && client._userId === userId) {
-      try { client.send(data); delivered++; } catch {}
-    }
-  }
-  return delivered;
-}
-
-/**
- * Send a message to a specific voice-device's WS connection. Returns
- * the count of frames sent — 0 means the device is offline or unknown.
- * Used for OTA wake-word delivery (ww_upload) and any future device-
- * scoped pushes.
- */
-export function sendToDevice(deviceId, msg) {
-  if (!_wss || !deviceId) return 0;
-  const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
-  let delivered = 0;
-  let sendError = null;
-  for (const client of _wss.clients) {
-    if (client.readyState === client.OPEN && client._deviceId === deviceId) {
-      try { client.send(data); delivered++; }
-      catch (e) { sendError = e.message; }
-    }
-  }
-  // Trace every voice-device send so silent failures (device offline,
-  // WS write threw, deviceId typo) are visible. Always-on — these are
-  // event-driven control messages, not chatty enough to log-spam.
-  const type = (typeof msg === 'object' && msg && typeof msg.type === 'string') ? msg.type : 'string-msg';
-  const tail = sendError ? ` error=${sendError}` : '';
-  console.log(`[ws-send] device=${deviceId} type=${type} delivered=${delivered} bytes=${data.length}${tail}`);
-  return delivered;
-}
-
-/**
- * Force-close every live WebSocket belonging to `deviceId`. Called after a
- * device is revoked/unpaired so a stolen or revoked device token can't keep
- * an already-established socket alive (chat, STT, TTS) until it happens to
- * disconnect on its own — deleting the registry entry + session token alone
- * doesn't touch an open connection. 4001 = the same policy-violation close
- * code the auth path uses. Returns the number of sockets closed.
- */
-export function closeDeviceSockets(deviceId) {
-  if (!_wss || !deviceId) return 0;
-  let closed = 0;
-  for (const client of _wss.clients) {
-    if (client._deviceId !== deviceId) continue;
-    try { client.close(4001, 'revoked'); closed++; }
-    catch { try { client.terminate(); closed++; } catch {} }
-  }
-  if (closed) console.log(`[ws] closed ${closed} socket(s) for revoked device=${deviceId}`);
-  return closed;
-}
-
-/**
- * Arm a follow-up listen window on a device AFTER its current reply has
- * actually finished playing out. The old call site (llm-loop's finally)
- * fired at LLM-done — i.e. before tts_audio_begin for short replies — so the
- * window burned down during synth + playback and could expire before the
- * user was even asked the question. Here:
- *   - live streamer → registered on its onClosed(clean); sent only for a
- *     clean close (an aborted/failed reply must not open a phantom window).
- *   - no streamer (legacy token/done path or no-audio turn) → sent now; the
- *     firmware's own deferral (reply_in_flight check) handles in-flight
- *     legacy audio.
- * Returns true if the window was sent or scheduled.
- */
-export function armFollowupAfterDrain(deviceId, { windowMs = 5000, conversation = false } = {}) {
-  if (!_wss || !deviceId) return false;
-  for (const client of _wss.clients) {
-    if (client.readyState !== client.OPEN || client._deviceId !== deviceId) continue;
-    // Tag with the turn the window belongs to (resolved at SEND time — the
-    // firmware drops a window whose turn it has already moved past).
-    const payload = () => ({
-      type: 'await_followup', windowMs,
-      ...(conversation ? { conversation: true } : {}),
-      ...(client._activeVoiceTurn?.id ? { turn_id: client._activeVoiceTurn.id } : {}),
-    });
-    const streamer = client._ttsStreamer;
-    if (streamer && !streamer.closed && !streamer.aborted) {
-      streamer.onClosed((clean) => {
-        if (!clean) return;
-        if (client.readyState === client.OPEN) {
-          client._followupArmedUntil = Date.now() + windowMs + 1000;
-          sendToDevice(deviceId, payload());
-        }
-      });
-      return true;
-    }
-    client._followupArmedUntil = Date.now() + windowMs + 1000;
-    sendToDevice(deviceId, payload());
-    return true;
-  }
-  return false;
-}
-
-/**
- * True if this voice-device id has at least one OPEN WS client right now.
- * Source of truth for the live "connected" indicator in the Voice Devices UI.
- * Cheap — iterates the WS client set, no per-call DB read.
- */
-export function isDeviceOnline(deviceId) {
-  if (!_wss || !deviceId) return false;
-  for (const client of _wss.clients) {
-    if (client.readyState === client.OPEN && client._deviceId === deviceId) return true;
-  }
-  return false;
-}
-
-/**
- * Resolve a LAN IP to the voice device currently connected from it, or null.
- * Used by the health loop to attribute UDP diag datagrams ([hb]/[boot]),
- * which carry only their sender address. LAN-scoped by nature: devices talk
- * to OE directly on the local network, so remoteAddress is the device's own
- * IP (the WAN-NAT ambiguity that makes IP monitoring useless does not apply).
- */
-export function getDeviceIdForIp(ip) {
-  if (!_wss || !ip) return null;
-  const want = String(ip).replace(/^::ffff:/, '');
-  for (const client of _wss.clients) {
-    if (client.readyState !== client.OPEN || !client._deviceId) continue;
-    const addr = (client._clientIp || client._socket?.remoteAddress || '').replace(/^::ffff:/, '');
-    if (addr === want) return { deviceId: client._deviceId, userId: client._userId };
-  }
-  return null;
-}
-
-/**
- * If this client is a voice-device WS and the user's voice-config has
- * advanced since the last push to this device, OTA-resend the wake words
- * for every configured slot. Skips silently for browser sessions and for
- * voice devices already on the current version (avoids unnecessary
- * SPIFFS writes on every reconnect).
- *
- * Async because pushConfigToDevice serializes per-slot sends and awaits
- * the device's ww_upload_ack between them. Only marks the version pushed
- * if EVERY configured slot acked ok — a single offline/timeout/failure
- * leaves the version stale so the next reconnect retries the rest.
- */
 async function maybePushVoiceConfig(ws) {
   if (!ws?._deviceId || !ws?._userId) return;
   try {
@@ -2836,13 +2663,13 @@ export function emitAgentNotification(fromUserId, agentId, notify) {
 }
 
 // ── Runtime introspection ────────────────────────────────────────────────────
-export function getWsClientCount() { return _wss?.clients?.size ?? 0; }
+export function getWsClientCount() { return getMainWss()?.clients?.size ?? 0; }
 export function getNodeClientCount() { return _nodeWss?.clients?.size ?? 0; }
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
 export function closeAllWsClients(reason = 'Server shutting down') {
-  if (!_wss) return;
-  for (const client of _wss.clients) {
+  if (!getMainWss()) return;
+  for (const client of getMainWss().clients) {
     try {
       client.send(JSON.stringify({ type: 'error', message: reason }));
       client.close(1001, reason);
