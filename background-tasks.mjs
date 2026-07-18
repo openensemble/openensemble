@@ -23,195 +23,38 @@ import {
   formatCompoundContractFailure,
 } from './lib/compound-workflow-contract.mjs';
 import { getOrchestrationPolicy } from './lib/orchestration-policy.mjs';
-import { withFileLockSync } from './lib/file-lock.mjs';
 import { assertActiveLabVerifierLeaseToken } from './lib/lab-verifier-lease.mjs';
 import { iterateUntilAbort } from './lib/abortable-async-iterator.mjs';
+import {
+  setBackgroundUserSendFn,
+  _sendOwner,
+  activeTasks,
+  verifierLeaseTokens,
+  rootTaskGraphs,
+  recentWorkers,
+  RECENT_CAP,
+  RECENT_READ_CAP,
+  recentDelegations,
+  _slug,
+} from './background-tasks/state.mjs';
+import {
+  _journalAdd,
+  _journalRemove,
+  _journalMarkCompletion,
+  _journalSnapshot,
+} from './background-tasks/journal.mjs';
+import {
+  registerAutoBackgroundTool,
+  markAutoBackgroundToolTerminal,
+  retireAutoBackgroundTool,
+} from './background-tasks/auto-bg-tool.mjs';
 
-// Background completion is private user state. Never route it through the
-// process-wide browser broadcast: on a household install that discloses one
-// person's worker/delegation result to every connected user.
-let _sendToUser = null;
-export function setBackgroundUserSendFn(fn) { _sendToUser = fn; }
-
-function _sendOwner(userId, payload) {
-  if (!_sendToUser || !userId || !payload) return 0;
-  try { return _sendToUser(userId, payload); }
-  catch (e) {
-    console.warn('[background-tasks] owner notification failed:', e?.message || e);
-    return 0;
-  }
-}
-
-/** Stable correlation passed into one detached background agent run. */
-export function backgroundRunTraceOptions(rec, traceSource = 'background') {
-  return {
-    rootTaskId: rec?.rootTaskId || rec?.taskId || null,
-    traceSource,
-    ...(rec?.sourceMessageId ? { messageId: rec.sourceMessageId } : {}),
-    ...(rec?.sourceAttemptId ? { attemptId: rec.sourceAttemptId } : {}),
-    ...(rec?.sourceSessionKey ? { sessionKey: rec.sourceSessionKey } : {}),
-    ...(rec?.sourceSessionEpoch ? { sessionEpoch: rec.sourceSessionEpoch } : {}),
-  };
-}
-
-export function resolveBackgroundRootTaskId(taskId, opts = {}, scheduledCtx = null) {
-  // A scheduled occurrence is the outer authorization boundary. A nested
-  // task context must not mint a fresh side-effect scope on replay.
-  return scheduledCtx?.runId || opts?.rootTaskId || taskId;
-}
-
-// Voice-device origin of the CURRENT turn (ALS), stamped onto task records at
-// registration so completions can announce themselves on the device speaker.
-function _voiceOrigin() {
-  try {
-    const tc = getTurnContext();
-    return { voiceDeviceId: tc?.deviceId ?? null, voiceConversation: !!tc?.conversationMode };
-  } catch { return { voiceDeviceId: null, voiceConversation: false }; }
-}
-
-// in-flight task registry: taskId -> { agentId, userId, agentName, startedAt }
-const activeTasks = new Map();
-// Verifier lease capabilities are tied to the in-memory task record without
-// becoming enumerable through getActiveTasks(), logs, or journal serializers.
-const verifierLeaseTokens = new WeakMap();
-
-// ── restart journal ───────────────────────────────────────────────────────────
-// activeTasks / rootTaskGraphs / the recent* rings are all in-memory, so a
-// server restart used to erase every trace that a delegation or worker ever
-// existed: the chip stayed "running" until the 1h watcher boot-reap,
-// check_workers reported ambiguous silence ("no background work"), and nobody
-// was told — which is how the coordinator ends up answering "already in
-// progress" from its own stale session promise. The journal is a tiny on-disk
-// mirror of in-flight tasks: entry added at dispatch, removed on completion.
-// Anything still present at boot was killed by the restart, by definition —
-// bootRecoverInterruptedTasks marks each one cancelled everywhere the truth is
-// consumed: the recent rings (check_workers), the watcher chip (UI), and the
-// owning chat session (the coordinator's next turn).
-const JOURNAL_PATH = path.join(BASE_DIR, 'background-task-journal.json');
-const JOURNAL_LOCK_PATH = `${JOURNAL_PATH}.lock`;
-const JOURNAL_VERSION = 1;
-
-function _plainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
-}
-
-function _journalReadUnlocked() {
-  let parsed;
-  try { parsed = JSON.parse(fs.readFileSync(JOURNAL_PATH, 'utf8')); }
-  catch (error) {
-    if (error?.code === 'ENOENT') return {};
-    throw new Error(`background task journal is unreadable: ${error?.message || error}`);
-  }
-  // Read the pre-versioned object written by older candidates, then migrate it
-  // on the next successful mutation. Every other shape fails closed.
-  if (_plainObject(parsed) && parsed.version === JOURNAL_VERSION && _plainObject(parsed.entries)) {
-    return parsed.entries;
-  }
-  if (_plainObject(parsed) && !Object.prototype.hasOwnProperty.call(parsed, 'version')) return parsed;
-  throw new Error('background task journal has an invalid shape');
-}
-
-function _journalSaveUnlocked(entries) {
-  if (!_plainObject(entries)) throw new Error('background task journal entries must be an object');
-  const tmp = `${JOURNAL_PATH}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-  try {
-    fs.mkdirSync(path.dirname(JOURNAL_PATH), { recursive: true });
-    const fd = fs.openSync(tmp, 'w', 0o600);
-    try {
-      fs.writeFileSync(fd, JSON.stringify({ version: JOURNAL_VERSION, entries }, null, 2));
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(tmp, JOURNAL_PATH);
-    try {
-      const dirFd = fs.openSync(path.dirname(JOURNAL_PATH), 'r');
-      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-    } catch { /* directory fsync is unavailable on some platforms */ }
-    return true;
-  } catch (e) {
-    try { fs.rmSync(tmp, { force: true }); } catch {}
-    console.warn('[background-tasks] journal write failed:', e.message);
-    return false;
-  }
-}
-
-function _journalSnapshot() {
-  return withFileLockSync(JOURNAL_LOCK_PATH, () => _journalReadUnlocked(), { timeoutMs: 5_000 });
-}
-
-function _journalMutate(mutator) {
-  try {
-    return withFileLockSync(JOURNAL_LOCK_PATH, () => {
-      const entries = _journalReadUnlocked();
-      const result = mutator(entries);
-      if (!_journalSaveUnlocked(entries)) return false;
-      return result ?? true;
-    }, { timeoutMs: 5_000 });
-  } catch (error) {
-    console.warn('[background-tasks] journal mutation refused:', error?.message || error);
-    return false;
-  }
-}
-
-function _journalAdd(taskId) {
-  const rec = activeTasks.get(taskId);
-  if (!rec) return false;
-  return _journalMutate(entries => { entries[taskId] = {
-    userId: rec.userId,
-    kind: rec.isWorker ? 'worker' : 'delegation',
-    agentId: rec.agentId,
-    agentName: rec.agentName,
-    agentEmoji: rec.agentEmoji || '🤖',
-    summary: rec.summary || '',
-    originalTask: String(rec.originalTask || rec.summary || '').slice(0, 12_000),
-    watcherId: rec.watcherId || null,
-    rootWatcherId: rec.rootWatcherId || null,
-    rootTaskId: rec.rootTaskId || taskId,
-    ownerKey: rec.ownerKey || null,
-    coordinatorAgentId: rec.coordinatorAgentId || null,
-    visibleAgentId: rec.visibleAgentId || null,
-    sourceMessageId: rec.sourceMessageId || null,
-    sourceAttemptId: rec.sourceAttemptId || null,
-    sourceSessionKey: rec.sourceSessionKey || null,
-    sourceSessionEpoch: rec.sourceSessionEpoch || null,
-    originScheduledTaskId: rec.originScheduledTaskId || null,
-    originScheduledTaskOwnerId: rec.originScheduledTaskOwnerId || null,
-    originScheduledTaskAgent: rec.originScheduledTaskAgent || null,
-    originScheduledRunId: rec.originScheduledRunId || null,
-    originScheduledManual: rec.originScheduledManual === true,
-    // Nonsecret restart guard only. The verifier lease capability itself is
-    // memory-only and is intentionally absent from this explicit serializer.
-    verifierLeaseRequired: rec.verifierLeaseRequired === true,
-    startedAt: rec.startedAt,
-  }; });
-}
-
-function _journalRemove(taskId) {
-  return _journalMutate(entries => {
-    if (!(taskId in entries)) return true;
-    delete entries[taskId];
-    return true;
-  });
-}
-
-function _journalMarkCompletion(taskId, completion) {
-  return _journalMutate(entries => {
-    if (!(taskId in entries)) return false;
-    entries[taskId] = {
-      ...entries[taskId],
-      completion: {
-        status: completion.status,
-        result: String(completion.result || '').slice(0, 50_000),
-        error: String(completion.error || '').slice(0, 8_000),
-        images: Array.isArray(completion.images) ? completion.images.slice(0, 8) : [],
-        completedAt: Date.now(),
-      },
-    };
-    return true;
-  });
-}
+export { setBackgroundUserSendFn } from './background-tasks/state.mjs';
+export {
+  registerAutoBackgroundTool,
+  markAutoBackgroundToolTerminal,
+  retireAutoBackgroundTool,
+} from './background-tasks/auto-bg-tool.mjs';
 
 /**
  * Restart recovery — called once from server boot, AFTER startWatcherSupervisor
@@ -444,17 +287,40 @@ export async function bootRecoverInterruptedTasks() {
   return ids.length;
 }
 
+
+
+/** Stable correlation passed into one detached background agent run. */
+export function backgroundRunTraceOptions(rec, traceSource = 'background') {
+  return {
+    rootTaskId: rec?.rootTaskId || rec?.taskId || null,
+    traceSource,
+    ...(rec?.sourceMessageId ? { messageId: rec.sourceMessageId } : {}),
+    ...(rec?.sourceAttemptId ? { attemptId: rec.sourceAttemptId } : {}),
+    ...(rec?.sourceSessionKey ? { sessionKey: rec.sourceSessionKey } : {}),
+    ...(rec?.sourceSessionEpoch ? { sessionEpoch: rec.sourceSessionEpoch } : {}),
+  };
+}
+
+export function resolveBackgroundRootTaskId(taskId, opts = {}, scheduledCtx = null) {
+  // A scheduled occurrence is the outer authorization boundary. A nested
+  // task context must not mint a fresh side-effect scope on replay.
+  return scheduledCtx?.runId || opts?.rootTaskId || taskId;
+}
+
+// Voice-device origin of the CURRENT turn (ALS), stamped onto task records at
+// registration so completions can announce themselves on the device speaker.
+function _voiceOrigin() {
+  try {
+    const tc = getTurnContext();
+    return { voiceDeviceId: tc?.deviceId ?? null, voiceConversation: !!tc?.conversationMode };
+  } catch { return { voiceDeviceId: null, voiceConversation: false }; }
+}
+
 // Root task graph for nested delegation. Existing ids remain intact:
 // - watcher UUIDs are still the user-visible chip ids
 // - bg_/deleg_/ephemeral ids remain internal runtime ids
 // This graph links them so status lookups can resolve "root -> child agent"
 // and a root chip does not finish while child delegations are still running.
-const rootTaskGraphs = new Map(); // rootTaskId -> { userId, rootWatcherId, visibleAgentId, children, pendingCompletion }
-
-function _slug(s) {
-  return String(s || 'agent').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'agent';
-}
-
 function _rootChildSnapshot(root) {
   if (!root?.children?.size) return [];
   return [...root.children.values()].map(c => ({
@@ -2114,85 +1980,6 @@ export function isTaskActive(taskId) {
   return activeTasks.has(taskId);
 }
 
-/** Give a generic slow-tool handoff a real liveness/cancellation owner. */
-export function registerAutoBackgroundTool({
-  taskId, userId, agentId, toolName, watcherId, startedAt = Date.now(), abort = null,
-}) {
-  if (!taskId || !userId || !watcherId || activeTasks.has(taskId)) return null;
-  const rawAgentId = String(agentId || 'jarvis');
-  const scopedAgentId = rawAgentId.startsWith(`${userId}_`)
-    ? rawAgentId
-    : `${userId}_${rawAgentId}`;
-  activeTasks.set(taskId, {
-    agentId: rawAgentId,
-    userId,
-    coordinatorAgentId: scopedAgentId,
-    visibleAgentId: scopedAgentId,
-    agentName: toolName || 'Background tool',
-    agentEmoji: '⏵',
-    startedAt,
-    summary: `${toolName || 'Background tool'} is still running`,
-    originalTask: `${toolName || 'Background tool'} is still running`,
-    phase: 'backgrounded',
-    status: 'running',
-    currentTool: toolName || null,
-    watcherId,
-    rootTaskId: watcherId,
-    rootWatcherId: watcherId,
-    spanId: `${taskId}:tool:${_slug(toolName)}`,
-    aliases: [taskId, watcherId].filter(Boolean),
-    isAutoBgTool: true,
-    abort: typeof abort === 'function' ? abort : null,
-  });
-  // Admission is complete only when the restart journal owns the execution.
-  // Callers still hold the foreground promise/iterator when this returns null,
-  // so failing closed here avoids an unjournaled detached side effect.
-  if (!_journalAdd(taskId)) {
-    activeTasks.delete(taskId);
-    return null;
-  }
-  return { taskId, watcherId };
-}
-
-/** Persist provider settlement before report/session/continuation awaits. */
-export function markAutoBackgroundToolTerminal(taskId, { status = 'done', result = '', error = null } = {}) {
-  const rec = activeTasks.get(taskId);
-  if (!rec?.isAutoBgTool || rec._terminalMarked) return false;
-  const terminal = status === 'cancelled' ? 'cancelled' : (status === 'done' && !error ? 'done' : 'error');
-  // Persist provider settlement first. User-facing completion delivery is
-  // allowed only after this succeeds, so a crash can recover the real terminal
-  // result instead of relabelling completed work as interrupted.
-  if (!_journalMarkCompletion(taskId, {
-    status: terminal,
-    result: terminal === 'done' ? result : '',
-    error: terminal === 'done' ? null : (error || result || 'Background tool failed.'),
-    images: [],
-  })) return false;
-  rec._terminalMarked = true;
-  rec.abort = null;
-  rec.status = terminal;
-  rec.phase = 'finalizing';
-  rec.currentTool = null;
-  rec.lastUpdateAt = Date.now();
-  return true;
-}
-
-/** Retire only the generic slow-tool owner; roles.mjs owns user surfaces. */
-export function retireAutoBackgroundTool(taskId) {
-  const rec = activeTasks.get(taskId);
-  if (!rec?.isAutoBgTool || rec._finalizationClaimed) return false;
-  if (!rec._terminalMarked) {
-    const marked = markAutoBackgroundToolTerminal(taskId, {
-      status: 'error', error: 'Background tool ended without terminal evidence.',
-    });
-    if (!marked) return false;
-  }
-  rec._finalizationClaimed = true;
-  activeTasks.delete(taskId);
-  _journalRemove(taskId);
-  return true;
-}
-
 // ── Sync (in-turn) delegation tracking ───────────────────────────────────────
 // A sync delegation streams into the caller's open turn, but it is still real
 // background-shaped work: it can outlive the visible turn (the auto-bg net
@@ -2413,23 +2200,6 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
 //   2. The run is abortable, so stop_worker can cancel it.
 //   3. The chip + completion report land in the OWNER's chat (chipOwnerId),
 //      not the coordinator's. Completion bubbles up to whoever owns the worker.
-
-// Recently-finished workers (ring buffer) so check_workers can report a TERMINAL
-// outcome ("failed at 04:04") instead of silently showing nothing — the #1 cause
-// of an agent telling the user "still running" when the worker actually died.
-const recentWorkers = [];
-const RECENT_CAP = 12;
-// Cap for the MERGED read (in-memory ring + durable JSONL tail) returned by
-// listRecentWorkersForOwner / listRecentDelegationsForUser. Larger than
-// RECENT_CAP because the durable tail can surface history the ring already
-// evicted (another user's flurry of tasks, or a restart).
-const RECENT_READ_CAP = 25;
-
-// Same idea for coordinator→specialist DELEGATIONS (dispatchBackground). Lets
-// check_workers report a terminal outcome ("specialist finished - 56 events added")
-// for a moment after the task ends, instead of the task simply vanishing the
-// instant it completes and leaving the next "is it done?" with nothing to show.
-const recentDelegations = [];
 
 function _retire(taskId, outcome, finalText) {
   const info = activeTasks.get(taskId);
