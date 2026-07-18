@@ -3,7 +3,7 @@
  * Extracted from ws-handler.mjs — pure move. Main connection setup stays there.
  */
 
-import { normalizeOrchestrationPolicy } from '../lib/orchestration-policy-core.mjs';
+import { getOrchestrationPolicy, getRequestedOrchestrationPolicy } from '../lib/orchestration-policy.mjs';
 import { getMainWss } from './main-wss.mjs';
 
 // Monotonic per-user/per-agent watermark for live chat/session events. A
@@ -47,11 +47,6 @@ export function orchestrationPolicyForClient(userId) {
     ...(effective.primaryAgentId ? { primaryAgentId: effective.primaryAgentId } : {}),
   };
 }
-
-// Backfill ws._deviceId for voice-device sessions that were created before
-// the deviceId was stored on the session record (pre-2026-05-12). Looks up
-// the device by 8-char token prefix and writes the result back into the
-// session so subsequent auths skip this. Returns the deviceId or null.
 
 // ── Broadcast helpers ────────────────────────────────────────────────────────
 export function broadcast(msg) {
