@@ -8,6 +8,7 @@ import path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { BASE_DIR } from '../../lib/paths.mjs';
 import { signManifestString, supportsSecureUpdates, getUpdatePublicKeyPem } from '../../lib/node-update-signing.mjs';
+import { resolveWriteTargetSync } from '../../lib/write-target.mjs';
 
 // ── State ────────────────────────────────────────────────────────────────────
 // Connected AND disconnected nodes both live in `nodes`. Disconnected entries
@@ -41,9 +42,10 @@ function tokenHashMatches(storedHash, token) {
 }
 
 function atomicWriteSync(filepath, data) {
-  const tmp = `${filepath}.tmp.${process.pid}.${randomBytes(3).toString('hex')}`;
+  const target = resolveWriteTargetSync(filepath);
+  const tmp = `${target}.tmp.${process.pid}.${randomBytes(3).toString('hex')}`;
   fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, filepath);
+  fs.renameSync(tmp, target);
 }
 
 function persistNodes() {

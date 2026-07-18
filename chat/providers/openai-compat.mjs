@@ -10,7 +10,7 @@ import { executeToolStreaming } from '../../roles.mjs';
 import {
   OPENAI_COMPAT_PROVIDERS, readAnthropicSSE, getCompatKey, fetchWithRetry,
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
-  modelCallTraceEvent,
+  modelCallTraceEvent, normalizeToolCallIdentity,
 } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
@@ -176,8 +176,16 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         // Key by index when present (spec), else by id — compat servers that
         // omit index on parallel calls used to collapse them all into idx 0.
         const idx = tc.index ?? tc.id ?? 0;
-        if (!toolCalls.has(idx)) toolCalls.set(idx, { id: tc.id ?? `tc${idx}`, name: '', argsJson: '' });
+        if (!toolCalls.has(idx)) {
+          const identity = normalizeToolCallIdentity(tc.id, providerKey);
+          toolCalls.set(idx, { id: identity.id, providerNative: identity.providerNative, name: '', argsJson: '' });
+        }
         const entry = toolCalls.get(idx);
+        if (tc.id && !entry.providerNative) {
+          const identity = normalizeToolCallIdentity(tc.id, providerKey);
+          entry.id = identity.id;
+          entry.providerNative = identity.providerNative;
+        }
         // ||= not +=: some servers resend the FULL name on every delta, which
         // += turned into "web_searchweb_search".
         if (tc.function?.name)      entry.name   ||= tc.function.name;
@@ -216,7 +224,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
           return { block, toolArgs: args };
         });
         for (const { block, toolArgs } of parsed) {
-          yield { type: 'tool_call', name: block.name, args: toolArgs };
+          yield { type: 'tool_call', name: block.name, args: toolArgs, toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
         }
         const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
           const { text, _notify, _images, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
@@ -226,7 +234,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         working.push({ role: 'assistant', content: textContent.trim() ? textContent : null, tool_calls: assistantToolCalls }); // keep the pre-tool preamble in history — dropping it left the model re-deriving its own reasoning next round
         for (const { block, result, _notify, events } of results) {
           for (const ev of events) yield ev;
-          yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
+          yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
           working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         }
@@ -247,16 +255,16 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       for (const block of blocks) {
         let args = {};
         try { args = JSON.parse(block.argsJson || '{}'); } catch (e) { console.warn(`[${providerKey}] Failed to parse tool args:`, e.message); }
-        yield { type: 'tool_call', name: block.name, args };
+        yield { type: 'tool_call', name: block.name, args, toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
         let compatToolResult = '';
         let _seqImages = null;
         for await (const chunk of executeToolStreaming(block.name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean))) {
           if (chunk.type === 'token')              compatToolResult += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
           if (chunk.type === '__hide_turn')         yield { type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId };
-          if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
-          if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
-          if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
+          if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
+          if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
+          if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text), ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
           if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') yield chunk;
           if (chunk.type === 'result') {
             compatToolResult = chunk.text;
@@ -266,7 +274,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         const { text: result, _notify, _images } = normalizeToolResult(compatToolResult);
         const effectiveImages = _seqImages ?? _images;
         if (effectiveImages?.length) _imagesByBlockId.set(block.id, { name: block.name, images: effectiveImages });
-        yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
+        yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         working.push({ role: 'tool', tool_call_id: block.id, content: applyRedactions(result) });
         compatSeqResults.push({ name: block.name, args: block.argsJson, result });

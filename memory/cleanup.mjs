@@ -4,7 +4,7 @@
  * `forget_fact` / `forgetByText` / the salience-GC path all flip a `forgotten`
  * boolean — the row stays on disk so the user can recover from accidental
  * forgets. This module does the actual disk reclamation: rows older than
- * `graceDays` with `forgotten = true` are dropped from each table.
+ * `graceDays` after their soft-forget time are dropped from each table.
  *
  *   cleanupForgottenForUser(userId, graceDays = 30)
  *   cleanupAllUsers(graceDays = 30)
@@ -15,7 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
-import { getDb } from './lance.mjs';
+import { getTable } from './lance.mjs';
 import { queuedWrite } from './shared.mjs';
 
 const SAFETY_FLOOR_DAYS = 0; // graceDays = 0 means "delete every forgotten row right now"
@@ -41,23 +41,23 @@ export async function cleanupForgottenForUser(userId, graceDays = 30) {
   const tableNames = listTableNames(userId);
   if (!tableNames.length) return { userId, deleted: {}, totalDeleted: 0 };
 
-  const db = await getDb(userId);
   const deleted = {};
   let total = 0;
 
   for (const name of tableNames) {
     let table;
-    try { table = await db.openTable(name); }
+    try { table = await getTable(name, userId); }
     catch (e) { console.debug('[cortex-cleanup] skip', userId, name, e.message); continue; }
 
     let before = -1;
     try { before = await table.countRows(); } catch {}
 
-    // Single SQL filter — keep the schema-seed `_init` row, drop everything
-    // else that's been soft-deleted long enough ago.
-    const filter = `forgotten = true AND id != '_init' AND created_at < '${cutoff}'`;
+    // The forgotten_at migration stamps legacy forgotten rows at migration
+    // time, giving them a full recovery window regardless of row creation age.
+    const seedId = `_init_${name}`.replace(/'/g, "''");
+    const filter = `forgotten = true AND forgotten_at != '' AND id != '_init' AND id != '${seedId}' AND forgotten_at < '${cutoff}'`;
     try {
-      await queuedWrite(name, () => table.delete(filter));
+      await queuedWrite(name, () => table.delete(filter), userId);
     } catch (e) {
       console.warn('[cortex-cleanup] delete failed for', userId, name + ':', e.message);
       continue;

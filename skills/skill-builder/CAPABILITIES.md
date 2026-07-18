@@ -230,77 +230,21 @@ optional and most skills should not include one.
 
 ---
 
-## 10. Browser extension as the fetcher (no-API sites)
+## 10. OE Bridge browser extension
 
-> ⛔ **NOT AVAILABLE YET — DO NOT RECOMMEND OR BUILD AGAINST THIS.** The OE
-> Bridge browser extension is not shipped: it's gitignored, absent from fresh
-> installs, and the `ctx.browser` / `helpers.browser` surface is incomplete
-> (read-only primitives only; no scripting to click or control a page). Until
-> it ships, do NOT pitch the extension to the user, do NOT offer it as a
-> capability, and do NOT scaffold skills that depend on `ctx.browser`,
-> `helpers.browser`, or `browser_list`. If a request would need it (scrape a
-> no-API site, control a web app like YouTube Music, read the user's tabs),
-> prefer a public API / RSS / JSON-LD source instead — and if there's no such
-> source, tell the user that browser automation isn't available yet rather
-> than building against the bridge. Everything below is retained for when it
-> ships; ignore it for now.
+> ✅ **THE EXTENSION IS SHIPPED; THE CUSTOM-SKILL API IS NOT.** OE Bridge is
+> included under `browser-extension/` and supports explicit, lease-bound
+> built-in browser workflows. Custom skills must still not depend on
+> `ctx.browser`, `helpers.browser`, or `browser_list`: those public skill
+> surfaces have not been released. Do not generate fictional browser helpers.
 
-**Trigger:** the user wants to monitor or read a site that has NO public
-API, no RSS feed, no structured data export — AND/OR is known for
-aggressive anti-bot (Best Buy, Target, Ticketmaster, Kayak, airline
-sites). Common phrasing: "track Best Buy restocks", "watch this site
-for changes", "scrape this URL", "monitor my school portal".
+When a user asks about installing or using Bridge, point them to the in-app
+**OE Bridge** guide. For a custom skill that needs site data, keep the fetcher
+preference as RSS > public API > JSON-LD > bounded server-side fetch. If none
+is available, explain that Bridge cannot yet be used as a custom-skill fetcher.
 
-**User pitch:** "If you've installed the OE Bridge browser extension,
-I can use YOUR browser as the fetcher instead of scraping from the
-server — that means your real session, your real IP, your real cookies.
-Sites that block server-side scrapers don't see this as a bot. Trade-
-off: only works while your browser is open and the OE Bridge extension
-is connected; if you close the browser, the watcher pauses until you
-reopen it."
-
-**Decisions to surface:**
-- Has the user installed the OE Bridge extension? Check first via
-  `browser_list`. If not, offer to talk them through install (see the
-  README at `~/.openensemble/browser-extension/`).
-- For a watcher: should the skill open a fresh tab each cycle, or
-  reuse an existing tab the user is leaving open?
-- What's the page selector / pattern that signals "new state"? (price
-  text, stock badge, headline change, etc.)
-
-**Skip when:** the site has a public API or RSS feed (cheaper, doesn't
-depend on the user keeping a browser open). Order of preference per
-the MONITORED-SOURCE PATTERN stays: RSS > public API > JSON-LD >
-browser-extension scrape > full server-side scrape.
-
-**Skill-side scaffolds** (Phase 1 — read-only):
-
-A kickoff tool (called from a chat turn) uses `ctx.browser`:
-```
-// in execute.mjs tool handler
-const tabs = (await ctx.browser.list())[0]?.tabs || [];
-const targetTab = tabs.find(t => t.url.includes('bestbuy.com/site/x'));
-const tabId = targetTab?.tabId ?? (await ctx.browser.openTab('https://www.bestbuy.com/...')).tabId;
-await new Promise(r => setTimeout(r, 3000));
-const page = await ctx.browser.readPage(tabId);
-```
-
-A watcher handler uses `helpers.browser` (same surface, bound to the
-record's userId — `ctx` isn't available inside a handler tick):
-```
-async [KIND](state, helpers) {
-  const tabs = (await helpers.browser.list())[0]?.tabs || [];
-  const targetTab = tabs.find(t => t.url.includes(state.url));
-  const tabId = targetTab?.tabId ?? (await helpers.browser.openTab(state.url)).tabId;
-  await new Promise(r => setTimeout(r, 3000));
-  const page = await helpers.browser.readPage(tabId);
-  const inStock = /add to cart/i.test(page.text);
-  if (inStock !== state.lastInStock) {
-    await helpers.fire({ message: `Best Buy: ${inStock ? 'IN STOCK' : 'sold out'}` });
-  }
-  return { newState: { ...state, lastInStock: inStock } };
-}
-```
+Revisit this capability menu only after the browser broker has a documented,
+server-enforced custom-skill API with lease and confirmation semantics.
 
 ## 11. Scheduled action (cron-style)
 

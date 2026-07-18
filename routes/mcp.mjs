@@ -394,6 +394,7 @@ export async function handle(req, res) {
         name: body?.name,
         scopes: Array.isArray(body?.scopes) ? body.scopes : undefined,
         agentId,
+        toolAllowlist: body?.toolAllowlist,
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, token, record }));

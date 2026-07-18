@@ -7,6 +7,7 @@ import {
   UUID_RE, assertId, safeLanceVal, queuedWrite,
   calcRetention, recencyScore, TOKEN_BUDGET,
 } from './shared.mjs';
+import { softForgetValues } from './forgotten-state.mjs';
 import { embed } from './embedding.mjs';
 import { getTable } from './lance.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
@@ -168,7 +169,7 @@ export async function recall({ agentId = 'main', type = 'episodes', query, query
           where: `id = '${assertId(m.id)}'`,
           values,
         }).catch(e => console.debug('[cortex] LanceDB update error:', e.message));
-      });
+      }, userId).catch(e => console.debug('[cortex] Recall update failed:', e.message));
     });
   }
 
@@ -227,7 +228,7 @@ export async function updateReviewSchedule({ agentId = 'main', type = 'params', 
       last_recalled_at: new Date().toISOString(),
       next_review_at: nextReview,
     }
-  }));
+  }), userId);
   return { newStability, nextReview, recallCount: (m.recall_count || 0) + 1, multiplier };
 }
 
@@ -239,7 +240,9 @@ export async function forget({ agentId = 'main', type = 'episodes', exactId, use
   assertId(exactId);
   const rows = await table.query().where(`id = '${exactId}'`).toArray().catch(() => []);
   if (rows[0]?.immortal && !includeImmortal) return { refused: true, reason: 'Immortal — cannot forget.' };
-  await queuedWrite(tableName, () => table.update({ where: `id = '${exactId}'`, values: { forgotten: true } }));
+  await queuedWrite(tableName, () => table.update({
+    where: `id = '${exactId}'`, values: softForgetValues(),
+  }), userId);
   await table.checkoutLatest?.();
   const verify = await table.query().where(`id = '${exactId}'`).limit(1).toArray().catch(() => []);
   if (verify[0] && verify[0].forgotten !== true) {
@@ -323,8 +326,10 @@ export async function forgetByText({
           // raw fallback, regardless of whether the ledger read succeeded.
           continue;
         }
-        await queuedWrite(tableName, () =>
-          table.update({ where: `id = '${assertId(hit.id)}'`, values: { forgotten: true } })
+        await queuedWrite(
+          tableName,
+          () => table.update({ where: `id = '${assertId(hit.id)}'`, values: softForgetValues() }),
+          userId,
         );
         totalForgotten++;
         forgottenTexts.push(hit.text);

@@ -10,6 +10,7 @@ import {
   VECTOR_DIM, dbPath, assertId, queuedWrite, getCortexConfig,
   providerHealthy, initialStability,
 } from './shared.mjs';
+import { softForgetValues, restoreForgottenValues } from './forgotten-state.mjs';
 import { embed, scoreSalience, checkContradiction } from './embedding.mjs';
 
 // Jailbreak-marker detection for child accounts. A child who socially-engineers
@@ -62,6 +63,10 @@ export async function getDb(userId = 'default') {
 /** Drop a cached DB handle — used after a destructive filesystem op (migration). */
 export function invalidateDbCache(userId) {
   _dbs.delete(userId);
+  const prefix = `${userId}::`;
+  for (const keys of [_scopeColumnEnsured, _hostScopeColumnEnsured, _forgottenAtColumnEnsured]) {
+    for (const key of keys) if (key.startsWith(prefix)) keys.delete(key);
+  }
 }
 
 // Evict idle LanceDB connections every 10 minutes
@@ -85,6 +90,7 @@ export const BASE_SCHEMA = {
   // confuses vectorSearch distance scoring and the dedup check in remember()
   // bails out treating every new write as a near-duplicate of _init.
   forgotten: true,
+  forgotten_at: '',
   salience_composite: 0.5, emotional_weight: 0.5, decision_weight: 0.5, uniqueness_score: 0.5,
   stability: 72, retention_score: 1.0, recall_count: 0,
   session_id: '', role: '', status: 'active', priority: 0.5,
@@ -108,6 +114,8 @@ export const BASE_SCHEMA = {
 // role_scope column exists — avoids retrying addColumns on every getTable call.
 const _scopeColumnEnsured = new Set();
 const _hostScopeColumnEnsured = new Set();
+const _forgottenAtColumnEnsured = new Set();
+const _forgottenAtColumnMigrations = new Map();
 
 async function ensureRoleScopeColumn(table, userId, name) {
   const key = `${userId}::${name}`;
@@ -135,6 +143,43 @@ async function ensureHostScopeColumn(table, userId, name) {
       console.debug('[cortex] host_scope column ensure skipped for', key + ':', e.message);
     }
   }
+}
+
+async function ensureForgottenAtColumn(table, userId, name) {
+  const key = `${userId}::${name}`;
+  if (_forgottenAtColumnEnsured.has(key)) return;
+  if (_forgottenAtColumnMigrations.has(key)) {
+    await _forgottenAtColumnMigrations.get(key);
+    return;
+  }
+  const migration = (async () => {
+    try {
+      await table.addColumns([{ name: 'forgotten_at', valueSql: "''" }]);
+    } catch (e) {
+      if (!/already exists|duplicate/i.test(e.message)) {
+        console.debug('[cortex] forgotten_at column ensure skipped for', key + ':', e.message);
+        return;
+      }
+    }
+
+    // Rows forgotten before this column existed have no reliable forget time.
+    // Start their full recovery window at migration instead of deriving it from
+    // created_at and potentially deleting an old memory immediately.
+    const seedId = `_init_${name}`.replace(/'/g, "''");
+    try {
+      await table.update({
+        where: `forgotten = true AND forgotten_at = '' AND id != '_init' AND id != '${seedId}'`,
+        values: { forgotten_at: new Date().toISOString() },
+      });
+    } catch (e) {
+      console.debug('[cortex] legacy forgotten_at migration skipped for', key + ':', e.message);
+      return;
+    }
+    _forgottenAtColumnEnsured.add(key);
+  })();
+  _forgottenAtColumnMigrations.set(key, migration);
+  try { await migration; }
+  finally { _forgottenAtColumnMigrations.delete(key); }
 }
 
 // Per-(userId, tableName) lock to prevent concurrent create races:
@@ -168,6 +213,7 @@ export async function getTable(name, userId = 'default') {
   // tables created before this feature landed. No-op after first call per table.
   await ensureRoleScopeColumn(table, userId, name);
   await ensureHostScopeColumn(table, userId, name);
+  await ensureForgottenAtColumn(table, userId, name);
   return table;
 }
 
@@ -197,7 +243,7 @@ export async function rememberFast({ agentId = 'main', type = 'episodes', text,
   const record = {
     id: 'mem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
     text, vector, agent_id: agentId, source, confidence, immortal,
-    forgotten: false,
+    ...restoreForgottenValues(),
     salience_composite: defaultSalience,
     emotional_weight:   defaultSalience,
     decision_weight:    defaultSalience,
@@ -219,7 +265,7 @@ export async function rememberFast({ agentId = 'main', type = 'episodes', text,
     host_scope: metadata.host_scope || '',
   };
 
-  await queuedWrite(tableName, () => table.add([record]));
+  await queuedWrite(tableName, () => table.add([record]), userId);
   return record;
 }
 
@@ -263,16 +309,19 @@ async function rememberEnrich(record, tableName, userId = 'default') {
       if (contradiction.contradicts && contradiction.conflicting_id) {
         supersededBy = contradiction.conflicting_id;
         const t = await getTable(tableName, userId);
-        await queuedWrite(tableName, () =>
-          t.update({ where: `id = '${assertId(contradiction.conflicting_id)}'`,
-            values: { superseded_by: record.id } }).catch(e => console.debug('[cortex] LanceDB update error:', e.message))
+        await queuedWrite(
+          tableName,
+          () => t.update({ where: `id = '${assertId(contradiction.conflicting_id)}'`,
+            values: { superseded_by: record.id } }).catch(e => console.debug('[cortex] LanceDB update error:', e.message)),
+          userId,
         );
       }
     }
 
     const table = await getTable(tableName, userId);
-    await queuedWrite(tableName, () =>
-      table.update({
+    await queuedWrite(
+      tableName,
+      () => table.update({
         where: `id = '${assertId(record.id)}'`,
         values: {
           salience_composite: salience.composite,
@@ -284,14 +333,17 @@ async function rememberEnrich(record, tableName, userId = 'default') {
           superseded_by:      supersededBy,
           enriched:           true,
         }
-      }).catch(e => console.debug('[cortex] LanceDB update error:', e.message))
+      }).catch(e => console.debug('[cortex] LanceDB update error:', e.message)),
+      userId,
     );
 
     // Post-enrichment GC: soft-delete truly unimportant episodes
     if (record.category === 'episodes' && salience.composite < 0.25) {
-      await queuedWrite(tableName, () =>
-        table.update({ where: `id = '${assertId(record.id)}'`, values: { forgotten: true } })
-          .catch(e => console.debug('[cortex] Episode GC error:', e.message))
+      await queuedWrite(
+        tableName,
+        () => table.update({ where: `id = '${assertId(record.id)}'`, values: softForgetValues() })
+          .catch(e => console.debug('[cortex] Episode GC error:', e.message)),
+        userId,
       );
     }
   } catch (e) {
@@ -359,7 +411,7 @@ export async function remember({
   const record = {
     id: 'mem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
     text, vector, agent_id: agentId, source, confidence, immortal,
-    forgotten: false,
+    ...restoreForgottenValues(),
     salience_composite: salience.composite,
     emotional_weight:   salience.emotional_weight,
     decision_weight:    salience.decision_weight,
@@ -382,7 +434,7 @@ export async function remember({
     host_scope: metadata.host_scope || '',
   };
 
-  await queuedWrite(tableName, () => table.add([record]));
+  await queuedWrite(tableName, () => table.add([record]), userId);
 
   // NOTE: inline contradiction detection was trialed here (stamp an old
   // conflicting fact's superseded_by so recall hides it) but reverted

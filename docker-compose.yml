@@ -7,9 +7,14 @@ services:
     restart: unless-stopped
     ports:
       - "3737:3737"
+      - "3739:3739"
     volumes:
       - oe-data:/app/users
-      - ./config.json:/app/config.json
+      - oe-state:/app/docker-data
+      - oe-plugins:/app/plugins
+      - oe-tls:/app/tls
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Set API keys via environment variables instead of config.json:
       # ANTHROPIC_API_KEY: sk-ant-...
@@ -17,9 +22,6 @@ services:
       # FIREWORKS_API_KEY: ...
       # BRAVE_API_KEY: ...
       # OLLAMA_API_KEY: ...
-      #
-      # Point to host Ollama (if running on host machine):
-      # OLLAMA_HOST: http://host.docker.internal:11434
       NODE_ENV: production
 
   # Optional: Caddy reverse proxy for HTTPS
@@ -38,4 +40,7 @@ services:
 
 volumes:
   oe-data:
+  oe-state:
+  oe-plugins:
+  oe-tls:
   # caddy-data:

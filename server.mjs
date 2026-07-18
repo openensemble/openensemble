@@ -1085,9 +1085,10 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     },
   });
 
-  // Snapshot pruner: daily sweep, deletes pre-state captures older than 30d
-  // unless their op_id is in pinned.json. Runs once at boot to clean any
-  // accumulated stale snapshots, then daily.
+  // Local snapshot pruner: daily sweep for pre-state files older than 30d.
+  // Remote host snapshots are intentionally not auto-deleted: an immutable op
+  // record can outlive a node→host reassignment, so deletion first needs a
+  // durable host-identity binding and a one-shot pruning ledger.
   try { pruneAllSnapshots(); } catch (e) { log.warn('snapshot-pruner', 'boot prune failed', { err: e.message }); }
   setInterval(() => {
     try { pruneAllSnapshots(); }

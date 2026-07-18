@@ -8,6 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomBytes } from 'crypto';
 
 const BASE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const USERS_DIR = path.join(BASE_DIR, 'users');
@@ -16,7 +17,28 @@ function move(src, dest) {
   if (!fs.existsSync(src)) return false;
   if (fs.existsSync(dest)) { try { fs.rmSync(src, { recursive: true, force: true }); } catch {} return false; }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.renameSync(src, dest);
+  try {
+    fs.renameSync(src, dest);
+  } catch (e) {
+    if (e?.code !== 'EXDEV') throw e;
+    // Docker may keep legacy root state and users on separate volumes. Copy
+    // into a temporary sibling on the destination filesystem, rename there,
+    // and remove the source only after the complete copy succeeds.
+    const tmp = `${dest}.migrate-${process.pid}-${randomBytes(3).toString('hex')}`;
+    try {
+      fs.cpSync(src, tmp, {
+        recursive: true,
+        preserveTimestamps: true,
+        errorOnExist: true,
+        force: false,
+      });
+      fs.renameSync(tmp, dest);
+      fs.rmSync(src, { recursive: true, force: true });
+    } catch (copyError) {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+      throw copyError;
+    }
+  }
   return true;
 }
 
@@ -145,8 +167,7 @@ export function migrateUserDirs() {
         const srcFile = path.join(sharedDocsDir, doc.id + doc.ext);
         const destFile = path.join(userDocsDir, doc.id + doc.ext);
         if (fs.existsSync(srcFile) && !fs.existsSync(destFile)) {
-          fs.renameSync(srcFile, destFile);
-          migrated++;
+          if (move(srcFile, destFile)) migrated++;
         }
 
         // Write to per-user docs-index.json

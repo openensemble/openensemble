@@ -6,8 +6,24 @@
  *   - stripThinking / stripReasoningPreamble text cleanup
  */
 
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { loadConfig } from '../../routes/_helpers.mjs';
+
+/**
+ * Return a correlation-safe identity for a provider tool call. Native IDs are
+ * preserved when they meet the same bounds enforced by provider-consumer;
+ * providers that omit IDs receive a globally unique server identity instead.
+ */
+export function normalizeToolCallIdentity(value, provider = 'tool') {
+  const native = typeof value === 'string'
+    && value.length > 0
+    && value === value.trim()
+    && value.length <= 512
+    && !/[\r\n\0]/.test(value);
+  if (native) return { id: value, providerNative: true };
+  const prefix = String(provider || 'tool').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'tool';
+  return { id: `oe_${prefix}_${randomUUID()}`, providerNative: false };
+}
 
 /**
  * Build an internal metadata-only record of the exact provider-native tool

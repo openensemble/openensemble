@@ -61,7 +61,7 @@ async function summarizeIdleSessions() {
             where: `id = '${assertId(record.id)}'`,
             values: { stability: 360, salience_composite: 0.75 },
           }).catch(e => console.debug('[cortex] Summary stability update error:', e.message));
-        });
+        }, userId).catch(e => console.debug('[cortex] Summary queue failed:', e.message));
       }
       // Clear the buffer after summarizing
       _sessionBuffers[bufKey] = [];

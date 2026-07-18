@@ -12,6 +12,7 @@ import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingT
 import { bindToolRouterContext, toolRouterContext } from '../lib/tool-router-context.mjs';
 import { beginMemoryScope } from '../lib/memory-scope-context.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
+import { filterToolsForMcpPolicy, getMcpToolPolicy } from '../lib/mcp-tool-policy.mjs';
 import {
   getTurn, beginTurn, recordSpan, recordError, finishTurn,
   setTurnLabProviderRequestCap,
@@ -84,6 +85,13 @@ import {
 } from './recovery.mjs';
 
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
+  // Every nested MCP delegation/worker inherits a dedicated capability store.
+  // Trim its provider schema on entry, while the final dispatcher gate remains
+  // authoritative against cached schemas or model-invented tool calls.
+  const mcpToolPolicy = getMcpToolPolicy();
+  if (mcpToolPolicy && Array.isArray(agent?.tools)) {
+    agent = { ...agent, tools: filterToolsForMcpPolicy(agent.tools, mcpToolPolicy) };
+  }
   // `attachment` is a legacy name kept for the many positional callers that
   // still pass a single object or null (background-tasks, skills/delegate,
   // lib/mcp-outbound, lib/run-agent-with-retry) — none of those carry more

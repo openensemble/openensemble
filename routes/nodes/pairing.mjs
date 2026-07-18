@@ -10,13 +10,12 @@
  */
 
 import { randomBytes } from 'crypto';
-import { createSession, requireAuth, readBody } from '../_helpers.mjs';
+import { createSession, getClientIp, requireAuth, readBody } from '../_helpers.mjs';
 // uaFromReq isn't re-exported by the ._helpers.mjs aggregator yet — import
 // straight from the submodule (see routes/_helpers/auth-sessions.mjs).
 import { uaFromReq } from '../_helpers/auth-sessions.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import {
-  getRedeemIp,
   isRedeemLockedOut,
   recordRedeemFailure,
   clearRedeemFailures,
@@ -78,7 +77,7 @@ export async function handlePairingRoutes(req, res, pathname) {
   // POST /api/nodes/redeem — redeem a code for a session token (unauthenticated;
   // called by the node agent during setup).
   if (pathname === '/api/nodes/redeem' && req.method === 'POST') {
-    const ip = getRedeemIp(req);
+    const ip = getClientIp(req);
     if (isGlobalRedeemLocked()) {
       console.warn('[pairing] Global redeem lockout active — refusing redeem');
       res.writeHead(429, { 'Content-Type': 'application/json' });

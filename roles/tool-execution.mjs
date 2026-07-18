@@ -37,7 +37,9 @@ import {
 } from '../lib/ephemeral-tool-cache.mjs';
 import { log } from '../logger.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
+import { getTurn } from '../lib/turn-trace-context.mjs';
 import { currentTaskContext, runInTaskContext } from '../lib/task-proxy-context.mjs';
+import { evaluateMcpToolAccess } from '../lib/mcp-tool-policy.mjs';
 import {
   abortError,
   createLinkedAbortController,
@@ -216,6 +218,30 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
 
   if (!owningWrap || !owningKey || !owningSkillId) {
     yield { type: 'result', text: `Unknown tool: ${name}` };
+    return;
+  }
+
+  // Outbound MCP PATs carry a transitive agent-tool capability in a separate
+  // AsyncLocalStorage context. Enforce it after exact owner resolution but
+  // before importing/evaluating any executor. Schema filtering is only UX;
+  // this is the authorization boundary, including delegated agents/workers.
+  const owningToolDef = owningWrap.manifest.tools
+    ?.find(tool => tool.function?.name === resolvedName) ?? null;
+  const mcpAccess = evaluateMcpToolAccess({
+    name: resolvedName,
+    toolDef: owningToolDef,
+    manifest: owningWrap.manifest,
+    ownerUserId: owningWrap.userId,
+  });
+  if (!mcpAccess.allowed) {
+    log.warn('tool', 'external MCP token blocked agent tool', {
+      tool: resolvedName, userId, agentId,
+    });
+    yield {
+      type: 'result',
+      text: `Tool "${name}" is not allowed by this external MCP access token.`,
+      isError: true,
+    };
     return;
   }
 
@@ -1409,7 +1435,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     // backgrounded tools (the return paths above) also don't record: their
     // result lands after the turn, and the recorder is consumed at turn end.
     if (!suppressLearning && !_resultWasError) {
-      try { recordToolExecution(userId, name); } catch { /* never block tool dispatch */ }
+      try {
+        const turn = getTurn();
+        recordToolExecution(userId, name, turn?.rootId ?? turn?.turnId ?? null);
+      } catch { /* never block tool dispatch */ }
     }
 
     // Personalization: fire-and-forget observation of this tool result (the

@@ -5,6 +5,9 @@
 
 import fs from 'fs';
 import { randomBytes } from 'crypto';
+import { resolveWriteTargetSync } from '../../lib/write-target.mjs';
+
+export { resolveWriteTargetSync } from '../../lib/write-target.mjs';
 
 // withLock serializes async operations on a shared key (file path).
 // Each call chains onto the prior operation so concurrent read-modify-writes
@@ -20,9 +23,29 @@ export async function withLock(key, fn) {
 // a crash or concurrent reader from seeing a half-written JSON blob, which
 // Node's writeFileSync does not guarantee on its own.
 export function atomicWriteSync(filePath, data, opts) {
-  const tmp = filePath + '.tmp.' + process.pid + '.' + randomBytes(4).toString('hex');
-  fs.writeFileSync(tmp, data, opts);
-  fs.renameSync(tmp, filePath);
+  // Docker and operator-managed installs may expose a durable file through a
+  // symlink (for example /app/config.json -> a named volume). Renaming over the
+  // link would replace the link itself and strand the new data in the
+  // disposable filesystem, so atomically replace the resolved target instead.
+  const targetPath = resolveWriteTargetSync(filePath);
+  let existingMode = null;
+  try {
+    existingMode = fs.statSync(targetPath).mode & 0o777;
+  } catch (e) {
+    if (e?.code !== 'ENOENT') throw e;
+  }
+
+  const tmp = targetPath + '.tmp.' + process.pid + '.' + randomBytes(4).toString('hex');
+  try {
+    fs.writeFileSync(tmp, data, opts);
+    // Replacing a 0600 credential/config file must not silently widen it to
+    // the process umask default (usually 0644).
+    if (existingMode !== null) fs.chmodSync(tmp, existingMode);
+    fs.renameSync(tmp, targetPath);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
+  }
 }
 
 // makeModify returns an async helper that loads, mutates (via fn), and saves

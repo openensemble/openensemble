@@ -10,7 +10,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage, fetchWithRetry, modelCallTraceEvent } from './_shared.mjs';
+import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage, fetchWithRetry, modelCallTraceEvent, normalizeToolCallIdentity } from './_shared.mjs';
 import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
@@ -183,6 +183,14 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
     // ── Tool calls branch ──────────────────────────────────────────────────────
     if (toolCalls) {
+      // Ollama's native chat schema correlates results by ordered `tool_name`
+      // and does not define wire-level call IDs. Keep our IDs internal so the
+      // durable OE event stream can correlate duplicate-name calls without
+      // sending unsupported fields back to Ollama.
+      const identifiedToolCalls = toolCalls.map(tc => {
+        const identity = normalizeToolCallIdentity(tc.id, 'ollama');
+        return { tc, toolCallId: identity.id, providerNative: identity.providerNative };
+      });
       // Clear any reasoning preamble streamed before the tool call
       if (content.trim()) yield { type: 'replace', text: '' };
       // Add the assistant's tool-call message to working history.
@@ -195,43 +203,44 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
       // result returned). Promise.all gives us concurrency. For ask_agent,
       // the coordinator waits for specialist responses before synthesizing.
       // Events are buffered per-tool and replayed in order after all complete.
-      if (toolCalls.length > 1) {
-        const batchParsed = toolCalls.map(tc => {
+      if (identifiedToolCalls.length > 1) {
+        const batchParsed = identifiedToolCalls.map(({ tc, toolCallId, providerNative }) => {
           const name = tc.function?.name ?? tc.name;
           const args = tc.function?.arguments ?? tc.arguments ?? {};
-          return { tc, name, args };
+          return { tc, name, args, toolCallId, providerNative };
         });
-        for (const { name, args } of batchParsed) {
-          yield { type: 'tool_call', name, args };
+        for (const { name, args, toolCallId, providerNative } of batchParsed) {
+          yield { type: 'tool_call', name, args, toolCallId, ...(providerNative ? { providerNative: true } : {}) };
           toolCallsMade.push(name);
         }
-        const batchResults = await Promise.all(batchParsed.map(async ({ name, args }) => {
+        const batchResults = await Promise.all(batchParsed.map(async ({ name, args, toolCallId, providerNative }) => {
           const { text, _notify, _images, events } = await drainToolWithEvents(name, args, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
-          return { name, result: text, _notify, _images, events };
+          return { name, args, toolCallId, providerNative, result: text, _notify, _images, events };
         }));
-        for (const { name, result, _notify, events } of batchResults) {
+        for (const { name, result, toolCallId, providerNative, _notify, events } of batchResults) {
           for (const ev of events) yield ev;
-          yield { type: 'tool_result', name, text: result, preview: summarizeToolResult(name, result) };
+          yield { type: 'tool_result', name, text: result, preview: summarizeToolResult(name, result), toolCallId, ...(providerNative ? { providerNative: true } : {}) };
           if (_notify) yield { type: '__notify', name, ..._notify };
-          ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name });
+          ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name, tool_name: name });
         }
         for (const { name, _images } of batchResults) {
           if (_images?.length) {
             ollamaMessages.push(buildImageUserMessage('ollama', _images, `[attached: image(s) returned by ${name}]`));
           }
         }
-        { const sc = guard.check(batchResults.map(r => ({ name: r.name, args: JSON.stringify(batchParsed.find(p => p.name === r.name)?.args ?? {}) })), batchResults.map(r => r.result));
+        { const sc = guard.check(batchResults.map(r => ({ name: r.name, args: JSON.stringify(r.args ?? {}) })), batchResults.map(r => r.result));
           if (sc.stalled) { console.warn(`[ollama] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
         continue;
       }
 
       const _imagePayloads = [];
-      for (const tc of toolCalls) {
+      const _sequentialResults = [];
+      for (const { tc, toolCallId, providerNative } of identifiedToolCalls) {
         const name = tc.function?.name ?? tc.name ?? '?';
         toolCallsMade.push(name);
         const args = tc.function?.arguments ?? tc.arguments ?? {};
 
-        yield { type: 'tool_call', name, args };
+        yield { type: 'tool_call', name, args, toolCallId, ...(providerNative ? { providerNative: true } : {}) };
 
         let toolResult = '';
         let _seqImages = null;
@@ -239,9 +248,9 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
           if (chunk.type === 'token')              toolResult += chunk.text;
           if (chunk.type === 'permission_request') yield chunk;
           if (chunk.type === '__hide_turn')         yield { type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId };
-          if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
-          if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
-          if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
+          if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
+          if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
+          if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text), ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
           if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') yield chunk;
           if (chunk.type === 'result') {
             toolResult = chunk.text;
@@ -251,20 +260,21 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
         const { text: result, _notify, _images } = normalizeToolResult(toolResult);
         const effectiveImages = _seqImages ?? _images;
         if (effectiveImages?.length) _imagePayloads.push({ name, images: effectiveImages });
-        yield { type: 'tool_result', name, text: result, preview: summarizeToolResult(name, result) };
+        yield { type: 'tool_result', name, text: result, preview: summarizeToolResult(name, result), toolCallId, ...(providerNative ? { providerNative: true } : {}) };
         if (_notify) yield { type: '__notify', name, ..._notify };
 
         // Add tool result to working history — truncate large outputs so the model
         // isn't carrying full file contents forward (mirrors Claude Code behavior).
-        ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name });
+        ollamaMessages.push({ role: 'tool', content: applyRedactions(truncateToolResult(result)), name, tool_name: name });
+        _sequentialResults.push({ toolCallId, result });
       }
       for (const payload of _imagePayloads) {
         ollamaMessages.push(buildImageUserMessage('ollama', payload.images, `[attached: image(s) returned by ${payload.name}]`));
       }
 
       { const sc = guard.check(
-          toolCalls.map(tc => ({ name: tc.function?.name ?? tc.name ?? '?', args: JSON.stringify(tc.function?.arguments ?? tc.arguments ?? {}) })),
-          toolCalls.map(tc => { const m = ollamaMessages.findLast(m => m.role === 'tool' && m.name === (tc.function?.name ?? tc.name)); return m?.content ?? ''; })
+          identifiedToolCalls.map(({ tc }) => ({ name: tc.function?.name ?? tc.name ?? '?', args: JSON.stringify(tc.function?.arguments ?? tc.arguments ?? {}) })),
+          identifiedToolCalls.map(({ toolCallId }) => _sequentialResults.find(r => r.toolCallId === toolCallId)?.result ?? '')
         );
         if (sc.stalled) { console.warn(`[ollama] stall: ${sc.reason}`); assistantContent = `Stopped: ${sc.reason}.`; yield { type: 'token', text: assistantContent }; break; } }
 

@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { BASE_DIR } from '../lib/paths.mjs';
 import { withFileLockSync } from '../lib/file-lock.mjs';
+import { resolveWriteTargetSync } from '../lib/write-target.mjs';
 import { activeTasks } from './state.mjs';
 
 // ── restart journal ───────────────────────────────────────────────────────────
@@ -48,9 +49,10 @@ function _journalReadUnlocked() {
 
 function _journalSaveUnlocked(entries) {
   if (!_plainObject(entries)) throw new Error('background task journal entries must be an object');
-  const tmp = `${JOURNAL_PATH}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  const target = resolveWriteTargetSync(JOURNAL_PATH);
+  const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(JOURNAL_PATH), { recursive: true });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
     const fd = fs.openSync(tmp, 'w', 0o600);
     try {
       fs.writeFileSync(fd, JSON.stringify({ version: JOURNAL_VERSION, entries }, null, 2));
@@ -58,9 +60,9 @@ function _journalSaveUnlocked(entries) {
     } finally {
       fs.closeSync(fd);
     }
-    fs.renameSync(tmp, JOURNAL_PATH);
+    fs.renameSync(tmp, target);
     try {
-      const dirFd = fs.openSync(path.dirname(JOURNAL_PATH), 'r');
+      const dirFd = fs.openSync(path.dirname(target), 'r');
       try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
     } catch { /* directory fsync is unavailable on some platforms */ }
     return true;

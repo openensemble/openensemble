@@ -18,6 +18,7 @@ import { registerScheduledChild, completeScheduledChild } from './lib/scheduled-
 import { appendTaskOutcome, loadTaskOutcomes } from './lib/task-outcomes.mjs';
 import { BASE_DIR, USERS_DIR } from './lib/paths.mjs';
 import { looksLikeToolError, looksLikeToolRefusal } from './lib/tool-error.mjs';
+import { resolveWriteTargetSync } from './lib/write-target.mjs';
 import {
   evaluateCompoundWorkflowContract,
   formatCompoundContractFailure,
@@ -114,8 +115,9 @@ export async function bootRecoverInterruptedTasks() {
   } catch (error) {
     // Preserve corrupt evidence for an operator; never reinterpret it as an
     // empty journal and overwrite tasks whose state is unknown.
-    const quarantine = `${JOURNAL_PATH}.corrupt.${Date.now()}`;
-    try { fs.renameSync(JOURNAL_PATH, quarantine); }
+    const journalTarget = resolveWriteTargetSync(JOURNAL_PATH);
+    const quarantine = `${journalTarget}.corrupt.${Date.now()}`;
+    try { fs.renameSync(journalTarget, quarantine); }
     catch (renameError) {
       console.error('[background-tasks] corrupt journal could not be quarantined:', renameError?.message || renameError);
     }

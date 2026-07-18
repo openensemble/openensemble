@@ -5,7 +5,7 @@
 import path from 'path';
 import { assertId, dbPath } from './shared.mjs';
 import { BASE_DIR } from '../lib/paths.mjs';
-import { getDb, invalidateDbCache } from './lance.mjs';
+import { getDb, getTable, invalidateDbCache } from './lance.mjs';
 
 export async function getMemoryStats(userId = 'default') {
   try {
@@ -14,7 +14,7 @@ export async function getMemoryStats(userId = 'default') {
     let total = 0;
     for (const name of tableNames) {
       try {
-        const t = await db.openTable(name);
+        const t = await getTable(name, userId);
         total += await t.countRows("forgotten = false AND id != '_init'");
       } catch (e) { console.warn('[cortex] Failed to count rows in', name + ':', e.message); }
     }
@@ -30,8 +30,11 @@ export async function listMemoryRows({ userId = 'default', table = null, limit =
   for (const name of tableNames) {
     if (!/^[a-zA-Z0-9_ -]+$/.test(name)) continue;
     try {
-      const t = await db.openTable(name);
-      const where = includeForgotten ? `id != '_init'` : `forgotten = false AND id != '_init'`;
+      const t = await getTable(name, userId);
+      const seedId = `_init_${name}`.replace(/'/g, "''");
+      const where = includeForgotten
+        ? `id != '_init' AND id != '${seedId}'`
+        : `forgotten = false AND id != '_init' AND id != '${seedId}'`;
       const got = await t.query().where(where).limit(max).toArray();
       for (const m of got) rows.push({ ...m, _table: name, _memory_type: tableType(name), _agent_table_id: tableAgentId(name) });
     } catch (e) {

@@ -392,7 +392,14 @@ export async function runSpecialistRoute({
       if (!suppressLearning) (async () => {
         try {
           const il = await import('../lib/intent-learner.mjs');
-          await il.captureFromTurn({ userId, agentId, userText, scopedSessionKey: `${userId}_${agentId}` });
+          const turn = getTurn();
+          await il.captureFromTurn({
+            userId,
+            agentId,
+            userText,
+            scopedSessionKey: `${userId}_${agentId}`,
+            turnCorrelationId: turn?.rootId ?? turn?.turnId ?? null,
+          });
         } catch (e) { console.warn('[chat] specialist post-turn learn failed:', e.message); }
       })();
     } catch (e) {

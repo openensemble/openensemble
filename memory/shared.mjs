@@ -460,14 +460,23 @@ export async function generateCombined(instruction, inputText, meta = {}) {
   }, meta);
 }
 
-// ── Write queue — prevents LanceDB concurrent write conflicts ────────────────
-const _writeQueues = {};
-export function queuedWrite(tableName, fn) {
-  if (!_writeQueues[tableName]) _writeQueues[tableName] = Promise.resolve();
-  _writeQueues[tableName] = _writeQueues[tableName]
-    .then(() => fn())
-    .catch(e => console.warn('[cortex] Queued write failed for', tableName + ':', e.message));
-  return _writeQueues[tableName];
+// ── Write queue — serializes writes per user database + table ────────────────
+const _writeQueues = new Map();
+export function queuedWrite(tableName, fn, userId = 'default') {
+  const key = `${userId}::${tableName}`;
+  const previous = _writeQueues.get(key) ?? Promise.resolve();
+  const operation = previous.then(() => fn());
+
+  // Preserve a resolved tail so one failed write cannot poison every later
+  // write, but return the original operation so its caller receives failure.
+  const tail = operation.catch(e => {
+    console.warn('[cortex] Queued write failed for', key + ':', e.message);
+  });
+  _writeQueues.set(key, tail);
+  tail.then(() => {
+    if (_writeQueues.get(key) === tail) _writeQueues.delete(key);
+  });
+  return operation;
 }
 
 // ── Ebbinghaus retention math ────────────────────────────────────────────────

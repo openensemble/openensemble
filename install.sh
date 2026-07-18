@@ -334,6 +334,16 @@ for d in users agents tasks expenses shared-docs; do
 done
 success "Data directories initialized"
 
+# A server with no profiles is reachable on the LAN, so "first caller wins"
+# is not a safe ownership proof. Generate a 256-bit one-time credential before
+# the service starts and present it in the local installer output. Upgrades
+# with an existing profile neither create nor print a credential.
+FIRST_RUN_CREDENTIAL=""
+if [[ -z "$(find "$INSTALL_DIR/users" -mindepth 2 -maxdepth 2 -name profile.json -print -quit 2>/dev/null)" ]]; then
+  FIRST_RUN_CREDENTIAL="$(node "$INSTALL_DIR/scripts/first-run-bootstrap.mjs")"
+  success "First-run owner setup credential generated"
+fi
+
 # ─── Self-signed TLS cert ─────────────────────────────────────────────────────
 # Provides HTTPS on port 3739 (alongside HTTP on 3737) so browser features
 # that require a secure context — WebUSB / Web Serial for the voice-device
@@ -684,7 +694,13 @@ fi
 LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$LAN_IP" ] && LAN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
 [ -z "$LAN_IP" ] && LAN_IP="localhost"
-WEB_URL="http://$LAN_IP:3737"
+if [[ -s "$INSTALL_DIR/tls/cert.pem" && -s "$INSTALL_DIR/tls/key.pem" ]]; then
+  WEB_URL="https://$LAN_IP:3739"
+  FIRST_RUN_TRANSPORT_NOTE="The certificate is self-signed; accept the browser warning on first visit."
+else
+  WEB_URL="http://localhost:3737"
+  FIRST_RUN_TRANSPORT_NOTE="HTTPS is unavailable, so first-run setup must be completed locally on the host."
+fi
 
 echo ""
 echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -694,6 +710,13 @@ echo ""
 echo -e "  ${BOLD}Install path:${RESET}  $INSTALL_DIR"
 echo -e "  ${BOLD}Config file:${RESET}   $INSTALL_DIR/config.json"
 echo -e "  ${BOLD}Web UI:${RESET}        $WEB_URL"
+echo -e "                       $FIRST_RUN_TRANSPORT_NOTE"
+if [[ -n "$FIRST_RUN_CREDENTIAL" ]]; then
+  echo -e "  ${BOLD}First-run credential:${RESET} ${YELLOW}$FIRST_RUN_CREDENTIAL${RESET}"
+  echo -e "                       Required to create the owner or restore a backup."
+  echo -e "                       Recover locally before setup with: ${YELLOW}oe bootstrap${RESET}"
+  echo -e "                       Local HTTP recovery: ${YELLOW}http://localhost:3737${RESET}"
+fi
 echo ""
 echo -e "  ${BOLD}Manage with the ${YELLOW}oe${RESET}${BOLD} command:${RESET}"
 echo -e "    oe status      — is it running?"
@@ -733,10 +756,10 @@ fi
 
 echo -e "  ${BOLD}Next steps:${RESET}"
 if [[ "${HAVE_SERVICE:-false}" == "true" || "$SERVER_AUTOSTARTED" == "true" ]]; then
-  echo -e "  1. Open ${YELLOW}${WEB_URL}${RESET} and create your first user"
+  echo -e "  1. Open ${YELLOW}${WEB_URL}${RESET} and create the owner with the first-run credential above"
 else
   echo -e "  1. Run ${YELLOW}$INSTALL_DIR/start.sh${RESET} or ${YELLOW}oe start${RESET} to start the server"
-  echo -e "  2. Open ${YELLOW}${WEB_URL}${RESET} and create your first user"
+  echo -e "  2. Open ${YELLOW}${WEB_URL}${RESET} and create the owner with the first-run credential above"
 fi
 echo -e "  ${YELLOW}→${RESET} From Settings → Providers, enable the ones you want and paste in API keys"
 echo ""

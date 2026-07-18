@@ -7,7 +7,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
-import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry, capabilityNotice, modelCallTraceEvent } from './_shared.mjs';
+import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry, capabilityNotice, modelCallTraceEvent, normalizeToolCallIdentity } from './_shared.mjs';
 import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
@@ -189,7 +189,13 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         totalCacheRead    += u.cache_read_input_tokens     ?? 0;
       }
       if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-        toolUseBlocks.set(event.index, { id: event.content_block.id, name: event.content_block.name, inputJson: '' });
+        const identity = normalizeToolCallIdentity(event.content_block.id, 'anthropic');
+        toolUseBlocks.set(event.index, {
+          id: identity.id,
+          providerNative: identity.providerNative,
+          name: event.content_block.name,
+          inputJson: '',
+        });
       }
       // Hosted server tools (web_search) execute server-side and fold their
       // results into the text deltas — never registered as a client tool_use, so
@@ -247,7 +253,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
           return { block, toolArgs };
         });
         for (const { block, toolArgs } of parsed) {
-          yield { type: 'tool_call', name: block.name, args: toolArgs };
+          yield { type: 'tool_call', name: block.name, args: toolArgs, toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
         }
         const results = await Promise.all(parsed.map(async ({ block, toolArgs }) => {
           const { text, _notify, _images, events } = await drainToolWithEvents(block.name, toolArgs, userId, agent.id, agent.tools?.map(t => t.function?.name).filter(Boolean));
@@ -255,7 +261,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         }));
         for (const { block, result, _notify, events } of results) {
           for (const ev of events) yield ev;
-          yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
+          yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
           if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         }
         working.push({ role: 'assistant', content: [
@@ -286,7 +292,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         let toolArgs = {};
         try { toolArgs = JSON.parse(block.inputJson || '{}'); } catch (e) { console.warn('[chat] Failed to parse Anthropic tool args:', e.message); }
 
-        yield { type: 'tool_call', name: block.name, args: toolArgs };
+        yield { type: 'tool_call', name: block.name, args: toolArgs, toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
         let toolResult = '';
         try {
           let _seqImages = null;
@@ -294,9 +300,9 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
             if (chunk.type === 'token')              toolResult += chunk.text;
             if (chunk.type === 'permission_request') yield chunk;
             if (chunk.type === '__hide_turn')         yield { type: '__hide_turn', reason: chunk.reason, taskId: chunk.taskId };
-            if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args };
-            if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text };
-            if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text) };
+            if (chunk.type === 'tool_call')          yield { type: 'tool_call', name: chunk.name, args: chunk.args, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
+            if (chunk.type === 'tool_progress')      yield { type: 'tool_progress', name: chunk.name, text: chunk.text, ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
+            if (chunk.type === 'tool_result')        yield { type: 'tool_result', name: chunk.name, text: chunk.text, preview: summarizeToolResult(chunk.name, chunk.text), ...(chunk.toolCallId ? { toolCallId: chunk.toolCallId } : {}), ...(chunk.providerNative ? { providerNative: true } : {}) };
             if (chunk.type === 'image' || chunk.type === 'video' || chunk.type === 'audio') yield chunk;
             if (chunk.type === 'result') {
               toolResult = chunk.text;
@@ -310,7 +316,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
           toolResult = `Tool error: ${e.message}`;
         }
         const { text: result, _notify, _images } = normalizeToolResult(toolResult);
-        yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result) };
+        yield { type: 'tool_result', name: block.name, text: result, preview: summarizeToolResult(block.name, result), toolCallId: block.id, ...(block.providerNative ? { providerNative: true } : {}) };
         if (_notify) yield { type: '__notify', name: block.name, ..._notify };
         seqResults.push({ block, toolArgs, result, _images: block._images ?? _images });
       }

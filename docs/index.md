@@ -53,7 +53,10 @@ cd openensemble
 ./install.sh
 ```
 
-Then open `http://<your-server-ip>:3737` and walk through first-run setup.
+Copy the one-time credential printed by the installer, then open
+`https://<your-server-ip>:3739`, accept the self-signed certificate warning,
+and use the credential for owner setup or initial restore. Run `oe bootstrap`
+locally if you need to recover it before setup is complete.
 Full steps in [Getting started]({{ site.baseurl }}/getting-started).
 
 ## License

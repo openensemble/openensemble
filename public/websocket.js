@@ -395,7 +395,20 @@ function connect() {
   };
   ws.onerror = () => {};
   ws.onmessage = ({ data }) => {
-    const msg = JSON.parse(data);
+    let msg;
+    try {
+      msg = JSON.parse(data);
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+        throw new Error('message must be a JSON object');
+      }
+    } catch (error) {
+      // Do not log the raw frame: a valid server message can contain private
+      // chat/tool data. Dropping one malformed frame leaves the socket usable.
+      console.warn('[websocket] ignored malformed server message:', error.message);
+      return;
+    }
+    // Handler failures are programming errors, not malformed wire data. Keep
+    // them visible to the browser console instead of silently hiding them.
     handleServerMessage(msg);
   };
 }

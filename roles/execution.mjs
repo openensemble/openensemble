@@ -9,6 +9,7 @@ import { skillDeclaresNetwork } from '../lib/skill-net-policy.mjs';
 import { getHiddenTools } from '../lib/skill-overrides.mjs';
 import { abortError } from '../lib/abort-utils.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
+import { evaluateMcpToolAccess } from '../lib/mcp-tool-policy.mjs';
 import {
   _manifests,
   resolveKey,
@@ -119,6 +120,13 @@ export async function executeRoleToolForSkillInternal(
     || !wrap.manifest.tools?.some(tool => tool.function?.name === name)) {
     return `Tool "${name}" is not declared by skill "${skillId}".`;
   }
+  const exactToolDef = wrap.manifest.tools
+    ?.find(tool => tool.function?.name === name) ?? null;
+  if (!evaluateMcpToolAccess({
+    name, toolDef: exactToolDef, manifest: wrap.manifest, ownerUserId: wrap.userId,
+  }).allowed) {
+    return `Tool "${name}" is not allowed by this external MCP access token.`;
+  }
   if (userId) {
     if (!isSkillAllowedForUser(skillId, userId)) {
       return `Tool "${name}" is not permitted for this account.`;
@@ -201,8 +209,14 @@ export async function executeGrantedRoleToolForSkill(
 // Execute a tool — routes to the skill that owns it, scoped to what `userId` can see.
 export async function executeRoleTool(name, args, userId = 'default', agentId = null) {
   for (const [key, wrap] of visibleEntries(userId)) {
-    if (wrap.manifest.tools?.some(t => t.function?.name === name)) {
+    const exactToolDef = wrap.manifest.tools?.find(t => t.function?.name === name);
+    if (exactToolDef) {
       const skillId = wrap.manifest.id;
+      if (!evaluateMcpToolAccess({
+        name, toolDef: exactToolDef, manifest: wrap.manifest, ownerUserId: wrap.userId,
+      }).allowed) {
+        return `Tool "${name}" is not allowed by this external MCP access token.`;
+      }
       // Same last-line gates executeToolStreaming enforces. This entry point
       // (the local-intent fast-path via runIntent, and executeTool callers
       // like /api/email/action) used to skip all three — a child whose phrase
@@ -236,4 +250,3 @@ export async function executeTool(name, args, userId = 'default', agentId = null
 }
 
 // User profile: roles/user-profile.mjs
-

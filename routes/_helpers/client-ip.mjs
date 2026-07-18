@@ -85,3 +85,31 @@ export function resolveClientIp(req, trustedProxies) {
   }
   return socketIp;
 }
+
+/** True for direct TLS or HTTPS asserted by the nearest trusted proxy. */
+export function requestUsesHttps(req, trustedProxies) {
+  if (req.socket?.encrypted) return true;
+  const socketIp = normalizeIp(req.socket?.remoteAddress) || 'unknown';
+  if (!ipInList(socketIp, trustedProxies)) return false;
+  const protos = String(req.headers?.['x-forwarded-proto'] || '')
+    .split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+  // A forwarding proxy appends its observation; the nearest trusted hop is
+  // therefore the rightmost value, not an attacker-controlled leftmost one.
+  return protos.at(-1) === 'https';
+}
+
+/**
+ * Plain HTTP bootstrap is a host-local recovery path only. Both the resolved
+ * client and requested hostname must be loopback.
+ */
+export function isExplicitLoopbackRequest(req, trustedProxies) {
+  const clientIp = resolveClientIp(req, trustedProxies).toLowerCase();
+  const loopbackClient = clientIp === '::1' || /^127(?:\.\d{1,3}){3}$/.test(clientIp);
+  if (!loopbackClient) return false;
+  const host = String(req.headers?.host || '').trim().toLowerCase();
+  const closeBracket = host.indexOf(']');
+  const hostname = host.startsWith('[') && closeBracket > 0
+    ? host.slice(1, closeBracket)
+    : host.split(':')[0];
+  return hostname === '::1' || hostname === 'localhost' || hostname === 'localhost.' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}

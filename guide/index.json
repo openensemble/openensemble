@@ -37,6 +37,7 @@
     {
       "title": "Integrations",
       "pages": [
+        { "slug": "browser-bridge", "title": "OE Bridge" },
         { "slug": "public-access", "title": "Public access (tunnel & Telegram)" },
         { "slug": "nodes",         "title": "Remote nodes" },
         { "slug": "services",      "title": "Service profiles" }

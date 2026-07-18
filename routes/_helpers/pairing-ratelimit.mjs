@@ -48,10 +48,6 @@ setInterval(() => {
   }
 }, 60_000).unref?.();
 
-export function getRedeemIp(req) {
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
-}
-
 function isLockedOut(namespace, ip) {
   const bucket = bucketFor(namespace);
   const entry = bucket.get(ip);

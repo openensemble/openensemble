@@ -77,7 +77,8 @@
     <div id="loginSetupForm" class="login-setup-form" style="display:none">
       <div class="login-setup-intro">
         <div class="login-setup-kicker">First-run setup</div>
-        <div>Create the owner profile. Model providers, agents, and optional integrations come next inside OpenEnsemble.</div>
+        <div>Create the owner profile. Enter the one-time credential shown by the local installer; if needed, run <code>oe bootstrap</code> on the OpenEnsemble host.</div>
+        <div style="margin-top:6px">From another device, use <code>https://&lt;server&gt;:3739</code> and accept the self-signed certificate once. Plain HTTP setup is limited to <code>http://localhost:3737</code>.</div>
       </div>
       <div class="login-setup-checklist" aria-label="First-run path">
         <div><span>1</span><strong>Owner profile</strong><small>Required</small></div>
@@ -92,6 +93,7 @@
         </select>
         <input id="setupName" placeholder="Your name" maxlength="30">
       </div>
+      <input type="password" id="setupBootstrapCredential" placeholder="One-time first-run credential" autocomplete="off" spellcheck="false">
       <input type="password" id="setupPw" placeholder="Choose a password" autocomplete="new-password">
       <input type="password" id="setupPw2" placeholder="Confirm password" autocomplete="new-password">
       <div class="login-error" id="setupError"></div>
@@ -1520,7 +1522,7 @@
           <div id="mcpServersBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
 
           <div class="settings-section-title" style="margin-top:24px;margin-bottom:6px">External access — use your agents from other apps</div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:10px">This server is also an MCP server. Create an access token and add it to Claude Code, Claude Desktop, Cursor, or any MCP client to talk to your agents and memory from there. Anything you send through an external client flows to that client's AI provider and may appear in its logs. Adult accounts only.</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px">This server is also an MCP server. Create an access token and add it to Claude Code, Claude Desktop, Cursor, or any MCP client to talk to your agents and memory from there. Agent tools are read-only by default; additional exact tools must be granted on the token. Anything you send through an external client flows to that client's AI provider and may appear in its logs. Adult accounts only.</div>
           <div id="mcpTokensBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
         </div>
 

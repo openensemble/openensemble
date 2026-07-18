@@ -17,11 +17,17 @@ import {
   setSessionCookie,
   getDefaultChildSafetyPrompt, safeId, getUserDir, safeError,
   CFG_PATH, USERS_PATH, ACTIVITY_DIR, NOTES_PATH, EXPENSES_DB, EXPENSE_GROUPS_PATH,
-  getAgentsForUser, getUserCoordinatorAgentId, getClientIp,
+  getAgentsForUser, getUserCoordinatorAgentId, getClientIp, isSafeBootstrapTransport,
 } from './_helpers.mjs';
 // uaFromReq isn't re-exported by the ._helpers.mjs aggregator yet — import
 // straight from the submodule (see routes/_helpers/auth-sessions.mjs).
 import { uaFromReq } from './_helpers/auth-sessions.mjs';
+import {
+  announceFirstRunCredential,
+  ensureFirstRunCredential,
+  FirstRunBootstrapError,
+  withFirstRunCredential,
+} from './_helpers/first-run-bootstrap.mjs';
 import { getDefaultRoles, listAllRoles } from '../roles.mjs';
 import { newAccountOrchestrationPolicy } from '../lib/orchestration-policy.mjs';
 import { listLogFiles, readLog } from '../logger.mjs';
@@ -35,6 +41,7 @@ import {
 } from '../lib/update.mjs';
 import { broadcastToUsers } from '../ws-handler.mjs';
 import { encryptBackup, decryptBackup, isEncryptedBackup } from '../lib/backup-crypto.mjs';
+import { resolveWriteTargetSync } from '../lib/write-target.mjs';
 
 // ── Rate limiting for invite redemption ────────────────────────────────────
 // Same pattern as routes/auth.mjs login limiter. Two buckets:
@@ -74,6 +81,8 @@ setInterval(() => {
 
 const BASE_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
+class InitialRestoreResponseHandled extends Error {}
+
 // Throttle for /api/admin/update/check — protects origin from refresh-spamming.
 let _lastForcedCheckAt = 0;
 
@@ -96,6 +105,34 @@ const BACKUP_DATA_FILES = [
 const BACKUP_MEDIA_DIRS = ['shared-docs'];
 // Old archives may still ship install-root memory-db; accept on restore only.
 const LEGACY_RESTORE_MEDIA_DIRS = ['memory-db'];
+const CUSTOM_PLUGIN_ID_RE = /^usr_[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
+
+function replaceRestoreDirectory(src, dst) {
+  const parent = path.dirname(dst);
+  const suffix = `${process.pid}-${randomBytes(3).toString('hex')}`;
+  const next = path.join(parent, `.${path.basename(dst)}.restore-${suffix}.new`);
+  const old = path.join(parent, `.${path.basename(dst)}.restore-${suffix}.old`);
+  fs.mkdirSync(parent, { recursive: true });
+  fs.cpSync(src, next, { recursive: true, errorOnExist: true, force: false });
+  let movedOld = false;
+  try {
+    try {
+      fs.lstatSync(dst);
+      fs.renameSync(dst, old);
+      movedOld = true;
+    } catch (e) {
+      if (e?.code !== 'ENOENT') throw e;
+    }
+    fs.renameSync(next, dst);
+  } catch (e) {
+    try { fs.rmSync(next, { recursive: true, force: true }); } catch {}
+    if (movedOld) {
+      try { fs.renameSync(old, dst); } catch {}
+    }
+    throw e;
+  }
+  if (movedOld) fs.rmSync(old, { recursive: true, force: true });
+}
 
 // Safe, secrets-free subset of config.json to carry through backup/restore.
 // Owner/admin role→agent assignments live in config.skillAssignments; without
@@ -177,8 +214,9 @@ async function performRestore(raw, { clearOwnerConfig = false } = {}) {
     for (const f of BACKUP_DATA_FILES) {
       const src = path.join(tmpDir, f);
       if (fs.existsSync(src)) {
-        fs.mkdirSync(path.dirname(path.join(BASE_DIR, f)), { recursive: true });
-        fs.copyFileSync(src, path.join(BASE_DIR, f));
+        const dst = resolveWriteTargetSync(path.join(BASE_DIR, f));
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
         restored++;
       }
     }
@@ -190,7 +228,20 @@ async function performRestore(raw, { clearOwnerConfig = false } = {}) {
     for (const dir of [...BACKUP_MEDIA_DIRS, ...LEGACY_RESTORE_MEDIA_DIRS]) {
       const src = path.join(tmpDir, dir);
       if (fs.existsSync(src)) {
-        fs.cpSync(src, path.join(BASE_DIR, dir), { recursive: true });
+        const dst = resolveWriteTargetSync(path.join(BASE_DIR, dir));
+        fs.mkdirSync(dst, { recursive: true });
+        fs.cpSync(src, dst, { recursive: true });
+        restored++;
+      }
+    }
+    const pluginsBackup = path.join(tmpDir, 'plugins');
+    if (fs.existsSync(pluginsBackup)) {
+      for (const entry of fs.readdirSync(pluginsBackup, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !CUSTOM_PLUGIN_ID_RE.test(entry.name)) continue;
+        const dst = path.join(BASE_DIR, 'plugins', entry.name);
+        // Replace rather than merge: stale server.mjs code from a newer local
+        // drawer must not survive when the restored drawer is static.
+        replaceRestoreDirectory(path.join(pluginsBackup, entry.name), dst);
         restored++;
       }
     }
@@ -274,6 +325,14 @@ function collectBackupFiles() {
   for (const dir of BACKUP_MEDIA_DIRS) {
     if (fs.existsSync(path.join(BASE_DIR, dir))) files.push(dir);
   }
+  const pluginsDir = path.join(BASE_DIR, 'plugins');
+  if (fs.existsSync(pluginsDir)) {
+    for (const entry of fs.readdirSync(pluginsDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && CUSTOM_PLUGIN_ID_RE.test(entry.name)) {
+        files.push(`plugins/${entry.name}`);
+      }
+    }
+  }
   if (writeOwnerStateSidecar()) files.push(OWNER_STATE_FILE);
   const tdDir = path.join(BASE_DIR, 'training-data');
   if (fs.existsSync(tdDir)) {
@@ -282,6 +341,34 @@ function collectBackupFiles() {
     }
   }
   return files;
+}
+
+// GNU tar archives a symlink itself by default. Docker intentionally exposes
+// historical /app state paths as links into its named volume, while restore
+// rejects symlinks in an archive. Group every canonical backup path by the
+// real directory that contains the same relative path, then use tar's
+// position-sensitive -C option. This follows only the managed top-level link;
+// unlike global --dereference, it does not follow arbitrary links nested in
+// user data.
+function backupTarArgs(files) {
+  const groups = new Map();
+  for (const rel of files) {
+    const parts = rel.split('/').filter(Boolean);
+    if (!parts.length || parts.includes('..') || parts[0].startsWith('-')) {
+      throw new Error(`Unsafe backup path: ${rel}`);
+    }
+    const resolved = fs.realpathSync(path.join(BASE_DIR, ...parts));
+    let root = resolved;
+    for (let i = 0; i < parts.length; i++) root = path.dirname(root);
+    if (path.resolve(root, ...parts) !== resolved) {
+      throw new Error(`Backup path does not preserve its canonical name: ${rel}`);
+    }
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(parts.join('/'));
+  }
+  const args = ['czf', '-'];
+  for (const [root, rels] of groups) args.push('-C', root, ...rels);
+  return args;
 }
 
 export async function handle(req, res) {
@@ -741,7 +828,7 @@ export async function handle(req, res) {
         // Cap memory at 2 GiB compressed to avoid OOM on huge installs;
         // anyone over that should use a plain backup or back up offline.
         const ENC_MAX = 2 * 1024 * 1024 * 1024;
-        const tar = spawn('tar', ['czf', '-', '--', ...files], { cwd: BASE_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+        const tar = spawn('tar', backupTarArgs(files), { cwd: BASE_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
         const chunks = [];
         let collected = 0;
         let aborted = false;
@@ -779,7 +866,7 @@ export async function handle(req, res) {
         'Content-Type': 'application/gzip',
         'Content-Disposition': `attachment; filename="openensemble-backup-${dateStr}.tar.gz"`,
       });
-      const tar = spawn('tar', ['czf', '-', '--', ...files], { cwd: BASE_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+      const tar = spawn('tar', backupTarArgs(files), { cwd: BASE_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
       tar.stdout.pipe(res);
       tar.stderr.on('data', d => console.error('[backup]', d.toString()));
       tar.on('error', () => { if (!res.writableEnded) res.end(); });
@@ -809,11 +896,9 @@ export async function handle(req, res) {
     return true;
   }
 
-  // ── First-run restore — no auth, only when no users exist yet. Lets a user
-  // land on a fresh install and restore their backup *before* creating a dummy
-  // profile that would then conflict with the archive's owner user. Also
-  // triggers an auto-restart so the restored users load and (in the encrypted-
-  // secrets case) the system key under users/_system/.master-key takes effect.
+  // ── First-run restore — one-time local bootstrap authorization, only when
+  // no users exist yet. This preserves restore-before-profile without making
+  // an empty LAN/tunnel-reachable install a first-caller-wins takeover.
   if (req.url === '/api/admin/restore-initial' && req.method === 'POST') {
     try {
       if (loadUsers().length > 0) {
@@ -821,13 +906,40 @@ export async function handle(req, res) {
         res.end(JSON.stringify({ error: 'Restore-initial is only available before any profiles exist. Use /api/admin/restore as owner instead.' }));
         return true;
       }
-      let raw = await readRestoreBody(req);
-      raw = await maybeDecryptRestore(raw, req, res); if (!raw) return true;
-      const restored = await performRestore(raw, { clearOwnerConfig: true });
+      if (!isSafeBootstrapTransport(req)) {
+        res.writeHead(426, { 'Content-Type': 'application/json', 'Upgrade': 'TLS/1.2' });
+        res.end(JSON.stringify({ error: 'Initial restore requires HTTPS from another device. Use https://<server>:3739, or open http://localhost:3737 on the OpenEnsemble host.' }));
+        return true;
+      }
+      // Ensure before reading a potentially 500 MB body. Authorization is
+      // verified inside the shared create-or-restore lock, and a failed
+      // decrypt/restore leaves the credential usable for a retry.
+      announceFirstRunCredential(ensureFirstRunCredential());
+      const bootstrapCredential = req.headers['x-oe-bootstrap-credential'];
+      const restored = await withFirstRunCredential(bootstrapCredential, async () => {
+        // Re-check inside the lock in case an owner-create request won while
+        // this request waited.
+        if (loadUsers().length > 0) {
+          throw new FirstRunBootstrapError('invalid', 'First-run setup is already complete.');
+        }
+        let raw = await readRestoreBody(req);
+        raw = await maybeDecryptRestore(raw, req, res);
+        if (!raw) throw new InitialRestoreResponseHandled();
+        return performRestore(raw, { clearOwnerConfig: true });
+      });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, restored, restarting: true }));
       setImmediate(() => restartProcess());
-    } catch (e) { safeError(res, e); }
+    } catch (e) {
+      if (e instanceof InitialRestoreResponseHandled) return true;
+      if (e instanceof FirstRunBootstrapError) {
+        const status = e.code === 'invalid' ? 403 : 503;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      } else {
+        safeError(res, e);
+      }
+    }
     return true;
   }
 

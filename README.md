@@ -20,10 +20,11 @@ Multi-profile accounts keep each user's workspace, agents, skills, files, and se
 ## Fastest path to first reply
 
 1. Run `./install.sh`.
-2. Open **http://{ip}:3737**.
-3. Create the owner account, or restore an existing backup.
-4. Connect one provider in **Settings -> Providers**.
-5. Create a coordinator or specialist agent and send a message.
+2. Copy the one-time first-run credential printed by the installer.
+3. Open **https://{ip}:3739** and accept the self-signed certificate warning.
+4. Create the owner account, or restore an existing backup, using that credential.
+5. Connect one provider in **Settings -> Providers**.
+6. Create a coordinator or specialist agent and send a message.
 
 Everything else - email, calendar, MCP servers, remote nodes, voice devices, tunnels, and backups - can be added later.
 
@@ -114,14 +115,41 @@ The installer:
 4. Writes a default `config.json` (providers all disabled)
 5. Optionally registers a systemd user service so OE comes up at boot
 
-Then open **http://{ip}:3737** and walk through first-run setup. The required path is short: create the owner account, connect one model provider, create an agent, and chat. Optional integrations can wait.
+The installer prints a one-time credential for owner creation or initial restore.
+Open **https://{ip}:3739**, accept the self-signed certificate warning, and enter
+that credential. If you lose it before setup, run `oe bootstrap` locally on the
+OpenEnsemble host. The required path is short: create the owner account, connect
+one model provider, create an agent, and chat. Optional integrations can wait.
 
 For a clean Docker deployment:
 
 ```bash
 docker build -t openensemble .
-docker run -p 3737:3737 -v oe-data:/app/users openensemble
+docker run -d --name openensemble \
+  -p 3737:3737 -p 3739:3739 \
+  --add-host host.docker.internal:host-gateway \
+  -v oe-data:/app/users -v oe-state:/app/docker-data \
+  -v oe-plugins:/app/plugins -v oe-tls:/app/tls \
+  openensemble
+docker exec openensemble node scripts/first-run-bootstrap.mjs
 ```
+
+The final command prints the one-time credential. Open
+**https://localhost:3739** (or use the Docker host's address), accept the
+self-signed certificate warning, and enter the credential. The named volumes
+persist profiles, plugins, runtime state/configuration, and the generated TLS
+key.
+
+Docker supports the core web app, remote providers, media conversion, and
+devices configured with the server address. Local Piper/Faster-Whisper install
+buttons target host systemd services and are not supported inside the single
+container; bridge networking also does not carry LAN discovery broadcasts.
+Set a host Ollama URL in Settings to `http://host.docker.internal:11434` when
+needed. Sandboxed coder shell commands and custom-skill subprocesses are also
+unavailable under Docker's default security profile; enabling nested sandboxing
+requires an operator-supplied security profile and should not be replaced with
+an unrestricted privileged container.
+See [Getting started](docs/getting-started.md) for the supported boundary.
 
 ## Configuring LLM providers
 

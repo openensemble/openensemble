@@ -315,6 +315,7 @@ function renderMcpTokens(tokens) {
             <div style="font-size:13px;font-weight:600">${escHtml(t.name)} <span style="font-size:10px;color:var(--muted);font-family:'Fira Code',monospace">oemcp_${escHtml(t.id)}_…</span></div>
             <div style="font-size:11px;color:var(--muted);margin-top:2px">
               ${(t.scopes ?? []).map(s => `<span style="padding:1px 6px;background:var(--bg3);border-radius:4px;margin-right:4px">${escHtml(scopeLabel[s] ?? s)}</span>`).join('')}
+              ${(t.scopes ?? []).includes('chat') ? `<span style="padding:1px 6px;background:var(--bg3);border-radius:4px;margin-right:4px">agent tools: read-only${t.toolAllowlist?.length ? ` + ${escHtml(t.toolAllowlist.join(', '))}` : ''}</span>` : ''}
               ${t.agentId ? `<span style="padding:1px 6px;background:var(--bg3);border-radius:4px;margin-right:4px">bound: ${escHtml(t.agentId)}</span>` : ''}
               created ${fmtDate(t.createdAt)} · last used ${fmtDate(t.lastUsedAt)}
             </div>
@@ -329,9 +330,12 @@ function renderMcpTokens(tokens) {
         <label style="font-size:11px;color:var(--muted)">Name (what will use it)</label>
         <input id="mcpTokenName" placeholder="laptop claude code" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
         <label style="font-size:11px;color:var(--muted)">Scopes</label>
-        <label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mcpTokenScopeChat" checked> Chat — ask your agents (they can use their tools, including ones with side effects)</label>
+        <label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mcpTokenScopeChat" checked> Chat — ask your agents (first-party read-only tools by default)</label>
         <label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mcpTokenScopeMemRead" checked> Memory read — recall stored facts and past conversations</label>
         <label style="font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="mcpTokenScopeMemWrite"> Memory write — pin and forget facts</label>
+        <label style="font-size:11px;color:var(--muted)">Additional agent tools (optional, exact names separated by commas)</label>
+        <input id="mcpTokenToolAllowlist" placeholder="email_list, email_compose" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
+        <div style="font-size:10px;color:var(--muted)">Only add tools this client genuinely needs. Explicit tools may change data or systems without an OE chat confirmation; high-impact tools such as <code>node_exec</code> remain blocked unless named here.</div>
         <label style="font-size:11px;color:var(--muted)">Limit to one agent (optional)</label>
         <select id="mcpTokenAgent" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;max-width:280px">
           <option value="">All my agents</option>
@@ -356,6 +360,8 @@ async function createMcpToken() {
     name: $('mcpTokenName')?.value.trim(),
     scopes,
     agentId: $('mcpTokenAgent')?.value || null,
+    toolAllowlist: [...new Set(String($('mcpTokenToolAllowlist')?.value || '')
+      .split(/[\s,]+/).map(s => s.trim()).filter(Boolean))],
   };
   if (status) status.textContent = 'Creating…';
   try {
@@ -659,4 +665,3 @@ function pickMcpCatalogEntry(id) {
   $('mcpAddId')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   $('mcpAddId')?.focus();
 }
-

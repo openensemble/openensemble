@@ -164,13 +164,19 @@ async function doSetup() {
   const pw = $('setupPw').value;
   const pw2 = $('setupPw2').value;
   const emoji = $('setupEmoji').value;
+  const bootstrapCredential = $('setupBootstrapCredential').value.trim();
+  if (!bootstrapCredential) { $('setupError').textContent = 'First-run credential required. Run `oe bootstrap` on the server.'; return; }
   if (!name) { $('setupError').textContent = 'Name required'; return; }
   if (!pw || pw.length < 8) { $('setupError').textContent = 'Password must be at least 8 characters'; return; }
   if (pw !== pw2) { $('setupError').textContent = 'Passwords do not match'; return; }
   $('setupError').textContent = '';
   try {
     const r = await _origFetch('/api/users', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-OE-Bootstrap-Credential': bootstrapCredential,
+      },
       body: JSON.stringify({ name, emoji, password: pw }),
     });
     const d = await r.json();
@@ -184,6 +190,7 @@ async function doSetup() {
     setToken(ld.token);
     setCurrentUser(ld.user ?? d);
     $('loginScreen').classList.add('hidden');
+    $('setupBootstrapCredential').value = '';
     $('setupName').value = ''; $('setupPw').value = ''; $('setupPw2').value = '';
     reconnectWS();
   } catch (e) { $('setupError').textContent = e.message; }
@@ -193,6 +200,8 @@ async function doInitialRestore() {
   const fileInput = document.getElementById('setupRestoreFile');
   const btn = document.getElementById('setupRestoreBtn');
   const status = document.getElementById('setupRestoreStatus');
+  const bootstrapCredential = document.getElementById('setupBootstrapCredential')?.value?.trim() ?? '';
+  if (!bootstrapCredential) { status.textContent = 'First-run credential required. Run `oe bootstrap` on the server.'; return; }
   if (!fileInput?.files?.length) { status.textContent = 'Choose a .tar.gz backup first.'; return; }
   if (!confirm('Restore this backup? Your profiles and data will be imported from the archive.')) return;
   btn.disabled = true; btn.textContent = 'Restoring…';
@@ -201,7 +210,10 @@ async function doInitialRestore() {
   try {
     const buf = await fileInput.files[0].arrayBuffer();
     const password = document.getElementById('setupRestorePassword')?.value ?? '';
-    const headers = { 'Content-Type': 'application/octet-stream' };
+    const headers = {
+      'Content-Type': 'application/octet-stream',
+      'X-OE-Bootstrap-Credential': bootstrapCredential,
+    };
     if (password) headers['X-Restore-Password'] = password;
     const r = await _origFetch('/api/admin/restore-initial', {
       method: 'POST',

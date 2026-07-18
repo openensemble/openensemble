@@ -1,10 +1,17 @@
 # Getting started
 
-This walk-through assumes you've already run `./install.sh` and the server is up at `http://{ip}:3737`. The goal is a working first chat, not a fully configured install.
+This walk-through assumes you've already run `./install.sh` and copied the
+one-time first-run credential it printed. Open `https://{ip}:3739` and accept
+the self-signed certificate warning. If you lose the credential before setup,
+run `oe bootstrap` locally on the OpenEnsemble host. The goal is a working first
+chat, not a fully configured install.
 
 ## 1. Create the owner account
 
-The first time you visit the URL, OpenEnsemble shows a first-run screen. Pick a name, emoji, and password. That account becomes the **owner** — the only role that can manage providers, system settings, the Cloudflare tunnel, and the update channel.
+The first time you visit the URL, OpenEnsemble shows a first-run screen. Enter
+the one-time credential, then pick a name, emoji, and password. That account
+becomes the **owner** — the only role that can manage providers, system
+settings, the Cloudflare tunnel, and the update channel.
 
 Already have a backup from another install? Use **"Already have an OpenEnsemble backup?"** on the first-run screen to restore it instead of starting empty.
 

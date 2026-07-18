@@ -15,11 +15,10 @@
  */
 
 import { randomBytes } from 'crypto';
-import { createSession, readBody, requireAuth } from '../_helpers.mjs';
+import { createSession, getClientIp, readBody, requireAuth } from '../_helpers.mjs';
 import { setSessionDeviceId, uaFromReq } from '../_helpers/auth-sessions.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import {
-  getRedeemIp,
   isRedeemLockedOut,
   recordRedeemFailure,
   clearRedeemFailures,
@@ -80,7 +79,7 @@ export async function handlePairingRoutes(req, res, pathname) {
   }
 
   if (pathname === '/api/devices/redeem' && req.method === 'POST') {
-    const ip = getRedeemIp(req);
+    const ip = getClientIp(req);
     if (isGlobalRedeemLocked()) {
       console.warn('[device-pairing] Global redeem lockout active — refusing redeem');
       res.writeHead(429, { 'Content-Type': 'application/json' });

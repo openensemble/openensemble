@@ -35,15 +35,45 @@ For a clean Docker deployment instead:
 
 ```bash
 docker build -t openensemble .
-docker run -p 3737:3737 -v oe-data:/app/users openensemble
+docker run -d --name openensemble \
+  -p 3737:3737 -p 3739:3739 \
+  --add-host host.docker.internal:host-gateway \
+  -v oe-data:/app/users -v oe-state:/app/docker-data \
+  -v oe-plugins:/app/plugins -v oe-tls:/app/tls \
+  openensemble
+docker exec openensemble node scripts/first-run-bootstrap.mjs
 ```
+
+The final command prints the one-time first-run credential. Open
+`https://localhost:3739` (or substitute the Docker host's address), accept the
+self-signed certificate warning, and enter the credential. The named volumes
+persist profiles, plugins, runtime state/configuration, and the generated TLS
+key.
+
+The image supports the web application, remote model/STT/TTS providers, media
+conversion, and manually addressed nodes and voice devices. The host-oriented
+local Piper/Faster-Whisper installers use systemd user services and therefore
+do not run inside this single container. Docker bridge networking also does not
+forward OE's LAN discovery broadcasts; enter the container host's address on a
+device, or use host networking on Linux after reviewing the exposed ports.
+For Ollama running on the Docker host, set the Ollama URL in OpenEnsemble
+Settings to `http://host.docker.internal:11434` (the example run command and
+Compose file provide that hostname). Sandboxed coder shell commands and custom
+skill subprocesses are unavailable under Docker's default security profile.
+Nested sandboxing requires an operator-supplied security profile; do not use an
+unrestricted privileged container as a shortcut.
 
 ## First run
 
-1. Open `http://<your-server-ip>:3737`.
-2. Create the owner account, or restore an existing backup.
-3. Connect one provider in **Settings → Providers**.
-4. Create your first assistant and send a message. New accounts use one
+1. Copy the one-time credential printed by `install.sh` (or by the Docker
+   command above). On a host install, `oe bootstrap` recovers it locally before
+   setup is complete.
+2. Open `https://<your-server-ip>:3739` and accept the self-signed certificate
+   warning. Plain HTTP setup is restricted to a browser running directly on
+   the host at `http://localhost:3737`.
+3. Create the owner account, or restore an existing backup, using the credential.
+4. Connect one provider in **Settings → Providers**.
+5. Create your first assistant and send a message. New accounts use one
    primary assistant by default; existing upgraded accounts keep their agent
    ensemble unless they choose to switch.
 

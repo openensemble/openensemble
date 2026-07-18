@@ -15,6 +15,7 @@ import { recall, forget, getMemoryStats, listMemoryRows } from '../memory.mjs';
 import { cleanupForgottenForUser } from '../memory/cleanup.mjs';
 import { getTable } from '../memory/lance.mjs';
 import { assertId, queuedWrite } from '../memory/shared.mjs';
+import { softForgetValues } from '../memory/forgotten-state.mjs';
 import { embed, scoreSalience } from '../memory/embedding.mjs';
 
 function safeTableName(name) {
@@ -32,6 +33,7 @@ function safeMemoryRow(m) {
     confidence: m.confidence,
     immortal: m.immortal,
     forgotten: m.forgotten,
+    forgotten_at: m.forgotten_at,
     salience_composite: m.salience_composite,
     emotional_weight: m.emotional_weight,
     decision_weight: m.decision_weight,
@@ -117,6 +119,7 @@ export async function handle(req, res) {
         confidence: m.confidence,
         immortal: m.immortal,
         forgotten: m.forgotten,
+        forgotten_at: m.forgotten_at,
         salience_composite: m.salience_composite,
         stability: m.stability,
         retention_score: m.retention_score,
@@ -180,7 +183,7 @@ export async function handle(req, res) {
           stability: immortal ? 999999 : Math.min(rows[0].stability || 72, 72),
           retention_score: immortal ? 1.0 : (rows[0].retention_score || 1.0),
         },
-      }));
+      }), authId);
       await table.checkoutLatest?.();
       const verify = await table.query().where(`id = '${memId}'`).limit(1).toArray().catch(() => []);
       if (verify[0] && verify[0].immortal !== immortal) {
@@ -232,7 +235,7 @@ export async function handle(req, res) {
           priority: salience.composite,
           enriched: true,
         },
-      }));
+      }), authId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, id: memId }));
     } catch (e) { safeError(res, e, 400); }
@@ -276,7 +279,9 @@ export async function handle(req, res) {
           return true;
         }
       }
-      await queuedWrite(tableName, () => table.update({ where: `id = '${memId}'`, values: { forgotten: true } }));
+      await queuedWrite(tableName, () => table.update({
+        where: `id = '${memId}'`, values: softForgetValues(),
+      }), authId);
       await table.checkoutLatest?.();
       const verify = await table.query().where(`id = '${memId}'`).limit(1).toArray().catch(() => []);
       if (verify[0] && verify[0].forgotten !== true) {

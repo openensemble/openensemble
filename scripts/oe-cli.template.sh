@@ -78,6 +78,10 @@ case "$cmd" in
     cd "$INSTALL_DIR"
     exec node scripts/bench.mjs "$@"
     ;;
+  bootstrap)
+    cd "$INSTALL_DIR"
+    exec node scripts/first-run-bootstrap.mjs
+    ;;
   uninstall)
     read -rp "Remove OpenEnsemble service? [y/N]: " yn
     case "${yn:-n}" in [Yy]*) ;; *) exit 0 ;; esac
@@ -107,6 +111,7 @@ Usage:  oe <command>
   logs [-f]           Show logs (pass -f to follow)
   update              git pull + npm install + restart
   bench               Benchmark this CPU on the memory + plan models
+  bootstrap           Show the local one-time first-run credential
   uninstall           Remove service (optionally wipe install dir)
   help                Show this message
 

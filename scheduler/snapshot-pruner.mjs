@@ -5,9 +5,9 @@
  * Granularity is per-file (not per-day-bucket): a single pinned op in an old
  * day-bucket keeps only that op's files alive. Empty day-buckets get rmdir'd.
  *
- * Designed to be called from server.mjs's startup — wire it into a 24h
- * setInterval (or via the scheduler) once we're ready to enforce retention
- * in production. For now it's just a callable function so tests can drive it.
+ * Local pruning is wired from server.mjs at boot and on a 24-hour interval.
+ * Host-level pruning remains callable/dry-run only until records carry a
+ * durable host identity and successful deletions have a one-shot ledger.
  */
 
 import fs from 'fs';
@@ -135,8 +135,16 @@ export async function pruneHostSnapshotsForNode(userId, nodeId, opts = {}) {
       // Could happen if user removed it. Keep counted as "scanned, untouched."
       continue;
     }
+    if (opts.dryRun) {
+      stats.deleted++;
+      continue;
+    }
     try {
-      const ctx = opts.ctx || (hs.type === 'zfs' && opts.execFnFor ? { execFn: opts.execFnFor(userId, nodeId) } : {});
+      const ctx = opts.ctxFor
+        ? opts.ctxFor(userId, nodeId, parent_host, hs)
+        : (opts.ctx || ((hs.type === 'zfs' || hs.type === 'btrfs') && opts.execFnFor
+          ? { execFn: opts.execFnFor(userId, nodeId) }
+          : {}));
       const r = await deleteHostSnapshot(parent_host, hs, ctx);
       if (r.deleted) stats.deleted++;
       else stats.failed++;
@@ -169,6 +177,34 @@ export function pruneAllSnapshots(opts = {}) {
       totals.kept_pinned += stats.kept_pinned;
       totals.kept_recent += stats.kept_recent;
       totals.empty_dirs_removed += stats.empty_dirs_removed;
+      totals.nodes++;
+    }
+  }
+  return totals;
+}
+
+/**
+ * Walk every persisted user/node operation log and prune expired host-level
+ * snapshots. Sequential iteration avoids issuing a burst of destructive API
+ * calls to a hypervisor or storage host during startup.
+ */
+export async function pruneAllHostSnapshots(opts = {}) {
+  const totals = { scanned: 0, deleted: 0, kept_pinned: 0, kept_recent: 0, failed: 0, nodes: 0 };
+  if (!fs.existsSync(USERS_DIR)) return totals;
+
+  for (const userEntry of fs.readdirSync(USERS_DIR, { withFileTypes: true })) {
+    if (!userEntry.isDirectory()) continue;
+    const nodesRoot = path.join(USERS_DIR, userEntry.name, 'nodes');
+    if (!fs.existsSync(nodesRoot)) continue;
+
+    for (const nodeEntry of fs.readdirSync(nodesRoot, { withFileTypes: true })) {
+      if (!nodeEntry.isDirectory()) continue;
+      const stats = await pruneHostSnapshotsForNode(userEntry.name, nodeEntry.name, opts);
+      totals.scanned += stats.scanned;
+      totals.deleted += stats.deleted;
+      totals.kept_pinned += stats.kept_pinned;
+      totals.kept_recent += stats.kept_recent;
+      totals.failed += stats.failed;
       totals.nodes++;
     }
   }

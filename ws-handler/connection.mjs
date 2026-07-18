@@ -419,30 +419,20 @@ export function onConnection(ws, req) {
         deviceId: ws._deviceId, turnId: s.turnId, bytes: s.bytes, gaps: s.gaps,
         ms: Date.now() - s.startedAt,
       });
-      // TODO(remove, added 2026-07-05): manual wake-phrase capture —
-      // temporary tooling for the v9 wake-word data harvest; delete this
-      // block once that collection round is done. While
-      // wake-captures-manual/ENABLE exists, save the raw turn audio for
-      // wake-word training data and end the turn with a short spoken ack
-      // instead of dispatching to the assistant — NOTE: that means every
-      // voice turn on every device answers "Saved." while the flag file
-      // exists. Recording protocol and harvest pipeline:
-      // wakeword-train/V9_PLAN.md §6.3.
+      // Explicit per-device wake-word training mode. Creating
+      // wake-captures-manual/ENABLE-<deviceId> records pause-separated WAVs
+      // and acknowledges each sample instead of dispatching it to chat. There
+      // is deliberately no global ENABLE switch: training one device must not
+      // hijack voice turns throughout the installation.
       try {
         const { BASE_DIR } = await import('../lib/paths.mjs');
         const { isManualWakeCaptureEnabled } = await import('../lib/manual-wake-capture.mjs');
         const capRoot = path.join(BASE_DIR, 'wake-captures-manual');
-        // Per-device flag `ENABLE-<deviceId>` scopes capture to a single device
-        // (e.g. only the kitchen during a harvest so other rooms keep working);
-        // legacy global `ENABLE` still captures on every device. Either one
-        // present for this device arms capture.
         if (isManualWakeCaptureEnabled(capRoot, ws._deviceId)) {
           const { wavWrapPcm16kMono } = await import('../lib/stt.mjs');
           const dir = path.join(capRoot, ws._deviceId);
           await fs.promises.mkdir(dir, { recursive: true });
           const file = path.join(dir, `turn_${Date.now()}_${s.turnId || 'noid'}.wav`);
-          // async write — a multi-hundred-KB sync write here would block the
-          // event loop under every other socket's traffic
           await fs.promises.writeFile(file, wavWrapPcm16kMono(pcm));
           log.info('voice', 'manual wake capture saved', {
             deviceId: ws._deviceId, file, bytes: s.bytes,
@@ -450,10 +440,6 @@ export function onConnection(ws, req) {
           const turnTag = s.turnId ? { turn_id: s.turnId } : {};
           ws.send(JSON.stringify({ type: 'token', text: 'Saved.', agent: 'system', ...turnTag }));
           ws.send(JSON.stringify({ type: 'done', agent: 'system', ...turnTag }));
-          // Continuous-capture loop: re-open the mic with a no-wake follow-up
-          // window so the speaker can keep dictating phrases hands-free. The
-          // loop ends after 15s of silence (or when the ENABLE flag is
-          // deleted); each pause-separated utterance lands as its own file.
           armFollowupAfterDrain(ws._deviceId, { windowMs: 15000, conversation: true });
           return;
         }

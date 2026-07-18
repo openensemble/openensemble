@@ -1461,7 +1461,13 @@ export async function handleChatMessage({
       // tool, the utterance was a miss the tier should learn. Gated internally by
       // localTier.learning; fully self-guarded; never throws into this IIFE.
       const il = await import('./lib/intent-learner.mjs');
-      await il.captureFromTurn({ userId, agentId, userText: ctx.userText, scopedSessionKey });
+      await il.captureFromTurn({
+        userId,
+        agentId,
+        userText: ctx.userText,
+        scopedSessionKey,
+        turnCorrelationId: turnStore?.rootId ?? turnStore?.turnId ?? wireTurnId,
+      });
     } catch (e) { console.warn('[chat-dispatch] post-turn learn failed:', e.message); }
   })();
 

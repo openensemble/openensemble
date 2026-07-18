@@ -10,12 +10,18 @@ import {
   requireAuth, getAuthToken, getSessionUserId, getUser, getUserRole, sanitizeUserForWire,
   isPrivileged, loadUsers, loadConfig, modifyUsers, modifyUser, hashPassword, validatePassword, verifyPassword, readBody,
   createSession, clearUserSessions, clearUserSessionsExcept, modifyExpGroups, isTimeBlocked, parseMultipart,
-  safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB, getClientIp,
+  safeId as safeIdFn, getUserDir, withLock, EXPENSES_DB, getClientIp, isSafeBootstrapTransport,
   setSessionCookie, getUserCoordinatorAgentId,
 } from './_helpers.mjs';
 // uaFromReq isn't re-exported by the ._helpers.mjs aggregator yet — import
 // straight from the submodule (see routes/_helpers/auth-sessions.mjs).
 import { uaFromReq } from './_helpers/auth-sessions.mjs';
+import {
+  announceFirstRunCredential,
+  ensureFirstRunCredential,
+  FirstRunBootstrapError,
+  withFirstRunCredential,
+} from './_helpers/first-run-bootstrap.mjs';
 import { migrateSharedCortexToUser } from '../memory.mjs';
 import {
   newAccountOrchestrationPolicy,
@@ -87,54 +93,81 @@ export async function handle(req, res) {
   if (req.url === '/api/users' && req.method === 'POST') {
     try {
       const existing = loadUsers();
-      if (existing.length > 0) {
+      const isInitialSetup = existing.length === 0;
+      if (!isInitialSetup) {
         const authId = requireAuth(req, res); if (!authId) return true;
         if (!isPrivileged(authId)) { res.writeHead(403); res.end(JSON.stringify({ error: 'Only admins can create users' })); return true; }
+      } else {
+        if (!isSafeBootstrapTransport(req)) {
+          res.writeHead(426, { 'Content-Type': 'application/json', 'Upgrade': 'TLS/1.2' });
+          res.end(JSON.stringify({ error: 'First-run setup requires HTTPS from another device. Use https://<server>:3739, or open http://localhost:3737 on the OpenEnsemble host.' }));
+          return true;
+        }
+        // Ensure before reading the request body, then verify/consume under
+        // the shared create-or-restore lock below.
+        announceFirstRunCredential(ensureFirstRunCredential());
       }
-      const { name, emoji = '🧑', color, password, role: requestedRole, allowedFeatures: requestedFeatures, childSafetyPrompt: reqChildPrompt, allowedModels: reqAllowedModels } = JSON.parse(await readBody(req));
+      const {
+        name, emoji = '🧑', color, password,
+        role: requestedRole,
+        allowedFeatures: requestedFeatures,
+        childSafetyPrompt: reqChildPrompt,
+        allowedModels: reqAllowedModels,
+      } = JSON.parse(await readBody(req));
+      const bootstrapCredential = req.headers['x-oe-bootstrap-credential'];
       if (!name?.trim()) { res.writeHead(400); res.end(JSON.stringify({ error: 'name required' })); return true; }
       const pwError = validatePassword(password);
       if (pwError) { res.writeHead(400); res.end(JSON.stringify({ error: pwError })); return true; }
       const id = 'user_' + randomBytes(4).toString('hex');
       const COLORS = ['#6c63ff','#ff6584','#43b89c','#f5a623','#4fa3e0','#e05c5c','#5ce07a'];
-      const passwordHash = await hashPassword(password);
       let user, isFirst;
-      await modifyUsers(list => {
-        let role = list.length === 0 ? 'owner' : 'user';
-        if (list.length > 0 && requestedRole && ['admin', 'user', 'child'].includes(requestedRole)) {
-          const authId2 = getSessionUserId(getAuthToken(req));
-          const authRole2 = getUserRole(authId2);
-          if (authRole2 === 'owner' || (authRole2 === 'admin' && ['user', 'child'].includes(requestedRole))) {
-            role = requestedRole;
+      const createUser = async () => {
+        // Do expensive password hashing only after first-run authorization.
+        const passwordHash = await hashPassword(password);
+        await modifyUsers(list => {
+          // The preflight and the locked mutation must agree. This closes the
+          // race where two empty-install requests both decide they are first.
+          if ((list.length === 0) !== isInitialSetup) {
+            throw new Error('Profile setup changed while this request was in progress. Please reload and try again.');
           }
-        }
-        // Safe-by-default child sandbox. Admin can override by PATCHing after
-        // create. Intentionally narrow: only kid-friendly tools and drawers.
-        const childDefaults = role === 'child' ? {
-          skillsLocked: true,
-          skills: ['web'],
-          allowedSkills: ['deep_research', 'web', 'image_generator'],
-          allowedFeatures: ['notes', 'news'],
-        } : {};
-        // Non-admin users start with no skills/features — admin explicitly grants access.
-        // Agents are always "agents you own" — there is no sharing.
-        const freshUserDefaults = (role !== 'owner' && role !== 'admin' && role !== 'child') ? { allowedSkills: [], allowedFeatures: [], skills: [] } : {};
-        // Allow admin to override allowedFeatures at creation time (for non-owner/admin roles)
-        const featureOverride = (role !== 'owner' && role !== 'admin' && Array.isArray(requestedFeatures)) ? { allowedFeatures: requestedFeatures } : {};
-        // Parent-child linking: auto-set parentId to creating admin's ID for child/user accounts
-        const authId2 = getSessionUserId(getAuthToken(req));
-        const parentLink = (role === 'child' || role === 'user') && authId2 ? { parentId: authId2 } : {};
-        // Per-child safety prompt and model allowlist
-        const tierOverrides = {};
-        if (role === 'child' && typeof reqChildPrompt === 'string' && reqChildPrompt.trim()) tierOverrides.childSafetyPrompt = reqChildPrompt.trim();
-        if ((role === 'child' || role === 'user') && Array.isArray(reqAllowedModels)) tierOverrides.allowedModels = reqAllowedModels;
-        // Orchestration mode is written EXPLICITLY at creation (integration
-        // plan D4) — never left absent for later inference. primaryAgentId is
-        // set by the single-mode onboarding/switch flow once an agent exists.
-        user = { id, name: name.trim(), emoji, color: color ?? COLORS[list.length % COLORS.length], newsDefaultTopic: 0, emailProvider: 'none', role, orchestration: newAccountOrchestrationPolicy(), ...freshUserDefaults, ...childDefaults, ...featureOverride, ...parentLink, ...tierOverrides, passwordHash, createdAt: new Date().toISOString() };
-        isFirst = list.length === 0;
-        list.push(user);
-      });
+          let role = list.length === 0 ? 'owner' : 'user';
+          if (list.length > 0 && requestedRole && ['admin', 'user', 'child'].includes(requestedRole)) {
+            const authId2 = getSessionUserId(getAuthToken(req));
+            const authRole2 = getUserRole(authId2);
+            if (authRole2 === 'owner' || (authRole2 === 'admin' && ['user', 'child'].includes(requestedRole))) {
+              role = requestedRole;
+            }
+          }
+          // Safe-by-default child sandbox. Admin can override by PATCHing after
+          // create. Intentionally narrow: only kid-friendly tools and drawers.
+          const childDefaults = role === 'child' ? {
+            skillsLocked: true,
+            skills: ['web'],
+            allowedSkills: ['deep_research', 'web', 'image_generator'],
+            allowedFeatures: ['notes', 'news'],
+          } : {};
+          // Non-admin users start with no skills/features — admin explicitly grants access.
+          // Agents are always "agents you own" — there is no sharing.
+          const freshUserDefaults = (role !== 'owner' && role !== 'admin' && role !== 'child') ? { allowedSkills: [], allowedFeatures: [], skills: [] } : {};
+          // Allow admin to override allowedFeatures at creation time (for non-owner/admin roles)
+          const featureOverride = (role !== 'owner' && role !== 'admin' && Array.isArray(requestedFeatures)) ? { allowedFeatures: requestedFeatures } : {};
+          // Parent-child linking: auto-set parentId to creating admin's ID for child/user accounts
+          const authId2 = getSessionUserId(getAuthToken(req));
+          const parentLink = (role === 'child' || role === 'user') && authId2 ? { parentId: authId2 } : {};
+          // Per-child safety prompt and model allowlist
+          const tierOverrides = {};
+          if (role === 'child' && typeof reqChildPrompt === 'string' && reqChildPrompt.trim()) tierOverrides.childSafetyPrompt = reqChildPrompt.trim();
+          if ((role === 'child' || role === 'user') && Array.isArray(reqAllowedModels)) tierOverrides.allowedModels = reqAllowedModels;
+          // Orchestration mode is written EXPLICITLY at creation (integration
+          // plan D4) — never left absent for later inference. primaryAgentId is
+          // set by the single-mode onboarding/switch flow once an agent exists.
+          user = { id, name: name.trim(), emoji, color: color ?? COLORS[list.length % COLORS.length], newsDefaultTopic: 0, emailProvider: 'none', role, orchestration: newAccountOrchestrationPolicy(), ...freshUserDefaults, ...childDefaults, ...featureOverride, ...parentLink, ...tierOverrides, passwordHash, createdAt: new Date().toISOString() };
+          isFirst = list.length === 0;
+          list.push(user);
+        });
+      };
+      if (isInitialSetup) await withFirstRunCredential(bootstrapCredential, createUser);
+      else await createUser();
       if (isFirst) {
         migrateSharedCortexToUser(user.id).then(r => {
           if (r.migrated) console.log(`[cortex] migrated shared data → user ${user.id}`);
@@ -143,7 +176,13 @@ export async function handle(req, res) {
       const { passwordHash: _ph, ...safe } = user;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(safe));
-    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+    } catch (e) {
+      const status = e instanceof FirstRunBootstrapError
+        ? (e.code === 'invalid' ? 403 : 503)
+        : 400;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return true;
   }
 

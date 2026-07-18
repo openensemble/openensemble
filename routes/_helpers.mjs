@@ -27,7 +27,7 @@ import {
   getUserDir,
 } from './_helpers/paths.mjs';
 import { withLock, atomicWriteSync, makeModify } from './_helpers/io-lock.mjs';
-import { resolveClientIp } from './_helpers/client-ip.mjs';
+import { isExplicitLoopbackRequest, requestUsesHttps, resolveClientIp } from './_helpers/client-ip.mjs';
 import { getSessionUserId as _gsuid, getAuthToken as _gtok } from './_helpers/auth-sessions.mjs';
 import { encryptConfigSecrets, decryptedConfigView, encryptProfileSecrets, decryptedProfileView } from '../lib/config-secrets.mjs';
 import { listAgents, getAgent, getAgentScope, loadCustomAgents, updateAgentMeta, invalidateModelOverridesCache } from '../agents.mjs';
@@ -107,11 +107,31 @@ const ENV_MAP = {
 // used. Defaults to loopback so same-machine nginx works out of the box — add
 // your reverse-proxy's address for a separate-box setup. See _helpers/client-ip.mjs.
 const DEFAULT_TRUSTED_PROXIES = ['127.0.0.1', '::1'];
+function trustedProxyList() {
+  const configured = loadConfig()?.security?.trustedProxies;
+  return Array.isArray(configured) && configured.length ? configured : DEFAULT_TRUSTED_PROXIES;
+}
+
 export function getClientIp(req) {
-  const cfg = loadConfig();
-  const configured = cfg?.security?.trustedProxies;
-  const trusted = Array.isArray(configured) && configured.length ? configured : DEFAULT_TRUSTED_PROXIES;
-  return resolveClientIp(req, trusted) || 'unknown';
+  return resolveClientIp(req, trustedProxyList()) || 'unknown';
+}
+
+/**
+ * True for direct TLS or HTTPS asserted by the nearest configured proxy.
+ * A direct caller cannot spoof X-Forwarded-Proto because forwarding headers
+ * are ignored unless the socket peer itself is trusted.
+ */
+export function isSecureRequest(req) {
+  return requestUsesHttps(req, trustedProxyList());
+}
+
+/**
+ * First-run secrets may use plain HTTP only through an explicitly loopback
+ * URL. Checking both resolved client and Host avoids treating a LAN request
+ * hidden behind a local reverse proxy as a local-browser recovery flow.
+ */
+export function isSafeBootstrapTransport(req) {
+  return isSecureRequest(req) || isExplicitLoopbackRequest(req, trustedProxyList());
 }
 
 export function loadConfig() {
