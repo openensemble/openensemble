@@ -4,6 +4,7 @@
  * Shared store: ./store.mjs. Parent binds remaining helpers via bindSupervisorDeps.
  */
 
+import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { USERS_DIR, SKILLS_DIR, userSkillsDir } from '../../lib/paths.mjs';
