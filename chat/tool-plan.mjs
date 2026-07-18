@@ -2,9 +2,12 @@
  * User tool-plan application and current-turn builders.
  * Extracted from chat.mjs.
  */
-import { getSelectedPlanKeepTools } from '../roles.mjs';
+import { getSelectedPlanKeepTools, listRoles } from '../roles.mjs';
 import { composeSkillSpaBlock } from '../lib/skill-prompt-composer.mjs';
 import { buildImageUserMessage } from './providers/_shared.mjs';
+import { readFileSync } from 'fs';
+import path from 'path';
+import { USERS_DIR } from '../lib/paths.mjs';
 
 const SELECTED_PLAN_CONTROL_TOOLS = new Set(['request_tools', 'web_search', 'email_user']);
 
