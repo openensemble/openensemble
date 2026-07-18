@@ -98,7 +98,7 @@ function tryRecoverDeviceSession(token) {
 import { log } from './logger.mjs';
 import { getMainWss, setMainWss } from './ws-handler/main-wss.mjs';
 import { initDesktopWss } from './ws-handler/desktop.mjs';
-import { initBrowserExtWss } from './ws-handler/browser-ext.mjs';
+import { initBrowserExtWss, bindBrowserExtDeps } from './ws-handler/browser-ext.mjs';
 import {
   dropSttSession,
   handleSttBinaryFrame,
@@ -469,6 +469,7 @@ export function closeAllWsClients(reason = 'Server shutting down') {
 bindConnectionDeps({
   BOOT_ID,
   MAX_WS_PER_USER,
+  WS_PING_INTERVAL,
   VOICE_CONFIG_PUSH_CONNECT_DELAY_MS,
   VOICE_ERROR_FALLBACK,
   _voiceConfigPushInFlight,
@@ -483,5 +484,40 @@ bindConnectionDeps({
   wsClientIp,
   rehydrateChatAttachments,
   getAgentScope,
+  emitAgentNotification,
+  handleChatMessage,
+  abortChat,
+  getActiveStreams,
+  getActiveStream,
+  markAlarmFired,
+  markAlarmAcked,
+  handleTvCommandResult,
+  handleTvState,
+  buildDashboardData,
+  getSlotAssignment,
+  recordTokenSecret,
+  getDeviceVoiceConfigVersion,
+  markVoiceConfigPushed,
+  touchDevice,
+  getDevice,
+  recordDeviceOtaProgress,
+  getAmbientForDevice,
+  dropAmbientForDevice,
+  readVoiceConfig,
+  pushConfigToDevice,
+  handleWwUploadAck,
+  dropSttSession,
+  handleSttBinaryFrame,
+  makeVoiceTurn,
+  suppressVoiceOutput,
+  isVoiceOutputSuppressed,
+  sessionKey,
+  _activeVoiceTurnByKey,
+  STT_SESSION_TTL_MS,
 });
-
+bindBrowserExtDeps({
+  handleChatMessage,
+  abortChat,
+  cancelPendingCredentialPrompts,
+  stampChatEvent,
+});

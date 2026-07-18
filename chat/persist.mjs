@@ -318,7 +318,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
   // with friction tracking; declines internally on rate-limit, destructive
   // verbs, mutation-only tool sets, etc. Skip ephemeral one-shots.
   if (!readOnlyTurn && !agent.ephemeral) {
-    import('./lib/skill-proposer.mjs')
+    import('../lib/skill-proposer.mjs')
       .then(m => m.maybeProposeSkill({
         userId, agentId: agent.id, agentName: agent.name,
         userMessage: sessionText, assistantContent: persistedAssistantContent, toolsUsed,
@@ -332,7 +332,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
   // resolves an ambiguous "turn off X" via ha_call_service — that turn is
   // exactly the alias-learning signal we want. Keyed by userId because the
   // FLUSH happens on the coordinator's next turn (different agentId).
-  import('./lib/routine-proposer.mjs')
+  import('../lib/routine-proposer.mjs')
     .then(m => m.maybeProposeRoutine({
       userId, agentId: agent.id, agentName: agent.name,
       userMessage: sessionText, toolsUsed, voiceCtx,
@@ -345,7 +345,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
   // turn. Cheap heuristic, no LLM. Same broad gating as routine-proposer
   // (runs even for ephemerals, since ops work often routes through them).
   if (!agent.ephemeral) {
-    import('./lib/location-fact-proposer.mjs')
+    import('../lib/location-fact-proposer.mjs')
       .then(m => m.maybeProposeLocationFact({
         userId, agentId: agent.id, agentName: agent.name,
         userMessage: sessionText, toolsUsed,
@@ -359,7 +359,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
     // skill tools that fired this turn. Pairs with recordCorrection in
     // memory/signals.mjs to compute correction-rate per skill and propose
     // deprecation when the ratio crosses threshold.
-    import('./lib/skill-telemetry.mjs')
+    import('../lib/skill-telemetry.mjs')
       .then(m => m.recordToolInvocations({ userId, toolsUsed }))
       .catch(e => console.warn('[skill-telemetry] record failed:', e.message));
 
@@ -371,7 +371,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
     // call on every invocation.
     (async () => {
       try {
-        const { userSkillsDir } = await import('./lib/paths.mjs');
+        const { userSkillsDir } = await import('../lib/paths.mjs');
         const fs = (await import('fs')).default;
         const path = (await import('path')).default;
         const dir = userSkillsDir(userId);
@@ -396,7 +396,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
           if (sid) skillIds.add(sid);
         }
         if (skillIds.size === 0) return;
-        const { appendTrigger } = await import('./lib/skill-triggers.mjs');
+        const { appendTrigger } = await import('../lib/skill-triggers.mjs');
         for (const sid of skillIds) appendTrigger(userId, sid, sessionText);
       } catch (e) {
         console.warn('[skill-triggers] append failed:', e.message);

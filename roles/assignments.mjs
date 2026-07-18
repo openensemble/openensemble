@@ -12,8 +12,11 @@ import { normalizeOrchestrationPolicy } from '../lib/orchestration-policy-core.m
 import { log } from '../logger.mjs';
 import { _readUserProfile } from './user-profile.mjs';
 
+/** @type {any} */
 let getRoleManifest = () => null;
+/** @type {any} */
 let getDefaultRoles = () => [];
+/** @type {any} */
 let isSkillRuntimeEnabledForUser = () => true;
 
 export function bindAssignmentDeps(deps) {
@@ -92,7 +95,7 @@ export function getDurableRoleAssignment(roleId, userId) {
  * follows the symbolic coordinator target instead.
  */
 export async function resolveWatcherRegistrationAgentId(userId, currentAgentId, skillId = null) {
-  const { getOrchestrationPolicy } = await import('./lib/orchestration-policy.mjs');
+  const { getOrchestrationPolicy } = await import('../lib/orchestration-policy.mjs');
   if (getOrchestrationPolicy(userId).mode !== 'single') return currentAgentId;
   if (skillId) {
     const durableOwner = getDurableRoleAssignment(skillId, userId);
@@ -366,4 +369,3 @@ export function reconcileRoleDrawers() {
     }
   }
 }
-

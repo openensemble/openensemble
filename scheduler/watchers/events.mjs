@@ -4,8 +4,11 @@
  * Bound to watcher store via bindEventBusDeps().
  */
 
+/** @type {any} */
 let getUserStore = () => null; // (userId) => store | null
+/** @type {any} */
 let persistUser = () => false;
+/** @type {any} */
 let setSystemHandler = () => {};
 
 export function bindEventBusDeps(deps) {

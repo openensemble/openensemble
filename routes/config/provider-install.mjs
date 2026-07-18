@@ -16,6 +16,7 @@ import {
   invalidateVoiceDepsCache,
 } from '../../lib/voice-deps.mjs';
 import { log } from '../../logger.mjs';
+import { PIPER_VOICE_CATALOG } from './speech.mjs';
 
 export async function tryHandleProviderInstall(req, res) {
   const pinServiceGpu = async (...args) => (await import('../config.mjs')).pinServiceGpu(...args);
@@ -33,7 +34,7 @@ export async function tryHandleProviderInstall(req, res) {
       // Resolve the install script path relative to this file (works whether
       // OE is run from /opt, ~/.openensemble, or a dev checkout).
       const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
-                                      '..', 'scripts', 'install-piper.sh');
+                                      '..', '..', 'scripts', 'install-piper.sh');
       if (!fs.existsSync(scriptPath)) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `install-piper.sh not found at ${scriptPath}` }));
@@ -132,7 +133,7 @@ export async function tryHandleProviderInstall(req, res) {
         if (!authId) return true;
         const which = uninstallMatch[1];
         const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
-                                        '..', 'scripts', `uninstall-${which}.sh`);
+                                        '..', '..', 'scripts', `uninstall-${which}.sh`);
         if (!fs.existsSync(scriptPath)) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: `uninstall-${which}.sh not found at ${scriptPath}` }));
@@ -170,7 +171,7 @@ export async function tryHandleProviderInstall(req, res) {
 
       const cfg = loadConfig();
       const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
-                                      '..', 'scripts', 'install-faster-whisper.sh');
+                                      '..', '..', 'scripts', 'install-faster-whisper.sh');
       if (!fs.existsSync(scriptPath)) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `install-faster-whisper.sh not found at ${scriptPath}` }));
@@ -263,7 +264,7 @@ export async function tryHandleProviderInstall(req, res) {
       if (!authId) return true;
 
       const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
-                                      '..', 'scripts', 'install-pocket-tts.sh');
+                                      '..', '..', 'scripts', 'install-pocket-tts.sh');
       if (!fs.existsSync(scriptPath)) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `install-pocket-tts.sh not found at ${scriptPath}` }));
@@ -307,7 +308,7 @@ export async function tryHandleProviderInstall(req, res) {
       if (!authId) return true;
 
       const scriptPath = path.resolve(path.dirname(new URL(import.meta.url).pathname),
-                                      '..', 'scripts', 'install-kittentts.sh');
+                                      '..', '..', 'scripts', 'install-kittentts.sh');
       if (!fs.existsSync(scriptPath)) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: `install-kittentts.sh not found at ${scriptPath}` }));

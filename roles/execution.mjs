@@ -14,14 +14,23 @@ import {
   resolveKey,
 } from './state.mjs';
 
+/** @type {any} */
 let getRoleManifest = () => null;
+/** @type {any} */
 let getExecutorByKey = async () => null;
+/** @type {any} */
 let buildCtx = async () => ({});
+/** @type {any} */
 let isSkillAllowedForUser = () => true;
+/** @type {any} */
 let isSkillRuntimeEnabledForUser = () => true;
+/** @type {any} */
 let isScopableSkill = () => false;
+/** @type {any} */
 let listRoles = () => [];
+/** @type {any} */
 let _readUserProfile = () => null;
+/** @type {any} */
 let visibleEntries = function* () {};
 
 export function bindExecutionDeps(deps) {
@@ -227,5 +236,4 @@ export async function executeTool(name, args, userId = 'default', agentId = null
 }
 
 // User profile: roles/user-profile.mjs
-
 

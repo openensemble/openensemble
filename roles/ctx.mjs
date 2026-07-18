@@ -4,6 +4,7 @@
  */
 
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
+import { abortError } from '../lib/abort-utils.mjs';
 import { buildSkillCredentials } from '../lib/credentials.mjs';
 import { skillDeclaresNetwork } from '../lib/skill-net-policy.mjs';
 import { buildProposeMonitor, buildCollectionHelpers } from '../lib/monitor-helper.mjs';
@@ -12,6 +13,8 @@ import { buildDeviceHelpers } from '../lib/device-helper.mjs';
 import { buildSkillLogger } from '../lib/skill-logger.mjs';
 import { buildRegisterLead } from '../lib/personalization/lead-helper.mjs';
 import { buildSkillPersonalizationHelpers } from '../lib/personalization/skill-helper.mjs';
+import { toolError } from '../lib/tool-error.mjs';
+import { getVoiceContext } from '../lib/voice-context.mjs';
 import { listDesktops, sendDesktopCommand } from '../lib/desktop-bus.mjs';
 import { getScheduledContext } from '../lib/scheduled-context.mjs';
 import { registerScheduledChild, completeScheduledChild } from '../lib/scheduled-child-barrier.mjs';
@@ -19,6 +22,7 @@ import { getUserFilesDir, userSkillsDir, SKILLS_DIR, USERS_DIR } from '../lib/pa
 import { log } from '../logger.mjs';
 import path from 'path';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { resolveWatcherRegistrationAgentId } from './assignments.mjs';
 
 // Bound deps from roles.mjs to avoid circular imports.
 let getRoleManifest = () => null;
@@ -351,4 +355,3 @@ export async function buildSkillExecutionContextForTest(userId, agentId, skillId
   if (process.env.NODE_ENV !== 'test') throw new Error('skill execution context test seam is unavailable');
   return buildCtx(userId, agentId, skillId);
 }
-

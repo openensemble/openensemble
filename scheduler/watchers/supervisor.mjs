@@ -29,21 +29,37 @@ import {
   inFlightControllers,
 } from './store.mjs';
 
+/** @type {any} */
 let abortInFlightWatcher = () => {};
+/** @type {any} */
 let isApprovedPreferenceWatcher = () => false;
+/** @type {any} */
 let isManagedPreferenceWatcher = () => false;
+/** @type {any} */
 let isSafeInformationalWatcher = () => false;
+/** @type {any} */
 let listWatchers = () => [];
+/** @type {any} */
 let loadAllUsersFromDisk = () => null;
+/** @type {any} */
 let loadUserWatchers = () => null;
+/** @type {any} */
 let persistUser = () => false;
+/** @type {any} */
 let releaseApprovedPreferenceGrant = () => {};
+/** @type {any} */
 let resolveHandler = async () => null;
+/** @type {any} */
 let runCustomWatcherSandboxed = async () => null;
+/** @type {any} */
 let runtimeWatcherAgentRef = () => {};
+/** @type {any} */
 let stopUnauthorizedPreferenceWatcher = async () => null;
+/** @type {any} */
 let unregisterWatcher = () => {};
+/** @type {any} */
 let subscribeToEvent = () => {};
+/** @type {any} */
 let unsubscribeFromEvent = () => {};
 
 export function bindSupervisorDeps(deps) {

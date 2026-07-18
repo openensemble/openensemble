@@ -21,7 +21,7 @@ import { activeTasks } from './state.mjs';
 // bootRecoverInterruptedTasks marks each one cancelled everywhere the truth is
 // consumed: the recent rings (check_workers), the watcher chip (UI), and the
 // owning chat session (the coordinator's next turn).
-const JOURNAL_PATH = path.join(BASE_DIR, 'background-task-journal.json');
+export const JOURNAL_PATH = path.join(BASE_DIR, 'background-task-journal.json');
 const JOURNAL_LOCK_PATH = `${JOURNAL_PATH}.lock`;
 const JOURNAL_VERSION = 1;
 

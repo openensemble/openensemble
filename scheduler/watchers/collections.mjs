@@ -2,8 +2,11 @@
 /**
  * Collection-watcher item CRUD. Bound to persistence via bindCollectionDeps().
  */
+/** @type {any} */
 let loadUserWatchers = () => null;
+/** @type {any} */
 let persistUser = () => false;
+/** @type {any} */
 let unregisterWatcher = () => false;
 
 export function bindCollectionDeps(deps) {
@@ -166,4 +169,3 @@ export function listAllCollections(userId, filter = {}) {
       items: [...(w.state.items || [])],
     }));
 }
-

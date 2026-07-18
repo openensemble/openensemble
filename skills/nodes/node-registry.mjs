@@ -432,6 +432,23 @@ export function removeNode(nodeId, userId) {
   if (!entry) return { removed: false, reason: 'not found' };
   if (entry.userId !== userId) return { removed: false, reason: 'not owned by user' };
 
+  // Profiles and health watchers created before node-id canonicalization may
+  // still use the hostname. Preserve that exact alias before deleting the
+  // registry entry so the async cascade can remove both representations.
+  // Do not treat the fallback value or a hostname still owned by another
+  // registered node as an identity; either could erase that node's state.
+  const hostname = typeof entry.hostname === 'string' ? entry.hostname : '';
+  const hostnameIsShared = hostname && [...nodes.entries()].some(([otherNodeId, other]) => (
+    otherNodeId !== nodeId
+    && other.userId === userId
+    && typeof other.hostname === 'string'
+    && other.hostname.toLowerCase() === hostname.toLowerCase()
+  ));
+  const legacyNodeIds = hostname && hostname.toLowerCase() !== 'unknown'
+    && hostname !== nodeId && !hostnameIsShared
+    ? [entry.hostname]
+    : [];
+
   revokedNodes.set(revocationKey(userId, nodeId), Date.now());
 
   // If currently connected: send a revocation message and close the WS
@@ -448,12 +465,12 @@ export function removeNode(nodeId, userId) {
   // Cascade is best-effort and must not undo the registry removal. Fire and
   // forget so the DELETE response stays snappy; purge is idempotent.
   import('../../lib/node-cleanup.mjs')
-    .then(m => m.purgeNodeLocalData(userId, nodeId))
+    .then(m => m.purgeNodeLocalData(userId, nodeId, legacyNodeIds))
     .catch(e => console.warn(`[nodes] cascade cleanup failed for ${nodeId}:`, e?.message || e));
 
   broadcastNodeEvent(userId, { type: 'node_removed', nodeId });
   console.log(`[nodes] Removed: ${nodeId} for user ${userId}`);
-  return { removed: true };
+  return { removed: true, legacyNodeIds };
 }
 
 export function unregisterNode(nodeId) {

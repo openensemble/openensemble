@@ -6,9 +6,12 @@
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
+import os from 'os';
 import {
-  requireAuth, loadConfig, readBody, readBodyBuffer, safeError,
+  requireAuth, requirePrivileged, loadConfig, readBody, readBodyBuffer, safeError,
+  getAuthToken,
 } from '../_helpers.mjs';
+import { getSessionMeta } from '../_helpers/auth-sessions.mjs';
 import { getSlotAssignment } from '../../lib/voice-devices.mjs';
 import { getVoiceRef } from '../../lib/voice-refs.mjs';
 import {
@@ -24,6 +27,7 @@ import {
   probeFasterWhisperAvailable,
   probeFfmpegAvailable,
   getTtsAvailability,
+  invalidateVoiceDepsCache,
 } from '../../lib/voice-deps.mjs';
 import { log } from '../../logger.mjs';
 
@@ -67,7 +71,7 @@ const KITTENTTS_DEFAULT_VOICE = 'expr-voice-2-f';
 // multivoice server in scripts/piper-multivoice-server.py picks up new files
 // automatically (no service restart needed). `source: 'openensemble'` voices
 // live in our own HF repo; everything else falls back to rhasspy/piper-voices.
-const PIPER_VOICE_CATALOG = [
+export const PIPER_VOICE_CATALOG = [
   { id: 'en_AU-OE_custom-medium',      label: 'OE Custom AU (Australian female)',    lang: 'en_AU', gender: 'female', quality: 'medium', size_mb: 61,  multi_speaker: false, source: 'openensemble' },
   { id: 'en_US-amy-medium',            label: 'Amy (American female)',                lang: 'en_US', gender: 'female', quality: 'medium', size_mb: 63,  multi_speaker: false, source: 'rhasspy' },
   { id: 'en_US-lessac-medium',         label: 'Lessac (American female)',             lang: 'en_US', gender: 'female', quality: 'medium', size_mb: 63,  multi_speaker: false, source: 'rhasspy' },

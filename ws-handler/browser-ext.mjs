@@ -8,6 +8,18 @@ import { log } from '../logger.mjs';
 import { getUser, getUserCoordinatorAgentId } from '../routes/_helpers.mjs';
 import { getMainWss } from './main-wss.mjs';
 
+let handleChatMessage = async () => {};
+let abortChat = () => {};
+let cancelPendingCredentialPrompts = () => {};
+let stampChatEvent = (_userId, event) => event;
+
+export function bindBrowserExtDeps(deps) {
+  if (deps.handleChatMessage !== undefined) handleChatMessage = deps.handleChatMessage;
+  if (deps.abortChat !== undefined) abortChat = deps.abortChat;
+  if (deps.cancelPendingCredentialPrompts !== undefined) cancelPendingCredentialPrompts = deps.cancelPendingCredentialPrompts;
+  if (deps.stampChatEvent !== undefined) stampChatEvent = deps.stampChatEvent;
+}
+
 export function initBrowserExtWss({
   maxPayload = 2 * 1024 * 1024,
   pingInterval = 15_000,
@@ -749,4 +761,3 @@ export function initBrowserExtWss({
 
   return wss;
 }
-

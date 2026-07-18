@@ -2,13 +2,25 @@
  * Model listing routes. Extracted from routes/config.mjs.
  */
 import {
-  requireAuth, loadConfig, safeError,
+  requireAuth, loadConfig, modifyConfig, safeError,
 } from '../_helpers.mjs';
 import { supportsImageGeneration, supportsVision } from '../../lib/model-capabilities.mjs';
 import { listOpenAIOAuthModels } from '../../lib/openai-codex-models.mjs';
 import { listXaiOAuthModels } from '../../lib/xai-oauth-models.mjs';
 import { OPENAI_COMPAT_PROVIDERS } from '../../chat/providers/_shared.mjs';
 import { log } from '../../logger.mjs';
+
+const GROK_BASE = 'https://api.x.ai/v1';
+const OLLAMA_DEFAULT = 'https://ollama.com/api';
+const LMS_DEFAULT = 'http://127.0.0.1:1234';
+const COMPAT_PROVIDERS = OPENAI_COMPAT_PROVIDERS;
+const PERPLEXITY_STATIC_MODELS = [
+  { id: 'sonar', name: 'Sonar' },
+  { id: 'sonar-pro', name: 'Sonar Pro' },
+  { id: 'sonar-reasoning', name: 'Sonar Reasoning' },
+  { id: 'sonar-reasoning-pro', name: 'Sonar Reasoning Pro' },
+  { id: 'sonar-deep-research', name: 'Sonar Deep Research' },
+];
 
 export async function tryHandleModelRoutes(req, res) {
 
@@ -451,7 +463,7 @@ export async function tryHandleModelRoutes(req, res) {
       // eagerly load node-llama-cpp on machines where it's not installed yet.
       let builtinReasonId = 'openensemble-reason-v3.q8_0.gguf';
       try {
-        const { getBuiltinReasonModelId } = await import('../memory/builtin-reason.mjs');
+        const { getBuiltinReasonModelId } = await import('../../memory/builtin-reason.mjs');
         builtinReasonId = getBuiltinReasonModelId();
       } catch { /* fall back to default name */ }
 

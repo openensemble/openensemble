@@ -42,6 +42,7 @@ import {
   _journalRemove,
   _journalMarkCompletion,
   _journalSnapshot,
+  JOURNAL_PATH,
 } from './background-tasks/journal.mjs';
 import {
   registerAutoBackgroundTool,

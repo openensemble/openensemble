@@ -7,13 +7,9 @@ import { randomBytes } from 'crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { handleChatMessage, abortChat, getActiveStreams, getActiveStream } from '../chat-dispatch.mjs';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
 import { projectActiveTasksForWire } from '../lib/background-task-wire.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer, getSessionEpoch } from '../sessions.mjs';
-import { markAlarmFired, markAlarmAcked } from '../lib/alarms.mjs';
-import { handleTvCommandResult, handleTvState } from '../lib/tv-commands.mjs';
-import { buildDashboardData } from '../lib/tv-dashboard.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
   getSessionUserId, getAuthToken, resolveShareGroup, loadConfig,
@@ -22,12 +18,6 @@ import {
 import { getVoiceRef } from '../lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from '../lib/voice-tts-stream.mjs';
 import { getSessionMeta, setSessionDeviceId, adoptSession } from '../routes/_helpers/auth-sessions.mjs';
-import {
-  getSlotAssignment, findDeviceByTokenPrefix, findDeviceByTokenAnyUser, recordTokenSecret,
-  getDeviceVoiceConfigVersion, markVoiceConfigPushed, touchDevice, getDevice, recordDeviceOtaProgress,
-} from '../lib/voice-devices.mjs';
-import { getAmbientForDevice, dropAmbientForDevice } from '../routes/devices.mjs';
-import { readVoiceConfig, pushConfigToDevice, handleWwUploadAck } from '../lib/voice-config.mjs';
 import {
   submitCredential, cancelCredential, cancelPendingCredentialPrompts,
   setCredentialEmitter, getPendingCredentialPrompts,
@@ -48,22 +38,12 @@ import {
   nextSessionSnapshotSeq,
   orchestrationPolicyForClient,
 } from './delivery.mjs';
-import {
-  dropSttSession,
-  handleSttBinaryFrame,
-  makeVoiceTurn,
-  suppressVoiceOutput,
-  isVoiceOutputSuppressed,
-  sessionKey,
-  _activeVoiceTurnByKey,
-  STT_SESSION_TTL_MS,
-} from './voice-stt.mjs';
-
 const OE_DEFAULT_VOICE_STATE = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
 
 // Bound from parent: boot id, caps, device recovery, voice config timing
 let BOOT_ID = '';
 let MAX_WS_PER_USER = 20;
+let WS_PING_INTERVAL = 15_000;
 let VOICE_CONFIG_PUSH_CONNECT_DELAY_MS = 1500;
 let VOICE_ERROR_FALLBACK = 'Something went wrong.';
 let _voiceConfigPushInFlight = new Map();
@@ -78,6 +58,36 @@ let isSameOriginWs = () => true;
 let wsClientIp = () => '';
 let rehydrateChatAttachments = async (u, a) => a;
 let getAgentScope = (id) => id;
+let emitAgentNotification = () => {};
+let handleChatMessage = async () => {};
+let abortChat = () => {};
+let getActiveStreams = () => [];
+let getActiveStream = () => null;
+let markAlarmFired = () => {};
+let markAlarmAcked = () => {};
+let handleTvCommandResult = () => {};
+let handleTvState = () => {};
+let buildDashboardData = async () => ({});
+let getSlotAssignment = () => null;
+let recordTokenSecret = () => {};
+let getDeviceVoiceConfigVersion = () => null;
+let markVoiceConfigPushed = () => {};
+let touchDevice = () => {};
+let getDevice = () => null;
+let recordDeviceOtaProgress = () => {};
+let getAmbientForDevice = () => null;
+let dropAmbientForDevice = () => {};
+let readVoiceConfig = () => ({});
+let pushConfigToDevice = async () => ({ ok: false });
+let handleWwUploadAck = () => {};
+let dropSttSession = () => {};
+let handleSttBinaryFrame = () => {};
+let makeVoiceTurn = () => null;
+let suppressVoiceOutput = () => null;
+let isVoiceOutputSuppressed = () => false;
+let sessionKey = (userId, agentId) => `${userId}_${agentId}`;
+let _activeVoiceTurnByKey = new Map();
+let STT_SESSION_TTL_MS = 30_000;
 
 export function bindConnectionDeps(deps) {
   for (const [k, v] of Object.entries(deps)) {
@@ -85,6 +95,7 @@ export function bindConnectionDeps(deps) {
     switch (k) {
       case 'BOOT_ID': BOOT_ID = v; break;
       case 'MAX_WS_PER_USER': MAX_WS_PER_USER = v; break;
+      case 'WS_PING_INTERVAL': WS_PING_INTERVAL = v; break;
       case 'VOICE_CONFIG_PUSH_CONNECT_DELAY_MS': VOICE_CONFIG_PUSH_CONNECT_DELAY_MS = v; break;
       case 'VOICE_ERROR_FALLBACK': VOICE_ERROR_FALLBACK = v; break;
       case '_voiceConfigPushInFlight': _voiceConfigPushInFlight = v; break;
@@ -99,6 +110,36 @@ export function bindConnectionDeps(deps) {
       case 'wsClientIp': wsClientIp = v; break;
       case 'rehydrateChatAttachments': rehydrateChatAttachments = v; break;
       case 'getAgentScope': getAgentScope = v; break;
+      case 'emitAgentNotification': emitAgentNotification = v; break;
+      case 'handleChatMessage': handleChatMessage = v; break;
+      case 'abortChat': abortChat = v; break;
+      case 'getActiveStreams': getActiveStreams = v; break;
+      case 'getActiveStream': getActiveStream = v; break;
+      case 'markAlarmFired': markAlarmFired = v; break;
+      case 'markAlarmAcked': markAlarmAcked = v; break;
+      case 'handleTvCommandResult': handleTvCommandResult = v; break;
+      case 'handleTvState': handleTvState = v; break;
+      case 'buildDashboardData': buildDashboardData = v; break;
+      case 'getSlotAssignment': getSlotAssignment = v; break;
+      case 'recordTokenSecret': recordTokenSecret = v; break;
+      case 'getDeviceVoiceConfigVersion': getDeviceVoiceConfigVersion = v; break;
+      case 'markVoiceConfigPushed': markVoiceConfigPushed = v; break;
+      case 'touchDevice': touchDevice = v; break;
+      case 'getDevice': getDevice = v; break;
+      case 'recordDeviceOtaProgress': recordDeviceOtaProgress = v; break;
+      case 'getAmbientForDevice': getAmbientForDevice = v; break;
+      case 'dropAmbientForDevice': dropAmbientForDevice = v; break;
+      case 'readVoiceConfig': readVoiceConfig = v; break;
+      case 'pushConfigToDevice': pushConfigToDevice = v; break;
+      case 'handleWwUploadAck': handleWwUploadAck = v; break;
+      case 'dropSttSession': dropSttSession = v; break;
+      case 'handleSttBinaryFrame': handleSttBinaryFrame = v; break;
+      case 'makeVoiceTurn': makeVoiceTurn = v; break;
+      case 'suppressVoiceOutput': suppressVoiceOutput = v; break;
+      case 'isVoiceOutputSuppressed': isVoiceOutputSuppressed = v; break;
+      case 'sessionKey': sessionKey = v; break;
+      case '_activeVoiceTurnByKey': _activeVoiceTurnByKey = v; break;
+      case 'STT_SESSION_TTL_MS': STT_SESSION_TTL_MS = v; break;
     }
   }
 }
@@ -1273,4 +1314,3 @@ export async function pushVoiceConfigVersion(ws) {
     console.warn(`[ws] voice-config v${r.version} partial sync to ${ws._deviceId}: acked=${r.ackedSlots.join(',') || '-'} cleared=${r.clearedSlots.join(',') || '-'} failed=${r.failedSlots.map(f=>f.slot+':'+f.err).join(',') || '-'} offline=${r.offlineSlots.join(',') || '-'}`);
   }
 }
-

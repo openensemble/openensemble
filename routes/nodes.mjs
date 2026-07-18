@@ -326,7 +326,10 @@ export async function handle(req, res) {
         // cascade — idempotent, and guarantees the response means "done".
         const dir = safeNodeDataDir(userId, nodeId);
         const hadDir = !!(dir && fs.existsSync(dir));
-        cascade = await purgeNodeLocalData(userId, nodeId);
+        // removeNode returns the exact pre-canonical hostname only when no
+        // other registered node owns it. Await that same narrow alias purge
+        // so a successful response means legacy storage is gone too.
+        cascade = await purgeNodeLocalData(userId, nodeId, result.legacyNodeIds || []);
         if (!result.removed && !hadDir && !cascade.watchersCancelled && !cascade.dataDeleted) {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: result.reason || 'not found' }));

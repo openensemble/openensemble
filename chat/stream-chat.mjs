@@ -5,7 +5,8 @@
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import path from 'path';
 import { buildAgentContext, formatContext, addToSessionBuffer } from '../memory.mjs';
-import { loadSession, loadCrossAgentContext } from '../sessions.mjs';
+import { loadSession, appendToSession, loadCrossAgentContext } from '../sessions.mjs';
+import { getUserFilesDir, USERS_DIR } from '../lib/paths.mjs';
 import { log } from '../logger.mjs';
 import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingToolSkills, shouldUseProviderHostedImageBackend } from '../lib/tool-router.mjs';
 import { bindToolRouterContext, toolRouterContext } from '../lib/tool-router-context.mjs';
@@ -18,6 +19,8 @@ import {
 import { listRoles } from '../roles.mjs';
 import { resolveValidatedSkillExecutionForTurn } from '../lib/skill-execution.mjs';
 import { voiceContext } from '../lib/voice-context.mjs';
+import { composeSkillSpaBlock } from '../lib/skill-prompt-composer.mjs';
+import { learnToolPlanFromTurn } from '../lib/tool-plan-memory.mjs';
 import { recordRunTrace, redactArgsForTrace, redactTextForTrace } from '../lib/run-inspector.mjs';
 import {
   buildWorkerStandingMemoryContext,
@@ -26,8 +29,10 @@ import {
 } from '../lib/worker-memory-policy.mjs';
 import {
   compactDocumentToolArgs,
+  compactDocumentFallback,
   compactDocumentToolPreview,
   compactDocumentToolResult,
+  findDocumentMutation,
   normalizeDocumentRequest,
 } from '../lib/document-artifacts.mjs';
 import {
@@ -257,7 +262,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // next turn — so we can drop the candidate if the user's current message
   // is corrective. Fire-and-forget; failures here must never block chat.
   if (!suppressLearning && !agent.ephemeral && !silent) {
-    import('./lib/skill-proposer.mjs')
+    import('../lib/skill-proposer.mjs')
       .then(m => m.flushPendingSkillCandidate({ agentId: agent.id, currentUserMessage: userText }))
       .catch(e => console.warn('[skill-proposer] flush failed:', e.message));
   }
@@ -266,7 +271,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // every user turn lands in Helen ephemerally, so gating on !ephemeral
   // would mean the flush never fires for voice-only users. Keyed by userId.
   if (!suppressLearning && !silent && !workerMemoryOwnerId) {
-    import('./lib/routine-proposer.mjs')
+    import('../lib/routine-proposer.mjs')
       .then(m => m.flushPendingRoutineCandidate({ userId, currentUserMessage: userText }))
       .catch(e => console.warn('[routine-proposer] flush failed:', e.message));
   }
@@ -275,7 +280,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // pending candidate if the new turn looks corrective, otherwise emit the
   // host-fact proposal bubble.
   if (!suppressLearning && !agent.ephemeral && !silent) {
-    import('./lib/location-fact-proposer.mjs')
+    import('../lib/location-fact-proposer.mjs')
       .then(m => m.flushPendingLocationFact({ userId, agentId: agent.id, currentUserMessage: userText }))
       .catch(e => console.warn('[location-fact-proposer] flush failed:', e.message));
   }
@@ -324,7 +329,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         userId,
         query: recallQuery,
         resolveOwnedAgent: async (ownerId, ownerUserId) => {
-          const { getAgentForUser } = await import('./routes/_helpers.mjs');
+          const { getAgentForUser } = await import('../routes/_helpers.mjs');
           return getAgentForUser(ownerId, ownerUserId);
         },
         buildContext: buildAgentContext,
@@ -344,7 +349,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const _triggersPromise = (!suppressLearning && !agent.ephemeral && userId && userId !== 'default')
     ? (async () => {
         try {
-          const { buildTriggerNudgeBlock } = await import('./lib/skill-triggers.mjs');
+          const { buildTriggerNudgeBlock } = await import('../lib/skill-triggers.mjs');
           return (await buildTriggerNudgeBlock(userId, sessionUserText)) || '';
         } catch (e) {
           console.debug('[skill-triggers] nudge build failed:', e.message);
@@ -390,7 +395,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const _monitorablePromise = (interactiveMonitorTurn && !agent.ephemeral && userId && userId !== 'default' && sessionUserText && !sessionUserText.trim().startsWith('/'))
     ? (async () => {
         try {
-          const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('./lib/monitorable-classifier.mjs');
+          const { classifyMonitorable, buildMonitorableSystemNote, recordMonitorableHit } = await import('../lib/monitorable-classifier.mjs');
           const hit = await classifyMonitorable(sessionUserText);
           if (hit.monitorable) {
             const offer = await recordMonitorableHit({ userId, agentId: agent.id, userText: sessionUserText, hit });
@@ -539,7 +544,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   let userEmailBlock = '';
   if (agent.skillCategory === 'email' && userId && userId !== 'default') {
     try {
-      const userPath = path.join(path.dirname(new URL(import.meta.url).pathname), 'users', userId, 'profile.json');
+      const userPath = path.join(USERS_DIR, userId, 'profile.json');
       if (existsSync(userPath)) {
         const user = JSON.parse(readFileSync(userPath, 'utf8'));
         if (user?.email) userEmailBlock = `\n\nUser's email address: ${user.email}`;
@@ -631,7 +636,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     if (a?.file_id && typeof a.mimeType === 'string') {
       const mime = a.mimeType.toLowerCase();
       if (mime.startsWith('audio/') || mime.startsWith('video/')) {
-        if (!getProfileFilePathForNotes) ({ getProfileFilePath: getProfileFilePathForNotes } = await import('./lib/profile-files.mjs'));
+        if (!getProfileFilePathForNotes) ({ getProfileFilePath: getProfileFilePathForNotes } = await import('../lib/profile-files.mjs'));
         const filePath = getProfileFilePathForNotes(userId, a.file_id);
         if (filePath) {
           const kind = mime.startsWith('audio/') ? 'audio' : 'video';

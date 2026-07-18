@@ -61,17 +61,29 @@ import {
 } from './auto-background.mjs';
 
 // Bound from roles.mjs after registry helpers are defined (avoids circular import).
+/** @type {any} */
 let resolveKey = () => null;
+/** @type {any} */
 let visibleEntries = function* () {};
+/** @type {any} */
 let getExecutorByKey = async () => null;
+/** @type {any} */
 let buildCtx = async () => ({});
+/** @type {any} */
 let runCustomSkillValue = async () => { throw new Error('tool-execution not bound'); };
+/** @type {any} */
 let shouldSandboxSkill = () => false;
+/** @type {any} */
 let isSkillAllowedForUser = () => true;
+/** @type {any} */
 let isSkillRuntimeEnabledForUser = () => true;
+/** @type {any} */
 let isScopableSkill = () => false;
+/** @type {any} */
 let getRoleManifest = () => null;
+/** @type {any} */
 let listRoles = () => [];
+/** @type {any} */
 let _readUserProfile = () => null;
 
 export function bindToolExecutionDeps(deps) {
