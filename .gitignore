@@ -93,6 +93,8 @@ scripts/smoke-plan-*.mjs
 /handoffs/
 # Grok Build local notes / handoffs (never commit)
 /grok/
+# OpenAI research and working notes (never commit)
+/openai/
 
 # --- Runtime artifacts ---
 server.pid
