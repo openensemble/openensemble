@@ -432,9 +432,28 @@ function appendError(msg, onRetry = null) {
   return el;
 }
 
+function isIntentionalTurnStop(terminal = {}) {
+  const code = typeof terminal?.code === 'string' ? terminal.code : '';
+  if (code) return code === 'stopped' && (!terminal?.status || terminal.status === 'stopped');
+  return terminal?.status === 'stopped';
+}
+
+function appendStopped(scroll = true) {
+  const el = document.createElement('div');
+  el.className = 'msg assistant turn-stopped';
+  el.innerHTML = '<div class="msg-bubble">Stopped</div>';
+  insertBefore(el);
+  if (scroll) scrollToBottom();
+  return el;
+}
+
 function appendTurnErrorBubble(row) {
   if (row?.assistantPartial) {
     appendAssistantBubble(`${row.assistantPartial}\n\n_Reply incomplete_`, row.ts, false);
+  }
+  if (isIntentionalTurnStop(row)) {
+    appendStopped(false);
+    return;
   }
   appendError(
     row?.error || row?.content || 'Turn failed',
@@ -477,14 +496,17 @@ function showTurnError(message, event = {}) {
     || (lastSentAttempt && (!event.turn_id || lastSentAttempt.attemptId === event.turn_id)
       ? lastSentAttempt : null);
   const forThisAgent = attempt && attempt.agent === activeAgent;
-  const canRetry = Boolean(forThisAgent && event.retryable === true);
-  const errorEl = appendError(message, canRetry ? retryFailedAttempt : null);
+  const stopped = isIntentionalTurnStop(event);
+  const canRetry = Boolean(!stopped && forThisAgent && event.retryable === true);
+  const terminalEl = stopped
+    ? appendStopped()
+    : appendError(message, canRetry ? retryFailedAttempt : null);
   if (forThisAgent) {
     if (attempt.sessionEntry) {
-      attempt.sessionEntry.turnStatus = 'failed';
+      attempt.sessionEntry.turnStatus = stopped ? 'stopped' : 'failed';
       attempt.sessionEntry.retryable = canRetry;
     }
-    failedAttempt = canRetry ? { ...attempt, errorEl } : null;
+    failedAttempt = canRetry ? { ...attempt, errorEl: terminalEl } : null;
     if (lastSentAttempt?.attemptId === attempt.attemptId) lastSentAttempt = null;
   }
 }
@@ -692,4 +714,3 @@ function insertBefore(el) {
   $('messages').insertBefore(el, $('typing'));
   if (!_renderingSession && !_autoScroll) { _newMessageCount++; _updateJumpPill(); }
 }
-

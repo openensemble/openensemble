@@ -1369,8 +1369,9 @@ function failRemoteDocumentTurns(agentId, documentRequest = null) {
   return true;
 }
 
-function cancelRemoteDocumentTurns(agentId, label = 'Stopped') {
-  const turns = [..._remoteDocumentTurns.entries()].filter(([, turn]) => turn.agentId === agentId);
+function cancelRemoteDocumentTurns(agentId, label = 'Stopped', documentRequest = null) {
+  const turns = [..._remoteDocumentTurns.entries()].filter(([, turn]) =>
+    turn.agentId === agentId && (!documentRequest?.requestId || turn.request.requestId === documentRequest.requestId));
   if (!turns.length) return false;
   for (const [key, turn] of turns) {
     _settleRemoteDocumentTurn(turn, 'ready', label);
@@ -1420,9 +1421,9 @@ function failDocumentChatTurn(agentId, message, documentRequest = null) {
   return true;
 }
 
-function cancelDocumentChatTurn(agentId, label = 'Stopped') {
+function cancelDocumentChatTurn(agentId, label = 'Stopped', documentRequest = null) {
   const turn = _documentChatTurns.get(agentId);
-  if (!turn) return false;
+  if (!turn || (documentRequest?.requestId && !_matchesDocumentTurn(turn, documentRequest))) return false;
   if (turn.outcome?.success) {
     turn.entry.documentRequest = { ...turn.request, status: 'complete', outcome: turn.outcome };
     _setDocumentArtifactState(turn.el, 'complete', turn.outcome);

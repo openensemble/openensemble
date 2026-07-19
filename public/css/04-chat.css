@@ -38,6 +38,11 @@
   word-break: break-word; overflow-wrap: anywhere; }
 .msg.user .msg-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
 .msg.assistant .msg-bubble { background: var(--bg3); border-bottom-left-radius: 4px; }
+.msg.turn-stopped { width: auto; }
+.msg.turn-stopped .msg-bubble {
+  padding: 6px 10px; color: var(--muted); background: transparent;
+  border: 1px solid var(--border); font-size: 12px; font-style: italic;
+}
 
 /* Document-edit turns replace body-sized chat output with one durable artifact. */
 .msg.document-artifact-message { align-self: flex-start; max-width: 390px; }

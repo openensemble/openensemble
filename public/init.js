@@ -188,8 +188,8 @@ async function init() {
         const state = stoppedState;
         if (!sessions[activeAgent]) sessions[activeAgent] = [];
         sessions[activeAgent].push({
-          role: 'turn_error', content: 'Stopped by user', error: 'Stopped by user',
-          status: 'stopped', retryable: false, assistantPartial: streamBuf,
+          role: 'turn_error', content: 'Stopped', error: 'Stopped',
+          status: 'stopped', code: 'stopped', retryable: false, assistantPartial: streamBuf,
           toolEvents: currentLiveToolEvents(), ts: Date.now(),
           ...(stoppedTurnId ? { turnId: stoppedTurnId } : {}),
           ...((state?.messageId || lastSentAttempt?.messageId) ? { messageId: state?.messageId || lastSentAttempt?.messageId } : {}),

@@ -1056,6 +1056,8 @@ function handleServerMessage(msg) {
         showLoginScreen();
         break;
       }
+      const intentionalStop = typeof isIntentionalTurnStop === 'function'
+        && isIntentionalTurnStop(msg);
       if (typeof pendingAttemptForId === 'function') {
         const attemptId = msg.attempt_id || msg.turn_id;
         msg._clientAttempt = pendingAttemptForId(attemptId);
@@ -1065,7 +1067,12 @@ function handleServerMessage(msg) {
           if (msg.agent) requestAgentSession(msg.agent);
         }
       }
-      if (typeof failDocumentChatTurn === 'function' && failDocumentChatTurn(msg.agent || activeAgent, msg.message, msg.documentRequest)) {
+      const documentTurnHandled = intentionalStop
+        ? (typeof cancelDocumentChatTurn === 'function'
+          && cancelDocumentChatTurn(msg.agent || activeAgent, 'Stopped', msg.documentRequest))
+        : (typeof failDocumentChatTurn === 'function'
+          && failDocumentChatTurn(msg.agent || activeAgent, msg.message, msg.documentRequest));
+      if (documentTurnHandled) {
         if (!msg.agent || msg.agent === activeAgent) {
           flushStreamRender();
           if (streamEl) streamEl.closest('.msg')?.remove();
@@ -1075,22 +1082,27 @@ function handleServerMessage(msg) {
         }
         break;
       }
-      if (msg.documentTurn && typeof failRemoteDocumentTurns === 'function'
-          && failRemoteDocumentTurns(msg.agent || activeAgent, msg.documentRequest)) {
+      const remoteDocumentTurnHandled = msg.documentTurn && (intentionalStop
+        ? (typeof cancelRemoteDocumentTurns === 'function'
+          && cancelRemoteDocumentTurns(msg.agent || activeAgent, 'Stopped', msg.documentRequest))
+        : (typeof failRemoteDocumentTurns === 'function'
+          && failRemoteDocumentTurns(msg.agent || activeAgent, msg.documentRequest)));
+      if (remoteDocumentTurnHandled) {
         finishDocumentStreamUi(msg.agent || activeAgent);
         break;
       }
       if (msg.agent) {
         const state = agentStreams[msg.agent] || freshAgentTurnState(msg.agent, msg);
         state.active = false;
-        state.phase = 'failed';
-        state.error = msg.message;
+        state.phase = intentionalStop ? 'stopped' : 'failed';
+        state.error = intentionalStop ? null : msg.message;
         agentStreams[msg.agent] = state;
         if (state.needsResync) requestAgentSession(msg.agent);
         if (msg.turn_id) terminalTurnIds[msg.agent] = msg.turn_id;
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
         const errorRow = {
           role: 'turn_error', content: msg.message, error: msg.message,
+          status: msg.status || (intentionalStop ? 'stopped' : 'failed'),
           retryable: msg.retryable === true, code: msg.code || 'turn_failed',
           assistantPartial: state.needsResync ? '' : (state.buf || (msg.agent === activeAgent ? streamBuf : '')),
           ts: Date.now(),
