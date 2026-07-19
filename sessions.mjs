@@ -172,6 +172,31 @@ const TURN_TERMINAL_ROLE = 'turn_terminal';
 const TURN_ARTIFACT_ROLES = new Set([
   'approval_pending', 'approval_resolved', 'attachment_decision',
 ]);
+// A session epoch proves that a turn is bound to a session generation; it does
+// NOT prove that the turn wrote a send-time pending user row. Hidden/isolated
+// turns intentionally keep the epoch guard while skipping that row. Track the
+// actual durable insert separately so completion can distinguish those turns
+// from an interactive turn whose pending row unexpectedly disappeared.
+const PENDING_USER_ROW_SESSIONS = Symbol('pendingUserRowSessions');
+
+function notePendingUserRow(turn, agentId) {
+  if (!turn || !agentId) return;
+  let sessions = turn[PENDING_USER_ROW_SESSIONS];
+  if (!sessions) {
+    sessions = new Set();
+    Object.defineProperty(turn, PENDING_USER_ROW_SESSIONS, {
+      value: sessions,
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
+  }
+  sessions.add(agentId);
+}
+
+function turnWrotePendingUserRow(turn, agentId) {
+  return Boolean(turn?.[PENDING_USER_ROW_SESSIONS]?.has(agentId));
+}
 
 function rowMatchesTurn(row, turn) {
   if (!row || !turn?.turnId) return false;
@@ -219,6 +244,7 @@ export function appendToSession(agentId, ...messages) {
     attemptId: turn.attemptId ?? null,
     sessionKey: turn.sessionKey ?? null,
     sessionEpoch: turn.sessionEpoch ?? null,
+    wrotePendingUserRow: turnWrotePendingUserRow(turn, agentId),
   } : null;
   const durableMessages = applyTurnMetadata(messages, turnMeta);
   return withSessionWriteLock(agentId, async () => {
@@ -237,13 +263,15 @@ export function appendToSession(agentId, ...messages) {
     // instead of appending a duplicate. Matching on the pendingTurn tag — not
     // content — keeps interleaved/barged-in turns safe: a turn only ever
     // replaces its OWN row. Falls through to a plain append when no tagged
-    // row exists (turns that never wrote one, or one already replaced).
+    // row exists for a turn that never wrote one (for example a hidden,
+    // isolated scheduled continuation).
     if (turnMeta?.turnId && durableMessages[0]?.role === 'user' && !durableMessages[0].pendingTurn) {
       if (await replacePendingUserRow(p, agentId, turnMeta.turnId, durableMessages)) return;
-      // This turn DID create a pending row, but it vanished without an epoch
-      // change only if another completion already consumed it. Never fall
-      // through to a duplicate append.
-      if (turnMeta.sessionKey === agentId && turnMeta.sessionEpoch) {
+      // If this turn DID durably create a pending row, its disappearance means
+      // another completion consumed it. Never fall through to a duplicate
+      // append. Session binding alone is insufficient here: internal turns are
+      // session-bound for Clear safety but intentionally skip the pending row.
+      if (turnMeta.wrotePendingUserRow) {
         const err = new Error('Pending turn row is no longer current');
         err.code = 'SESSION_CLEARED';
         throw err;
@@ -505,6 +533,7 @@ export function appendUserTurnPending(agentId, msg) {
         !(row?.role === 'turn_error' && row.messageId === turn.messageId));
       await atomicRewrite(p, rewritten.map(row => JSON.stringify(row)).join('\n') + '\n');
       _lineCounts.set(agentId, rewritten.length);
+      notePendingUserRow(turn, agentId);
       return { inserted: true, duplicate: false, status: 'active', retry: true };
     }
     const fh = await fsp.open(p, 'a', 0o600);
@@ -515,6 +544,7 @@ export function appendUserTurnPending(agentId, msg) {
       await fh.close();
     }
     _lineCounts.set(agentId, (_lineCounts.get(agentId) ?? existing.length) + 1);
+    notePendingUserRow(turn, agentId);
     return { inserted: true, duplicate: false, status: 'active' };
   });
 }
