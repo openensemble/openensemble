@@ -34,7 +34,6 @@ import {
 import { sendToDevice } from '../ws-handler.mjs';
 import { updateDevice } from '../lib/voice-devices.mjs';
 import { broadcastAlarmStop, hasActiveAlarms } from '../lib/alarms.mjs';
-import { abortChat } from './slot-registry.mjs';
 import { stopAmbientOnDevice } from '../lib/ambient-playback.mjs';
 import { getAmbientForDevice } from '../routes/devices.mjs';
 import { classifyRoutineIntent } from '../lib/routines.mjs';
@@ -265,13 +264,14 @@ function executeVoiceIntent(intent, deviceId, userId, agentId = null, { spareBed
       // also skip markStopIntent — it exists to suppress ambient auto-
       // restores, which is exactly what we don't want here.
       if (deviceId && !spareBed) markStopIntent(deviceId);
-      // Abort the in-flight LLM turn too. This fast-path runs before
-      // openTurn(), so "stop" during THINKING used to only silence audio —
-      // the prior turn's tool calls (an email send, an HA action) kept
-      // executing in the background with their tokens dropped as stale.
-      if (userId && agentId) {
-        try { abortChat(userId, agentId); } catch (e) { console.warn('[chat] voice-stop abort failed:', e.message); }
-      }
+      // Do NOT abortChat() here. handleChatMessage already called
+      // openTurn() before this fast-path, and openTurn aborts any prior
+      // in-flight controller for the same user+agent. Calling abortChat
+      // after that aborts THIS stop turn: the finalizer then emits
+      // "Stopped before whole-turn finalization completed.", the chat UI
+      // shows a ⚠, and the voice streamer concatenates the "okay." ack
+      // with VOICE_ERROR_FALLBACK ("Something went wrong.").
+      // Physical barge-in / WS stop still abort via voice-stt / connection.
       // Local audio was already stopped by the barge-in handler in
       // firmware when the wake fired. Also broadcast alarm_stop to every
       // device holding an active alarm for this user; the server removes

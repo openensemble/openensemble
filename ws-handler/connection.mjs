@@ -1074,13 +1074,16 @@ export function onConnection(ws, req) {
           // Voice-device fan-out: the firmware only TTS's `token` events
           // (oe_ws.c emits OE_WS_EVT_CHAT_TOKEN → speak). Plain `error`
           // events arrive but are silently dropped. Keep voice errors short
-          // and generic, and never speak them after physical stop/mute.
+          // and generic, and never speak them after physical stop/mute or for
+          // intentional user-stop terminals (status/code `stopped`).
           // Other tabs/clients still see the raw `error` so the UI can
           // render it appropriately.
           const isVoiceOrigin = !!ws._deviceId;
           const voiceSuppressed = isVoiceOrigin && isVoiceOutputSuppressed(ws, voiceTurn);
           const staleVoiceTurn = isVoiceOrigin && voiceTurn && ws._activeVoiceTurn?.id !== voiceTurn.id;
           const voiceSilent = isVoiceOrigin && !deviceSpeakReplies;
+          const isUserStopTerminal = e?.type === 'error' &&
+            (e.status === 'stopped' || e.code === 'stopped');
           if (ttsStreamer && isVoiceOrigin) {
             // Streaming path: the server synthesizes + pushes tts_audio frames;
             // the device never receives raw token/done. Route the text through
@@ -1089,6 +1092,13 @@ export function onConnection(ws, req) {
               try { ttsStreamer.abort(); } catch {}
             } else if (e?.type === 'token' && typeof e.text === 'string') ttsStreamer.pushText(e.text);
             else if (e?.type === 'done') ttsStreamer.finish();
+            else if (isUserStopTerminal) {
+              // User said stop (or barge-in cancelled the turn). Flush any
+              // short ack already buffered ("okay.") without appending the
+              // generic error fallback — that combo was heard as
+              // "okay something went wrong."
+              ttsStreamer.finish();
+            }
             else if (e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) { ttsStreamer.pushText(VOICE_ERROR_FALLBACK); ttsStreamer.finish(); }
             else if (e?.type === 'tool_call' && e.name === 'ask_agent' && !voiceDelegationAckSpoken) {
               // Sync delegation starting — could grind for a minute with zero
@@ -1112,6 +1122,8 @@ export function onConnection(ws, req) {
                 if (e?.type === 'done' || e?.type === 'error') {
                   ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
                 }
+              } else if (isVoiceOrigin && isUserStopTerminal) {
+                ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
               } else if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
                 ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: e.agent ?? 'system', ...turnTag }));
                 ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
