@@ -32,12 +32,29 @@ const FIELD_WATCH_SELECTION_KEY = 'browserFieldWatchPendingSelection';
 const FIELD_WATCH_PICKER_TTL_MS = 5 * 60_000;
 const FIELD_WATCH_POLL_INTERVAL_MS = 60_000;
 const CONFIRMATION_TTL_MS = 60_000;
+const EXTENSION_UI_DOCUMENTS = new Set(['popup.html', 'sidepanel.html']);
 let _pendingConfirmation = null;
 let _pendingConfirmationResolve = null;
 let _fieldWatchPollInFlight = false;
 let _lastFieldWatchPollAt = 0;
 let _suggestionMatchers = [];
 let _activeSuggestion = null;
+
+// A Chrome side panel is extension UI, but Chrome may still attach its host
+// tab to MessageSender.tab.  Therefore `sender.tab` cannot distinguish the
+// side panel from a content script.  Authenticate the actual sender document
+// instead and allow only our two user-facing extension pages.
+function isExtensionUiSender(sender) {
+  const runtimeId = String(chrome?.runtime?.id || '');
+  if (!runtimeId || sender?.id !== runtimeId || typeof sender?.url !== 'string') return false;
+  try {
+    return [...EXTENSION_UI_DOCUMENTS].some(documentName => (
+      sender.url === chrome.runtime.getURL(documentName)
+    ));
+  } catch {
+    return false;
+  }
+}
 
 async function getConfig() {
   const c = await chrome.storage.local.get(['serverUrl', 'name', 'browserCredential', 'pendingBrowserCredential']);
@@ -2543,7 +2560,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'get_pending_confirmation') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'confirmations are available only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'confirmations are available only in extension UI' }); return; }
       if (_pendingConfirmation && Date.now() >= Number(_pendingConfirmation.expiresAt)) {
         await clearPendingConfirmation(false, 'confirmation timed out');
       }
@@ -2551,7 +2568,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'confirmation_respond') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'browser actions can be confirmed only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'browser actions can be confirmed only in extension UI' }); return; }
       if (!_pendingConfirmation || msg.id !== _pendingConfirmation.id) {
         sendResponse({ ok: false, error: 'that confirmation is no longer pending' });
         return;
@@ -2562,7 +2579,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'browser_pairing_complete') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'pairing completion must come from extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'pairing completion must come from extension UI' }); return; }
       const credential = msg.credential;
       if (!credential?.credentialId || !credential?.privateKeyJwk?.d || !credential?.serverUrl) {
         sendResponse({ ok: false, error: 'pairing credential was incomplete' });
@@ -2580,12 +2597,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'suggestion_get') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'suggestions are available only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'suggestions are available only in extension UI' }); return; }
       sendResponse({ ok: true, available: Boolean(_activeSuggestion) });
       return;
     }
     if (msg?.type === 'suggestion_open') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'suggestions are available only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'suggestions are available only in extension UI' }); return; }
       try {
         const active = await evaluateActiveSuggestion();
         if (!active) throw new Error('There is no relevant project suggestion on this page now.');
@@ -2601,7 +2618,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'suggestion_respond') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'suggestions can be changed only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'suggestions can be changed only in extension UI' }); return; }
       try {
         const active = await evaluateActiveSuggestion();
         if (!active || String(msg.matcherId || '') !== active.matcherId) {
@@ -2622,7 +2639,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'field_watch_picker_start') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'field selection must start from extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'field selection must start from extension UI' }); return; }
       try {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
         const grant = await startFieldWatchPicker(active);
@@ -2633,7 +2650,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'field_watch_picker_cancel') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'field picker cancellation must come from extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'field picker cancellation must come from extension UI' }); return; }
       await stopFieldWatchPicker();
       await _sessionStore().remove(FIELD_WATCH_SELECTION_KEY).catch(() => {});
       sendResponse({ ok: true });
@@ -2674,13 +2691,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'field_watch_pending_get') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'field watch state is available only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'field watch state is available only in extension UI' }); return; }
       const stored = await _sessionStore().get([FIELD_WATCH_SELECTION_KEY]).catch(() => ({}));
       sendResponse({ ok: true, selection: stored?.[FIELD_WATCH_SELECTION_KEY] || null });
       return;
     }
     if (msg?.type === 'field_watch_list') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'field watches are available only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'field watches are available only in extension UI' }); return; }
       try {
         const data = await sendBrowserRpc('field_watch_list');
         sendResponse({ ok: true, watches: Array.isArray(data.watches) ? data.watches : [] });
@@ -2690,7 +2707,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'field_watch_create') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'field watches can be created only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'field watches can be created only in extension UI' }); return; }
       try {
         const stored = await _sessionStore().get([FIELD_WATCH_SELECTION_KEY]);
         const selection = stored?.[FIELD_WATCH_SELECTION_KEY];
@@ -2735,7 +2752,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'field_watch_revoke') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'field watches can be revoked only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'field watches can be revoked only in extension UI' }); return; }
       try {
         const data = await sendBrowserRpc('field_watch_revoke', { watchId: String(msg.watchId || '').slice(0, 100) });
         for (const tab of await chrome.tabs.query({}).catch(() => [])) {
@@ -2778,10 +2795,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     if (msg?.type === 'grant_lease') {
       // Leases are user-channel artifacts: only the extension's own UI
-      // (popup / side panel — senders with no tab) may create one. A
+      // (the authenticated popup / side-panel document) may create one. A
       // content script relaying page-forged messages could never mint a
       // grant this way.
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'lease grants must come from the extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'lease grants must come from the extension UI' }); return; }
       try {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!active?.id) { sendResponse({ ok: false, error: 'no active tab to grant access to' }); return; }
@@ -2833,7 +2850,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // the page the user is looking at RIGHT NOW, attach it to their
       // question, done. No lease is minted — explicitly asking is consent
       // to read this page once, not to let OE act on the tab.
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'one-shot page asks must come from the extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'one-shot page asks must come from the extension UI' }); return; }
       try {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
         sendResponse(await sendOneShotContext({ tab: active, question: msg.question, requestId: msg.requestId, announce: false }));
@@ -2843,7 +2860,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'ask_screenshot_oneshot') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'one-shot screenshots must come from the extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'one-shot screenshots must come from the extension UI' }); return; }
       try {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
         sendResponse(await sendOneShotContext({
@@ -2859,7 +2876,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'compare_tabs_oneshot') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'tab comparison must come from the extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'tab comparison must come from the extension UI' }); return; }
       try {
         sendResponse(await sendSelectedTabsComparison({
           tabIds: msg.tabIds,
@@ -2873,7 +2890,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'clip_prepare') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'clips must be prepared from the extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'clips must be prepared from the extension UI' }); return; }
       try {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
         const capture = await captureClip({ tab: active });
@@ -2884,19 +2901,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'clip_pending_get') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'clip state is available only to extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'clip state is available only to extension UI' }); return; }
       const capture = await getPendingClip();
       sendResponse({ ok: true, capture: capture ? { kind: capture.kind, title: capture.title, url: capture.url } : null });
       return;
     }
     if (msg?.type === 'clip_pending_cancel') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'clip cancellation is available only in extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'clip cancellation is available only in extension UI' }); return; }
       await chrome.storage.session.remove(PENDING_CLIP_KEY);
       sendResponse({ ok: true });
       return;
     }
     if (msg?.type === 'clip_targets') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'clip targets are available only to extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'clip targets are available only to extension UI' }); return; }
       try {
         const data = await sendBrowserRpc('clip_targets');
         sendResponse({ ok: true, targets: Array.isArray(data.targets) ? data.targets : [] });
@@ -2906,7 +2923,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'clip_save') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'clips can be saved only from extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'clips can be saved only from extension UI' }); return; }
       try {
         const capture = await getPendingClip();
         if (!capture) throw new Error('the pending clip expired — capture the page again');
@@ -2924,7 +2941,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'voice_send') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'voice messages must come from extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'voice messages must come from extension UI' }); return; }
       if (!_ws || _ws.readyState !== 1) { sendResponse({ ok: false, error: 'not connected to OE' }); return; }
       const mimeType = String(msg.mimeType || '').toLowerCase().slice(0, 100);
       const base64 = String(msg.base64 || '');
@@ -2947,7 +2964,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'handoff_targets') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'device targets are available only to extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'device targets are available only to extension UI' }); return; }
       try {
         const data = await sendBrowserRpc('handoff_targets');
         sendResponse({ ok: true, targets: Array.isArray(data.targets) ? data.targets : [] });
@@ -2957,7 +2974,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'handoff_send') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'page handoff must come from extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'page handoff must come from extension UI' }); return; }
       try {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
         const capture = await captureHandoffPage(active);
@@ -3026,13 +3043,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     if (msg?.type === 'get_teach_state') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'Teach state is available only to extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'Teach state is available only to extension UI' }); return; }
       const grant = await getTeachGrant();
       sendResponse({ ok: true, active: Boolean(grant), grant });
       return;
     }
     if (msg?.type === 'teach_start') {
-      if (_sender?.tab) { sendResponse({ ok: false, error: 'Teach Mode must be started from extension UI' }); return; }
+      if (!isExtensionUiSender(_sender)) { sendResponse({ ok: false, error: 'Teach Mode must be started from extension UI' }); return; }
       try {
         const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!active?.id || !active.url) throw new Error('no active web page to teach');
@@ -3174,6 +3191,7 @@ if (typeof chrome?.alarms?.create === 'function') {
 // are module exports only; extension pages and websites cannot call them.
 export const __test = Object.freeze({
   getConfig,
+  isExtensionUiSender,
   authorize,
   dispatch,
   grantLease,

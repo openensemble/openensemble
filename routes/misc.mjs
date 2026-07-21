@@ -717,7 +717,10 @@ export async function handle(req, res) {
     }
     try {
       const body = JSON.parse(await readBody(req));
-      const { label, agent, cron, prompt, timezone, enabled, repeat, time, dow, intervalMs, datetime } = body;
+      const { label, agent, cron, prompt, timezone, enabled, silent, repeat, time, dow, intervalMs, datetime } = body;
+      if (silent != null && typeof silent !== 'boolean') {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'silent must be a boolean' })); return true;
+      }
       // Per-user task cap — prevents a misbehaving account from scheduling
       // thousands of frequent-cron jobs that would swamp the scheduler.
       const MAX_TASKS_PER_USER = 100;
@@ -743,7 +746,10 @@ export async function handle(req, res) {
       if (!schedulable) {
         res.writeHead(400); res.end(JSON.stringify({ error: 'Task needs a schedulable shape: time ("HH:MM"), intervalMs, datetime, or a supported cron' })); return true;
       }
-      const task = await addTask({ label, agent, ...(cron != null ? { cron } : {}), ...fields, prompt, timezone, enabled, ownerId: authId });
+      const task = await addTask({
+        label, agent, ...(cron != null ? { cron } : {}), ...fields,
+        prompt, timezone, enabled, silent: silent === true, ownerId: authId,
+      });
       scheduleNewTask(task);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(task));

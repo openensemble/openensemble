@@ -619,6 +619,10 @@ async function runTask(task, broadcast, opts = {}) {
       originTaskId: task.id,
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
+      // Silent is a per-fire visibility contract, not just a flag for the
+      // main stream. Background children and the barrier reaction inherit it
+      // through scheduledContext so they cannot re-introduce chat output.
+      silent: task.silent === true,
       // Per-fire nonce for the child barrier — overlapping fires of the same
       // recurring task must not share a barrier group (see keyFor).
       runId: scheduledRunRootId,
@@ -642,6 +646,7 @@ async function runTask(task, broadcast, opts = {}) {
       originTaskOwnerId: userId,
       originTaskAgent: task.agent,
       originTaskRunId: scheduledCtx.runId,
+      originTaskManual: manual,
       rootTaskId: scheduledCtx.runId,
       traceSource: 'scheduled',
     });
@@ -743,8 +748,15 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate, cum
     createScheduledReactionTerminalCapture,
   } = await import('./lib/scheduled-reaction.mjs');
   const prompt = buildScheduledReactionPrompt({ task, aggregate, cumulativeAggregate });
-  const terminalCapture = createScheduledReactionTerminalCapture(e => sendToUser(userId, e));
-  await scheduledContext.run(scheduledCtx, () => handleChatMessage({
+  const silent = task.silent === true || scheduledCtx?.silent === true;
+  const reactionScheduledCtx = { ...scheduledCtx, silent };
+  // A silent scheduled task still needs the hidden reaction to consume worker
+  // results and drive any dependent steps, but none of its streaming frames
+  // belong on the live chat surface.
+  const terminalCapture = createScheduledReactionTerminalCapture(
+    silent ? () => {} : e => sendToUser(userId, e),
+  );
+  await scheduledContext.run(reactionScheduledCtx, () => handleChatMessage({
     userId,
     agentId: task.agent,
     text: prompt,
@@ -756,7 +768,8 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate, cum
     _hiddenUser: true,
     _isBackgroundContinuation: true,
     _isolatedTaskRun: true,
-    ...scheduledReactionTraceOptions(scheduledCtx),
+    _silent: silent,
+    ...scheduledReactionTraceOptions(reactionScheduledCtx),
   }));
   terminalCapture.assertSucceeded();
 }
@@ -885,6 +898,7 @@ export async function recoverInterruptedScheduledBackground({
   originTaskOwnerId = null,
   originScheduledRunId = null,
   manual = false,
+  silent = null,
   aggregate = '',
 }) {
   const ownerId = originTaskOwnerId || userId;
@@ -894,7 +908,11 @@ export async function recoverInterruptedScheduledBackground({
     return { ok: true, alreadyFinalized: true };
   }
   const reason = 'Server restarted after background work finished but before the scheduled continuation was durably finalized. The producer was not rerun; its result was preserved for review.';
-  await finalizeScheduledTask(task, {
+  // Visibility belongs to the interrupted fire. A user may have toggled the
+  // recurring task after that fire started; recovery must not retroactively
+  // turn a quiet occurrence into a visible chat failure (or vice versa).
+  const recoveryTask = typeof silent === 'boolean' ? { ...task, silent } : task;
+  await finalizeScheduledTask(recoveryTask, {
     succeeded: false,
     output: aggregate,
     lastError: reason,

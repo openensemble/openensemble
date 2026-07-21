@@ -29,7 +29,10 @@ import { getAgentScope } from './agents.mjs';
 // path carries boot_id.
 const BOOT_ID = randomBytes(8).toString('hex');
 console.log(`[ws] boot_id: ${BOOT_ID}`);
-import { handleChatMessage, abortChat, getActiveStreams, getActiveStream } from './chat-dispatch.mjs';
+import {
+  handleChatMessage, abortChat, getActiveStreams, getActiveStream,
+  getActiveStreamForClient,
+} from './chat-dispatch.mjs';
 import { getActiveTasks as getActiveBgTasks } from './background-tasks.mjs';
 import { projectActiveTasksForWire } from './lib/background-task-wire.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer, getSessionEpoch } from './sessions.mjs';
@@ -489,6 +492,7 @@ bindConnectionDeps({
   abortChat,
   getActiveStreams,
   getActiveStream,
+  getActiveStreamForClient,
   markAlarmFired,
   markAlarmAcked,
   handleTvCommandResult,

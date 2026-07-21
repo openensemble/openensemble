@@ -145,8 +145,13 @@ export async function racePendingIteratorNext(pendingNext, timeoutMs, signal = n
 
 /** Do not detach a tool a second time when a durable task already owns it. */
 export function autoBackgroundToolsInCurrentContext() {
+  const scheduledCtx = getScheduledContext();
   return currentTaskContext() == null
-    && getTurnContext()?.awaitSlowTools !== true;
+    && getTurnContext()?.awaitSlowTools !== true
+    // A quiet schedule must keep ownership of slow tools until they finish.
+    // Detaching here creates an independent watcher/report path outside the
+    // silent turn's browser-suppression contract.
+    && !(scheduledCtx?.originTaskId && scheduledCtx?.silent === true);
 }
 
 let _autoBackgroundDelayForTest = null;
@@ -294,4 +299,3 @@ export async function _emitAutoBgToolReport({
   } catch (_) { /* best-effort */ }
   await _emitAutoBgNotify(userId, key || agentId, notify);
 }
-

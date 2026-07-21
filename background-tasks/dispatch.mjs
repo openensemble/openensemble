@@ -92,6 +92,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const summary = (opts?.summary || task || '').slice(0, 120);
   const ac = new AbortController();
   const scheduledCtx = getScheduledContext();
+  const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
   // Coordinator-declared forward pipeline (produce → hand off → consume): both
   // stages run inside this ONE background task — one chip, one journal entry,
   // one AbortController covering the whole chain. `handoff.agent` is the real
@@ -148,6 +149,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
     originScheduledTaskAgent: opts?.originScheduledTaskAgent || scheduledCtx?.originTaskAgent || null,
     originScheduledRunId: scheduledCtx?.runId || null, // barrier per-fire nonce — completion must rejoin the SAME fire's group
     originScheduledManual: scheduledCtx?.manual === true,
+    originScheduledSilent: silentScheduled === true,
     originScheduledNote: scheduledCtx?.scheduledNote || null,
     ...(_voiceOrigin()),
   });
@@ -181,31 +183,33 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   // it to done/error. The activeTasks record gets the watcherId so progress
   // callbacks can update the same watcher.
   let watcherId = null;
-  try {
-    watcherId = registerWatcher({
-      userId,
-      agentId: visibleAgentId,       // chip lives in the user's visible chat
-      kind: 'task_proxy',
-      label: taskLabel(agentEmoji, pipeName, summary),
-      state: taskState(taskId, { phase: 'queued' }),
-      cadenceSec: 30,
-      expiresAt: null,   // indefinite — task runs as long as it takes
-      // No skillId: system-handler (registered via _systemHandlers in watchers.mjs)
-    });
-    const rec = activeTasks.get(taskId);
-    if (rec) {
-      rec.watcherId = watcherId;
-      rec.rootWatcherId = rec.rootWatcherId || watcherId;
-      rec.aliases = [...new Set([...(rec.aliases || []), watcherId, rec.rootWatcherId, rec.parentWatcherId].filter(Boolean))];
-      if (rec.rootTaskId === taskId) {
-        registerTaskRoot({ userId, rootTaskId: rec.rootTaskId, rootWatcherId: watcherId, visibleAgentId, summary });
-      } else {
-        _attachRootChild(taskId, rec);
+  if (!silentScheduled) {
+    try {
+      watcherId = registerWatcher({
+        userId,
+        agentId: visibleAgentId,       // chip lives in the user's visible chat
+        kind: 'task_proxy',
+        label: taskLabel(agentEmoji, pipeName, summary),
+        state: taskState(taskId, { phase: 'queued' }),
+        cadenceSec: 30,
+        expiresAt: null,   // indefinite — task runs as long as it takes
+        // No skillId: system-handler (registered via _systemHandlers in watchers.mjs)
+      });
+      const rec = activeTasks.get(taskId);
+      if (rec) {
+        rec.watcherId = watcherId;
+        rec.rootWatcherId = rec.rootWatcherId || watcherId;
+        rec.aliases = [...new Set([...(rec.aliases || []), watcherId, rec.rootWatcherId, rec.parentWatcherId].filter(Boolean))];
+        if (rec.rootTaskId === taskId) {
+          registerTaskRoot({ userId, rootTaskId: rec.rootTaskId, rootWatcherId: watcherId, visibleAgentId, summary });
+        } else {
+          _attachRootChild(taskId, rec);
+        }
       }
+      pushTaskProgress(taskId, `Delegated to ${agentName}: ${summary}`, { phase: 'queued' });
+    } catch (e) {
+      console.warn('[background-tasks] task_proxy watcher registration failed:', e.message);
     }
-    pushTaskProgress(taskId, `Delegated to ${agentName}: ${summary}`, { phase: 'queued' });
-  } catch (e) {
-    console.warn('[background-tasks] task_proxy watcher registration failed:', e.message);
   }
   _journalAdd(taskId);
 
@@ -257,7 +261,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
         const artifacts = [];
         const images = [];
         const bodyDocIds = [];
-        for await (const ev of iterateUntilAbort(streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, false, null, {
+        for await (const ev of iterateUntilAbort(streamChat(stageAgent, stageTask, ac.signal, null, userId, null, stageNote, silentScheduled === true, null, {
           toolPlan: stagePlan,
           routeText: stageRoute,
           isolatedTaskRun: true,
@@ -938,8 +942,9 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
   //    Include the original task summary so the user (and the LLM on its next
   //    turn) can see WHICH task the specialist is replying to — important when
   //    multiple background tasks are in flight at once.
-  try {
-    const reportAgentId = await _resolveRuntimeSessionKey(
+  if (!rec?.originScheduledSilent) {
+    try {
+      const reportAgentId = await _resolveRuntimeSessionKey(
       userId,
       rec?.visibleAgentId || coordinatorAgentId,
     );
@@ -1004,9 +1009,10 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
         ts: reportTs,
       });
     }
-  } catch (e) {
-    if (rec.isWorker) completionDeliveryDurable = false;
-    console.error('[background-tasks] failed to inject session notice:', e.message);
+    } catch (e) {
+      if (rec.isWorker) completionDeliveryDurable = false;
+      console.error('[background-tasks] failed to inject session notice:', e.message);
+    }
   }
 
   // Speak the completion on the originating voice device (idle-gated queue;
@@ -1045,6 +1051,7 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
           originTaskOwnerId: rec.originScheduledTaskOwnerId,
           originTaskAgent: rec.originScheduledTaskAgent,
           runId: rec.originScheduledRunId || null,
+          silent: rec.originScheduledSilent === true,
         },
         childId: taskId,
         resultText: result || `${agentName} completed the task.`,
@@ -1101,4 +1108,3 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
   if (!rec.isWorker || completionDeliveryDurable) _journalRemove(taskId);
   return true;
 }
-

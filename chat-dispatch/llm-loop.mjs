@@ -524,6 +524,7 @@ export async function runLlmTurn({
   userText, sessionUserText = userText, attachment, attachments, toolPlan, documentRequest, schedulerNote, source, deviceId,
   conversationMode = false,
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false, readOnlyTurn = false,
+  silent = false,
   suppressLearning = false, verifierAllowedTools = null,
   verifierLeaseRequired = false, verifierLeaseToken = null,
 }) {
@@ -546,15 +547,20 @@ export async function runLlmTurn({
   async function emitTurnFailure(event, retryable = !toolInvoked) {
     const message = String(event?.message || 'The turn failed before completion.');
     retryable = retryable === true && !preLlmSideEffectCommitted;
-    let durable = false;
-    try {
-      durable = await failPendingTurn(scopedSessionKey, message, {
-        status: ac.signal.aborted ? 'stopped' : 'failed',
-        retryable: retryable === true,
-        partial: streamBuf,
-      });
-    } catch (e) {
-      console.warn('[chat] failed to persist terminal turn status:', e.message);
+    // Silent/internal turns deliberately have no pending session row. Their
+    // scheduler/task-run record is the durable status surface, so a missing
+    // chat row must not turn the real provider error into a fake storage error.
+    let durable = silent;
+    if (!silent) {
+      try {
+        durable = await failPendingTurn(scopedSessionKey, message, {
+          status: ac.signal.aborted ? 'stopped' : 'failed',
+          retryable: retryable === true,
+          partial: streamBuf,
+        });
+      } catch (e) {
+        console.warn('[chat] failed to persist terminal turn status:', e.message);
+      }
     }
     if (ac.signal.aborted) return;
     onEvent({
@@ -585,7 +591,7 @@ export async function runLlmTurn({
       if (e.type === 'tool_call') toolInvoked = true;
       if (e.type === 'error') { callbackError = e; return; }
       onEvent({ ...e, agent: agentId });
-    }, userId ?? 'default', _attachments, schedulerNote, false, { source, deviceId }, {
+    }, userId ?? 'default', _attachments, schedulerNote, silent, { source, deviceId }, {
       toolPlan, documentRequest, hiddenUser, isolatedTaskRun,
       readOnlyTurn, sessionUserText,
     })) {
@@ -682,7 +688,7 @@ export async function runLlmTurn({
         const storageFailure = e?.code === 'SESSION_CLEARED' || /persist|session.*clear|storage/i.test(enrichedMessage || '');
         await emitTurnFailure({ type: 'error', message: enrichedMessage, ...(storageFailure ? { code: 'persistence_failed' } : {}) }, !toolInvoked && !storageFailure);
       }
-    } else {
+    } else if (!silent) {
       await failPendingTurn(scopedSessionKey, 'Stopped by user', {
         status: 'stopped', retryable: false, partial: streamBuf,
       }).catch(() => {});

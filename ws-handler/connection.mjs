@@ -63,6 +63,7 @@ let handleChatMessage = async () => {};
 let abortChat = () => {};
 let getActiveStreams = () => [];
 let getActiveStream = () => null;
+let getActiveStreamForClient = () => null;
 let markAlarmFired = () => {};
 let markAlarmAcked = () => {};
 let handleTvCommandResult = () => {};
@@ -115,6 +116,7 @@ export function bindConnectionDeps(deps) {
       case 'abortChat': abortChat = v; break;
       case 'getActiveStreams': getActiveStreams = v; break;
       case 'getActiveStream': getActiveStream = v; break;
+      case 'getActiveStreamForClient': getActiveStreamForClient = v; break;
       case 'markAlarmFired': markAlarmFired = v; break;
       case 'markAlarmAcked': markAlarmAcked = v; break;
       case 'handleTvCommandResult': handleTvCommandResult = v; break;
@@ -760,7 +762,7 @@ export function onConnection(ws, req) {
         const snapshotGeneration = nextSessionSnapshotSeq();
         const messages = await loadSession(key, 60);
         const pendingStream = getStreamBuffer(key);
-        const activeStream = getActiveStream(ws._userId, agentId);
+        const activeStream = getActiveStreamForClient(ws._userId, agentId);
         const activeSnapshotRevision = getChatRevision(ws._userId, agentId);
         const sessionEpoch = getSessionEpoch(key);
         const requestId = typeof msg.request_id === 'string' && msg.request_id.length <= 80

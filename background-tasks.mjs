@@ -152,6 +152,9 @@ export async function bootRecoverInterruptedTasks() {
         originTaskOwnerId: first.originScheduledTaskOwnerId || first.userId,
         originScheduledRunId: first.originScheduledRunId || null,
         manual: first.originScheduledManual === true,
+        silent: typeof first.originScheduledSilent === 'boolean'
+          ? first.originScheduledSilent
+          : null,
         aggregate,
       });
       scheduledRecovery.set(key, recovered?.ok === true);
@@ -174,6 +177,7 @@ export async function bootRecoverInterruptedTasks() {
       : recoveredError;
     const recentOutcome = recoveredStatus === 'done' ? 'done'
       : (recoveredStatus === 'cancelled' ? 'stopped' : 'error');
+    const silentScheduled = Boolean(e.originScheduledTaskId) && e.originScheduledSilent === true;
 
     // 1. Terminal fact for check_workers (the rings are in-memory, also lost).
     if (e.kind === 'worker') {
@@ -211,7 +215,7 @@ export async function bootRecoverInterruptedTasks() {
 
     // 2. Finalize the chip now instead of waiting out the 1h watcher boot-reap.
     //    completeWatcher no-ops if the reap already moved it to recent.
-    if (e.watcherId) {
+    if (e.watcherId && !silentScheduled) {
       try {
         completeWatcher(e.userId, e.watcherId, {
           status: recoveredStatus,
@@ -242,9 +246,14 @@ export async function bootRecoverInterruptedTasks() {
     const scheduledKey = e.originScheduledTaskId
       ? `${e.userId}:${e.originScheduledTaskId}:${e.originScheduledRunId || 'r0'}`
       : null;
-    let deliveryDurable = Boolean(reportAgentId)
-      && (!scheduledKey || scheduledRecovery.get(scheduledKey) === true);
-    if (reportAgentId) {
+    const scheduledRecoveryDurable = !scheduledKey || scheduledRecovery.get(scheduledKey) === true;
+    // Silent scheduled runs use the scheduler/task-run record as their durable
+    // completion surface. They intentionally have no session report or live
+    // completion notification to deliver.
+    let deliveryDurable = silentScheduled
+      ? scheduledRecoveryDurable
+      : Boolean(reportAgentId) && scheduledRecoveryDurable;
+    if (!silentScheduled && reportAgentId) {
       try {
         await _appendSessionReportOnce(reportAgentId, {
           role: 'assistant',
@@ -275,7 +284,7 @@ export async function bootRecoverInterruptedTasks() {
     //    detail: their raw report is hidden above and a primary-labelled
     //    assistant notification is delivered instead. Named delegations keep
     //    their existing card, scoped to this owner only.
-    if (e.kind === 'worker') {
+    if (!silentScheduled && e.kind === 'worker') {
       const published = await _publishWorkerCompletion({
         taskId,
         userId: e.userId,
@@ -306,7 +315,7 @@ export async function bootRecoverInterruptedTasks() {
           console.warn('[background-tasks] restart artifact recovery failed:', error?.message || error);
         }
       }
-    } else {
+    } else if (!silentScheduled) {
       _sendOwner(e.userId, {
         type: 'agent_report',
         agent: reportAgentId,
@@ -1099,6 +1108,8 @@ export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '
 export function registerSyncDelegation({ taskId, userId, agentId, agentName, agentEmoji = '🤖', summary = '', watcherId = null, visibleAgentId = null, abort = null, rootTaskId = null, parentTaskId = null, parentWatcherId = null, rootWatcherId = null }) {
   if (!taskId || !userId) return null;
   const rTask = rootTaskId || taskId;
+  const scheduledCtx = getScheduledContext();
+  const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
   activeTasks.set(taskId, {
     agentId, userId, agentName, agentEmoji,
     startedAt: Date.now(), summary: String(summary || '').slice(0, 120),
@@ -1113,6 +1124,12 @@ export function registerSyncDelegation({ taskId, userId, agentId, agentName, age
     aliases: [taskId, agentId, watcherId].filter(Boolean),
     isDelegation: true,
     isSync: true,
+    originScheduledTaskId: scheduledCtx?.originTaskId || null,
+    originScheduledTaskOwnerId: scheduledCtx?.originTaskOwnerId || null,
+    originScheduledTaskAgent: scheduledCtx?.originTaskAgent || null,
+    originScheduledRunId: scheduledCtx?.runId || null,
+    originScheduledManual: scheduledCtx?.manual === true,
+    originScheduledSilent: silentScheduled === true,
     abort: typeof abort === 'function' ? abort : null,
   });
   const rec = activeTasks.get(taskId);

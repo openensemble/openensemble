@@ -219,7 +219,11 @@ export function markAgentBusy(agentId) {
 export function getActiveStreams(userId) {
   const result = [];
   for (const info of activeStreams.values()) {
-    if (info.userId === userId) result.push(snapshotActiveStream(info));
+    // Internal silent turns still own the per-agent execution slot, but they
+    // are not a browser stream and must stay absent from reconnect snapshots.
+    if (info.userId === userId && info.omitFromReconnect !== true) {
+      result.push(snapshotActiveStream(info));
+    }
   }
   return result;
 }
@@ -227,6 +231,16 @@ export function getActiveStreams(userId) {
 export function getActiveStream(userId, agentId) {
   const info = activeStreams.get(`${userId}_${agentId}`);
   return info ? snapshotActiveStream(info) : null;
+}
+
+// Transport-safe single-agent lookup for explicit load_session requests.
+// getActiveStream above intentionally remains unfiltered for Stop/recovery
+// ownership checks inside the server.
+export function getActiveStreamForClient(userId, agentId) {
+  const info = activeStreams.get(`${userId}_${agentId}`);
+  return info && info.omitFromReconnect !== true
+    ? snapshotActiveStream(info)
+    : null;
 }
 
 /** @param {any} info */
@@ -317,6 +331,11 @@ export function recordStreamEvent(scopedSessionKey, event) {
       break;
   }
 
+  // A silent internal turn has no recoverable chat artifact. Keeping a
+  // .streaming file would let crash recovery manufacture a visible partial
+  // assistant row from output that was explicitly configured as quiet.
+  if (info.omitFromReconnect === true) return;
+
   // Throttled/durable crash snapshot. Raw tool args are intentionally omitted
   // from disk; they can contain credentials. The live in-memory snapshot still
   // carries args for a same-process reconnect.
@@ -341,7 +360,7 @@ export function recordStreamEvent(scopedSessionKey, event) {
  * @param {string} scopedSessionKey
  * @param {string} userId
  * @param {string} agentId
- * @param {{turnId?: string|null, messageId?: string|null, attemptId?: string|null, seq?: number}} [meta]
+ * @param {{turnId?: string|null, messageId?: string|null, attemptId?: string|null, seq?: number, hidden?: boolean}} [meta]
  */
 export function openTurn(scopedSessionKey, userId, agentId, meta = {}) {
   abortControllers.get(scopedSessionKey)?.abort();
@@ -357,16 +376,21 @@ export function openTurn(scopedSessionKey, userId, agentId, meta = {}) {
     seq: meta.seq ?? 0,
     phase: 'running',
     content: '',
-    hidden: false,
+    hidden: meta.hidden === true,
+    omitFromReconnect: meta.hidden === true,
     toolEvents: [],
     permissionRequest: null,
   };
   activeStreams.set(scopedSessionKey, info);
-  writeStreamBuffer(scopedSessionKey, {
-    content: '', turnId: info.turnId, messageId: info.messageId,
-    attemptId: info.attemptId, seq: info.seq, phase: info.phase,
-    hidden: false, toolEvents: [], permissionRequest: null,
-  });
+  if (info.omitFromReconnect) {
+    clearStreamBuffer(scopedSessionKey);
+  } else {
+    writeStreamBuffer(scopedSessionKey, {
+      content: '', turnId: info.turnId, messageId: info.messageId,
+      attemptId: info.attemptId, seq: info.seq, phase: info.phase,
+      hidden: false, toolEvents: [], permissionRequest: null,
+    });
+  }
   return ac;
 }
 

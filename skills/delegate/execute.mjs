@@ -435,6 +435,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   let background;
   const enclosingTaskOwner = currentTaskContext();
   const scheduledOwner = getScheduledContext();
+  const silentScheduledOwner = scheduledOwner?.originTaskId && scheduledOwner?.silent === true;
   const mustAwaitOwnedTask = enclosingTaskOwner != null && !scheduledOwner?.originTaskId;
   if (doHandoff) {
     // A declared forward pipeline is by construction long (produce, then
@@ -552,38 +553,40 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         unlinkParentAbort = () => parentSignal.removeEventListener('abort', onParentAbort);
       }
     }
-    try {
-      syncWatchers = await import('../../scheduler/watchers.mjs');
-      syncWatcherId = syncWatchers.registerWatcher({
-        userId,
-        agentId: syncVisibleAgentId,
-        kind: 'task_proxy',
-        label: `${agentEmoji} ${agentName}: ${taskSummary}`,
-        state: {
-          taskId: syncWatcherTaskId,
-          status: 'running',
-          targetAgentId: scopedAgent.id,
-          targetAgentName: agentName,
-          targetAgentEmoji: agentEmoji,
-          summary: taskSummary,
-          startedAt: Date.now(),
-          lastActivityAt: Date.now(),
+    if (!silentScheduledOwner) {
+      try {
+        syncWatchers = await import('../../scheduler/watchers.mjs');
+        syncWatcherId = syncWatchers.registerWatcher({
+          userId,
+          agentId: syncVisibleAgentId,
+          kind: 'task_proxy',
+          label: `${agentEmoji} ${agentName}: ${taskSummary}`,
+          state: {
+            taskId: syncWatcherTaskId,
+            status: 'running',
+            targetAgentId: scopedAgent.id,
+            targetAgentName: agentName,
+            targetAgentEmoji: agentEmoji,
+            summary: taskSummary,
+            startedAt: Date.now(),
+            lastActivityAt: Date.now(),
+            phase: 'queued',
+            toolsUsed: 0,
+            currentTool: null,
+            canCancel: true,
+          },
+          cadenceSec: 30,
+          expiresAt: null,
+        });
+        syncTaskCtx.watcherId = syncWatcherId;
+        syncTaskCtx.rootWatcherId = syncTaskCtx.rootWatcherId || syncWatcherId;
+        syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Delegating to ${agentName}: ${taskSummary}`, {
           phase: 'queued',
-          toolsUsed: 0,
-          currentTool: null,
           canCancel: true,
-        },
-        cadenceSec: 30,
-        expiresAt: null,
-      });
-      syncTaskCtx.watcherId = syncWatcherId;
-      syncTaskCtx.rootWatcherId = syncTaskCtx.rootWatcherId || syncWatcherId;
-      syncWatchers.pushWatcherStatus(userId, syncWatcherId, `Delegating to ${agentName}: ${taskSummary}`, {
-        phase: 'queued',
-        canCancel: true,
-      });
-    } catch (e) {
-      console.warn('[delegate] sync task_proxy watcher registration failed:', e.message);
+        });
+      } catch (e) {
+        console.warn('[delegate] sync task_proxy watcher registration failed:', e.message);
+      }
     }
     try {
       const bgMod = await import('../../background-tasks.mjs');
@@ -900,7 +903,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
               userId,
               null,
               sNote,
-              false,
+              silentScheduledOwner === true,
               null,
               { toolPlan: sToolPlan, routeText: sRouteText || undefined },
             ),

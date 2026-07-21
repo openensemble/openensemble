@@ -155,6 +155,7 @@ export function spawnWorker({
   // is needed. Falls back to null for an interactive (non-scheduled) worker,
   // which must NOT link to any barrier group.
   const scheduledCtx = getScheduledContext();
+  const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
   const rootTaskId = resolveBackgroundRootTaskId(taskId, { rootTaskId: requestedRootTaskId }, scheduledCtx);
   const parentTurnCtx = getTurnContext() || {};
   const suppressLearning = parentTurnCtx.suppressLearning === true;
@@ -194,6 +195,7 @@ export function spawnWorker({
     originScheduledTaskAgent: scheduledCtx?.originTaskAgent || null,
     originScheduledRunId: scheduledCtx?.runId || null, // barrier per-fire nonce — must rejoin the SAME fire's group
     originScheduledManual: scheduledCtx?.manual === true,
+    originScheduledSilent: silentScheduled === true,
   };
   activeTasks.set(taskId, taskRecord);
   if (verifierLeaseToken) verifierLeaseTokens.set(taskRecord, verifierLeaseToken);
@@ -213,21 +215,23 @@ export function spawnWorker({
   }
 
   let watcherId = null;
-  try {
-    watcherId = registerWatcher({
-      userId,
-      agentId: chipOwnerId,   // chip lives in the OWNER's chat
-      kind: 'task_proxy',
-      label: taskLabel(emoji, workerName, summary),
-      state: taskState(taskId, { phase: 'queued' }),
-      cadenceSec: 30,
-      expiresAt: null,
-    });
-    const rec = activeTasks.get(taskId);
-    if (rec) rec.watcherId = watcherId;
-    pushTaskProgress(taskId, `Started ${workerName}: ${summary}`, { phase: 'queued' });
-  } catch (e) {
-    console.warn('[workers] task_proxy watcher registration failed:', e.message);
+  if (!silentScheduled) {
+    try {
+      watcherId = registerWatcher({
+        userId,
+        agentId: chipOwnerId,   // chip lives in the OWNER's chat
+        kind: 'task_proxy',
+        label: taskLabel(emoji, workerName, summary),
+        state: taskState(taskId, { phase: 'queued' }),
+        cadenceSec: 30,
+        expiresAt: null,
+      });
+      const rec = activeTasks.get(taskId);
+      if (rec) rec.watcherId = watcherId;
+      pushTaskProgress(taskId, `Started ${workerName}: ${summary}`, { phase: 'queued' });
+    } catch (e) {
+      console.warn('[workers] task_proxy watcher registration failed:', e.message);
+    }
   }
   if (!_journalAdd(taskId)) {
     activeTasks.delete(taskId);
@@ -295,7 +299,7 @@ export function spawnWorker({
         verifierLeaseToken,
       }, () => toolRouterContext.run(null, () => runInTaskContext(taskCtx, async () => {
         const rec = activeTasks.get(taskId);
-        for await (const ev of iterateUntilAbort(streamChat(workerAgent, modelTask, ac.signal, null, userId, null, scheduledNote, false, null, {
+        for await (const ev of iterateUntilAbort(streamChat(workerAgent, modelTask, ac.signal, null, userId, null, scheduledNote, silentScheduled === true, null, {
           toolPlan: rememberedPlan,
           routeText: originalTask,
           isolatedTaskRun: true,

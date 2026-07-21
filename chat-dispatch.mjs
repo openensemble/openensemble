@@ -27,6 +27,7 @@ import {
 // without each switching to the new module path.
 export {
   isAgentBusy, waitForAgentIdle, markAgentBusy, getActiveStreams, getActiveStream,
+  getActiveStreamForClient,
   abortChat, abortAllChats,
 } from './chat-dispatch/slot-registry.mjs';
 import { tryHandleSlashCommand } from './chat-dispatch/slash-commands.mjs';
@@ -438,6 +439,7 @@ function normalizeToolPlan(plan) {
  * @param {boolean} [opts._hiddenUser]               internal turn; persist user prompt hidden from UI
  * @param {boolean} [opts._isBackgroundContinuation] internal guard for completed background-task wakeups
  * @param {boolean} [opts._isolatedTaskRun]          internal scheduled/background task turn with no chat history
+ * @param {boolean} [opts._silent]                   internal turn; execute and capture output without chat persistence
  * @param {boolean} [opts._readOnlyTurn]             internal untrusted-context turn; no interceptors, tools, or learning
  * @param {string|null} [opts._untrustedContext]     current-turn-only data appended for the model, never persisted
  * @param {string|null} [opts.turnId]                external correlation id (voice/legacy clients)
@@ -478,6 +480,7 @@ export async function handleChatMessage({
   _hiddenUser = false,
   _isBackgroundContinuation = false,
   _isolatedTaskRun = false,
+  _silent = false,
   _readOnlyTurn = false,
   _untrustedContext = null,
   turnId = null,
@@ -611,7 +614,7 @@ export async function handleChatMessage({
   let heldErrorEvent = null;
   let terminalErrorEmitted = false;
   let postCommitFailed = false;
-  let skipPostTurnArtifacts = false;
+  let skipPostTurnArtifacts = _silent;
   const replayedArtifactSignatures = new Set();
   let outwardText = '';
   let fastPathEvidence = null;
@@ -659,7 +662,7 @@ export async function handleChatMessage({
   // themselves stay on disk regardless. After the turn lands, ask the user
   // whether to keep or discard EACH one (see the attachment_decision emit
   // in the finally block below — one decision bubble per file_id).
-  let _attachmentsForDecision = (source !== 'voice-device' && !_isRoutineFollowup)
+  let _attachmentsForDecision = (!_silent && source !== 'voice-device' && !_isRoutineFollowup)
     ? attachmentList.filter(a => a?.file_id).map(a => ({ file_id: a.file_id, name: a.name, mimeType: a.mimeType }))
     : [];
 
@@ -755,7 +758,7 @@ export async function handleChatMessage({
     source, userText: rawText, userId, agentId, onEvent,
   })) return;
 
-  if (!_hiddenUser && !_isolatedTaskRun && (rawText?.trim() || attachmentList.length)) {
+  if (!_silent && !_hiddenUser && !_isolatedTaskRun && (rawText?.trim() || attachmentList.length)) {
     try {
       const pendingUserEntry = {
         role: 'user',
@@ -831,6 +834,7 @@ export async function handleChatMessage({
             messageId: wireMessageId,
             attemptId: wireAttemptId,
             seq: eventSeq,
+            hidden: _silent,
           });
           _pendingApprovalsBefore = labVerifierTurn
             ? null
@@ -899,6 +903,7 @@ export async function handleChatMessage({
     messageId: wireMessageId,
     attemptId: wireAttemptId,
     seq: eventSeq,
+    hidden: _silent,
   });
   turnAc = ac;
 
@@ -915,9 +920,11 @@ export async function handleChatMessage({
       attachment.base64 = (await fs.promises.readFile(filePath)).toString('base64');
     } catch (e) {
       skipPostTurnArtifacts = true;
-      await failPendingTurn(scopedSessionKey, 'The attached image is no longer available', {
-        retryable: false,
-      }).catch(() => {});
+      if (!_silent) {
+        await failPendingTurn(scopedSessionKey, 'The attached image is no longer available', {
+          retryable: false,
+        }).catch(() => {});
+      }
       onEvent({
         type: 'error', agent: agentId, code: 'attachment_missing', retryable: false,
         message: 'The attached image could not be reopened, so this turn was not executed. Attach it again to retry.',
@@ -1045,7 +1052,9 @@ export async function handleChatMessage({
 
   // Model restriction check
   if (chatUser?.allowedModels != null && agent.model && !chatUser.allowedModels.includes(agent.model)) {
-    await failPendingTurn(scopedSessionKey, `Model "${agent.model}" is not available for this account`, { retryable: false });
+    if (!_silent) {
+      await failPendingTurn(scopedSessionKey, `Model "${agent.model}" is not available for this account`, { retryable: false });
+    }
     onEvent({ type: 'error', message: `Model "${agent.model}" is not available for your account. Ask your admin to grant access.`, agent: agentId, ...documentEventMeta });
     return;
   }
@@ -1418,6 +1427,7 @@ export async function handleChatMessage({
       ac, onEvent: wrappedOnEvent, onNotify,
       hiddenUser: _hiddenUser,
       isolatedTaskRun: _isolatedTaskRun,
+      silent: _silent,
       readOnlyTurn: _readOnlyTurn,
       suppressLearning: labVerifierTurn,
       verifierAllowedTools: labVerifierAllowedTools,
@@ -1426,10 +1436,12 @@ export async function handleChatMessage({
     });
   } catch (e) {
     const key = `${userId}_${agentId}`;
-    await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
-      status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',
-      retryable: false,
-    }).catch(() => {});
+    if (!_silent) {
+      await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
+        status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',
+        retryable: false,
+      }).catch(() => {});
+    }
     if (!terminalErrorEmitted) {
       onEvent({
         type: 'error', agent: agentId,
@@ -1449,7 +1461,7 @@ export async function handleChatMessage({
   //   Path B: if the LLM's reply asked "did you mean X?", stash a pending
   //           clarification keyed by userId. The next turn's affirmation
   //           check (above) consumes it.
-  if (!_readOnlyTurn && !labVerifierTurn) (async () => {
+  if (!_silent && !_readOnlyTurn && !labVerifierTurn) (async () => {
     try {
       const learner = await import('./lib/alias-learner.mjs');
       await learner.observeTurnAndLearn(userId, ctx.userText, scopedSessionKey);
@@ -1473,10 +1485,12 @@ export async function handleChatMessage({
 
   } catch (e) {
     const key = `${userId}_${agentId}`;
-    await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
-      status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',
-      retryable: false,
-    }).catch(() => {});
+    if (!_silent) {
+      await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
+        status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',
+        retryable: false,
+      }).catch(() => {});
+    }
     if (!terminalErrorEmitted) {
       onEvent({
         type: 'error', agent: agentId,
@@ -1690,13 +1704,15 @@ export async function handleChatMessage({
           // runLlmTurn has a chance to convert the pending user row. Persist a
           // visible stopped error when that row still exists; this is a no-op
           // when the LLM/error path already recorded it.
-          await failPendingTurn(eventScopedSessionKey, 'Stopped by user', {
-            status: 'stopped', retryable: false, partial: outwardText,
-          });
-          await markTurnTerminal(eventScopedSessionKey, {
-            type: 'stopped', code: stoppedCode, retryable: false,
-            message: stoppedMessage,
-          });
+          if (!_silent) {
+            await failPendingTurn(eventScopedSessionKey, 'Stopped by user', {
+              status: 'stopped', retryable: false, partial: outwardText,
+            });
+            await markTurnTerminal(eventScopedSessionKey, {
+              type: 'stopped', code: stoppedCode, retryable: false,
+              message: stoppedMessage,
+            });
+          }
         } catch (e) {
           console.warn('[chat-dispatch] stopped terminal persist failed:', e.message);
           stoppedCode = 'persistence_failed';
@@ -1715,17 +1731,19 @@ export async function handleChatMessage({
         rawOnEvent(terminal);
       }
     } else if (heldTerminal) {
-      try {
-        await markTurnTerminal(eventScopedSessionKey, {
-          ...heldTerminal,
-          type: heldErrorEvent ? 'error' : 'done',
-        });
-      } catch (e) {
-        console.warn('[chat-dispatch] whole-turn terminal persist failed:', e.message);
-        heldErrorEvent = {
-          type: 'error', agent: agentId, code: 'persistence_failed', retryable: false,
-          message: 'The reply finished, but its terminal state could not be saved. Reload before taking another action.',
-        };
+      if (!_silent) {
+        try {
+          await markTurnTerminal(eventScopedSessionKey, {
+            ...heldTerminal,
+            type: heldErrorEvent ? 'error' : 'done',
+          });
+        } catch (e) {
+          console.warn('[chat-dispatch] whole-turn terminal persist failed:', e.message);
+          heldErrorEvent = {
+            type: 'error', agent: agentId, code: 'persistence_failed', retryable: false,
+            message: 'The reply finished, but its terminal state could not be saved. Reload before taking another action.',
+          };
+        }
       }
       // Turns intentionally without a session row (voice-empty/no-op/internal)
       // return false and still need their transport terminal. A thrown write is
