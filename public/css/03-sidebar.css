@@ -8,6 +8,18 @@
   position: relative; z-index: 500;
   padding-top: calc(8px + var(--safe-top));
 }
+.sidebar-feature-scroll {
+  width: 100%; flex: 1; min-height: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable both-edges;
+}
+.sidebar-footer {
+  width: 100%; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; flex-shrink: 0;
+}
 .strip-btn {
   width: 40px; height: 40px; background: none; border: none;
   border-radius: 8px; cursor: pointer; font-size: 18px;
@@ -29,7 +41,6 @@
 }
 .session-dot.warn  { display: block; background: var(--yellow); }
 .session-dot.alert { display: block; background: var(--red); }
-.strip-spacer { flex: 1; }
 .strip-sep { width: 32px; height: 1px; background: var(--border); margin: 4px 0; }
 /* User avatar button */
 .strip-user-btn {

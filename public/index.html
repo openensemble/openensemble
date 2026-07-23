@@ -117,106 +117,109 @@
 
   <!-- Left sidebar strip -->
   <div class="sidebar-strip" id="sidebarStrip">
-    <button class="strip-btn" id="sbtnAgents" data-action="toggleDrawer" data-args="[&quot;drawerAgents&quot;, &quot;sbtnAgents&quot;]" title="Agents">
-      <i data-lucide="bot"></i>
-      <span class="strip-tooltip">Agents</span>
-    </button>
-    <button class="strip-btn" id="sbtnInbox" data-action="toggleDrawer" data-args="[&quot;drawerInbox&quot;, &quot;sbtnInbox&quot;]" title="Inbox">
-      <i data-lucide="mail"></i>
-      <span class="strip-badge" id="inboxBadge" style="display:none"></span>
-      <span class="strip-tooltip">Inbox</span>
-    </button>
-    <button class="strip-btn" id="sbtnNews" data-action="toggleDrawer" data-args="[&quot;drawerNews&quot;, &quot;sbtnNews&quot;]" title="News">
-      <i data-lucide="newspaper"></i>
-      <span class="strip-tooltip">News</span>
-    </button>
-    <button class="strip-btn" id="sbtnMarkets" data-action="toggleDrawer" data-args="[&quot;drawerMarkets&quot;, &quot;sbtnMarkets&quot;]" title="Markets">
-      <i data-lucide="trending-up"></i>
-      <span class="strip-tooltip">Markets</span>
-    </button>
-    <button class="strip-btn" id="sbtnTutorToday" data-action="toggleDrawer" data-args="[&quot;drawerTutorToday&quot;, &quot;sbtnTutorToday&quot;]" title="Today · Tutor">
-      <i data-lucide="graduation-cap"></i>
-      <span class="strip-tooltip">Today · Tutor</span>
-    </button>
-    <button class="strip-btn" id="sbtnTasks" data-action="toggleDrawer" data-args="[&quot;drawerTasks&quot;, &quot;sbtnTasks&quot;]" title="Tasks">
-      <i data-lucide="square-check"></i>
-      <span class="strip-tooltip">Tasks</span>
-      <span class="strip-badge" id="tasksBadge" style="display:none"></span>
-    </button>
-    <button class="strip-btn" id="sbtnLearn" data-action="toggleDrawer" data-args="[&quot;drawerLearn&quot;, &quot;sbtnLearn&quot;]" title="Learn">
-      <i data-lucide="sparkles"></i>
-      <span class="strip-tooltip">Learn</span>
-      <span class="strip-badge" id="learnBadge" style="display:none"></span>
-    </button>
-    <button class="strip-btn" id="sbtnRunInspector" data-action="toggleDrawer" data-args="[&quot;drawerRunInspector&quot;, &quot;sbtnRunInspector&quot;]" title="Run Inspector" style="display:none">
-      <i data-lucide="scan-search"></i>
-      <span class="strip-tooltip">Run Inspector</span>
-    </button>
-    <button class="strip-btn" id="sbtnMemoryControl" data-action="toggleDrawer" data-args="[&quot;drawerMemoryControl&quot;, &quot;sbtnMemoryControl&quot;]" title="Memory" style="display:none">
-      <i data-lucide="brain"></i>
-      <span class="strip-tooltip">Memory</span>
-    </button>
-    <button class="strip-btn" id="sbtnSkillPermissions" data-action="toggleDrawer" data-args="[&quot;drawerSkillPermissions&quot;, &quot;sbtnSkillPermissions&quot;]" title="Permissions" style="display:none">
-      <i data-lucide="shield-check"></i>
-      <span class="strip-tooltip">Permissions</span>
-    </button>
-    <button class="strip-btn" id="sbtnNotes" data-action="toggleDrawer" data-args="[&quot;drawerNotes&quot;, &quot;sbtnNotes&quot;]" title="Docs">
-      <i data-lucide="folder"></i>
-      <span class="strip-tooltip">Docs</span>
-    </button>
-    <button class="strip-btn" id="sbtnMessages" data-action="toggleDrawer" data-args="[&quot;drawerMessages&quot;, &quot;sbtnMessages&quot;]" title="Messages">
-      <i data-lucide="message-circle"></i>
-      <span class="strip-tooltip">Messages</span>
-      <span class="strip-badge" id="notesBadge" style="display:none"></span>
-    </button>
-    <button class="strip-btn" id="sbtnExpenses" data-action="toggleDrawer" data-args="[&quot;drawerExpenses&quot;, &quot;sbtnExpenses&quot;]" title="Expenses">
-      <i data-lucide="wallet"></i>
-      <span class="strip-tooltip">Expenses</span>
-    </button>
-    <button class="strip-btn" id="sbtnSettings" data-action="toggleDrawer" data-args="[&quot;drawerSettings&quot;, &quot;sbtnSettings&quot;]" title="Settings">
-      <i data-lucide="settings"></i>
-      <span class="strip-tooltip">Settings</span>
-    </button>
-    <button class="strip-btn" id="sbtnDash" data-action="toggleDrawer" data-args="[&quot;drawerDashboard&quot;, &quot;sbtnDash&quot;]" title="Dashboard">
-      <i data-lucide="layout-dashboard"></i>
-      <span class="strip-tooltip">Dashboard</span>
-    </button>
-    <button class="strip-btn" id="sbtnNodes" data-action="toggleDrawer" data-args="[&quot;drawerNodes&quot;, &quot;sbtnNodes&quot;]" title="Nodes">
-      <i data-lucide="server"></i>
-      <span class="strip-tooltip">Nodes</span>
-      <span class="strip-btn-alert" id="sbtnNodesAlert" style="display:none" title="One or more nodes report unhealthy"></span>
-    </button>
-    <button class="strip-btn" id="sbtnDevices" data-action="toggleDrawer" data-args="[&quot;drawerDevices&quot;, &quot;sbtnDevices&quot;]" title="Voice devices">
-      <i data-lucide="mic"></i>
-      <span class="strip-tooltip">Voice devices</span>
-    </button>
-    <button class="strip-btn" id="sbtnGuide" data-action="toggleDrawer" data-args="[&quot;drawerGuide&quot;, &quot;sbtnGuide&quot;]" title="Guide">
-      <i data-lucide="book-open"></i>
-      <span class="strip-tooltip">Guide</span>
-      <span class="strip-btn-alert" id="sbtnGuideAlert" style="display:none" title="New entries in What's new"></span>
-    </button>
+    <div class="sidebar-feature-scroll" id="sidebarFeatureScroll">
+      <button class="strip-btn" id="sbtnAgents" data-action="toggleDrawer" data-args="[&quot;drawerAgents&quot;, &quot;sbtnAgents&quot;]" title="Agents">
+        <i data-lucide="bot"></i>
+        <span class="strip-tooltip">Agents</span>
+      </button>
+      <button class="strip-btn" id="sbtnInbox" data-action="toggleDrawer" data-args="[&quot;drawerInbox&quot;, &quot;sbtnInbox&quot;]" title="Inbox">
+        <i data-lucide="mail"></i>
+        <span class="strip-badge" id="inboxBadge" style="display:none"></span>
+        <span class="strip-tooltip">Inbox</span>
+      </button>
+      <button class="strip-btn" id="sbtnNews" data-action="toggleDrawer" data-args="[&quot;drawerNews&quot;, &quot;sbtnNews&quot;]" title="News">
+        <i data-lucide="newspaper"></i>
+        <span class="strip-tooltip">News</span>
+      </button>
+      <button class="strip-btn" id="sbtnMarkets" data-action="toggleDrawer" data-args="[&quot;drawerMarkets&quot;, &quot;sbtnMarkets&quot;]" title="Markets">
+        <i data-lucide="trending-up"></i>
+        <span class="strip-tooltip">Markets</span>
+      </button>
+      <button class="strip-btn" id="sbtnTutorToday" data-action="toggleDrawer" data-args="[&quot;drawerTutorToday&quot;, &quot;sbtnTutorToday&quot;]" title="Today · Tutor">
+        <i data-lucide="graduation-cap"></i>
+        <span class="strip-tooltip">Today · Tutor</span>
+      </button>
+      <button class="strip-btn" id="sbtnTasks" data-action="toggleDrawer" data-args="[&quot;drawerTasks&quot;, &quot;sbtnTasks&quot;]" title="Tasks">
+        <i data-lucide="square-check"></i>
+        <span class="strip-tooltip">Tasks</span>
+        <span class="strip-badge" id="tasksBadge" style="display:none"></span>
+      </button>
+      <button class="strip-btn" id="sbtnLearn" data-action="toggleDrawer" data-args="[&quot;drawerLearn&quot;, &quot;sbtnLearn&quot;]" title="Learn">
+        <i data-lucide="sparkles"></i>
+        <span class="strip-tooltip">Learn</span>
+        <span class="strip-badge" id="learnBadge" style="display:none"></span>
+      </button>
+      <button class="strip-btn" id="sbtnRunInspector" data-action="toggleDrawer" data-args="[&quot;drawerRunInspector&quot;, &quot;sbtnRunInspector&quot;]" title="Run Inspector" style="display:none">
+        <i data-lucide="scan-search"></i>
+        <span class="strip-tooltip">Run Inspector</span>
+      </button>
+      <button class="strip-btn" id="sbtnMemoryControl" data-action="toggleDrawer" data-args="[&quot;drawerMemoryControl&quot;, &quot;sbtnMemoryControl&quot;]" title="Memory" style="display:none">
+        <i data-lucide="brain"></i>
+        <span class="strip-tooltip">Memory</span>
+      </button>
+      <button class="strip-btn" id="sbtnSkillPermissions" data-action="toggleDrawer" data-args="[&quot;drawerSkillPermissions&quot;, &quot;sbtnSkillPermissions&quot;]" title="Permissions" style="display:none">
+        <i data-lucide="shield-check"></i>
+        <span class="strip-tooltip">Permissions</span>
+      </button>
+      <button class="strip-btn" id="sbtnNotes" data-action="toggleDrawer" data-args="[&quot;drawerNotes&quot;, &quot;sbtnNotes&quot;]" title="Docs">
+        <i data-lucide="folder"></i>
+        <span class="strip-tooltip">Docs</span>
+      </button>
+      <button class="strip-btn" id="sbtnMessages" data-action="toggleDrawer" data-args="[&quot;drawerMessages&quot;, &quot;sbtnMessages&quot;]" title="Messages">
+        <i data-lucide="message-circle"></i>
+        <span class="strip-tooltip">Messages</span>
+        <span class="strip-badge" id="notesBadge" style="display:none"></span>
+      </button>
+      <button class="strip-btn" id="sbtnExpenses" data-action="toggleDrawer" data-args="[&quot;drawerExpenses&quot;, &quot;sbtnExpenses&quot;]" title="Expenses">
+        <i data-lucide="wallet"></i>
+        <span class="strip-tooltip">Expenses</span>
+      </button>
+      <button class="strip-btn" id="sbtnSettings" data-action="toggleDrawer" data-args="[&quot;drawerSettings&quot;, &quot;sbtnSettings&quot;]" title="Settings">
+        <i data-lucide="settings"></i>
+        <span class="strip-tooltip">Settings</span>
+      </button>
+      <button class="strip-btn" id="sbtnDash" data-action="toggleDrawer" data-args="[&quot;drawerDashboard&quot;, &quot;sbtnDash&quot;]" title="Dashboard">
+        <i data-lucide="layout-dashboard"></i>
+        <span class="strip-tooltip">Dashboard</span>
+      </button>
+      <button class="strip-btn" id="sbtnNodes" data-action="toggleDrawer" data-args="[&quot;drawerNodes&quot;, &quot;sbtnNodes&quot;]" title="Nodes">
+        <i data-lucide="server"></i>
+        <span class="strip-tooltip">Nodes</span>
+        <span class="strip-btn-alert" id="sbtnNodesAlert" style="display:none" title="One or more nodes report unhealthy"></span>
+      </button>
+      <button class="strip-btn" id="sbtnDevices" data-action="toggleDrawer" data-args="[&quot;drawerDevices&quot;, &quot;sbtnDevices&quot;]" title="Voice devices">
+        <i data-lucide="mic"></i>
+        <span class="strip-tooltip">Voice devices</span>
+      </button>
+      <button class="strip-btn" id="sbtnGuide" data-action="toggleDrawer" data-args="[&quot;drawerGuide&quot;, &quot;sbtnGuide&quot;]" title="Guide">
+        <i data-lucide="book-open"></i>
+        <span class="strip-tooltip">Guide</span>
+        <span class="strip-btn-alert" id="sbtnGuideAlert" style="display:none" title="New entries in What's new"></span>
+      </button>
+    </div>
 
-    <div class="strip-spacer"></div>
-    <div class="strip-sep"></div>
+    <div class="sidebar-footer">
+      <div class="strip-sep"></div>
 
-    <button id="stripUserBtn" class="strip-user-btn" data-action="openUserPicker" title="Switch profile">
-      <span id="stripUserEmoji">🧑</span>
-      <span class="strip-tooltip" id="stripUserTooltip">Profile</span>
-    </button>
+      <button id="stripUserBtn" class="strip-user-btn" data-action="openUserPicker" title="Switch profile">
+        <span id="stripUserEmoji">🧑</span>
+        <span class="strip-tooltip" id="stripUserTooltip">Profile</span>
+      </button>
 
-    <button class="strip-btn" id="sbtnClear" data-action="clearSession" title="Clear session">
-      <i data-lucide="trash-2"></i>
-      <span class="strip-tooltip">Clear session</span>
-      <span class="session-dot" id="sessionDot"></span>
-    </button>
-    <button class="strip-btn" id="sbtnSearch" data-action="openSearch" title="Search conversations (Ctrl+K)">
-      <i data-lucide="search"></i>
-      <span class="strip-tooltip">Search</span>
-    </button>
-    <button class="strip-btn" id="sbtnLayout" data-action="toggleLayout" title="Toggle layout">
-      <i data-lucide="columns-2"></i>
-      <span class="strip-tooltip" id="layoutTooltip">Switch layout</span>
-    </button>
+      <button class="strip-btn" id="sbtnClear" data-action="clearSession" title="Clear session">
+        <i data-lucide="trash-2"></i>
+        <span class="strip-tooltip">Clear session</span>
+        <span class="session-dot" id="sessionDot"></span>
+      </button>
+      <button class="strip-btn" id="sbtnSearch" data-action="openSearch" title="Search conversations (Ctrl+K)">
+        <i data-lucide="search"></i>
+        <span class="strip-tooltip">Search</span>
+      </button>
+      <button class="strip-btn" id="sbtnLayout" data-action="toggleLayout" title="Toggle layout">
+        <i data-lucide="columns-2"></i>
+        <span class="strip-tooltip" id="layoutTooltip">Switch layout</span>
+      </button>
+    </div>
   </div>
 
   <!-- Main workspace -->

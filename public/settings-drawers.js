@@ -136,6 +136,7 @@ async function reconcileCustomDrawers(nextDrawers) {
 function mountCustomDrawers() {
   const workspace = document.getElementById('workspace');
   const strip     = document.getElementById('sidebarStrip');
+  const featureList = document.getElementById('sidebarFeatureScroll');
   if (!workspace || !strip) return;
 
   for (const p of drawers) {
@@ -176,10 +177,16 @@ function mountCustomDrawers() {
       btn.dataset.action = 'toggleDrawer';
       btn.dataset.args = JSON.stringify([drawerId, btnId]);
       btn.innerHTML = `${iconMarkup}<span class="strip-tooltip">${escHtml(p.name)}</span>`;
-      // Insert before the strip spacer so it sits with the other feature buttons.
-      const spacer = strip.querySelector('.strip-spacer');
-      if (spacer) strip.insertBefore(btn, spacer);
-      else strip.appendChild(btn);
+      // Keep drawer selectors in the independently-scrollable feature region;
+      // the profile and utility controls below it stay pinned.
+      if (featureList) {
+        featureList.appendChild(btn);
+      } else {
+        // Backwards-compatible fallback for an older page shell.
+        const spacer = strip.querySelector('.strip-spacer');
+        if (spacer) strip.insertBefore(btn, spacer);
+        else strip.appendChild(btn);
+      }
     }
 
     // Drawer panel
