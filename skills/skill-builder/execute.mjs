@@ -1,10 +1,21 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, unlinkSync } from 'fs';
-import { pathToFileURL, fileURLToPath } from 'url';
+import {
+  readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync,
+  unlinkSync, renameSync,
+} from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { SKILLS_DIR, USERS_DIR, userSkillsDir } from '../../lib/paths.mjs';
-import { PLUGINS_DIR, registerDrawerManifest, unregisterDrawerManifest } from '../../plugins.mjs';
+import {
+  PLUGINS_DIR,
+  DRAWER_TRANSACTION_COMMIT_FILE,
+  deriveDrawerApiPrefixes,
+  registerDrawerManifest,
+  unregisterDrawerManifest,
+  validateDrawerServerModule,
+} from '../../plugins.mjs';
 import { mayImportCustomCodeInProcess } from '../../lib/custom-code-policy.mjs';
+import { atomicWriteSync, withLock } from '../../routes/_helpers/io-lock.mjs';
+import { notifyUser } from '../../lib/personalization/notify.mjs';
 
 const BLUEPRINT = path.join(SKILLS_DIR, 'SKILL_BLUEPRINT.md');
 const CAPABILITIES = path.join(SKILLS_DIR, 'skill-builder', 'CAPABILITIES.md');
@@ -208,7 +219,7 @@ async function runPreWriteGates(skillDir, manifest, code, opts) {
 // Build a globally-unique drawer plugin id from (userId, skillId).
 // Stored flat in plugins/ so the id must not collide across users.
 function drawerPluginIdFor(userId, skillId) {
-  const shortUser = userId.replace(/^user_/, '');
+  const shortUser = userId.replace(/^user_/, '').replace(/[^a-zA-Z0-9_-]/g, '_');
   return `usr_${shortUser}_${skillId}`;
 }
 
@@ -216,78 +227,401 @@ function safeDomSuffix(s) { return s.replace(/[^a-zA-Z0-9]/g, '_'); }
 function drawerDomIdFor(pluginId) { return 'drawer_' + safeDomSuffix(pluginId); }
 function drawerBtnIdFor(pluginId) { return 'sbtn_'   + safeDomSuffix(pluginId); }
 
-// Build and persist a drawer plugin. Returns null on success, or an error string.
-export async function createDrawerForSkill(pluginId, skillName, skillIcon, userId, skillId, drawer) {
-  if (!drawer || typeof drawer !== 'object') return null;
-  const { name, icon, lucideIcon, html, initJs, serverCode } = drawer;
-  if (!html?.trim()) return 'drawer.html is required when a drawer is provided.';
+const DRAWER_HTML_MAX_BYTES = 512 * 1024;
+const DRAWER_INIT_MAX_BYTES = 512 * 1024;
+const DRAWER_SERVER_MAX_BYTES = 1024 * 1024;
 
-  // Drawer server modules do not have a subprocess protocol today. Until
-  // they do, never write or sanity-import one for an account that is not
-  // authorized to run this custom skill in-process. Static HTML/JS drawers
-  // remain available; only serverCode is refused.
-  if (serverCode?.trim() && !mayImportCustomCodeInProcess(userId, skillId)) {
-    return 'drawer.serverCode is unavailable for child, restricted, or unreadable accounts because drawer server modules run in the main OE process. Create a static drawer instead.';
-  }
-
-  const pluginDir = path.join(PLUGINS_DIR, pluginId);
-  if (existsSync(pluginDir)) {
-    return `Plugin directory "${pluginId}" already exists — refusing to overwrite.`;
-  }
-
-  const manifest = {
-    id:                 pluginId,
-    name:               (name ?? skillName).trim(),
-    icon:               (icon ?? skillIcon ?? '🔧').trim(),
-    lucideIcon:         typeof lucideIcon === 'string' && lucideIcon.trim() ? lucideIcon.trim() : undefined,
-    description:        `Drawer for skill ${skillName}`,
-    version:            '1.0.0',
-    drawer:             true,
-    drawerId:           drawerDomIdFor(pluginId),
-    btnId:              drawerBtnIdFor(pluginId),
-    enabled_by_default: true,
-    custom:             true,
-    createdBy:          userId,
-    createdAt:          new Date().toISOString(),
-    skillId,
-    html,
-    initJs:             initJs ?? '',
-  };
-  if (!manifest.lucideIcon) delete manifest.lucideIcon;
-
-  mkdirSync(pluginDir, { recursive: true });
-  writeFileSync(path.join(pluginDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-
-  if (serverCode?.trim()) {
-    if (!serverCode.includes('handleRequest')) {
-      rmSync(pluginDir, { recursive: true, force: true });
-      return 'drawer.serverCode must export async function handleRequest(req, res, cfg).';
-    }
-    writeFileSync(path.join(pluginDir, 'server.mjs'), serverCode);
-
-    // Sanity-import the server module so we catch syntax errors early.
-    try {
-      const url = pathToFileURL(path.join(pluginDir, 'server.mjs')).href + `?validate=${Date.now()}`;
-      const mod = await import(url);
-      if (typeof mod.handleRequest !== 'function') {
-        rmSync(pluginDir, { recursive: true, force: true });
-        return 'drawer.serverCode must export a function named handleRequest.';
-      }
-    } catch (e) {
-      rmSync(pluginDir, { recursive: true, force: true });
-      return `drawer.serverCode failed to load: ${e.message}`;
-    }
-  }
-
-  registerDrawerManifest(manifest);
-  return null;
+function nextDrawerVersion(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(version || ''));
+  return m ? `${m[1]}.${m[2]}.${Number(m[3]) + 1}` : '1.0.0';
 }
 
-function removeDrawerForSkill(userId, skillId) {
-  const pluginId  = drawerPluginIdFor(userId, skillId);
+function validateDrawerSourceSize(label, value, maxBytes) {
+  const bytes = Buffer.byteLength(String(value || ''), 'utf8');
+  return bytes > maxBytes
+    ? `${label} is too large (${bytes} bytes; maximum ${maxBytes}).`
+    : null;
+}
+
+function normalizeDrawerSpec(drawer, { skillName, skillIcon }) {
+  if (!drawer || typeof drawer !== 'object' || Array.isArray(drawer)) {
+    return { error: 'drawer must be an object.' };
+  }
+  const name = typeof drawer.name === 'string' ? drawer.name.trim() : '';
+  const html = typeof drawer.html === 'string' ? drawer.html : '';
+  const initJs = drawer.initJs == null ? '' : drawer.initJs;
+  const serverCode = drawer.serverCode == null ? '' : drawer.serverCode;
+  if (!name) return { error: 'drawer.name is required.' };
+  if (!html.trim()) return { error: 'drawer.html is required.' };
+  if (typeof initJs !== 'string') return { error: 'drawer.initJs must be a string when provided.' };
+  if (typeof serverCode !== 'string') return { error: 'drawer.serverCode must be a string when provided.' };
+
+  const sizeError = validateDrawerSourceSize('drawer.html', html, DRAWER_HTML_MAX_BYTES)
+    || validateDrawerSourceSize('drawer.initJs', initJs, DRAWER_INIT_MAX_BYTES)
+    || validateDrawerSourceSize('drawer.serverCode', serverCode, DRAWER_SERVER_MAX_BYTES);
+  if (sizeError) return { error: sizeError };
+
+  if (initJs.trim()) {
+    try {
+      // Match the browser's exact execution shape (AsyncFunction) without
+      // executing any user code. This catches malformed generated JS before
+      // it can replace a working drawer.
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+      new AsyncFunction(initJs);
+    } catch (e) {
+      return { error: `drawer.initJs failed to compile: ${e.message}` };
+    }
+  }
+
+  return {
+    value: {
+      name,
+      icon: typeof drawer.icon === 'string' && drawer.icon.trim()
+        ? drawer.icon.trim()
+        : (skillIcon || '🔧'),
+      lucideIcon: typeof drawer.lucideIcon === 'string' && drawer.lucideIcon.trim()
+        ? drawer.lucideIcon.trim()
+        : '',
+      html,
+      initJs,
+      serverCode,
+      description: `Drawer for skill ${skillName}`,
+    },
+  };
+}
+
+function readDrawerBundle(ownerId, skillId) {
+  const pluginId = drawerPluginIdFor(ownerId, skillId);
   const pluginDir = path.join(PLUGINS_DIR, pluginId);
-  if (existsSync(pluginDir)) rmSync(pluginDir, { recursive: true, force: true });
-  unregisterDrawerManifest(pluginId);
+  const manifestPath = path.join(pluginDir, 'manifest.json');
+  if (!existsSync(manifestPath)) return null;
+  let manifest;
+  try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); }
+  catch (e) { return { error: `Could not parse drawer manifest: ${e.message}` }; }
+  if (manifest?.id !== pluginId || manifest?.custom !== true
+      || manifest?.createdBy !== ownerId || manifest?.skillId !== skillId) {
+    return { error: 'Drawer ownership metadata is invalid; refusing to modify it.' };
+  }
+  const serverPath = path.join(pluginDir, 'server.mjs');
+  return {
+    pluginId,
+    pluginDir,
+    manifest,
+    serverCode: existsSync(serverPath) ? readFileSync(serverPath, 'utf8') : '',
+  };
+}
+
+function prepareDrawerTransaction(pluginId, pluginDir) {
+  const prefix = `.${pluginId}.rollback-`;
+  const rollbackDirs = existsSync(PLUGINS_DIR)
+    ? readdirSync(PLUGINS_DIR, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name.startsWith(prefix))
+      .map(entry => path.join(PLUGINS_DIR, entry.name))
+    : [];
+  const markerPath = path.join(pluginDir, DRAWER_TRANSACTION_COMMIT_FILE);
+  if (!rollbackDirs.length) {
+    // A committed create has no prior directory to retain. If cleanup was
+    // interrupted after its marker write, the canonical directory is enough.
+    if (existsSync(markerPath)) {
+      try { rmSync(markerPath, { force: true }); } catch {}
+    }
+    return null;
+  }
+
+  let marker = null;
+  try { marker = JSON.parse(readFileSync(markerPath, 'utf8')); } catch {}
+  const matchingCommitted = marker?.pluginId === pluginId
+    && rollbackDirs.some(dir => dir.endsWith(`.rollback-${marker.nonce}`));
+  if (!matchingCommitted) {
+    if (rollbackDirs.length !== 1) {
+      return `Drawer "${pluginId}" has multiple interrupted rollback copies. They were preserved and no live files were changed; resolve the ambiguous transaction copies before retrying.`;
+    }
+    const rollbackDir = rollbackDirs[0];
+    let rollbackManifest;
+    try {
+      rollbackManifest = JSON.parse(
+        readFileSync(path.join(rollbackDir, 'manifest.json'), 'utf8'),
+      );
+      if (rollbackManifest?.id !== pluginId) throw new Error('rollback ownership mismatch');
+      const discardDir = path.join(
+        PLUGINS_DIR,
+        `.${pluginId}.recovery-discard-${process.pid}-${randomBytes(5).toString('hex')}`,
+      );
+      let movedLive = false;
+      if (existsSync(pluginDir)) {
+        renameSync(pluginDir, discardDir);
+        movedLive = true;
+      }
+      try {
+        renameSync(rollbackDir, pluginDir);
+        registerDrawerManifest(rollbackManifest);
+        if (movedLive) rmSync(discardDir, { recursive: true, force: true });
+        return null;
+      } catch (e) {
+        if (!existsSync(pluginDir) && movedLive && existsSync(discardDir)) {
+          renameSync(discardDir, pluginDir);
+        }
+        throw e;
+      }
+    } catch (e) {
+      return `Drawer "${pluginId}" interrupted-transaction recovery failed; all recoverable copies were preserved: ${e.message}`;
+    }
+  }
+
+  // The live directory carries a marker proving it committed after the swap.
+  // Every older rollback for this plugin is now obsolete; clean all of them
+  // before permitting a new transaction so an old artifact cannot later roll
+  // a newer version backward.
+  try {
+    for (const rollbackDir of rollbackDirs) {
+      const rollbackManifest = JSON.parse(
+        readFileSync(path.join(rollbackDir, 'manifest.json'), 'utf8'),
+      );
+      if (rollbackManifest?.id !== pluginId) {
+        throw new Error(`ownership mismatch in ${path.basename(rollbackDir)}`);
+      }
+    }
+    for (const rollbackDir of rollbackDirs) {
+      rmSync(rollbackDir, { recursive: true, force: true });
+    }
+    rmSync(markerPath, { force: true });
+    return null;
+  } catch (e) {
+    return `Drawer "${pluginId}" committed, but rollback cleanup is incomplete: ${e.message}`;
+  }
+}
+
+async function persistDrawerBundle({
+  pluginId, skillName, skillIcon, userId, skillId, drawer, createOnly = false,
+  expectedVersion,
+}) {
+  const expectedPluginId = drawerPluginIdFor(userId, skillId);
+  if (pluginId !== expectedPluginId) {
+    return `Drawer id mismatch: expected "${expectedPluginId}".`;
+  }
+
+  const normalized = normalizeDrawerSpec(drawer, { skillName, skillIcon });
+  if (normalized.error) return normalized.error;
+  const spec = normalized.value;
+  if (spec.serverCode.trim() && !mayImportCustomCodeInProcess(userId, skillId)) {
+    return 'drawer.serverCode is unavailable for this account. Create a static HTML/initJs drawer instead.';
+  }
+
+  const pluginDir = path.join(PLUGINS_DIR, pluginId);
+  return withLock(pluginDir, async () => {
+    const transactionError = prepareDrawerTransaction(pluginId, pluginDir);
+    if (transactionError) return transactionError;
+
+    // Whole-skill deletion removes this file before it takes the drawer lock.
+    // Rechecking under that lock prevents a stale update turn from recreating
+    // an orphan drawer after the skill has already been deleted.
+    try {
+      const skillManifest = JSON.parse(
+        readFileSync(path.join(userSkillsDir(userId), skillId, 'manifest.json'), 'utf8'),
+      );
+      if (skillManifest?.id !== skillId || skillManifest?.createdBy !== userId) {
+        return `Skill "${skillId}" changed ownership or was deleted; drawer update cancelled.`;
+      }
+    } catch {
+      return `Skill "${skillId}" was deleted before the drawer update committed.`;
+    }
+
+    const prior = readDrawerBundle(userId, skillId);
+    if (prior?.error) return prior.error;
+    if (createOnly && prior) {
+      return `Drawer for skill "${skillId}" already exists. Use skill_update_drawer to replace it.`;
+    }
+    if (!createOnly && prior && !expectedVersion) {
+      return `Drawer "${skillId}" changed concurrently or was not read first. Call skill_read_drawer and retry with expected_version.`;
+    }
+    if (expectedVersion && prior?.manifest?.version !== expectedVersion) {
+      return `Drawer "${skillId}" version conflict: expected ${expectedVersion}, current version is ${prior?.manifest?.version || 'absent'}. Read it again before retrying.`;
+    }
+
+    const manifest = {
+      id: pluginId,
+      name: spec.name,
+      icon: spec.icon,
+      ...(spec.lucideIcon ? { lucideIcon: spec.lucideIcon } : {}),
+      description: spec.description,
+      version: prior ? nextDrawerVersion(prior.manifest.version) : '1.0.0',
+      drawer: true,
+      drawerId: drawerDomIdFor(pluginId),
+      btnId: drawerBtnIdFor(pluginId),
+      enabled_by_default: prior?.manifest?.enabled_by_default ?? true,
+      ...(prior?.manifest?.defaultSettings
+          && typeof prior.manifest.defaultSettings === 'object'
+          && !Array.isArray(prior.manifest.defaultSettings)
+        ? { defaultSettings: prior.manifest.defaultSettings }
+        : {}),
+      ...(prior?.manifest?.settingsSchema
+          && typeof prior.manifest.settingsSchema === 'object'
+          && !Array.isArray(prior.manifest.settingsSchema)
+        ? { settingsSchema: prior.manifest.settingsSchema }
+        : {}),
+      custom: true,
+      createdBy: userId,
+      createdAt: prior?.manifest?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      skillId,
+      html: spec.html,
+      initJs: spec.initJs,
+    };
+    manifest.apiPrefixes = deriveDrawerApiPrefixes(manifest);
+
+    const nonce = `${process.pid}-${randomBytes(5).toString('hex')}`;
+    const stageDir = path.join(PLUGINS_DIR, `.${pluginId}.stage-${nonce}`);
+    const backupDir = path.join(PLUGINS_DIR, `.${pluginId}.rollback-${nonce}`);
+    const commitPath = path.join(pluginDir, DRAWER_TRANSACTION_COMMIT_FILE);
+    let committed = false;
+    mkdirSync(stageDir, { recursive: false });
+    try {
+      writeFileSync(path.join(stageDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+      if (spec.serverCode.trim()) {
+        const serverPath = path.join(stageDir, 'server.mjs');
+        writeFileSync(serverPath, spec.serverCode);
+        const validation = await validateDrawerServerModule(serverPath, { timeoutMs: 5_000 });
+        if (!validation?.ok) {
+          return `drawer.serverCode failed isolated validation; the current drawer was left unchanged:\n\n${validation?.error || 'unknown validation error'}`;
+        }
+      }
+
+      let movedPrior = false;
+      let installedNew = false;
+      try {
+        if (existsSync(pluginDir)) {
+          renameSync(pluginDir, backupDir);
+          movedPrior = true;
+        }
+        renameSync(stageDir, pluginDir);
+        installedNew = true;
+        registerDrawerManifest(manifest);
+        atomicWriteSync(commitPath, JSON.stringify({ pluginId, nonce }) + '\n', {
+          encoding: 'utf8',
+          mode: 0o600,
+        });
+        committed = true;
+      } catch (e) {
+        let restoreError = null;
+        try {
+          if (installedNew && existsSync(pluginDir)) rmSync(pluginDir, { recursive: true, force: true });
+          if (movedPrior && existsSync(backupDir)) renameSync(backupDir, pluginDir);
+          if (prior?.manifest) registerDrawerManifest(prior.manifest);
+          else unregisterDrawerManifest(pluginId);
+        } catch (error) {
+          restoreError = error;
+          console.error('[skill-builder] drawer rollback failed:', error.message);
+        }
+        return restoreError
+          ? `Drawer install failed and automatic rollback was incomplete: ${e.message}. Recovery copy retained at ${backupDir}: ${restoreError.message}`
+          : `Drawer install failed — previous version restored: ${e.message}`;
+      }
+      if (existsSync(backupDir)) {
+        try { rmSync(backupDir, { recursive: true, force: true }); }
+        catch (e) { console.warn('[skill-builder] drawer rollback-dir cleanup failed:', e.message); }
+      }
+      if (!existsSync(backupDir)) {
+        try { rmSync(commitPath, { force: true }); } catch {}
+      }
+
+      void notifyUser(userId, {
+        type: 'drawers_changed',
+        action: prior ? 'update' : 'add',
+        pluginId,
+        version: manifest.version,
+      });
+      return null;
+    } finally {
+      if (existsSync(stageDir)) rmSync(stageDir, { recursive: true, force: true });
+      if (committed && existsSync(backupDir) && existsSync(pluginDir)) {
+        try { rmSync(backupDir, { recursive: true, force: true }); } catch {}
+      }
+      if (committed && !existsSync(backupDir)) {
+        try { rmSync(commitPath, { force: true }); } catch {}
+      }
+    }
+  });
+}
+
+// Build and persist a drawer plugin. Returns null on success, or an error string.
+export async function createDrawerForSkill(pluginId, skillName, skillIcon, userId, skillId, drawer) {
+  if (drawer == null) return null;
+  if (typeof drawer !== 'object' || Array.isArray(drawer)) {
+    return 'drawer must be an object.';
+  }
+  return persistDrawerBundle({
+    pluginId, skillName, skillIcon, userId, skillId, drawer, createOnly: true,
+  });
+}
+
+function purgeDrawerTransactionArtifacts(pluginId) {
+  try {
+    if (!existsSync(PLUGINS_DIR)) return;
+    const prefixes = [
+      `.${pluginId}.stage-`,
+      `.${pluginId}.rollback-`,
+      `.${pluginId}.delete-`,
+      `.${pluginId}.recovery-discard-`,
+    ];
+    for (const entry of readdirSync(PLUGINS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !prefixes.some(prefix => entry.name.startsWith(prefix))) continue;
+      try { rmSync(path.join(PLUGINS_DIR, entry.name), { recursive: true, force: true }); }
+      catch (e) {
+        console.warn('[skill-builder] drawer transaction-artifact cleanup failed:', e.message);
+      }
+    }
+  } catch (e) {
+    console.warn('[skill-builder] drawer transaction-artifact scan failed:', e.message);
+  }
+}
+
+async function removeDrawerForSkill(
+  userId,
+  skillId,
+  { requireExisting = false, expectedVersion } = {},
+) {
+  const pluginId = drawerPluginIdFor(userId, skillId);
+  const pluginDir = path.join(PLUGINS_DIR, pluginId);
+  return withLock(pluginDir, async () => {
+    if (requireExisting) {
+      const transactionError = prepareDrawerTransaction(pluginId, pluginDir);
+      if (transactionError) return { error: transactionError };
+    }
+    const prior = readDrawerBundle(userId, skillId);
+    if (prior?.error) return { error: prior.error };
+    if (expectedVersion && prior?.manifest?.version !== expectedVersion) {
+      return {
+        error: `Drawer "${skillId}" version conflict: expected ${expectedVersion}, current version is ${prior?.manifest?.version || 'absent'}. Read it again before retrying.`,
+      };
+    }
+    if (!prior) {
+      unregisterDrawerManifest(pluginId);
+      if (!requireExisting) purgeDrawerTransactionArtifacts(pluginId);
+      return requireExisting
+        ? { error: `Skill "${skillId}" does not have a drawer.` }
+        : { removed: false, pluginId };
+    }
+    const tombstone = path.join(
+      PLUGINS_DIR,
+      `.${pluginId}.delete-${process.pid}-${randomBytes(5).toString('hex')}`,
+    );
+    try {
+      renameSync(pluginDir, tombstone);
+      unregisterDrawerManifest(pluginId);
+      rmSync(tombstone, { recursive: true, force: true });
+      if (!requireExisting) purgeDrawerTransactionArtifacts(pluginId);
+    } catch (e) {
+      try {
+        if (!existsSync(pluginDir) && existsSync(tombstone)) renameSync(tombstone, pluginDir);
+        registerDrawerManifest(prior.manifest);
+      } catch (restoreError) {
+        console.error('[skill-builder] drawer delete rollback failed:', restoreError.message);
+      }
+      return { error: `Drawer delete failed — previous version restored: ${e.message}` };
+    }
+    void notifyUser(userId, { type: 'drawers_changed', action: 'delete', pluginId });
+    return { removed: true, pluginId };
+  });
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -727,6 +1061,7 @@ async function handleCreate(args, userId) {
   // agent only via this skillAssignments entry. Resolves "coordinator"
   // shorthand to the user's actual coordinator agent id so the user
   // doesn't have to remember the unique slug. Other ids pass through.
+  let assignmentPersisted = false;
   try {
     const { setRoleAssignment } = await import('../../roles.mjs');
     let targetAgentId = assign_to.trim();
@@ -736,6 +1071,7 @@ async function handleCreate(args, userId) {
       if (resolved) targetAgentId = resolved;
     }
     setRoleAssignment(skillId, targetAgentId, userId);
+    assignmentPersisted = true;
   } catch (e) {
     console.warn('[skill-builder] assign failed:', e.message);
   }
@@ -750,12 +1086,20 @@ async function handleCreate(args, userId) {
     if (drawerErr) {
       removeRoleManifest(skillId, userId);
       rmSync(skillDir, { recursive: true, force: true });
+      if (assignmentPersisted) {
+        try {
+          const { setRoleAssignment } = await import('../../roles.mjs');
+          setRoleAssignment(skillId, null, userId);
+        } catch (e) {
+          console.warn('[skill-builder] assignment rollback failed:', e.message);
+        }
+      }
       await modifyProfile(userId, user => {
         user.skills = (user.skills ?? []).filter(s => s !== skillId);
       });
       return `Drawer creation failed — skill creation rolled back:\n\n${drawerErr}`;
     }
-    drawerNote = ` A sidebar drawer was also installed — reload the page to see it.`;
+    drawerNote = ' A sidebar drawer was also installed and hot-loaded in connected browsers.';
   }
 
   // Improvement log — first entry for the new skill.
@@ -1300,15 +1644,150 @@ async function handleUpdateManifest(args, userId) {
 // Resolve a custom skill manifest with the same owner/admin visibility rule
 // every skill-builder handler uses. Returns { manifest, ownerId } or a string
 // error message to return verbatim.
-async function _resolveOwnedSkill(skillId, userId) {
+async function _resolveOwnedSkill(skillId, userId, requestedOwnerId = null) {
   const { getRoleManifest, listAllRoles } = await import('../../roles.mjs');
-  let manifest = getRoleManifest(skillId, userId);
-  if (manifest && !manifest.custom) return 'Only user-created skills can be used with this tool.';
-  if (!manifest && isPrivileged(userId)) {
-    manifest = listAllRoles().find(m => m.id === skillId && m.custom) ?? null;
+  const privileged = isPrivileged(userId);
+  const ownerId = typeof requestedOwnerId === 'string' ? requestedOwnerId.trim() : '';
+  if (ownerId && ownerId !== userId && !privileged) {
+    return 'owner_id may only target another account when called by an admin/owner.';
+  }
+
+  let manifest = null;
+  const scoped = getRoleManifest(skillId, userId);
+  if (!ownerId && scoped?.custom && scoped.createdBy === userId) manifest = scoped;
+
+  if (!manifest && privileged) {
+    const matches = listAllRoles().filter(m =>
+      m.id === skillId && m.custom && (!ownerId || m.createdBy === ownerId));
+    if (matches.length > 1) {
+      const owners = [...new Set(matches.map(m => m.createdBy).filter(Boolean))];
+      return `Multiple users own a custom skill named "${skillId}". Retry with owner_id (${owners.join(', ')}).`;
+    }
+    manifest = matches[0] ?? null;
+  }
+
+  if (!manifest && scoped && !scoped.custom) {
+    return 'Only user-created skills can be used with this tool.';
   }
   if (!manifest) return `Skill "${skillId}" not found. Use skill_list to see your skills.`;
+  if (!manifest.createdBy
+      || (manifest.createdBy !== userId && !privileged)) {
+    return 'Skill ownership could not be verified.';
+  }
   return { manifest, ownerId: manifest.createdBy };
+}
+
+async function handleReadDrawer(args, userId) {
+  const skillId = String(args?.id || '').trim();
+  if (!skillId) return 'id is required.';
+  const resolved = await _resolveOwnedSkill(skillId, userId, args?.owner_id);
+  if (typeof resolved === 'string') return resolved;
+  const { ownerId } = resolved;
+  const bundle = readDrawerBundle(ownerId, skillId);
+  if (bundle?.error) return bundle.error;
+  if (!bundle) return `Skill "${skillId}" does not have a drawer.`;
+  const m = bundle.manifest;
+  return JSON.stringify({
+    id: skillId,
+    owner_id: ownerId,
+    version: m.version,
+    drawer: {
+      name: m.name,
+      ...(m.lucideIcon ? { lucideIcon: m.lucideIcon } : {}),
+      ...(m.icon ? { icon: m.icon } : {}),
+      html: m.html || '',
+      initJs: m.initJs || '',
+      serverCode: bundle.serverCode || '',
+    },
+  }, null, 2);
+}
+
+async function handleUpdateDrawer(args, userId) {
+  const skillId = String(args?.id || '').trim();
+  if (!skillId) return 'id is required.';
+  if (!args?.drawer || typeof args.drawer !== 'object' || Array.isArray(args.drawer)) {
+    return 'drawer is required and must be a complete drawer object.';
+  }
+  const resolved = await _resolveOwnedSkill(skillId, userId, args?.owner_id);
+  if (typeof resolved === 'string') return resolved;
+  const { manifest, ownerId } = resolved;
+  const existingBundle = readDrawerBundle(ownerId, skillId);
+  if (existingBundle?.error) return existingBundle.error;
+  const expectedVersion = typeof args?.expected_version === 'string'
+    ? args.expected_version.trim()
+    : '';
+  // An interrupted swap may temporarily hide the canonical directory while
+  // its rollback copy remains authoritative. Supplying a version proves this
+  // is a replacement; persistDrawerBundle recovers and CAS-checks it under
+  // the lock before writing.
+  const existed = !!existingBundle || !!expectedVersion;
+  if (existed && !expectedVersion) {
+    return 'expected_version is required when replacing a drawer. Call skill_read_drawer first and pass its version.';
+  }
+  const pluginId = drawerPluginIdFor(ownerId, skillId);
+  const error = await persistDrawerBundle({
+    pluginId,
+    skillName: manifest.name,
+    skillIcon: manifest.icon,
+    userId: ownerId,
+    skillId,
+    drawer: args.drawer,
+    createOnly: false,
+    expectedVersion: expectedVersion || undefined,
+  });
+  if (error) return error;
+
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    appendEntry(ownerId, skillId, {
+      kind: 'drawer_update',
+      summary: `${existed ? 'Replaced' : 'Added'} drawer "${args.drawer.name}"`,
+    });
+  } catch (e) { console.debug('[skill-builder] log append (drawer_update) failed:', e.message); }
+
+  return `Skill "${manifest.name}" (${skillId}) drawer ${existed ? 'updated' : 'added'} and hot-reloaded.`
+    + ' OE does not need a restart; connected browsers refresh the drawer automatically.';
+}
+
+async function handleDeleteDrawer(args, userId) {
+  const skillId = String(args?.id || '').trim();
+  if (!skillId) return 'id is required.';
+  const resolved = await _resolveOwnedSkill(skillId, userId, args?.owner_id);
+  if (typeof resolved === 'string') return resolved;
+  const { manifest, ownerId } = resolved;
+  const expectedVersion = typeof args?.expected_version === 'string'
+    ? args.expected_version.trim()
+    : '';
+  if (!expectedVersion) {
+    return 'expected_version is required before deleting a drawer. Call skill_read_drawer first and pass its version.';
+  }
+  const result = await removeDrawerForSkill(ownerId, skillId, {
+    requireExisting: true,
+    expectedVersion,
+  });
+  if (result.error) return result.error;
+
+  try {
+    await modifyProfile(ownerId, profile => {
+      if (profile.pluginPrefs) delete profile.pluginPrefs[result.pluginId];
+      if (Array.isArray(profile.allowedFeatures)) {
+        profile.allowedFeatures = profile.allowedFeatures.filter(id => id !== result.pluginId);
+      }
+    });
+  } catch (e) {
+    console.warn('[skill-builder] drawer preference cleanup failed:', e.message);
+  }
+
+  try {
+    const { appendEntry } = await import('../../lib/skill-improvement-log.mjs');
+    appendEntry(ownerId, skillId, {
+      kind: 'drawer_delete',
+      summary: `Deleted drawer "${manifest.name}" without deleting the skill`,
+    });
+  } catch (e) { console.debug('[skill-builder] log append (drawer_delete) failed:', e.message); }
+
+  return `Skill "${manifest.name}" (${skillId}) drawer deleted and unloaded.`
+    + ' The skill, its tools, and its saved data were left intact. OE does not need a restart.';
 }
 
 // ── skill_rollback ────────────────────────────────────────────────────────────
@@ -1590,7 +2069,10 @@ async function handleDelete(args, userId) {
   clearExecutorCache(skillId, ownerId);
 
   // Remove the paired drawer plugin (if any). Safe no-op when no drawer exists.
-  removeDrawerForSkill(ownerId, skillId);
+  const drawerRemoval = await removeDrawerForSkill(ownerId, skillId);
+  if (drawerRemoval.error) {
+    console.warn('[skill-builder] paired drawer cleanup failed:', drawerRemoval.error);
+  }
 
   // Drop the LanceDB skill-trigger rows for this skill — the JSON triggers
   // file went with the skill dir above, but the embedded mirror persists
@@ -1609,6 +2091,12 @@ async function handleDelete(args, userId) {
   await modifyProfile(ownerId, user => {
     user.skills = (user.skills ?? []).filter(s => s !== skillId);
     if (user.skillAssignments) delete user.skillAssignments[skillId];
+    if (user.pluginPrefs) delete user.pluginPrefs[drawerPluginIdFor(ownerId, skillId)];
+    if (Array.isArray(user.allowedFeatures)) {
+      user.allowedFeatures = user.allowedFeatures.filter(
+        id => id !== drawerPluginIdFor(ownerId, skillId),
+      );
+    }
   });
 
   // Rebuild the embed-router intent index so the deleted skill's example
@@ -1927,7 +2415,12 @@ export async function executeSkillTool(name, args, userId, agentId) {
   // sandbox+network. Both reach skill creation / prompt injection, so they are
   // gated alongside the direct code-authoring tools. draft start/update/show/
   // discard stay open — they only mutate an in-progress spec, no code runs.
-  const CODE_AUTHORING = new Set(['skill_create', 'skill_update_code', 'skill_patch_code', 'skill_update_tool_def', 'skill_update_manifest', 'skill_draft_build', 'skill_delete', 'skill_rollback', 'skill_try_tool']);
+  const CODE_AUTHORING = new Set([
+    'skill_create', 'skill_update_code', 'skill_patch_code',
+    'skill_update_tool_def', 'skill_update_manifest',
+    'skill_update_drawer', 'skill_delete_drawer',
+    'skill_draft_build', 'skill_delete', 'skill_rollback', 'skill_try_tool',
+  ]);
   if (CODE_AUTHORING.has(name) && !isPrivileged(userId)) {
     return 'Permission denied: skill authoring (create/update/patch/delete/rollback/try) is restricted to admin/owner accounts.';
   }
@@ -1940,6 +2433,9 @@ export async function executeSkillTool(name, args, userId, agentId) {
     if (name === 'skill_patch_code')        return await handlePatchCode(args, userId);
     if (name === 'skill_update_tool_def')   return await handleUpdateToolDef(args, userId);
     if (name === 'skill_update_manifest')   return await handleUpdateManifest(args, userId);
+    if (name === 'skill_read_drawer')       return await handleReadDrawer(args, userId);
+    if (name === 'skill_update_drawer')     return await handleUpdateDrawer(args, userId);
+    if (name === 'skill_delete_drawer')     return await handleDeleteDrawer(args, userId);
     if (name === 'skill_rollback')          return await handleRollback(args, userId);
     if (name === 'skill_try_tool')          return await handleTryTool(args, userId);
     if (name === 'skill_delete')            return await handleDelete(args, userId);

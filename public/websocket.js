@@ -1320,6 +1320,9 @@ function handleServerMessage(msg) {
       }
       break;
     }
+    case 'drawers_changed':
+      if (typeof scheduleDrawerReload === 'function') scheduleDrawerReload();
+      break;
     case 'agent_list':
       // The roster broadcast carries the normalized STORED policy so picker
       // visibility updates for switches made in chat or another browser. Do
@@ -1340,6 +1343,9 @@ function handleServerMessage(msg) {
       }
       buildTabs();
       buildAgentDrawer();
+      // The roster arrives on every fresh WebSocket connection. Refreshing
+      // here heals a drawer invalidation missed while the tab was offline.
+      if (typeof scheduleDrawerReload === 'function') scheduleDrawerReload();
       if (typeof renderToolPlanPicker === 'function') renderToolPlanPicker();
       // Keep Settings' per-agent model rows in sync if the panel is rendered
       if (document.getElementById('agentModelRows') && typeof renderAgentModelRows === 'function') {

@@ -1,7 +1,7 @@
 {
   "id": "skill-builder",
   "name": "Skill Builder",
-  "description": "Create, update, and delete custom skills on demand",
+  "description": "Create, update, and delete custom skills and their sidebar drawers on demand",
   "icon": "🔩",
   "category": "service",
   "execution_hint": { "tier": "strong", "effort": "high" },
@@ -18,6 +18,8 @@
     "fix a bug in the skill we built",
     "show me the code for this skill",
     "delete one of my custom skills",
+    "update the drawer for my skill",
+    "remove a drawer but keep the skill",
     "change the tool schema in my skill",
     "roll back my last skill edit"
   ],
@@ -242,11 +244,11 @@
                 },
                 "initJs": {
                   "type": "string",
-                  "description": "OPTIONAL JS body that runs when the drawer is opened. Runs in the page global scope; use `document.getElementById(...)` and `fetch('/api/usr_myskill/...')` freely."
+                  "description": "OPTIONAL AsyncFunction body that runs when the drawer first opens. OE supplies `signal` (aborted before hot update/delete) and `drawerId`. Use addEventListener, pass signal to same-origin fetch, rely on the HttpOnly session cookie (never localStorage tokens), and return cleanup for timers/listeners outside the drawer DOM."
                 },
                 "serverCode": {
                   "type": "string",
-                  "description": "OPTIONAL ESM source for plugins/usr_{id}/server.mjs. Must export: async function handleRequest(req, res, cfg). Return true if handled, false otherwise. Only needed if the drawer needs custom HTTP endpoints."
+                  "description": "OPTIONAL ESM backend. Must export async function handleRequest(req,res,cfg) and return true when handled. Use only /api/usr_<skill-id>/ or cfg.apiPrefixes; raw core-like /api/<skill-id>/ routes are rejected. Code is preflighted and runs in a bounded disposable worker, never OE's main process."
                 }
               },
               "required": [
@@ -627,6 +629,119 @@
           "required": [
             "skill",
             "tool"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_read_drawer",
+        "description": "Read the complete current drawer definition and concurrency version for an existing user-created skill, including HTML, initJs, and serverCode. ALWAYS call this before changing or deleting an existing drawer. Pass `version` back as expected_version and pass the complete revised drawer to skill_update_drawer. Use the exact skill id; never inspect or edit plugins/ directly.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Exact skill id from its manifest (no usr_ prefix)."
+            },
+            "owner_id": {
+              "type": "string",
+              "description": "Admin/owner only: explicit owning user id when more than one account has a custom skill with this id. Omit for your own skill."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_update_drawer",
+        "description": "Add or atomically replace the sidebar drawer attached to an existing user-created skill. For an existing drawer, call skill_read_drawer first, pass its `version` as expected_version, and submit the COMPLETE revised drawer object; stale versions are rejected instead of silently overwriting a concurrent edit. Omitted initJs/serverCode are cleared. Candidate initJs is compiled and serverCode is validated in an isolated child before any live files change. On failure the previous drawer stays active. On success the backend worker and connected browser UI hot-reload without restarting OE. Never edit plugins/ directly and never restart OE for a drawer-only change.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Exact skill id from its manifest (no usr_ prefix)."
+            },
+            "owner_id": {
+              "type": "string",
+              "description": "Admin/owner only: explicit owning user id when more than one account has a custom skill with this id. Omit for your own skill."
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Required when replacing an existing drawer: exact version returned by skill_read_drawer. Omit only when adding the skill's first drawer."
+            },
+            "drawer": {
+              "type": "object",
+              "description": "Complete replacement drawer definition.",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Drawer label shown in the header and sidebar tooltip."
+                },
+                "lucideIcon": {
+                  "type": "string",
+                  "description": "Preferred Lucide icon name."
+                },
+                "icon": {
+                  "type": "string",
+                  "description": "Fallback emoji when no Lucide icon is supplied."
+                },
+                "html": {
+                  "type": "string",
+                  "description": "Complete drawer body HTML. Use OE's .cdraw-* classes and no inline event handlers."
+                },
+                "initJs": {
+                  "type": "string",
+                  "description": "Complete optional AsyncFunction body run when the drawer opens. OE supplies `signal` (aborted before hot update/delete) and `drawerId`; pass signal to fetch and check it after awaits. Use addEventListener and same-origin fetch, and return a cleanup function for timers or listeners outside the drawer DOM. An empty/omitted value clears the old init code."
+                },
+                "serverCode": {
+                  "type": "string",
+                  "description": "Complete optional ESM backend. Export async function handleRequest(req,res,cfg). Routes must use /api/usr_<skill-id>/ or a generated prefix in cfg.apiPrefixes; raw /api/<skill-id>/ is rejected so custom code cannot shadow core APIs. It runs in a disposable worker process so a crash or hang cannot take down OE. An empty/omitted value removes the old backend."
+                }
+              },
+              "required": [
+                "name",
+                "html"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "drawer"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "skill_delete_drawer",
+        "description": "Delete only the sidebar drawer attached to a user-created skill. Call skill_read_drawer first and pass its version as expected_version; stale deletes are rejected. The skill, its tools, saved data, and watchers remain intact. The drawer backend is terminated and unloaded immediately and connected browsers reconcile automatically; no OE restart is needed. Use skill_delete instead only when the user wants the entire skill removed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Exact skill id from its manifest (no usr_ prefix)."
+            },
+            "owner_id": {
+              "type": "string",
+              "description": "Admin/owner only: explicit owning user id when more than one account has a custom skill with this id. Omit for your own skill."
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact version returned by skill_read_drawer."
+            }
+          },
+          "required": [
+            "id",
+            "expected_version"
           ]
         }
       }

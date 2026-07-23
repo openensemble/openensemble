@@ -1104,7 +1104,7 @@ Give any custom ids a unique prefix (e.g. `usr_myskill_root`, not `root`) to avo
 ```html
 <div class="cdraw-toolbar">
   <span class="cdraw-section-title" style="margin:0">Invoices</span>
-  <button class="cdraw-btn" onclick="myskillReload()">
+  <button id="usr_myskill_refresh" class="cdraw-btn">
     <i data-lucide="refresh-cw"></i> Refresh
   </button>
 </div>
@@ -1113,11 +1113,11 @@ Give any custom ids a unique prefix (e.g. `usr_myskill_root`, not `root`) to avo
 
 ```js
 // initJs — renders rows using .cdraw-row / .cdraw-icon-btn / lucide icons.
-window.myskillReload = async function () {
+const list = document.getElementById('usr_myskill_list');
+async function reload() {
   const el = document.getElementById('usr_myskill_list');
   el.innerHTML = '<div class="cdraw-loading">Loading…</div>';
-  const token = localStorage.getItem('oe_token');
-  const res = await fetch('/api/usr_myskill/list', { headers: { Authorization: `Bearer ${token}` } });
+  const res = await fetch('/api/usr_myskill/list', { credentials: 'same-origin' });
   const data = await res.json();
   if (!data.length) { el.innerHTML = '<div class="cdraw-empty">Nothing here yet.</div>'; return; }
   el.innerHTML = data.map(it => `
@@ -1127,27 +1127,55 @@ window.myskillReload = async function () {
         <div class="cdraw-row-sub">${it.subtitle}</div>
       </div>
       <div class="cdraw-row-actions">
-        <button class="cdraw-icon-btn accent" title="Mark read" onclick="myskillMark('${it.id}')"><i data-lucide="check"></i></button>
-        <button class="cdraw-icon-btn accent" title="Send"      onclick="myskillSend('${it.id}')"><i data-lucide="send"></i></button>
-        <button class="cdraw-icon-btn danger" title="Delete"    onclick="myskillDel('${it.id}')"><i data-lucide="trash-2"></i></button>
+        <button class="cdraw-icon-btn accent" title="Mark read" data-op="read" data-id="${it.id}"><i data-lucide="check"></i></button>
+        <button class="cdraw-icon-btn accent" title="Send" data-op="send" data-id="${it.id}"><i data-lucide="send"></i></button>
+        <button class="cdraw-icon-btn danger" title="Delete" data-op="delete" data-id="${it.id}"><i data-lucide="trash-2"></i></button>
       </div>
     </div>`).join('');
   if (typeof lucide !== 'undefined') lucide.createIcons();
-};
-myskillReload();
+}
+document.getElementById('usr_myskill_refresh').addEventListener('click', reload);
+list.addEventListener('click', async event => {
+  const button = event.target.closest('button[data-op]');
+  if (!button) return;
+  // Dispatch button.dataset.op + button.dataset.id to your namespaced API.
+});
+await reload();
 ```
 
 The runtime also re-scans for lucide icons after `initJs` resolves, but it's fine (and idempotent) to call `lucide.createIcons()` yourself when you re-render rows.
 
 ### initJs (optional)
 
-Body of a function that runs the first time the drawer is opened (not on every open). Runs in the page's global scope — you can call `fetch()`, `document.getElementById()`, add event listeners, etc.
+Body of a function that runs the first time the drawer is opened (not on every
+open). Runs in the page's global scope — you can call `fetch()`,
+`document.getElementById()`, add event listeners, etc. OE supplies two optional
+locals: `signal` (an `AbortSignal` cancelled before hot replacement/deletion)
+and `drawerId`.
 
 ```js
-"initJs": "const root = document.getElementById('usr_myskill_root'); const r = await fetch('/api/usr_myskill/items'); root.textContent = JSON.stringify(await r.json());"
+"initJs": "const root = document.getElementById('usr_myskill_root'); const r = await fetch('/api/usr_myskill/items', { signal }); if (!signal.aborted) root.textContent = JSON.stringify(await r.json());"
 ```
 
 (Top-level `await` is allowed because the body is wrapped in an async function by the runtime.)
+
+Inline `onclick` attributes are blocked by OE's Content Security Policy. Bind
+events with `addEventListener()` in `initJs` instead. Authentication uses an
+HttpOnly same-origin cookie, so do not read a token from `localStorage`; normal
+same-origin `fetch()` calls (optionally with `credentials: 'same-origin'`) carry
+the session automatically.
+
+If `initJs` installs a timer or a listener outside the drawer's own DOM, return
+a cleanup function. OE awaits that cleanup (with a short bound) before a hot
+update or delete removes the old drawer:
+
+```js
+const onVisibility = () => { /* refresh or pause work */ };
+document.addEventListener('visibilitychange', onVisibility);
+signal.addEventListener('abort', () =>
+  document.removeEventListener('visibilitychange', onVisibility), { once: true });
+return () => document.removeEventListener('visibilitychange', onVisibility);
+```
 
 ### HTML is plain HTML — no frameworks
 
@@ -1160,13 +1188,25 @@ Only needed if the drawer needs its own HTTP endpoints. This becomes `plugins/<p
 - Use `import` at the top — `require()` will throw `require is not defined in ES module scope`.
 - The function MUST be named exactly `handleRequest` — do not rename it, do not wrap it.
 - Use the Node built-in `fs`, `path`, `crypto`, etc. You may not install new packages.
+- Custom drawer servers run in a disposable worker process, not OE's main
+  process. A syntax error, top-level throw/exit, handler crash, timeout, or
+  memory failure therefore cannot terminate OE. Updating or deleting the
+  drawer terminates the old worker and its child-process group.
+- Keep routes inside `/api/usr_<skill-id>/` (or the generated plugin-id
+  namespace returned in `cfg.apiPrefixes`). OE enforces that namespace before
+  forwarding a request. Raw `/api/<skill-id>/` routes are deliberately not
+  allowed because a skill named `users`, `admin`, or `config` could otherwise
+  intercept a core API.
+- Do not start timers, daemons, or long-running jobs at module import time.
+  Durable background work belongs in the skill's watcher handlers.
 
-Authenticating requests: OpenEnsemble uses `Authorization: Bearer <token>` headers (or `?token=…` query strings). The app helper `requireAuth(req, res)` resolves the user id and writes a 401 if no token — use it to scope data to the current user:
+OE authenticates and owner-scopes the request before it reaches the worker.
+Use the scoped `cfg.userId`; the worker never receives the full OE
+configuration:
 
 ```js
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import path from 'path';
-import { requireAuth } from '../../routes/_helpers.mjs';
 
 const BASE_USERS_DIR = path.join(process.env.OPENENSEMBLE_ROOT, 'users');
 
@@ -1174,8 +1214,12 @@ export async function handleRequest(req, res, cfg) {
   // All our routes start with /api/usr_myskill/
   if (!req.url.startsWith('/api/usr_myskill/')) return false;
 
-  const userId = requireAuth(req, res);
-  if (!userId) return true; // requireAuth already wrote the 401
+  const userId = cfg.userId;
+  if (!userId) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return true;
+  }
 
   if (req.url === '/api/usr_myskill/items' && req.method === 'GET') {
     const dir = path.join(BASE_USERS_DIR, userId, 'myskill-data');
@@ -1191,25 +1235,34 @@ export async function handleRequest(req, res, cfg) {
 }
 ```
 
-Note: `initJs` running in the browser needs to attach the token to its fetch calls. Read it from `localStorage.getItem('oe_token')` and pass it as `Authorization: Bearer <token>`:
-
-```js
-const token = localStorage.getItem('oe_token');
-const res = await fetch('/api/usr_myskill/items', {
-  headers: { Authorization: `Bearer ${token}` },
-});
-```
-
-- The handler receives `(req, res, cfg)` where `cfg` is the parsed `config.json`.
+- The handler receives `(req, res, cfg)` where `cfg` contains only scoped
+  drawer context such as `userId`, `skillId`, and `pluginId`.
 - Return `true` when you've written the response; return `false` to pass the request to the next handler.
 - Prefix your URL paths with `/api/usr_myskill/` so they don't collide with core routes.
 
 ### Lifecycle
 
 - Drawers are visible **only to their creator** — other users don't see them.
+- To inspect an existing drawer, call `skill_read_drawer({id})`. It returns
+  the complete source plus a `version` concurrency token.
+- To add a drawer later or replace one, call `skill_update_drawer` with the
+  complete drawer returned by `skill_read_drawer`, revised as needed. When
+  replacing, pass the read result's `version` as `expected_version`; a stale
+  edit is rejected instead of overwriting someone else's newer work. Candidate
+  browser and server code is validated before an atomic swap, and a failure
+  leaves the prior drawer active.
+- To remove only the UI/backend while retaining the skill, its tools, watchers,
+  and saved data, read it first and call
+  `skill_delete_drawer({id, expected_version})`.
+- Admins editing another account's duplicate-named skill pass the explicit
+  `owner_id` returned by the read tool; ordinary users can address only their
+  own drawer.
 - On `skill_delete`, the drawer plugin directory and its sidebar button are removed automatically.
-- After `skill_create` returns, the user needs to **reload the page once** for the drawer to appear (the tools, however, are available immediately with no reload).
+- Successful add/update/delete operations hot-reload the server-side drawer and
+  notify connected browsers to reconcile their sidebar and open panel. A
+  reconnect also refreshes the drawer catalog.
 - If the drawer creation fails (missing `html`, invalid `serverCode`, etc.) the entire skill creation is rolled back.
+- Never edit `plugins/` directly and never restart OE for a drawer-only change.
 
 ### Rules of thumb
 

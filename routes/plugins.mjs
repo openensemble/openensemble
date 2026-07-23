@@ -12,7 +12,10 @@ export async function handle(req, res) {
   if (req.url === '/api/drawers' && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
     const user = getUser(authId);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    });
     res.end(JSON.stringify(getDrawersForUser(user)));
     return true;
   }

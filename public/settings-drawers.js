@@ -2,20 +2,135 @@
 // Globals intentional.
 
 // ── Drawers ───────────────────────────────────────────────────────────────────
+let _drawerReloadTimer = null;
+let _drawerReloadInFlight = null;
+let _drawerReloadQueued = false;
+
 async function loadDrawers() {
-  try {
-    drawers = await fetch('/api/drawers').then(r => r.json());
+  if (_drawerReloadInFlight) {
+    // Do not lose an invalidation that arrives while an earlier catalog fetch
+    // is still in flight. Re-fetch once more after it settles so the browser
+    // always converges on the latest committed drawer version.
+    _drawerReloadQueued = true;
+    return _drawerReloadInFlight;
+  }
+  _drawerReloadInFlight = (async () => {
+    const requestedUserId = _currentUser?.id ?? null;
+    const next = await fetch('/api/drawers', { cache: 'no-store' }).then(async r => {
+      if (!r.ok) throw new Error(`Drawer catalog HTTP ${r.status}`);
+      const value = await r.json();
+      if (!Array.isArray(value)) throw new Error('Drawer catalog is not an array');
+      return value;
+    });
+    if ((_currentUser?.id ?? null) !== requestedUserId) {
+      _drawerReloadQueued = true;
+      return;
+    }
+    await reconcileCustomDrawers(next);
+    drawers = next;
     const newsDr = drawers.find(p => p.id === 'news');
     if (newsDr?.settings?.topics?.length) NEWS_TOPICS = newsDr.settings.topics;
     if (newsDr && typeof newsDr.settings?.defaultTopic === 'number') newsTopic = newsDr.settings.defaultTopic;
     mountCustomDrawers();
     applyDrawerVisibility();
-  } catch {}
+    if (document.getElementById('pluginsList')) renderDrawersSettings();
+  })();
+  try {
+    await _drawerReloadInFlight;
+  } catch (e) {
+    // Keep the currently-mounted, working catalog on a transient refresh
+    // failure. A reconnect or later invalidation retries.
+    console.warn('[drawers] catalog refresh failed:', e.message);
+  } finally {
+    _drawerReloadInFlight = null;
+    if (_drawerReloadQueued) {
+      _drawerReloadQueued = false;
+      setTimeout(() => loadDrawers(), 0);
+    }
+  }
+}
+
+function scheduleDrawerReload({ immediate = false } = {}) {
+  clearTimeout(_drawerReloadTimer);
+  if (immediate) return loadDrawers();
+  _drawerReloadTimer = setTimeout(() => loadDrawers(), 80);
 }
 
 // Tracks initJs execution state for custom drawers so we only run it once per open.
 window._customDrawerInitJs = window._customDrawerInitJs ?? {};
 window._customDrawerInitialized = window._customDrawerInitialized ?? {};
+window._customDrawerCleanup = window._customDrawerCleanup ?? {};
+window._customDrawerMounts = window._customDrawerMounts ?? {};
+window._customDrawerAbort = window._customDrawerAbort ?? {};
+window._customDrawerGeneration = window._customDrawerGeneration ?? {};
+window._customDrawerInitPromise = window._customDrawerInitPromise ?? {};
+
+function customDrawerSignature(p) {
+  return JSON.stringify([
+    p.version || '', p.name || '', p.icon || '', p.lucideIcon || '',
+    p.drawerId || '', p.btnId || '', p.html || '', p.initJs || '',
+  ]);
+}
+
+async function unmountCustomDrawer(pluginId, mounted) {
+  const drawerId = mounted?.drawerId;
+  const btnId = mounted?.btnId;
+  if (drawerId && activeDrawerId === drawerId) closeAllDrawers();
+  if (drawerId) {
+    // Invalidate the old init before touching the DOM. Cooperative init code
+    // receives this AbortSignal; the generation check also prevents a late
+    // resolution from installing cleanup state over the replacement drawer.
+    window._customDrawerGeneration[drawerId]
+      = (window._customDrawerGeneration[drawerId] || 0) + 1;
+    window._customDrawerAbort[drawerId]?.abort();
+    const initPromise = window._customDrawerInitPromise[drawerId];
+    if (initPromise) {
+      try {
+        await Promise.race([
+          Promise.resolve(initPromise),
+          new Promise(resolve => setTimeout(resolve, 1000)),
+        ]);
+      } catch {}
+    }
+  }
+  const cleanup = drawerId && window._customDrawerCleanup[drawerId];
+  if (typeof cleanup === 'function') {
+    try { await Promise.race([Promise.resolve(cleanup()), new Promise(resolve => setTimeout(resolve, 1000))]); }
+    catch (e) { console.warn(`[custom drawer ${drawerId}] cleanup error:`, e); }
+  }
+  if (drawerId) {
+    document.getElementById(drawerId)?.remove();
+    delete window._customDrawerInitJs[drawerId];
+    delete window._customDrawerInitialized[drawerId];
+    delete window._customDrawerCleanup[drawerId];
+    delete window._customDrawerAbort[drawerId];
+    delete window._customDrawerInitPromise[drawerId];
+  }
+  if (btnId) document.getElementById(btnId)?.remove();
+  delete window._customDrawerMounts[pluginId];
+
+  // An already-open mobile menu contains cloned sidebar buttons. Close it so
+  // the next open rebuilds from the authoritative strip instead of retaining
+  // a deleted or stale custom tile.
+  if (typeof closeDrawer === 'function'
+      && document.getElementById('drawer')?.classList.contains('open')) {
+    closeDrawer();
+  }
+}
+
+async function reconcileCustomDrawers(nextDrawers) {
+  const nextById = new Map(
+    nextDrawers.filter(p => p?.custom && p?.drawer).map(p => [p.id, p]),
+  );
+  for (const [pluginId, mounted] of Object.entries(window._customDrawerMounts)) {
+    const next = nextById.get(pluginId);
+    const domMissing = !document.getElementById(mounted.drawerId)
+      || !document.getElementById(mounted.btnId);
+    if (!next || mounted.signature !== customDrawerSignature(next) || domMissing) {
+      await unmountCustomDrawer(pluginId, mounted);
+    }
+  }
+}
 
 // Build DOM for any custom (skill-builder) drawer that isn't already mounted.
 function mountCustomDrawers() {
@@ -28,6 +143,13 @@ function mountCustomDrawers() {
     const drawerId = p.drawerId;
     const btnId    = p.btnId;
     if (!drawerId || !btnId) continue;
+    const signature = customDrawerSignature(p);
+    const existingMount = window._customDrawerMounts[p.id];
+    if (existingMount?.signature === signature
+        && document.getElementById(drawerId)
+        && document.getElementById(btnId)) {
+      continue;
+    }
 
     // Prefer a lucide icon (consistent with built-in drawers). Fall back to
     // emoji. A plugin manifest can set `lucideIcon: "receipt"` etc.
@@ -77,6 +199,10 @@ function mountCustomDrawers() {
     }
 
     if (p.initJs) window._customDrawerInitJs[drawerId] = p.initJs;
+    else delete window._customDrawerInitJs[drawerId];
+    window._customDrawerGeneration[drawerId]
+      = (window._customDrawerGeneration[drawerId] || 0) + 1;
+    window._customDrawerMounts[p.id] = { drawerId, btnId, signature };
   }
 
   // Materialize any new lucide icons we just injected.
@@ -90,17 +216,47 @@ function runCustomDrawerInit(drawerId) {
   const code = window._customDrawerInitJs[drawerId];
   if (!code) return;
   window._customDrawerInitialized[drawerId] = true;
+  const generation = window._customDrawerGeneration[drawerId] || 0;
+  const controller = new AbortController();
+  window._customDrawerAbort[drawerId] = controller;
   try {
     // AsyncFunction so the init body may use top-level await (fetch, etc.)
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    const fn = new AsyncFunction(code);
-    Promise.resolve(fn())
-      .then(() => {
+    // `signal` and `drawerId` are optional backwards-compatible arguments.
+    // New drawers should pass signal to fetch and check signal.aborted after
+    // awaits so a hot update cannot let stale work touch replacement DOM.
+    const fn = new AsyncFunction('signal', 'drawerId', code);
+    const initPromise = Promise.resolve(fn(controller.signal, drawerId))
+      .then(cleanup => {
+        if (window._customDrawerGeneration[drawerId] !== generation) {
+          if (typeof cleanup === 'function') {
+            return Promise.race([
+              Promise.resolve(cleanup()),
+              new Promise(resolve => setTimeout(resolve, 1000)),
+            ]).catch(e => console.warn(`[custom drawer ${drawerId}] stale cleanup error:`, e));
+          }
+          return;
+        }
+        if (typeof cleanup === 'function') window._customDrawerCleanup[drawerId] = cleanup;
         // Materialize any `data-lucide` icons the init code rendered.
         if (typeof lucide !== 'undefined') lucide.createIcons();
       })
-      .catch(e => console.error(`[custom drawer ${drawerId}] initJs error:`, e));
+      .catch(e => {
+        if (window._customDrawerGeneration[drawerId] === generation) {
+          delete window._customDrawerInitialized[drawerId];
+        }
+        console.error(`[custom drawer ${drawerId}] initJs error:`, e);
+      })
+      .finally(() => {
+        if (window._customDrawerInitPromise[drawerId] === initPromise) {
+          delete window._customDrawerInitPromise[drawerId];
+        }
+      });
+    window._customDrawerInitPromise[drawerId] = initPromise;
   } catch (e) {
+    if (window._customDrawerGeneration[drawerId] === generation) {
+      delete window._customDrawerInitialized[drawerId];
+    }
     console.error(`[custom drawer ${drawerId}] initJs compile error:`, e);
   }
 }
@@ -238,4 +394,3 @@ function addDrawerTopic(drawerId) {
   saveDrawerSetting(drawerId, 'topics', p.settings.topics);
   renderDrawersSettings();
 }
-

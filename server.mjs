@@ -12,7 +12,7 @@ import crypto     from 'crypto';
 import { fileURLToPath } from 'url';
 import { listAgents } from './agents.mjs';
 import { loadRoleManifests, validateSkills, reconcileRoleDrawers } from './roles.mjs';
-import { loadDrawerManifests } from './plugins.mjs';
+import { loadDrawerManifests, stopAllDrawerWorkers } from './plugins.mjs';
 import { startScheduler, stopScheduler, loadTasksForOwner, addTask, removeTask, registerBuiltin } from './scheduler.mjs';
 import { initPersonalization } from './lib/personalization/scheduler-init.mjs';
 import { setNotifyFn } from './lib/personalization/notify.mjs';
@@ -101,6 +101,7 @@ import { setRuntimeWarnBroadcast } from './lib/runtime-warn.mjs';
 import { setSalienceNotifyBroadcast } from './lib/proposal-salience.mjs';
 import { startUpdateChecker } from './lib/update.mjs';
 import { runBootCheck, aliveResponse, cancelCommitDeadline } from './lib/oe-admin-boot-check.mjs';
+import { resumeRestartContinuationAtBoot } from './lib/restart-continuation.mjs';
 import { sendReminderEmail } from './lib/reminder-email.mjs';
 
 // Shared helpers
@@ -978,6 +979,11 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // exits if the deadline expires). Safe no-op when no pending marker.
   if (!ISOLATED_LAB_RUNTIME) {
     runBootCheck({ port: PORT }).catch(e => console.warn('[oe-admin] boot-check failed:', e.message));
+    // A restart may have terminated the initiating chat stream after all
+    // writes completed. Resume its same-agent, read-only verification/report
+    // only after the HTTP surface and role registry are live. Do not await:
+    // audited continuations poll the boot-check outcome.
+    void resumeRestartContinuationAtBoot();
   }
 
   // MCP tools — warm each user's tool cache from their registered servers.
@@ -1294,6 +1300,7 @@ async function shutdown(signal) {
   stopAllWatchers();
   stopVoiceDeviceMonitor();
   stopCalendarMirrorLoop();
+  stopAllDrawerWorkers();
   stopHaWebSocketBridge();
   stopTunnelSupervisor().catch(() => {});
   stopMdnsAdvertiser().catch(() => {});

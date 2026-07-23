@@ -35,7 +35,8 @@ them. Other users get a clear permission denied.
 │   ├── user-providers.json           — WRITABLE via add_provider only
 │   ├── oe-admin-audit.jsonl          — append-only audit log
 │   ├── oe-admin-snapshots/           — per-entry file snapshots
-│   └── .pending-change.json          — single-slot in-flight marker
+│   ├── .pending-change.json          — single-slot in-flight marker
+│   └── .restart-continuation.json     — chmod 0600 post-boot report handoff
 ├── skills/oe-admin/integrations/     — WRITABLE via save_integration_recipe
 ├── users/<id>/credentials/           — WRITABLE via credential primitive
 └── (everything else)                 — READ-ONLY for this skill
@@ -99,20 +100,45 @@ ask the user how they'd like to add other credentials.
 
 `owner`, `userIds`, `users` are also denied to prevent privilege escalation.
 
-### `restart_server({ reason })`
+### `restart_server({ reason, continuation })`
 
-Final step for any change that needs a restart. Flow:
+Final step for any change that needs a restart. It may also perform an
+ordinary privileged restart when no audit entry is pending. Flow:
 
-1. Records a pending marker linking the most recent audit entry.
-2. Issues a `credential_prompt` of kind `confirm` — user must type the
+1. Validates a bounded continuation handoff. `writesComplete` MUST be
+   `true`; all mutation work must already be finished.
+2. Captures the exact user, calling agent, audit id, and turn correlation
+   server-side, then atomically writes a chmod-0600 checkpoint.
+3. If an audit change is pending, records a marker linking that exact entry.
+4. Issues a `credential_prompt` of kind `confirm` — user must type the
    literal phrase `RESTART`.
-3. Spawns a detached re-exec and exits.
-4. The next boot runs `runBootCheck()`:
+5. Uses the shared systemd/standalone restart primitive and exits.
+6. The next boot runs `runBootCheck()`:
    - If `/api/_alive` responds 200 within `commitDeadlineMs` (default
      60s), the change is auto-committed.
    - If the deadline expires, the change is auto-reverted (snapshots
      restored, inverse commands run) and the process exits non-zero so
      the supervisor respawns clean.
+7. Once WebSocket broadcasting is ready, OE consumes the checkpoint as a
+   hidden turn on the same agent. That turn is read-only and receives no
+   tools. Its visible report is appended with a stable report id, then the
+   checkpoint is cleared only after durable success.
+
+Continuation shape:
+
+```json
+{
+  "writesComplete": true,
+  "summary": "Concrete summary of the authorized operation",
+  "completed": ["Mutation and pre-restart verification already completed"],
+  "verification": ["Report the server-verified audit outcome after boot"]
+}
+```
+
+Each list contains 1-8 bounded strings. Never include credentials, raw user
+messages, correlation ids, audit ids, commands to run, or unfinished writes.
+OE binds identity/audit/correlation itself. If a resumed audit was rolled
+back, the report says so and does not retry the mutation.
 
 Single-slot rule: only one change can be awaiting restart-commit at a
 time. If `hasPendingChange()` is true, every mutation tool refuses.
@@ -127,12 +153,17 @@ infrastructure your admin asks about most often:
 
 - `oe_update_check()` — read-only; returns whether `origin/HEAD` has commits
   beyond your current SHA.
-- `oe_update_apply({ force?: false })` — pulls, runs `npm install` if
+- `oe_update_apply({ force?: false, continuation })` — pulls, runs `npm install` if
   package.json changed, and triggers `restartProcess()`. Refuses on a dirty
   tree unless `force: true`. Audit-logs the prior SHA so a broken update
   can be manually reverted with `git reset --hard <fromSha>` if needed.
-  (The boot-check pipeline does NOT auto-revert OE updates — too invasive.
-  Updates are commit-ish operations the admin must reason about.)
+  It writes the same report-only restart checkpoint before changing files
+  and removes it if update application fails. On success it binds the exact
+  `fromSha`/`toSha` before the already-scheduled restart runs. The new boot
+  marks the audit committed only when its live checkout equals `toSha`
+  (including the already-current/no-op case); a missing/mismatched SHA marks
+  it rolled back and is reported plainly. The generic boot-check pipeline
+  does NOT auto-reset OE updates — that would be too invasive.
 
 ### Cloudflare tunnel
 
@@ -279,7 +310,9 @@ also records an `inverse` block describing the undo.
 ## Restart semantics
 
 Most changes need a restart. After you make the change(s), tell the
-admin to restart, then call `restart_server({ reason })`. The boot
+admin to restart, then call `restart_server({ reason, continuation })`.
+The continuation must attest `writesComplete: true` and may describe only
+completed work plus a read-only verification/report checklist. The boot
 watchdog will:
 
 - Commit the change if the new process answers `/api/_alive` within the
@@ -295,6 +328,16 @@ The supervisor at `bin/oe-supervise.mjs` (opt-in, runs OE as a child
 process) handles the case where Node itself can't start (corrupt
 node_modules, broken syntax). Not all installs run the supervisor; the
 in-process boot-check is the always-on layer.
+
+After a healthy boot, the continuation resumer waits for the bound audit
+entry to become `committed` or `rolled_back` (or reports an indeterminate
+timeout), then asks the same agent for a final report with tools disabled.
+It streams that report to connected clients and appends it once to the same
+session under a stable report id. A second crash leaves the checkpoint in
+place; the next boot retries it. Transient provider/storage failures also get
+three bounded exponential-backoff attempts in the same boot, with only one
+active runner. If the report already exists, OE clears the checkpoint without
+appending a duplicate.
 
 ## Verification (always do this!)
 
@@ -317,5 +360,9 @@ to check connectivity").
 - **Skipping `oe_admin_read_blueprint`.** You're reading this now. Good.
 - **Forgetting `restart_server` after a config change.** Tell the admin
   to restart explicitly. Don't auto-restart unless they've said yes.
+- **Putting unfinished work in a restart continuation.** Never do this.
+  Finish every write first, set `writesComplete: true`, and include only
+  completed items plus read-only outcomes to report. The resumed turn has
+  no tools by design.
 - **Two pending changes at once.** Refused by the single-slot marker.
   Commit (restart) or revert the first one before starting another.

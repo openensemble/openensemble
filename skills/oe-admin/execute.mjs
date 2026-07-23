@@ -30,7 +30,7 @@ import {
 } from '../../lib/credentials.mjs';
 import {
   recordPending, getEntry, listAudit, markCommitted, markRolledBack,
-  hasPendingChange, writePendingMarker, deletePendingMarker, revertEntry,
+  hasPendingChange, writePendingMarker, revertEntry,
 } from '../../lib/oe-admin-audit.mjs';
 import {
   loadUserProviders, setUserProvider, removeUserProvider, mergeProviders,
@@ -39,7 +39,14 @@ import { OPENAI_COMPAT_PROVIDERS } from '../../chat/providers/_shared.mjs';
 import { modifyConfig, loadConfig } from '../../routes/_helpers.mjs';
 import {
   checkForUpdate, applyUpdate, forceApplyUpdate, getCachedState, getCurrentSha,
+  restartProcess,
 } from '../../lib/update.mjs';
+import {
+  normalizeRestartContinuation,
+  writeRestartContinuationCheckpoint,
+  bindUpdateRestartCheckpoint,
+  clearRestartContinuationCheckpoint,
+} from '../../lib/restart-continuation.mjs';
 import {
   getStatus as getTunnelStatus, configure as configureTunnel,
   start as startTunnel, stop as stopTunnel, setEnabled as setTunnelEnabled,
@@ -471,13 +478,24 @@ async function handleInstallIntegration(args, userId) {
 
 // ── Tool: restart_server ─────────────────────────────────────────────────────
 
-async function handleRestartServer(args, userId) {
-  const { reason } = args ?? {};
-  const recent = listAudit({ limit: 5 });
-  const pending = recent.find(e => e.status === 'pending');
-  if (!pending) {
-    return 'No pending change to commit. If you want to restart anyway, run the system restart command (admin only).';
+async function handleRestartServer(args, userId, agentId) {
+  const { reason, continuation } = args ?? {};
+  if (typeof agentId !== 'string' || !agentId.trim()) {
+    return 'Restart requires a persistent calling agent so the post-boot report has a safe destination.';
   }
+  if (typeof reason !== 'string' || reason.trim().length < 3 || reason.trim().length > 500) {
+    return 'reason is required and must be 3-500 characters.';
+  }
+  try {
+    normalizeRestartContinuation(continuation);
+  } catch (e) {
+    return `Invalid restart continuation: ${e.message}`;
+  }
+
+  // Bind the exact audit entry server-side. Tool arguments cannot select an
+  // audit id or supply correlation identifiers.
+  const recent = listAudit({ limit: 50 });
+  const pending = recent.find(e => e.status === 'pending' && e.restartRequired);
 
   // Final confirm step.
   let confirmResult;
@@ -485,7 +503,9 @@ async function handleRestartServer(args, userId) {
     confirmResult = await requestCredential({
       userId,
       label: 'Type RESTART to confirm',
-      description: `About to restart OE to commit audit ${pending.id} (${pending.op}). Reason: ${reason ?? '(none)'}.`,
+      description: pending
+        ? `About to restart OE to commit audit ${pending.id} (${pending.op}). Reason: ${reason}.`
+        : `About to perform an ordinary privileged OE restart. Reason: ${reason}.`,
       kind: 'confirm',
       ttlMs: 60_000,
     });
@@ -498,36 +518,43 @@ async function handleRestartServer(args, userId) {
     return 'Confirmation phrase was not "RESTART" — restart cancelled.';
   }
 
-  // Write the pending marker linking the change to this restart attempt.
-  writePendingMarker({ entryId: pending.id });
-
-  log.warn('oe-admin', 'restart triggered by admin', { userId, entryId: pending.id, reason });
-
-  // Under systemd, just SIGTERM and let Restart=always respawn. Standalone,
-  // spawn a detached re-exec. Same dual path lib/update.mjs:restartProcess
-  // uses — keeps oe-admin compatible with the systemd-unit recipe.
-  const underSystemd = !!(process.env.INVOCATION_ID || process.env.SYSTEMD_EXEC_PID);
-  setTimeout(() => {
-    try {
-      if (underSystemd) {
-        log.info('oe-admin', 'restart: systemd will respawn');
-        process.kill(process.pid, 'SIGTERM');
-        return;
-      }
-      const child = spawn(process.argv[0], process.argv.slice(1), {
-        detached: true,
-        stdio: 'ignore',
-        cwd: BASE_DIR,
-      });
-      child.unref();
-      setTimeout(() => process.exit(0), 500);
-    } catch (e) {
-      log.error('oe-admin', 'restart spawn failed', { err: e.message });
-      deletePendingMarker();
+  // The checkpoint must be durable before either the audit marker or SIGTERM.
+  // Resumption is report-only, so a killed pre-restart turn never replays a
+  // mutation whose completion state is ambiguous.
+  let checkpoint;
+  try {
+    checkpoint = writeRestartContinuationCheckpoint({
+      userId,
+      agentId,
+      reason,
+      auditId: pending?.id ?? null,
+      continuation,
+      op: 'restart_server',
+    });
+    if (pending) writePendingMarker({ entryId: pending.id });
+  } catch (e) {
+    if (checkpoint) {
+      clearRestartContinuationCheckpoint({ expectedId: checkpoint.id });
     }
-  }, 200);
+    return `Restart cancelled before shutdown: could not persist its continuation checkpoint (${e.message}).`;
+  }
 
-  return `Restart scheduled. Audit ${pending.id} will be committed once the new process answers /api/_alive within ${pending.commitDeadlineMs ?? 60_000}ms; otherwise the change will be auto-reverted.`;
+  log.warn('oe-admin', 'restart triggered by admin', {
+    userId,
+    agentId,
+    entryId: pending?.id ?? null,
+    checkpointId: checkpoint.id,
+    reason,
+  });
+
+  // Shared dual-path primitive: systemd gets SIGTERM + Restart=; standalone
+  // installs get the detached re-exec path.
+  setImmediate(() => restartProcess());
+
+  if (!pending) {
+    return `Ordinary restart scheduled. Continuation ${checkpoint.id} will publish the same-agent result after OE returns.`;
+  }
+  return `Restart scheduled. Audit ${pending.id} will be committed once the new process answers /api/_alive within ${pending.commitDeadlineMs ?? 60_000}ms; otherwise the change will be auto-reverted. Continuation: ${checkpoint.id}.`;
 }
 
 // ── Tool: list_audit_log / revert_audit_entry ────────────────────────────────
@@ -607,7 +634,15 @@ async function handleUpdateCheck() {
 
 function shortSha(s) { return s ? String(s).slice(0, 8) : '<none>'; }
 
-async function handleUpdateApply(args, userId) {
+async function handleUpdateApply(args, userId, agentId) {
+  if (typeof agentId !== 'string' || !agentId.trim()) {
+    return 'Update requires a persistent calling agent so the post-boot report has a safe destination.';
+  }
+  try {
+    normalizeRestartContinuation(args?.continuation);
+  } catch (e) {
+    return `Invalid update continuation: ${e.message}`;
+  }
   const fromSha = await getCurrentSha();
   // Audit-log the update intent before kicking it off. applyUpdate restarts
   // the process itself, so the boot-check / pending-marker pipeline doesn't
@@ -622,19 +657,55 @@ async function handleUpdateApply(args, userId) {
     restartRequired: true,
     commitDeadlineMs: 90_000,
   });
-  const result = args?.force
-    ? await forceApplyUpdate()
-    : await applyUpdate();
+  let checkpoint;
+  try {
+    checkpoint = writeRestartContinuationCheckpoint({
+      userId,
+      agentId,
+      reason: args?.force ? 'Force-apply OE self-update' : 'Apply OE self-update',
+      auditId: entryId,
+      continuation: args.continuation,
+      op: 'oe_update_apply',
+    });
+  } catch (e) {
+    markRolledBack(entryId, 'continuation_checkpoint_failed');
+    return `Update cancelled before changing files: could not persist its restart continuation (${e.message}).`;
+  }
+  let result;
+  try {
+    result = args?.force
+      ? await forceApplyUpdate()
+      : await applyUpdate();
+  } catch (e) {
+    clearRestartContinuationCheckpoint({ expectedId: checkpoint.id });
+    markRolledBack(entryId, 'apply_threw');
+    throw e;
+  }
   if (!result.ok) {
+    clearRestartContinuationCheckpoint({ expectedId: checkpoint.id });
     markRolledBack(entryId, `apply_failed:${result.code}`);
     return `Update failed (${result.code}): ${result.message}`;
   }
-  // applyUpdate calls restartProcess at the end — the audit entry stays
-  // pending until manually committed by the admin via list_audit_log /
-  // (future) commit_audit_entry. For now, mark it committed optimistically
-  // since the new build will start applying immediately.
-  markCommitted(entryId);
-  return `Update applying: ${shortSha(result.fromSha)} → ${shortSha(result.toSha)}${result.npmRan ? ' (npm install ran)' : ''}. Server restarting. Audit: ${entryId}.`;
+  // applyUpdate has only SCHEDULED restartProcess at this point. Bind its exact
+  // result synchronously before the event loop reaches that setImmediate. The
+  // next boot commits this audit only if its live checkout equals toSha.
+  try {
+    bindUpdateRestartCheckpoint({
+      checkpointId: checkpoint.id,
+      fromSha: result.fromSha,
+      toSha: result.toSha,
+    });
+  } catch (e) {
+    // Do not clear the checkpoint: restart is already scheduled. A checkpoint
+    // without a verified expected SHA fails closed to rolled_back after boot
+    // and still gives the user a durable visible report.
+    log.error('oe-admin', 'update restart outcome binding failed', {
+      entryId,
+      checkpointId: checkpoint.id,
+      err: e.message,
+    });
+  }
+  return `Update applying: ${shortSha(result.fromSha)} → ${shortSha(result.toSha)}${result.npmRan ? ' (npm install ran)' : ''}. Server restarting. Audit ${entryId} will commit only after the new boot verifies ${shortSha(result.toSha)}. Continuation: ${checkpoint.id}.`;
 }
 
 // ── Tool: tunnel_* ───────────────────────────────────────────────────────────
@@ -767,11 +838,11 @@ export async function executeSkillTool(name, args, userId, agentId) {
     if (name === 'add_provider')            return await handleAddProvider(args, userId, agentId);
     if (name === 'set_config_field')        return await handleSetConfigField(args, userId);
     if (name === 'install_integration')     return await handleInstallIntegration(args, userId);
-    if (name === 'restart_server')          return await handleRestartServer(args, userId);
+    if (name === 'restart_server')          return await handleRestartServer(args, userId, agentId);
     if (name === 'list_audit_log')          return handleListAudit(args);
     if (name === 'revert_audit_entry')      return await handleRevertAuditEntry(args, userId);
     if (name === 'oe_update_check')         return await handleUpdateCheck();
-    if (name === 'oe_update_apply')         return await handleUpdateApply(args, userId);
+    if (name === 'oe_update_apply')         return await handleUpdateApply(args, userId, agentId);
     if (name === 'tunnel_status')           return handleTunnelStatus();
     if (name === 'tunnel_configure')        return await handleTunnelConfigure(args, userId);
     if (name === 'tunnel_start')            return await handleTunnelStart(args, userId);

@@ -142,13 +142,52 @@
       "type": "function",
       "function": {
         "name": "restart_server",
-        "description": "Commit pending changes and restart the OE server. Issues a confirmation credential prompt (admin must type the exact phrase RESTART). The post-restart boot-check auto-reverts if the server fails to come up within the commit deadline.",
+        "description": "Restart the OE server, with or without a pending audit change. Requires a bounded report-only continuation handoff and a confirmation credential prompt (admin must type RESTART). For audited changes, the post-restart boot-check commits or auto-reverts; after boot, the same agent publishes a durable visible outcome without replaying mutations.",
         "parameters": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
-            "reason": { "type": "string", "description": "Short reason for the restart (audit trail)" }
+            "reason": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 500,
+              "description": "Short reason for the restart (audit trail)."
+            },
+            "continuation": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Crash-safe handoff for the same agent's post-boot visible report. It must contain no secrets or unfinished writes.",
+              "properties": {
+                "writesComplete": {
+                  "type": "boolean",
+                  "enum": [true],
+                  "description": "Required attestation that every mutation finished before restart; the resumed turn has no tools."
+                },
+                "summary": {
+                  "type": "string",
+                  "minLength": 10,
+                  "maxLength": 1200,
+                  "description": "Concrete summary of the user-authorized operation."
+                },
+                "completed": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "items": { "type": "string", "minLength": 3, "maxLength": 500 },
+                  "description": "What was already completed before restart."
+                },
+                "verification": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "items": { "type": "string", "minLength": 3, "maxLength": 500 },
+                  "description": "Read-only post-boot checks/outcomes to report; never mutation steps."
+                }
+              },
+              "required": ["writesComplete", "summary", "completed", "verification"]
+            }
           },
-          "required": ["reason"]
+          "required": ["reason", "continuation"]
         }
       }
     },
@@ -192,13 +231,47 @@
       "type": "function",
       "function": {
         "name": "oe_update_apply",
-        "description": "Pull latest from origin, run npm install if package.json changed, then restart the server. Refuses to run on a dirty working tree unless force:true is set (which discards local edits to tracked files).",
+        "description": "Call oe_admin_read_blueprint first. Pull latest from origin, run npm install if package.json changed, then restart the server and publish a crash-safe same-agent outcome. Refuses a dirty working tree unless force:true (which discards tracked local edits). Requires a bounded report-only continuation handoff.",
         "parameters": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
-            "force": { "type": "boolean", "description": "If true, discard local edits to tracked files before pulling. Default false." }
+            "force": { "type": "boolean", "description": "If true, discard local edits to tracked files before pulling. Default false." },
+            "continuation": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Crash-safe handoff for the same agent's post-boot visible report. It must contain no secrets or unfinished writes.",
+              "properties": {
+                "writesComplete": {
+                  "type": "boolean",
+                  "enum": [true],
+                  "description": "Attest that the update tool owns all writes and only schedules restart after they finish."
+                },
+                "summary": {
+                  "type": "string",
+                  "minLength": 10,
+                  "maxLength": 1200,
+                  "description": "Concrete summary of the requested update."
+                },
+                "completed": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "items": { "type": "string", "minLength": 3, "maxLength": 500 },
+                  "description": "What the update path will have completed before its restart."
+                },
+                "verification": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "items": { "type": "string", "minLength": 3, "maxLength": 500 },
+                  "description": "Read-only outcomes the resumed report must cover."
+                }
+              },
+              "required": ["writesComplete", "summary", "completed", "verification"]
+            }
           },
-          "required": []
+          "required": ["continuation"]
         }
       }
     },

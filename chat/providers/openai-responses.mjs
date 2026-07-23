@@ -748,14 +748,19 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     let loopUsageValuesValid = true;
     let loopOutputBudgetValid = true;
     // A completed response is authoritative only when it is the final parsed
-    // provider event for this request. The direct ChatGPT Codex endpoint closes
-    // cleanly after response.completed; other Responses providers must also
-    // send the standard [DONE] sentinel.
+    // provider event for this request. The subscription-backed Codex and
+    // SuperGrok endpoints may close cleanly after response.completed; the
+    // public Responses provider must also send the standard [DONE] sentinel.
     let loopTerminalWasLast = true;
     let loopSseDoneCount = 0;
 
     const seenEventTypes = new Set();
-    for await (const ev of readAnthropicSSE(res.body, { strict: labCodexRelay })) {
+    for await (const ev of readAnthropicSSE(res.body, {
+      // A missing [DONE] is valid for SuperGrok only at a genuinely clean EOF.
+      // Strict parsing keeps a malformed or truncated trailing record from
+      // being silently discarded and misclassified as that clean close.
+      strict: labCodexRelay || isXaiOauth,
+    })) {
       if (ev.__sseDone === true) {
         loopSseDoneCount++;
         continue;
@@ -924,12 +929,13 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
     // Validate THIS request before executing tools or accepting final text.
     // Aggregate equality cannot prove per-request integrity: a duplicate in one
-    // round and an omission in another could otherwise cancel out. ChatGPT's
-    // direct Codex endpoint legitimately closes at clean EOF after its single
-    // response.completed event; every other Responses provider must terminate
-    // with exactly one [DONE] sentinel.
+    // round and an omission in another could otherwise cancel out. The
+    // subscription-backed Codex and SuperGrok endpoints legitimately close at
+    // clean EOF after their single response.completed event; the public
+    // Responses provider must terminate with exactly one [DONE] sentinel.
+    const cleanEofAllowed = isCodex || isXaiOauth;
     const validStreamTerminator = loopSseDoneCount === 1
-      || (isCodex && loopSseDoneCount === 0);
+      || (cleanEofAllowed && loopSseDoneCount === 0);
     const validTerminal = finalized
       && loopCompletionCount === 1
       && loopUsageCount === 1
@@ -937,6 +943,16 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       && loopTerminalWasLast
       && validStreamTerminator;
     if (!validTerminal) {
+      console.warn(`[${tag}] rejecting invalid Responses stream terminal`, {
+        finalized,
+        completionCount: loopCompletionCount,
+        usageCount: loopUsageCount,
+        usageValuesValid: loopUsageValuesValid,
+        terminalWasLast: loopTerminalWasLast,
+        sseDoneCount: loopSseDoneCount,
+        cleanEofAllowed,
+        streamTerminatorValid: validStreamTerminator,
+      });
       usageCardinalityValid = false;
       if (textContent.trim()) yield { type: 'replace', text: '' };
       yield usageTelemetry();
