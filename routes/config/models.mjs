@@ -249,9 +249,18 @@ export async function tryHandleModelRoutes(req, res) {
       // OAuth-backed ChatGPT provider: pull the account-visible Codex model list
       // when connected; fall back inside the helper for disconnected setup/admin UI.
       if (prov === 'openai-oauth') {
-        const annotated = await listOpenAIOAuthModels(authId, { refresh: urlObj.searchParams.get('refresh') === '1' });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(annotated));
+        const refresh = urlObj.searchParams.get('refresh') === '1';
+        try {
+          const annotated = await listOpenAIOAuthModels(authId, { refresh, strict: refresh });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(annotated));
+        } catch (e) {
+          console.warn('[openai-oauth-models] explicit refresh failed:', e.message);
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'Could not refresh OpenAI models. Refresh the ChatGPT login token or reconnect, then try again.',
+          }));
+        }
         return true;
       }
       if (prov === 'xai-oauth') {

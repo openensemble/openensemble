@@ -1195,7 +1195,11 @@ async function loadCompatProviderModels(providerId, refresh = false) {
   const box = $(`providerModels_${providerId}`);
   if (box) box.textContent = 'Loading models…';
   try {
-    const models = await fetch(`/api/provider-models/${providerId}${refresh ? '?refresh=1' : ''}`).then(r => r.json());
+    const res = await fetch(`/api/provider-models/${providerId}${refresh ? '?refresh=1' : ''}`, {
+      cache: 'no-store',
+    });
+    const models = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(models?.error || `Model refresh failed (${res.status})`);
     if (!Array.isArray(models) || models.length === 0) {
       if (box) box.textContent = 'No models returned. Check that the API key is valid.';
       return;
