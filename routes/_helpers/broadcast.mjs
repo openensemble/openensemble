@@ -12,3 +12,9 @@ export function broadcastAgentList() { _broadcastAgentListFn(); }
 let _broadcastToUsersFn = () => {};
 export function setUserBroadcastFn(fn) { _broadcastToUsersFn = fn; }
 export function broadcastToUsers(userIds, msg) { _broadcastToUsersFn(userIds, msg); }
+
+// sendToUser — same user scoping as broadcastToUsers, plus chat-revision
+// stamping so a live continuation cannot be erased by an older session load.
+let _sendToUserFn = () => 0;
+export function setUserSendFn(fn) { _sendToUserFn = fn; }
+export function sendToUser(userId, msg) { return _sendToUserFn(userId, msg); }

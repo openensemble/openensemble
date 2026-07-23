@@ -157,11 +157,13 @@ const _lineCounts     = new Map(); // agentId → estimated line count
 
 function applyTurnMetadata(messages, turn) {
   if (!turn?.turnId) return messages;
+  const messageId = turn.sessionMessageId ?? turn.messageId ?? null;
+  const attemptId = turn.sessionAttemptId ?? turn.attemptId ?? turn.turnId;
   return messages.map((message, index) => ({
     ...message,
     ...(message.turnId ? {} : { turnId: turn.turnId }),
-    ...(turn.messageId && !message.messageId ? { messageId: turn.messageId } : {}),
-    ...(turn.attemptId && !message.attemptId ? { attemptId: turn.attemptId } : {}),
+    ...(messageId && !message.messageId ? { messageId } : {}),
+    ...(attemptId && !message.attemptId ? { attemptId } : {}),
     ...(index === 0 && message.role === 'user' && !message.pendingTurn && !message.turnStatus
       ? { turnStatus: 'complete' }
       : {}),
@@ -200,9 +202,10 @@ function turnWrotePendingUserRow(turn, agentId) {
 
 function rowMatchesTurn(row, turn) {
   if (!row || !turn?.turnId) return false;
+  const attemptId = turn.sessionAttemptId ?? turn.attemptId ?? null;
   return row.turnId === turn.turnId
     || row.pendingTurn === turn.turnId
-    || (turn.attemptId && row.attemptId === turn.attemptId);
+    || (attemptId && row.attemptId === attemptId);
 }
 
 function terminalReplay(rows, turn) {
@@ -240,8 +243,8 @@ export function appendToSession(agentId, ...messages) {
   const turn = getTurn();
   const turnMeta = turn ? {
     turnId: turn.turnId ?? null,
-    messageId: turn.messageId ?? null,
-    attemptId: turn.attemptId ?? null,
+    messageId: turn.sessionMessageId ?? turn.messageId ?? null,
+    attemptId: turn.sessionAttemptId ?? turn.attemptId ?? null,
     sessionKey: turn.sessionKey ?? null,
     sessionEpoch: turn.sessionEpoch ?? null,
     wrotePendingUserRow: turnWrotePendingUserRow(turn, agentId),
@@ -314,15 +317,21 @@ export function appendToSession(agentId, ...messages) {
  * load-then-append sequence is not sufficient: both writers could observe the
  * row as absent. The stable reportId is the durable idempotency key.
  *
+ * @param {{expectedEpoch?: string|null}} [options]
  * @returns {Promise<'appended'|'existing'>}
  */
-export function appendSessionReportOnce(agentId, row) {
+export function appendSessionReportOnce(agentId, row, { expectedEpoch = null } = {}) {
   if (!row?.reportId) return Promise.reject(new Error('Session report requires a reportId'));
   if (typeof agentId === 'string' && agentId.startsWith('ephemeral_')) {
     return Promise.reject(new Error('Session report requires a persistent agent'));
   }
   const durable = applyTurnMetadata([row], getTurn())[0];
   return withSessionWriteLock(agentId, async () => {
+    if (expectedEpoch && getSessionEpoch(agentId) !== expectedEpoch) {
+      const error = new Error('Session was cleared before this report could be saved');
+      error.code = 'SESSION_CLEARED';
+      throw error;
+    }
     const p = sessionPath(agentId);
     await fsp.mkdir(path.dirname(p), { recursive: true });
     let rows = [];
@@ -389,8 +398,10 @@ export function appendUserTurnPending(agentId, msg) {
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
     }
+    const sessionAttemptId = turn.sessionAttemptId ?? turn.attemptId ?? turnId;
+    const sessionMessageId = turn.sessionMessageId ?? turn.messageId ?? null;
     const prior = existing.filter(row =>
-      row?.attemptId === (turn.attemptId ?? turnId)
+      row?.attemptId === sessionAttemptId
       || row?.turnId === turnId
       || row?.pendingTurn === turnId);
     if (prior.length) {
@@ -522,15 +533,15 @@ export function appendUserTurnPending(agentId, msg) {
       // because it can be reused; Linux start ticks identify the incarnation.
       turnOwner: getProcessIdentity(),
     }], turn)[0];
-    const retryIdx = turn.messageId
+    const retryIdx = sessionMessageId
       ? existing.findIndex(row => row?.role === 'user'
-          && row.messageId === turn.messageId
+          && row.messageId === sessionMessageId
           && ['failed', 'stopped'].includes(row.turnStatus))
       : -1;
     if (retryIdx !== -1) {
       existing[retryIdx] = entry;
       const rewritten = existing.filter(row =>
-        !(row?.role === 'turn_error' && row.messageId === turn.messageId));
+        !(row?.role === 'turn_error' && row.messageId === sessionMessageId));
       await atomicRewrite(p, rewritten.map(row => JSON.stringify(row)).join('\n') + '\n');
       _lineCounts.set(agentId, rewritten.length);
       notePendingUserRow(turn, agentId);
@@ -641,8 +652,8 @@ export function markTurnTerminal(agentId, terminal = {}) {
   if (!turn?.turnId) return Promise.resolve(false);
   const turnMeta = {
     turnId: turn.turnId,
-    messageId: turn.messageId ?? null,
-    attemptId: turn.attemptId ?? turn.turnId,
+    messageId: turn.sessionMessageId ?? turn.messageId ?? null,
+    attemptId: turn.sessionAttemptId ?? turn.attemptId ?? turn.turnId,
   };
   const expectedEpoch = turn?.sessionKey === agentId ? turn.sessionEpoch : null;
   return withSessionWriteLock(agentId, async () => {
@@ -837,23 +848,31 @@ export function clearSession(agentId) {
 }
 
 // Full delete (used when the agent is being permanently removed, not just
-// when the user clears its context). Removes the session JSONL, the
-// .streaming buffer, the LM Studio response-id file, and evicts every
-// in-memory tracking entry so nothing leaks across agent IDs over time.
+// when the user clears its context). Removes the session JSONL, streaming
+// buffer, and LM Studio response-id files. Keep a freshly rotated epoch
+// tombstone so an old restart/task checkpoint can never match a deleted and
+// later recreated agent merely because both otherwise read as "legacy".
 export async function deleteSession(agentId) {
-  const paths = [sessionPath(agentId), streamBufferPath(agentId), lmsIdPath(agentId), sessionEpochPath(agentId)];
-  try {
-    const { localId } = parseAgentId(agentId);
-    const prefix = `${safeId(localId)}.`;
-    for (const name of await fsp.readdir(getSessionsDir(agentId))) {
-      if ((name === `${safeId(localId)}.lms_id`) || (name.startsWith(prefix) && name.endsWith('.lms_id'))) {
-        paths.push(path.join(getSessionsDir(agentId), name));
+  return withSessionWriteLock(agentId, async () => {
+    const paths = [sessionPath(agentId), streamBufferPath(agentId), lmsIdPath(agentId)];
+    try {
+      const { localId } = parseAgentId(agentId);
+      const prefix = `${safeId(localId)}.`;
+      for (const name of await fsp.readdir(getSessionsDir(agentId))) {
+        if ((name === `${safeId(localId)}.lms_id`) || (name.startsWith(prefix) && name.endsWith('.lms_id'))) {
+          paths.push(path.join(getSessionsDir(agentId), name));
+        }
       }
-    }
-  } catch { /* directory may not exist */ }
-  await Promise.all(paths.map(p => fsp.rm(p, { force: true }).catch(() => {})));
-  _lineCounts.delete(agentId);
-  for (const key of _lastFlush.keys()) if (key.startsWith(`${agentId}:`)) _lastFlush.delete(key);
+    } catch { /* directory may not exist */ }
+    await Promise.all(paths.map(p => fsp.rm(p, { force: true }).catch(() => {})));
+    await atomicRewrite(
+      sessionEpochPath(agentId),
+      `se_${randomUUID().slice(0, 12)}\n`,
+    );
+    await fsyncDir(getSessionsDir(agentId));
+    _lineCounts.delete(agentId);
+    for (const key of _lastFlush.keys()) if (key.startsWith(`${agentId}:`)) _lastFlush.delete(key);
+  });
 }
 
 // ── LM Studio stateful response ID ───────────────────────────────────────────

@@ -1450,6 +1450,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         await persist(agent, sessionText, '', userId, emit, skipSignals, skipEpisodes, {
           withSignalWordsGate, toolsUsed, toolEvents, toolIdentityAnomalies, voiceCtx, hideTurn, hideTaskId,
           hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+          excludeHiddenUserFromModel: turnOpts?.excludeHiddenUserFromModel === true,
           readOnlyTurn,
           suppressLearning,
           workerLeafRun: Boolean(workerMemoryOwnerId),
@@ -1530,6 +1531,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       await persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
         withSignalWordsGate, toolsUsed, toolEvents, toolIdentityAnomalies, voiceCtx, hideTurn, hideTaskId,
         hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
+        excludeHiddenUserFromModel: turnOpts?.excludeHiddenUserFromModel === true,
         readOnlyTurn,
         suppressLearning,
         workerLeafRun: Boolean(workerMemoryOwnerId),

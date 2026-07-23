@@ -106,7 +106,7 @@ import { sendReminderEmail } from './lib/reminder-email.mjs';
 
 // Shared helpers
 import {
-  loadConfig, loadUsers, loadPersistedSessions, setBroadcastFn, setUserBroadcastFn,
+  loadConfig, loadUsers, loadPersistedSessions, setBroadcastFn, setUserBroadcastFn, setUserSendFn,
   CFG_PATH, getClientIp,
 } from './routes/_helpers.mjs';
 import { log, configureLogger } from './logger.mjs';
@@ -618,6 +618,7 @@ setBroadcastFn(broadcastAgentList);
 setBackgroundUserSendFn(sendToUser);
 setNodesBroadcastFn(sendToUser);
 setUserBroadcastFn(broadcastToUsers);
+setUserSendFn(sendToUser);
 setRuntimeWarnBroadcast(broadcast);
 setRuntimeMetricsFn(() => ({
   wsClients: getWsClientCount(),
@@ -979,10 +980,10 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // exits if the deadline expires). Safe no-op when no pending marker.
   if (!ISOLATED_LAB_RUNTIME) {
     runBootCheck({ port: PORT }).catch(e => console.warn('[oe-admin] boot-check failed:', e.message));
-    // A restart may have terminated the initiating chat stream after all
-    // writes completed. Resume its same-agent, read-only verification/report
-    // only after the HTTP surface and role registry are live. Do not await:
-    // audited continuations poll the boot-check outcome.
+    // A sanctioned restart may have interrupted an unfinished agent task.
+    // Resume it through the normal same-user/same-agent dispatcher only after
+    // HTTP, delivery hooks, and the role registry are live. Do not await:
+    // audited continuations may poll the boot-check outcome.
     void resumeRestartContinuationAtBoot();
   }
 
@@ -1305,6 +1306,7 @@ async function shutdown(signal) {
   stopTunnelSupervisor().catch(() => {});
   stopMdnsAdvertiser().catch(() => {});
   _stopUpdateChecker?.();
+  cancelCommitDeadline();
 
   // 3. Abort all in-flight chat streams
   abortAllChats();

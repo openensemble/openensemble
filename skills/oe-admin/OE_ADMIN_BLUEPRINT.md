@@ -36,7 +36,7 @@ them. Other users get a clear permission denied.
 │   ├── oe-admin-audit.jsonl          — append-only audit log
 │   ├── oe-admin-snapshots/           — per-entry file snapshots
 │   ├── .pending-change.json          — single-slot in-flight marker
-│   └── .restart-continuation.json     — chmod 0600 post-boot report handoff
+│   └── .restart-continuation.json     — chmod 0600 post-boot task handoff
 ├── skills/oe-admin/integrations/     — WRITABLE via save_integration_recipe
 ├── users/<id>/credentials/           — WRITABLE via credential primitive
 └── (everything else)                 — READ-ONLY for this skill
@@ -100,49 +100,58 @@ ask the user how they'd like to add other credentials.
 
 `owner`, `userIds`, `users` are also denied to prevent privilege escalation.
 
-### `restart_server({ reason, continuation })`
+### `restart_server({ reason, continuation? })`
 
 Final step for any change that needs a restart. It may also perform an
 ordinary privileged restart when no audit entry is pending. Flow:
 
-1. Validates a bounded continuation handoff. `writesComplete` MUST be
-   `true`; all mutation work must already be finished.
-2. Captures the exact user, calling agent, audit id, and turn correlation
-   server-side, then atomically writes a chmod-0600 checkpoint.
-3. If an audit change is pending, records a marker linking that exact entry.
-4. Issues a `credential_prompt` of kind `confirm` — user must type the
+1. Issues a `credential_prompt` of kind `confirm` — user must type the
    literal phrase `RESTART`.
-5. Uses the shared systemd/standalone restart primitive and exits.
-6. The next boot runs `runBootCheck()`:
+2. Captures the exact user, visible conversation agent, session generation,
+   original request, audit id, and turn correlation server-side, then
+   atomically writes a chmod-0600 checkpoint. No model-authored identity or
+   correlation field is accepted.
+3. If an audit change is pending, records a marker linking that exact entry.
+4. Uses the shared systemd/standalone restart primitive and exits. That
+   primitive also enforces automatic checkpoint creation for any sanctioned
+   agent-triggered restart path, even when the caller supplied no handoff.
+5. The next boot runs `runBootCheck()`:
    - If `/api/_alive` responds 200 within `commitDeadlineMs` (default
      60s), the change is auto-committed.
    - If the deadline expires, the change is auto-reverted (snapshots
      restored, inverse commands run) and the process exits non-zero so
      the supervisor respawns clean.
-7. Once WebSocket broadcasting is ready, OE consumes the checkpoint as a
-   hidden turn on the same agent. That turn is read-only and receives no
-   tools. Its visible report is appended with a stable report id, then the
-   checkpoint is cleared only after durable success.
+6. Once chat delivery is ready, OE revalidates that user, resolves the current
+   runtime projection of the same visible agent, and compares the saved session
+   generation. Clearing the conversation revokes the old continuation.
+7. OE consumes the checkpoint as a durable hidden turn in the same session.
+   The agent receives the original task, prior history, optional progress
+   hints, and its normal tools. Its visible reply and whole-turn `done` marker
+   are fsynced before the checkpoint is cleared.
 
-Continuation shape:
+Optional progress-hint shape:
 
 ```json
 {
-  "writesComplete": true,
-  "summary": "Concrete summary of the authorized operation",
-  "completed": ["Mutation and pre-restart verification already completed"],
-  "verification": ["Report the server-verified audit outcome after boot"]
+  "summary": "Concrete summary of the authorized task",
+  "completed": ["Effect already completed before restart; do not replay blindly"],
+  "remaining": ["Work still needed after OE returns"],
+  "successCriteria": ["How to verify the original task is finished"]
 }
 ```
 
-Each list contains 1-8 bounded strings. Never include credentials, raw user
-messages, correlation ids, audit ids, commands to run, or unfinished writes.
-OE binds identity/audit/correlation itself. If a resumed audit was rolled
-back, the report says so and does not retry the mutation.
+The hint is optional because OE captures enough server-owned state to resume
+without it. Lists are bounded to 0-8 completed items and 1-8 remaining/success
+items. Never include credentials, raw user messages, correlation ids, or audit
+ids. Hints cannot expand the original request's authority. Completed items are
+replay warnings, not proof: the resumed agent verifies current state before
+repeating a possibly mutating action. If a resumed audit was rolled back, the
+agent is told plainly and must not blindly replay the same mutation.
 
-Single-slot rule: only one change can be awaiting restart-commit at a
-time. If `hasPendingChange()` is true, every mutation tool refuses.
-Either restart now or call `revert_audit_entry` to clear the marker.
+Single-slot rule: only one restart continuation can own the next boot at a
+time. A conflicting user, agent, or turn fails closed instead of overwriting
+the existing task. Separately, only one audited change can await
+restart-commit; if `hasPendingChange()` is true, mutation tools refuse.
 
 ## More wrapped surfaces
 
@@ -153,13 +162,13 @@ infrastructure your admin asks about most often:
 
 - `oe_update_check()` — read-only; returns whether `origin/HEAD` has commits
   beyond your current SHA.
-- `oe_update_apply({ force?: false, continuation })` — pulls, runs `npm install` if
+- `oe_update_apply({ force?: false, continuation? })` — pulls, runs `npm install` if
   package.json changed, and triggers `restartProcess()`. Refuses on a dirty
   tree unless `force: true`. Audit-logs the prior SHA so a broken update
   can be manually reverted with `git reset --hard <fromSha>` if needed.
-  It writes the same report-only restart checkpoint before changing files
-  and removes it if update application fails. On success it binds the exact
-  `fromSha`/`toSha` before the already-scheduled restart runs. The new boot
+  It writes the same task checkpoint before changing files and removes it if
+  update application fails. On success it binds the exact `fromSha`/`toSha`
+  before scheduling restart. The new boot
   marks the audit committed only when its live checkout equals `toSha`
   (including the already-current/no-op case); a missing/mismatched SHA marks
   it rolled back and is reported plainly. The generic boot-check pipeline
@@ -309,11 +318,10 @@ also records an `inverse` block describing the undo.
 
 ## Restart semantics
 
-Most changes need a restart. After you make the change(s), tell the
-admin to restart, then call `restart_server({ reason, continuation })`.
-The continuation must attest `writesComplete: true` and may describe only
-completed work plus a read-only verification/report checklist. The boot
-watchdog will:
+Most changes need a restart. After you make the change(s), tell the admin to
+restart, then call `restart_server({ reason })`; optional continuation hints
+can record precise completed/remaining work but are never required for
+recovery. The boot watchdog will:
 
 - Commit the change if the new process answers `/api/_alive` within the
   commit deadline (default 60s).
@@ -329,15 +337,17 @@ process) handles the case where Node itself can't start (corrupt
 node_modules, broken syntax). Not all installs run the supervisor; the
 in-process boot-check is the always-on layer.
 
-After a healthy boot, the continuation resumer waits for the bound audit
-entry to become `committed` or `rolled_back` (or reports an indeterminate
-timeout), then asks the same agent for a final report with tools disabled.
-It streams that report to connected clients and appends it once to the same
-session under a stable report id. A second crash leaves the checkpoint in
-place; the next boot retries it. Transient provider/storage failures also get
-three bounded exponential-backoff attempts in the same boot, with only one
-active runner. If the report already exists, OE clears the checkpoint without
-appending a duplicate.
+After a healthy boot, the continuation resumer waits for the bound audit entry
+to become `committed` or `rolled_back` (or marks the outcome indeterminate),
+then resumes the unfinished task through the ordinary dispatcher. The hidden
+recovery prompt is excluded from later model history, while the visible answer,
+tool records, and terminal marker use the normal durable session path. Stable
+message identity prevents a completed reply from being appended twice. A
+cross-process lease permits only one runner. Transient provider/storage
+failures may retry only before any tool call; once tool activity begins,
+ambiguous replay fails closed and produces a deterministic visible explanation.
+The marker is not cleared until either a durable answer finishes, Clear revokes
+that session generation, or a terminal fail-closed reply is persisted.
 
 ## Verification (always do this!)
 
@@ -360,9 +370,13 @@ to check connectivity").
 - **Skipping `oe_admin_read_blueprint`.** You're reading this now. Good.
 - **Forgetting `restart_server` after a config change.** Tell the admin
   to restart explicitly. Don't auto-restart unless they've said yes.
-- **Putting unfinished work in a restart continuation.** Never do this.
-  Finish every write first, set `writesComplete: true`, and include only
-  completed items plus read-only outcomes to report. The resumed turn has
-  no tools by design.
+- **Restarting OE from a recipe or shell wrapper.** Never call `systemctl
+  restart/stop openensemble`, `oe restart/update`, container restart, host
+  reboot, or an equivalent wrapped command. Those bypass the scoped recovery
+  checkpoint and are rejected. Finish the recipe, then call `restart_server`.
+- **Treating progress hints as authority.** They are context only. Never put
+  secrets or new scope in them; the original durable user request and approval
+  records remain the authority. Record completed effects accurately so the
+  resumed agent can avoid replaying them.
 - **Two pending changes at once.** Refused by the single-slot marker.
   Commit (restart) or revert the first one before starting another.

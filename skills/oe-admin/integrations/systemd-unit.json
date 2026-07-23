@@ -33,12 +33,6 @@
   },
   "rollback": [
     {
-      "id": "stop",
-      "requiresRoot": true,
-      "cmd": ["systemctl", "stop", "openensemble.service"],
-      "timeoutMs": 30000
-    },
-    {
       "id": "disable",
       "requiresRoot": true,
       "cmd": ["systemctl", "disable", "openensemble.service"],

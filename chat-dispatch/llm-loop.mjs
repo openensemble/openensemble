@@ -524,6 +524,7 @@ export async function runLlmTurn({
   userText, sessionUserText = userText, attachment, attachments, toolPlan, documentRequest, schedulerNote, source, deviceId,
   conversationMode = false,
   ac, onEvent, onNotify, hiddenUser = false, isolatedTaskRun = false, readOnlyTurn = false,
+  excludeHiddenUserFromModel = false,
   silent = false,
   suppressLearning = false, verifierAllowedTools = null,
   verifierLeaseRequired = false, verifierLeaseToken = null,
@@ -593,7 +594,7 @@ export async function runLlmTurn({
       onEvent({ ...e, agent: agentId });
     }, userId ?? 'default', _attachments, schedulerNote, silent, { source, deviceId }, {
       toolPlan, documentRequest, hiddenUser, isolatedTaskRun,
-      readOnlyTurn, sessionUserText,
+      readOnlyTurn, sessionUserText, excludeHiddenUserFromModel,
     })) {
       if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
       // Retain the first terminal error, but keep draining streamChat. Its

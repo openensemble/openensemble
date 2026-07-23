@@ -9,9 +9,10 @@
  *   4. Issues credential prompts via the central primitive (values never
  *      reach the LLM).
  *
- * Restart semantics: changes that need a restart write a single-slot
- * pending marker, then `restart_server` triggers the re-exec. The boot
- * watchdog auto-reverts if the next process can't come up.
+ * Restart semantics: changes that need a restart write a single-slot,
+ * user/session-scoped task checkpoint, then `restart_server` triggers the
+ * re-exec. The boot watchdog auto-reverts an audited change if the next
+ * process cannot come up; a healthy boot resumes the initiating task.
  */
 
 import fs from 'fs';
@@ -480,16 +481,15 @@ async function handleInstallIntegration(args, userId) {
 
 async function handleRestartServer(args, userId, agentId) {
   const { reason, continuation } = args ?? {};
-  if (typeof agentId !== 'string' || !agentId.trim()) {
-    return 'Restart requires a persistent calling agent so the post-boot report has a safe destination.';
-  }
   if (typeof reason !== 'string' || reason.trim().length < 3 || reason.trim().length > 500) {
     return 'reason is required and must be 3-500 characters.';
   }
-  try {
-    normalizeRestartContinuation(continuation);
-  } catch (e) {
-    return `Invalid restart continuation: ${e.message}`;
+  if (continuation !== undefined) {
+    try {
+      normalizeRestartContinuation(continuation);
+    } catch (e) {
+      return `Invalid optional restart progress hints: ${e.message}`;
+    }
   }
 
   // Bind the exact audit entry server-side. Tool arguments cannot select an
@@ -519,8 +519,9 @@ async function handleRestartServer(args, userId, agentId) {
   }
 
   // The checkpoint must be durable before either the audit marker or SIGTERM.
-  // Resumption is report-only, so a killed pre-restart turn never replays a
-  // mutation whose completion state is ambiguous.
+  // Identity, the visible session, its clear-generation, correlation, and the
+  // original request come from the server-owned active turn. Progress hints
+  // are optional; a restart never depends on the model constructing them.
   let checkpoint;
   try {
     checkpoint = writeRestartContinuationCheckpoint({
@@ -549,12 +550,15 @@ async function handleRestartServer(args, userId, agentId) {
 
   // Shared dual-path primitive: systemd gets SIGTERM + Restart=; standalone
   // installs get the detached re-exec path.
-  setImmediate(() => restartProcess());
+  setImmediate(() => restartProcess({
+    reason: reason.trim(),
+    op: 'restart_server',
+  }));
 
   if (!pending) {
-    return `Ordinary restart scheduled. Continuation ${checkpoint.id} will publish the same-agent result after OE returns.`;
+    return `Ordinary restart scheduled. Continuation ${checkpoint.id} will automatically resume this task for the same user and agent after OE returns.`;
   }
-  return `Restart scheduled. Audit ${pending.id} will be committed once the new process answers /api/_alive within ${pending.commitDeadlineMs ?? 60_000}ms; otherwise the change will be auto-reverted. Continuation: ${checkpoint.id}.`;
+  return `Restart scheduled. Audit ${pending.id} will be committed once the new process answers /api/_alive within ${pending.commitDeadlineMs ?? 60_000}ms; otherwise the change will be auto-reverted. This task will then resume automatically as continuation ${checkpoint.id}.`;
 }
 
 // ── Tool: list_audit_log / revert_audit_entry ────────────────────────────────
@@ -635,18 +639,17 @@ async function handleUpdateCheck() {
 function shortSha(s) { return s ? String(s).slice(0, 8) : '<none>'; }
 
 async function handleUpdateApply(args, userId, agentId) {
-  if (typeof agentId !== 'string' || !agentId.trim()) {
-    return 'Update requires a persistent calling agent so the post-boot report has a safe destination.';
-  }
-  try {
-    normalizeRestartContinuation(args?.continuation);
-  } catch (e) {
-    return `Invalid update continuation: ${e.message}`;
+  if (args?.continuation !== undefined) {
+    try {
+      normalizeRestartContinuation(args.continuation);
+    } catch (e) {
+      return `Invalid optional update progress hints: ${e.message}`;
+    }
   }
   const fromSha = await getCurrentSha();
-  // Audit-log the update intent before kicking it off. applyUpdate restarts
-  // the process itself, so the boot-check / pending-marker pipeline doesn't
-  // apply here — but the log entry records fromSha so an admin can manually
+  // Audit-log the update intent before kicking it off. This wrapper suppresses
+  // applyUpdate's built-in restart until the checkpoint is bound to the exact
+  // result SHA. The log also records fromSha so an admin can manually
   // `git reset --hard <fromSha>` if the new build is broken.
   const entryId = recordPending({
     userId,
@@ -674,8 +677,8 @@ async function handleUpdateApply(args, userId, agentId) {
   let result;
   try {
     result = args?.force
-      ? await forceApplyUpdate()
-      : await applyUpdate();
+      ? await forceApplyUpdate({ restart: false })
+      : await applyUpdate({ restart: false });
   } catch (e) {
     clearRestartContinuationCheckpoint({ expectedId: checkpoint.id });
     markRolledBack(entryId, 'apply_threw');
@@ -686,9 +689,8 @@ async function handleUpdateApply(args, userId, agentId) {
     markRolledBack(entryId, `apply_failed:${result.code}`);
     return `Update failed (${result.code}): ${result.message}`;
   }
-  // applyUpdate has only SCHEDULED restartProcess at this point. Bind its exact
-  // result synchronously before the event loop reaches that setImmediate. The
-  // next boot commits this audit only if its live checkout equals toSha.
+  // Bind the exact result before scheduling shutdown. The next boot commits
+  // this audit only if its live checkout equals toSha.
   try {
     bindUpdateRestartCheckpoint({
       checkpointId: checkpoint.id,
@@ -696,16 +698,20 @@ async function handleUpdateApply(args, userId, agentId) {
       toSha: result.toSha,
     });
   } catch (e) {
-    // Do not clear the checkpoint: restart is already scheduled. A checkpoint
-    // without a verified expected SHA fails closed to rolled_back after boot
-    // and still gives the user a durable visible report.
     log.error('oe-admin', 'update restart outcome binding failed', {
       entryId,
       checkpointId: checkpoint.id,
       err: e.message,
     });
+    clearRestartContinuationCheckpoint({ expectedId: checkpoint.id });
+    markRolledBack(entryId, 'update_checkpoint_bind_failed');
+    return `Update files were applied, but OE did not restart because its recovery checkpoint could not be finalized (${e.message}). Restart manually after checking the current checkout.`;
   }
-  return `Update applying: ${shortSha(result.fromSha)} → ${shortSha(result.toSha)}${result.npmRan ? ' (npm install ran)' : ''}. Server restarting. Audit ${entryId} will commit only after the new boot verifies ${shortSha(result.toSha)}. Continuation: ${checkpoint.id}.`;
+  setImmediate(() => restartProcess({
+    reason: args?.force ? 'Force-apply OE self-update' : 'Apply OE self-update',
+    op: 'oe_update_apply',
+  }));
+  return `Update applied: ${shortSha(result.fromSha)} → ${shortSha(result.toSha)}${result.npmRan ? ' (npm install ran)' : ''}. Server restarting. Audit ${entryId} will commit only after the new boot verifies ${shortSha(result.toSha)}; this task will resume automatically as continuation ${checkpoint.id}.`;
 }
 
 // ── Tool: tunnel_* ───────────────────────────────────────────────────────────

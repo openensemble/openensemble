@@ -536,6 +536,7 @@ export const modifyInvites   = makeModify(loadInvites,   saveInvites,   INVITES_
 // ── Barrel re-exports from extracted submodules ──────────────────────────────
 export {
   setBroadcastFn, broadcastAgentList, setUserBroadcastFn, broadcastToUsers,
+  setUserSendFn, sendToUser,
 } from './_helpers/broadcast.mjs';
 
 export {

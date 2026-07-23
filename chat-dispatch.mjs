@@ -61,7 +61,10 @@ import { extractTransactions } from './skills/expenses/execute.mjs';
 import { getRoleAssignments, listRoles } from './roles.mjs';
 import { getDevice, getSlotAssignment } from './lib/voice-devices.mjs';
 import { log } from './logger.mjs';
-import { turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTurnAgent } from './lib/turn-trace-context.mjs';
+import {
+  turnTraceContext, beginTurn, finishTurn, recordRouting, getTurn, setTurnAgent,
+  setTurnRestartContext, recordTurnRestartToolEvent,
+} from './lib/turn-trace-context.mjs';
 import { resolveDispatchTurnCorrelation } from './lib/turn-correlation.mjs';
 import { getAmbientForDevice } from './routes/devices.mjs';
 import { resumeAmbientOnDevice } from './lib/ambient-playback.mjs';
@@ -441,6 +444,9 @@ function normalizeToolPlan(plan) {
  * @param {boolean} [opts._isolatedTaskRun]          internal scheduled/background task turn with no chat history
  * @param {boolean} [opts._silent]                   internal turn; execute and capture output without chat persistence
  * @param {boolean} [opts._readOnlyTurn]             internal untrusted-context turn; no interceptors, tools, or learning
+ * @param {boolean} [opts._durableHiddenUser]         persist a hidden send-time row for crash-safe internal retries
+ * @param {boolean} [opts._excludeHiddenUserFromModel] keep the internal prompt out of later model history
+ * @param {boolean} [opts._suppressLearning]          run normally but do not learn preferences/routes from internal text
  * @param {string|null} [opts._untrustedContext]     current-turn-only data appended for the model, never persisted
  * @param {string|null} [opts.turnId]                external correlation id (voice/legacy clients)
  * @param {string|null} [opts.messageId]             logical browser message id (stable across explicit retries)
@@ -448,6 +454,8 @@ function normalizeToolPlan(plan) {
  * @param {string|null} [opts._rootTaskId]           stable internal background/scheduled operation root
  * @param {string|null} [opts._sideEffectMessageId]  logical authorization message for a hidden continuation
  * @param {string|null} [opts._sideEffectAttemptId]  authorization attempt decoupled from the fresh wire turn id
+ * @param {string|null} [opts._expectedSessionEpoch] internal generation pin for crash-safe continuations
+ * @param {string|null} [opts._expectedResolvedAgentId] internal topology pin for crash-safe continuations
  * @returns {Promise<void>}
  */
 export async function handleChatMessage({
@@ -482,6 +490,9 @@ export async function handleChatMessage({
   _isolatedTaskRun = false,
   _silent = false,
   _readOnlyTurn = false,
+  _durableHiddenUser = false,
+  _excludeHiddenUserFromModel = false,
+  _suppressLearning = false,
   _untrustedContext = null,
   turnId = null,
   messageId = null,
@@ -489,6 +500,8 @@ export async function handleChatMessage({
   _rootTaskId = null,
   _sideEffectMessageId = null,
   _sideEffectAttemptId = null,
+  _expectedSessionEpoch = null,
+  _expectedResolvedAgentId = null,
 }) {
   // Wake-slot routing — household-shared voice device.
   //
@@ -541,6 +554,16 @@ export async function handleChatMessage({
   // ensemble keeps invalid explicit ids invalid so normal error handling and
   // isolation semantics are unchanged.
   agentId = resolveRuntimeAgentId(userId, requestedAgentId, { fallbackUnknown: !!deviceId }) ?? requestedAgentId;
+  if (_expectedResolvedAgentId && agentId !== _expectedResolvedAgentId) {
+    onEvent({
+      type: 'error',
+      code: 'agent_projection_changed',
+      retryable: false,
+      agent: agentId ?? requestedAgentId ?? 'system',
+      message: 'This continuation was cancelled because the agent setup changed.',
+    });
+    return;
+  }
 
   const toolPlan = normalizeToolPlan(rawToolPlan);
   // normalizeToolPlan preserves this source only after authenticating the
@@ -551,6 +574,7 @@ export async function handleChatMessage({
   const labVerifierAllowedTools = labVerifierTurn
     ? toolPlan.verifierAllowedTools
     : null;
+  const suppressTurnLearning = labVerifierTurn || _suppressLearning;
   // normalizeToolPlan authenticated this exact raw capability, then stripped
   // it from the model-visible/durable plan. Retain it only in AsyncLocalStorage
   // so verifier-started workers can revalidate the live lease at completion.
@@ -620,6 +644,7 @@ export async function handleChatMessage({
   let fastPathEvidence = null;
   onEvent = (event) => {
     if (!event || typeof event !== 'object') return rawOnEvent(event);
+    recordTurnRestartToolEvent(event);
     if (event.type === 'token' && typeof event.text === 'string') outwardText += event.text;
     if (event.type === 'replace' && typeof event.text === 'string') outwardText = event.text;
     if (event.type === 'done') {
@@ -742,12 +767,24 @@ export async function handleChatMessage({
 
   const scopedSessionKey = `${userId}_${agentId}`;
   eventScopedSessionKey = scopedSessionKey;
+  const currentSessionEpoch = getSessionEpoch(scopedSessionKey);
+  if (_expectedSessionEpoch && currentSessionEpoch !== _expectedSessionEpoch) {
+    onEvent({
+      type: 'error',
+      agent: agentId,
+      code: 'session_cleared',
+      retryable: false,
+      message: 'This continuation was cancelled because the conversation was cleared.',
+    });
+    return;
+  }
+  setTurnRestartContext({ text: rawText?.trim() ?? '' });
   if (turnStore) {
     turnStore.sessionKey = scopedSessionKey;
     // Capture before the first await. appendUserTurnPending compare-and-sets
     // this generation under the writer lock, so Clear cannot be crossed by a
     // paused pre-open request that later adopts the new epoch.
-    turnStore.sessionEpoch = getSessionEpoch(scopedSessionKey);
+    turnStore.sessionEpoch = currentSessionEpoch;
   }
 
   // False-positive wake/noise turns are deliberately ephemeral. Handle them
@@ -758,12 +795,15 @@ export async function handleChatMessage({
     source, userText: rawText, userId, agentId, onEvent,
   })) return;
 
-  if (!_silent && !_hiddenUser && !_isolatedTaskRun && (rawText?.trim() || attachmentList.length)) {
+  if (!_silent && (!_hiddenUser || _durableHiddenUser) && !_isolatedTaskRun
+      && (rawText?.trim() || attachmentList.length)) {
     try {
       const pendingUserEntry = {
         role: 'user',
         content: rawText?.trim() || attachmentList.map(a => `[Attached: ${a?.name ?? 'file'}]`).join('\n'),
         ts: Date.now(),
+        ...(_hiddenUser ? { hidden: true } : {}),
+        ...(_hiddenUser && _excludeHiddenUserFromModel ? { excludeFromModel: true } : {}),
         ...(wireMessageId ? { messageId: wireMessageId } : {}),
         ...(wireAttemptId ? { attemptId: wireAttemptId } : {}),
         ...(documentRequest ? { documentRequest } : {}),
@@ -944,7 +984,7 @@ export async function handleChatMessage({
     return;
   }
 
-  _pendingApprovalsBefore = labVerifierTurn
+  _pendingApprovalsBefore = (labVerifierTurn || _hiddenUser)
     ? null
     : await snapshotPendingApprovals(userId, agentId);
 
@@ -1063,7 +1103,8 @@ export async function handleChatMessage({
 
   // Profile intercepts: news-topic preference (side-effect; pipeline continues)
   // and agent rename / re-emoji (short-circuits with a spoken confirmation).
-  if (!documentRequest && !_readOnlyTurn && !labVerifierTurn) {
+  if (!documentRequest && !_readOnlyTurn && !_hiddenUser
+      && !_isBackgroundContinuation && !suppressTurnLearning) {
     tryNewsPrefIntercept({ rawText, userId, onEvent });
     if (await tryRenameIntercept({ rawText, userId, agentId, agent, onEvent, onBroadcast })) return;
   }
@@ -1126,7 +1167,7 @@ export async function handleChatMessage({
     attachment: attachmentList[0] ?? null,
     attachments: attachmentList,
     toolPlan,
-    suppressLearning: labVerifierTurn,
+    suppressLearning: suppressTurnLearning,
     documentRequest,
     _isRoutineFollowup,
     // Profile is threaded through so the HA fast-path can enforce the same
@@ -1161,7 +1202,7 @@ export async function handleChatMessage({
   // "ask <name>") in the incoming user message are logged against the
   // previous turn's pickedAgent so we can propose a routing override after
   // threshold. Fire-and-forget — detection never blocks dispatch.
-  if (ctx.userText && !_isBackgroundContinuation && !_readOnlyTurn && !labVerifierTurn) {
+  if (ctx.userText && !_isBackgroundContinuation && !_readOnlyTurn && !suppressTurnLearning) {
     import('./lib/router-mistakes.mjs').then(m =>
       m.detectAndLog({ userId, currentAgentId: agentId, userText: ctx.userText })
     ).catch(e => console.warn('[router-mistakes] hook failed:', e.message));
@@ -1233,7 +1274,7 @@ export async function handleChatMessage({
       attachment: c.attachment,
       attachments: c.attachments,
       conversationMode,
-      suppressLearning: labVerifierTurn,
+      suppressLearning: suppressTurnLearning,
       verifierAllowedTools: labVerifierAllowedTools,
       verifierLeaseRequired: labVerifierTurn,
       verifierLeaseToken: labVerifierLeaseToken,
@@ -1310,7 +1351,7 @@ export async function handleChatMessage({
   // run concurrently to cut serial pre-LLM latency.
   const _hintsPromise = _readOnlyTurn ? Promise.resolve('') : (async () => {
     try {
-      if (!labVerifierTurn) {
+      if (!suppressTurnLearning) {
         const { maybeConsumeAffirmation } = await import('./lib/alias-learner.mjs');
         await maybeConsumeAffirmation(userId, ctx.userText);
       }
@@ -1318,7 +1359,7 @@ export async function handleChatMessage({
     try {
       const { buildContextHints } = await import('./lib/context-resolvers.mjs');
       return (await buildContextHints(userId, ctx.userText, {
-        suppressLearning: labVerifierTurn,
+        suppressLearning: suppressTurnLearning,
       })).hints || '';
     } catch (e) {
       console.warn('[chat-dispatch] context-resolvers failed:', e.message);
@@ -1429,7 +1470,8 @@ export async function handleChatMessage({
       isolatedTaskRun: _isolatedTaskRun,
       silent: _silent,
       readOnlyTurn: _readOnlyTurn,
-      suppressLearning: labVerifierTurn,
+      suppressLearning: suppressTurnLearning,
+      excludeHiddenUserFromModel: _excludeHiddenUserFromModel,
       verifierAllowedTools: labVerifierAllowedTools,
       verifierLeaseRequired: labVerifierTurn,
       verifierLeaseToken: labVerifierLeaseToken,
@@ -1461,7 +1503,7 @@ export async function handleChatMessage({
   //   Path B: if the LLM's reply asked "did you mean X?", stash a pending
   //           clarification keyed by userId. The next turn's affirmation
   //           check (above) consumes it.
-  if (!_silent && !_readOnlyTurn && !labVerifierTurn) (async () => {
+  if (!_silent && !_readOnlyTurn && !suppressTurnLearning) (async () => {
     try {
       const learner = await import('./lib/alias-learner.mjs');
       await learner.observeTurnAndLearn(userId, ctx.userText, scopedSessionKey);
