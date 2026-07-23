@@ -6,6 +6,26 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-07-23
+
+**Home Assistant commands now confirm against live events**
+OpenEnsemble keeps a persistent connection to Home Assistant's event stream and maintains a current entity-state snapshot. State-changing tool calls wait briefly for the matching update instead of rereading the old state a few milliseconds after the command. If a device is slow to report back, OE says the command was accepted and confirmation is pending; it no longer describes the stale state as a failure. The connection automatically reconnects and resynchronizes state, with bounded REST polling as its fallback.
+
+**Home Assistant automations can fire saved OE routines**
+An HA automation can fire the custom event `openensemble_event` to run an existing OpenEnsemble routine without exposing OE to arbitrary prompts or tool calls. Use the routine's existing webhook token as the capability:
+
+```yaml
+actions:
+  - event: openensemble_event
+    event_data:
+      v: 1
+      action: run_routine
+      routine_id: goodnight
+      webhook_token: !secret oe_goodnight_token
+```
+
+The token determines both the routine and its owner; an event-supplied user identity or device target is never trusted. Set the routine's target device in OE if it needs to speak or play audio. Put the token in Home Assistant's `secrets.yaml`, and rotate it with the routine editor's **Regen** button if needed. The token is still present in HA's runtime event data and automation traces, so users who can inspect HA events must be trusted with that routine capability. Depending on HA permissions, subscribing to custom events may require a long-lived token owned by an HA administrator; OE reports **Live states only** when state streaming works but routine events are not authorized. A persistent loop breaker latches a routine capability after 20 fires without a 12-hour quiet period; **Regen** explicitly resets it. Custom events are ephemeral while HA or OE is offline, while entity state is automatically resynchronized after reconnect.
+
 ## 2026-07-17
 
 **One assistant or a full agent team — switch whenever you want**

@@ -28,32 +28,10 @@
 
 import { requireAuth, readBody } from './_helpers.mjs';
 import {
-  loadRoutines, saveRoutines, executeRoutine, runDeferredAmbient,
+  loadRoutines, saveRoutines, executeRoutineOutOfBand,
   findRoutineByWebhookToken, regenerateWebhookToken, resolveRoutineDeviceId,
 } from '../lib/routines.mjs';
 import { listDevices } from '../lib/voice-devices.mjs';
-import { speakRoutineTts } from '../lib/voice-reminder.mjs';
-
-// Speak a routine's reply (if any) then start its deferred ambient sound only
-// after the announcement finishes. Shared by the Test button and webhook fires
-// (both push to an idle device, no live chat session). Non-blocking.
-async function speakThenAmbient(userId, deviceId, result) {
-  let ttsMs = 0;
-  if (result.text && deviceId) {
-    try {
-      ({ durationMs: ttsMs } = await speakRoutineTts({ userId, deviceIds: [deviceId], text: result.text }));
-    } catch (e) {
-      console.warn(`[routines] tts push failed: ${e.message}`);
-    }
-  }
-  const ambient = Array.isArray(result.ambient) ? result.ambient : [];
-  if (ambient.length && deviceId) {
-    setTimeout(() => {
-      runDeferredAmbient(ambient, { userId, deviceId })
-        .catch(e => console.warn(`[routines] ambient start failed: ${e.message}`));
-    }, ttsMs > 0 ? ttsMs + 300 : 0);
-  }
-}
 
 export async function handle(req, res) {
   if (req.url === '/api/routines' && req.method === 'GET') {
@@ -119,12 +97,11 @@ export async function handle(req, res) {
       const devs = listDevices(userId);
       deviceId = devs[0]?.id ?? null;
     }
-    const result = await executeRoutine(routine, { userId, deviceId });
-    // Speak the reply (MP3-marker path; the "Test" button has no live WS chat
-    // session) then start any ambient sound only after it finishes.
-    await speakThenAmbient(userId, deviceId, result);
+    const result = await executeRoutineOutOfBand(routine, {
+      userId, deviceId,
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, ...result, deviceId }));
+    res.end(JSON.stringify({ ok: true, ...result }));
     return true;
   }
 
@@ -164,11 +141,9 @@ export async function handle(req, res) {
     let requested = typeof body.deviceId === 'string' ? body.deviceId : null;
     if (requested && !listDevices(userId).some(d => d.id === requested)) requested = null;
     const deviceId = resolveRoutineDeviceId(routine, requested);
-    const result = await executeRoutine(routine, { userId, deviceId });
-    // Webhook fires don't have an open chat session — push TTS via the
-    // MP3-marker path so an idle paired device speaks the reply, then start any
-    // ambient sound only after the announcement finishes.
-    await speakThenAmbient(userId, deviceId, result);
+    const result = await executeRoutineOutOfBand(routine, {
+      userId, deviceId,
+    });
     if (result.followupPrompt) {
       // run_prompt inside a webhook-triggered routine is a known gap — the
       // followup needs an active chat session to stream the LLM reply back to

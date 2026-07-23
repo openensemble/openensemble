@@ -18,6 +18,11 @@ import { initPersonalization } from './lib/personalization/scheduler-init.mjs';
 import { setNotifyFn } from './lib/personalization/notify.mjs';
 import { startWatcherSupervisor, stopWatcherSupervisor } from './scheduler/watchers.mjs';
 import { startBackgroundRefresh as startHaCacheRefresh } from './lib/ha-cache.mjs';
+import {
+  startHaWebSocketBridge,
+  stopHaWebSocketBridge,
+} from './lib/ha-websocket.mjs';
+import { handleHomeAssistantOpenEnsembleEvent } from './lib/ha-event-bridge.mjs';
 import { loadIntentEmbeddings } from './lib/specialist-embed-router.mjs';
 import { registerSystemWatchHandlers } from './scheduler/watch-handlers.mjs';
 import { startHealthMonitorHandlers } from './scheduler/health-monitor.mjs';
@@ -1029,7 +1034,12 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   // HA entity-name cache: powers the chat-dispatch fast-path so "turn on X"
   // skips the LLM. Lazy load on first use, plus a periodic refresh so newly
   // added HA devices show up without a server restart.
-  if (!ISOLATED_LAB_RUNTIME) startHaCacheRefresh();
+  if (!ISOLATED_LAB_RUNTIME) {
+    startHaCacheRefresh();
+    startHaWebSocketBridge({
+      onOpenEnsembleEvent: handleHomeAssistantOpenEnsembleEvent,
+    });
+  }
 
   // Specialist intent-example embeddings — warm the embed-router cache so the
   // first user query doesn't pay the ~1-3s "embed N example phrases" cost.
@@ -1284,6 +1294,7 @@ async function shutdown(signal) {
   stopAllWatchers();
   stopVoiceDeviceMonitor();
   stopCalendarMirrorLoop();
+  stopHaWebSocketBridge();
   stopTunnelSupervisor().catch(() => {});
   stopMdnsAdvertiser().catch(() => {});
   _stopUpdateChecker?.();

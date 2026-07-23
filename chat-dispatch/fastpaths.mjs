@@ -202,26 +202,36 @@ async function classifyHaIntent(text, userId, suppressLearning = false) {
 }
 
 async function executeHaIntent(intent) {
-  const { getHaConfig, haRequest } = await import('../lib/ha-client.mjs');
+  const { getHaConfig } = await import('../lib/ha-client.mjs');
+  const { callHaServiceAndConfirm } = await import('../lib/ha-service.mjs');
   const haCfg = getHaConfig();
   if (!haCfg) return { error: 'Home Assistant is not configured.' };
   // serviceDomain may differ from the entity's domain (e.g. group entity
   // controlled via homeassistant.turn_off). intent.data is optional.
   const serviceDomain = intent.serviceDomain || intent.domain;
-  const payload = { entity_id: intent.entity_id, ...(intent.data || {}) };
-  const res = await haRequest(haCfg, `/services/${serviceDomain}/${intent.service}`, 'POST', payload);
-  // Treat HA's response timeout the same way routines do: optimistically
-  // confirm and let HA finish async. The interactive path's 15-second wait
-  // followed by an LLM-fallback was producing a confusing "no confirmation
-  // and then a paraphrased reply" UX whenever HA happened to be slow to
-  // ack (common with bulk service calls like light.all). Real transport
-  // failures (ECONNREFUSED / 4xx auth / DNS) still propagate.
-  if (res?.__err) {
-    if (/timeout/i.test(res.__err)) {
-      console.log(`[chat] ha-fastpath: HA didn't ack ${serviceDomain}.${intent.service} on ${intent.entity_id} within 15s — speaking optimistic confirmation`);
-    } else {
-      return { error: res.__err };
+  const result = await callHaServiceAndConfirm({
+    haCfg,
+    domain: serviceDomain,
+    service: intent.service,
+    entityId: intent.entity_id,
+    data: intent.data || {},
+  });
+  if (!result.accepted) {
+    // A timed-out POST may already have reached HA. Own the turn without
+    // claiming success or falling through to a second service call.
+    if (/timeout/i.test(result.error || '')) {
+      return {
+        text: `Home Assistant did not confirm the request for ${intent.friendly_name}; it may still complete.`,
+        pending: true,
+      };
     }
+    return { error: result.error || 'Home Assistant service call failed.' };
+  }
+  if (result.pending) {
+    return {
+      text: `Home Assistant accepted the request for ${intent.friendly_name}; confirmation is still pending.`,
+      pending: true,
+    };
   }
   let confirm;
   if (intent.service === 'turn_on'  && !intent.data) confirm = `${intent.friendly_name} on.`;

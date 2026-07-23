@@ -25,6 +25,10 @@ import {
 } from './_helpers.mjs';
 import { invalidateCache as invalidateHaCache, ensureCache as ensureHaCache } from '../lib/ha-cache.mjs';
 import { getHaConfig, haRequest } from '../lib/ha-client.mjs';
+import {
+  getHaWebSocketStatus,
+  reconfigureHaWebSocketBridge,
+} from '../lib/ha-websocket.mjs';
 
 // In-process cache for the HA service catalog. Same 5-min TTL as the entity
 // cache — service definitions change rarely (only when integrations are
@@ -135,11 +139,23 @@ export async function handle(req, res) {
     // configure it) get it back. Everyone else still learns whether HA is
     // configured, which is all the non-admin UI needs.
     const priv = isPrivileged(authId);
+    const eventStream = getHaWebSocketStatus();
     return json({
       url: priv ? (ha.url || '') : '',
       allowSelfSigned: !!ha.allowSelfSigned,
       hasToken: !!(ha.token && String(ha.token).length > 0),
       configured: !!(ha.url && ha.token),
+      eventStream: {
+        state: eventStream.state,
+        ready: eventStream.ready,
+        lastConnectedAt: eventStream.lastConnectedAt,
+        lastEventAt: eventStream.lastEventAt,
+        customEventsAuthorized: eventStream.customEventsAuthorized,
+        ...(priv ? {
+          lastError: eventStream.lastError,
+          customEventsError: eventStream.customEventsError,
+        } : {}),
+      },
     });
   }
 
@@ -154,6 +170,7 @@ export async function handle(req, res) {
       await modifyConfig((c) => { delete c.homeAssistant; });
       invalidateHaCache();
       invalidateServicesCache();
+      reconfigureHaWebSocketBridge();
       return json({ ok: true, cleared: true });
     }
     if (url != null) {
@@ -175,6 +192,7 @@ export async function handle(req, res) {
     });
     invalidateHaCache();
     invalidateServicesCache();
+    reconfigureHaWebSocketBridge();
     return json({ ok: true });
   }
 

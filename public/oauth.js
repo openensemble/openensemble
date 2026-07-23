@@ -2512,8 +2512,18 @@ async function loadProviderHa() {
     urlEl.value = cfg.url || '';
     if ($('providerHaAllowSelfSigned')) $('providerHaAllowSelfSigned').checked = !!cfg.allowSelfSigned;
     if ($('providerHaConnected')) {
-      $('providerHaConnected').textContent = cfg.configured ? 'Connected' : '';
-      $('providerHaConnected').style.color = cfg.configured ? 'var(--success, #4caf50)' : 'var(--muted)';
+      const streamState = cfg.eventStream?.state;
+      const live = !!cfg.eventStream?.ready;
+      const authFailed = streamState === 'auth_invalid';
+      const routineEventsBlocked = live && cfg.eventStream?.customEventsAuthorized === false;
+      $('providerHaConnected').textContent = !cfg.configured
+        ? ''
+        : (live
+          ? (routineEventsBlocked ? 'Live states only' : 'Live events')
+          : (authFailed ? 'Authentication failed' : 'Connecting…'));
+      $('providerHaConnected').style.color = live
+        ? 'var(--success, #4caf50)'
+        : (authFailed ? 'var(--red, #e05c5c)' : 'var(--muted)');
     }
     if ($('providerHaToken')) {
       $('providerHaToken').placeholder = cfg.hasToken
