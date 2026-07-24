@@ -13,9 +13,10 @@
   display: flex; flex-direction: column; align-items: center; gap: 2px;
   overflow-y: auto; overflow-x: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.sidebar-feature-scroll::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .sidebar-footer {
   width: 100%; display: flex; flex-direction: column; align-items: center;
   gap: 2px; flex-shrink: 0;
