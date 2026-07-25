@@ -99,6 +99,8 @@ const ENV_MAP = {
   OE_SESSION_EXPIRY:   'sessionExpiryHours',
   OE_VISION_PROVIDER:  'visionProvider',
   OE_VISION_MODEL:     'visionModel',
+  OE_VERIFY_GATE_URL:  'verifyGateUpstreamUrl',
+  OE_VERIFY_GATE_SECRET: 'verifyGateClientSecret',
 };
 
 // Resolve the real client IP for rate-limiting. X-Forwarded-For / CF-Connecting-IP

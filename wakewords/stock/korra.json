@@ -1,6 +1,7 @@
 {
   "type": "micro",
-  "wake_word": "Korra (deprecated)",
+  "wake_word": "Korra",
+  "deprecated": true,
   "author": "OpenEnsemble",
   "website": "https://openensemble.dev/",
   "model": "korra.tflite",

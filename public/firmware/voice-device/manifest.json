@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.73-waithint",
+  "version": "0.2.78-otaworker",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
@@ -30,7 +30,7 @@
       "name": "app",
       "offset": "0x20000",
       "file": "oe_voice_device.bin",
-      "sha256": "8ee7f2b6c0a4382c48ee5c57eacc93a2cfe5e6f3c759a6d7fa7e18b1981abde0"
+      "sha256": "ef844a82ef5fcf2bb127f28c1bceb60935b7e3cc47f9eb25f04c690994665ed9"
     },
     {
       "name": "wakewords",

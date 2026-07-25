@@ -75,6 +75,7 @@ import { handle as handleAdmission }    from './routes/admission.mjs';
 import { handle as handleBrowserPairing } from './routes/browser-pairing.mjs';
 import { handle as handleDevices }      from './routes/devices.mjs';
 import { handle as handleWakewords }    from './routes/wakewords.mjs';
+import { handle as handleVoiceGate }    from './routes/voice-gate.mjs';
 import { handle as handleTv }           from './routes/tv.mjs';
 import { handle as handleVoiceRefs }    from './routes/voice-refs.mjs';
 import { handle as handleVoiceConfig }  from './routes/voice-config.mjs';
@@ -310,6 +311,7 @@ const routeHandlers = [
   handleBrowserPairing,
   handleDevices,
   handleWakewords,
+  handleVoiceGate, // authenticated direct-LAN ingress; verifier stays loopback-only
   handleTv,        // /api/tv/* + /api/tv-app/* + /api/wakewords/stock/:id.tflite
                    // (after handleWakewords, which only matches /api/wakewords
                    // exactly and single-segment /api/wakewords/:id, so it falls

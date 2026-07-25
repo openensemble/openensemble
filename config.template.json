@@ -16,6 +16,9 @@
   },
   "visionProvider": "ollama",
   "visionModel": "llava",
+  "verifyGateEnabled": false,
+  "verifyGateUpstreamUrl": "http://127.0.0.1:5390/v1/verify",
+  "verifyGateClientSecret": "",
   "skillAssignments": {
     "coordinator": "coordinator",
     "coder": "",

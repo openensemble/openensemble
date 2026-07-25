@@ -85,6 +85,11 @@ let dropSttSession = () => {};
 let handleSttBinaryFrame = () => {};
 let makeVoiceTurn = () => null;
 let suppressVoiceOutput = () => null;
+let applyVoiceDeviceTtsHold = (_ws, streamer) => streamer;
+let clearVoiceDeviceTtsHold = () => {};
+let promoteVoiceDeviceTtsHold = () => false;
+let handleVoiceDeviceTtsFlow = () => false;
+let handleVoiceDeviceStop = () => false;
 let isVoiceOutputSuppressed = () => false;
 let sessionKey = (userId, agentId) => `${userId}_${agentId}`;
 let _activeVoiceTurnByKey = new Map();
@@ -138,6 +143,11 @@ export function bindConnectionDeps(deps) {
       case 'handleSttBinaryFrame': handleSttBinaryFrame = v; break;
       case 'makeVoiceTurn': makeVoiceTurn = v; break;
       case 'suppressVoiceOutput': suppressVoiceOutput = v; break;
+      case 'applyVoiceDeviceTtsHold': applyVoiceDeviceTtsHold = v; break;
+      case 'clearVoiceDeviceTtsHold': clearVoiceDeviceTtsHold = v; break;
+      case 'promoteVoiceDeviceTtsHold': promoteVoiceDeviceTtsHold = v; break;
+      case 'handleVoiceDeviceTtsFlow': handleVoiceDeviceTtsFlow = v; break;
+      case 'handleVoiceDeviceStop': handleVoiceDeviceStop = v; break;
       case 'isVoiceOutputSuppressed': isVoiceOutputSuppressed = v; break;
       case 'sessionKey': sessionKey = v; break;
       case '_activeVoiceTurnByKey': _activeVoiceTurnByKey = v; break;
@@ -515,7 +525,8 @@ export function onConnection(ws, req) {
     // open WSes so any open Settings → Voice devices tab can show a progress
     // bar without polling. The originating WS is the device itself; we don't
     // echo it back. Phase strings come from oe_ota.c: "checking" |
-    // "downloading" | "applying" | "rebooting" | "up_to_date" | "error".
+    // "downloading" | "applying" | "restarting_for_memory" | "rebooting" |
+    // "up_to_date" | "error".
     if (msg.type === 'ota_progress') {
       if (!ws._deviceId) return;
       const payload = {
@@ -619,18 +630,7 @@ export function onConnection(ws, req) {
     // checked so a stale pause can't stall a newer turn's stream. A pause
     // with no resume self-aborts in the streamer (PAUSE_ABORT_MS).
     if (msg.type === 'tts_pause' || msg.type === 'tts_resume') {
-      if (!ws._deviceId) return;
-      const st = ws._ttsStreamer;
-      if (!st) return;
-      if (typeof msg.turn_id === 'string' && msg.turn_id &&
-          ws._activeVoiceTurn?.id && msg.turn_id !== ws._activeVoiceTurn.id) {
-        log.info('voice', 'stale tts flow-control ignored', {
-          deviceId: ws._deviceId, type: msg.type, turnId: msg.turn_id, activeTurnId: ws._activeVoiceTurn.id,
-        });
-        return;
-      }
-      if (msg.type === 'tts_pause') { try { st.pause?.(); } catch {} }
-      else { try { st.resume?.(); } catch {} }
+      handleVoiceDeviceTtsFlow(ws, msg);
       return;
     }
 
@@ -638,27 +638,9 @@ export function onConnection(ws, req) {
       // Barge-in / mute: halt any in-flight server-side TTS push immediately so
       // the device stops getting audio frames, then abort the LLM turn.
       if (ws._deviceId) {
-        // Stale stop: the device names the turn it is stopping (fw ≥ 0.2.65).
-        // If a newer turn is already active on this socket, the stop raced it
-        // — honoring it would kill the wrong (new) turn.
-        if (typeof msg.turn_id === 'string' && msg.turn_id &&
-            ws._activeVoiceTurn?.id && msg.turn_id !== ws._activeVoiceTurn.id) {
-          log.info('voice', 'stale stop ignored', {
-            deviceId: ws._deviceId, stopTurnId: msg.turn_id, activeTurnId: ws._activeVoiceTurn.id,
-          });
-          return;
-        }
-        const stoppedTurn = suppressVoiceOutput(ws, 'stop', { sendDone: true });
-        if (!stoppedTurn) {
-          // No active turn — fall back to the last voice turn this socket
-          // ran. Aborting ws._userId's coordinator here was wrong for
-          // slot-routed turns: the LLM turn runs as the slot's OWNER user.
-          const last = ws._lastVoiceTurn;
-          const stopAgent = typeof msg.agent === 'string' ? msg.agent
-            : (last?.agentId ?? getUserCoordinatorAgentId(ws._userId));
-          const stopUser = last?.effectiveUserId ?? ws._userId;
-          if (stopAgent) abortChat(stopUser, stopAgent);
-        }
+        handleVoiceDeviceStop(ws, msg, {
+          getCoordinatorAgentId: getUserCoordinatorAgentId,
+        });
       } else {
         const stopAgent = typeof msg.agent === 'string' ? msg.agent : getUserCoordinatorAgentId(ws._userId);
         if (stopAgent) {
@@ -800,6 +782,13 @@ export function onConnection(ws, req) {
       // every event of this turn so the firmware can drop stale-turn events.
       const deviceTurnId = (typeof msg.turn_id === 'string' && msg.turn_id.length > 0 && msg.turn_id.length <= 24)
         ? msg.turn_id : null;
+      // A verify-gated accepted chat promotes the provisional hold id into
+      // this turn id. Resolve the held old output before any avg-cutoff return
+      // and before replacing active turn/streamer ownership. This is the
+      // server-side fallback when the device's immediate scoped STOP failed.
+      if (ws._deviceId && deviceTurnId) {
+        promoteVoiceDeviceTtsHold(ws, deviceTurnId);
+      }
       // Browser chat uses a logical message id plus a per-execution attempt id.
       // Re-sending the SAME attempt after a lost ACK is idempotent; pressing the
       // explicit Retry button keeps message_id but mints a new attempt_id.
@@ -968,6 +957,7 @@ export function onConnection(ws, req) {
             turnId: voiceTurn?.id ?? null,
           });
           ws._ttsStreamer = ttsStreamer;
+          applyVoiceDeviceTtsHold(ws, ttsStreamer);
           ttsStreamer.onClosed(() => { ws._lastVoiceActivityAt = Date.now(); });
         }
       } catch (e) { log.warn('voice-tts', 'streamer setup failed', { error: e.message }); ttsStreamer = null; }
@@ -1231,6 +1221,7 @@ export function onConnection(ws, req) {
       try { ws._ttsStreamer.abort(); } catch {}
       ws._ttsStreamer = null;
     }
+    clearVoiceDeviceTtsHold(ws);
     dropSttSession(ws, ws._sttSession ? 'socket closed' : null);
     // A device socket dropping mid-turn used to orphan the LLM turn — tokens
     // streamed to nobody while tools kept executing. Abort it; the device

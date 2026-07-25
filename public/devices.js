@@ -81,6 +81,14 @@ function _coordinatorLabel() {
   return name || 'your coordinator';
 }
 
+// `wake_word` is the pure spoken phrase consumed by firmware and the verify
+// gate. Presentation metadata such as deprecation must stay separate so it
+// cannot become part of the normalized gate identity.
+function wakewordDisplayName(w) {
+  const phrase = w?.wake_word || w?.id || '(no phrase)';
+  return w?.deprecated ? `${phrase} (deprecated)` : phrase;
+}
+
 // Per-user voice configuration: { version, updated_at, slot_assignments }.
 // Single source of truth for wake-slot routing — applies to every voice
 // device paired to this user. Fetched on drawer open via /api/voice-config
@@ -461,7 +469,7 @@ function renderDevices() {
   // can I assign". renderRow still has a stock-pill branch as defensive
   // code in case any caller invokes it on a stock entry.
   const renderRow = (w) => {
-    const phrase = escHtml(w.wake_word || '(no phrase)');
+    const phrase = escHtml(wakewordDisplayName(w));
     const size = (w.size_bytes / 1024).toFixed(1) + ' KB';
     const author = w.author ? ` · ${escHtml(w.author)}` : '';
     const trailing = w.stock
@@ -1127,7 +1135,7 @@ function renderVoiceConfigPanel(roster, deviceCount) {
     }
     const curWw = a?.wakewordId || '';
     const wwOpts = ['<option value="">(no wake word — pick one)</option>']
-      .concat(_wakewordLibrary.map(w => `<option value="${escHtml(w.id)}" ${w.id === curWw ? 'selected' : ''}>${escHtml(w.wake_word || w.id)}</option>`))
+      .concat(_wakewordLibrary.map(w => `<option value="${escHtml(w.id)}" ${w.id === curWw ? 'selected' : ''}>${escHtml(wakewordDisplayName(w))}</option>`))
       .join('');
     const wwEntry = curWw ? _wakewordLibrary.find(w => w.id === curWw) : null;
     const defaultCutoff = wwEntry?.probability_cutoff;
@@ -1294,6 +1302,10 @@ window._handleOtaProgress = function (msg) {
       break;
     }
     case 'applying':  row.textContent = 'Writing flash…'; break;
+    case 'restarting_for_memory':
+      row.textContent = 'Restarting once to recover OTA memory…';
+      setTimeout(loadDevices, 8000);
+      break;
     case 'rebooting': row.textContent = `Rebooting into ${msg.target_version || 'new firmware'}…`; setTimeout(loadDevices, 8000); break;
     case 'error':     row.textContent = `Update failed: ${msg.err || 'unknown error'}`; break;
     default:          row.textContent = msg.phase || '';
@@ -1788,7 +1800,7 @@ window.deleteVoiceRef = async function (id) {
 // devices keep the old loaded model until rebooted).
 window.deleteWakeword = async function (id) {
   const w = _wakewordLibrary.find(x => x.id === id);
-  if (!confirm(`Delete "${w?.wake_word || id}" from your library?\n\nDevices already using this wake word keep it loaded until they reboot.`)) return;
+  if (!confirm(`Delete "${wakewordDisplayName(w || { id })}" from your library?\n\nDevices already using this wake word keep it loaded until they reboot.`)) return;
   try {
     const r = await fetch(`/api/wakewords/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);

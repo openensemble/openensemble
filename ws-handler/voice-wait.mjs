@@ -14,7 +14,10 @@ import { getDevice } from '../lib/voice-devices.mjs';
 import { loadConfig } from '../routes/_helpers.mjs';
 import { getVoiceRef } from '../lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from '../lib/voice-tts-stream.mjs';
-import { isVoiceOutputSuppressed } from './voice-stt.mjs';
+import {
+  applyVoiceDeviceTtsHold,
+  isVoiceOutputSuppressed,
+} from './voice-stt.mjs';
 
 const OE_DEFAULT_VOICE_STATE = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
 
@@ -123,6 +126,7 @@ export function speakAnnouncement(ws, devicePrefs, entry) {
     // Own the slot while speaking so a wake/stop during the announcement
     // interacts with it exactly like a reply (new chat aborts it, etc.).
     ws._ttsStreamer = streamer;
+    applyVoiceDeviceTtsHold(ws, streamer);
     streamer.onClosed((clean) => {
       ws._lastVoiceActivityAt = Date.now();
       if (clean && devicePrefs?.conversation_mode) {

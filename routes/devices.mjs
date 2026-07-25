@@ -823,6 +823,33 @@ export async function handle(req, res) {
     return true;
   }
 
+  // POST /api/devices/:id/reboot — credentials-preserving recovery restart.
+  // Firmware already handles this command for automatic mic recovery; expose
+  // the same narrowly scoped primitive so an owner can clear long-uptime heap
+  // fragmentation before retrying an OTA. Unlike enter-ap, this does not wipe
+  // pairing, revoke the session, or remove the registry entry.
+  const rebootMatch = p.match(/^\/api\/devices\/([^/]+)\/reboot$/);
+  if (rebootMatch && req.method === 'POST') {
+    const userId = requireAuth(req, res);
+    if (!userId) return true;
+    const id = decodeURIComponent(rebootMatch[1]);
+    const device = getDevice(userId, id);
+    if (!device) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+      return true;
+    }
+    if (!isDeviceOnline(id)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'device_offline' }));
+      return true;
+    }
+    const sent = sendToDevice(id, { type: 'reboot', reason: 'manual_recovery' });
+    res.writeHead(sent ? 202 : 502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ nudged: !!sent }));
+    return true;
+  }
+
   // POST /api/devices/:id/enter-ap — tell the device to wipe its Wi-Fi/pairing
   // creds and reboot into the captive-portal AP (oe-voice-XXXX) so it can be
   // moved to a different Wi-Fi network. The device must be ONLINE to receive

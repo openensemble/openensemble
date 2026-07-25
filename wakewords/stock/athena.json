@@ -1,6 +1,7 @@
 {
   "type": "micro",
-  "wake_word": "Athena (deprecated)",
+  "wake_word": "Athena",
+  "deprecated": true,
   "author": "OpenEnsemble",
   "website": "https://openensemble.dev/",
   "model": "athena.tflite",

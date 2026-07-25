@@ -59,6 +59,7 @@ import { hasVoiceAnnouncements, nextVoiceAnnouncement } from './lib/voice-announ
 import { normalizeDocumentRequest } from './lib/document-artifacts.mjs';
 import { getProfileFilePath } from './lib/profile-files.mjs';
 import { getOrchestrationPolicy, getRequestedOrchestrationPolicy } from './lib/orchestration-policy.mjs';
+import { buildVoiceDeviceServerCaps } from './lib/voice-device-server-caps.mjs';
 
 
 // Backfill ws._deviceId for voice-device sessions that were created before
@@ -107,6 +108,11 @@ import {
   handleSttBinaryFrame,
   makeVoiceTurn,
   suppressVoiceOutput,
+  applyVoiceDeviceTtsHold,
+  clearVoiceDeviceTtsHold,
+  promoteVoiceDeviceTtsHold,
+  handleVoiceDeviceTtsFlow,
+  handleVoiceDeviceStop,
   isVoiceOutputSuppressed,
   sessionKey,
   _activeVoiceTurnByKey,
@@ -278,13 +284,18 @@ function reconcileVoiceDeviceState(ws) {
     // resets the flags on every disconnect. turn_ids has no firmware gate
     // (turn_id fields are harmless to old servers) but is declared anyway.
     const _capsCfg = loadConfig();
-    sendToDevice(ws._deviceId, {
-      type: 'server_caps',
-      turn_ids: true,
-      tts_pause: true,
-      // Streaming STT needs a working transcription backend server-side.
-      stt_stream: _capsCfg.sttMode === 'local' || !!(_capsCfg.sttApiKey && _capsCfg.sttApiUrl),
+    const serverCaps = buildVoiceDeviceServerCaps({
+      deviceId: ws._deviceId,
+      config: _capsCfg,
     });
+    if (_capsCfg.verifyGateEnabled === true &&
+        (!String(_capsCfg.verifyGateUpstreamUrl || '').trim()
+          || !String(_capsCfg.verifyGateClientSecret || '').trim())) {
+      // Keep advertising the fixed proxy path so a configured device fails
+      // closed through OE (503) instead of silently reverting to ungated wake.
+      log.warn('voice', 'wake gate enabled but internal upstream/secret is incomplete; requests will fail closed');
+    }
+    sendToDevice(ws._deviceId, serverCaps);
     if (d.name) sendToDevice(ws._deviceId, { type: 'set_device_name', name: d.name });
     sendToDevice(ws._deviceId, { type: 'set_headphone_mode', enabled: !!d.headphone_mode });
     sendToDevice(ws._deviceId, { type: 'set_conversation_mode', enabled: !!d.conversation_mode });
@@ -514,6 +525,11 @@ bindConnectionDeps({
   handleSttBinaryFrame,
   makeVoiceTurn,
   suppressVoiceOutput,
+  applyVoiceDeviceTtsHold,
+  clearVoiceDeviceTtsHold,
+  promoteVoiceDeviceTtsHold,
+  handleVoiceDeviceTtsFlow,
+  handleVoiceDeviceStop,
   isVoiceOutputSuppressed,
   sessionKey,
   _activeVoiceTurnByKey,
