@@ -14,15 +14,141 @@ import path from 'path';
 import { listBrowsers, sendCommand } from '../../lib/browser-bus.mjs';
 import { getUserFilesDir, userSiteNotesDir, userSiteNotesPath, userSharedSiteNotesPath } from '../../lib/paths.mjs';
 import {
+  canonicalBrowserRoutineOrigin,
   deleteBrowserRoutine,
   listBrowserRoutines,
   replayBrowserRoutine,
   saveBrowserRoutineFromTeachEvents,
 } from '../../lib/browser-routines.mjs';
-import { atomicWriteSync } from '../../routes/_helpers/io-lock.mjs';
+import {
+  browserMemoryTextContainsSecret,
+  deleteBrowserPlaybook,
+  evaluateBrowserAssertions,
+  listBrowserPlaybooks,
+  normalizeBrowserAssertions,
+  saveBrowserPlaybook,
+  templateBrowserAction,
+} from '../../lib/browser-playbooks.mjs';
+import { atomicWriteSync, withLock } from '../../routes/_helpers/io-lock.mjs';
 
 const MAX_SITE_NOTE_WRITE = 8_000;
 const MAX_SITE_NOTES_FILE = 64_000;
+const LEARNING_INSPECTION_FRESH_MS = 2 * 60_000;
+const LEARNING_MAX_RUN_MS = 15 * 60_000;
+const LEARNING_MAX_TRANSITIONS = 40;
+const LEARNING_PAGE_INSTRUCTION = /\b(?:ignore|disregard|override)\s+(?:all\s+)?(?:previous|prior|system|developer)\s+instructions?\b|\b(?:reveal|print|show|send|upload)\s+(?:the\s+)?(?:system prompt|credentials?|passwords?|tokens?|secrets?)\b|\b(?:system|developer|assistant)\s*:|\bfrom now on\b|\b(?:you|oe|the assistant)\s+(?:must|should|need to)\b|\b(?:always|never)\s+(?:click|select|fill|submit|send|upload|download|open|run|call|use)\b|\b(?:run|call|use)\s+(?:the\s+)?(?:browser_[a-z_]+|tool)\b/i;
+const LEARNING_RAW_URL = /\bhttps?:\/\/\S+/i;
+
+/** Process-local, fail-closed ledger. Never reconstructed from extension state. */
+const _activeLearningRuns = new Map();
+
+function _compact(value, max = 240) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function _formatSemanticSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return 'No semantic page state was returned.';
+  const lines = [
+    `**${_compact(snapshot.title, 200) || '(no title)'}**`,
+    `URL: ${_compact(snapshot.url, 1_500) || '(unknown)'}`,
+    `Origin: ${_compact(snapshot.origin, 300) || '(unknown)'}`,
+  ];
+  const headings = Array.isArray(snapshot.headings) ? snapshot.headings : [];
+  if (headings.length) {
+    lines.push('', '## Headings');
+    for (const heading of headings) {
+      lines.push(`- h${Number(heading?.level) || '?'}: ${_compact(heading?.text, 200)}`);
+    }
+  }
+  const dialogs = Array.isArray(snapshot.dialogs) ? snapshot.dialogs : [];
+  if (dialogs.length) {
+    lines.push('', '## Dialogs');
+    for (const dialog of dialogs) {
+      const state = [dialog?.modal ? 'modal' : null, dialog?.open === false ? 'closed' : 'open'].filter(Boolean).join(', ');
+      lines.push(`- ${_compact(dialog?.role, 32) || 'dialog'} “${_compact(dialog?.name || dialog?.label, 180) || '(unnamed)'}”${state ? ` (${state})` : ''}`);
+    }
+  }
+  const statuses = Array.isArray(snapshot.statusSignals) ? snapshot.statusSignals : [];
+  if (statuses.length) {
+    lines.push('', '## Status signals');
+    for (const status of statuses) {
+      lines.push(`- ${_compact(status?.role, 32) || 'status'}: ${_compact(status?.text, 300)}`);
+    }
+  }
+  const controls = Array.isArray(snapshot.controls) ? snapshot.controls : [];
+  if (controls.length) {
+    lines.push('', '## Interactive controls');
+    controls.forEach((control, index) => {
+      const target = {
+        role: _compact(control?.role, 32),
+        ...(control?.name ? { name: _compact(control.name, 160) } : {}),
+        ...(control?.label ? { label: _compact(control.label, 160) } : {}),
+        ordinal: Number(control?.ordinal),
+        exact: true,
+      };
+      const state = [];
+      for (const key of ['type', 'disabled', 'checked', 'selected', 'expanded', 'pressed', 'required', 'readOnly', 'multiple']) {
+        if (control?.[key] != null && control[key] !== '') state.push(`${key}=${String(control[key])}`);
+      }
+      if (Array.isArray(control?.options) && control.options.length) {
+        state.push(`options=[${control.options.map(option => _compact(option, 80)).filter(Boolean).slice(0, 20).join(' | ')}]`);
+      }
+      lines.push(`${index + 1}. \`${JSON.stringify(target)}\`${state.length ? ` — ${state.join(', ')}` : ''}`);
+    });
+  }
+  if (snapshot.truncated && Object.values(snapshot.truncated).some(Boolean)) {
+    lines.push('', '_The semantic snapshot was safely truncated; inspect again after narrowing the page state if needed._');
+  }
+  return lines.join('\n').slice(0, 16_000);
+}
+
+function _semanticActionFromArgs(args) {
+  const type = _compact(args?.operation, 24).toLowerCase();
+  if (!['click', 'fill', 'select', 'toggle', 'wait_for'].includes(type)) {
+    throw new TypeError('operation must be click, fill, select, toggle, or wait_for');
+  }
+  const rawTarget = args?.target && typeof args.target === 'object' && !Array.isArray(args.target)
+    ? args.target
+    : {};
+  const target = {
+    role: _compact(rawTarget.role, 32).toLowerCase(),
+    name: rawTarget.name == null ? null : _compact(rawTarget.name, 160),
+    label: rawTarget.label == null ? null : _compact(rawTarget.label, 160),
+    ordinal: Number(rawTarget.ordinal),
+    exact: rawTarget.exact !== false,
+  };
+  if (!target.role || (!target.name && !target.label)) {
+    throw new TypeError('target must copy a role and accessible name or label from browser_inspect_page');
+  }
+  if (!Number.isInteger(target.ordinal) || target.ordinal < 1 || target.ordinal > 20) {
+    throw new TypeError('target.ordinal must be the integer from browser_inspect_page (1–20)');
+  }
+  if (target.exact !== true) {
+    throw new TypeError('target.exact must not be false; semantic actions use exact live-inspection matching');
+  }
+  /** @type {any} */
+  const action = { type, target };
+  if (type === 'fill') {
+    if (typeof args?.value !== 'string') throw new TypeError('value is required for fill');
+    action.value = args.value;
+  }
+  if (type === 'select') {
+    if (typeof args?.option !== 'string' || !args.option.trim()) throw new TypeError('option is required for select');
+    action.option = args.option;
+  }
+  if (type === 'toggle') {
+    if (typeof args?.checked !== 'boolean') throw new TypeError('checked is required for toggle');
+    action.checked = args.checked;
+  }
+  if (type === 'wait_for') {
+    action.state = _compact(args?.state, 16).toLowerCase();
+    if (!['visible', 'hidden', 'enabled', 'disabled'].includes(action.state)) {
+      throw new TypeError('state is required for wait_for');
+    }
+    if (args?.timeoutMs != null) action.timeoutMs = Number(args.timeoutMs);
+  }
+  return action;
+}
 
 // Pull the registrable domain out of a URL — strips scheme, www., port,
 // path. Used by browser_screenshot / browser_read_page to find site
@@ -102,7 +228,12 @@ async function _liveBrowsers(userId) {
   return Promise.all(connected.map(async browser => {
     try {
       const tabs = await sendCommand(userId, 'list_tabs', {}, { extId: browser.extId, timeoutMs: 5000 });
-      return { ...browser, tabs: Array.isArray(tabs) ? tabs : [], tabCount: Array.isArray(tabs) ? tabs.length : 0 };
+      return {
+        ...browser,
+        tabs: Array.isArray(tabs) ? tabs : [],
+        tabCount: Array.isArray(tabs) ? tabs.length : 0,
+        accessError: null,
+      };
     } catch (e) {
       return { ...browser, tabs: [], tabCount: 0, accessError: e?.message || String(e) };
     }
@@ -115,9 +246,942 @@ async function _activeLeasedTab(userId, extId = null) {
   return browser?.tabs?.find(t => t.active) || browser?.tabs?.[0] || null;
 }
 
+function _boundedLearningText(value, label, max, { memorySafe = false, required = true } = {}) {
+  if (typeof value !== 'string') {
+    if (!required && value == null) return '';
+    throw new TypeError(`${label} must be text`);
+  }
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (required && !text) throw new TypeError(`${label} is required`);
+  if (text.length > max) throw new TypeError(`${label} exceeds ${max} characters`);
+  if (memorySafe && text && (
+    browserMemoryTextContainsSecret(text) ||
+    LEARNING_PAGE_INSTRUCTION.test(text) ||
+    LEARNING_RAW_URL.test(text)
+  )) {
+    throw new TypeError(`${label} may not contain credentials, secrets, raw URLs, or page-authored instructions`);
+  }
+  return text;
+}
+
+function _agentKey(agentId) {
+  const value = String(agentId || 'main').trim();
+  return value.slice(0, 160) || 'main';
+}
+
+function _learningLockKey(userId) {
+  return `browser-learning:${String(userId)}`;
+}
+
+function _learningRunId(value) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 140) {
+    throw new TypeError('runId is required');
+  }
+  return value.trim();
+}
+
+async function _resolveExtensionForTab(userId, tabId, requestedExtId = null) {
+  if (!Number.isInteger(tabId) || tabId < 1) {
+    throw new TypeError('tabId is required (integer from browser_list)');
+  }
+  const browsers = await _liveBrowsers(userId);
+  if (!browsers.length) throw new Error('no browser extension is connected');
+  if (requestedExtId != null) {
+    const extId = _boundedLearningText(requestedExtId, 'extId', 160);
+    const browser = browsers.find(item => item.extId === extId);
+    if (!browser) throw new Error('the requested browser extension is no longer connected');
+    if (browser.accessError) throw new Error(`the requested extension cannot enumerate its leased tabs: ${browser.accessError}`);
+    if (!browser.tabs.some(tab => Number(tab?.tabId) === tabId)) {
+      throw new Error('that tab is not covered by a current lease in the requested extension');
+    }
+    return browser;
+  }
+  const matches = browsers.filter(browser => (
+    !browser.accessError && browser.tabs.some(tab => Number(tab?.tabId) === tabId)
+  ));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new Error('more than one connected extension reports that tabId; pass the extId shown by browser_list');
+  }
+  const accessErrors = browsers.filter(browser => browser.accessError);
+  if (accessErrors.length === browsers.length) {
+    throw new Error(`no extension could enumerate its leased tabs: ${accessErrors[0].accessError}`);
+  }
+  throw new Error('that tab is not covered by a current browser lease; run browser_list again');
+}
+
+function _validatedLearningGrant(data, tabId) {
+  if (!data || typeof data !== 'object' || Array.isArray(data) || data.confirmed !== true) {
+    throw new Error('the extension did not return a confirmed learning grant');
+  }
+  const runId = _learningRunId(data.runId);
+  if (!/^learn_[A-Za-z0-9_]+$/.test(runId)) throw new Error('the extension returned an invalid learning run id');
+  if (Number(data.tabId) !== tabId) throw new Error('the extension confirmed a different tab');
+  const origin = canonicalBrowserRoutineOrigin(data.origin);
+  let url;
+  try { url = new URL(String(data.url || '')); }
+  catch { throw new Error('the extension returned an invalid learning URL'); }
+  if (url.origin !== origin) throw new Error('the extension learning URL does not match its confirmed origin');
+  const confirmedAt = Number(data.confirmedAt);
+  const expiresAt = Number(data.leaseExpiresAt);
+  const now = Date.now();
+  if (!Number.isFinite(confirmedAt) || confirmedAt > now + 5_000 ||
+      !Number.isFinite(expiresAt) || expiresAt <= now ||
+      expiresAt > confirmedAt + LEARNING_MAX_RUN_MS + 5_000) {
+    throw new Error('the extension returned an invalid learning-run lifetime');
+  }
+  return {
+    runId,
+    tabId,
+    origin,
+    url: url.href,
+    title: _compact(data.title, 240),
+    confirmedAt,
+    expiresAt,
+  };
+}
+
+function _validateSnapshotForRun(snapshot, run) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new Error('the extension returned no semantic page state');
+  }
+  const origin = canonicalBrowserRoutineOrigin(snapshot.origin);
+  if (origin !== run.origin) throw new Error('the inspected page left the learning run origin');
+  let url;
+  try { url = new URL(String(snapshot.url || '')); }
+  catch { throw new Error('the semantic inspection returned an invalid URL'); }
+  if (url.origin !== run.origin) throw new Error('the semantic inspection URL left the learning run origin');
+  return snapshot;
+}
+
+function _targetSeenInSnapshot(snapshot, target) {
+  const fold = value => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+  const matches = (actual, wanted) => {
+    if (!wanted) return true;
+    return target.exact === false
+      ? fold(actual).includes(fold(wanted))
+      : fold(actual) === fold(wanted);
+  };
+  return (Array.isArray(snapshot?.controls) ? snapshot.controls : []).some(control => (
+    fold(control?.role) === fold(target.role) &&
+    matches(control?.name, target.name) &&
+    matches(control?.label, target.label) &&
+    Number(control?.ordinal) === Number(target.ordinal)
+  ));
+}
+
+function _learningMutationConflict(userId, name, args) {
+  const run = _activeLearningRuns.get(userId);
+  if (!run || Date.now() >= Number(run.expiresAt)) return null;
+  const mutationTools = new Set([
+    'browser_close_tab', 'browser_back', 'browser_forward', 'browser_reload',
+    'browser_click_xy', 'browser_type', 'browser_keypress', 'browser_media_control',
+    'browser_routine_run',
+  ]);
+  if (name === 'browser_act' && args?.runId == null) mutationTools.add(name);
+  if (!mutationTools.has(name)) return null;
+  const requestedTabId = args?.tabId == null ? null : Number(args.tabId);
+  if (requestedTabId != null && requestedTabId !== run.tabId) return null;
+  return (
+    `${name} cannot modify the active learning tab outside its verified semantic ledger. ` +
+    `Use browser_act with runId=${run.runId}, or finish/abort that learning run first.`
+  );
+}
+
+function _requestActionTemplate(action, origin) {
+  /** @type {any} */
+  const publicAction = { type: action.type, origin, target: action.target };
+  if (action.type === 'fill') publicAction.textLength = action.value.length;
+  if (action.type === 'select') publicAction.option = action.option;
+  if (action.type === 'toggle') publicAction.checked = action.checked;
+  if (action.type === 'wait_for') {
+    publicAction.state = action.state;
+    publicAction.timeoutMs = Number.isInteger(action.timeoutMs) ? action.timeoutMs : 5_000;
+  }
+  return templateBrowserAction(publicAction, origin);
+}
+
+function _formatPlaybookAction(action) {
+  const target = JSON.stringify(action?.target || {});
+  if (action?.parameter) return `${action.type} ${target} using runtime parameter “${action.parameter}”`;
+  if (action?.type === 'toggle') return `${action.type} ${target} to checked=${String(action.checked)}`;
+  if (action?.type === 'wait_for') return `${action.type} ${target} until ${action.state}`;
+  return `${action?.type || 'action'} ${target}`;
+}
+
+function _formatPlaybooks(playbooks, { detailed = true } = {}) {
+  if (!Array.isArray(playbooks) || !playbooks.length) return 'No matching learned playbooks.';
+  const lines = [`${playbooks.length} learned playbook(s):`];
+  for (const playbook of playbooks.slice(0, detailed ? 10 : 20)) {
+    lines.push(
+      `- **${_compact(playbook?.name, 100)}** — id=${_compact(playbook?.id, 100)}, origin=${_compact(playbook?.origin, 300)}, ` +
+      `${Array.isArray(playbook?.transitions) ? playbook.transitions.length : 0} verified transition(s), successes=${Number(playbook?.successCount) || 0}`,
+      `  Goal: ${_compact(playbook?.goal, 300)}`,
+    );
+    if (detailed) {
+      for (const [index, transition] of (playbook?.transitions || []).slice(0, LEARNING_MAX_TRANSITIONS).entries()) {
+        lines.push(
+          `  ${index + 1}. ${_formatPlaybookAction(transition?.action)}`,
+          `     Verify: ${JSON.stringify(transition?.assertions || {})}`,
+        );
+      }
+      lines.push(`  Final verification: ${JSON.stringify(playbook?.finalAssertions || {})}`);
+    }
+  }
+  return lines.join('\n').slice(0, 20_000);
+}
+
+function _formatAssertionChecks(evaluation) {
+  return (evaluation?.checks || [])
+    .map(check => `${check.conclusive === false ? 'UNKNOWN' : (check.passed ? 'pass' : 'FAIL')} ${check.label}${check.reason ? ` (${check.reason})` : ''}`)
+    .join('; ');
+}
+
+function _cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function _runtimeValuesForAction(action) {
+  if (action?.type === 'fill' && typeof action.value === 'string' && action.value.trim()) return [action.value];
+  if (action?.type === 'select' && typeof action.option === 'string' && action.option.trim()) return [action.option];
+  return [];
+}
+
+function _decodedMemoryVariants(value) {
+  const variants = new Set();
+  const decodeHtml = input => String(input || '').replace(
+    /&#(?:x([0-9a-f]{1,6})|([0-9]{1,7}));?/gi,
+    (match, hex, decimal) => {
+      const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
+      if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return match;
+      try { return String.fromCodePoint(codePoint); } catch { return match; }
+    },
+  );
+  const add = input => {
+    const text = String(input || '').normalize('NFKC').toLocaleLowerCase();
+    if (text) variants.add(text);
+  };
+  add(value);
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const item of [...variants]) {
+      try { add(decodeURIComponent(item)); } catch {}
+      if (item.includes('+')) add(item.replace(/\+/g, ' '));
+      if (item.includes('&#')) add(decodeHtml(item));
+    }
+  }
+  return [...variants];
+}
+
+function _memoryRepresentations(value) {
+  const full = new Set();
+  const compact = new Set();
+  const tokens = new Set();
+  for (const variant of _decodedMemoryVariants(value)) {
+    const folded = variant.replace(/\s+/g, ' ').trim();
+    if (!folded) continue;
+    full.add(folded);
+    const joined = folded.replace(/[^\p{L}\p{N}]+/gu, '');
+    if (joined) compact.add(joined);
+    for (const token of folded.match(/[\p{L}\p{N}]+/gu) || []) tokens.add(token);
+  }
+  return { full, compact, tokens };
+}
+
+function _runtimeEncodingSources(value) {
+  const sources = new Set();
+  const variants = new Set();
+  const add = input => {
+    const text = String(input || '').normalize('NFKC');
+    if (text) variants.add(text);
+  };
+  add(value);
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const item of [...variants]) {
+      try { add(decodeURIComponent(item)); } catch {}
+      if (item.includes('+')) add(item.replace(/\+/g, ' '));
+    }
+  }
+  for (const item of [...variants]) {
+    add(item.toLocaleLowerCase());
+    add(item.toLocaleUpperCase());
+  }
+  for (const variant of variants) {
+    const folded = variant.replace(/\s+/g, ' ').trim();
+    if (!folded) continue;
+    sources.add(folded);
+    const compact = folded.replace(/[^\p{L}\p{N}]+/gu, '');
+    if (compact) sources.add(compact);
+  }
+  return sources;
+}
+
+function _runtimeBase64Representations(value) {
+  const encoded = new Set();
+  const sources = _runtimeEncodingSources(value);
+  for (const source of sources) {
+    const base64 = Buffer.from(source, 'utf8').toString('base64').toLocaleLowerCase();
+    encoded.add(base64);
+    encoded.add(base64.replace(/=+$/g, ''));
+    encoded.add(base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''));
+    encoded.add(base64.replace(/[^a-z0-9]/g, ''));
+  }
+  return encoded;
+}
+
+function _rfc4648Base32(value) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bytes = Buffer.from(value, 'utf8');
+  let accumulator = 0;
+  let bits = 0;
+  let output = '';
+  for (const byte of bytes) {
+    accumulator = (accumulator << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      output += alphabet[(accumulator >> bits) & 31];
+    }
+    accumulator &= bits ? (1 << bits) - 1 : 0;
+  }
+  if (bits) output += alphabet[(accumulator << (5 - bits)) & 31];
+  return output.padEnd(Math.ceil(output.length / 8) * 8, '=');
+}
+
+function _runtimeBase32Representations(value) {
+  const encoded = new Set();
+  for (const source of _runtimeEncodingSources(value)) {
+    const base32 = _rfc4648Base32(source).toLocaleLowerCase();
+    encoded.add(base32);
+    encoded.add(base32.replace(/=+$/g, ''));
+  }
+  return encoded;
+}
+
+function _runtimeHexRepresentations(value) {
+  const encoded = new Set();
+  for (const source of _runtimeEncodingSources(value)) {
+    encoded.add(Buffer.from(source, 'utf8').toString('hex').toLocaleLowerCase());
+  }
+  return encoded;
+}
+
+function _encodingSplitAcrossCandidates(encoded, candidates) {
+  if (!encoded) return false;
+  /** Map an encoding offset to the greatest number of distinct fields used. */
+  let offsets = new Map([[0, 0]]);
+  for (const represented of candidates) {
+    const next = new Map(offsets);
+    const pieces = new Set([
+      ...represented.full,
+      ...represented.compact,
+      ...represented.tokens,
+    ]);
+    for (const [offset, fieldsUsed] of offsets) {
+      for (const piece of pieces) {
+        if (!piece || !encoded.startsWith(piece, offset)) continue;
+        const advanced = offset + piece.length;
+        const nextFieldsUsed = fieldsUsed + 1;
+        if (nextFieldsUsed > (next.get(advanced) || 0)) {
+          next.set(advanced, nextFieldsUsed);
+        }
+      }
+    }
+    offsets = next;
+  }
+  return (offsets.get(encoded.length) || 0) >= 2;
+}
+
+function _assertMemoryOmitsRuntime(value, runtimeValues, label) {
+  if (!Array.isArray(runtimeValues) || !runtimeValues.length || value == null) return;
+  /** @type {string[]} */
+  const candidates = [];
+  const visit = item => {
+    if (typeof item === 'string') candidates.push(item);
+    else if (Array.isArray(item)) item.forEach(visit);
+    else if (item && typeof item === 'object') Object.values(item).forEach(visit);
+  };
+  visit(value);
+  const candidateInputs = [
+    ...candidates,
+    candidates.join(' '),
+    candidates.join(''),
+  ];
+  const candidateFull = new Set();
+  const candidateCompact = new Set();
+  const candidateTokens = new Set();
+  const candidateFields = candidates.map(rawCandidate => _memoryRepresentations(rawCandidate));
+  for (const rawCandidate of candidateInputs) {
+    const represented = _memoryRepresentations(rawCandidate);
+    for (const item of represented.full) candidateFull.add(item);
+    for (const item of represented.compact) candidateCompact.add(item);
+    for (const item of represented.tokens) candidateTokens.add(item);
+  }
+  for (const rawRuntime of runtimeValues) {
+    const runtime = _memoryRepresentations(rawRuntime);
+    const runtimeBase64 = _runtimeBase64Representations(rawRuntime);
+    const runtimeBase32 = _runtimeBase32Representations(rawRuntime);
+    const runtimeHex = _runtimeHexRepresentations(rawRuntime);
+    const runtimeCompacts = [...runtime.compact];
+    if ([...candidateFull].some(text => (
+      [...runtime.full].some(runtimeText => runtimeText.length >= 3 && text.includes(runtimeText))
+    ))) {
+      throw new TypeError(`${label} may not persist a runtime fill or select value`);
+    }
+    if ([...candidateCompact].some(text => (
+      runtimeCompacts.some(runtimeText => runtimeText.length >= 3 && text.includes(runtimeText))
+    ))) {
+      throw new TypeError(`${label} may not persist a formatted runtime fill or select value`);
+    }
+    for (const token of runtime.tokens) {
+      if (candidateTokens.has(token)) {
+        throw new TypeError(
+          token.length <= 2
+            ? `${label} may not persist a short runtime fill or select token`
+            : `${label} may not persist a runtime fill or select token fragment`,
+        );
+      }
+    }
+    /** @type {Array<[string, Set<string>, number]>} */
+    const encodedForms = [
+      ['base64', runtimeBase64, 4],
+      ['base32', runtimeBase32, 4],
+      ['hex', runtimeHex, 6],
+    ];
+    for (const [kind, encodings, minimumLength] of encodedForms) {
+      const matched = [...encodings].some(encoded => (
+        encoded.length >= minimumLength &&
+        (
+          [...candidateFull, ...candidateCompact].some(text => text.includes(encoded)) ||
+          _encodingSplitAcrossCandidates(encoded, candidateFields)
+        )
+      ));
+      if (matched) {
+        throw new TypeError(
+          `${label} may not persist a ${kind}-encoded runtime fill or select value`,
+        );
+      }
+    }
+  }
+}
+
+function _evaluateAssertionChange(beforeSnapshot, afterSnapshot, assertions, { requireSupplied = false } = {}) {
+  const after = evaluateBrowserAssertions(afterSnapshot, assertions, { requireSupplied });
+  const before = evaluateBrowserAssertions(beforeSnapshot, after.assertions, { requireSupplied });
+  const newlySatisfied = after.checks.length > 0 && after.checks.every((check, index) => (
+    check.passed &&
+    before.checks[index]?.conclusive !== false &&
+    before.checks[index]?.passed === false
+  ));
+  return { ...after, before, newlySatisfied };
+}
+
+function _finalAssertionsComeFromVerifiedTransitions(finalAssertions, transitions) {
+  const verified = new Set();
+  for (const transition of transitions || []) {
+    for (const [key, value] of Object.entries(transition?.assertions || {})) {
+      verified.add(`${key}:${JSON.stringify(value)}`);
+    }
+  }
+  return Object.entries(finalAssertions || {}).every(([key, value]) => (
+    verified.has(`${key}:${JSON.stringify(value)}`)
+  ));
+}
+
+async function _endExtensionLearningRun(userId, run) {
+  try {
+    await sendCommand(
+      userId,
+      'end_learning_run',
+      { runId: run.runId },
+      { extId: run.extId, timeoutMs: 5_000 },
+    );
+    return '';
+  } catch (error) {
+    return ` The extension could not clear its transient run immediately: ${error?.message || String(error)}`;
+  }
+}
+
+async function _requireLearningRun(userId, agentId, runId, requestedExtId = null) {
+  const id = _learningRunId(runId);
+  const run = _activeLearningRuns.get(userId);
+  if (!run || run.runId !== id) {
+    throw new Error('no matching server learning ledger is active; start a new learning run');
+  }
+  if (run.agentId !== _agentKey(agentId)) {
+    throw new Error('this learning run belongs to the agent that started it');
+  }
+  if (requestedExtId != null && String(requestedExtId).trim() !== run.extId) {
+    throw new Error('this learning run is bound to a different browser extension');
+  }
+  if (Date.now() >= run.expiresAt) {
+    _activeLearningRuns.delete(userId);
+    await _endExtensionLearningRun(userId, run);
+    throw new Error('the learning run expired; start a new one');
+  }
+  return run;
+}
+
+async function _inspectLearningRun(userId, run) {
+  const rawSnapshot = await sendCommand(
+    userId,
+    'inspect_page',
+    { tabId: run.tabId, runId: run.runId },
+    { extId: run.extId, timeoutMs: 12_000 },
+  );
+  _validateSnapshotForRun(rawSnapshot, run);
+  const inspectionId = _boundedLearningText(rawSnapshot?.inspectionId, 'inspectionId', 140);
+  if (!/^inspect_[A-Za-z0-9_]+$/.test(inspectionId)) {
+    throw new Error('the extension returned an invalid learning inspection proof');
+  }
+  const snapshot = { ...rawSnapshot };
+  delete snapshot.inspectionId;
+  run.latestInspection = snapshot;
+  run.inspectionId = inspectionId;
+  run.inspectedAt = Date.now();
+  run.inspectionVersion += 1;
+  return snapshot;
+}
+
+const _learningSweepTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [userId, run] of _activeLearningRuns) {
+    if (now < Number(run.expiresAt)) continue;
+    _activeLearningRuns.delete(userId);
+    _endExtensionLearningRun(userId, run).catch(() => {});
+  }
+}, 60_000);
+_learningSweepTimer.unref?.();
+
 export default async function execute(name, args, userId, agentId) {
+  const learningConflict = _learningMutationConflict(userId, name, args);
+  if (learningConflict) return learningConflict;
+
   if (name === 'browser_list') {
     return _humanList(await _liveBrowsers(userId));
+  }
+
+  if (name === 'browser_learning_start') {
+    const tabId = Number(args?.tabId);
+    try {
+      if (!Number.isInteger(tabId) || tabId < 1) {
+        throw new TypeError('tabId is required (integer from browser_list)');
+      }
+      const goalInput = typeof args?.goal === 'string'
+        ? args.goal.replace(/\bhttps?:\/\/\S+/gi, '[site]')
+        : args?.goal;
+      const goal = _boundedLearningText(goalInput, 'goal', 300, { memorySafe: true });
+      const playbookName = args?.name == null
+        ? goal.slice(0, 100)
+        : _boundedLearningText(
+            typeof args.name === 'string' ? args.name.replace(/\bhttps?:\/\/\S+/gi, '[site]') : args.name,
+            'name',
+            100,
+            { memorySafe: true },
+          );
+      return await withLock(_learningLockKey(userId), async () => {
+        const existing = _activeLearningRuns.get(userId);
+        if (existing && Date.now() < existing.expiresAt) {
+          throw new Error(`learning run ${existing.runId} is already active; finish or abort it first`);
+        }
+        if (existing) {
+          _activeLearningRuns.delete(userId);
+          await _endExtensionLearningRun(userId, existing);
+        }
+
+        const browser = await _resolveExtensionForTab(userId, tabId, args?.extId);
+        let grant = null;
+        let startedRunId = null;
+        try {
+          // Server state is authoritative. A run surviving only in the
+          // extension after a server restart is explicitly ended, never
+          // reconstructed into a writable learning ledger.
+          const orphan = await sendCommand(
+            userId,
+            'get_learning_run',
+            {},
+            { extId: browser.extId, timeoutMs: 5_000 },
+          );
+          if (orphan?.runId) {
+            await sendCommand(
+              userId,
+              'end_learning_run',
+              { runId: orphan.runId },
+              { extId: browser.extId, timeoutMs: 5_000 },
+            );
+          }
+
+          const rawGrant = await sendCommand(
+            userId,
+            'start_learning_run',
+            { tabId, goalSummary: goal },
+            { extId: browser.extId, timeoutMs: 65_000 },
+          );
+          if (typeof rawGrant?.runId === 'string' && rawGrant.runId.trim().length <= 140) {
+            startedRunId = rawGrant.runId.trim();
+          }
+          grant = _validatedLearningGrant(rawGrant, tabId);
+          const run = {
+            ...grant,
+            userId,
+            agentId: _agentKey(agentId),
+            extId: browser.extId,
+            goal,
+            name: playbookName,
+            latestInspection: null,
+            initialInspection: null,
+            inspectionId: null,
+            inspectedAt: 0,
+            inspectionVersion: 0,
+            pendingAction: null,
+            transitions: [],
+            failures: 0,
+            runtimeValues: [],
+            persistenceTainted: false,
+          };
+          const snapshot = await _inspectLearningRun(userId, run);
+          run.initialInspection = _cloneJson(snapshot);
+          const playbooks = listBrowserPlaybooks(userId, {
+            origin: run.origin,
+            goal,
+            limit: 5,
+          });
+          _activeLearningRuns.set(userId, run);
+          return [
+            `Learning run confirmed: ${run.runId}`,
+            `Scope: extension=${run.extId}, tabId=${run.tabId}, origin=${run.origin}, expires=${new Date(run.expiresAt).toISOString()}`,
+            '',
+            '## Fresh live inspection',
+            _formatSemanticSnapshot(snapshot),
+            '',
+            '## Same-origin learned priors',
+            _formatPlaybooks(playbooks),
+            '',
+            'Reason from the live inspection, take one semantic action, then verify it with a structured checkpoint.',
+          ].join('\n');
+        } catch (error) {
+          if (grant?.runId || startedRunId) {
+            await _endExtensionLearningRun(userId, {
+              ...(grant || {}),
+              runId: grant?.runId || startedRunId,
+              extId: browser.extId,
+            });
+          }
+          throw error;
+        }
+      });
+    } catch (error) {
+      return `Could not start adaptive browser learning: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_inspect_page') {
+    const tabId = Number(args?.tabId);
+    try {
+      if (!Number.isInteger(tabId) || tabId < 1) {
+        throw new TypeError('tabId is required (integer from browser_list)');
+      }
+      if (args?.runId != null) {
+        return await withLock(_learningLockKey(userId), async () => {
+          const run = await _requireLearningRun(userId, agentId, args.runId, args?.extId);
+          if (run.tabId !== tabId) throw new Error('the learning run is bound to a different tab');
+          const snapshot = await _inspectLearningRun(userId, run);
+          return `Fresh inspection for learning run ${run.runId}:\n\n${_formatSemanticSnapshot(snapshot)}`;
+        });
+      }
+      const browser = await _resolveExtensionForTab(userId, tabId, args?.extId);
+      const snapshot = await sendCommand(
+        userId,
+        'inspect_page',
+        { tabId },
+        { extId: browser.extId, timeoutMs: 12_000 },
+      );
+      return _formatSemanticSnapshot(snapshot);
+    } catch (error) {
+      return `Failed to inspect the page: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_act') {
+    const tabId = Number(args?.tabId);
+    try {
+      if (!Number.isInteger(tabId) || tabId < 1) {
+        throw new TypeError('tabId is required (integer from browser_list)');
+      }
+      const expectedAssertions = normalizeBrowserAssertions(args?.expectedOutcome, { required: true });
+      const action = _semanticActionFromArgs(args);
+      if (args?.runId == null) {
+        const browser = await _resolveExtensionForTab(userId, tabId, args?.extId);
+        const data = await sendCommand(
+          userId,
+          'semantic_action',
+          { tabId, action },
+          { extId: browser.extId, timeoutMs: 65_000 },
+        );
+        return [
+          `Performed one semantic ${action.type} action${data?.confirmed ? ' after the user allowed it once' : ''}.`,
+          data?.result?.summary ? `Extension result: ${_compact(data.result.summary, 240)}` : '',
+          'Inspect the page again before deciding whether it worked.',
+        ].filter(Boolean).join(' ');
+      }
+
+      return await withLock(_learningLockKey(userId), async () => {
+        const run = await _requireLearningRun(userId, agentId, args.runId, args?.extId);
+        if (run.tabId !== tabId) throw new Error('the learning run is bound to a different tab');
+        if (run.pendingAction) {
+          throw new Error('the prior action still needs a success/failure checkpoint before another action');
+        }
+        if (!run.latestInspection || Date.now() - run.inspectedAt > LEARNING_INSPECTION_FRESH_MS) {
+          throw new Error('the learning inspection is stale; inspect the page again before acting');
+        }
+        if (!run.inspectionId) {
+          throw new Error('the latest inspection has no usable extension proof; inspect the page again');
+        }
+        if (action.target.exact !== true) {
+          throw new Error('learning actions must copy an exact target from browser_inspect_page');
+        }
+        if (action.type === 'click' && ['checkbox', 'radio', 'switch', 'option'].includes(action.target.role)) {
+          throw new Error('use toggle/select instead of clicking a stateful option control during learning');
+        }
+        if (!_targetSeenInSnapshot(run.latestInspection, action.target)) {
+          throw new Error('the requested semantic target was not present in the latest learning inspection');
+        }
+        if (run.transitions.length >= LEARNING_MAX_TRANSITIONS) {
+          throw new Error(`a learning run is limited to ${LEARNING_MAX_TRANSITIONS} verified transitions`);
+        }
+
+        const requestTemplate = _requestActionTemplate(action, run.origin);
+        const runtimeValues = [...run.runtimeValues, ..._runtimeValuesForAction(action)];
+        _assertMemoryOmitsRuntime(action.target, runtimeValues, 'the durable semantic target');
+        _assertMemoryOmitsRuntime(expectedAssertions, runtimeValues, 'the bound expected outcome');
+        const beforeExpected = evaluateBrowserAssertions(
+          run.latestInspection,
+          expectedAssertions,
+          { requireSupplied: true },
+        );
+        if (beforeExpected.checks.some(check => check.conclusive === false)) {
+          throw new Error(
+            `the expected outcome is not conclusively false in the pre-action inspection: ${_formatAssertionChecks(beforeExpected)}`,
+          );
+        }
+        if (beforeExpected.checks.some(check => check.passed)) {
+          throw new Error(
+            `every expected outcome predicate must be false before the action: ${_formatAssertionChecks(beforeExpected)}`,
+          );
+        }
+        run.runtimeValues = runtimeValues;
+        run.pendingAction = {
+          startedAt: Date.now(),
+          inspectionVersion: run.inspectionVersion,
+          beforeInspection: _cloneJson(run.latestInspection),
+          expectedAssertions: _cloneJson(expectedAssertions),
+          requestTemplate,
+          action: null,
+          state: 'dispatching',
+        };
+        run.inspectedAt = 0;
+        const inspectionId = run.inspectionId;
+        run.inspectionId = null;
+        let data;
+        try {
+          data = await sendCommand(
+            userId,
+            'semantic_action',
+            { tabId, runId: run.runId, inspectionId, action },
+            { extId: run.extId, timeoutMs: 65_000 },
+          );
+          const verifiedTemplate = templateBrowserAction(data?.semanticAction, run.origin);
+          if (JSON.stringify(verifiedTemplate) !== JSON.stringify(requestTemplate)) {
+            throw new Error('the extension-confirmed semantic action did not match the requested template');
+          }
+          run.pendingAction.action = verifiedTemplate;
+          run.pendingAction.state = 'acted';
+          run.pendingAction.confirmed = data?.confirmed === true;
+        } catch (error) {
+          run.pendingAction.state = 'uncertain';
+          run.persistenceTainted = true;
+          throw new Error(
+            `the action did not return a trustworthy completion result (${error?.message || String(error)}). ` +
+            'Inspect the page and checkpoint this attempt as failure, or abort the run; do not repeat it blindly.',
+          );
+        }
+        return [
+          `Action dispatched for learning run ${run.runId}${data?.confirmed ? ' after one-time user confirmation' : ''}.`,
+          data?.result?.summary ? `Extension result: ${_compact(data.result.summary, 240)}` : '',
+          `Expected outcome bound before dispatch: ${JSON.stringify(expectedAssertions)}.`,
+          'Now verify the fresh page state with browser_learning_checkpoint before taking another action.',
+        ].filter(Boolean).join(' ');
+      });
+    } catch (error) {
+      return `Browser semantic action was not completed: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_learning_checkpoint') {
+    try {
+      const runId = _learningRunId(args?.runId);
+      const outcome = String(args?.outcome || '');
+      if (!['success', 'failure'].includes(outcome)) throw new TypeError('outcome must be success or failure');
+      _boundedLearningText(args?.summary, 'summary', 400);
+      return await withLock(_learningLockKey(userId), async () => {
+        const run = await _requireLearningRun(userId, agentId, runId);
+        const pending = run.pendingAction;
+        if (!pending) throw new Error('there is no pending semantic action to checkpoint');
+        if (outcome === 'success' && run.persistenceTainted) {
+          throw new Error('this run is permanently ineligible for persistence after a rejected or uncertain verification');
+        }
+        try {
+          const checkpointAssertions = args?.assertions == null
+            ? pending.expectedAssertions
+            : normalizeBrowserAssertions(args.assertions, { required: outcome === 'success' });
+          if (outcome === 'success' &&
+              JSON.stringify(checkpointAssertions) !== JSON.stringify(pending.expectedAssertions)) {
+            throw new Error('success verification must exactly reuse the structured outcome bound before the action');
+          }
+          const snapshot = await _inspectLearningRun(userId, run);
+          _assertMemoryOmitsRuntime(checkpointAssertions, run.runtimeValues, 'verification assertions');
+          const evaluation = _evaluateAssertionChange(
+            pending.beforeInspection,
+            snapshot,
+            checkpointAssertions,
+            { requireSupplied: outcome === 'success' },
+          );
+          if (outcome === 'success') {
+            if (pending.state !== 'acted' || !pending.action) {
+              throw new Error('the extension never returned a trustworthy action result, so this attempt cannot be retained as a success');
+            }
+            if (!evaluation.passed) {
+              throw new Error(`the structured verification did not pass: ${_formatAssertionChecks(evaluation)}`);
+            }
+            if (!evaluation.newlySatisfied) {
+              throw new Error('every structured predicate must be conclusively false before the action and true afterward');
+            }
+            run.transitions.push({
+              action: JSON.parse(JSON.stringify(pending.action)),
+              assertions: JSON.parse(JSON.stringify(evaluation.assertions)),
+            });
+            run.pendingAction = null;
+            return [
+              `Verified transition ${run.transitions.length} for learning run ${run.runId}.`,
+              `Checks: ${_formatAssertionChecks(evaluation)}.`,
+              '',
+              _formatSemanticSnapshot(snapshot),
+            ].join('\n');
+          }
+          run.failures += 1;
+          run.persistenceTainted = true;
+          run.pendingAction = null;
+          return [
+            `Recorded a failed attempt in transient run state. This run can continue the task, but it is now ineligible for durable playbook persistence; abort and restart from a clean baseline to learn it.`,
+            evaluation.supplied ? `Checks: ${_formatAssertionChecks(evaluation)}.` : '',
+            '',
+            _formatSemanticSnapshot(snapshot),
+          ].filter(Boolean).join('\n');
+        } catch (error) {
+          if (outcome === 'success') {
+            run.persistenceTainted = true;
+            pending.state = 'verification_rejected';
+          }
+          throw error;
+        }
+      });
+    } catch (error) {
+      return `Could not checkpoint the learning action: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_learning_finish') {
+    try {
+      const runId = _learningRunId(args?.runId);
+      const outcome = String(args?.outcome || '');
+      if (!['success', 'aborted'].includes(outcome)) throw new TypeError('outcome must be success or aborted');
+      _boundedLearningText(args?.summary, 'summary', 400);
+      return await withLock(_learningLockKey(userId), async () => {
+        const run = await _requireLearningRun(userId, agentId, runId);
+        if (outcome === 'aborted') {
+          _activeLearningRuns.delete(userId);
+          const warning = await _endExtensionLearningRun(userId, run);
+          return `Aborted learning run ${run.runId}. No playbook was saved.${warning}`;
+        }
+        if (run.pendingAction) throw new Error('the most recent action still needs a checkpoint');
+        if (run.persistenceTainted) {
+          throw new Error('a rejected verification, failed action, or uncertain action tainted this run; abort it and restart from a clean baseline before saving a playbook');
+        }
+        if (!run.transitions.length) throw new Error('no verified semantic transitions are available to save');
+        const snapshot = await _inspectLearningRun(userId, run);
+        _assertMemoryOmitsRuntime(args?.assertions, run.runtimeValues, 'final verification assertions');
+        const finalEvaluation = _evaluateAssertionChange(
+          run.initialInspection,
+          snapshot,
+          args?.assertions,
+          { requireSupplied: true },
+        );
+        if (!finalEvaluation.passed) {
+          throw new Error(`the final structured verification did not pass: ${_formatAssertionChecks(finalEvaluation)}`);
+        }
+        if (!finalEvaluation.newlySatisfied) {
+          throw new Error('every final predicate must have been conclusively false in the initial inspection and true now');
+        }
+        if (!_finalAssertionsComeFromVerifiedTransitions(finalEvaluation.assertions, run.transitions)) {
+          throw new Error('each final assertion must reuse a result predicate that was causally proven by a successful action checkpoint');
+        }
+        _assertMemoryOmitsRuntime(
+          {
+            name: run.name,
+            goal: run.goal,
+            transitions: run.transitions.map(transition => ({
+              target: {
+                name: transition?.action?.target?.name,
+                label: transition?.action?.target?.label,
+              },
+              assertions: transition?.assertions,
+            })),
+          },
+          run.runtimeValues,
+          'the durable playbook',
+        );
+        const saved = await saveBrowserPlaybook(userId, {
+          name: run.name,
+          goal: run.goal,
+          origin: run.origin,
+          transitions: run.transitions,
+          finalAssertions: finalEvaluation.assertions,
+        });
+        _activeLearningRuns.delete(userId);
+        const warning = await _endExtensionLearningRun(userId, run);
+        return (
+          `Saved adaptive browser playbook “${saved.name}” (${saved.id}) with ` +
+          `${saved.transitions.length} verified transition(s) for ${saved.origin}. ` +
+          `It has ${saved.successCount} confirmed success(es) and remains a fallible live-planning prior.${warning}`
+        );
+      });
+    } catch (error) {
+      return `Could not finish adaptive browser learning: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_playbook_list') {
+    try {
+      const origin = args?.origin == null
+        ? null
+        : _boundedLearningText(args.origin, 'origin', 300);
+      const goal = args?.goal == null
+        ? ''
+        : _boundedLearningText(args.goal, 'goal', 300, { required: false });
+      return _formatPlaybooks(listBrowserPlaybooks(userId, { origin, goal, limit: 20 }));
+    } catch (error) {
+      return `Failed to list browser playbooks: ${error?.message || String(error)}`;
+    }
+  }
+
+  if (name === 'browser_playbook_delete') {
+    try {
+      const playbookId = _boundedLearningText(args?.playbookId, 'playbookId', 100);
+      return await deleteBrowserPlaybook(userId, playbookId)
+        ? `Deleted adaptive browser playbook ${playbookId}.`
+        : `No adaptive browser playbook ${playbookId} belongs to this user.`;
+    } catch (error) {
+      return `Failed to delete browser playbook: ${error?.message || String(error)}`;
+    }
   }
 
   if (name === 'browser_open_tab') {

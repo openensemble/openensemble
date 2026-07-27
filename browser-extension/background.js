@@ -132,6 +132,639 @@ async function readPage(tabId, expectedUrl = null) {
   return result;
 }
 
+// Return a bounded accessibility-oriented view of the live document. This is
+// deliberately a different primitive from readPage(): it exposes page
+// structure and control state, never body text, HTML, selectors, coordinates,
+// form values, or page-provided scripts.
+async function semanticPageSnapshotInDocument(
+  expectedUrl,
+  expectedOrigin = null,
+  expectedSnapshot = null,
+  step = null,
+  confirmed = false,
+  expectedTargetFingerprint = null,
+  expectedDocumentId = null,
+) {
+  if (location.href !== expectedUrl) {
+    return { __oeDenied: true, reason: 'page changed before semantic inspection' };
+  }
+
+  const LIMITS = {
+    visited: 12_000,
+    headings: 48,
+    dialogs: 20,
+    statusSignals: 32,
+    controls: 240,
+  };
+  const SECRET_VALUE_PATTERNS = [
+    /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b/g,
+    /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+    /\b(?:\d[ -]?){13,19}\b/g,
+  ];
+  const SECRET_LABEL = /\b(?:password|passcode|one[ -]?time(?: code)?|otp|verification code|security code|cvv|cvc|api[ _-]?key|access[ _-]?token|auth[ _-]?token|secret(?: key)?)\b/i;
+
+  const cleanText = (value, max = 160) => {
+    let text = String(value || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    for (const pattern of SECRET_VALUE_PATTERNS) text = text.replace(pattern, '[redacted]');
+    if (SECRET_LABEL.test(text)) {
+      text = text.replace(
+        /(\b(?:password|passcode|one[ -]?time(?: code)?|otp|verification code|security code|cvv|cvc|api[ _-]?key|access[ _-]?token|auth[ _-]?token|secret(?: key)?)\b\s*(?::|=|is)?\s*)([^\s,;]+)/ig,
+        '$1[redacted]',
+      );
+    }
+    return text.slice(0, max);
+  };
+  const boolAttr = (el, property, ariaName = null) => {
+    if (typeof el?.[property] === 'boolean' && el[property]) return true;
+    if (ariaName && el.getAttribute?.(ariaName) === 'true') return true;
+    if (typeof el?.[property] === 'boolean') return false;
+    return false;
+  };
+  const ariaBool = (el, name) => {
+    const value = el.getAttribute?.(name);
+    return value === 'true' ? true : value === 'false' ? false : undefined;
+  };
+  const isVisible = el => {
+    if (!el?.isConnected || el.hidden || el.getAttribute?.('aria-hidden') === 'true') return false;
+    try {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+      const rects = el.getClientRects?.();
+      return Boolean(rects?.length);
+    } catch {
+      return false;
+    }
+  };
+  const rootById = (el, id) => {
+    const root = el.getRootNode?.();
+    return root?.getElementById?.(id) || document.getElementById(id);
+  };
+  const labelOf = el => {
+    const labelledBy = String(el.getAttribute?.('aria-labelledby') || '')
+      .split(/\s+/).filter(Boolean)
+      .map(id => {
+        const label = rootById(el, id);
+        return cleanText(label?.innerText || label?.textContent, 160);
+      }).filter(Boolean).join(' ');
+    const native = Array.from(el.labels || [])
+      .map(label => cleanText(label.innerText || label.textContent, 160)).filter(Boolean).join(' ');
+    const wrappingLabel = el.closest?.('label');
+    const wrapping = cleanText(wrappingLabel?.innerText || wrappingLabel?.textContent, 160);
+    return cleanText(labelledBy || native || wrapping, 160);
+  };
+  const nameOf = (el, role) => {
+    const labelled = labelOf(el);
+    const labelledName = el.getAttribute?.('aria-label') || labelled;
+    if (labelledName) return cleanText(labelledName, 160);
+    if (['button', 'link', 'menuitem', 'tab', 'option'].includes(role)) {
+      const tag = String(el.tagName || '').toLowerCase();
+      const type = String(el.getAttribute?.('type') || '').toLowerCase();
+      if (role === 'button' && tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(type)) {
+        return cleanText(el.getAttribute?.('value'), 160);
+      }
+      return cleanText(el.innerText || el.textContent || el.getAttribute?.('title') || el.getAttribute?.('alt'), 160);
+    }
+    return cleanText(
+      el.getAttribute?.('placeholder') || el.getAttribute?.('title') ||
+      el.getAttribute?.('alt') || el.getAttribute?.('name'),
+      160,
+    );
+  };
+  const roleOf = el => {
+    const explicit = cleanText(el.getAttribute?.('role'), 32).toLowerCase();
+    if (explicit) return explicit;
+    const tag = String(el.tagName || '').toLowerCase();
+    const type = String(el.getAttribute?.('type') || '').toLowerCase();
+    if (tag === 'a' && el.hasAttribute?.('href')) return 'link';
+    if (tag === 'button') return 'button';
+    if (tag === 'summary') return 'button';
+    if (tag === 'textarea' || el.isContentEditable) return 'textbox';
+    if (tag === 'select') return el.multiple ? 'listbox' : 'combobox';
+    if (tag === 'option') return 'option';
+    if (tag === 'input') {
+      if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
+      if (['file', 'hidden', 'range'].includes(type)) return '';
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'search') return 'searchbox';
+      if (type === 'number') return 'spinbutton';
+      return 'textbox';
+    }
+    return '';
+  };
+  const headingLevel = el => {
+    const tag = String(el.tagName || '').toLowerCase();
+    if (/^h[1-6]$/.test(tag)) return Number(tag.slice(1));
+    if (el.getAttribute?.('role') === 'heading') {
+      const level = Number(el.getAttribute?.('aria-level'));
+      return Number.isInteger(level) && level >= 1 && level <= 6 ? level : 2;
+    }
+    return null;
+  };
+
+  // TreeWalker does not descend into shadow roots, so enumerate each open
+  // root explicitly. Closed roots remain inaccessible by browser design.
+  const elements = [];
+  const roots = [document];
+  let visited = 0;
+  while (roots.length && visited < LIMITS.visited) {
+    const root = roots.shift();
+    let walker;
+    try { walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); } catch { continue; }
+    let node = walker.currentNode === root ? walker.nextNode() : walker.currentNode;
+    while (node && visited < LIMITS.visited) {
+      visited += 1;
+      elements.push(node);
+      if (node.shadowRoot?.mode === 'open') roots.push(node.shadowRoot);
+      node = walker.nextNode();
+    }
+  }
+
+  const headings = [];
+  const dialogs = [];
+  const statusSignals = [];
+  const controls = [];
+  const ordinals = new Map();
+  let headingOverflow = false;
+  let dialogOverflow = false;
+  let statusOverflow = false;
+  let controlOverflow = false;
+
+  for (const el of elements) {
+    if (!isVisible(el)) continue;
+    const explicitRole = cleanText(el.getAttribute?.('role'), 32).toLowerCase();
+    const level = headingLevel(el);
+    if (level != null) {
+      const text = cleanText(el.innerText || el.textContent, 200);
+      if (text) {
+        if (headings.length < LIMITS.headings) headings.push({ level, text });
+        else headingOverflow = true;
+      }
+    }
+
+    const tag = String(el.tagName || '').toLowerCase();
+    const dialogRole = explicitRole === 'alertdialog' ? 'alertdialog'
+      : (explicitRole === 'dialog' || tag === 'dialog' ? 'dialog' : null);
+    if (dialogRole) {
+      const label = labelOf(el);
+      const name = cleanText(el.getAttribute?.('aria-label') || label, 160);
+      if (dialogs.length < LIMITS.dialogs) {
+        dialogs.push({
+          role: dialogRole,
+          name,
+          label,
+          modal: el.getAttribute?.('aria-modal') === 'true',
+          open: tag === 'dialog' ? Boolean(el.open) : true,
+        });
+      } else {
+        dialogOverflow = true;
+      }
+    }
+
+    if (['alert', 'status', 'log', 'progressbar', 'timer'].includes(explicitRole) || el.hasAttribute?.('aria-live')) {
+      const text = cleanText(el.innerText || el.textContent, 240);
+      if (text) {
+        if (statusSignals.length < LIMITS.statusSignals) {
+          const liveRaw = cleanText(el.getAttribute?.('aria-live'), 16).toLowerCase();
+          statusSignals.push({
+            role: ['alert', 'status', 'log', 'progressbar', 'timer'].includes(explicitRole)
+              ? explicitRole : 'status',
+            text,
+            live: ['off', 'polite', 'assertive'].includes(liveRaw) ? liveRaw : 'off',
+            busy: el.getAttribute?.('aria-busy') === 'true',
+          });
+        } else {
+          statusOverflow = true;
+        }
+      }
+    }
+
+    const role = roleOf(el);
+    if (!role) continue;
+    const interactiveRoles = new Set([
+      'button', 'link', 'textbox', 'searchbox', 'combobox', 'listbox', 'option',
+      'checkbox', 'radio', 'switch', 'menuitem', 'tab', 'spinbutton',
+    ]);
+    if (!interactiveRoles.has(role)) continue;
+    if (controls.length >= LIMITS.controls) {
+      controlOverflow = true;
+      continue;
+    }
+    const label = labelOf(el);
+    const name = nameOf(el, role);
+    if (!name && !label) continue;
+    const type = cleanText(el.getAttribute?.('type') || tag, 32).toLowerCase();
+    const ordinalKey = `${role}\u0000${name.toLocaleLowerCase()}\u0000${label.toLocaleLowerCase()}`;
+    const ordinal = (ordinals.get(ordinalKey) || 0) + 1;
+    ordinals.set(ordinalKey, ordinal);
+    const control = {
+      role,
+      name,
+      label,
+      type,
+      ordinal,
+      disabled: boolAttr(el, 'disabled', 'aria-disabled'),
+    };
+    const checked = typeof el.checked === 'boolean' ? el.checked : ariaBool(el, 'aria-checked');
+    const selected = typeof el.selected === 'boolean' ? el.selected : ariaBool(el, 'aria-selected');
+    const expanded = ariaBool(el, 'aria-expanded');
+    const pressed = ariaBool(el, 'aria-pressed');
+    if (checked !== undefined) control.checked = checked;
+    if (selected !== undefined) control.selected = selected;
+    if (expanded !== undefined) control.expanded = expanded;
+    if (pressed !== undefined) control.pressed = pressed;
+    if (typeof el.required === 'boolean') control.required = el.required;
+    if (typeof el.readOnly === 'boolean') control.readOnly = el.readOnly;
+    if (typeof el.multiple === 'boolean') control.multiple = el.multiple;
+    if (tag === 'select') {
+      control.options = Array.from(el.options || [])
+        .slice(0, 40)
+        .map(option => cleanText(option.innerText || option.textContent, 80))
+        .filter(Boolean);
+    }
+    controls.push(control);
+  }
+
+  const snapshot = {
+    url: location.href,
+    origin: location.origin,
+    title: cleanText(document.title, 240),
+    headings,
+    dialogs,
+    statusSignals,
+    controls,
+    truncated: {
+      headings: headingOverflow,
+      dialogs: dialogOverflow,
+      statusSignals: statusOverflow,
+      controls: controlOverflow || visited >= LIMITS.visited,
+    },
+  };
+  if (!step) return snapshot;
+
+  // Learning actions take their final semantic snapshot and activate the
+  // resolved element in this one injected call. There is deliberately no
+  // await between the comparison and activation, so page script cannot swap
+  // an identically-described ordinal into place after proof validation.
+  if (location.origin !== expectedOrigin ||
+      String(window.__oeLearningDocumentId || '').slice(0, 100) !== expectedDocumentId) {
+    return { ok: false, reason: 'the page document changed after the learning inspection' };
+  }
+  if (!expectedSnapshot || typeof expectedSnapshot !== 'object' || Array.isArray(expectedSnapshot)) {
+    return { ok: false, reason: 'the learning inspection proof has no semantic snapshot' };
+  }
+  const comparableSnapshot = {
+    ...snapshot,
+    // The broker separately binds the exact unsanitized URL above. Reuse the
+    // proof's redacted URL here so secret-bearing URLs are never reconstructed
+    // in page context merely to compare the public semantic snapshot.
+    url: expectedSnapshot.url,
+    controls: snapshot.controls.filter(control => (
+      Number.isInteger(Number(control?.ordinal)) &&
+      Number(control.ordinal) >= 1 &&
+      Number(control.ordinal) <= 20
+    )),
+  };
+  if (JSON.stringify(comparableSnapshot) !== JSON.stringify(expectedSnapshot)) {
+    return { ok: false, reason: 'the semantic page state changed after inspection; inspect again before acting' };
+  }
+  const copiedExactly = comparableSnapshot.controls.some(control => (
+    control?.role === step.target?.role &&
+    String(control?.name || '') === String(step.target?.name || '') &&
+    String(control?.label || '') === String(step.target?.label || '') &&
+    Number(control?.ordinal) === Number(step.target?.ordinal) &&
+    step.target?.exact === true
+  ));
+  if (!copiedExactly) {
+    return { ok: false, reason: 'the requested target was not copied exactly from the learning inspection' };
+  }
+
+  // Keep target resolution and target fingerprinting byte-for-byte compatible
+  // with routinePageOperation's independently inspected descriptor.
+  const actionNorm = (value, max = 160) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const actionRoleOf = el => {
+    const explicit = actionNorm(el.getAttribute?.('role')).toLowerCase();
+    if (explicit) return explicit;
+    const tag = String(el.tagName || '').toLowerCase();
+    const type = String(el.getAttribute?.('type') || '').toLowerCase();
+    if (tag === 'a' && el.hasAttribute?.('href')) return 'link';
+    if (tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(type))) return 'button';
+    if (tag === 'summary') return 'button';
+    if (tag === 'textarea' || el.isContentEditable) return 'textbox';
+    if (tag === 'select') return el.multiple ? 'listbox' : 'combobox';
+    if (tag === 'option') return 'option';
+    if (tag === 'input') {
+      if (['file', 'hidden', 'range'].includes(type)) return '';
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'search') return 'searchbox';
+      if (type === 'number') return 'spinbutton';
+      return 'textbox';
+    }
+    return '';
+  };
+  const actionLabelOf = el => {
+    const root = el.getRootNode?.();
+    const labelledBy = actionNorm(el.getAttribute?.('aria-labelledby')).split(/\s+/).filter(Boolean)
+      .map(id => {
+        const label = root?.getElementById?.(id) || document.getElementById(id);
+        return actionNorm(label?.innerText || label?.textContent);
+      }).filter(Boolean).join(' ');
+    const native = Array.from(el.labels || [])
+      .map(label => actionNorm(label.innerText || label.textContent)).filter(Boolean).join(' ');
+    const wrapping = el.closest?.('label');
+    return actionNorm(labelledBy || native || wrapping?.innerText || wrapping?.textContent);
+  };
+  const actionNameOf = (el, role) => {
+    const labelled = actionLabelOf(el);
+    const labelledName = el.getAttribute?.('aria-label') || labelled;
+    if (labelledName) return actionNorm(labelledName);
+    if (['button', 'link', 'menuitem', 'tab', 'option'].includes(role)) {
+      const tag = String(el.tagName || '').toLowerCase();
+      const type = String(el.getAttribute?.('type') || '').toLowerCase();
+      if (role === 'button' && tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(type)) {
+        return actionNorm(el.getAttribute?.('value'));
+      }
+      return actionNorm(el.innerText || el.textContent || el.getAttribute?.('title') || el.getAttribute?.('alt'));
+    }
+    return actionNorm(
+      el.getAttribute?.('placeholder') || el.getAttribute?.('title') ||
+      el.getAttribute?.('alt') || el.getAttribute?.('name'),
+    );
+  };
+  const actionMatches = (actual, wanted) => {
+    if (!wanted) return true;
+    return actionNorm(actual).toLocaleLowerCase() === actionNorm(wanted).toLocaleLowerCase();
+  };
+  const candidates = elements
+    .filter(el => actionRoleOf(el) === step.target.role)
+    .filter(el => actionMatches(actionNameOf(el, actionRoleOf(el)), step.target.name))
+    .filter(el => actionMatches(actionLabelOf(el), step.target.label))
+    .filter(el => isVisible(el));
+  const el = candidates[step.target.ordinal - 1] || null;
+  if (!el) {
+    return { ok: false, reason: `could not find ${step.target.role} “${step.target.name || step.target.label}”` };
+  }
+  const tag = String(el.tagName || '').toLowerCase();
+  const type = String(el.getAttribute?.('type') || '').toLowerCase();
+  const autocomplete = String(el.getAttribute?.('autocomplete') || '').toLowerCase();
+  const identity = `${el.id || ''} ${el.getAttribute?.('name') || ''} ${el.getAttribute?.('aria-label') || ''} ${actionLabelOf(el)}`;
+  const sensitive = type === 'password' || /^(?:cc-|current-password|new-password|one-time-code)/i.test(autocomplete) ||
+    /password|passcode|credit|card.?(?:number|cvv|cvc)|security.?code|one.?time.?code|otp|routing.?number|bank.?account|\biban\b|\bswift\b|social.?security|\bssn\b|medical.?record|patient.?id|member.?id|api.?key|access.?token|secret/i.test(identity);
+  if (sensitive) return { ok: false, reason: 'routine target became a sensitive field' };
+  const disabled = Boolean(el.disabled || el.getAttribute?.('aria-disabled') === 'true');
+  const readOnly = Boolean(el.readOnly || el.getAttribute?.('aria-readonly') === 'true');
+  if (step.type !== 'wait_for' && disabled) return { ok: false, reason: 'routine target is disabled' };
+  if (step.type === 'fill' && readOnly) return { ok: false, reason: 'routine fill target is read-only' };
+  const href = el.href && /^https?:/i.test(el.href) ? el.href : null;
+  if (href && new URL(href).origin !== location.origin) {
+    return { ok: false, reason: 'routine link would leave its granted origin' };
+  }
+  if (el.hasAttribute?.('download')) return { ok: false, reason: 'routine downloads are not supported' };
+  const isSubmit = Boolean(el.form && ((tag === 'button' && (type || 'submit') === 'submit') ||
+    (tag === 'input' && ['submit', 'image'].includes(type))));
+  const summaryText = actionNorm(actionNameOf(el, actionRoleOf(el)) || actionLabelOf(el));
+  const highImpact = /\b(?:buy|purchase|pay|checkout|place (?:the )?order|order now|book|reserve|transfer|send money|bid|submit|send|post|publish|share|upload|delete|erase|remove|cancel|terminate|close (?:my |the )?account|sign[ -]?(?:in|out|up)|log[ -]?(?:in|out)|subscribe|unsubscribe|download|install|confirm|continue|finish|save|accept|agree|approve)\b/i
+    .test(`${summaryText} ${step.option || ''}`);
+  const highImpactPath = href
+    ? /\/(?:checkout|payment|billing|delete|download|logout|signout)(?:[/?#]|$)/i.test(new URL(href).pathname)
+    : false;
+  const safeOrdinaryLink = step.type === 'click' && tag === 'a' && href &&
+    new URL(href).origin === location.origin && !highImpact && !highImpactPath;
+  const requiresConfirmation = step.type === 'click'
+    ? !safeOrdinaryLink
+    : (step.type === 'select' || step.type === 'toggle');
+  const descriptor = {
+    role: actionRoleOf(el), name: actionNameOf(el, actionRoleOf(el)), label: actionLabelOf(el),
+    tag, type, id: String(el.id || '').slice(0, 100), fieldName: String(el.getAttribute?.('name') || '').slice(0, 100),
+    href: href?.slice(0, 1000) || null, isSubmit, safeOrdinaryLink,
+  };
+  if (expectedTargetFingerprint && JSON.stringify(descriptor) !== expectedTargetFingerprint) {
+    return { ok: false, reason: 'routine target changed after inspection' };
+  }
+  if (requiresConfirmation && !confirmed) return { ok: false, reason: 'routine step requires explicit confirmation' };
+  window.__oeSyntheticActionTs = Date.now();
+  window.__oeConfirmedActionTs = confirmed ? window.__oeSyntheticActionTs : 0;
+
+  if (step.type === 'click') {
+    if (!confirmed && safeOrdinaryLink) {
+      location.assign(href);
+      return { ok: true, summary: `navigated through link “${summaryText}”` };
+    }
+    el.click();
+    return { ok: true, summary: `clicked ${step.target.role} “${summaryText}”` };
+  }
+  if (step.type === 'fill') {
+    const editable = tag === 'textarea' || el.isContentEditable ||
+      (tag === 'input' && !['hidden', 'file', 'checkbox', 'radio', 'submit', 'button', 'image'].includes(type));
+    if (!editable) return { ok: false, reason: 'routine fill target is no longer editable' };
+    el.focus?.();
+    if ('value' in el) {
+      const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(el, step.value); else el.value = step.value;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: step.value, inputType: 'insertText' }));
+      el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    } else {
+      el.textContent = step.value;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: step.value, inputType: 'insertText' }));
+    }
+    return { ok: true, summary: `filled ${step.target.role} “${summaryText}”` };
+  }
+  if (step.type === 'select') {
+    if (tag !== 'select') return { ok: false, reason: 'routine select target is no longer a native select control' };
+    const wanted = actionNorm(step.option).toLocaleLowerCase();
+    const option = Array.from(el.options || []).find(item => (
+      actionNorm(item.textContent).toLocaleLowerCase() === wanted ||
+      actionNorm(item.value).toLocaleLowerCase() === wanted
+    ));
+    if (!option) return { ok: false, reason: `could not find taught option “${step.option}”` };
+    el.value = option.value;
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    return { ok: true, summary: `selected “${actionNorm(option.textContent)}”` };
+  }
+  if (step.type === 'toggle') {
+    const checkedNow = () => Boolean(el.checked ?? el.getAttribute?.('aria-checked') === 'true');
+    if (checkedNow() !== step.checked) el.click();
+    if (checkedNow() !== step.checked) return { ok: false, reason: 'toggle did not reach the taught state' };
+    return { ok: true, summary: `${step.checked ? 'enabled' : 'disabled'} ${step.target.role} “${summaryText}”` };
+  }
+  if (step.type === 'wait_for') {
+    const deadline = Date.now() + step.timeoutMs;
+    const stateNow = node => {
+      const style = getComputedStyle(node);
+      const visible = node.isConnected && style.display !== 'none' &&
+        style.visibility !== 'hidden' && node.getClientRects().length > 0;
+      const enabled = !node.disabled && node.getAttribute?.('aria-disabled') !== 'true';
+      return { visible, enabled };
+    };
+    while (Date.now() <= deadline) {
+      const state = stateNow(el);
+      if ((step.state === 'visible' && state.visible) || (step.state === 'hidden' && !state.visible) ||
+          (step.state === 'enabled' && state.enabled) || (step.state === 'disabled' && !state.enabled)) {
+        return { ok: true, state: step.state };
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return { ok: false, reason: `timed out waiting for target to become ${step.state}` };
+  }
+  return { ok: false, reason: 'unsupported routine operation' };
+}
+
+function cleanSemanticText(value, max = 160) {
+  let text = String(value || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  text = text
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b/g, '[redacted]')
+    .replace(/\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
+    .replace(/\b(?:\d[ -]?){13,19}\b/g, '[redacted]');
+  text = text.replace(
+    /(\b(?:password|passcode|one[ -]?time(?: code)?|otp|verification code|security code|cvv|cvc|api[ _-]?key|access[ _-]?token|auth[ _-]?token|secret(?: key)?)\b\s*(?::|=|is)?\s*)([^\s,;]+)/ig,
+    '$1[redacted]',
+  );
+  return text.slice(0, max);
+}
+
+function sanitizeSemanticUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (!['http:', 'https:'].includes(url.protocol)) return '';
+    url.username = '';
+    url.password = '';
+    const originalHash = url.hash;
+    url.hash = '';
+    const secretKey = /(?:^|[_-])(?:access|auth|id|refresh)?token(?:$|[_-])|password|passwd|passcode|otp|secret|api[_-]?key|session|credential|signature|^sig$|^code$|^state$|reset(?:[_-]?key)?|magic(?:[_-]?link)?|invite|verification?|authorize/i;
+    const secretValue = rawValue => {
+      const text = String(rawValue || '');
+      return /^(?:sk-|gh[pousr]_|github_pat_|AKIA)/.test(text) ||
+        /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/.test(text) ||
+        /^[a-f0-9]{24,}$/i.test(text) ||
+        /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(text) ||
+        /^[A-Za-z0-9._~-]{48,}$/.test(text) ||
+        (/^[A-Za-z0-9._~-]{32,}$/.test(text) && /[A-Za-z]/.test(text) && /\d/.test(text));
+    };
+    const pathParts = url.pathname.split('/');
+    for (let index = 0; index < pathParts.length; index += 1) {
+      let decoded = pathParts[index];
+      try { decoded = decodeURIComponent(decoded); } catch {}
+      let previous = index > 0 ? pathParts[index - 1] : '';
+      try { previous = decodeURIComponent(previous); } catch {}
+      if (secretValue(decoded) || (secretKey.test(previous) && decoded)) pathParts[index] = '[redacted]';
+    }
+    url.pathname = pathParts.join('/');
+    for (const [key, rawValue] of [...url.searchParams.entries()]) {
+      if (secretKey.test(key) || secretValue(rawValue)) url.searchParams.set(key, '[redacted]');
+    }
+    if (originalHash) {
+      const body = originalHash.slice(1);
+      if (body.includes('=')) {
+        const prefix = /^[?!]/.test(body) ? body[0] : '';
+        const params = new URLSearchParams(prefix ? body.slice(1) : body);
+        for (const [key, rawValue] of [...params.entries()]) {
+          if (secretKey.test(key) || secretValue(rawValue)) params.set(key, '[redacted]');
+        }
+        url.hash = `${prefix}${params.toString()}`;
+      } else if (body.startsWith('/')) {
+        const parts = body.split('/');
+        for (let index = 0; index < parts.length; index += 1) {
+          let decoded = parts[index];
+          try { decoded = decodeURIComponent(decoded); } catch {}
+          let previous = index > 0 ? parts[index - 1] : '';
+          try { previous = decodeURIComponent(previous); } catch {}
+          if (secretValue(decoded) || (secretKey.test(previous) && decoded)) parts[index] = '[redacted]';
+        }
+        url.hash = parts.join('/');
+      } else if (secretKey.test(body) || secretValue(body)) {
+        url.hash = '[redacted]';
+      } else {
+        url.hash = originalHash;
+      }
+    }
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+function sanitizeSemanticPageSnapshot(raw, target) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('semantic inspection returned no snapshot');
+  if (raw.__oeDenied) throw new Error(cleanSemanticText(raw.reason, 240) || 'page changed before semantic inspection');
+  if (raw.url !== target.url || raw.origin !== target.origin) throw new Error('page changed during semantic inspection');
+
+  const take = (value, cap) => Array.isArray(value) ? value.slice(0, cap) : [];
+  const headings = take(raw.headings, 48).map(row => ({
+    level: Math.min(6, Math.max(1, Number(row?.level) || 2)),
+    text: cleanSemanticText(row?.text, 200),
+  })).filter(row => row.text);
+  const dialogs = take(raw.dialogs, 20).map(row => ({
+    role: row?.role === 'alertdialog' ? 'alertdialog' : 'dialog',
+    name: cleanSemanticText(row?.name, 160),
+    label: cleanSemanticText(row?.label, 160),
+    modal: row?.modal === true,
+    open: row?.open !== false,
+  }));
+  const statusRoles = new Set(['alert', 'status', 'log', 'progressbar', 'timer']);
+  const statusSignals = take(raw.statusSignals, 32).map(row => ({
+    role: statusRoles.has(row?.role) ? row.role : 'status',
+    text: cleanSemanticText(row?.text, 240),
+    live: ['off', 'polite', 'assertive'].includes(row?.live) ? row.live : 'off',
+    busy: row?.busy === true,
+  })).filter(row => row.text);
+  const controlRoles = new Set([
+    'button', 'link', 'textbox', 'searchbox', 'combobox', 'listbox', 'option',
+    'checkbox', 'radio', 'switch', 'menuitem', 'tab', 'spinbutton',
+  ]);
+  const controls = take(raw.controls, 240).map(row => {
+    if (!controlRoles.has(row?.role)) return null;
+    const ordinal = Number(row?.ordinal);
+    if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > 20) return null;
+    const control = {
+      role: row.role,
+      name: cleanSemanticText(row?.name, 160),
+      label: cleanSemanticText(row?.label, 160),
+      type: cleanSemanticText(row?.type, 32).toLowerCase(),
+      ordinal,
+      disabled: row?.disabled === true,
+    };
+    for (const key of ['checked', 'selected', 'expanded', 'pressed', 'required', 'readOnly', 'multiple']) {
+      if (typeof row?.[key] === 'boolean') control[key] = row[key];
+    }
+    if (Array.isArray(row?.options)) {
+      control.options = row.options.slice(0, 40)
+        .map(option => cleanSemanticText(option, 80))
+        .filter(Boolean);
+    }
+    return control;
+  }).filter(row => row && (row.name || row.label));
+  return {
+    url: sanitizeSemanticUrl(target.url),
+    origin: target.origin,
+    title: cleanSemanticText(raw.title, 240),
+    headings,
+    dialogs,
+    statusSignals,
+    controls,
+    truncated: {
+      headings: raw.truncated?.headings === true || (Array.isArray(raw.headings) && raw.headings.length > 48),
+      dialogs: raw.truncated?.dialogs === true || (Array.isArray(raw.dialogs) && raw.dialogs.length > 20),
+      statusSignals: raw.truncated?.statusSignals === true || (Array.isArray(raw.statusSignals) && raw.statusSignals.length > 32),
+      controls: raw.truncated?.controls === true || (Array.isArray(raw.controls) && raw.controls.length > 240),
+    },
+  };
+}
+
+async function inspectPage(tabId, expectedUrl, expectedOrigin) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: Number(tabId) },
+    func: semanticPageSnapshotInDocument,
+    args: [expectedUrl],
+  });
+  return sanitizeSemanticPageSnapshot(result, {
+    url: expectedUrl,
+    origin: expectedOrigin,
+  });
+}
+
 async function openTab(url) {
   const tab = await chrome.tabs.create({ url });
   return { tabId: tab.id, url: tab.url || url, title: tab.title || '', windowId: tab.windowId };
@@ -639,22 +1272,96 @@ function validateRoutineStep(step, grantedOrigin) {
   return { type, origin: grantedOrigin, target: normalized };
 }
 
+// One-off semantic actions use the same independently validated execution
+// machinery as saved routines, but the server never supplies an origin. The
+// broker derives it from the exact live lease target so a command cannot
+// widen itself by claiming a different site.
+function validateSemanticAction(action, authenticatedOrigin) {
+  if (!action || typeof action !== 'object' || Array.isArray(action)) {
+    throw new Error('semantic_action.action must be an object');
+  }
+  const type = String(action.type || '');
+  const allowedByType = {
+    click: new Set(['type', 'target']),
+    fill: new Set(['type', 'target', 'value']),
+    select: new Set(['type', 'target', 'option']),
+    toggle: new Set(['type', 'target', 'checked']),
+    wait_for: new Set(['type', 'target', 'state', 'timeoutMs']),
+  };
+  const allowed = allowedByType[type];
+  if (!allowed) throw new Error(`unsupported semantic action type: ${type || '(missing)'}`);
+  for (const key of Object.keys(action)) {
+    if (!allowed.has(key)) throw new Error(`unsupported semantic action field: ${key}`);
+  }
+  if (!action.target || typeof action.target !== 'object' || Array.isArray(action.target) ||
+      !Object.prototype.hasOwnProperty.call(action.target, 'ordinal')) {
+    throw new Error('semantic_action.target.ordinal is required from the live semantic inspection');
+  }
+  const step = {
+    type,
+    origin: authenticatedOrigin,
+    target: action.target,
+  };
+  for (const key of ['value', 'option', 'checked', 'state', 'timeoutMs']) {
+    if (Object.prototype.hasOwnProperty.call(action, key)) step[key] = action[key];
+  }
+  const validated = validateRoutineStep(step, authenticatedOrigin);
+  if (validated.target.exact !== true) {
+    throw new Error('semantic_action targets must use exact matching from the live inspection');
+  }
+  return validated;
+}
+
+function publicSemanticAction(step) {
+  const target = {
+    role: step.target.role,
+    name: cleanSemanticText(step.target.name, 160) || null,
+    label: cleanSemanticText(step.target.label, 160) || null,
+    ordinal: step.target.ordinal,
+    exact: step.target.exact,
+  };
+  const out = { type: step.type, origin: step.origin, target };
+  if (step.type === 'fill') out.textLength = step.value.length;
+  if (step.type === 'select') out.option = cleanSemanticText(step.option, 160);
+  if (step.type === 'toggle') out.checked = step.checked;
+  if (step.type === 'wait_for') {
+    out.state = step.state;
+    out.timeoutMs = step.timeoutMs;
+  }
+  return out;
+}
+
+function sanitizeSemanticActionResult(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || result.ok !== true) {
+    throw new Error(cleanSemanticText(result?.reason, 240) || 'semantic action failed');
+  }
+  const out = { ok: true };
+  const summary = cleanSemanticText(result.summary, 240);
+  if (summary) out.summary = summary;
+  if (['visible', 'hidden', 'enabled', 'disabled'].includes(result.state)) out.state = result.state;
+  if (result.absent === true) out.absent = true;
+  return out;
+}
+
 // Self-contained because Chrome serializes this function into an isolated
 // page world. `phase=inspect` returns a fingerprint and risk decision;
 // `phase=execute` re-resolves the target and requires the same fingerprint.
 async function routinePageOperation(step, expectedUrl, phase, confirmed, expectedFingerprint) {
   if (expectedUrl && location.href !== expectedUrl) return { ok: false, reason: 'page changed before routine step' };
-  const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const norm = (value, max = 160) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
   const roleOf = el => {
     const explicit = norm(el.getAttribute?.('role')).toLowerCase();
     if (explicit) return explicit;
     const tag = String(el.tagName || '').toLowerCase();
     const type = String(el.getAttribute?.('type') || '').toLowerCase();
-    if (tag === 'a') return 'link';
+    if (tag === 'a' && el.hasAttribute?.('href')) return 'link';
     if (tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(type))) return 'button';
-    if (tag === 'textarea') return 'textbox';
+    if (tag === 'summary') return 'button';
+    if (tag === 'textarea' || el.isContentEditable) return 'textbox';
     if (tag === 'select') return el.multiple ? 'listbox' : 'combobox';
+    if (tag === 'option') return 'option';
     if (tag === 'input') {
+      if (['file', 'hidden', 'range'].includes(type)) return '';
       if (type === 'checkbox') return 'checkbox';
       if (type === 'radio') return 'radio';
       if (type === 'search') return 'searchbox';
@@ -664,25 +1371,72 @@ async function routinePageOperation(step, expectedUrl, phase, confirmed, expecte
     return '';
   };
   const labelOf = el => {
+    const root = el.getRootNode?.();
     const labelledBy = norm(el.getAttribute?.('aria-labelledby')).split(/\s+/).filter(Boolean)
-      .map(id => norm(document.getElementById(id)?.innerText)).filter(Boolean).join(' ');
-    const native = Array.from(el.labels || []).map(label => norm(label.innerText)).filter(Boolean).join(' ');
-    return norm(labelledBy || native || el.closest?.('label')?.innerText);
+      .map(id => {
+        const label = root?.getElementById?.(id) || document.getElementById(id);
+        return norm(label?.innerText || label?.textContent);
+      }).filter(Boolean).join(' ');
+    const native = Array.from(el.labels || [])
+      .map(label => norm(label.innerText || label.textContent)).filter(Boolean).join(' ');
+    const wrapping = el.closest?.('label');
+    return norm(labelledBy || native || wrapping?.innerText || wrapping?.textContent);
   };
-  const nameOf = el => norm(el.getAttribute?.('aria-label') || labelOf(el) || el.innerText || el.value || el.getAttribute?.('placeholder') || el.getAttribute?.('name'));
+  const nameOf = (el, role) => {
+    const labelled = labelOf(el);
+    const labelledName = el.getAttribute?.('aria-label') || labelled;
+    if (labelledName) return norm(labelledName);
+    if (['button', 'link', 'menuitem', 'tab', 'option'].includes(role)) {
+      const tag = String(el.tagName || '').toLowerCase();
+      const type = String(el.getAttribute?.('type') || '').toLowerCase();
+      if (role === 'button' && tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(type)) {
+        return norm(el.getAttribute?.('value'));
+      }
+      return norm(el.innerText || el.textContent || el.getAttribute?.('title') || el.getAttribute?.('alt'));
+    }
+    return norm(
+      el.getAttribute?.('placeholder') || el.getAttribute?.('title') ||
+      el.getAttribute?.('alt') || el.getAttribute?.('name'),
+    );
+  };
   const matches = (actual, wanted, exact) => {
     if (!wanted) return true;
     const a = norm(actual).toLocaleLowerCase();
     const w = norm(wanted).toLocaleLowerCase();
     return exact ? a === w : a.includes(w);
   };
-  const candidates = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role]')).slice(0, 10_000)
+  const allSemanticElements = [];
+  const roots = [document];
+  let visitedElements = 0;
+  const semanticSelector = 'a[href],button,input,textarea,select,option,summary,[contenteditable],[role]';
+  while (roots.length && visitedElements < 10_000) {
+    const root = roots.shift();
+    let found = [];
+    try { found = Array.from(root.querySelectorAll('*')); } catch {}
+    for (const candidate of found) {
+      if (visitedElements >= 10_000) break;
+      visitedElements += 1;
+      if (candidate.shadowRoot?.mode === 'open') roots.push(candidate.shadowRoot);
+      if (candidate.matches?.(semanticSelector)) allSemanticElements.push(candidate);
+    }
+  }
+  const visible = el => {
+    if (!el?.isConnected || el.hidden || el.getAttribute?.('aria-hidden') === 'true') return false;
+    try {
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
+        && Boolean(el.getClientRects?.().length);
+    } catch {
+      return false;
+    }
+  };
+  const candidates = allSemanticElements
     .filter(el => roleOf(el) === step.target.role)
-    .filter(el => matches(nameOf(el), step.target.name, step.target.exact))
-    .filter(el => matches(labelOf(el), step.target.label, step.target.exact));
+    .filter(el => matches(nameOf(el, roleOf(el)), step.target.name, step.target.exact))
+    .filter(el => matches(labelOf(el), step.target.label, step.target.exact))
+    .filter(el => visible(el));
   const el = candidates[step.target.ordinal - 1] || null;
   if (!el) {
-    if (step.type === 'wait_for' && step.state === 'hidden') return { ok: true, state: 'hidden', absent: true };
     return { ok: false, reason: `could not find ${step.target.role} “${step.target.name || step.target.label}”` };
   }
   const tag = String(el.tagName || '').toLowerCase();
@@ -692,19 +1446,34 @@ async function routinePageOperation(step, expectedUrl, phase, confirmed, expecte
   const sensitive = type === 'password' || /^(?:cc-|current-password|new-password|one-time-code)/i.test(autocomplete) ||
     /password|passcode|credit|card.?(?:number|cvv|cvc)|security.?code|one.?time.?code|otp|routing.?number|bank.?account|\biban\b|\bswift\b|social.?security|\bssn\b|medical.?record|patient.?id|member.?id|api.?key|access.?token|secret/i.test(identity);
   if (sensitive) return { ok: false, reason: 'routine target became a sensitive field' };
+  const disabled = Boolean(el.disabled || el.getAttribute?.('aria-disabled') === 'true');
+  const readOnly = Boolean(el.readOnly || el.getAttribute?.('aria-readonly') === 'true');
+  if (step.type !== 'wait_for' && disabled) {
+    return { ok: false, reason: 'routine target is disabled' };
+  }
+  if (step.type === 'fill' && readOnly) {
+    return { ok: false, reason: 'routine fill target is read-only' };
+  }
   const href = el.href && /^https?:/i.test(el.href) ? el.href : null;
   if (href && new URL(href).origin !== location.origin) return { ok: false, reason: 'routine link would leave its granted origin' };
   if (el.hasAttribute?.('download')) return { ok: false, reason: 'routine downloads are not supported' };
   const isSubmit = Boolean(el.form && ((tag === 'button' && (type || 'submit') === 'submit') ||
     (tag === 'input' && ['submit', 'image'].includes(type))));
-  const summaryText = norm(nameOf(el) || labelOf(el)).slice(0, 160);
+  const summaryText = norm(nameOf(el, roleOf(el)) || labelOf(el));
   const highImpact = /\b(?:buy|purchase|pay|checkout|place (?:the )?order|order now|book|reserve|transfer|send money|bid|submit|send|post|publish|share|upload|delete|erase|remove|cancel|terminate|close (?:my |the )?account|sign[ -]?(?:in|out|up)|log[ -]?(?:in|out)|subscribe|unsubscribe|download|install|confirm|continue|finish|save|accept|agree|approve)\b/i
     .test(`${summaryText} ${step.option || ''}`);
-  const requiresConfirmation = isSubmit || highImpact;
+  const highImpactPath = href
+    ? /\/(?:checkout|payment|billing|delete|download|logout|signout)(?:[/?#]|$)/i.test(new URL(href).pathname)
+    : false;
+  const safeOrdinaryLink = step.type === 'click' && tag === 'a' && href &&
+    new URL(href).origin === location.origin && !highImpact && !highImpactPath;
+  const requiresConfirmation = step.type === 'click'
+    ? !safeOrdinaryLink
+    : (step.type === 'select' || step.type === 'toggle');
   const descriptor = {
-    role: roleOf(el), name: nameOf(el).slice(0, 160), label: labelOf(el).slice(0, 160),
+    role: roleOf(el), name: nameOf(el, roleOf(el)), label: labelOf(el),
     tag, type, id: String(el.id || '').slice(0, 100), fieldName: String(el.getAttribute?.('name') || '').slice(0, 100),
-    href: href?.slice(0, 1000) || null, isSubmit,
+    href: href?.slice(0, 1000) || null, isSubmit, safeOrdinaryLink,
   };
   const fingerprint = JSON.stringify(descriptor);
   if (phase === 'inspect') return {
@@ -717,6 +1486,10 @@ async function routinePageOperation(step, expectedUrl, phase, confirmed, expecte
   window.__oeConfirmedActionTs = confirmed ? window.__oeSyntheticActionTs : 0;
 
   if (step.type === 'click') {
+    if (!confirmed && safeOrdinaryLink) {
+      location.assign(href);
+      return { ok: true, summary: `navigated through link “${summaryText}”` };
+    }
     el.click();
     return { ok: true, summary: `clicked ${step.target.role} “${summaryText}”` };
   }
@@ -799,6 +1572,93 @@ async function executeRoutineStep(tabId, step, expectedUrl, { confirmed = false,
   });
   if (!result?.ok) throw new Error(result?.reason || 'routine step failed');
   return result;
+}
+
+async function executeLearningSemanticAction(tabId, step, {
+  expectedUrl,
+  expectedOrigin,
+  expectedDocumentId,
+  expectedSnapshot,
+  confirmed = false,
+  fingerprint = null,
+} = {}) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: Number(tabId) },
+    func: semanticPageSnapshotInDocument,
+    args: [
+      expectedUrl,
+      expectedOrigin,
+      expectedSnapshot,
+      step,
+      confirmed,
+      fingerprint,
+      expectedDocumentId,
+    ],
+  });
+  if (!result?.ok) throw new Error(result?.reason || 'learning semantic action failed');
+  return result;
+}
+
+async function executeSemanticAction(target, rawAction, {
+  runId = null,
+  inspectionId = null,
+} = {}) {
+  const step = validateSemanticAction(rawAction, target.origin);
+  if (runId != null) {
+    if (step.target.exact !== true) {
+      throw new Error('learning actions must copy an exact target from the live inspection');
+    }
+    if (step.type === 'click' && ['checkbox', 'radio', 'switch', 'option'].includes(step.target.role)) {
+      throw new Error('learning must use toggle/select instead of clicking a stateful option control');
+    }
+  }
+  const perform = async () => {
+    // A matching one-use proof is claimed before the first awaited page
+    // validation. The command lock prevents duplicate claims and prevents a
+    // newer inspection from being installed and then overwritten in flight.
+    const learningProof = runId != null
+      ? await claimLearningInspection(runId, inspectionId, target, step)
+      : null;
+    const inspected = await inspectRoutineStep(target.tabId, step, target.url);
+    let confirmed = false;
+    let liveTarget = target;
+    if (inspected.requiresConfirmation) {
+      const decision = await requestUserConfirmation({
+        action: 'semantic_action',
+        summary: `OE wants to ${cleanSemanticText(inspected.summary, 220)} on ${target.title || target.origin}. Allow this action once?`,
+        target,
+      });
+      if (!decision.approved) throw new Error(decision.reason || 'the user did not approve that semantic action');
+      confirmed = true;
+    }
+    // Revalidate every action immediately before dispatch, including fills,
+    // waits, and ordinary same-origin links that did not need a prompt.
+    liveTarget = await validateLiveLeaseTarget(target.tabId, target.url);
+    await enforceLearningMutationScope('semantic_action', { runId }, liveTarget);
+    if (learningProof) {
+      await requireLearningRunBinding(runId, liveTarget);
+    }
+    const result = learningProof
+      ? await executeLearningSemanticAction(liveTarget.tabId, step, {
+          expectedUrl: learningProof.inspection.url,
+          expectedOrigin: learningProof.run.origin,
+          expectedDocumentId: learningProof.inspection.documentId,
+          expectedSnapshot: learningProof.snapshot,
+          confirmed,
+          fingerprint: inspected.fingerprint,
+        })
+      : await executeRoutineStep(liveTarget.tabId, step, liveTarget.url, {
+          confirmed,
+          fingerprint: inspected.fingerprint,
+        });
+    await validateLiveLeaseTarget(liveTarget.tabId);
+    return {
+      semanticAction: publicSemanticAction(step),
+      result: sanitizeSemanticActionResult(result),
+      confirmed,
+    };
+  };
+  return runId != null ? withLearningCommandLock(perform) : perform();
 }
 
 async function focusWindow() {
@@ -1493,7 +2353,11 @@ async function revokeLease(reason = 'revoked') {
   await _loadLease();
   const affected = _lease ? _lease.tabs.map(t => t.tabId) : [];
   _lease = null;
-  await _saveLease();
+  try {
+    await _saveLease();
+  } finally {
+    await clearLearningRun(`lease ${reason}`).catch(() => {});
+  }
   if (affected.length) console.log(`[OE Bridge] lease cleared (${reason})`);
   await broadcastLeaseState(affected);
 }
@@ -1517,6 +2381,417 @@ async function resumeLease(tabId) {
   return { ok: true, lease: _lease };
 }
 
+// A learning run is a short, explicitly confirmed planning scope. It does
+// not grant any browser capability by itself: every inspection/action still
+// passes through the normal lease broker, and consequential actions still
+// receive their own confirmation. The grant follows this exact tab while it
+// remains on the confirmed origin. documentId is a freshness check around the
+// confirmation itself, not a promise that same-origin navigation is forbidden.
+const LEARNING_RUN_KEY = 'browserLearningRun';
+const LEARNING_RUN_DENY_KEY = 'browserLearningRunDenyBefore';
+const LEARNING_INSPECTION_TTL_MS = 2 * 60_000;
+let _learningRun = null;
+let _learningRunLoaded = false;
+let _learningInspectionSnapshot = null;
+let _learningCommandTail = Promise.resolve();
+
+function withLearningCommandLock(task) {
+  const result = _learningCommandTail.then(task, task);
+  _learningCommandTail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function publicLearningRun(run) {
+  if (!run) return null;
+  return {
+    runId: run.runId,
+    tabId: run.tabId,
+    url: sanitizeSemanticUrl(run.url),
+    origin: run.origin,
+    title: run.title,
+    documentId: run.documentId,
+    goalSummary: run.goalSummary,
+    confirmed: true,
+    confirmedAt: run.confirmedAt,
+    leaseExpiresAt: run.leaseExpiresAt,
+  };
+}
+
+async function bindLearningDocument(tabId, { expectedUrl = null, expectedOrigin } = {}) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: Number(tabId) },
+    func: (expectedUrl, expectedOrigin) => {
+      if ((expectedUrl && location.href !== expectedUrl) || location.origin !== expectedOrigin) {
+        return { ok: false, reason: 'page changed before document binding' };
+      }
+      const key = '__oeLearningDocumentId';
+      if (typeof window[key] !== 'string' || !window[key]) {
+        const id = globalThis.crypto?.randomUUID?.()
+          || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 14)}`;
+        try {
+          Object.defineProperty(window, key, {
+            value: id,
+            configurable: false,
+            enumerable: false,
+            writable: false,
+          });
+        } catch {
+          window[key] = id;
+        }
+      }
+      return {
+        ok: true,
+        url: location.href,
+        origin: location.origin,
+        title: String(document.title || '').slice(0, 240),
+        documentId: String(window[key] || '').slice(0, 100),
+      };
+    },
+    args: [expectedUrl, expectedOrigin],
+  });
+  if (!result?.ok || result.origin !== expectedOrigin || (expectedUrl && result.url !== expectedUrl) || !result.documentId) {
+    throw new Error(cleanSemanticText(result?.reason, 240) || 'could not bind the learning run to this document');
+  }
+  return {
+    url: result.url,
+    origin: originOf(result.url),
+    title: cleanSemanticText(result.title, 240),
+    documentId: cleanSemanticText(result.documentId, 100),
+  };
+}
+
+async function _loadLearningRun() {
+  if (_learningRunLoaded) return;
+  // The bounded semantic snapshot is intentionally memory-only. A restored
+  // service worker can recover the learning run, but never an actionable
+  // inspection proof without a fresh page inspection.
+  _learningInspectionSnapshot = null;
+  try {
+    const [stored, local] = await Promise.all([
+      _sessionStore().get([LEARNING_RUN_KEY]),
+      chrome.storage.local.get([LEARNING_RUN_DENY_KEY]),
+    ]);
+    const candidate = stored?.[LEARNING_RUN_KEY];
+    const deniedByTombstone = candidate &&
+      Number(candidate.confirmedAt || 0) <= Number(local?.[LEARNING_RUN_DENY_KEY] || 0);
+    if (!deniedByTombstone && candidate?.runId && candidate?.tabId && candidate?.url && candidate?.origin &&
+        candidate?.documentId && Number(candidate.leaseExpiresAt) > Date.now()) {
+      const lease = await getLease();
+      const entry = lease?.tabs?.find(row => (
+        Number(row.tabId) === Number(candidate.tabId) &&
+        !row.suspended &&
+        row.origin === candidate.origin
+      ));
+      const tab = entry ? await chrome.tabs.get(Number(candidate.tabId)).catch(() => null) : null;
+      if (tab?.url && originOf(tab.url) === candidate.origin && !(await sensitiveMatch(tab.url))) {
+        const document = await bindLearningDocument(candidate.tabId, {
+          expectedOrigin: candidate.origin,
+        }).catch(() => null);
+        if (document) {
+          _learningRun = {
+            ...candidate,
+            url: document.url,
+            title: document.title || cleanSemanticText(tab.title, 240),
+            documentId: document.documentId,
+            inspection: null,
+          };
+        }
+      }
+    }
+  } catch {
+    _learningRun = null;
+  }
+  _learningRunLoaded = true;
+  if (!_learningRun) {
+    try { await _sessionStore().remove([LEARNING_RUN_KEY]); } catch {}
+  }
+  updateActionIndicator().catch(() => {});
+}
+
+async function _saveLearningRun(priorConfirmedAt = 0) {
+  const candidate = _learningRun;
+  if (candidate) {
+    try {
+      const local = await chrome.storage.local.get([LEARNING_RUN_DENY_KEY]);
+      if (_learningRun !== candidate) throw new Error('learning run changed while it was being saved');
+      if (Number(candidate.confirmedAt || 0) <= Number(local?.[LEARNING_RUN_DENY_KEY] || 0)) {
+        throw new Error('the learning run is older than the local revocation marker');
+      }
+      await _sessionStore().set({ [LEARNING_RUN_KEY]: candidate });
+      if (_learningRun !== candidate) throw new Error('learning run changed while it was being saved');
+      return;
+    } catch (error) {
+      const deniedAt = Math.max(Date.now(), Number(candidate.confirmedAt || 0));
+      try { await chrome.storage.local.set({ [LEARNING_RUN_DENY_KEY]: deniedAt }); } catch {}
+      if (_learningRun === candidate) _learningRun = null;
+      throw error;
+    }
+  }
+
+  // Clear the durable session value and write a deny-only local tombstone.
+  // Either successful write is sufficient to prevent an old run from
+  // authorizing work after a service-worker eviction.
+  const deniedAt = Math.max(Date.now(), Number(priorConfirmedAt || 0));
+  let tombstoneSaved = false;
+  let sessionRemoved = false;
+  let firstError = null;
+  try {
+    await chrome.storage.local.set({ [LEARNING_RUN_DENY_KEY]: deniedAt });
+    tombstoneSaved = true;
+  } catch (error) {
+    firstError = error;
+  }
+  try {
+    await _sessionStore().remove([LEARNING_RUN_KEY]);
+    sessionRemoved = true;
+  } catch (error) {
+    firstError ||= error;
+  }
+  if (!tombstoneSaved && !sessionRemoved) {
+    throw firstError || new Error('could not clear the learning run');
+  }
+  if (!sessionRemoved) {
+    console.warn('[OE Bridge] stale learning session value retained, but denied by local tombstone');
+  }
+}
+
+async function clearLearningRun(reason = 'ended') {
+  const prior = _learningRun;
+  _learningRun = null;
+  _learningInspectionSnapshot = null;
+  _learningRunLoaded = true;
+  try { await _saveLearningRun(prior?.confirmedAt); } finally {
+    if (prior) console.log(`[OE Bridge] learning run ${prior.runId} ended (${reason})`);
+    await updateActionIndicator();
+  }
+}
+
+async function getLearningRun() {
+  if (!_learningRunLoaded) await _loadLearningRun();
+  if (!_learningRun) return null;
+  const lease = await getLease();
+  const entry = lease?.tabs?.find(row => (
+    Number(row.tabId) === Number(_learningRun.tabId) &&
+    !row.suspended &&
+    row.origin === _learningRun.origin
+  ));
+  const tab = entry ? await chrome.tabs.get(Number(_learningRun.tabId)).catch(() => null) : null;
+  const expired = Date.now() >= Number(_learningRun.leaseExpiresAt);
+  const sensitive = tab?.url ? await sensitiveMatch(tab.url) : 'a closed page';
+  const document = !expired && !sensitive && originOf(tab?.url) === _learningRun.origin
+    ? await bindLearningDocument(_learningRun.tabId, {
+        expectedOrigin: _learningRun.origin,
+      }).catch(() => null)
+    : null;
+  if (expired || !document) {
+    await clearLearningRun(expired ? 'expired' : 'tab left its confirmed site');
+    return null;
+  }
+  if (_learningRun.url !== document.url || _learningRun.documentId !== document.documentId ||
+      _learningRun.title !== document.title) {
+    const documentChanged = _learningRun.url !== document.url ||
+      _learningRun.documentId !== document.documentId;
+    _learningRun = {
+      ..._learningRun,
+      url: document.url,
+      title: document.title || cleanSemanticText(tab?.title, 240),
+      documentId: document.documentId,
+      inspection: documentChanged ? null : (_learningRun.inspection || null),
+    };
+    if (documentChanged) _learningInspectionSnapshot = null;
+    await _saveLearningRun();
+  }
+  return _learningRun;
+}
+
+async function startLearningRun(target, goalSummary) {
+  if (await getLearningRun()) throw new Error('a learning run is already active; end it before starting another');
+  const goal = cleanSemanticText(goalSummary, 300);
+  if (!goal) throw new Error('goalSummary is required');
+  const before = await bindLearningDocument(target.tabId, {
+    expectedUrl: target.url,
+    expectedOrigin: target.origin,
+  });
+  if (before.origin !== target.origin) throw new Error('page changed before the learning confirmation');
+
+  const decision = await requestUserConfirmation({
+    action: 'start_learning_run',
+    summary: `Let OE learn how to accomplish “${goal}” on ${target.title || target.origin}? This covers only this tab and site for up to 15 minutes.`,
+    target,
+  });
+  if (!decision.approved) throw new Error(decision.reason || 'the user did not approve the learning run');
+
+  const liveTarget = await validateLiveLeaseTarget(target.tabId, target.url);
+  const after = await bindLearningDocument(liveTarget.tabId, {
+    expectedUrl: liveTarget.url,
+    expectedOrigin: liveTarget.origin,
+  });
+  if (after.origin !== liveTarget.origin || after.documentId !== before.documentId) {
+    throw new Error('the page document changed while the learning run was awaiting confirmation');
+  }
+  const lease = await getLease();
+  if (!lease || Date.now() >= Number(lease.expiresAt)) throw new Error('the browser lease expired before learning could start');
+  let confirmedAt = Date.now();
+  try {
+    const local = await chrome.storage.local.get([LEARNING_RUN_DENY_KEY]);
+    confirmedAt = Math.max(confirmedAt, Number(local?.[LEARNING_RUN_DENY_KEY] || 0) + 1);
+  } catch {}
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  const randomPart = randomUuid?.replace(/-/g, '') || Math.random().toString(36).slice(2, 14);
+  _learningRun = {
+    runId: `learn_${confirmedAt.toString(36)}_${randomPart}`,
+    tabId: liveTarget.tabId,
+    url: liveTarget.url,
+    origin: liveTarget.origin,
+    title: after.title || cleanSemanticText(liveTarget.title, 240),
+    documentId: after.documentId,
+    goalSummary: goal,
+    confirmedAt,
+    leaseExpiresAt: Math.min(Number(lease.expiresAt), confirmedAt + LEASE_DURATION_MS),
+    inspection: null,
+  };
+  _learningInspectionSnapshot = null;
+  _learningRunLoaded = true;
+  await _saveLearningRun();
+  await updateActionIndicator();
+  return publicLearningRun(_learningRun);
+}
+
+async function endLearningRun(runId, reason = 'server ended run') {
+  const id = cleanSemanticText(runId, 140);
+  if (!id) throw new Error('runId is required');
+  const active = await getLearningRun();
+  if (!active) return { ended: false, runId: id };
+  if (active.runId !== id) throw new Error('runId does not match the active learning run');
+  const endedAt = Date.now();
+  await clearLearningRun(reason);
+  return { ended: true, runId: id, endedAt };
+}
+
+async function requireLearningRunBinding(runId, target) {
+  if (runId == null) return null;
+  const id = cleanSemanticText(runId, 140);
+  if (!id) throw new Error('runId must be a non-empty learning-run identifier');
+  const active = await getLearningRun();
+  if (!active || active.runId !== id) throw new Error('the learning run is not active in this browser');
+  if (Number(active.tabId) !== Number(target?.tabId) || active.origin !== target?.origin) {
+    throw new Error('the learning run is bound to a different tab or site');
+  }
+  return active;
+}
+
+async function semanticSnapshotFingerprint(snapshot) {
+  const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function semanticSnapshotHasExactTarget(snapshot, target) {
+  if (target?.exact !== true) return false;
+  return (Array.isArray(snapshot?.controls) ? snapshot.controls : []).some(control => (
+    control?.role === target.role &&
+    String(control?.name || '') === String(target.name || '') &&
+    String(control?.label || '') === String(target.label || '') &&
+    Number(control?.ordinal) === Number(target.ordinal)
+  ));
+}
+
+async function recordLearningInspection(run, target, snapshot) {
+  const document = await bindLearningDocument(target.tabId, {
+    expectedUrl: target.url,
+    expectedOrigin: target.origin,
+  });
+  if (document.documentId !== run.documentId || document.url !== target.url) {
+    throw new Error('the page changed while the learning inspection was being bound');
+  }
+  const issuedAt = Date.now();
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  const randomPart = randomUuid?.replace(/-/g, '') || Math.random().toString(36).slice(2, 14);
+  const inspection = {
+    id: `inspect_${issuedAt.toString(36)}_${randomPart}`,
+    url: document.url,
+    documentId: document.documentId,
+    issuedAt,
+    snapshotFingerprint: await semanticSnapshotFingerprint(snapshot),
+  };
+  if (_learningRun !== run || !_learningRun || _learningRun.runId !== run.runId) {
+    throw new Error('the learning run ended while its inspection was being bound');
+  }
+  const nextRun = {
+    ...run,
+    url: document.url,
+    title: document.title || run.title,
+    documentId: document.documentId,
+    inspection,
+  };
+  _learningRun = nextRun;
+  _learningInspectionSnapshot = null;
+  await _saveLearningRun();
+  if (_learningRun !== nextRun || _learningRun?.inspection?.id !== inspection.id) {
+    throw new Error('the learning run changed while its inspection was being bound');
+  }
+  _learningInspectionSnapshot = {
+    runId: run.runId,
+    inspectionId: inspection.id,
+    snapshot,
+  };
+  return inspection.id;
+}
+
+async function claimLearningInspection(runId, inspectionId, target, step) {
+  const run = await requireLearningRunBinding(runId, target);
+  const id = cleanSemanticText(inspectionId, 140);
+  const inspection = run?.inspection;
+  if (!id || !inspection || inspection.id !== id) {
+    throw new Error('the semantic action is missing the latest learning inspection proof');
+  }
+  if (_learningRun !== run || _learningRun?.inspection !== inspection ||
+      _learningRun?.inspection?.id !== id) {
+    throw new Error('the semantic action is missing the latest learning inspection proof');
+  }
+  const cached = _learningInspectionSnapshot;
+  const snapshot = cached?.runId === run.runId && cached?.inspectionId === id
+    ? cached.snapshot
+    : null;
+
+  // Synchronously claim this exact proof before any target/document
+  // validation awaits. Every failure after this point consumes the proof.
+  _learningRun = { ...run, inspection: null };
+  _learningInspectionSnapshot = null;
+  await _saveLearningRun();
+  if (Date.now() - Number(inspection.issuedAt || 0) > LEARNING_INSPECTION_TTL_MS) {
+    throw new Error('the learning inspection proof expired; inspect the page again');
+  }
+  if (inspection.url !== target.url || inspection.documentId !== run.documentId) {
+    throw new Error('the page changed after the learning inspection');
+  }
+  if (!snapshot) {
+    throw new Error('the learning inspection proof must be refreshed after the extension restarted');
+  }
+  if (await semanticSnapshotFingerprint(snapshot) !== inspection.snapshotFingerprint) {
+    throw new Error('the learning inspection proof snapshot is invalid; inspect the page again');
+  }
+  if (!semanticSnapshotHasExactTarget(snapshot, step.target)) {
+    throw new Error('the requested target was not copied exactly from the learning inspection');
+  }
+  return { run, inspection, snapshot };
+}
+
+const LEARNING_TAB_MUTATIONS = new Set([
+  'close_tab', 'back', 'forward', 'reload', 'media_control',
+  'click_xy', 'type', 'keypress', 'run_routine_step', 'semantic_action',
+]);
+
+async function enforceLearningMutationScope(action, args, target) {
+  if (!target || !LEARNING_TAB_MUTATIONS.has(action)) return;
+  const active = await getLearningRun();
+  if (!active || Number(active.tabId) !== Number(target.tabId)) return;
+  if (action === 'semantic_action' && args?.runId === active.runId) return;
+  throw new Error(
+    'this tab has an active learning run; page mutations must use its exact semantic action and inspection proof',
+  );
+}
+
 async function broadcastLeaseState(tabIds) {
   for (const t of tabIds || []) {
     const entry = _lease ? _lease.tabs.find(x => x.tabId === t) : null;
@@ -1531,14 +2806,17 @@ async function broadcastLeaseState(tabIds) {
 async function updateActionIndicator() {
   if (!chrome?.action?.setBadgeText) return;
   const awaitingConfirmation = Boolean(_pendingConfirmation && Date.now() < Number(_pendingConfirmation.expiresAt));
+  const learning = Boolean(_learningRun && Date.now() < Number(_learningRun.leaseExpiresAt));
   const teaching = Boolean(_watchMode && _teachGrant && Date.now() < Number(_teachGrant.expiresAt));
   const active = _lease?.tabs?.some(t => !t.suspended);
   const paused = !active && _lease?.tabs?.length;
   const suggestion = Boolean(_activeSuggestion);
-  const text = awaitingConfirmation ? '!' : (teaching ? 'T' : (active ? 'ON' : (paused ? 'Ⅱ' : (suggestion ? '1' : ''))));
-  const color = awaitingConfirmation ? '#b91c1c' : (teaching ? '#b91c1c' : (active ? '#d97706' : (suggestion ? '#2563eb' : '#64748b')));
+  const text = awaitingConfirmation ? '!' : (learning ? 'L' : (teaching ? 'T' : (active ? 'ON' : (paused ? 'Ⅱ' : (suggestion ? '1' : '')))));
+  const color = awaitingConfirmation ? '#b91c1c' : (learning ? '#7c3aed' : (teaching ? '#b91c1c' : (active ? '#d97706' : (suggestion ? '#2563eb' : '#64748b'))));
   const title = awaitingConfirmation
     ? 'OE Bridge — action waiting for your confirmation'
+    : learning
+      ? 'OE Bridge — confirmed learning run active on one tab and site'
     : teaching
     ? 'OE Bridge — Teach Mode is observing one tab'
     : active
@@ -1554,6 +2832,8 @@ async function updateActionIndicator() {
     await chrome.action.setTitle({ title });
   } catch {}
 }
+
+_loadLearningRun().catch(() => {});
 
 function publicConfirmation(value) {
   if (!value) return null;
@@ -1608,6 +2888,9 @@ async function suspendLeaseEntry(entry, reason) {
   entry.suspended = true;
   entry.reason = reason;
   await _saveLease();
+  if (_learningRun?.tabId === entry.tabId) {
+    await clearLearningRun(`lease suspended: ${reason}`).catch(() => {});
+  }
   console.log(`[OE Bridge] lease suspended on tab ${entry.tabId} (${reason})`);
   await broadcastLeaseState([entry.tabId]);
 }
@@ -1650,6 +2933,8 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   }
   const teach = await getTeachGrant();
   if (teach?.tabId === tabId) await stopTeachGrant('taught tab closed');
+  if (!_learningRunLoaded) await _loadLearningRun();
+  if (_learningRun?.tabId === tabId) await clearLearningRun('learned tab closed');
   const lease = await getLease();
   if (!lease || !lease.tabs.some(t => t.tabId === tabId)) return;
   lease.tabs = lease.tabs.filter(t => t.tabId !== tabId);
@@ -1666,6 +2951,20 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (changeInfo.url || changeInfo.title) {
     setTimeout(() => evaluateActiveSuggestion().catch(() => {}), 100);
+  }
+  if (!_learningRunLoaded) await _loadLearningRun();
+  if (_learningRun?.tabId === tabId && changeInfo.url) {
+    const nextOrigin = originOf(changeInfo.url);
+    const sensitiveLearningUrl = await sensitiveMatch(changeInfo.url);
+    if (nextOrigin !== _learningRun.origin || sensitiveLearningUrl) {
+      await clearLearningRun(sensitiveLearningUrl ? 'tab entered a sensitive page' : 'tab changed sites');
+    } else {
+      // The confirmed scope is the exact tab + origin, so Play Console-style
+      // SPA routes and ordinary same-site navigations remain inside it. The
+      // next getLearningRun call refreshes the current document evidence.
+      _learningRun = { ..._learningRun, url: changeInfo.url };
+      await _saveLearningRun().catch(() => {});
+    }
   }
   if (!changeInfo.url) return;
   const teach = await getTeachGrant();
@@ -1707,12 +3006,14 @@ const ACTION_TIERS = {
   // Server may always turn Teach Mode OFF, but cannot turn it on or read a
   // different tab. Observation reads require the active UI-minted TeachGrant.
   set_watch_mode: 'watch_control',
+  get_learning_run: 'learning_control', end_learning_run: 'learning_control',
   get_observations: 'teach',
-  list_tabs: 'lease', read_page: 'lease',
+  list_tabs: 'lease', read_page: 'lease', inspect_page: 'lease',
   close_tab: 'lease', focus_tab: 'lease', back: 'lease',
   forward: 'lease', reload: 'lease', focus_window: 'lease',
   screenshot: 'lease', click_xy: 'lease', type: 'lease', keypress: 'lease',
-  run_routine_step: 'lease',
+  run_routine_step: 'lease', semantic_action: 'lease',
+  start_learning_run: 'lease',
 };
 
 const NO_LEASE_HINT =
@@ -1729,6 +3030,9 @@ async function authorize(action, args) {
   if (tier === 'watch_control') {
     if (args?.on === false) return { ok: true };
     return { ok: false, reason: 'Teach Mode can only be started by the user from the extension UI' };
+  }
+  if (tier === 'learning_control') {
+    return { ok: true };
   }
   if (tier === 'teach') {
     const grant = await getTeachGrant();
@@ -1801,8 +3105,9 @@ async function authorize(action, args) {
 // tab's content script so the user sees what's happening. list_tabs and
 // focus_window are not user-facing per-tab work, so they skip the banner.
 const TAB_TOUCHING_ACTIONS = new Set([
-  'read_page', 'media_control', 'back', 'forward', 'reload', 'close_tab', 'focus_tab',
-  'screenshot', 'click_xy', 'type', 'keypress', 'run_routine_step',
+  'read_page', 'inspect_page', 'media_control', 'back', 'forward', 'reload', 'close_tab', 'focus_tab',
+  'screenshot', 'click_xy', 'type', 'keypress', 'run_routine_step', 'semantic_action',
+  'start_learning_run',
 ]);
 
 async function fireActivityBanner(action, tabId) {
@@ -1838,6 +3143,7 @@ async function dispatch(action, args) {
     else if (!(await getLease())) throw new Error('the browser lease expired before the action was confirmed');
   }
   const effectiveTabId = target?.tabId ?? null;
+  await enforceLearningMutationScope(action, args, target);
   if (effectiveTabId) await fireActivityBanner(action, effectiveTabId);
 
   switch (action) {
@@ -1865,16 +3171,40 @@ async function dispatch(action, args) {
       await validateLiveLeaseTarget(target.tabId, target.url);
       return data;
     }
+    case 'inspect_page': {
+      const keys = Object.keys(args || {});
+      if (keys.some(key => !['tabId', 'runId'].includes(key))) {
+        throw new Error('inspect_page accepts only tabId and optional runId');
+      }
+      const inspect = async () => {
+        const learningRun = await requireLearningRunBinding(args?.runId, target);
+        const data = await inspectPage(target.tabId, target.url, target.origin);
+        await validateLiveLeaseTarget(target.tabId, target.url);
+        if (!learningRun) return data;
+        const inspectionId = await recordLearningInspection(learningRun, target, data);
+        return { ...data, inspectionId };
+      };
+      return args?.runId != null ? withLearningCommandLock(inspect) : inspect();
+    }
     case 'media_control': {
+      await enforceLearningMutationScope(action, args, target);
       const data = await mediaControl(target.tabId, target.url, String(args?.action || ''));
       await validateLiveLeaseTarget(target.tabId, target.url);
       return data;
     }
-    case 'close_tab':     return await closeTab(target.tabId);
+    case 'close_tab':
+      await enforceLearningMutationScope(action, args, target);
+      return await closeTab(target.tabId);
     case 'focus_tab':     return await focusTab(target.tabId);
-    case 'back':          return await tabBack(target.tabId);
-    case 'forward':       return await tabForward(target.tabId);
-    case 'reload':        return await tabReload(target.tabId);
+    case 'back':
+      await enforceLearningMutationScope(action, args, target);
+      return await tabBack(target.tabId);
+    case 'forward':
+      await enforceLearningMutationScope(action, args, target);
+      return await tabForward(target.tabId);
+    case 'reload':
+      await enforceLearningMutationScope(action, args, target);
+      return await tabReload(target.tabId);
     case 'focus_window':  return await focusTab(target.tabId);
     case 'screenshot': {
       const data = await screenshot(target.tabId, target.url);
@@ -1896,6 +3226,7 @@ async function dispatch(action, args) {
         target = await validateLiveLeaseTarget(target.tabId, target.url);
         confirmed = true;
       }
+      await enforceLearningMutationScope(action, args, target);
       const data = await clickXY(target.tabId, x, y, target.url, {
         confirmed,
         fingerprint: inspected.fingerprint,
@@ -1904,11 +3235,13 @@ async function dispatch(action, args) {
       return { ...data, confirmed };
     }
     case 'type': {
+      await enforceLearningMutationScope(action, args, target);
       const data = await typeText(target.tabId, String(args?.text || ''), target.url);
       await validateLiveLeaseTarget(target.tabId, target.url);
       return data;
     }
     case 'keypress': {
+      await enforceLearningMutationScope(action, args, target);
       const data = await keypress(target.tabId, String(args?.key || ''), target.url);
       await validateLiveLeaseTarget(target.tabId, target.url);
       return data;
@@ -1928,6 +3261,7 @@ async function dispatch(action, args) {
         target = await validateLiveLeaseTarget(target.tabId, target.url);
         confirmed = true;
       }
+      await enforceLearningMutationScope(action, args, target);
       const data = await executeRoutineStep(target.tabId, step, target.url, {
         confirmed,
         fingerprint: inspected.fingerprint,
@@ -1938,6 +3272,41 @@ async function dispatch(action, args) {
         throw error;
       });
       return { ...data, confirmed };
+    }
+    case 'semantic_action': {
+      const keys = Object.keys(args || {});
+      if (keys.some(key => !['tabId', 'runId', 'inspectionId', 'action'].includes(key))) {
+        throw new Error('semantic_action accepts tabId, action, and optional learning inspection proof');
+      }
+      if (!Object.prototype.hasOwnProperty.call(args || {}, 'tabId') || !Number.isFinite(Number(args?.tabId))) {
+        throw new Error('semantic_action.tabId is required');
+      }
+      if (!Object.prototype.hasOwnProperty.call(args || {}, 'action')) {
+        throw new Error('semantic_action.action is required');
+      }
+      if ((args?.runId == null) !== (args?.inspectionId == null)) {
+        throw new Error('runId and inspectionId must be supplied together');
+      }
+      return executeSemanticAction(target, args.action, {
+        runId: args?.runId,
+        inspectionId: args?.inspectionId,
+      });
+    }
+    case 'start_learning_run': {
+      const keys = Object.keys(args || {});
+      if (keys.some(key => !['tabId', 'goalSummary'].includes(key))) {
+        throw new Error('start_learning_run accepts only tabId and goalSummary');
+      }
+      return withLearningCommandLock(() => startLearningRun(target, args?.goalSummary));
+    }
+    case 'end_learning_run': {
+      const keys = Object.keys(args || {});
+      if (keys.some(key => key !== 'runId')) throw new Error('end_learning_run accepts only runId');
+      return withLearningCommandLock(() => endLearningRun(args?.runId));
+    }
+    case 'get_learning_run': {
+      if (Object.keys(args || {}).length) throw new Error('get_learning_run accepts no arguments');
+      return publicLearningRun(await getLearningRun());
     }
     case 'get_observations': {
       // Pass args.tabId RAW (don't pre-resolve via the generic
@@ -3207,6 +4576,14 @@ export const __test = Object.freeze({
   pushObservation,
   getObservations,
   validateRoutineStep,
+  validateSemanticAction,
+  sanitizeSemanticPageSnapshot,
+  sanitizeSemanticUrl,
+  inspectPage,
+  startLearningRun,
+  endLearningRun,
+  getLearningRun,
+  bindLearningDocument,
   canonicalFieldWatchUrl,
   sanitizePickedField,
   executeBrowserFieldCheck,
@@ -3214,6 +4591,9 @@ export const __test = Object.freeze({
   dropMemoryState() {
     _lease = null;
     _leaseLoaded = false;
+    _learningRun = null;
+    _learningRunLoaded = false;
+    _learningInspectionSnapshot = null;
   },
   async resetState() {
     if (_pendingConfirmation) await clearPendingConfirmation(false, 'test reset');
@@ -3222,13 +4602,17 @@ export const __test = Object.freeze({
     _watchMode = false;
     _watchModeLoaded = true;
     _teachGrant = null;
+    _learningRun = null;
+    _learningRunLoaded = true;
+    _learningInspectionSnapshot = null;
+    _learningCommandTail = Promise.resolve();
     _observations = new Map();
     _fieldWatchPollInFlight = false;
     _lastFieldWatchPollAt = 0;
     try { await chrome.storage.session.clear(); } catch {}
     try {
       await chrome.storage.local.remove([
-        'leaseDenyBefore', 'watchMode', 'neverReadDomains', 'token',
+        'leaseDenyBefore', LEARNING_RUN_DENY_KEY, 'watchMode', 'neverReadDomains', 'token',
         'browserCredential', 'pendingBrowserCredential', 'browserSuggestionMatchers',
       ]);
     } catch {}

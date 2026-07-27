@@ -28,6 +28,7 @@ Command tiers (enforced by the broker in `background.js`):
 
 - **Requires an active lease** — `list_tabs` (active leased tabs only), `read_page` (reduced text + links + JSON-LD, no raw HTML), `screenshot`, safe `type`/`keypress`, and tab navigation (`back`/`forward`/`reload`/`close_tab`/`focus_tab`/`focus_window`). Every action is bound to the exact tab and live page authorized by the broker.
 - **Requires per-use confirmation** — opening tabs, ambiguous or consequential clicks, and media control. Confirmations bind to the exact inspected tab, origin, document, and target; form submission, Enter, and Space remain unavailable.
+- **Adaptive learning runs** — after a one-time extension confirmation, OE can inspect the live semantic page state, reason about one accessibility-addressed action, execute it through the broker, inspect again, and save only explicitly verified successes as an origin-bound playbook. Playbooks are hints for future replanning, never blind macros; runtime form text, secrets, page instructions, selectors, coordinates, screenshots, and raw HTML are not learned.
 - **Teach Mode** — starts only from a direct user click, observes one tab and origin, redacts sensitive identifiers and values, and can save semantic routines or bounded site notes. Routines persist accessibility targets—not selectors or coordinates—and revalidate every step during replay.
 
 Lease semantics:
