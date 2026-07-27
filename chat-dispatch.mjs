@@ -1053,17 +1053,23 @@ export async function handleChatMessage({
   }
   if (_vTrace) console.log(`[voice-trace] control-intent: miss device=${deviceId} text="${(rawText || '').slice(0, 60)}" — falling through to LLM`);
 
-  // Voice-device source → slim tool subset. Reasoning effort kept at the
-  // agent default (typically 'high' for gpt-5.x — required for reliable
-  // custom tool calling). The tool reduction alone trimmed a "what time
-  // is it" round-trip from 61 s to ~3 s on the coordinator; dropping reasoning
-  // to low was tested but caused the model to skip useful tool calls.
+  // Voice-device source: previously clamped to VOICE_DEVICE_TOOL_ALLOWLIST to
+  // "stay snappy". Removed 2026-07-27 (owner decision: give voice the same
+  // tools as chat) — voice now uses the SAME full tool surface + router as
+  // text/web. Rationale: (1) the allowlist's own comment named this the
+  // intended replacement; (2) the tool-router already trims EVERY turn (voice
+  // and text alike) to ~18 tools before the model, so the model never sees the
+  // full surface either way — measured latency delta between the two paths was
+  // ~a few hundred ms, mostly cached; (3) the old "61s→3s" figure predates the
+  // tool-router and was the model LOOPING over an untrimmed set, which the
+  // router now prevents. Parity restores request_tools (the mid-turn recovery
+  // hatch) and every domain tool text has. NOTE: this also lifts the deliberate
+  // "writes stay off voice" scoping the allowlist carried (e.g. calendar
+  // writes) — voice now has the owner's full authority, same as their chat.
+  // Reverting = restore the `agent.tools.filter(voiceToolAllowlistFor(userId))`
+  // block; VOICE_DEVICE_TOOL_ALLOWLIST is retained above for that.
   if (source === 'voice-device' && Array.isArray(agent.tools) && agent.tools.length) {
-    const originalCount = agent.tools.length;
-    const voiceAllow = voiceToolAllowlistFor(userId);
-    const slim = agent.tools.filter(t => voiceAllow.has(t.function?.name));
-    agent = { ...agent, tools: slim };
-    console.log(`[chat] voice-device source: tools ${originalCount} → ${slim.length}`);
+    console.log(`[chat] voice-device source: full tool surface (${agent.tools.length}) → tool-router (parity with text)`);
   }
 
   if (
