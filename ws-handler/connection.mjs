@@ -46,6 +46,48 @@ let MAX_WS_PER_USER = 20;
 let WS_PING_INTERVAL = 15_000;
 let VOICE_CONFIG_PUSH_CONNECT_DELAY_MS = 1500;
 let VOICE_ERROR_FALLBACK = 'Something went wrong.';
+
+// Spoken when a turn goes quiet — the 3 s silent-turn ack, and the ack for a
+// sync delegation that could grind with zero tokens. Both used to say the one
+// same sentence every time, which gets grating fast for anyone who talks to a
+// device regularly. Randomized instead, with a short recent-history guard so a
+// re-roll can't land on something just said (pure random repeats far more
+// often than people expect). Keep entries short, warm, and non-technical, and
+// keep the trailing space — these are pushed straight into the TTS streamer.
+const VOICE_WAIT_ACKS = [
+  'On it — give me a moment. ',
+  'Working on that now. ',
+  'Give me a second. ',
+  'Let me look into that. ',
+  'One moment. ',
+  "I'm on it. ",
+  'Just a sec. ',
+  'Looking that up now. ',
+  'Hang tight. ',
+  'Let me check on that. ',
+  'Give me just a moment. ',
+  "I'm working on it. ",
+  'Bear with me a moment. ',
+  'Let me dig into that. ',
+  'Okay, working on it. ',
+  "That'll take me a moment. ",
+  'Let me get that for you. ',
+  "Still here — this'll take a sec. ",
+  'Give me a moment to sort that out. ',
+  'Let me take a look. ',
+];
+const _recentWaitAcks = [];
+function pickWaitAck() {
+  const keep = Math.min(5, VOICE_WAIT_ACKS.length - 1);
+  const roll = () => VOICE_WAIT_ACKS[Math.floor(Math.random() * VOICE_WAIT_ACKS.length)];
+  let pick = roll();
+  // Bounded re-roll: never loop forever even if the pool were shrunk to
+  // fewer entries than the history window.
+  for (let i = 0; i < 8 && _recentWaitAcks.includes(pick); i++) pick = roll();
+  _recentWaitAcks.push(pick);
+  while (_recentWaitAcks.length > keep) _recentWaitAcks.shift();
+  return pick;
+}
 let _voiceConfigPushInFlight = new Map();
 let broadcastAgentList = () => {};
 let resolveDeviceId = () => null;
@@ -980,7 +1022,7 @@ export function onConnection(ws, req) {
             if (isVoiceOutputSuppressed(ws, voiceTurn)) return;
             voiceDelegationAckSpoken = true;                   // no double-ack
             log.info('voice', 'silent-turn ack spoken', { deviceId: ws._deviceId, turnId: voiceTurn?.id ?? null });
-            ackStreamer.pushText('On it — give me a moment. ');
+            ackStreamer.pushText(pickWaitAck());
           } catch { /* ack is best-effort */ }
         }, 3000);
         silentAckTimer.unref?.();
@@ -1099,7 +1141,7 @@ export function onConnection(ws, req) {
               // streamer's idle burst-close then re-opens the mic for the
               // wait. Once per turn.
               voiceDelegationAckSpoken = true;
-              ttsStreamer.pushText('On it — give me a moment. ');
+              ttsStreamer.pushText(pickWaitAck());
             }
             else if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify(e)); } catch {} }
           } else if (ws.readyState === ws.OPEN) {
