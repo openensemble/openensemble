@@ -277,9 +277,16 @@ function showBrowserPairingApproval(requestId) {
   overlay.innerHTML = `
     <div role="dialog" aria-modal="true" aria-labelledby="browserPairingTitle" style="background:var(--bg1);border:1px solid var(--border);border-radius:14px;padding:24px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.5)">
       <h2 id="browserPairingTitle" style="margin:0 0 7px;font-size:20px;color:var(--text)">Pair OE Bridge</h2>
-      <p style="margin:0 0 16px;color:var(--muted);font-size:13px;line-height:1.5">Enter the code shown by the browser extension. Approving binds that browser to your current OE profile; it does not give the extension your login token.</p>
+      <p style="margin:0 0 16px;color:var(--muted);font-size:13px;line-height:1.5">Enter the code shown by the browser extension. Pairing binds that browser to your current OE profile; it does not give the extension your login token.</p>
       <label for="browserPairingCode" style="display:block;color:var(--muted);font-size:12px;margin-bottom:5px">Browser code</label>
       <input id="browserPairingCode" inputmode="text" autocomplete="one-time-code" maxlength="9" placeholder="ABCD-1234" style="box-sizing:border-box;width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:12px;font:700 19px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:1px" />
+      <label id="browserPairingEnableRow" style="display:flex;align-items:flex-start;gap:9px;margin-top:12px;padding:10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;cursor:not-allowed">
+        <input id="browserPairingEnable" type="checkbox" disabled style="margin-top:2px;accent-color:var(--accent)">
+        <span>
+          <b>Enable agent browser access</b>
+          <span id="browserPairingEnableNote" style="display:block;color:var(--muted);font-size:11px;line-height:1.45;margin-top:2px">Checking your profile’s tool settings…</span>
+        </span>
+      </label>
       <div id="browserPairingError" aria-live="polite" style="min-height:18px;margin-top:7px;color:#e06b6b;font-size:12px"></div>
       <div style="display:flex;gap:8px;margin-top:8px">
         <button id="browserPairingCancel" type="button" style="flex:1;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px;cursor:pointer">Not now</button>
@@ -290,6 +297,47 @@ function showBrowserPairingApproval(requestId) {
   const code = overlay.querySelector('#browserPairingCode');
   const error = overlay.querySelector('#browserPairingError');
   const approve = overlay.querySelector('#browserPairingApprove');
+  const enable = overlay.querySelector('#browserPairingEnable');
+  const enableRow = overlay.querySelector('#browserPairingEnableRow');
+  const enableNote = overlay.querySelector('#browserPairingEnableNote');
+  let browserStatus = null;
+  const capabilityLoad = (async () => {
+    try {
+      const response = await fetch('/api/browser/status', { cache: 'no-store' });
+      const status = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(status.error || 'Could not load browser settings');
+      browserStatus = status;
+      const capability = status.capability || {};
+      const alreadyEnabled = capability.enabled === true;
+      const hasPairedBrowser = Array.isArray(status.paired) && status.paired.length > 0;
+      if (alreadyEnabled) {
+        enable.checked = true;
+        enable.disabled = true;
+        enableNote.textContent = 'Already enabled. Tab leases and per-use confirmations still apply.';
+      } else if (capability.canToggle === true) {
+        // A first pairing offers the complete setup in one explicit action.
+        // Re-pairing preserves an intentionally disabled capability.
+        enable.checked = !hasPairedBrowser;
+        enable.disabled = false;
+        enableRow.style.cursor = 'pointer';
+        enableNote.textContent = hasPairedBrowser
+          ? 'Currently disabled. Check this only if you also want to turn browser tools back on.'
+          : 'Lets assistants request browser actions. It grants no tab access by itself.';
+      } else {
+        enable.checked = false;
+        enable.disabled = true;
+        enableNote.textContent = capability.reason === 'managed'
+          ? 'Your tool access is managed by an administrator. The browser can still be paired.'
+          : 'Browser tools are not allowed for this profile. The browser can still be paired.';
+      }
+      return status;
+    } catch (e) {
+      enable.checked = false;
+      enable.disabled = true;
+      enableNote.textContent = 'Pair now, then enable browser access later in Settings → Browser.';
+      return null;
+    }
+  })();
   const close = () => {
     overlay.remove();
     const url = new URL(location.href);
@@ -307,6 +355,7 @@ function showBrowserPairingApproval(requestId) {
     approve.textContent = 'Approving…';
     error.textContent = '';
     try {
+      await capabilityLoad;
       const response = await fetch('/api/browser/pairing/approvals', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -314,8 +363,35 @@ function showBrowserPairingApproval(requestId) {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || 'The code was not accepted.');
+      const enableRequested = enable.checked;
+      let activationError = null;
+      let accessEnabled = browserStatus?.capability?.enabled === true;
+      if (enableRequested && !accessEnabled) {
+        try {
+          if (typeof _setSkillEnabled !== 'function') throw new Error('Browser controls are still loading');
+          const result = await _setSkillEnabled('browser-ext', true);
+          accessEnabled = result.enabled === true;
+          if (!accessEnabled) throw new Error('OE did not enable browser controls');
+          if (_currentUser) _currentUser = { ..._currentUser, skills: result.skills };
+          _skillsCache = null;
+        } catch (e) {
+          activationError = e?.message || String(e);
+        }
+      }
       close();
-      showToast('OE Bridge paired to this profile.');
+      const settingsAlreadyOpen = typeof activeDrawerId !== 'undefined'
+        && activeDrawerId === 'drawerSettings';
+      if (typeof openSettingsDrawer === 'function') openSettingsDrawer(!settingsAlreadyOpen);
+      if (typeof switchSettingsTab === 'function') switchSettingsTab('browser');
+      if (activationError) {
+        showToast(`Browser paired, but agent browser access was not enabled: ${activationError}`, 5000);
+      } else if (enableRequested || accessEnabled) {
+        showToast('OE Bridge paired and agent browser access enabled.');
+      } else if (!browserStatus) {
+        showToast('OE Bridge paired. Check agent browser access in Settings → Browser.');
+      } else {
+        showToast('OE Bridge paired. Agent browser access remains off.');
+      }
     } catch (e) {
       error.textContent = e?.message || String(e);
       approve.disabled = false;

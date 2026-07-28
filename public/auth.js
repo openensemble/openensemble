@@ -662,6 +662,22 @@ async function loadSkillsList() {
     const customSkills = skills.filter(isCustom);
     const assignableAgents = (allAgents ?? []).filter(a => !a.archived);
 
+    function skillActivationControl(s) {
+      const privileged = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
+      const managed = _currentUser?.skillsLocked === true && !privileged;
+      const toggleArgs = JSON.stringify([s.id, '$checked']).replace(/'/g, "&#39;");
+      if (s.always_on) {
+        return '<span style="font-size:10px;color:var(--muted);white-space:nowrap">Always on</span>';
+      }
+      return `<label style="display:flex;align-items:center;gap:6px;font-size:10px;color:var(--muted);cursor:${managed ? 'not-allowed' : 'pointer'};white-space:nowrap">
+        <input type="checkbox" ${s.enabled ? 'checked' : ''} ${managed ? 'disabled' : ''}
+          data-change-action="toggleSkill" data-change-args='${toggleArgs}'
+          aria-label="${s.enabled ? 'Disable' : 'Enable'} ${escHtml(s.name)}"
+          style="accent-color:var(--accent);cursor:${managed ? 'not-allowed' : 'pointer'}">
+        <span>${managed ? 'Managed' : (s.enabled ? 'Enabled' : 'Disabled')}</span>
+      </label>`;
+    }
+
     function roleCard(s) {
       const owner = s.assignment ? (allAgents.find(a => a.id === s.assignment) ?? null) : null;
       const delegationHtml = owner
@@ -680,6 +696,7 @@ async function loadSkillsList() {
             ${s.description ? `<div style="font-size:11px;color:var(--muted)">${escHtml(s.description)}</div>` : ''}
             ${delegationHtml}
           </div>
+          ${skillActivationControl(s)}
           ${deleteBtn}
         </div>
         ${_renderSkillExecutionControls(s, allAgents)}
@@ -694,6 +711,7 @@ async function loadSkillsList() {
             <div style="font-size:13px;font-weight:600;color:var(--text)">${escHtml(s.name)}</div>
             ${s.description ? `<div style="font-size:11px;color:var(--muted)">${escHtml(s.description)}</div>` : ''}
           </div>
+          ${skillActivationControl(s)}
         </div>
         ${_renderSkillExecutionControls(s, allAgents)}
       </div>`;
@@ -722,6 +740,7 @@ async function loadSkillsList() {
               </select>
             </div>
           </div>
+          ${skillActivationControl(s)}
         </div>
         ${_renderSkillExecutionControls(s, allAgents)}
       </div>`;
@@ -853,16 +872,63 @@ async function submitNewRole() {
   } catch { if (errEl) errEl.textContent = 'Failed to create role'; }
 }
 
-async function toggleSkill(skillId, enabled) {
+async function _setSkillEnabled(skillId, enabled) {
+  const response = await fetch('/api/roles/toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skillId, enabled }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Could not ${enabled ? 'enable' : 'disable'} this tool`);
+  }
+  if (typeof result.enabled !== 'boolean' || !Array.isArray(result.skills)) {
+    throw new Error('OE returned an invalid tool status');
+  }
+  return result;
+}
+
+async function toggleSkill(skillId, enabled, event) {
+  const control = event?.target?.matches?.('input[type="checkbox"]') ? event.target : null;
+  if (control) control.disabled = true;
+  let result;
   try {
-    await fetch('/api/roles/toggle', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skillId, enabled }),
-    });
-    // Reload agents list since tool availability changed
+    result = await _setSkillEnabled(skillId, enabled);
+  } catch (e) {
+    if (control) control.checked = !enabled;
+    showToast(e?.message || `Could not ${enabled ? 'enable' : 'disable'} this tool`);
+    if (control?.isConnected) control.disabled = false;
+    return;
+  }
+
+  // The mutation is committed. Keep the authoritative state even when a
+  // secondary roster/settings refresh happens to fail.
+  if (control) {
+    control.checked = result.enabled;
+    control.setAttribute?.('aria-label', `${result.enabled ? 'Disable' : 'Enable'} ${skillId === 'browser-ext' ? 'agent browser access' : 'tool'}`);
+    if (control.nextElementSibling) {
+      control.nextElementSibling.textContent = skillId === 'browser-ext'
+        ? (result.enabled ? 'On' : 'Off')
+        : (result.enabled ? 'Enabled' : 'Disabled');
+    }
+  }
+  if (_currentUser) _currentUser = { ..._currentUser, skills: result.skills };
+  _skillsCache = null;
+  showToast(`${result.enabled ? 'Enabled' : 'Disabled'} ${skillId === 'browser-ext' ? 'Browser Extension' : 'tool'}`);
+
+  try {
     const updated = await fetch('/api/agents').then(r => r.json());
     agents = updated;
     buildTabs();
     buildAgentDrawer();
-  } catch {}
+  } catch (e) {
+    console.warn('[skills] roster refresh after toggle failed:', e);
+  }
+  try { await loadSkillsList(); }
+  catch (e) { console.warn('[skills] settings refresh after toggle failed:', e); }
+  if (skillId === 'browser-ext' && typeof loadBrowserBridge === 'function') {
+    try { await loadBrowserBridge(); }
+    catch (e) { console.warn('[browser] settings refresh after toggle failed:', e); }
+  }
+  if (control?.isConnected) control.disabled = false;
 }

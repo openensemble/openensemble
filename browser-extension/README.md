@@ -6,10 +6,13 @@ Chrome / Edge extension connecting your local OE server to your browser. All ser
 
 ## Install
 
-1. Open `chrome://extensions` (or `edge://extensions`).
-2. Toggle **Developer mode** in the top right.
-3. Click **Load unpacked**.
-4. Pick `~/.openensemble/browser-extension/`.
+1. In OE, open **Settings → Browser** and download **OE Bridge**, then extract
+   the ZIP. Developers working directly in the OE checkout may use the local
+   `browser-extension/` folder instead.
+2. Open `chrome://extensions` (or `edge://extensions`).
+3. Toggle **Developer mode** in the top right.
+4. Click **Load unpacked** and select the extracted
+   `openensemble-bridge` folder (or the checkout's `browser-extension/` folder).
 
 The puzzle-piece icon appears in your toolbar. Pin it.
 
@@ -18,9 +21,16 @@ The puzzle-piece icon appears in your toolbar. Pin it.
 1. Click the extension icon to open the popup.
 2. Optionally enter the OE server URL, then give this browser a friendly name. Each household member must use a separate browser profile; shared profiles are refused because they cannot isolate identity.
 3. Press **Pair this browser**. The extension discovers OE and creates a browser-only P-256 identity key.
-4. Open the approval link, confirm the displayed code in OE, then return to the popup. It polls automatically, or you can press **I've approved — check now**.
+4. Open the approval link, confirm the displayed code in OE, and choose whether
+   to enable agent browser access. Then return to the popup. It polls
+   automatically, or you can press **I've approved — check now**.
 
 An unfinished request lives only for the browser session, so opening OE to approve it does not lose the code. OE never gives the extension a web-session token. Re-pairing stages the replacement key and keeps the current credential untouched until the new key completes its first signed connection.
+
+Pairing and agent-tool activation are separate. You can change activation later
+in **Settings → Browser** or **Settings → Skills**, and revoke the browser
+credential from **Settings → Browser**. Re-pairing preserves an existing
+disabled state unless you explicitly turn access back on.
 
 ## What it does
 

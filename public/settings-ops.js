@@ -2,59 +2,186 @@
 // Globals intentional.
 
 // ── Browser Bridge tab ───────────────────────────────────────────────────────
+const BROWSER_CAPABILITY_SKILL_ID = 'browser-ext';
 let _browserBridgePollTimer = null;
+let _browserBridgeLoadSeq = 0;
+
+function browserCapabilityCardHtml(capability, { statusLoaded = true } = {}) {
+  const available = capability?.available === true;
+  const enabled = capability?.enabled === true;
+  const managed = capability?.managed === true;
+  const alwaysOn = capability?.alwaysOn === true;
+  const controlDisabled = !statusLoaded || capability?.canToggle !== true;
+  const stateLabel = !statusLoaded
+    ? 'Status unavailable'
+    : !available
+      ? 'Not allowed'
+      : managed
+        ? (enabled ? 'Enabled · managed' : 'Disabled · managed')
+      : enabled
+        ? 'Enabled'
+        : 'Disabled';
+  const detail = !statusLoaded
+    ? 'OE could not load your tool permissions. Refresh this page and try again.'
+    : !available
+      ? 'Browser tools are not available to this profile. Ask an administrator to allow the Browser Extension tool.'
+      : managed
+        ? 'Your tool access is managed by an administrator.'
+        : alwaysOn
+          ? 'Browser tools are managed by this OE installation.'
+        : enabled
+          ? 'Your assistants can request browser actions. Tab leases and “Allow once” confirmations still apply.'
+          : 'Extension chat still works, but assistants cannot open, read, or control browser tabs until you enable this.';
+  const toggleArgs = JSON.stringify(['$checked']).replace(/'/g, "&#39;");
+  return `
+    <div data-browser-capability-card style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:14px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
+        <div style="min-width:0">
+          <div style="font-size:13px;font-weight:650;color:var(--text)">Agent browser access</div>
+          <div data-browser-capability-state style="font-size:11px;color:${enabled ? 'var(--green,#43b89c)' : 'var(--muted)'};margin-top:2px">${stateLabel}</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text);cursor:${controlDisabled ? 'not-allowed' : 'pointer'};white-space:nowrap">
+          <input id="browserCapabilityToggle" type="checkbox" ${enabled ? 'checked' : ''} ${controlDisabled ? 'disabled' : ''}
+            data-change-action="toggleBrowserCapability" data-change-args='${toggleArgs}'
+            aria-label="Enable agent browser access"
+            style="accent-color:var(--accent);cursor:${controlDisabled ? 'not-allowed' : 'pointer'}">
+          <span>${enabled ? 'On' : 'Off'}</span>
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-top:8px">${detail}</div>
+    </div>`;
+}
+
+async function toggleBrowserCapability(enabled, event) {
+  if (typeof toggleSkill !== 'function') {
+    showToast('Browser settings are still loading. Try again in a moment.');
+    if (event?.target) event.target.checked = !enabled;
+    return;
+  }
+  // Invalidate any status request that started before this user action.
+  _browserBridgeLoadSeq++;
+  return toggleSkill.call(this, BROWSER_CAPABILITY_SKILL_ID, enabled, event);
+}
+
+function browserInstallHtml() {
+  return `
+    <details style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:11px 12px;margin-top:12px">
+      <summary style="font-size:12px;font-weight:600;color:var(--text);cursor:pointer">Install OE Bridge on this computer</summary>
+      <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-top:9px">
+        <a class="btn-sm" href="/api/browser/extension.zip" download="openensemble-bridge.zip"
+          style="display:inline-block;text-decoration:none;background:var(--accent);border:none;color:#fff;margin-bottom:7px">Download OE Bridge</a>
+        <ol style="margin:3px 0 0 18px;padding:0">
+          <li>Extract the downloaded ZIP.</li>
+          <li>Open <code>chrome://extensions</code> or <code>edge://extensions</code>.</li>
+          <li>Turn on <b>Developer mode</b>, choose <b>Load unpacked</b>, and select the extracted <code>openensemble-bridge</code> folder.</li>
+          <li>Open the extension, choose <b>Pair this browser</b>, and approve its code in OE.</li>
+        </ol>
+        <div style="margin-top:7px">No command line or access to the OE server’s files is required.</div>
+      </div>
+    </details>`;
+}
+
+function browserPairedHtml(paired, connected, pairingError = null) {
+  const liveCredentialIds = new Set(connected.map(item => item?.credentialId).filter(Boolean));
+  let html = '<div style="font-size:12px;font-weight:650;color:var(--text);margin:14px 0 7px">Paired browsers</div>';
+  if (pairingError) {
+    return html + `<div style="font-size:11px;color:var(--red,#e05c5c)">${escHtml(pairingError)}</div>`;
+  }
+  if (!paired.length) {
+    return html + '<div style="font-size:11px;color:var(--muted)">No browsers paired to this profile yet.</div>';
+  }
+  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString() : 'Never';
+  html += paired.map(browser => {
+    const online = liveCredentialIds.has(browser.credentialId);
+    const args = JSON.stringify([browser.credentialId, browser.browserName || 'this browser'])
+      .replace(/'/g, '&#39;');
+    return `
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:11px 12px;margin-bottom:8px">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+          <div style="min-width:0">
+            <div style="font-size:12px;font-weight:600;color:var(--text)">${escHtml(browser.browserName || 'Browser')}
+              ${browser.extensionVersion ? `<span style="font-size:10px;font-weight:400;color:var(--muted)">v${escHtml(browser.extensionVersion)}</span>` : ''}
+            </div>
+            <div style="font-size:10px;color:${online ? 'var(--green,#43b89c)' : 'var(--muted)'};margin-top:2px">${online ? 'Connected now' : 'Paired · offline'}</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:4px">Paired ${fmtTime(browser.createdAt)} · Last used ${fmtTime(browser.lastUsedAt)}</div>
+          </div>
+          <button class="btn-sm" data-action="revokeBrowserCredential" data-args='${args}'
+            style="background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);flex-shrink:0">Revoke</button>
+        </div>
+      </div>`;
+  }).join('');
+  return html;
+}
+
+function browserConnectedHtml(connected) {
+  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString() : 'Unknown';
+  const heading = '<div style="font-size:12px;font-weight:650;color:var(--text);margin:14px 0 7px">Live connections</div>';
+  if (!connected.length) {
+    return heading + `
+      <div style="font-size:11px;color:var(--muted);line-height:1.5">
+        No paired browser is connected right now. Open OE Bridge in the browser you want to use.
+      </div>`;
+  }
+  return heading + connected.map(browser => `
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:11px 12px;margin-bottom:8px">
+      <div style="font-size:12px;font-weight:600;color:var(--text)">${escHtml(browser.name || 'Browser')}
+        ${browser.version ? `<span style="font-size:10px;font-weight:400;color:var(--muted)">v${escHtml(browser.version)}</span>` : ''}
+      </div>
+      <div style="font-size:10px;color:var(--green,#43b89c);margin-top:2px">Connected since ${fmtTime(browser.registeredAt)}</div>
+    </div>`).join('') + `
+    <div style="font-size:11px;color:var(--muted);line-height:1.5">
+      A connection does not expose your tabs. Grant a 15-minute tab lease in OE Bridge when you want an assistant to read or control a page. Opening a URL still requires <b>Allow once</b>.
+    </div>`;
+}
+
+async function revokeBrowserCredential(credentialId, browserName, event) {
+  if (!credentialId) return;
+  if (!confirm(`Revoke ${browserName}? It will disconnect immediately and must be paired again.`)) return;
+  const button = event?.target?.closest?.('button');
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(`/api/browser/pairing/credentials/${encodeURIComponent(credentialId)}`, {
+      method: 'DELETE',
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || 'Could not revoke this browser');
+    showToast(`${browserName} revoked`);
+    await loadBrowserBridge();
+  } catch (e) {
+    showToast(e?.message || 'Could not revoke this browser');
+    if (button?.isConnected) button.disabled = false;
+  }
+}
+
 async function loadBrowserBridge() {
   const body = document.getElementById('browserBridgeBody');
   if (!body) return;
+  const requestSeq = ++_browserBridgeLoadSeq;
   try {
-    const r = await fetch('/api/browser/status', { credentials: 'include', cache: 'no-store' });
-    if (!r.ok) {
-      body.innerHTML = `<div style="font-size:12px;color:var(--muted)">Couldn't fetch status (HTTP ${r.status}).</div>`;
+    const response = await fetch('/api/browser/status', {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    if (requestSeq !== _browserBridgeLoadSeq) return;
+    if (!response.ok) {
+      body.innerHTML = `${browserCapabilityCardHtml(null, { statusLoaded: false })}
+        <div style="font-size:12px;color:var(--muted)">Couldn't fetch extension status (HTTP ${response.status}).</div>
+        ${browserInstallHtml()}`;
       return;
     }
-    const j = await r.json();
-    const list = j.connected || [];
-    if (!list.length) {
-      body.innerHTML = `
-        <div style="font-size:13px;color:var(--muted);margin-bottom:12px">
-          No browser extensions connected.
-        </div>
-        <div style="font-size:12px;color:var(--text);line-height:1.6">
-          Install the <b>OpenEnsemble Bridge</b> extension to let your agents see your tabs, open URLs, control media playback, and use your browser as a fetcher for sites without APIs.
-          <ol style="margin:8px 0 0 18px;padding:0">
-            <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>).</li>
-            <li>Toggle <b>Developer mode</b> on.</li>
-            <li>Click <b>Load unpacked</b> and pick <code>~/.openensemble/browser-extension/</code>.</li>
-            <li>Click the new puzzle-piece icon. It should auto-detect this server and connect.</li>
-          </ol>
-        </div>
-      `;
-      return;
-    }
-    const fmtTime = (ts) => ts ? new Date(ts).toLocaleString() : '?';
-    const rows = list.map(b => {
-      const tabs = (b.tabs || []).slice(0, 25).map(t => {
-        const star = t.active ? '★' : ' ';
-        const safe = (s) => String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-        return `<div style="font-size:11px;color:var(--text);font-family:monospace;padding:2px 0">${star} <span style="color:var(--muted)">[${t.tabId}]</span> ${safe(t.title || '(no title)')}<br><span style="color:var(--muted);margin-left:16px">${safe(t.url)}</span></div>`;
-      }).join('');
-      const overflow = (b.tabs || []).length > 25 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">… ${(b.tabs || []).length - 25} more tab(s)</div>` : '';
-      return `
-        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-            <div>
-              <div style="font-weight:600;font-size:13px">${escHtml(b.name || '(unnamed)')}${b.version ? ` <span style="color:var(--muted);font-weight:400;font-size:11px">v${escHtml(b.version)}</span>` : ''}</div>
-              <div style="font-size:11px;color:var(--muted);font-family:monospace;margin-top:2px">extId: ${escHtml(b.extId)}</div>
-              <div style="font-size:11px;color:var(--muted);margin-top:2px">Connected: ${fmtTime(b.registeredAt)} · ${b.tabCount} tab(s)</div>
-            </div>
-          </div>
-          ${tabs ? `<details><summary style="cursor:pointer;font-size:11px;color:var(--muted)">Open tabs (${b.tabCount})</summary><div style="margin-top:6px;max-height:240px;overflow-y:auto">${tabs}${overflow}</div></details>` : ''}
-        </div>
-      `;
-    }).join('');
-    body.innerHTML = rows;
+    const status = await response.json();
+    if (requestSeq !== _browserBridgeLoadSeq) return;
+    const connected = Array.isArray(status.connected) ? status.connected : [];
+    const paired = Array.isArray(status.paired) ? status.paired : [];
+    body.innerHTML = browserCapabilityCardHtml(status.capability)
+      + browserPairedHtml(paired, connected, status.pairingError)
+      + browserConnectedHtml(connected)
+      + browserInstallHtml();
   } catch (e) {
-    body.innerHTML = `<div style="font-size:12px;color:var(--red,#e05c5c)">Error: ${e?.message || String(e)}</div>`;
+    if (requestSeq !== _browserBridgeLoadSeq) return;
+    body.innerHTML = `${browserCapabilityCardHtml(null, { statusLoaded: false })}
+      <div style="font-size:12px;color:var(--red,#e05c5c)">Error: ${escHtml(e?.message || String(e))}</div>
+      ${browserInstallHtml()}`;
   }
 }
 
@@ -320,4 +447,3 @@ async function saveSessionExpiry() {
     showToast('Session expiry saved!', 2000);
   } catch (e) { showToast(e.message || 'Failed to save setting'); }
 }
-

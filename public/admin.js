@@ -47,7 +47,8 @@ async function loadUserManagement() {
       const isSelf = u.id === myId;
       const isOwner = u.role === 'owner';
       const canManageUserOrchestration = canManageOrchestration(u);
-      // Roles + Skills checkboxes split — checked = granted access; null = unrestricted (all checked)
+      // Authorization only: checked means the account may use/activate it.
+      // Activation is a separate user setting in Settings → Skills/Browser.
       const allowedSkills = u.allowedSkills ?? null;
       // Filter to globals only. User-scoped custom skills (userScope = creator's id)
       // are private to their owner — the role registry won't yield them to any
@@ -250,11 +251,11 @@ async function loadUserManagement() {
           ${deleteBtn}
         </div>
         <details style="margin-bottom:6px">
-          <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Roles (unchecked = no access)</summary>
+          <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Allowed roles (unchecked = blocked)</summary>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;padding:6px" id="roleAllowGrid_${u.id}">${roleChecks}</div>
         </details>
         <details style="margin-bottom:6px">
-          <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Tools (unchecked = no access)</summary>
+          <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Allowed tools (unchecked = blocked)</summary>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;padding:6px" id="skillAllowGrid_${u.id}">${toolChecks}</div>
         </details>
         <details style="margin-bottom:6px">
@@ -269,7 +270,7 @@ async function loadUserManagement() {
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;margin-top:8px">
           <input type="checkbox" ${lockChecked} id="lockToolsChk_${u.id}"
             style="accent-color:var(--red,#e05c5c);cursor:pointer">
-          🔒 Lock tools (prevent user from changing)
+          🔒 Lock tool activation (prevent user from changing on/off)
         </label>
         ${!isSelf && !isOwner ? `
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;margin-top:4px">
@@ -348,7 +349,9 @@ async function adminSetOrchestrationPrimary(userId, primaryAgentId) {
 async function adminSaveUser(userId) {
   const body = {};
 
-  // Roles + Tools (combined into allowedSkills + skills mirror)
+  // Authorization only. Do not mirror allowedSkills into active skills:
+  // saving an unrelated account setting must not re-enable tools the user
+  // deliberately turned off.
   const roleGrid  = $(`roleAllowGrid_${userId}`);
   const skillGrid = $(`skillAllowGrid_${userId}`);
   if (roleGrid || skillGrid) {
@@ -364,7 +367,6 @@ async function adminSaveUser(userId) {
     body.allowedSkills = targetRole === 'child'
       ? checked
       : (checked.length === all.length ? null : checked);
-    body.skills = checked;
   }
 
   // Enabled drawers

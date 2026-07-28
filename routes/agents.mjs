@@ -6,7 +6,7 @@ import fs   from 'fs';
 import path from 'path';
 import {
   requireAuth, requirePrivileged, getAuthToken, getSessionUserId, getUser,
-  isPrivileged, loadUsers, loadConfig,
+  getUserRole, isPrivileged, loadUsers, loadConfig,
   modifyUsers, modifyUser, modifyConfig,
   agentToWire, readBody, getAgentsForUser, getUserEnabledSkills,
   saveUserAgentOverride, broadcastAgentList,
@@ -17,11 +17,13 @@ import { createCustomAgent, deleteCustomAgent, updateCustomAgent } from '../agen
 import {
   onRoleEnabled, getRoleAssignments, setRoleAssignment, clearRoleAssignmentsForAgent,
   getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools,
+  isSkillRuntimeEnabledForUser,
 } from '../roles.mjs';
 import { EFFORT_VALUES, normalizeReasoningEffort, reasoningEffortOptions } from '../lib/reasoning-effort.mjs';
 import {
   clearSkillOverride,
   getSkillExecutionOverride,
+  setSkillOverride,
   setSkillExecutionOverride,
 } from '../lib/skill-overrides.mjs';
 import { isExecutionTextModel } from '../lib/skill-execution.mjs';
@@ -38,7 +40,8 @@ function setRoleAssignmentForUser(roleId, agentId, userId) {
 }
 
 function visibleRoleForUser(userId, skillId) {
-  const role = listRoles(userId).find(item => item.id === skillId && !item.hidden);
+  const role = listRoles(userId, { includeDisabled: true })
+    .find(item => item.id === skillId && !item.hidden);
   if (!role) return null;
   const user = getUser(userId);
   if (!isPrivileged(userId) && Array.isArray(user?.allowedSkills)
@@ -561,7 +564,7 @@ export async function handle(req, res) {
     const userSkills = getUserEnabledSkills(authId);
     const assignments = getRoleAssignments(authId);
     const priv = isPrivileged(authId);
-    let roleList = listRoles(authId).filter(s => !s.hidden);
+    let roleList = listRoles(authId, { includeDisabled: true }).filter(s => !s.hidden);
     if (!priv) {
       const currentUser = loadUsers().find(u => u.id === authId);
       if (currentUser?.allowedSkills != null) {
@@ -570,7 +573,7 @@ export async function handle(req, res) {
     }
     const roles = roleList.map(s => ({
       ...s,
-      enabled: userSkills.includes(s.id),
+      enabled: !s.disabledByOverride && (s.always_on === true || userSkills.includes(s.id)),
       assignment: assignments[s.id] ?? null,
       // The server resolves an unassigned skill through the coordinator (then
       // roster fallback), not whichever chat tab happens to be active. Surface
@@ -639,29 +642,86 @@ export async function handle(req, res) {
   }
 
   if (req.url === '/api/roles/toggle' && req.method === 'POST') {
-    const authId = requireAuth(req, res); if (!authId) return true;
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
     try {
-      const { skillId, enabled, userId: targetUserId } = JSON.parse(await readBody(req));
-      const targetId = (targetUserId && isPrivileged(authId)) ? targetUserId : authId;
-      // Pre-flight checks on a snapshot (low-risk, roles toggle isn't highly concurrent)
+      const body = JSON.parse(await readBody(req));
+      const { skillId, enabled, userId: requestedTargetId } = body || {};
+      if (typeof skillId !== 'string' || !skillId.trim() || skillId.length > 128) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'A valid skillId is required' })); return true;
+      }
+      if (typeof enabled !== 'boolean') {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'enabled must be a boolean' })); return true;
+      }
+      if (requestedTargetId !== undefined
+          && (typeof requestedTargetId !== 'string' || !requestedTargetId)) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'userId must be a non-empty string' })); return true;
+      }
+      const targetId = requestedTargetId || authId;
+      const authRole = getUserRole(authId);
+
+      // Users can mutate only themselves. Admins may manage only ordinary
+      // accounts they created; the owner remains the installation-wide
+      // authority. This mirrors /api/users/:id instead of treating every
+      // privileged account as globally omnipotent.
       const snap = loadUsers();
       const snapIdx = snap.findIndex(u => u.id === targetId);
       if (snapIdx === -1) { res.writeHead(404); res.end(JSON.stringify({ error: 'User not found' })); return true; }
-      if (snap[snapIdx].skillsLocked && !isPrivileged(authId)) {
+      const target = snap[snapIdx];
+      if (targetId !== authId) {
+        const adminCanManage = authRole === 'admin'
+          && (target.role === 'user' || target.role === 'child')
+          && target.parentId === authId;
+        if (authRole !== 'owner' && !adminCanManage) {
+          res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true;
+        }
+      }
+
+      const manifest = getRoleManifest(skillId, targetId);
+      if (!manifest || manifest.hidden) {
+        res.writeHead(404); res.end(JSON.stringify({ error: 'Tool not found' })); return true;
+      }
+      if (manifest.always_on && !enabled) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'This tool is always on' })); return true;
+      }
+      if (target.skillsLocked && targetId === authId && !isPrivileged(authId)) {
         res.writeHead(403); res.end(JSON.stringify({ error: 'Your tools are managed by an administrator' })); return true;
       }
-      if (enabled && snap[snapIdx].allowedSkills != null && !isPrivileged(authId) && !snap[snapIdx].allowedSkills.includes(skillId)) {
+      if (Array.isArray(target.allowedSkills)
+          && !target.allowedSkills.includes(skillId)
+          && target.role !== 'owner' && target.role !== 'admin') {
         res.writeHead(403); res.end(JSON.stringify({ error: 'That tool is not permitted for your account' })); return true;
       }
+
+      const wasEnabled = isSkillRuntimeEnabledForUser(skillId, targetId);
+      // The disabled override is authoritative for default/bundled sources,
+      // while profile.skills is the explicit activation source. Keep both in
+      // sync so toggling works for every non-always-on skill and can undo a
+      // prior advanced override without erasing hidden-tool/execution choices.
+      const currentSeed = Array.isArray(target.skills)
+        ? target.skills
+        : getUserEnabledSkills(targetId);
+      // Enabling commits the profile source before lifting the deny override;
+      // disabling commits the deny first. A second-write failure therefore
+      // always fails closed and a retry converges the two stores.
+      if (!enabled) {
+        const overrideResult = await setSkillOverride(targetId, skillId, { disabled: true });
+        if (!overrideResult.ok) throw new Error(overrideResult.error || 'Could not update tool override');
+      }
       const updatedSkills = await modifyUser(targetId, u => {
-        const current = u.skills ?? getUserEnabledSkills(targetId);
+        const current = Array.isArray(u.skills) ? u.skills : currentSeed;
         u.skills = enabled
           ? [...new Set([...current, skillId])]
           : current.filter(s => s !== skillId);
       }).then(u => u?.skills ?? null);
+      if (enabled) {
+        const overrideResult = await setSkillOverride(targetId, skillId, { disabled: false });
+        if (!overrideResult.ok) throw new Error(overrideResult.error || 'Could not update tool override');
+      }
+      const effectiveEnabled = isSkillRuntimeEnabledForUser(skillId, targetId);
       broadcastAgentList();
-      if (enabled) onRoleEnabled(skillId, targetId).catch(() => {});
-      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ skills: updatedSkills ?? [] }));
+      if (!wasEnabled && effectiveEnabled) onRoleEnabled(skillId, targetId).catch(() => {});
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ skills: updatedSkills ?? [], enabled: effectiveEnabled }));
     } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
     return true;
   }

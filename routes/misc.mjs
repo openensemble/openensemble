@@ -37,6 +37,47 @@ import { maybeRunSweep, forceRun as forceWeek1Sweep, getSweepStatus } from '../l
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { getMemoryStats } from '../memory.mjs';
 import { getGmailAuthHeader } from './gmail.mjs';
+import {
+  getRoleManifest,
+  isSkillAllowedForUser,
+  isSkillRuntimeEnabledForUser,
+} from '../roles.mjs';
+import { listBrowserCredentials } from '../lib/browser-pairing.mjs';
+import {
+  BROWSER_EXTENSION_PACKAGE_FILENAME,
+  buildBrowserExtensionPackage,
+} from '../lib/browser-extension-package.mjs';
+
+const BROWSER_CAPABILITY_SKILL_ID = 'browser-ext';
+
+export function browserCapabilityForUser(userId) {
+  const manifest = getRoleManifest(BROWSER_CAPABILITY_SKILL_ID, userId);
+  if (!manifest || manifest.hidden) {
+    return {
+      id: BROWSER_CAPABILITY_SKILL_ID,
+      available: false,
+      enabled: false,
+      canToggle: false,
+      managed: false,
+      alwaysOn: false,
+      reason: 'not_available',
+    };
+  }
+  const profile = getUser(userId);
+  const privileged = isPrivileged(userId);
+  const allowed = isSkillAllowedForUser(BROWSER_CAPABILITY_SKILL_ID, userId);
+  const managed = profile?.skillsLocked === true && !privileged;
+  const alwaysOn = manifest.always_on === true;
+  return {
+    id: BROWSER_CAPABILITY_SKILL_ID,
+    available: allowed,
+    enabled: allowed && isSkillRuntimeEnabledForUser(BROWSER_CAPABILITY_SKILL_ID, userId),
+    canToggle: allowed && !managed && !alwaysOn,
+    managed,
+    alwaysOn,
+    reason: !allowed ? 'not_allowed' : managed ? 'managed' : null,
+  };
+}
 
 // Translate the 5-field cron shapes the scheduler can actually run into its
 // native {repeat, time, dow, intervalMs} fields. Returns null for anything
@@ -74,12 +115,41 @@ async function getEmailUnreadCount(userId) {
 }
 
 export async function handle(req, res) {
+  // Authenticated self-service download for browsers that do not share the OE
+  // host filesystem. This replaces the old "~/.openensemble/..." instruction.
+  if (req.url === '/api/browser/extension.zip' && req.method === 'GET') {
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
+    const archive = buildBrowserExtensionPackage();
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Length': archive.length,
+      'Content-Disposition': `attachment; filename="${BROWSER_EXTENSION_PACKAGE_FILENAME}"`,
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(archive);
+    return true;
+  }
+
   // ── Browser extension status (lists connected extensions for this user) ─
   if (req.url === '/api/browser/status' && req.method === 'GET') {
-    const authId = requireAuth(req, res); if (!authId) return true;
-    const { listBrowsers, getBrowserCount } = await import('../lib/browser-bus.mjs');
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
+    const { listBrowsers } = await import('../lib/browser-bus.mjs');
+    let paired = [];
+    let pairingError = null;
+    try {
+      paired = listBrowserCredentials(authId);
+    } catch (e) {
+      console.warn('[browser] failed to list paired browsers:', e?.message || e);
+      pairingError = 'Paired browser records could not be loaded';
+    }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ connected: listBrowsers(authId), globalCount: getBrowserCount() }));
+    res.end(JSON.stringify({
+      capability: browserCapabilityForUser(authId),
+      connected: listBrowsers(authId),
+      paired,
+      ...(pairingError ? { pairingError } : {}),
+    }));
     return true;
   }
 

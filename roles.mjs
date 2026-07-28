@@ -486,20 +486,31 @@ export function getSelectedPlanKeepTools(selectedToolNames = null, userId = null
   return keep;
 }
 
-/** Return all skill manifests visible to `userId` — globals + that user's own skills. */
-export function listRoles(userId = null) {
+/**
+ * Return skill manifests visible to `userId` — globals + that user's own
+ * skills. Settings callers may include disabled overrides so a user can turn
+ * a skill back on; runtime callers keep the fail-closed default.
+ */
+export function listRoles(userId = null, { includeDisabled = false } = {}) {
   const out = [];
   for (const wrap of _manifests.values()) {
     if (wrap.userId === null || wrap.userId === userId) {
       if (userId && !isSkillAllowedForUser(wrap.manifest.id, userId)) continue;
       // Phase-10: user can disable any non-always_on skill. The override is
       // read at runtime from disk — manifests stay immutable in the cache.
-      if (userId && isSkillDisabled(userId, wrap.manifest.id, !!wrap.manifest.always_on)) continue;
+      if (userId && !includeDisabled
+          && isSkillDisabled(userId, wrap.manifest.id, !!wrap.manifest.always_on)) continue;
       // userScope: null = global skill, <userId> = user-scoped custom skill.
       // Surfaced so admin UIs can filter out user-scoped skills when rendering
       // cross-user permission grids — granting another user access to a
       // user-scoped skill is a no-op since the registry won't yield it to them.
-      out.push({ ...wrap.manifest, userScope: wrap.userId });
+      out.push({
+        ...wrap.manifest,
+        userScope: wrap.userId,
+        ...(includeDisabled && userId
+          ? { disabledByOverride: isSkillDisabled(userId, wrap.manifest.id, !!wrap.manifest.always_on) }
+          : {}),
+      });
     }
   }
   return out;
@@ -952,4 +963,3 @@ bindToolExecutionDeps({
 
 export { TOOL_ALIASES, NON_LEARNING_BLOCKED_TOOLS };
 export const executeToolStreaming = _executeToolStreaming;
-

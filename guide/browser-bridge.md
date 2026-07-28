@@ -6,11 +6,16 @@ ambient access to your tabs.
 
 ## Install
 
-1. Open `chrome://extensions` or `edge://extensions`.
-2. Turn on **Developer mode**.
-3. Choose **Load unpacked**.
-4. Select the `browser-extension` folder inside your OpenEnsemble install.
-5. Pin **OpenEnsemble Bridge** from the browser's extensions menu.
+1. In OE, open **Settings → Browser** and choose **Download OE Bridge**.
+2. Extract the downloaded ZIP.
+3. Open `chrome://extensions` or `edge://extensions`.
+4. Turn on **Developer mode**.
+5. Choose **Load unpacked** and select the extracted
+   `openensemble-bridge` folder.
+6. Pin **OpenEnsemble Bridge** from the browser's extensions menu.
+
+This works from any household member's computer; they do not need command-line
+access or access to the OE server's filesystem.
 
 ## Pair this browser
 
@@ -23,12 +28,20 @@ The extension receives a browser-only credential, not your OE web-session
 token. You can revoke a paired browser from OE at any time; revocation also
 disconnects its live socket.
 
+On a profile's first pairing, OE explicitly offers to enable **Agent browser
+access** at the same time. It can also be changed later under
+**Settings → Browser** or **Settings → Skills**. Pairing and activation are
+separate: a paired extension can use its user-initiated chat features while
+agent browser tools remain off. If an administrator manages the profile's
+tools, only the administrator can allow or unlock this capability.
+
 ## Permission model
 
 - **Ask about this page** sends one bounded snapshot for the question you
   initiated. It does not create an ongoing grant.
 - Browser commands need a short-lived lease granted from the extension UI. A
   lease applies to one tab and the site showing when you granted it.
+- Opening a URL still requires an **Allow once** confirmation in the extension.
 - Navigating to another site suspends the lease until you explicitly resume it.
 - Consequential actions such as opening tabs, ambiguous clicks, and media
   control require per-use confirmation.
