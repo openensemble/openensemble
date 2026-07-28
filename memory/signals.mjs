@@ -25,6 +25,18 @@ import {
 // If the agent's last response was about email/task operations, skip correction detection
 const AGENT_ACTION_RESPONSE_RE = /\b(moved to trash|trashed|permanently deleted|found \d+|done!? all \d+|email(s)? (have been|were)|scheduled (to run|at)|task .{1,40} scheduled)\b/i;
 
+// An unhealthy reason provider silently disables ALL conversation-driven
+// learning (corrections, preferences, friction proposals). That failure mode
+// once went unnoticed for weeks — surface it, but throttled so a down
+// provider doesn't spam every turn.
+let _unhealthyWarnAt = 0;
+function warnProviderUnhealthy(where) {
+  const now = Date.now();
+  if (now - _unhealthyWarnAt < 10 * 60 * 1000) return;
+  _unhealthyWarnAt = now;
+  console.warn(`[cortex] ${where} skipped: reason provider unreachable — corrections/preferences/friction are NOT being learned until it recovers`);
+}
+
 // User turn that is purely a question ("what/which/who/...", "do/does/is/..."):
 // a question asks about existing memory, it doesn't assert a new preference.
 // When the user recalls ("what fruit do i like") and the agent answers ("you
@@ -53,7 +65,7 @@ async function extractPreferenceStructureForUser(userId, text) {
 }
 
 async function detectSignals({ agentId, userMessage, agentLastResponse, userId = 'default' }) {
-  if (!await providerHealthy()) return { correction: null, preference: null };
+  if (!await providerHealthy()) { warnProviderUnhealthy('signal detection'); return { correction: null, preference: null }; }
 
   const safeUser  = userMessage.slice(0, 300).replace(/"/g, "'");
   const safeAgent = (agentLastResponse || '').slice(0, 300).replace(/"/g, "'");
@@ -303,7 +315,7 @@ function _cosineSim(a, b) {
 }
 
 export async function trackFriction({ agentId, userMessage, userId = 'default' }) {
-  if (!await providerHealthy()) return { promoted: false };
+  if (!await providerHealthy()) { warnProviderUnhealthy('friction tracking'); return { promoted: false }; }
   pruneFrictionCounters(agentId);
   const safeMsg = userMessage.slice(0, 150).replace(/"/g, "'");
   const agentKeys = Object.keys(_frictionCounters).filter(k => k.startsWith(agentId + '_'));

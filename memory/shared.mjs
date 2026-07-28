@@ -268,6 +268,13 @@ export async function providerHealthy() {
     const { lmstudioBase } = getCortexConfig();
     return _isReachable(`${lmstudioBase}/v1/models`);
   }
+  if (provider === 'llamacpp') {
+    // Local managed server — no API key, so the cloud has-a-key heuristic
+    // below would report it permanently unhealthy. Ping it like the other
+    // local providers instead (spec.baseUrl already ends in /v1).
+    const spec = getProviderSpec('llamacpp');
+    return _isReachable(`${spec.baseUrl}/models`);
+  }
   const spec = getProviderSpec(provider);
   // If we have a key for a cloud provider, treat as healthy.
   return !!(spec && spec.headers && (spec.headers.Authorization || spec.headers['x-api-key']));
