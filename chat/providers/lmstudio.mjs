@@ -17,6 +17,7 @@ import { LoopGuard, compressToolDefs } from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { effectiveReasoningEffort, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
+import { appendPendingCoordinatorUpdate } from '../../lib/coordinator-directives.mjs';
 
 // ── LM Studio — native /api/v1/chat (stateful, no-tools path) ────────────────
 // Uses previous_response_id so LM Studio maintains context server-side.
@@ -193,6 +194,7 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
   let streamUsageDisabled = false;
 
   while (guard.tick()) {
+    appendPendingCoordinatorUpdate(working);
     // Re-read tools per iteration so dynamic toolset mutations
     // (request_tools meta-tool) take effect on the next provider call.
     const lmTools = compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }));
@@ -310,7 +312,7 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
 
       const blocks = [...toolCalls.values()];
 
-      if (blocks.length > 1) {
+      if (blocks.length > 1 && agent._coordinatedWorkstream !== true) {
         // Multiple tool calls in one assistant turn — run in parallel.
         // All tools run via executeToolStreaming (blocking per-tool, full
         // result returned). Promise.all gives us concurrency. For ask_agent,

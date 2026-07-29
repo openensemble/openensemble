@@ -11,6 +11,7 @@
     {
       "type": "function",
       "readOnly": true,
+      "parallelSafeRead": true,
       "function": {
         "name": "web_search",
         "description": "Search the web using Brave Search. Use for current news, facts, or anything that needs up-to-date information.",
@@ -27,6 +28,7 @@
     },
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "fetch_url",
         "description": "Fetch the text content of any URL. Use to read news articles, documentation, or any web page. Avoid news.google.com URLs — use the original publisher URL instead.",

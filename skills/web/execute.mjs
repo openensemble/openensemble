@@ -32,6 +32,9 @@ function requestSignal(ownerSignal, timeoutMs) {
   return ownerSignal ? AbortSignal.any([ownerSignal, timeout]) : timeout;
 }
 
+const FETCH_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_FETCH_REDIRECTS = 5;
+
 async function execWebSearch(query, count = 5, signal = null) {
   throwIfAborted(signal);
   const key = getBraveKey();
@@ -71,23 +74,47 @@ async function execFetchUrl(url, signal = null) {
   if (/news\.google\.com\/(articles|rss|stories)\//.test(url)) {
     return `Cannot fetch Google News article URLs directly — they require a browser session. Ask the user to open the link in their browser, or search Brave for the article title to find the original publisher URL.`;
   }
-  // SSRF guard — refuse private/loopback/link-local hosts so an LLM (or
-  // prompt-injected web content) can't redirect fetches to cloud metadata,
-  // LAN admin pages, Tailnet, or this server itself.
-  const safety = await raceWithAbort(isUrlSafe(url), signal, 'Web fetch cancelled');
-  throwIfAborted(signal);
-  if (!safety.ok) return `Error: url blocked (${safety.reason}).`;
   const fetchSignal = requestSignal(signal, 12_000);
   try {
-    const res = await raceWithAbort(fetch(url, {
-      redirect: 'follow',
-      signal: fetchSignal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-      },
-    }), fetchSignal, 'Web fetch timed out');
+    let currentUrl = url;
+    let res = null;
+    // Follow redirects manually so every hop is checked before the request.
+    // A safe public URL can otherwise 30x into a LAN host, cloud metadata
+    // endpoint, Tailnet service, or this server and bypass the initial guard.
+    for (let hop = 0; hop <= MAX_FETCH_REDIRECTS; hop++) {
+      const safety = await raceWithAbort(
+        isUrlSafe(currentUrl),
+        fetchSignal,
+        'Web fetch timed out',
+      );
+      throwIfAborted(signal);
+      if (!safety.ok) return `Error: url blocked (${safety.reason}).`;
+
+      res = await raceWithAbort(fetch(currentUrl, {
+        redirect: 'manual',
+        signal: fetchSignal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+        },
+      }), fetchSignal, 'Web fetch timed out');
+      throwIfAborted(signal);
+
+      if (!FETCH_REDIRECT_STATUSES.has(res.status)) break;
+      const location = res.headers.get('location');
+      if (!location) break;
+      if (hop === MAX_FETCH_REDIRECTS) {
+        return `Fetch error: too many redirects (maximum ${MAX_FETCH_REDIRECTS}).`;
+      }
+      try {
+        currentUrl = new URL(location, currentUrl).href;
+      } catch {
+        return `Fetch error: invalid redirect URL (${location}).`;
+      }
+    }
+
+    if (!res) return 'Fetch error: no response received.';
     throwIfAborted(signal);
     if (!res.ok) return `HTTP ${res.status}: ${res.statusText}`;
     const contentType = res.headers.get('content-type') ?? '';

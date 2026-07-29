@@ -26,6 +26,21 @@ import {
 import { getOrchestrationPolicy } from './lib/orchestration-policy.mjs';
 import { assertActiveLabVerifierLeaseToken } from './lib/lab-verifier-lease.mjs';
 import { iterateUntilAbort } from './lib/abortable-async-iterator.mjs';
+import { abortError, createLinkedAbortController } from './lib/abort-utils.mjs';
+import {
+  registerCoordinatedTask,
+  claimWork,
+  completeCoordinatedTask,
+  coordinatedTaskRoot,
+  coordinatedTasksSnapshot,
+  markCoordinatedTaskStarted,
+  taskCoordinationSnapshot,
+  rootCoordinationSnapshot,
+  redirectCoordinatedTask,
+  consumeTaskDirectives,
+  sealCoordinatedTask,
+  clearWorkCoordination,
+} from './lib/work-coordination.mjs';
 import {
   setBackgroundUserSendFn,
   _sendOwner,
@@ -347,7 +362,7 @@ export async function bootRecoverInterruptedTasks() {
 /** Stable correlation passed into one detached background agent run. */
 export function backgroundRunTraceOptions(rec, traceSource = 'background') {
   return {
-    rootTaskId: rec?.rootTaskId || rec?.taskId || null,
+    rootTaskId: rec?.traceRootTaskId || rec?.rootTaskId || rec?.taskId || null,
     traceSource,
     ...(rec?.sourceMessageId ? { messageId: rec.sourceMessageId } : {}),
     ...(rec?.sourceAttemptId ? { attemptId: rec.sourceAttemptId } : {}),
@@ -377,18 +392,66 @@ function _voiceOrigin() {
 // This graph links them so status lookups can resolve "root -> child agent"
 // and a root chip does not finish while child delegations are still running.
 function _rootChildSnapshot(root) {
+  if (!root) return [];
+  const activeRows = root.children?.values ? [...root.children.values()] : [];
+  const completedRows = Array.isArray(root.completedChildren) ? root.completedChildren : [];
+  const graphIds = new Set([...activeRows, ...completedRows].map(row => row.taskId));
+  const retainedRows = coordinatedTasksSnapshot(root.rootTaskId)
+    .filter(row => !graphIds.has(row.taskId));
+  const retainedActive = retainedRows.filter(row =>
+    !['done', 'complete', 'completed', 'error', 'failed', 'cancelled', 'canceled', 'stopped']
+      .includes(String(row.status).toLowerCase()));
+  const retainedTerminal = retainedRows.filter(row => !retainedActive.includes(row));
+  const rows = [...activeRows, ...retainedActive, ...completedRows, ...retainedTerminal];
+  return rows.map(c => {
+    const coordination = taskCoordinationSnapshot(c.taskId) || {};
+    const status = c.status || 'running';
+    const terminal = ['done', 'complete', 'completed', 'error', 'failed', 'cancelled', 'canceled', 'stopped']
+      .includes(String(status).toLowerCase());
+    return {
+      taskId: c.taskId,
+      parentTaskId: c.parentTaskId || null,
+      watcherId: c.watcherId || null,
+      spanId: c.spanId || null,
+      name: c.name || 'Agent',
+      summary: c.summary || '',
+      status,
+      phase: c.phase || status,
+      currentTool: c.currentTool || null,
+      startedAt: c.startedAt || null,
+      lastActivityAt: c.lastActivityAt || null,
+      progress: terminal ? null : (c.progress || null),
+      claims: coordination.claims || c.claims || [],
+      role: coordination.role || c.role || 'worker',
+      lastEvent: terminal ? '' : (c.lastEvent || coordination.lastEvent || ''),
+      endedAt: coordination.endedAt || c.endedAt || null,
+    };
+  });
+}
+
+function _activeRootChildSnapshot(root) {
   if (!root?.children?.size) return [];
   return [...root.children.values()].map(c => ({
     taskId: c.taskId,
-    watcherId: c.watcherId || null,
-    spanId: c.spanId || null,
     name: c.name || 'Agent',
-    summary: c.summary || '',
-    status: c.status || 'running',
-    currentTool: c.currentTool || null,
-    startedAt: c.startedAt || null,
-    lastActivityAt: c.lastActivityAt || null,
   }));
+}
+
+function _rootCompletionOwnerActive(root) {
+  const ownerId = root?.completionOwnerTaskId || root?.rootTaskId;
+  return !!(ownerId && !root?.completionOwnerReleased && activeTasks.has(ownerId));
+}
+
+function _touchRootCompletionOwner(root, at = Date.now()) {
+  const ownerId = root?.completionOwnerTaskId || root?.rootTaskId;
+  const owner = ownerId ? activeTasks.get(ownerId) : null;
+  if (!owner) return;
+  owner.lastActivityAt = Math.max(Number(owner.lastActivityAt) || 0, at);
+  owner.lastUpdateAt = Math.max(Number(owner.lastUpdateAt) || 0, at);
+}
+
+function _rootCoordinationState(root) {
+  return root?.rootTaskId ? (rootCoordinationSnapshot(root.rootTaskId) || {}) : {};
 }
 
 function _ensureRootGraph({ userId, rootTaskId, rootWatcherId = null, visibleAgentId = null, summary = '' }) {
@@ -398,14 +461,17 @@ function _ensureRootGraph({ userId, rootTaskId, rootWatcherId = null, visibleAge
     root = {
       userId,
       rootTaskId,
+      completionOwnerTaskId: rootTaskId,
       rootWatcherId: rootWatcherId || null,
       visibleAgentId: visibleAgentId || null,
       summary: summary || '',
       children: new Map(),
+      completedChildren: [],
       pendingCompletion: null,
     };
     rootTaskGraphs.set(rootTaskId, root);
   } else {
+    if (!Array.isArray(root.completedChildren)) root.completedChildren = [];
     if (rootWatcherId && !root.rootWatcherId) root.rootWatcherId = rootWatcherId;
     if (visibleAgentId && !root.visibleAgentId) root.visibleAgentId = visibleAgentId;
     if (summary && !root.summary) root.summary = summary;
@@ -429,6 +495,7 @@ function _attachRootChild(taskId, rec) {
   if (!root) return;
   root.children.set(taskId, {
     taskId,
+    parentTaskId: rec.parentTaskId || null,
     watcherId: rec.watcherId || null,
     spanId: rec.spanId || null,
     name: rec.agentName,
@@ -438,13 +505,15 @@ function _attachRootChild(taskId, rec) {
     startedAt: rec.startedAt,
     lastActivityAt: Date.now(),
   });
+  _touchRootCompletionOwner(root);
   if (root.rootWatcherId) {
-    const names = _rootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
+    const names = _activeRootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
     pushWatcherStatus(rec.userId, root.rootWatcherId, `Delegated child task running: ${names || rec.agentName}`, {
       rootTaskId: rec.rootTaskId,
       phase: 'child_running',
       status: 'running',
       childTasks: _rootChildSnapshot(root),
+      ..._rootCoordinationState(root),
       lastActivityAt: Date.now(),
     });
   }
@@ -461,15 +530,23 @@ function _updateRootChildProgress(rec, extra = {}) {
     lastActivityAt: Date.now(),
     ...extra,
   });
+  _touchRootCompletionOwner(root);
   if (root.rootWatcherId && rec.watcherId !== root.rootWatcherId) {
     const action = rec.currentTool ? `running ${rec.currentTool}` : (extra.status || child.status || 'running');
-    pushWatcherStatus(rec.userId, root.rootWatcherId, `${rec.agentName || 'Agent'}: ${action}`, {
-      rootTaskId: rec.rootTaskId,
-      phase: 'child_progress',
-      status: 'running',
-      childTasks: _rootChildSnapshot(root),
-      lastActivityAt: Date.now(),
-    });
+    pushWatcherStatus(
+      rec.userId,
+      root.rootWatcherId,
+      `${rec.agentName || 'Agent'}: ${action}`,
+      {
+        rootTaskId: rec.rootTaskId,
+        phase: 'child_progress',
+        status: 'running',
+        childTasks: _rootChildSnapshot(root),
+        ..._rootCoordinationState(root),
+        lastActivityAt: Date.now(),
+      },
+      { emitIfUnchanged: true },
+    );
   }
 }
 
@@ -480,7 +557,25 @@ export function hasActiveTaskChildren(rootTaskId) {
 
 export function clearTaskRoot(rootTaskId) {
   if (!rootTaskId) return false;
+  clearWorkCoordination(rootTaskId);
   return rootTaskGraphs.delete(rootTaskId);
+}
+
+/**
+ * Release a root's coordinator-lifetime hold at the coordinator's terminal
+ * transition. If its last child won the race just before this release, retire
+ * the now-idle headless graph immediately instead of waiting for another child
+ * event that will never come.
+ */
+export function releaseRootCompletionOwner(rootTaskId) {
+  const root = rootTaskGraphs.get(rootTaskId);
+  if (!root) return false;
+  root.completionOwnerReleased = true;
+  if (root.children?.size || root.rootWatcherId) return true;
+  if (root.pendingCompletion) _fireDeferredVoiceCompletion(root.pendingCompletion);
+  clearWorkCoordination(rootTaskId);
+  rootTaskGraphs.delete(rootTaskId);
+  return true;
 }
 
 /** @param {{ userId?: string, rootTaskId?: string, rootWatcherId?: string|null, status?: string, finalText?: string, finalReportPreview?: string }} [opts] */
@@ -494,13 +589,14 @@ export function deferRootCompletion({ userId, rootTaskId, rootWatcherId = null, 
     finalReportPreview,
     at: Date.now(),
   };
-  const names = _rootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
+  const names = _activeRootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
   if (root.rootWatcherId) {
     pushWatcherStatus(userId || root.userId, root.rootWatcherId, `Waiting on delegated task(s): ${names || 'child task'}`, {
       rootTaskId,
       phase: 'waiting_children',
       status: 'running',
       childTasks: _rootChildSnapshot(root),
+      ..._rootCoordinationState(root),
       finalReportPreview,
       lastActivityAt: Date.now(),
     });
@@ -541,11 +637,22 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
   const child = root.children.get(taskId);
   if (child) {
     child.status = status;
+    child.phase = status;
     child.currentTool = null;
+    child.lastEvent = '';
+    child.progress = null;
     child.lastActivityAt = Date.now();
+    child.endedAt = Date.now();
     child.finalReportPreview = finalReportPreview;
+    root.completedChildren = Array.isArray(root.completedChildren) ? root.completedChildren : [];
+    root.completedChildren.push({ ...child });
+    if (root.completedChildren.length > 12) root.completedChildren.shift();
   }
   root.children.delete(taskId);
+  _touchRootCompletionOwner(root);
+  const remainingChildren = _rootChildSnapshot(root).filter(row =>
+    !['done', 'complete', 'completed', 'error', 'failed', 'cancelled', 'canceled', 'stopped']
+      .includes(String(row.status).toLowerCase()));
   if (!root.rootWatcherId) {
     if (root.children.size === 0) {
       if (root.pendingCompletion) _fireDeferredVoiceCompletion(root.pendingCompletion);
@@ -553,7 +660,13 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
       // (the scheduled-child barrier owns their UI lifecycle). Retire that
       // graph when its last child finishes even when there is no root watcher
       // or deferred completion, otherwise one entry leaks per scheduled fire.
-      rootTaskGraphs.delete(rec.rootTaskId);
+      // The detached coordinator is the lifetime hold for its bounded team:
+      // queued lanes may not have registered yet, and completed claims plus
+      // the one-wave reservation must survive those zero-child gaps.
+      if (!_rootCompletionOwnerActive(root)) {
+        clearWorkCoordination(rec.rootTaskId);
+        rootTaskGraphs.delete(rec.rootTaskId);
+      }
     }
     return;
   }
@@ -563,13 +676,14 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
     root.pendingCompletion.finalReportPreview = finalReportPreview;
   }
 
-  if (root.children.size > 0) {
-    const names = _rootChildSnapshot(root).map(c => c.name).filter(Boolean).join(', ');
+  if (remainingChildren.length > 0) {
+    const names = remainingChildren.map(c => c.name).filter(Boolean).join(', ');
     pushWatcherStatus(rec.userId, root.rootWatcherId, `${rec.agentName || 'Agent'} finished; waiting on ${names || 'remaining child task(s)'}`, {
       rootTaskId: rec.rootTaskId,
       phase: 'waiting_children',
       status: 'running',
       childTasks: _rootChildSnapshot(root),
+      ..._rootCoordinationState(root),
       lastActivityAt: Date.now(),
     });
     return;
@@ -584,7 +698,8 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
       rootTaskId: rec.rootTaskId,
       status: finalStatus,
       phase: finalStatus,
-      childTasks: [],
+      childTasks: _rootChildSnapshot(root),
+      ..._rootCoordinationState(root),
       canCancel: false,
       currentTool: null,
       finalReportPreview: root.pendingCompletion.finalReportPreview || finalReportPreview,
@@ -595,8 +710,29 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
       finalText,
     });
     _fireDeferredVoiceCompletion(root.pendingCompletion);
+    clearWorkCoordination(rec.rootTaskId);
     rootTaskGraphs.delete(rec.rootTaskId);
+    return;
   }
+
+  // The coordinator itself is still running (for example, synthesizing the
+  // results returned by parallel_work). Keep the root alive, but clear the
+  // active rows and publish the completed aggregate instead of leaving the
+  // final child looking perpetually active.
+  const completionOwner = activeTasks.get(root.completionOwnerTaskId || root.rootTaskId);
+  const ownerCancelling = completionOwner?.status === 'cancelling'
+    || completionOwner?.phase === 'cancelling';
+  pushWatcherStatus(rec.userId, root.rootWatcherId, ownerCancelling
+    ? `Cancelling ${completionOwner?.agentName || 'coordinator'}...`
+    : `${rec.agentName || 'Worker'} finished; coordinator is combining results`, {
+    rootTaskId: rec.rootTaskId,
+    phase: ownerCancelling ? 'cancelling' : 'coordinating',
+    status: ownerCancelling ? 'cancelling' : 'running',
+    childTasks: _rootChildSnapshot(root),
+    ..._rootCoordinationState(root),
+    ...(ownerCancelling ? { canCancel: false, cancelling: true } : {}),
+    lastActivityAt: Date.now(),
+  });
 }
 
 function taskLabel(agentEmoji, agentName, summary) {
@@ -643,6 +779,81 @@ function pushTaskProgress(taskId, text, extra = {}) {
   const pushed = pushWatcherStatus(rec.userId, rec.watcherId, text, taskState(taskId, extra));
   _updateRootChildProgress({ ...rec, taskId }, { status: extra.phase || rec.phase || 'running' });
   return pushed;
+}
+
+/**
+ * Refresh a child row after a claim, conflict, redirect, or milestone. This is
+ * intentionally a small projection: private claim keys and full directives
+ * stay in the server-side coordination registry.
+ */
+export function noteTaskCoordination(taskId, text, {
+  appendProgress = true,
+  ...extra
+} = {}) {
+  const rec = activeTasks.get(taskId);
+  if (!rec) return false;
+  rec.lastActivityAt = Date.now();
+  if (text && appendProgress) {
+    pushWorkerProgress(taskId, { kind: 'note', text: String(text).slice(0, 240) });
+  }
+  const snapshot = taskCoordinationSnapshot(taskId) || {};
+  _updateRootChildProgress({ ...rec, taskId }, {
+    claims: snapshot.claims || [],
+    role: snapshot.role || 'worker',
+    lastEvent: String(text || snapshot.lastEvent || '').slice(0, 240),
+    ...extra,
+  });
+  return true;
+}
+
+/** Publish a centrally reserved team plan, including lanes still queued. */
+export function noteTaskTeamPlan(rootTaskId, text = 'Coordinator assigned the team plan') {
+  const rec = activeTasks.get(rootTaskId);
+  if (!rec) return false;
+  const root = _ensureRootGraph({
+    userId: rec.userId,
+    rootTaskId,
+    rootWatcherId: rec.rootWatcherId || rec.watcherId || null,
+    visibleAgentId: rec.visibleAgentId || rec.coordinatorAgentId || null,
+    summary: rec.summary || '',
+  });
+  if (!root?.rootWatcherId) return true;
+  return pushWatcherStatus(
+    rec.userId,
+    root.rootWatcherId,
+    String(text || 'Coordinator assigned the team plan').slice(0, 240),
+    {
+      rootTaskId,
+      phase: 'child_running',
+      status: 'running',
+      childTasks: _rootChildSnapshot(root),
+      ..._rootCoordinationState(root),
+      lastActivityAt: Date.now(),
+    },
+    { emitIfUnchanged: true },
+  );
+}
+
+/** Manager-authorized redirect delivered to a child after its current tool. */
+export function redirectTaskWork(userId, taskId, directive, {
+  ownerKey = null,
+  reason = '',
+  releaseClaims = true,
+} = {}) {
+  const rec = activeTasks.get(taskId);
+  if (!rec || rec.userId !== userId || !rec.parentTaskId) {
+    return { ok: false, reason: 'coordinated child task not found' };
+  }
+  if (ownerKey && rec.ownerKey && rec.ownerKey !== ownerKey) {
+    return { ok: false, reason: 'that workstream belongs to a different agent' };
+  }
+  const result = redirectCoordinatedTask({ taskId, directive, reason, releaseClaims });
+  if (result.ok) {
+    noteTaskCoordination(taskId, `Redirected: ${String(directive || '').slice(0, 180)}`, {
+      status: rec.status || 'running',
+    });
+  }
+  return result;
 }
 
 function nextToolEventSeq(events) {
@@ -1181,15 +1392,50 @@ export function registerSyncDelegation({ taskId, userId, agentId, agentName, age
  * @param {string} userId
  * @param {object} [opts]
  * @param {(tokenText:string)=>void} [opts.onProgress] - per-token callback (for UI streaming)
+ * @param {(taskId:string)=>void} [opts.onTaskStart] - receives the runtime child id
+ * @param {string} [opts.taskId] - trusted pre-reserved child id
+ * @param {boolean} [opts.preRegistered] - primary claim was atomically reserved by the coordinator
  * @param {string} [opts.agentEmoji] - icon (default 🔎)
  * @param {AbortSignal} [opts.signal] - owner cancellation propagated into the ephemeral turn
+ * @param {boolean} [opts.coordinated] - attach this child to the current root task graph
+ * @param {string} [opts.label] - short workstream label
+ * @param {{kind?:string,key?:string,label?:string,mode?:string}} [opts.initialClaim]
+ * @param {string|null} [opts.ownerKey] - stable owning agent id for redirect authorization
+ * @param {boolean} [opts.isolatedTaskRun] - apply detached-worker capability filtering
+ * @param {string|null} [opts.workerMemoryAgentId] - stable owner memory scope
  * @returns {Promise<string>} final concatenated text
  */
 export async function dispatchEphemeral(agent, task, userId, opts = {}) {
-  const taskId = `eph_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const requestedTaskId = typeof opts.taskId === 'string' ? opts.taskId.trim() : '';
+  const taskId = requestedTaskId || `eph_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const agentName = agent.name ?? 'Worker';
   const agentEmoji = opts.agentEmoji ?? '🔎';
+  // streamChat trims tools and recomposes prompt fields in place. A late
+  // redirect starts a genuinely fresh lane pass, so snapshot the pristine safe
+  // child surface once and clone those mutable fields for every pass.
+  const pristineAgent = { ...agent };
+  const pristineTools = Array.isArray(agent.tools) ? [...agent.tools] : [];
+  const pristinePromptTiers = agent._promptTiers ? { ...agent._promptTiers } : null;
+  const pristineAssembledTiers = agent._promptTiersAssembled
+    ? { ...agent._promptTiersAssembled }
+    : null;
+  const pristineComposerInputs = agent._composerInputs ? { ...agent._composerInputs } : null;
+  const freshAgentPass = () => {
+    const pass = {
+      ...pristineAgent,
+      tools: [...pristineTools],
+      systemPrompt: pristineAgent.systemPrompt,
+    };
+    if (pristinePromptTiers) pass._promptTiers = { ...pristinePromptTiers };
+    else delete pass._promptTiers;
+    if (pristineAssembledTiers) pass._promptTiersAssembled = { ...pristineAssembledTiers };
+    else delete pass._promptTiersAssembled;
+    if (pristineComposerInputs) pass._composerInputs = { ...pristineComposerInputs };
+    else delete pass._composerInputs;
+    return pass;
+  };
   const parentTaskCtx = currentTaskContext();
+  const coordinated = opts.coordinated === true && !!parentTaskCtx?.taskId;
   const taskCtx = {
     taskId,
     watcherId: parentTaskCtx?.watcherId || null,
@@ -1200,38 +1446,194 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
     parentWatcherId: parentTaskCtx?.watcherId || null,
     rootWatcherId: parentTaskCtx?.rootWatcherId || parentTaskCtx?.watcherId || null,
     visibleAgentId: parentTaskCtx?.visibleAgentId || parentTaskCtx?.agentId || null,
-    spanId: `${parentTaskCtx?.rootTaskId || parentTaskCtx?.taskId || taskId}:ephemeral:${taskId}`,
+    spanId: `${parentTaskCtx?.traceRootTaskId || parentTaskCtx?.rootTaskId || parentTaskCtx?.taskId || taskId}:ephemeral:${taskId}`,
+    ownerKey: opts.ownerKey || parentTaskCtx?.ownerKey || null,
+    traceRootTaskId: parentTaskCtx?.traceRootTaskId
+      || parentTaskCtx?.rootTaskId
+      || parentTaskCtx?.taskId
+      || taskId,
   };
-  const signal = opts.signal || getTurnContext()?.signal || null;
-  activeTasks.set(taskId, {
-    agentId: agent.id, userId, agentName, startedAt: Date.now(),
+  const parentTurnContext = getTurnContext() || {};
+  const ownerSignal = opts.signal || parentTurnContext.signal || null;
+  const childAbort = createLinkedAbortController(ownerSignal, `Workstream ${taskId} cancelled`);
+  const signal = childAbort.signal;
+  const record = {
+    taskId,
+    agentId: agent.id, userId, agentName, agentEmoji,
+    summary: String(opts.label || task || '').slice(0, 120),
+    startedAt: Date.now(), lastActivityAt: Date.now(),
     rootTaskId: taskCtx.rootTaskId,
     parentTaskId: taskCtx.parentTaskId,
-  });
+    parentWatcherId: taskCtx.parentWatcherId,
+    rootWatcherId: taskCtx.rootWatcherId,
+    visibleAgentId: taskCtx.visibleAgentId,
+    spanId: taskCtx.spanId,
+    traceRootTaskId: taskCtx.traceRootTaskId,
+    watcherId: null,
+    ownerKey: taskCtx.ownerKey,
+    status: 'running',
+    phase: 'queued',
+    toolsUsed: 0,
+    isWorkstream: coordinated,
+    abort: reason => childAbort.abort(reason),
+  };
+  activeTasks.set(taskId, record);
+  opts.onTaskStart?.(taskId);
+
+  if (coordinated) {
+    if (opts.preRegistered === true) {
+      if (coordinatedTaskRoot(taskId) !== taskCtx.rootTaskId) {
+        activeTasks.delete(taskId);
+        childAbort.dispose();
+        throw new Error('Pre-registered workstream does not belong to this coordinator team.');
+      }
+      markCoordinatedTaskStarted(taskId);
+    } else {
+      registerCoordinatedTask({
+        rootTaskId: taskCtx.rootTaskId,
+        taskId,
+        parentTaskId: taskCtx.parentTaskId,
+        userId,
+        name: agentName,
+        label: opts.label || agentName,
+      });
+    }
+    if (opts.preRegistered !== true && opts.initialClaim?.key) {
+      const claimed = claimWork({
+        rootTaskId: taskCtx.rootTaskId,
+        taskId,
+        kind: opts.initialClaim.kind,
+        key: opts.initialClaim.key,
+        label: opts.initialClaim.label || opts.label,
+        mode: opts.initialClaim.mode,
+      });
+      if (!claimed.ok) {
+        completeCoordinatedTask(taskId, 'error', claimed.reason);
+        activeTasks.delete(taskId);
+        childAbort.dispose();
+        throw new Error(claimed.reason);
+      }
+    }
+    _attachRootChild(taskId, record);
+  }
 
   try {
     const { streamChat } = await import('./chat.mjs');
     let out = '';
-    await runInTaskContext(taskCtx, async () => {
-      for await (const ev of iterateUntilAbort(streamChat(agent, task, signal, null, userId, null, null, false, null, {
-        rootTaskId: taskCtx.rootTaskId,
-        traceSource: 'background',
-      }), signal, 'Ephemeral background task cancelled')) {
-        if (ev.type === 'token') {
-          out += ev.text;
-          opts.onProgress?.(ev.text);
-        } else if (ev.type === 'replace') out = String(ev.text || '');
-        else if (ev.type === '__content') out = String(ev.content || '');
-        if (ev.type === 'error') throw new Error(ev.message);
+    let lastProgressPush = 0;
+    let redirectPasses = 0;
+    let runTask = task;
+    record.phase = 'running';
+    await runWithTurnContext(
+      { ...parentTurnContext, signal },
+      () => runInTaskContext(taskCtx, async () => {
+      while (true) {
+        out = '';
+        const passAgent = freshAgentPass();
+        for await (const ev of iterateUntilAbort(streamChat(passAgent, runTask, signal, null, userId, null, null, false, null, {
+          rootTaskId: taskCtx.traceRootTaskId,
+          traceSource: 'background',
+          routeText: redirectPasses > 0 ? runTask : (opts.routeText || runTask),
+          isolatedTaskRun: opts.isolatedTaskRun === true,
+          workerMemoryAgentId: opts.workerMemoryAgentId || null,
+        }), signal, 'Ephemeral background task cancelled')) {
+          if (ev.type === 'token') {
+            out += ev.text;
+            opts.onProgress?.(ev.text);
+          } else if (ev.type === 'replace') out = String(ev.text || '');
+          else if (ev.type === '__content') out = String(ev.content || '');
+          if (ev.type === 'tool_call' && ev.name) {
+            record.toolsUsed += 1;
+            record.currentTool = ev.name;
+            record.phase = 'tool';
+            record.lastActivityAt = Date.now();
+            pushWorkerProgress(taskId, { kind: 'tool', tool: ev.name });
+            if (coordinated) _updateRootChildProgress(record, {
+              phase: 'tool',
+              status: 'running',
+              lastEvent: `Using ${ev.name}`,
+            });
+          } else if (ev.type === 'tool_progress' && ev.text) {
+            record.phase = 'streaming';
+            record.lastActivityAt = Date.now();
+            if (coordinated && Date.now() - lastProgressPush >= 500) {
+              lastProgressPush = Date.now();
+              _updateRootChildProgress(record, {
+                phase: 'streaming',
+                status: 'running',
+                lastEvent: String(ev.text).slice(-180),
+              });
+            }
+          } else if (ev.type === 'tool_result' && ev.name) {
+            const firstLine = String(ev.text || '').split('\n').find(line => line.trim()) || '';
+            record.currentTool = null;
+            record.phase = 'result';
+            record.lastActivityAt = Date.now();
+            pushWorkerProgress(taskId, {
+              kind: 'result',
+              tool: ev.name,
+              text: firstLine.slice(0, 160),
+            });
+            if (coordinated) _updateRootChildProgress(record, {
+              phase: 'result',
+              status: 'running',
+              lastEvent: firstLine.slice(0, 180),
+            });
+          }
+          if (ev.type === 'error') throw new Error(ev.message);
+        }
+        if (signal?.aborted) throw abortError(signal, 'cancelled');
+        // A redirect can arrive while the provider is producing its final
+        // answer, after the last tool boundary. Re-run the isolated lane with
+        // that update before resolving it to the coordinator.
+        const sealed = coordinated ? sealCoordinatedTask(taskId) : { ok: true };
+        if (sealed.ok) break;
+        const lateDirectives = sealed.pending ? consumeTaskDirectives(taskId) : [];
+        if (!lateDirectives.length) {
+          throw new Error(sealed.reason || 'Workstream could not seal its final result.');
+        }
+        redirectPasses += 1;
+        if (redirectPasses > 3) throw new Error('Workstream exceeded its bounded redirect limit.');
+        const update = lateDirectives
+          .map(item => `- ${item.text}${item.reason ? ` (${item.reason})` : ''}`)
+          .join('\n');
+        record.phase = 'redirected';
+        record.lastActivityAt = Date.now();
+        _updateRootChildProgress(record, {
+          phase: 'redirected',
+          status: 'running',
+          lastEvent: 'Applying coordinator redirect',
+        });
+        runTask = [
+          `Original lane assignment: ${task}`,
+          '[COORDINATOR UPDATE — replace the prior scope before finishing]',
+          update,
+          'Start a fresh lane answer under this update. Do not continue or return the superseded draft.',
+        ].join('\n\n');
       }
-      if (signal?.aborted) throw new Error('cancelled');
-    });
+      }),
+    );
+    record.status = 'done';
+    record.phase = 'done';
+    if (coordinated) {
+      completeCoordinatedTask(taskId, 'done', out.trim().slice(0, 240));
+      _completeRootChild(taskId, record, 'done', out.trim().slice(0, 800));
+    }
     activeTasks.delete(taskId);
     return out.trim();
   } catch (err) {
+    const cancelled = signal.aborted;
+    record.status = cancelled ? 'cancelled' : 'error';
+    record.phase = record.status;
+    if (coordinated) {
+      completeCoordinatedTask(taskId, record.status, err?.message || String(err));
+      _completeRootChild(taskId, record, record.status, String(err?.message || err).slice(0, 800));
+    }
     activeTasks.delete(taskId);
-    if (signal?.aborted) throw new Error('cancelled');
+    if (cancelled) throw abortError(signal, 'cancelled');
     throw err;
+  } finally {
+    childAbort.dispose();
   }
 }
 
@@ -1252,6 +1654,7 @@ bindDispatchDeps({
   persistedReportImage,
   pushTaskProgress,
   registerTaskRoot,
+  releaseRootCompletionOwner,
   reportImageFromEvent,
   reportImagesFromText,
   resolveBackgroundRootTaskId,

@@ -18,6 +18,7 @@ import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 import { applyOpenAICompatReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
 import { capabilityNotice } from './_shared.mjs';
+import { appendPendingCoordinatorUpdate } from '../../lib/coordinator-directives.mjs';
 
 export async function* streamOpenAICompat(providerKey, agent, systemPrompt, messages, signal, userId = 'default') {
   const cfg = OPENAI_COMPAT_PROVIDERS[providerKey];
@@ -54,6 +55,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
   let streamUsageDisabled = false;
 
   while (guard.tick()) {
+    appendPendingCoordinatorUpdate(working);
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
     // meta-tool expanding the coordinator's surface mid-turn) take effect on
     // the next provider call.
@@ -62,7 +64,9 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     // model does it implicitly). Either way: one round-trip, not search→synth.
     // Gated to agents that already hold Brave web_search — never a new grant.
     const { useNative, functionTools, nativeTool } =
-      resolveNativeWebSearch(providerKey, agent.model, agent.tools || [], { disabled: nativeSearchDisabled });
+      resolveNativeWebSearch(providerKey, agent.model, agent.tools || [], {
+        disabled: nativeSearchDisabled || agent._coordinatedWorkstream === true,
+      });
     const compatFnTools = functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
       : undefined;
@@ -212,7 +216,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
 
       const blocks = [...toolCalls.values()];
 
-      if (blocks.length > 1) {
+      if (blocks.length > 1 && agent._coordinatedWorkstream !== true) {
         // Multiple tool calls in one assistant turn — run in parallel.
         // All tools run via executeToolStreaming (blocking per-tool, full
         // result returned). Promise.all gives us concurrency. For ask_agent,

@@ -7,6 +7,18 @@ import { currentTaskContext, iterateInTaskContext } from '../../lib/task-proxy-c
 import { iterateUntilAbort } from '../../lib/abortable-async-iterator.mjs';
 import { getScheduledContext } from '../../lib/scheduled-context.mjs';
 import { getTurnContext, iterateInTurnContext } from '../../lib/turn-abort-context.mjs';
+import { getToolRouterContext } from '../../lib/tool-router-context.mjs';
+import { createLinkedAbortController, isAbortError } from '../../lib/abort-utils.mjs';
+import { isEphemeralReadOnlyTool } from '../../lib/ephemeral-tool-cache.mjs';
+import { unlockParallelWorkGate } from '../../lib/parallel-work-gate.mjs';
+import {
+  canonicalWorkClaimKey,
+  claimWork,
+  completeCoordinatedTask,
+  reserveParallelWork,
+  reserveCoordinatedTasks,
+  taskCoordinationSnapshot,
+} from '../../lib/work-coordination.mjs';
 
 // Max nested delegation depth. user→A→coordinator→B = 2 hops, which is
 // the deepest useful chain (specialist escalates to coordinator who then
@@ -32,6 +44,10 @@ function _parseCallerSession(callerAgentId) {
   // Legacy format (no depth marker) — treat as depth 1.
   m = String(callerAgentId).match(/^ephemeral_deleg_\d+_[a-z0-9]+_(.+)$/);
   if (m) return { effectiveAgentId: m[1], depth: 1 };
+  // Detached owner clones and their bounded parallel children retain the
+  // stable owner id as the final suffix.
+  m = String(callerAgentId).match(/^ephemeral_(?:worker|workstream)_[^_]+_[^_]+_(.+)$/);
+  if (m) return { effectiveAgentId: m[1], depth: 1 };
   // Direct (non-ephemeral) caller — may carry a `user_<id>_` prefix from
   // chat-dispatch's per-user session-key wrapper. Strip it so the agents
   // lookup finds the bare agent id.
@@ -47,6 +63,481 @@ function _parseCallerSession(callerAgentId) {
 // it from its own direct chat OR from an ephemeral delegation (the coordinator
 // asking "how's your work going"). Workers are LEAVES: they cannot hire workers.
 const MAX_WORKERS_PER_AGENT = 5;
+const MAX_WORKSTREAMS_PER_CALL = 4;
+const MAX_WORKSTREAM_RESULT_CHARS = 10_000;
+// Admission for this feature's child lanes. A coordinator's provider loop is
+// suspended while its parallel_work tool awaits them, so these are the added
+// concurrent model streams. Other subsystems retain their own existing caps.
+const MAX_PARALLEL_LANES_PER_USER = Math.max(
+  1,
+  Math.min(12, Number.parseInt(process.env.OPENENSEMBLE_MAX_PARALLEL_WORKSTREAMS || '6', 10) || 6),
+);
+const PARALLEL_TEAM_DEADLINE_MS = Math.max(
+  30_000,
+  Math.min(
+    30 * 60_000,
+    Number.parseInt(process.env.OPENENSEMBLE_PARALLEL_TEAM_TIMEOUT_MS || '600000', 10) || 600_000,
+  ),
+);
+const MAX_WORKSTREAM_TOOL_LOOPS = 16;
+
+/** @type {Map<string, {active:number, waiters:Array<any>}>} */
+const workstreamSlots = new Map();
+
+function _slotState(userId) {
+  let state = workstreamSlots.get(userId);
+  if (!state) {
+    state = { active: 0, waiters: [] };
+    workstreamSlots.set(userId, state);
+  }
+  return state;
+}
+
+async function _acquireWorkstreamSlot(userId, signal = null) {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('Parallel work cancelled');
+  }
+  const state = _slotState(userId);
+  if (state.active < MAX_PARALLEL_LANES_PER_USER) {
+    state.active += 1;
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    const waiter = { resolve, reject, signal, onAbort: null };
+    waiter.onAbort = () => {
+      const index = state.waiters.indexOf(waiter);
+      if (index >= 0) state.waiters.splice(index, 1);
+      reject(signal?.reason instanceof Error ? signal.reason : new Error('Parallel work cancelled'));
+    };
+    state.waiters.push(waiter);
+    signal?.addEventListener?.('abort', waiter.onAbort, { once: true });
+    if (signal?.aborted) waiter.onAbort();
+  });
+}
+
+function _releaseWorkstreamSlot(userId) {
+  const state = workstreamSlots.get(userId);
+  if (!state) return;
+  while (state.waiters.length) {
+    const waiter = state.waiters.shift();
+    waiter.signal?.removeEventListener?.('abort', waiter.onAbort);
+    if (waiter.signal?.aborted) continue;
+    waiter.resolve();
+    return;
+  }
+  state.active = Math.max(0, state.active - 1);
+  if (state.active === 0) workstreamSlots.delete(userId);
+}
+
+const PARALLEL_BUILTIN_SAFE_TOOL_NAMES = new Set([
+  'web_search',
+  'fetch_url',
+  'list_profile_files',
+  'read_profile_file',
+  'list_documents',
+  'read_document',
+  'list_document_versions',
+  'email_list_accounts',
+  'email_learned_labels',
+  'list_research',
+  'get_research',
+]);
+
+async function _parallelChildTools() {
+  const router = getToolRouterContext();
+  const pool = Array.isArray(router?.fullTools) && router.fullTools.length
+    ? router.fullTools
+    : (Array.isArray(router?.agent?.tools) ? router.agent.tools : []);
+  const trustedParallelReads = new Set();
+  try {
+    const { listRoles } = await import('../../roles.mjs');
+    for (const manifest of listRoles(null)) {
+      if (manifest?.custom === true || manifest?.userScope) continue;
+      for (const tool of (Array.isArray(manifest?.tools) ? manifest.tools : [])) {
+        if (tool?.parallelSafeRead === true && tool?.function?.name) {
+          trustedParallelReads.add(tool.function.name);
+        }
+      }
+    }
+  } catch {
+    // Exact built-in allowlists below still provide a fail-closed surface.
+  }
+  const blocked = new Set([
+    'parallel_work',
+    'spawn_worker',
+    'ask_agent',
+    'check_workers',
+    'stop_worker',
+    'redirect_worker',
+  ]);
+  const safeControls = new Set(['claim_work', 'report_progress', 'request_tools']);
+  return pool.filter(tool => {
+    const name = tool?.function?.name;
+    if (!name || blocked.has(name)) return false;
+    if (safeControls.has(name)) return true;
+    // `parallelSafeRead` is intentionally distinct from the platform-wide
+    // `readOnly` permission bit. The latter also affects ambient MCP tokens
+    // and unattended lead sweeps; this feature must not widen either surface.
+    // Generic claims cannot prove that arbitrary mutating arguments remain
+    // inside a lane, so the coordinator serializes writes after synthesis.
+    return trustedParallelReads.has(name)
+      || PARALLEL_BUILTIN_SAFE_TOOL_NAMES.has(name)
+      || isEphemeralReadOnlyTool(name);
+  });
+}
+
+function _makeParallelChild(baseAgent, ownerKey, item, tools) {
+  const id = `ephemeral_workstream_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
+  const childContract = [
+    '## Coordinated child workstream',
+    `You are one bounded member of a parallel team. Work only on: ${item.label}.`,
+    `Assignment: ${item.task}`,
+    'The coordinator has already reserved your primary workstream. Before expanding to another shared source, file, endpoint, account, topic, or resource, call claim_work with a stable kind/key.',
+    'If claim_work reports a conflict, do not duplicate that work; choose an uncovered alternative and claim it first.',
+    'Coordinator updates appended to tool results are authoritative. Follow them before taking another action.',
+    'Your tool surface is read-only by design. Analyze and gather evidence only; never mutate shared state. The coordinator will serialize any writes after synthesizing all lanes.',
+    'Use report_progress for concrete milestones. Return a concise, evidence-based result for this lane only; the coordinator will synthesize all lanes.',
+    'Do not delegate, create background work, or attempt to manage another child.',
+  ].join('\n');
+  const child = {
+    ...baseAgent,
+    id,
+    name: item.label,
+    ephemeral: true,
+    workerOwnerId: ownerKey,
+    _coordinatedWorkstream: true,
+    // The root coordinator may currently carry a locked preflight object.
+    // Never inherit that mutable state into a leaf: children already are the
+    // fan-out and must run their assigned read-only tools directly.
+    _parallelWorkGate: null,
+    maxToolLoops: Math.min(
+      MAX_WORKSTREAM_TOOL_LOOPS,
+      Math.max(1, Number(baseAgent?.maxToolLoops) || MAX_WORKSTREAM_TOOL_LOOPS),
+    ),
+    maxTokens: Math.min(4_096, Math.max(512, Number(baseAgent?.maxTokens) || 4_096)),
+    tools,
+    systemPrompt: [baseAgent?.systemPrompt || '', childContract].filter(Boolean).join('\n\n'),
+  };
+  // Tool trimming and request_tools both recompose prompts from these cached
+  // source fields. Put the lane contract in the source as well as the flat
+  // prompt so capability recovery cannot erase the assignment or leaf rule.
+  if (baseAgent?._promptTiers) {
+    child._promptTiers = {
+      ...baseAgent._promptTiers,
+      volatile: [baseAgent._promptTiers.volatile || '', childContract].filter(Boolean).join('\n\n'),
+    };
+    child.systemPrompt = [
+      child._promptTiers.stable,
+      child._promptTiers.context,
+      child._promptTiers.volatile,
+    ].filter(Boolean).join('\n\n');
+  } else if (baseAgent?._systemPromptShell) {
+    child._systemPromptShell = [baseAgent._systemPromptShell, childContract]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+  delete child._promptTiersAssembled;
+  return child;
+}
+
+function _parallelItems(args) {
+  const raw = Array.isArray(args?.work_items) ? args.work_items : [];
+  if (raw.length < 2 || raw.length > MAX_WORKSTREAMS_PER_CALL) return [];
+  const allowedModes = new Set(['exclusive', 'shared', 'verification']);
+  const items = [];
+  for (const item of raw) {
+    if (typeof item?.label !== 'string'
+        || typeof item?.task !== 'string'
+        || typeof item?.claim?.kind !== 'string'
+        || typeof item?.claim?.key !== 'string') {
+      return [];
+    }
+    const label = item.label.trim().slice(0, 80);
+    const task = item.task.trim().slice(0, 8_000);
+    const kind = item.claim.kind.trim().slice(0, 40);
+    const key = item.claim.key.trim().slice(0, 240);
+    const mode = item.claim.mode ?? 'exclusive';
+    if (!label || !task || !kind || !key || !allowedModes.has(mode)) return [];
+    items.push({
+      label,
+      task,
+      claim: {
+        kind,
+        key,
+        label: String(item.claim.label || label).trim().slice(0, 160),
+        mode,
+      },
+    });
+  }
+  return items;
+}
+
+async function* _claimWorkTool(args) {
+  const tc = currentTaskContext();
+  if (!tc?.taskId || !tc?.rootTaskId || !tc?.parentTaskId) {
+    yield {
+      type: 'result',
+      text: 'claim_work is only available inside a coordinated child workstream.',
+      isError: true,
+    };
+    return;
+  }
+  const result = claimWork({
+    rootTaskId: tc.rootTaskId,
+    taskId: tc.taskId,
+    kind: args?.kind,
+    key: args?.key,
+    label: args?.label,
+    mode: args?.mode,
+  });
+  const bg = await import('../../background-tasks.mjs');
+  if (result.ok) {
+    const claim = result.claim;
+    bg.noteTaskCoordination(
+      tc.taskId,
+      result.duplicate
+        ? `Already covering ${claim?.label || args?.key}`
+        : `Claimed ${claim?.label || args?.key}`,
+    );
+    yield {
+      type: 'result',
+      text: result.duplicate
+        ? `You already own "${claim?.label || args?.key}". Continue without claiming it again.`
+        : `Claim accepted: ${claim?.kind || 'work'} "${claim?.label || args?.key}" (${claim?.mode || 'exclusive'}).`,
+    };
+    return;
+  }
+  bg.noteTaskCoordination(tc.taskId, `Overlap avoided: ${result.reason || 'claim conflict'}`);
+  yield {
+    type: 'result',
+    text: `Claim rejected: ${result.reason || 'another worker already owns this scope'}`,
+  };
+}
+
+async function* _redirectWorkerTool(args, userId, callerAgentId) {
+  const taskId = String(args?.worker_id || '').trim();
+  const directive = String(args?.directive || '').trim();
+  if (!taskId || !directive) {
+    yield { type: 'result', text: 'redirect_worker requires worker_id and directive.', isError: true };
+    return;
+  }
+  const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+  const agents = getAgentsForUser(userId);
+  const singleMode = agents.length === 1 && agents[0]?._rosterSolo === true;
+  const { effectiveAgentId: ownerKey } = _parseCallerSession(callerAgentId);
+  const bg = await import('../../background-tasks.mjs');
+  const result = bg.redirectTaskWork(userId, taskId, directive, {
+    ownerKey: singleMode ? null : ownerKey,
+    reason: String(args?.reason || '').trim(),
+    releaseClaims: args?.release_claims !== false,
+  });
+  yield {
+    type: 'result',
+    text: result.ok
+      ? `${result.duplicate ? 'Redirect already queued' : 'Redirect queued'} for ${taskId}. It will be delivered immediately after the worker's current tool call.`
+      : `Could not redirect ${taskId}: ${result.reason}.`,
+    ...(result.ok ? {} : { isError: true }),
+  };
+}
+
+async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
+  const taskContext = currentTaskContext();
+  if (!taskContext?.taskId
+      || !taskContext?.ownerKey
+      || taskContext?.parentTaskId
+      || taskContext.rootTaskId !== taskContext.taskId) {
+    yield {
+      type: 'result',
+      text: 'parallel_work is only available to a detached coordinator worker. Start one complete background outcome with spawn_worker; that worker can fan out independent lanes safely.',
+      isError: true,
+    };
+    return;
+  }
+  const items = _parallelItems(args);
+  if (items.length < 2) {
+    yield {
+      type: 'result',
+      text: 'parallel_work needs 2–4 complete, genuinely independent work_items, each with label, task, and claim.kind/key. Handle a single or dependent step directly.',
+      isError: true,
+    };
+    return;
+  }
+  const seenClaims = new Map();
+  const conflictingInitialClaim = items.some(item => {
+    const key = canonicalWorkClaimKey(item.claim.kind, item.claim.key);
+    const priorMode = seenClaims.get(key);
+    seenClaims.set(key, item.claim.mode);
+    return priorMode && (priorMode === 'exclusive' || item.claim.mode === 'exclusive');
+  });
+  if (conflictingInitialClaim) {
+    yield {
+      type: 'result',
+      text: 'parallel_work rejected overlapping initial claims. Give each workstream a distinct resource/scope, or keep intentional corroboration in one lane.',
+      isError: true,
+    };
+    return;
+  }
+
+  const router = getToolRouterContext();
+  const { effectiveAgentId: parsedOwner } = _parseCallerSession(callerAgentId);
+  const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+  const durableAgents = getAgentsForUser(userId);
+  const baseAgent = router?.agent
+    || durableAgents.find(agent => agent.id === parsedOwner)
+    || durableAgents.find(agent => callerAgentId?.endsWith?.(`_${agent.id}`))
+    || durableAgents[0];
+  const ownerKey = baseAgent?.workerOwnerId || parsedOwner || baseAgent?.id;
+  if (!baseAgent || !ownerKey) {
+    yield { type: 'result', text: 'parallel_work could not resolve the calling agent.', isError: true };
+    return;
+  }
+  const childTools = await _parallelChildTools();
+  if (!childTools.length) {
+    yield { type: 'result', text: 'parallel_work has no safe child tools available in this turn.', isError: true };
+    return;
+  }
+
+  const reservation = reserveParallelWork({
+    rootTaskId: taskContext.rootTaskId,
+    coordinatorTaskId: taskContext.taskId,
+    userId,
+    childCount: items.length,
+    maxCalls: 1,
+    maxChildren: MAX_WORKSTREAMS_PER_CALL,
+    deadlineMs: PARALLEL_TEAM_DEADLINE_MS,
+  });
+  if (!reservation.ok) {
+    yield { type: 'result', text: `parallel_work was not started: ${reservation.reason}`, isError: true };
+    return;
+  }
+
+  const plannedAt = Date.now();
+  const plannedItems = items.map((item, index) => ({
+    ...item,
+    taskId: `eph_${plannedAt}_${Math.random().toString(36).slice(2, 7)}_${index + 1}`,
+  }));
+  const planned = reserveCoordinatedTasks({
+    rootTaskId: taskContext.rootTaskId,
+    parentTaskId: taskContext.taskId,
+    userId,
+    tasks: plannedItems.map(item => ({
+      taskId: item.taskId,
+      name: item.label,
+      label: item.label,
+      claim: item.claim,
+    })),
+  });
+  if (!planned.ok) {
+    yield {
+      type: 'result',
+      text: `parallel_work could not reserve its central lane plan: ${planned.reason}`,
+      isError: true,
+    };
+    return;
+  }
+  const bg = await import('../../background-tasks.mjs');
+  bg.noteTaskTeamPlan?.(
+    taskContext.rootTaskId,
+    `Coordinator assigned ${plannedItems.length} non-overlapping workstreams`,
+  );
+
+  const parentSignal = ctx?.signal || getTurnContext()?.signal || null;
+  const teamAbort = createLinkedAbortController(parentSignal, 'Parallel work cancelled');
+  const deadlineDelay = Math.max(1, reservation.deadlineAt - Date.now());
+  const deadlineTimer = setTimeout(
+    () => teamAbort.abort('Parallel work reached its team deadline'),
+    deadlineDelay,
+  );
+  deadlineTimer.unref?.();
+  const signal = teamAbort.signal;
+  const requested = Number.parseInt(args?.max_parallelism, 10);
+  const concurrency = Math.max(
+    1,
+    Math.min(items.length, MAX_WORKSTREAMS_PER_CALL, Number.isFinite(requested) ? requested : items.length),
+  );
+  const goal = String(args?.goal || 'the assigned task').trim().slice(0, 500);
+  yield {
+    type: 'token',
+    text: `Starting ${items.length} independent workstreams (${concurrency} at a time) for ${goal}…\n`,
+  };
+
+  const results = Array(plannedItems.length);
+  let cursor = 0;
+  const runOne = async index => {
+    const item = plannedItems[index];
+    let acquired = false;
+    try {
+      await _acquireWorkstreamSlot(userId, signal);
+      acquired = true;
+      const child = _makeParallelChild(baseAgent, ownerKey, item, childTools);
+      const text = await bg.dispatchEphemeral(child, item.task, userId, {
+        taskId: item.taskId,
+        preRegistered: true,
+        signal,
+        coordinated: true,
+        label: item.label,
+        ownerKey,
+        isolatedTaskRun: true,
+        workerMemoryAgentId: ownerKey,
+        routeText: item.task,
+        agentEmoji: baseAgent.emoji || '↳',
+      });
+      results[index] = { item, status: 'done', text };
+    } catch (error) {
+      const coordination = taskCoordinationSnapshot(item.taskId);
+      if (coordination && !coordination.endedAt) {
+        completeCoordinatedTask(
+          item.taskId,
+          isAbortError(error, signal) ? 'cancelled' : 'error',
+          error?.message || String(error),
+        );
+      }
+      results[index] = {
+        item,
+        status: isAbortError(error, signal) ? 'cancelled' : 'error',
+        text: error?.message || String(error),
+      };
+    } finally {
+      if (acquired) _releaseWorkstreamSlot(userId);
+    }
+  };
+  try {
+    const runners = Array.from({ length: concurrency }, async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= plannedItems.length) return;
+        await runOne(index);
+      }
+    });
+    await Promise.all(runners);
+  } finally {
+    clearTimeout(deadlineTimer);
+    teamAbort.dispose();
+  }
+
+  const completed = results.filter(result => result?.status === 'done').length;
+  // The coordinator crossed the barrier for one structurally valid wave.
+  // Restore exactly the surface selected before the preflight (not fullTools);
+  // provider loops re-read this object before their next continuation.
+  unlockParallelWorkGate(
+    baseAgent,
+    completed === plannedItems.length ? 'completed' : (completed ? 'partial' : 'failed-lanes'),
+  );
+  const sections = results.map((result, index) => {
+    if (!result) return `## ${plannedItems[index].label}\n\nWorkstream did not return a result.`;
+    const body = String(result.text || '').slice(0, MAX_WORKSTREAM_RESULT_CHARS);
+    const suffix = String(result.text || '').length > MAX_WORKSTREAM_RESULT_CHARS
+      ? '\n\n[Workstream result truncated for coordinator context.]'
+      : '';
+    const status = result.status === 'done' ? '' : ` (${result.status})`;
+    return `## ${result.item.label}${status}\n\n${body}${suffix}`;
+  }).join('\n\n');
+  yield {
+    type: 'result',
+    text: `Parallel work complete: ${completed}/${plannedItems.length} workstreams succeeded. Synthesize these lane results into the final answer; resolve conflicts explicitly and do not merely concatenate them.\n\n${sections}`,
+    ...(completed ? {} : { isError: true }),
+  };
+}
 
 async function* _workerTool(name, args, userId, callerAgentId, internalOptions = null) {
   const bg = await import('../../background-tasks.mjs');
@@ -72,6 +563,10 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     let tc = null;
     try { const m = await import('../../lib/task-proxy-context.mjs'); tc = m.currentTaskContext?.(); } catch { /* not in a worker */ }
     if (tc?.taskId && bg.recordWorkerProgress(tc.taskId, note)) {
+      bg.noteTaskCoordination?.(tc.taskId, String(note).slice(0, 240), {
+        appendProgress: false,
+        phase: 'milestone',
+      });
       yield { type: 'result', text: `Progress recorded: ${String(note).slice(0, 100)}` };
     } else {
       yield { type: 'result', text: 'Noted, but you are not running as a background worker so there is nothing to attach this to.' };
@@ -107,6 +602,14 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
           ? `⚠ STALLED — no activity for ${ago(w.idleSec)} (was running ${w.currentTool || 'nothing'})`
           : (w.currentTool ? `running ${w.currentTool}` : 'between steps');
         out.push(`• ${w.name} [${w.taskId}] — ${head}; ${w.toolsUsed} tool calls, ${ago(w.elapsedSec)} elapsed. Job: ${w.summary}`);
+        if (Array.isArray(w.childTasks) && w.childTasks.length) {
+          for (const child of w.childTasks) {
+            const claims = Array.isArray(child.claims) && child.claims.length
+              ? ` · claims: ${child.claims.filter(c => c?.status === 'active').map(c => c.label).filter(Boolean).join(', ')}`
+              : '';
+            out.push(`    ↳ ${child.name || 'Worker'} [${child.taskId}] — ${child.currentTool ? `running ${child.currentTool}` : (child.status || 'running')}${claims}${child.lastEvent ? ` · ${child.lastEvent}` : ''}`);
+          }
+        }
         const log = fmtLog(w.progress);
         if (log) out.push(log);
       }
@@ -254,6 +757,18 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
 }
 
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null, internalOptions = null) {
+  if (name === 'parallel_work') {
+    yield* _parallelWorkTool(args, userId, callerAgentId, internalOptions);
+    return;
+  }
+  if (name === 'claim_work') {
+    yield* _claimWorkTool(args);
+    return;
+  }
+  if (name === 'redirect_worker') {
+    yield* _redirectWorkerTool(args, userId, callerAgentId);
+    return;
+  }
   if (name === 'spawn_worker' || name === 'check_workers' || name === 'stop_worker' || name === 'report_progress') {
     yield* _workerTool(name, args, userId, callerAgentId, internalOptions);
     return;

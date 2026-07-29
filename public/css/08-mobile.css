@@ -199,6 +199,42 @@
   /* Long URLs / unbroken strings wrap in chat bubbles on narrow screens */
   .msg-bubble { word-break: break-word; overflow-wrap: anywhere; }
 
+  /* Compact coordinator cards stay readable without a wide status column. */
+  .msg.task-chip { padding: 9px; }
+  .task-chip-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 8px;
+  }
+  .task-chip-agent { grid-column: 1; grid-row: 1; }
+  .task-chip-cancel { grid-column: 2; grid-row: 1; }
+  .task-chip-badge { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
+  .task-chip-task { -webkit-line-clamp: 3; }
+  .task-chip-meta { white-space: normal; }
+  .task-chip-overview { gap: 3px; }
+  .task-chip-child {
+    grid-template-columns: 13px minmax(0, 1fr);
+    gap: 5px 6px;
+  }
+  .task-chip-child-state {
+    grid-column: 2;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px;
+    justify-items: start;
+    min-width: 0;
+    max-width: 100%;
+    text-align: left;
+  }
+  .task-chip-child[data-depth="1"] { margin-left: 8px; }
+  .task-chip-child[data-depth="2"] { margin-left: 16px; }
+  .task-chip-child[data-depth="3"] { margin-left: 24px; }
+  .task-chip-child[data-depth="4"] { margin-left: 32px; }
+  .task-chip-child-action { white-space: normal; }
+  .task-chip-event-row { grid-template-columns: 13px minmax(0, 1fr); }
+  .task-chip-event-time { display: none; }
+  .task-chip-raw pre { max-height: min(12em, 35dvh); }
+  .task-chip-reply input { font-size: 16px; }
+
   /* Desk drawers full width on mobile */
   .desk-drawer { width: 100%; max-width: 100%; }
 

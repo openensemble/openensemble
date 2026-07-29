@@ -141,6 +141,7 @@
   "tools": [
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "email_list_accounts",
         "description": "List all connected email accounts (Gmail, Microsoft, IMAP). Call this when you need to know what accounts are available or when the user mentions an account by name.",
@@ -541,6 +542,7 @@
     },
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "email_learned_labels",
         "description": "Show what the local tier has LEARNED about how this user sorts their email — a summary of sender→label mappings captured automatically from past sorts (whether you or the user applied them), and how many are trusted enough (seen consistently) to apply locally without a cloud call. Use when the user asks what you've learned about organizing their email, or to reuse known mappings before a sort.",

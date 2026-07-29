@@ -8,6 +8,7 @@
   "tools": [
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "list_profile_files",
         "description": "List files in the user's profile — uploaded documents, saved research, generated images, generated videos, coder workspace files, AND any docs other users have shared with them (annotated with `[shared by <userId>]`). Returns ids, filenames, sizes, types, timestamps, and sharing status. This is the single tool for ANY 'list my files' / 'show my docs' / 'what's been shared with me' question.\n\n**Default to folder='all' for fuzzy phrasings.** Phrases like 'list my documents', 'show my files', 'what do I have', 'my stuff' are user shorthand for the whole profile, NOT the literal documents subfolder. Only narrow to a specific folder when the user explicitly names a category (\"just images\", \"my videos\", \"the research markdowns\", \"code only\").",
@@ -30,6 +31,7 @@
     },
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "read_profile_file",
         "description": "Read the content of a file from the user's profile. Use the file_id returned by list_profile_files. Returns text for documents/research/code, image data for photos, and a metadata note for videos (which can't be read as text). Caps text output at 50,000 characters.",

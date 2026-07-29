@@ -15,6 +15,7 @@ import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, com
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { effectiveReasoningEffort, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
+import { appendPendingCoordinatorUpdate } from '../../lib/coordinator-directives.mjs';
 
 export async function* streamOllama(agent, systemPrompt, working, signal, userId = 'default') {
   // Inject system as first message — more reliable than top-level system field.
@@ -33,6 +34,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
   let thinkingDisabled = false;
 
   while (guard.tick()) {
+    appendPendingCoordinatorUpdate(ollamaMessages);
     // Compress old tool-call/result pairs before sending to keep context small.
     compressOllamaHistory(ollamaMessages, agent.contextSize ?? 32768);
 
@@ -203,7 +205,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
       // result returned). Promise.all gives us concurrency. For ask_agent,
       // the coordinator waits for specialist responses before synthesizing.
       // Events are buffered per-tool and replayed in order after all complete.
-      if (identifiedToolCalls.length > 1) {
+      if (identifiedToolCalls.length > 1 && agent._coordinatedWorkstream !== true) {
         const batchParsed = identifiedToolCalls.map(({ tc, toolCallId, providerNative }) => {
           const name = tc.function?.name ?? tc.name;
           const args = tc.function?.arguments ?? tc.arguments ?? {};

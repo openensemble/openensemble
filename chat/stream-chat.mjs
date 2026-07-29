@@ -12,7 +12,12 @@ import { trimToolsForTurn, recordTurnRouting, expandToolsByReason, inferMissingT
 import { bindToolRouterContext, toolRouterContext } from '../lib/tool-router-context.mjs';
 import { beginMemoryScope } from '../lib/memory-scope-context.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
+import { currentTaskContext } from '../lib/task-proxy-context.mjs';
 import { filterToolsForMcpPolicy, getMcpToolPolicy } from '../lib/mcp-tool-policy.mjs';
+import {
+  installParallelWorkGate,
+  isParallelWorkGateLocked,
+} from '../lib/parallel-work-gate.mjs';
 import {
   getTurn, beginTurn, recordSpan, recordError, finishTurn,
   setTurnLabProviderRequestCap,
@@ -262,7 +267,13 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // the await point in THIS async context so the ALS store propagates to the
   // provider dispatch.
   const _trimPromise = (!userToolPlanResult && Array.isArray(agent.tools) && agent.tools.length > 0)
-    ? trimToolsForTurn({ agent, userText: routeText, userId, source: voiceCtx?.source ?? null })
+    ? trimToolsForTurn({
+        agent,
+        userText: routeText,
+        userId,
+        source: voiceCtx?.source ?? null,
+        documentRequest: turnOpts?.documentRequest ?? null,
+      })
         .catch(e => { console.warn('[chat] tool-router trim failed, shipping full toolset:', e.message); return null; })
     : null;
   // Flush any deferred skill-proposal candidate from the prior turn. The
@@ -531,6 +542,31 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     });
   }
 
+  // A clearly divisible detached outcome gets a structural preflight, not
+  // merely a prompt suggestion. Save the already-routed surface and expose
+  // only parallel_work until one valid bounded wave finishes. Every provider
+  // re-reads agent.tools on continuation, so the exact routed set can be
+  // restored safely by the tool executor after the child barrier resolves.
+  const _parallelWorkGate = installParallelWorkGate({
+    agent,
+    routeText,
+    taskContext: currentTaskContext(),
+  });
+  if (_parallelWorkGate.locked) {
+    if (_routerStore) {
+      _routerStore.initialToolNames = new Set(
+        (agent.tools ?? []).map(tool => tool.function?.name).filter(Boolean),
+      );
+    }
+    log.info('chat', 'mandatory parallel-work preflight installed', {
+      userId,
+      agentId: agent.id,
+      family: _parallelWorkGate.assessment?.family || null,
+      reasons: _parallelWorkGate.assessment?.reasons || [],
+      suggestedLanes: _parallelWorkGate.assessment?.suggestedLanes || null,
+    });
+  }
+
   // Provider-hosted image generation is an implementation swap, never an
   // ambient capability grant. The Responses adapter additionally requires the
   // current (possibly tool-plan constrained or request_tools-expanded) surface
@@ -569,6 +605,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const userToolPlanBlock = buildUserToolPlanSystemBlock(agent, userToolPlanResult);
   const desktopFoldersBlock = buildDesktopFoldersBlock(userId, voiceCtx?.source);
   const triggerSuffix = skillTriggersBlock ? `\n\n${skillTriggersBlock}` : '';
+  const parallelWorkGateBlock = _parallelWorkGate.note
+    ? `\n\n${_parallelWorkGate.note}`
+    : '';
 
   // Monitorable-intent classifier — kicked off above, awaited here.
   const monitorableBlock = await _monitorablePromise;
@@ -594,7 +633,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // so the byte sequence under non-Anthropic providers is unchanged.
   // (memBlock previously inserted between userEmail and crossAgent with a
   // leading "\n\n"; preserve that boundary in the volatile string.)
-  const _volatileFromTurn = `${memBlock ? '\n\n' + memBlock : ''}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${desktopFoldersBlock}${monitorableBlock}`;
+  const _volatileFromTurn = `${memBlock ? '\n\n' + memBlock : ''}${crossAgentBlock}${triggerSuffix}${noteBlock}${userToolPlanBlock}${desktopFoldersBlock}${monitorableBlock}${parallelWorkGateBlock}`;
   let systemPrompt;
   if (_tiers) {
     // The agent.systemPrompt that chat-dispatch built already includes
@@ -1079,9 +1118,58 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     consumeProvider(providerGen, { suppressText: false }),
     _routerStore,
   );
+  let parallelPreflightFailure = null;
+  // The schema boundary makes a text-only bypass unlikely, but a model can
+  // always choose not to call any tool. Discard that unsupported draft and
+  // retry once with an explicit correction. A second refusal fails closed
+  // instead of letting a detached worker report an answer it never gathered.
+  if (!errored && isParallelWorkGateLocked(agent)) {
+    const retryNote = [
+      '',
+      '',
+      '[System correction: Your prior draft did not complete the mandatory parallel-work preflight.',
+      'Do not answer the task yet. Call parallel_work now with 2–4 centrally assigned, non-overlapping work items and distinct stable claims.',
+      'This is a capability requirement for this detached outcome, not an optional recommendation.]',
+    ].join('\n');
+    const recoveryMessages = [...trimmed, withRetryNote(currentUserTurn, retryNote)];
+    yield { type: 'replace', text: '' };
+    ({ providerGen, withSignalWordsGate } = buildProviderGen(agent, systemPrompt, recoveryMessages));
+    const _priorToolsUsed = toolsUsed;
+    const _priorToolEvents = toolEvents;
+    const _priorToolIdentityAnomalies = toolIdentityAnomalies;
+    const _priorUsage = usage;
+    const _priorModelCalls = modelCalls;
+    {
+      const _r = yield* bindToolRouterContext(consumeProvider(providerGen, {
+        suppressText: false,
+        providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
+      }), _routerStore);
+      ({ assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
+      usage = mergeProviderUsage(_priorUsage, _r.usage);
+      modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
+      turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
+      toolsUsed = [...(_priorToolsUsed || []), ...(toolsUsed || [])];
+      toolEvents = [...(_priorToolEvents || []), ...(toolEvents || [])];
+      toolIdentityAnomalies = [
+        ...(_priorToolIdentityAnomalies || []),
+        ...(toolIdentityAnomalies || []),
+      ];
+    }
+    if (!errored && isParallelWorkGateLocked(agent)) {
+      parallelPreflightFailure = 'The worker could not produce the required parallel-work plan after two attempts.';
+      assistantContent = parallelPreflightFailure;
+      errored = true;
+      yield { type: 'replace', text: '' };
+    }
+  }
   let recoveredMissingTools = false;
   if (!errored && canRecover && !hideTurn && toolsUsed.length === 0 && MISSING_TOOL_REPLY_RE.test(assistantContent || '')) {
-    const missingSkills = inferMissingToolSkills({ userText: routeText, assistantText: assistantContent, userId });
+    const missingSkills = inferMissingToolSkills({
+      userText: routeText,
+      assistantText: assistantContent,
+      userId,
+      documentRequest: turnOpts?.documentRequest ?? null,
+    });
     for (const skillId of [...missingSkills]) {
       if (_routerStore.initiallyIncludedSkills.has(skillId) || _routerStore.addedSkills.has(skillId)) missingSkills.delete(skillId);
     }
@@ -1468,6 +1556,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     });
     if (persistenceError) {
       yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'A tool or media action may have completed, but its chat record could not be saved. Do not retry automatically.' };
+    }
+    if (parallelPreflightFailure) {
+      yield {
+        type: 'error',
+        code: 'parallel_preflight_failed',
+        retryable: false,
+        message: parallelPreflightFailure,
+      };
     }
     return;
   }

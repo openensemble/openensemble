@@ -527,7 +527,13 @@ export function unregisterWatcher(userId, watcherId, reason = 'cancelled') {
  * watcher's history is appended and a WS status event is broadcast to all
  * tabs. No-op if the watcher doesn't exist.
  */
-export function pushWatcherStatus(userId, watcherId, text, extraState = null) {
+export function pushWatcherStatus(
+  userId,
+  watcherId,
+  text,
+  extraState = null,
+  { emitIfUnchanged = false } = {},
+) {
   const data = byUser.get(userId);
   if (!data) return false;
   const record = data.active.find(w => w.id === watcherId);
@@ -545,10 +551,17 @@ export function pushWatcherStatus(userId, watcherId, text, extraState = null) {
     }
     return true;
   }
-  if (text && text !== record.lastStatusText) {
+  const textChanged = !!text && text !== record.lastStatusText;
+  if (textChanged) {
     record.lastStatusText = text;
     record.lastChangeAt = Date.now();
     pushHistory(record, { text, ts: Date.now() });
+  }
+  // Most watcher updates are intentionally deduplicated by their visible
+  // status text. Coordinator cards also carry structured child/claim state,
+  // which can change while that coarse text stays the same. Those callers may
+  // request a fresh frame without polluting the human-readable status history.
+  if (text && (textChanged || emitIfUnchanged)) {
     lifecycle.sendStatusFn?.(userId, watcherStatusPayload(record, text));
   }
   // Debounced: this runs per tool_progress chunk during streaming delegations.

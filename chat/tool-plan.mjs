@@ -9,7 +9,18 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
 
-const SELECTED_PLAN_CONTROL_TOOLS = new Set(['request_tools', 'web_search', 'email_user']);
+const SELECTED_PLAN_CONTROL_TOOLS = new Set([
+  'request_tools',
+  'web_search',
+  'email_user',
+  'spawn_worker',
+  'parallel_work',
+  'claim_work',
+  'check_workers',
+  'stop_worker',
+  'redirect_worker',
+  'report_progress',
+]);
 
 export function sanitizeToolPlanForStream(plan) {
   if (!plan || typeof plan !== 'object') return null;
@@ -165,4 +176,3 @@ export function buildCurrentUserTurn(agent, userText, attachments) {
   if (!imageParts.length) return { role: 'user', content: userText };
   return buildImageUserMessage(agent.provider, imageParts, userText || 'What is in this image?');
 }
-

@@ -130,6 +130,7 @@
     {
       "type": "function",
       "readOnly": true,
+      "parallelSafeRead": true,
       "function": {
         "name": "list_research",
         "description": "List the user's saved research documents. Optionally filter by a search query that matches against titles and tags.",
@@ -147,6 +148,7 @@
     {
       "type": "function",
       "readOnly": true,
+      "parallelSafeRead": true,
       "function": {
         "name": "get_research",
         "description": "Retrieve the full content of a saved research document by its ID.",

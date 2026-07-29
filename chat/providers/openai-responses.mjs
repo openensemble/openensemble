@@ -30,6 +30,7 @@ import { getUserFilesDir } from '../../lib/paths.mjs';
 import { getTurn, getTurnLabProviderRequestCap } from '../../lib/turn-trace-context.mjs';
 import { getToolRouterContext } from '../../lib/tool-router-context.mjs';
 import { getTurnContext } from '../../lib/turn-abort-context.mjs';
+import { appendPendingCoordinatorUpdate } from '../../lib/coordinator-directives.mjs';
 import {
   assertActiveLabVerifierLeaseToken,
   inspectLabVerifierLease,
@@ -429,6 +430,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
   try {
     while (guard.tick()) {
+    appendPendingCoordinatorUpdate(working);
     // Re-read tools per iteration so dynamic toolset mutations (e.g. the
     // request_tools meta-tool expanding the coordinator's surface mid-turn)
     // take effect on the very next provider call. Cost: one O(tools) map
@@ -448,6 +450,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     const nativeSearch = nativeWebSearch(wsProvider, agent.model);
     const useNativeSearch = !labCodexRelay
       && !nativeSearchDisabled
+      && agent._coordinatedWorkstream !== true
       && nativeSearch?.kind === 'responses'
       && agent.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
     if (useNativeSearch) {
@@ -1091,7 +1094,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         continue;
       }
 
-      if (blocks.length > 1) {
+      if (blocks.length > 1 && agent._coordinatedWorkstream !== true) {
         // Multiple tool calls in one assistant turn — run in parallel.
         // All tools run via executeToolStreaming (blocking per-tool, full
         // result returned). Promise.all gives us concurrency. For ask_agent,

@@ -14,6 +14,7 @@ import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 import { applyAnthropicReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
+import { appendPendingCoordinatorUpdate } from '../../lib/coordinator-directives.mjs';
 
 // Convert Ollama/OpenAI tool format → Anthropic format (with description compression)
 export function toAnthropicTools(tools) {
@@ -70,6 +71,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
   let reasoningDisabled = false;
 
   while (guard.tick()) {
+    appendPendingCoordinatorUpdate(working);
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
     // meta-tool expanding the coordinator's surface mid-turn) take effect on
     // the next provider call. The system message keeps its ephemeral
@@ -82,7 +84,9 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // its cache_control marker lands on the last *function* tool; the server
     // tool is appended after (a few uncached tokens, negligible).
     const { useNative, functionTools, nativeTool } =
-      resolveNativeWebSearch('anthropic', agent.model, agent.tools || [], { disabled: nativeSearchDisabled });
+      resolveNativeWebSearch('anthropic', agent.model, agent.tools || [], {
+        disabled: nativeSearchDisabled || agent._coordinatedWorkstream === true,
+      });
     let anthropicTools = functionTools?.length ? toAnthropicTools(functionTools) : undefined;
     if (useNative && nativeTool) {
       anthropicTools = [...(anthropicTools || []), nativeTool];
@@ -238,7 +242,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     if (stopReason === 'tool_use' && toolUseBlocks.size > 0) {
       const blocks = [...toolUseBlocks.values()];
 
-      if (blocks.length > 1) {
+      if (blocks.length > 1 && agent._coordinatedWorkstream !== true) {
         // Multiple tool calls in one assistant turn — run in parallel.
         // The LLM emitted them together, which signals they're independent.
         // All tools run via executeToolStreaming (blocking per-tool, full

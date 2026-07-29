@@ -156,7 +156,16 @@ export function spawnWorker({
   // which must NOT link to any barrier group.
   const scheduledCtx = getScheduledContext();
   const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
-  const rootTaskId = resolveBackgroundRootTaskId(taskId, { rootTaskId: requestedRootTaskId }, scheduledCtx);
+  // A worker is the completion owner for its own bounded team. Keep its task
+  // graph rooted at the worker id so two coordinators spawned from one chat
+  // turn can never share children, claims, status, or cancellation. Preserve
+  // the originating turn/schedule root separately for trace correlation.
+  const traceRootTaskId = resolveBackgroundRootTaskId(
+    taskId,
+    { rootTaskId: requestedRootTaskId },
+    scheduledCtx,
+  );
+  const rootTaskId = taskId;
   const parentTurnCtx = getTurnContext() || {};
   const suppressLearning = parentTurnCtx.suppressLearning === true;
   // Missing capability never downgrades a verifier-started worker to an
@@ -180,6 +189,7 @@ export function spawnWorker({
     originalTask,
     autoContinue: true,
     rootTaskId,
+    traceRootTaskId,
     sourceMessageId,
     sourceAttemptId,
     sourceSessionKey,
@@ -284,7 +294,9 @@ export function spawnWorker({
         rootTaskId: workerRec?.rootTaskId || taskId,
         rootWatcherId: workerRec?.rootWatcherId || watcherId,
         visibleAgentId: workerRec?.visibleAgentId || chipOwnerId,
-        spanId: workerRec?.spanId || `${workerRec?.rootTaskId || taskId}:worker:${taskId}`,
+        spanId: workerRec?.spanId || `${workerRec?.traceRootTaskId || taskId}:worker:${taskId}`,
+        ownerKey,
+        traceRootTaskId: workerRec?.traceRootTaskId || taskId,
       };
       pushTaskProgress(taskId, `${workerName} started working`, { phase: 'running' });
       await runWithTurnContext({
@@ -407,6 +419,7 @@ export function listWorkersForOwner(userId, ownerKey) {
         elapsedSec: Math.round((now - info.startedAt) / 1000),
         idleSec: Math.round((now - lastAt) / 1000),
         stalled: (now - lastAt) > 120000,         // no tool activity for >2min
+        childTasks: info.rootTaskId ? (_rootChildSnapshot(rootTaskGraphs.get(info.rootTaskId)) || []) : [],
         progress: (info.progress || []).slice(-8), // recent log w/ domain numbers
       };
     });
@@ -436,6 +449,7 @@ export function listWorkersForUser(userId) {
         elapsedSec: Math.round((now - info.startedAt) / 1000),
         idleSec: Math.round((now - lastAt) / 1000),
         stalled: (now - lastAt) > 120000,
+        childTasks: info.rootTaskId ? (_rootChildSnapshot(rootTaskGraphs.get(info.rootTaskId)) || []) : [],
         progress: (info.progress || []).slice(-8),
       };
     });
@@ -651,6 +665,10 @@ export function stopWorker(userId, taskId, ownerKey = null) {
   if (!info || info.userId !== userId) return { ok: false, reason: 'not found' };
   if (info.isWorker) {
     if (ownerKey && info.ownerKey !== ownerKey) return { ok: false, reason: 'that worker belongs to a different agent' };
+  } else if (info.isWorkstream) {
+    if (ownerKey && info.ownerKey && info.ownerKey !== ownerKey) {
+      return { ok: false, reason: 'that workstream belongs to a different agent' };
+    }
   } else if (!info.isDelegation) {
     return { ok: false, reason: 'not a worker or delegated task' };
   }

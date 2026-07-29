@@ -13,6 +13,7 @@ import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '.
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
 import { applyOpenAICompatReasoning, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
+import { appendPendingCoordinatorUpdate } from '../../lib/coordinator-directives.mjs';
 
 /**
  * Anthropic-model prompt caching via OpenRouter: OpenRouter forwards
@@ -72,13 +73,16 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
   let reasoningDisabled = false;
 
   while (guard.tick()) {
+    appendPendingCoordinatorUpdate(working);
     // Re-read tools per iteration so dynamic toolset mutations
     // (request_tools meta-tool) take effect on the next provider call.
     // Native web search: when the agent already holds Brave web_search, drop it
     // and append OpenRouter's server tool so the search runs server-side in one
     // round-trip instead of search→result→synthesize.
     const { useNative, functionTools, nativeTool } =
-      resolveNativeWebSearch('openrouter', agent.model, agent.tools || [], { disabled: nativeSearchDisabled });
+      resolveNativeWebSearch('openrouter', agent.model, agent.tools || [], {
+        disabled: nativeSearchDisabled || agent._coordinatedWorkstream === true,
+      });
     const orFnTools = functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
       : undefined;
@@ -203,7 +207,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
 
       const blocks = [...toolCalls.values()];
 
-      if (blocks.length > 1) {
+      if (blocks.length > 1 && agent._coordinatedWorkstream !== true) {
         // Multiple tool calls in one assistant turn — run in parallel.
         // All tools run via executeToolStreaming (blocking per-tool, full
         // result returned). Promise.all gives us concurrency. For ask_agent,

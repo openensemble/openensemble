@@ -23,6 +23,7 @@
   "tools": [
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "list_documents",
         "description": "List text documents in the user's Documents drawer (own + shared with them). Returns names and ids. Optionally filter by a search term.",
@@ -36,6 +37,7 @@
     },
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "read_document",
         "description": "Read the current content of a text document by id (e.g. doc_a1b2c3d4e5f6).",
@@ -83,6 +85,7 @@
     },
     {
       "type": "function",
+      "parallelSafeRead": true,
       "function": {
         "name": "list_document_versions",
         "description": "List the version history of a document: version number, who made it, when, and the change note.",

@@ -39,6 +39,10 @@ import { log } from '../logger.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
 import { getTurn } from '../lib/turn-trace-context.mjs';
 import { currentTaskContext, runInTaskContext } from '../lib/task-proxy-context.mjs';
+import {
+  consumeCoordinatorUpdateText,
+  coordinatedToolBarrierText,
+} from '../lib/coordinator-directives.mjs';
 import { evaluateMcpToolAccess } from '../lib/mcp-tool-policy.mjs';
 import {
   abortError,
@@ -321,6 +325,24 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     }
     if (_stripped) args = _stripped;
   }
+  // Coordinated lanes are enforced read-only. Some otherwise read-only tools
+  // expose a generic follow_up mode that registers a persistent watch; strip
+  // that side effect even if a child emits it (web search, calendar reads, and
+  // future first-party read tools all inherit the same boundary).
+  if (currentTaskContext()?.parentTaskId
+      && String(agentId || '').startsWith('ephemeral_workstream_')
+      && args?.follow_up === true) {
+    args = { ...args, follow_up: false };
+  }
+
+  // Coordinated children execute provider-emitted batches serially. A claim
+  // conflict or a manager redirect after an earlier call invalidates the rest
+  // of that already-emitted batch, so fail closed before invoking the skill.
+  const coordinationBarrier = coordinatedToolBarrierText();
+  if (coordinationBarrier) {
+    yield { type: 'result', text: coordinationBarrier };
+    return;
+  }
 
   // Phase-2: merge accepted default-arg pins before invocation. User-provided
   // args win over pins — mergeDefaults only fills keys absent from `args`.
@@ -338,7 +360,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     const hit = _ephemCacheGet(agentId, name, mergedArgs);
     if (hit) {
       log.info('tool', 'ephemeral cache hit', { tool: name, agentId });
-      yield { type: 'result', text: `[cached from earlier ${name} this session]\n${hit.text}` };
+      const update = consumeCoordinatorUpdateText();
+      const control = update ? `\n\n${update}` : '';
+      yield { type: 'result', text: `[cached from earlier ${name} this session]\n${hit.text}${control}` };
       return;
     }
   }
@@ -388,16 +412,29 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         value = { ...value, text: norm.text, isError: true };
       }
     }
-    if (value?.type === 'result' && typeof value.text === 'string') _lastResultText = value.text;
-    if (!_isEphem(agentId)) return value;
     if (value?.type !== 'result' || typeof value.text !== 'string') return value;
-    let outText = value.text;
-    if (_ephemIsListTool(name)) {
-      try { outText = await _ephemRerank(agentId, name, outText); }
-      catch { /* embedder error → keep original */ }
+    if (_isEphem(agentId)) {
+      let outText = value.text;
+      if (_ephemIsListTool(name)) {
+        try { outText = await _ephemRerank(agentId, name, outText); }
+        catch { /* embedder error → keep original */ }
+      }
+      _ephemCacheSet(agentId, name, mergedArgs, outText);
+      if (outText !== value.text) value = { ...value, text: outText };
     }
-    _ephemCacheSet(agentId, name, mergedArgs, outText);
-    return outText === value.text ? value : { ...value, text: outText };
+    // Keep manager directives out of the read-only result cache and learning
+    // evidence. They are transient control messages, not domain tool output.
+    _lastResultText = value.text;
+    // A coordinator may redirect a child while one of its tools is in flight.
+    // Deliver that server-owned control message at the next safe model
+    // boundary: after the tool settles, before its result is appended to the
+    // provider conversation. Directives are consumed exactly once.
+    const control = consumeCoordinatorUpdateText();
+    if (!control) return value;
+    return {
+      ...value,
+      text: `${value.text}\n\n${control}`,
+    };
   };
   // Count a tool failure (threshold-gated tool_failure proposal). Shared by the
   // throw path (catch below) and the caught-and-returned-error path.

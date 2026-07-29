@@ -51,6 +51,7 @@ let mergeReportImages = () => [];
 let persistedReportImage = () => null;
 let pushTaskProgress = () => {};
 let registerTaskRoot = () => {};
+let releaseRootCompletionOwner = () => {};
 let reportImageFromEvent = () => null;
 let reportImagesFromText = () => [];
 let resolveBackgroundRootTaskId = () => null;
@@ -75,6 +76,7 @@ export function bindDispatchDeps(deps) {
   if (deps.persistedReportImage !== undefined) persistedReportImage = deps.persistedReportImage;
   if (deps.pushTaskProgress !== undefined) pushTaskProgress = deps.pushTaskProgress;
   if (deps.registerTaskRoot !== undefined) registerTaskRoot = deps.registerTaskRoot;
+  if (deps.releaseRootCompletionOwner !== undefined) releaseRootCompletionOwner = deps.releaseRootCompletionOwner;
   if (deps.reportImageFromEvent !== undefined) reportImageFromEvent = deps.reportImageFromEvent;
   if (deps.reportImagesFromText !== undefined) reportImagesFromText = deps.reportImagesFromText;
   if (deps.resolveBackgroundRootTaskId !== undefined) resolveBackgroundRootTaskId = deps.resolveBackgroundRootTaskId;
@@ -872,6 +874,7 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
     console.warn('[background-tasks] root-child completion failed:', e?.message || e);
   }
   activeTasks.delete(taskId);
+  if (rec?.rootTaskId === taskId) releaseRootCompletionOwner(taskId);
   // When deferring the chip, keep the root graph (it holds pendingCompletion +
   // the child set) so the last child can finalize the chip via _completeRootChild.
   if (rec?.rootTaskId === taskId && !deferChip) clearTaskRoot(taskId);
