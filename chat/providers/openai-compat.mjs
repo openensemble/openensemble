@@ -12,7 +12,11 @@ import {
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
   modelCallTraceEvent, normalizeToolCallIdentity,
 } from './_shared.mjs';
-import { LoopGuard, compressToolDefs } from '../compress.mjs';
+import {
+  LoopGuard,
+  appendFinalProviderRoundInstructionToMessages,
+  compressToolDefs,
+} from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
@@ -56,6 +60,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
 
   while (guard.tick()) {
     appendPendingCoordinatorUpdate(working);
+    const finalRound = guard.isFinalRound();
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
     // meta-tool expanding the coordinator's surface mid-turn) take effect on
     // the next provider call.
@@ -65,9 +70,9 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     // Gated to agents that already hold Brave web_search — never a new grant.
     const { useNative, functionTools, nativeTool } =
       resolveNativeWebSearch(providerKey, agent.model, agent.tools || [], {
-        disabled: nativeSearchDisabled || agent._coordinatedWorkstream === true,
+        disabled: finalRound || nativeSearchDisabled || agent._coordinatedWorkstream === true,
       });
-    const compatFnTools = functionTools?.length
+    const compatFnTools = !finalRound && functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
       : undefined;
     let compatTools = compatFnTools;
@@ -77,7 +82,9 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     }
     const body = {
       model:    agent.model,
-      messages: working,
+      messages: finalRound
+        ? appendFinalProviderRoundInstructionToMessages(working)
+        : working,
       stream:   true,
     };
     if (agent.maxTokens) {
@@ -87,7 +94,7 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     // Without this OpenAI(-compat) sends no usage chunk at all and every
     // cost/cache metric reads 0.
     if (!streamUsageDisabled) body.stream_options = { include_usage: true };
-    if (compatTools)     body.tools      = compatTools;
+    if (!finalRound && compatTools) body.tools = compatTools;
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, providerKey, agent);
 
     yield modelCallTraceEvent({
@@ -211,6 +218,25 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       cachedTokens += iterUsage.prompt_tokens_details?.cached_tokens ?? 0;
     }
 
+    if (finalRound && toolCalls.size > 0) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      if (totalInputTokens || totalOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cachedTokens,
+          provider: providerKey,
+          model: agent.model,
+        };
+      }
+      yield {
+        type: 'error',
+        message: `${cfg.displayName}: returned a tool call during the tools-disabled final response round; no tool was executed.`,
+      };
+      return;
+    }
+
     if (toolCalls.size > 0) {
       if (textContent.trim()) yield { type: 'replace', text: '' };
 
@@ -299,6 +325,21 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
       yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
     }
     assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);
+    if (finalRound && !assistantContent.trim()) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      if (totalInputTokens || totalOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cachedTokens,
+          provider: providerKey,
+          model: agent.model,
+        };
+      }
+      yield { type: 'error', message: `${cfg.displayName}: final response round produced no answer.` };
+      return;
+    }
     if (assistantContent !== textContent) yield { type: 'replace', text: assistantContent };
     if (firstTokenAt && tokenCount > 0) {
       const genSecs = (Date.now() - firstTokenAt) / 1000;

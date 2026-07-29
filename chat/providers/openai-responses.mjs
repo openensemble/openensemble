@@ -20,7 +20,11 @@ import {
   GROK_CLI_HEADERS,
 } from '../../lib/xai-oauth-auth.mjs';
 import { OPENAI_OAUTH_BASE, readAnthropicSSE, stripThinking, stripReasoningPreamble, getStripThinkingTags, getCompatKey, OPENAI_COMPAT_PROVIDERS, capabilityNotice, modelCallTraceEvent } from './_shared.mjs';
-import { LoopGuard, compressToolDefs } from '../compress.mjs';
+import {
+  LoopGuard,
+  appendFinalProviderRoundInstruction,
+  compressToolDefs,
+} from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
@@ -430,6 +434,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
 
   try {
     while (guard.tick()) {
+    const finalRound = guard.isFinalRound();
     appendPendingCoordinatorUpdate(working);
     // Re-read tools per iteration so dynamic toolset mutations (e.g. the
     // request_tools meta-tool expanding the coordinator's surface mid-turn)
@@ -462,9 +467,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         agent, responsesTools, nativeImagesThisTurn, NATIVE_IMAGE_GEN_CAP,
       );
     }
+    // Reserve the exact last permitted provider request for synthesis. This
+    // stays inside maxToolLoops while preventing a successful research run from
+    // ending with one more tool call and no user-facing answer.
+    if (finalRound) responsesTools = undefined;
     const body = {
       model:        agent.model,
-      instructions: systemPrompt,
+      instructions: finalRound
+        ? appendFinalProviderRoundInstruction(systemPrompt)
+        : systemPrompt,
       input:        toResponsesInput(working),
       // The ChatGPT Codex backend defaults reasoning.effort to "none", which
       // makes gpt-5.x models refuse to call custom function tools with
@@ -982,6 +993,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     }
 
     if (toolCalls.size > 0) {
+      if (finalRound) {
+        if (textContent.trim()) yield { type: 'replace', text: '' };
+        yield usageTelemetry();
+        yield {
+          type: 'error',
+          message: `${displayName}: returned a tool call during the completion-only final round; no tools were executed.`,
+        };
+        return;
+      }
       awaitingPostToolAnswer = true;
       if (textContent.trim()) yield { type: 'replace', text: '' };
 
@@ -1204,7 +1224,19 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         .join('\n\n');
       textContent = [textContent.trim(), imageText].filter(Boolean).join('\n\n');
     }
-    assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);
+    const finalText = stripReasoningPreamble(
+      getStripThinkingTags() ? stripThinking(textContent) : textContent,
+    );
+    if (finalRound && !finalText.trim()) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      yield usageTelemetry();
+      yield {
+        type: 'error',
+        message: `${displayName}: completion-only final round produced no answer.`,
+      };
+      return;
+    }
+    assistantContent = finalText;
     awaitingPostToolAnswer = false;
     if (assistantContent !== textContent) yield { type: 'replace', text: assistantContent };
     if (firstTokenAt && tokenCount > 0) {

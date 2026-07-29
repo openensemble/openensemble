@@ -7,7 +7,11 @@ import { currentTaskContext, iterateInTaskContext } from '../../lib/task-proxy-c
 import { iterateUntilAbort } from '../../lib/abortable-async-iterator.mjs';
 import { getScheduledContext } from '../../lib/scheduled-context.mjs';
 import { getTurnContext, iterateInTurnContext } from '../../lib/turn-abort-context.mjs';
-import { getToolRouterContext } from '../../lib/tool-router-context.mjs';
+import {
+  getToolRouterContext,
+  isToolSuppressedForTurn,
+  suppressToolForTurn,
+} from '../../lib/tool-router-context.mjs';
 import { createLinkedAbortController, isAbortError } from '../../lib/abort-utils.mjs';
 import { isEphemeralReadOnlyTool } from '../../lib/ephemeral-tool-cache.mjs';
 import {
@@ -666,6 +670,21 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
 }
 
 async function* _workerTool(name, args, userId, callerAgentId, internalOptions = null) {
+  // check_workers is a snapshot, not a wait primitive. Consume its schema
+  // synchronously before the first await so parallel/replayed same-turn calls
+  // cannot race. A successful spawn also suppresses it below: its verified
+  // launch receipt is enough for the initiating turn.
+  if (name === 'check_workers') {
+    if (isToolSuppressedForTurn('check_workers')) {
+      yield {
+        type: 'result',
+        text: 'Worker status is already resolved for this turn. Do not poll again: use the verified launch receipt or the first status snapshot and reply now. Completion reports post automatically; check again only after a later user status request.',
+      };
+      return;
+    }
+    suppressToolForTurn('check_workers');
+  }
+
   const bg = await import('../../background-tasks.mjs');
   const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
   // The owner is the STABLE agent behind whatever session is calling — strip the
@@ -849,7 +868,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     && internalOptions.executionTask.trim()
     ? internalOptions.executionTask.trim()
     : task;
-  const workerTask = `${trustedExecutionTask}\n\n[You are a background worker running detached from the chat. Work autonomously to completion — do NOT ask for confirmation or wait for approval; the user is not watching this session. Use your tools directly. When finished, reply with a short summary of what you did and anything that needs a human.]`;
+  const workerTask = `${trustedExecutionTask}\n\n[You are a background worker running detached from the chat. Work autonomously to completion — do NOT ask for confirmation or wait for approval; the user is not watching this session. Use your tools directly. When finished, return the complete user-facing deliverable requested. Never merely announce that the result is ready or offer to provide it later. Omit internal process mechanics unless the user explicitly requested them, and call out anything that still needs a human.]`;
   const chipOwnerId = `${userId}_${ownerKey}`;   // owner's direct-chat session: chip + completion report land here
   let sourceTurn = null;
   try {
@@ -895,7 +914,8 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   }
   const tid = admitted.taskId;
   if (admitted.duplicate) {
-    yield { type: 'result', text: `This job already has a background worker (${tid}). Do NOT call spawn_worker again for this request; reply to the user now and use check_workers later for status.` };
+    suppressToolForTurn('check_workers');
+    yield { type: 'result', text: `This job already has a background worker (${tid}). Do NOT call spawn_worker or check_workers again in this turn; reply to the user now. Its report will post automatically, and check_workers is for a later user status request.` };
     return;
   }
   const countNote = requestedWorkstreams === null
@@ -903,7 +923,8 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     : (requestedWorkstreams > MAX_PARALLEL_WORKSTREAMS
       ? ` The request specified ${requestedWorkstreams} child workers; this server's per-outcome safety cap is ${MAX_PARALLEL_WORKSTREAMS}, so the coordinator will use ${MAX_PARALLEL_WORKSTREAMS} and must report that limit visibly.`
       : ` It is required to create exactly ${requestedWorkstreams} child workstreams; the coordinator does not count toward that total.`);
-  yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}.${countNote} It's running now — I can check on it anytime with check_workers, and its report will land here when it's done.` };
+  suppressToolForTurn('check_workers');
+  yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}.${countNote} This is a verified launch receipt: do NOT call check_workers in this turn. Reply to the user now; the report will post automatically when complete. Use check_workers only after a later user status request.` };
 }
 
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null, internalOptions = null) {

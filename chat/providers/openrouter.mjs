@@ -8,7 +8,11 @@ import {
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
   capabilityNotice, modelCallTraceEvent, normalizeToolCallIdentity,
 } from './_shared.mjs';
-import { LoopGuard, compressToolDefs } from '../compress.mjs';
+import {
+  LoopGuard,
+  appendFinalProviderRoundInstructionToMessages,
+  compressToolDefs,
+} from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { resolveNativeWebSearch } from '../../lib/model-capabilities.mjs';
@@ -74,6 +78,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
 
   while (guard.tick()) {
     appendPendingCoordinatorUpdate(working);
+    const finalRound = guard.isFinalRound();
     // Re-read tools per iteration so dynamic toolset mutations
     // (request_tools meta-tool) take effect on the next provider call.
     // Native web search: when the agent already holds Brave web_search, drop it
@@ -81,9 +86,9 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     // round-trip instead of search→result→synthesize.
     const { useNative, functionTools, nativeTool } =
       resolveNativeWebSearch('openrouter', agent.model, agent.tools || [], {
-        disabled: nativeSearchDisabled || agent._coordinatedWorkstream === true,
+        disabled: finalRound || nativeSearchDisabled || agent._coordinatedWorkstream === true,
       });
-    const orFnTools = functionTools?.length
+    const orFnTools = !finalRound && functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))
       : undefined;
     let orTools = orFnTools;
@@ -91,9 +96,14 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       orTools = [...(orFnTools || []), nativeTool];
       console.log(`[openrouter] native web search: server tool injected (${nativeTool.type})`);
     }
+    const requestMessages = finalRound
+      ? appendFinalProviderRoundInstructionToMessages(working)
+      : working;
     const body = {
       model:    agent.model,
-      messages: isAnthropicModel ? withAnthropicCacheBreakpoints(working) : working,
+      messages: isAnthropicModel
+        ? withAnthropicCacheBreakpoints(requestMessages)
+        : requestMessages,
       stream:   true,
       // Final SSE chunk then carries {prompt_tokens, completion_tokens,
       // prompt_tokens_details.cached_tokens} — without it OpenRouter sends no
@@ -101,7 +111,7 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       usage:    { include: true },
     };
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
-    if (orTools) body.tools = orTools;
+    if (!finalRound && orTools) body.tools = orTools;
     if (!reasoningDisabled) applyOpenAICompatReasoning(body, 'openrouter', agent);
 
     yield modelCallTraceEvent({
@@ -202,6 +212,25 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
       cachedTokens      += iterUsage.prompt_tokens_details?.cached_tokens ?? 0;
     }
 
+    if (finalRound && toolCalls.size > 0) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      if (totalInputTokens || totalOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cachedTokens,
+          provider: 'openrouter',
+          model: agent.model,
+        };
+      }
+      yield {
+        type: 'error',
+        message: 'OpenRouter: returned a tool call during the tools-disabled final response round; no tool was executed.',
+      };
+      return;
+    }
+
     if (toolCalls.size > 0) {
       if (textContent.trim()) yield { type: 'replace', text: '' };
 
@@ -284,6 +313,21 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     }
 
     assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);
+    if (finalRound && !assistantContent.trim()) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      if (totalInputTokens || totalOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cachedTokens,
+          provider: 'openrouter',
+          model: agent.model,
+        };
+      }
+      yield { type: 'error', message: 'OpenRouter: final response round produced no answer.' };
+      return;
+    }
     if (assistantContent !== textContent) yield { type: 'replace', text: assistantContent };
     if (firstTokenAt && tokenCount > 0) {
       const genSecs = (Date.now() - firstTokenAt) / 1000;

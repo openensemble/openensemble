@@ -8,7 +8,11 @@
 
 import { executeToolStreaming } from '../../roles.mjs';
 import { ANTHROPIC_URL, readAnthropicSSE, getAnthropicKey, fetchWithRetry, capabilityNotice, modelCallTraceEvent, normalizeToolCallIdentity } from './_shared.mjs';
-import { LoopGuard, compressToolDefs } from '../compress.mjs';
+import {
+  FINAL_PROVIDER_ROUND_INSTRUCTION,
+  LoopGuard,
+  compressToolDefs,
+} from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { buildImageUserMessage } from './_shared.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
@@ -72,6 +76,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
 
   while (guard.tick()) {
     appendPendingCoordinatorUpdate(working);
+    const finalRound = guard.isFinalRound();
     // Re-read tools per iteration so dynamic toolset mutations (request_tools
     // meta-tool expanding the coordinator's surface mid-turn) take effect on
     // the next provider call. The system message keeps its ephemeral
@@ -85,9 +90,11 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // tool is appended after (a few uncached tokens, negligible).
     const { useNative, functionTools, nativeTool } =
       resolveNativeWebSearch('anthropic', agent.model, agent.tools || [], {
-        disabled: nativeSearchDisabled || agent._coordinatedWorkstream === true,
+        disabled: finalRound || nativeSearchDisabled || agent._coordinatedWorkstream === true,
       });
-    let anthropicTools = functionTools?.length ? toAnthropicTools(functionTools) : undefined;
+    let anthropicTools = !finalRound && functionTools?.length
+      ? toAnthropicTools(functionTools)
+      : undefined;
     if (useNative && nativeTool) {
       anthropicTools = [...(anthropicTools || []), nativeTool];
       console.log(`[anthropic] native web search: server tool injected (${nativeTool.type})`);
@@ -105,13 +112,16 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // (volatile changes per turn anyway, so caching stable alone retains
     // most of the win).
     const tiers = agent._promptTiersAssembled;
-    const systemBlocks = tiers
+    const baseSystemBlocks = tiers
       ? [
           { type: 'text', text: tiers.stable, cache_control: { type: 'ephemeral' } },
           tiers.context ? { type: 'text', text: tiers.context, cache_control: { type: 'ephemeral' } } : null,
           tiers.volatile ? { type: 'text', text: tiers.volatile } : null,
         ].filter(Boolean)
       : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+    const systemBlocks = finalRound
+      ? [...baseSystemBlocks, { type: 'text', text: FINAL_PROVIDER_ROUND_INSTRUCTION }]
+      : baseSystemBlocks;
     const body = {
       model:      agent.model,
       max_tokens: agent.maxTokens ?? 8192,
@@ -173,6 +183,7 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // the text so far is partial — surfaced as a warning below, not persisted
     // silently as a complete reply.
     let sawTerminal  = false;
+    let serverToolUseObserved = false;
 
     let cacheCreated = 0, cacheRead = 0;
     for await (const event of readAnthropicSSE(res.body)) {
@@ -205,9 +216,11 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       // results into the text deltas — never registered as a client tool_use, so
       // the loop below won't try to run them. Surface a transient indicator for
       // parity with the Codex path; not a token, so voice devices won't speak it.
-      if (event.type === 'content_block_start' && event.content_block?.type === 'server_tool_use'
-          && event.content_block?.name === 'web_search') {
-        yield { type: 'tool_progress', name: 'web_search', text: 'Searching the web…' };
+      if (event.type === 'content_block_start' && event.content_block?.type === 'server_tool_use') {
+        serverToolUseObserved = true;
+        if (event.content_block?.name === 'web_search') {
+          yield { type: 'tool_progress', name: 'web_search', text: 'Searching the web…' };
+        }
       }
       if (event.type === 'content_block_delta') {
         if (event.delta?.type === 'text_delta') {
@@ -236,6 +249,26 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
       const hitRate = totalCacheable ? (cacheRead / totalCacheable) : 0;
       const tierMode = agent._promptTiersAssembled ? 'tiered' : 'flat';
       console.log(`[anthropic] cache: mode=${tierMode} created=${cacheCreated} read=${cacheRead} uncached=${totalInputTokens} hit=${(hitRate*100).toFixed(0)}%`);
+    }
+
+    if (finalRound && (toolUseBlocks.size > 0 || serverToolUseObserved)) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      if (totalInputTokens || totalOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cachedTokens: totalCacheRead,
+          cacheCreatedTokens: totalCacheCreated,
+          provider: 'anthropic',
+          model: agent.model,
+        };
+      }
+      yield {
+        type: 'error',
+        message: 'Anthropic: returned a tool call during the tools-disabled final response round; no tool was executed.',
+      };
+      return;
     }
 
     // ── Tool use ──────────────────────────────────────────────────────────────
@@ -350,6 +383,21 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // as a complete reply.
     if (!sawTerminal && !stopReason) {
       yield { type: 'cortex_warning', message: 'The response may be incomplete — the model stream ended before its completion marker.' };
+    }
+    if (finalRound && !textContent.trim()) {
+      if (totalInputTokens || totalOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cachedTokens: totalCacheRead,
+          cacheCreatedTokens: totalCacheCreated,
+          provider: 'anthropic',
+          model: agent.model,
+        };
+      }
+      yield { type: 'error', message: 'Anthropic: final response round produced no answer.' };
+      return;
     }
     assistantContent = textContent;
     break;

@@ -339,9 +339,10 @@ async function saveNewsPreference() {
 }
 
 // Per-role/per-skill execution overrides. These are account-scoped server
-// settings; the manifest itself stays immutable. Empty values mean "inherit
-// the agent that is handling this request", while explicit `auto` remains a
-// real effort choice rather than being overloaded as inheritance.
+// settings; the manifest itself stays immutable. Empty model values mean
+// "use the model selected on the agent that is handling this request", while
+// explicit `auto` remains a real effort choice rather than being overloaded
+// as inheritance. Automatic skill/task policy never swaps a named agent model.
 const _SKILL_EXECUTION_EFFORT_OPTIONS = [
   { value: 'auto', label: 'Auto' },
   { value: 'off', label: 'Off' },
@@ -422,7 +423,7 @@ function _skillExecutionModelOptionsHtml(execution) {
     if (!groups.has(model.provider)) groups.set(model.provider, []);
     groups.get(model.provider).push({ ...model, value });
   }
-  let html = `<option value=""${!currentValue ? ' selected' : ''}>Auto (tier-matched)</option>`;
+  let html = `<option value=""${!currentValue ? ' selected' : ''}>Agent model (inherit)</option>`;
   if (currentValue && !currentAvailable) {
     html += `<option value="${escHtml(currentValue)}" selected>${escHtml(current.model)} (unavailable)</option>`;
   }
@@ -466,7 +467,7 @@ function _skillExecutionSummary(execution, hint = null) {
   const value = _normalizeSkillExecution(execution);
   if (!value.model && !value.reasoningEffort) {
     const auto = _skillExecutionHintSummary(hint);
-    return auto ? `Auto · ${auto}` : 'Auto (structure + task)';
+    return auto ? `Agent model · Auto effort · ${auto}` : 'Agent model · Auto effort';
   }
   const effort = value.reasoningEffort
     ? `${value.reasoningEffort[0].toUpperCase()}${value.reasoningEffort.slice(1)}`
@@ -510,7 +511,7 @@ function _renderSkillExecutionControls(skill, allAgents) {
           </select>
         </label>
       </div>
-      <div class="skill-execution-hint">Leave model and effort on “Inherit” for <strong>Auto</strong> (${escHtml(autoLabel)}): OE picks a tier-matched model from your enabled providers when this skill is routed (workers included). Pin only when you want a fixed model. Multi-skill turns freeze one profile (strongest wins). Local shortcuts may not call a model.</div>
+      <div class="skill-execution-hint">Leave Model on <strong>Agent model</strong> to keep the provider/model selected in Settings → Agents (workers included). Automatic skill/task policy may tune reasoning effort using ${escHtml(autoLabel)}, but never swaps a named agent's model. Choose a model here only when you explicitly want this skill to override the agent. Multi-skill turns freeze one profile (strongest explicit pin wins). Local shortcuts may not call a model.</div>
       <div class="skill-execution-status" role="status" aria-live="polite"></div>
     </div>
   </details>`;

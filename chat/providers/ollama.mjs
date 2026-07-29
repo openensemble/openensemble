@@ -11,7 +11,14 @@
 
 import { executeToolStreaming } from '../../roles.mjs';
 import { getOllamaUrl, getOllamaKey, readNDJSON, stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage, fetchWithRetry, modelCallTraceEvent, normalizeToolCallIdentity } from './_shared.mjs';
-import { LoopGuard, compressToolDefs, compressToolCalls, truncateToolResult, compressOllamaHistory } from '../compress.mjs';
+import {
+  LoopGuard,
+  appendFinalProviderRoundInstructionToMessages,
+  compressToolDefs,
+  compressToolCalls,
+  truncateToolResult,
+  compressOllamaHistory,
+} from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { effectiveReasoningEffort, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
@@ -35,18 +42,21 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
   while (guard.tick()) {
     appendPendingCoordinatorUpdate(ollamaMessages);
+    const finalRound = guard.isFinalRound();
     // Compress old tool-call/result pairs before sending to keep context small.
     compressOllamaHistory(ollamaMessages, agent.contextSize ?? 32768);
 
     const effort = effectiveReasoningEffort(agent, 'auto');
     const body = {
       model:    agent.model,
-      messages: ollamaMessages,
+      messages: finalRound
+        ? appendFinalProviderRoundInstructionToMessages(ollamaMessages)
+        : ollamaMessages,
       stream:   true,
       think:    thinkingDisabled ? false : (effort === 'high' ? true : effort === 'off' ? false : (agent.think ?? false)),
       options:  { num_ctx: agent.contextSize ?? 32768, num_predict: agent.maxTokens ?? 8192 },
     };
-    if (agent.tools.length) {
+    if (!finalRound && agent.tools.length) {
       body.tools = compressToolDefs(agent.tools);
       // Force tool use on the first call so models like GLM don't skip tools and answer from history.
       // Subsequent iterations (after a tool result) use 'auto' to allow a free-text final response.
@@ -63,7 +73,7 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     // sessions it was hundreds of synchronous stdout writes per turn.
     const bodyJson = JSON.stringify(body);
     const approxTokens = Math.round(bodyJson.length / 4);
-    console.log(`[ollama] loop=${guard.count} agent=${agent.id} model=${agent.model} msgs=${ollamaMessages.length} tools=${agent.tools.length} body=${bodyJson.length}b (~${approxTokens} tokens)`);
+    console.log(`[ollama] loop=${guard.count} agent=${agent.id} model=${agent.model} msgs=${ollamaMessages.length} tools=${body.tools?.length ?? 0} body=${bodyJson.length}b (~${approxTokens} tokens)`);
     if (process.env.OE_OLLAMA_DEBUG === '1') {
       ollamaMessages.forEach((m, i) => {
         const tcInfo = m.tool_calls ? ` tool_calls=[${m.tool_calls.map(t => t.function?.name ?? '?').join(',')}]` : '';
@@ -183,6 +193,24 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
       if (parsed.length) toolCalls = parsed;
     }
 
+    if (finalRound && toolCalls) {
+      if (content.trim()) yield { type: 'replace', text: '' };
+      if (ollamaInputTokens || ollamaOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: ollamaInputTokens,
+          outputTokens: ollamaOutputTokens,
+          provider: 'ollama',
+          model: agent.model,
+        };
+      }
+      yield {
+        type: 'error',
+        message: 'Ollama: returned a tool call during the tools-disabled final response round; no tool was executed.',
+      };
+      return;
+    }
+
     // ── Tool calls branch ──────────────────────────────────────────────────────
     if (toolCalls) {
       // Ollama's native chat schema correlates results by ordered `tool_name`
@@ -287,6 +315,20 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     assistantContent = stripTags
       ? stripReasoningPreamble(stripThinking(content))
       : stripReasoningPreamble(content);
+    if (finalRound && !assistantContent.trim()) {
+      if (content.trim()) yield { type: 'replace', text: '' };
+      if (ollamaInputTokens || ollamaOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: ollamaInputTokens,
+          outputTokens: ollamaOutputTokens,
+          provider: 'ollama',
+          model: agent.model,
+        };
+      }
+      yield { type: 'error', message: 'Ollama: final response round produced no answer.' };
+      return;
+    }
     if (assistantContent !== content) yield { type: 'replace', text: assistantContent };
     if (ollamaPerf) yield { type: 'perf', ...ollamaPerf };
     break;

@@ -13,7 +13,11 @@ import {
   stripThinking, stripReasoningPreamble, getStripThinkingTags, buildImageUserMessage,
   fetchWithRetry, modelCallTraceEvent, normalizeToolCallIdentity,
 } from './_shared.mjs';
-import { LoopGuard, compressToolDefs } from '../compress.mjs';
+import {
+  LoopGuard,
+  appendFinalProviderRoundInstructionToMessages,
+  compressToolDefs,
+} from '../compress.mjs';
 import { summarizeToolResult, normalizeToolResult, drainToolWithEvents } from '../preview.mjs';
 import { applyRedactions } from '../../lib/credentials.mjs';
 import { effectiveReasoningEffort, isReasoningUnsupportedError } from '../../lib/reasoning-effort.mjs';
@@ -195,14 +199,26 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
 
   while (guard.tick()) {
     appendPendingCoordinatorUpdate(working);
+    const finalRound = guard.isFinalRound();
     // Re-read tools per iteration so dynamic toolset mutations
     // (request_tools meta-tool) take effect on the next provider call.
-    const lmTools = compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }));
+    const lmTools = finalRound
+      ? undefined
+      : compressToolDefs(agent.tools).map(t => ({ type: 'function', function: t.function }));
     // LM Studio models vary widely in tool-call support. Some emit pseudo-tool
     // XML inside reasoning_content when forced. Let capable models call tools,
     // but allow plain text for simple turns like "hello".
-    const toolChoice = 'auto';
-    const body = { model: agent.model, messages: working, stream: true, tools: lmTools, tool_choice: toolChoice };
+    const body = {
+      model: agent.model,
+      messages: finalRound
+        ? appendFinalProviderRoundInstructionToMessages(working)
+        : working,
+      stream: true,
+    };
+    if (!finalRound && lmTools?.length) {
+      body.tools = lmTools;
+      body.tool_choice = 'auto';
+    }
     if (agent.maxTokens) body.max_tokens = agent.maxTokens;
     // Ask for real usage on the final chunk instead of approximating from
     // streamed token counts. Older builds that reject it hit the latch below.
@@ -306,6 +322,24 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
       yield { type: 'token', text: reasoningContent };
     }
 
+    if (finalRound && toolCalls.size > 0) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      if (lmInputTokens || lmOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: lmInputTokens,
+          outputTokens: lmOutputTokens,
+          provider: 'lmstudio',
+          model: agent.model,
+        };
+      }
+      yield {
+        type: 'error',
+        message: 'LM Studio: returned a tool call during the tools-disabled final response round; no tool was executed.',
+      };
+      return;
+    }
+
     if (toolCalls.size > 0) {
       // Clear any reasoning preamble streamed before the tool call
       if (textContent.trim()) yield { type: 'replace', text: '' };
@@ -389,6 +423,20 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
     }
 
     assistantContent = stripReasoningPreamble(getStripThinkingTags() ? stripThinking(textContent) : textContent);
+    if (finalRound && !assistantContent.trim()) {
+      if (textContent.trim()) yield { type: 'replace', text: '' };
+      if (lmInputTokens || lmOutputTokens) {
+        yield {
+          type: '__usage',
+          inputTokens: lmInputTokens,
+          outputTokens: lmOutputTokens,
+          provider: 'lmstudio',
+          model: agent.model,
+        };
+      }
+      yield { type: 'error', message: 'LM Studio: final response round produced no answer.' };
+      return;
+    }
     if (assistantContent !== textContent) yield { type: 'replace', text: assistantContent };
     // Emit timing stats derived from wall clock
     totalCompatTokens += tokenCount;

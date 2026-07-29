@@ -116,6 +116,14 @@ export {
   retireAutoBackgroundTool,
 } from './background-tasks/auto-bg-tool.mjs';
 
+function _rowCarriesModelContext(row) {
+  return Boolean(
+    row
+    && row.excludeFromModel !== true
+    && ['user', 'assistant', 'system', 'tool'].includes(row.role),
+  );
+}
+
 /**
  * Restart recovery — called once from server boot, AFTER startWatcherSupervisor
  * (completeWatcher only sees watcher files already loaded into memory). Every
@@ -181,8 +189,9 @@ export async function bootRecoverInterruptedTasks() {
   for (const [taskId, e] of Object.entries(entries)) {
     const name = e.agentName || 'Agent';
     const completion = e?.completion && typeof e.completion === 'object' ? e.completion : null;
-    const recoveredStatus = completion?.status === 'done' ? 'done'
-      : (completion?.status === 'cancelled' ? 'cancelled' : 'error');
+    const recoveredStatus = !completion ? 'cancelled'
+      : (completion.status === 'done' ? 'done'
+        : (completion.status === 'cancelled' ? 'cancelled' : 'error'));
     const recoveredResult = completion?.result || '';
     const recoveredError = completion
       ? (completion.error || (recoveredStatus === 'cancelled' ? 'Cancelled before completion.' : ''))
@@ -268,12 +277,34 @@ export async function bootRecoverInterruptedTasks() {
     let deliveryDurable = silentScheduled
       ? scheduledRecoveryDurable
       : Boolean(reportAgentId) && scheduledRecoveryDurable;
+    let workerRawContextDurable = false;
+    let repairedWorkerRawShouldBeExcluded = false;
+    let existingWorkerRawCarriesContext = null;
     if (!silentScheduled && reportAgentId) {
       try {
-        await _appendSessionReportOnce(reportAgentId, {
+        // If a previous finalization managed to persist the visible completion
+        // but not the hidden raw report, retain the visible row as the single
+        // model-context copy and exclude the raw row repaired on this boot.
+        // Normal completions use the inverse: raw in context, visible excluded.
+        if (e.kind === 'worker') {
+          try {
+            const { loadSession } = await import('./sessions.mjs');
+            const existingRows = await loadSession(reportAgentId, 1_000);
+            const visible = existingRows.find(
+              row => row?.reportId === `${taskId}:primary-completion`,
+            );
+            const existingRaw = existingRows.find(row => row?.reportId === reportId);
+            repairedWorkerRawShouldBeExcluded = _rowCarriesModelContext(visible);
+            existingWorkerRawCarriesContext = existingRaw
+              ? _rowCarriesModelContext(existingRaw)
+              : null;
+          } catch { /* append-once below remains authoritative */ }
+        }
+        const rawReportStored = await _appendSessionReportOnce(reportAgentId, {
           role: 'assistant',
           kind: 'agent_report',
           ...(e.kind === 'worker' ? { hidden: true } : {}),
+          ...(repairedWorkerRawShouldBeExcluded ? { excludeFromModel: true } : {}),
           reportId,
           agentName: name, agentEmoji: e.agentEmoji || '🤖',
           content,
@@ -289,6 +320,11 @@ export async function bootRecoverInterruptedTasks() {
           status: recoveredStatus,
           ts: now,
         });
+        if (e.kind === 'worker') {
+          workerRawContextDurable = rawReportStored === 'appended'
+            ? !repairedWorkerRawShouldBeExcluded
+            : (rawReportStored === 'existing' && existingWorkerRawCarriesContext === true);
+        }
       } catch (err) {
         deliveryDurable = false;
         console.warn('[background-tasks] restart-notice inject failed:', err.message);
@@ -313,6 +349,8 @@ export async function bootRecoverInterruptedTasks() {
         // Verifier capabilities are never journaled. A recovered verifier task
         // therefore takes the deterministic zero-model completion path.
         verifierLeaseToken: null,
+        rawContextDurable: workerRawContextDurable,
+        completionStatus: recoveredStatus,
       });
       deliveryDurable = deliveryDurable && published;
       if (Array.isArray(completion?.images) && completion.images.length) {

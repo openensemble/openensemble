@@ -140,7 +140,11 @@ export function _journalMarkCompletion(taskId, completion) {
       ...entries[taskId],
       completion: {
         status: completion.status,
-        result: String(completion.result || '').slice(0, 50_000),
+        // This is the crash-recovery source of truth until both session rows
+        // are durable. Worker output is already bounded by the provider run;
+        // truncating it here silently loses the tail after a mid-finalization
+        // restart.
+        result: String(completion.result || ''),
         error: String(completion.error || '').slice(0, 8_000),
         images: Array.isArray(completion.images) ? completion.images.slice(0, 8) : [],
         completedAt: Date.now(),

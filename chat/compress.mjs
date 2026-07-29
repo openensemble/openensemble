@@ -41,6 +41,14 @@ export class LoopGuard {
     return ++this.count <= this.maxLoops;
   }
   /**
+   * True during the last provider request allowed by this guard. Providers use
+   * that round for completion only: tools are withheld so useful results from
+   * earlier rounds are synthesized instead of being stranded at the ceiling.
+   */
+  isFinalRound() {
+    return this.maxLoops > 0 && this.count === this.maxLoops;
+  }
+  /**
    * Call after tool execution, before `continue`.
    * @param {Array<{name:string, args:string}>} calls  — tool name + raw args JSON
    * @param {Array<string>}                     results — tool result strings
@@ -64,6 +72,32 @@ export class LoopGuard {
     }
     return { stalled: false, reason: '' };
   }
+}
+
+export const FINAL_PROVIDER_ROUND_INSTRUCTION =
+  'This is the final response round for this turn. Do not call or request any tools. '
+  + 'Use the conversation and tool results already available to give the best complete answer now, '
+  + 'and clearly state any remaining uncertainty.';
+
+export function appendFinalProviderRoundInstruction(prompt) {
+  return [String(prompt ?? '').trim(), FINAL_PROVIDER_ROUND_INSTRUCTION]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+export function appendFinalProviderRoundInstructionToMessages(messages) {
+  const next = [...messages];
+  const systemIndex = next.findIndex(message => message?.role === 'system');
+  if (systemIndex === -1) {
+    return [{ role: 'system', content: FINAL_PROVIDER_ROUND_INSTRUCTION }, ...next];
+  }
+
+  const system = next[systemIndex];
+  const content = Array.isArray(system.content)
+    ? [...system.content, { type: 'text', text: FINAL_PROVIDER_ROUND_INSTRUCTION }]
+    : appendFinalProviderRoundInstruction(system.content);
+  next[systemIndex] = { ...system, content };
+  return next;
 }
 
 // ── Tool definition compression ──────────────────────────────────────────────
