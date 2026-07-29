@@ -125,6 +125,22 @@ async function resolvePhrase(phrase, userId, suppressLearning = false) {
   return await lookupEntity(phrase);
 }
 
+/**
+ * Classification-only probe for the follow-up chain tail: "would this text
+ * execute as an HA command?" Same authorization + classifier the fast-path
+ * itself uses, but nothing executes and nothing is learned — the real
+ * tryHaFastpath still runs (and learns) if the turn proceeds. Fail-closed.
+ */
+export async function probeHaCommand(text, userId) {
+  if (!text || !hasHaIntentSyntax(text)) return null;
+  try {
+    if (!await fastpathToolAllowed(userId, HA_SKILL_ID, HA_SERVICE_TOOL)) return null;
+    return await classifyHaIntent(text, userId, true);
+  } catch {
+    return null;
+  }
+}
+
 async function classifyHaIntent(text, userId, suppressLearning = false) {
   if (typeof text !== 'string') return null;
   const trimmed = text.trim().replace(/[.,!?]+$/, '');

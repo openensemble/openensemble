@@ -27,6 +27,7 @@ import {
 } from '../routes/_helpers.mjs';
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { armFollowupAfterDrain } from '../ws-handler.mjs';
+import { isVoicePolicyEnabled, DISPOSITION_WINDOW_MS } from '../lib/voice-policy.mjs';
 import { runWithTurnContext } from '../lib/turn-abort-context.mjs';
 import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
@@ -501,15 +502,33 @@ const ASKS_FOR_REPLY = /\b(please\s+(say|tell|repeat)|say\s+["'“]|tell\s+me|le
  */
 export function armFollowupForReply({ source, deviceId, conversationMode, reply, ac }) {
   if (source !== 'voice-device' || !deviceId || ac?.signal?.aborted) return;
-  if (conversationMode) {
-    armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
+  const text = (reply || '').trim();
+  const asksReply = ENDS_WITH_QUESTION.test(text) || ASKS_FOR_REPLY.test(text);
+  if (!isVoicePolicyEnabled()) {
+    // Pre-disposition behavior, kept reachable by config for fast rollback.
+    if (conversationMode) armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
+    else if (asksReply) armFollowupAfterDrain(deviceId, { windowMs: 5000 });
     return;
   }
-  const text = (reply || '').trim();
-  if (ENDS_WITH_QUESTION.test(text) || ASKS_FOR_REPLY.test(text)) {
-    // Armed at reply DRAIN (streamer close), not LLM-done — the old direct
-    // send raced the audio and could expire mid-reply.
-    armFollowupAfterDrain(deviceId, { windowMs: 5000 });
+  // Disposition by reply shape (voice-conversation-policy phase 1):
+  //   `required` — the reply asked the user something; the window isn't
+  //     optional and gets the long length, conversation mode or not.
+  //   `open` — plain informational reply; only conversation-mode devices
+  //     keep listening, same as today.
+  // Armed at reply DRAIN (streamer close), not LLM-done — a direct send
+  // would race the audio and could expire mid-reply.
+  if (asksReply) {
+    armFollowupAfterDrain(deviceId, {
+      windowMs: DISPOSITION_WINDOW_MS.required,
+      conversation: conversationMode,
+      disposition: 'required',
+    });
+  } else if (conversationMode) {
+    armFollowupAfterDrain(deviceId, {
+      windowMs: DISPOSITION_WINDOW_MS.open,
+      conversation: true,
+      disposition: 'open',
+    });
   }
 }
 

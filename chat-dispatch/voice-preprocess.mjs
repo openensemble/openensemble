@@ -37,6 +37,7 @@ import { broadcastAlarmStop, hasActiveAlarms } from '../lib/alarms.mjs';
 import { stopAmbientOnDevice } from '../lib/ambient-playback.mjs';
 import { getAmbientForDevice } from '../routes/devices.mjs';
 import { classifyRoutineIntent } from '../lib/routines.mjs';
+import { evaluateContinuation, getVoicePolicyConfig, chainCommandCandidates } from '../lib/voice-policy.mjs';
 
 // Per-device "the user just said stop" marker. Used by chat-dispatch's
 // ambient auto-restore so that 3-second restore setTimeouts queued by
@@ -430,6 +431,16 @@ export async function tryVoiceTimerIntent({ source, deviceId, rawText, userId, a
  * stop/cancel. Regex-matched + executed as a WS message to the originating
  * device with no LLM round-trip.
  */
+// Control intents that read as chainable device commands get a `terminal`
+// disposition: the dispatcher follows the ack with a ~2 s chain tail that
+// only accepts another parsed device command ("volume down… and pause").
+// stop / conversation_end END the exchange — no window of any kind.
+const TERMINAL_CHAIN_INTENTS = new Set([
+  'volume_up', 'volume_down', 'volume_set', 'mute', 'unmute',
+  'headphone_on', 'headphone_off', 'pause', 'resume',
+  'airplay_next', 'airplay_prev',
+]);
+
 export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode = false, bargeIn = false, recentReplyStop = false }) {
   if (!(source === 'voice-device' && typeof rawText === 'string')) return null;
   const ambientActive = !!(deviceId && getAmbientForDevice(deviceId));
@@ -465,7 +476,93 @@ export function tryVoiceControlIntent({ source, rawText, deviceId, userId, agent
     onEvent({ type: 'token', text: confirmation, agent: agentId });
   }
   onEvent({ type: 'done', agent: agentId });
-  return { handled: true };
+  return {
+    handled: true,
+    ...(TERMINAL_CHAIN_INTENTS.has(intent.type) ? { disposition: 'terminal' } : {}),
+  };
+}
+
+/**
+ * Match a chain-tail capture against the deterministic device-command
+ * parsers — timer create/cancel/extend, the control-intent regexes, routines,
+ * and the HA classifier (classification probe only; nothing executes here).
+ * Elliptical chains are expanded first ("and the porch" → "turn off the
+ * porch" using the previous command's verb — see chainCommandCandidates).
+ * Returns the candidate text that parsed (so the turn proceeds with a
+ * parseable utterance and the REAL handlers fire on it), or null.
+ */
+async function matchChainedDeviceCommand({ text, prevUserText, userId, deviceId, conversationMode }) {
+  const ambientActive = !!(deviceId && getAmbientForDevice(deviceId));
+  for (const candidate of chainCommandCandidates(text, prevUserText)) {
+    if (classifyTimerIntent(candidate) || classifyTimerCancelIntent(candidate) || classifyTimerExtendIntent(candidate)) return candidate;
+    if (classifyVoiceIntent(candidate, { ambientActive, conversationEnabled: conversationMode })) return candidate;
+    if (userId && classifyRoutineIntent(candidate, userId)) return candidate;
+    try {
+      const { probeHaCommand } = await import('./fastpaths.mjs');
+      if (await probeHaCommand(candidate, userId)) return candidate;
+    } catch { /* fail closed for this candidate */ }
+  }
+  return null;
+}
+
+/**
+ * Follow-up window gate (voice-conversation-policy phase 3 + the terminal
+ * chain tail's high bar). Called by handleChatMessage BEFORE the send-time
+ * durability write (same contract as the empty-transcript guard): a dropped
+ * capture must leave no trace — overheard room conversation must never land
+ * in the user's chat history or future LLM context.
+ *
+ *   - empty transcript inside any window: drop (the normal empty-wake
+ *     apology would violate the in-window silence contract).
+ *   - chain tail (`terminal`): only a parsed device command may pass —
+ *     elliptical chains are expanded via the previous command's verb; the
+ *     matched candidate replaces the transcript so the real handlers fire.
+ *   - `open` window: the continuation heuristic judges the transcript. In
+ *     'log' mode (the shipping default) verdicts are logged and NOTHING is
+ *     dropped; 'enforce' drops rejects — unless the text parses as a device
+ *     command, which is always addressed to us.
+ *   - `required` window: the assistant asked a question — answers can be
+ *     full sentences with no lexical tie, so always pass (verdict logged).
+ *
+ * Silence contract (§3.2): a drop emits only the terminal `done` so the
+ * device leaves THINKING — no token, no chime, no persistence.
+ *
+ * @returns {Promise<{handled?: true, rewrittenText?: string} | null>}
+ */
+export async function tryVoiceFollowupGate({ source, deviceId, userId, userText, agentId, onEvent, followup, conversationMode = false }) {
+  if (source !== 'voice-device' || !followup) return null;
+  const text = typeof userText === 'string' ? userText.trim() : '';
+  const preview = text.slice(0, 80);
+  const dropSilently = (kind, extra = {}) => {
+    console.log(`[voice-policy] ${kind} device=${deviceId} text="${preview}" ${Object.entries(extra).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+    onEvent({ type: 'done', agent: agentId });
+    return { handled: /** @type {true} */ (true) };
+  };
+  if (!text) return dropSilently('followup empty-capture drop');
+  if (followup.chainTail) {
+    const matched = await matchChainedDeviceCommand({
+      text, prevUserText: followup.prevUserText ?? null, userId, deviceId, conversationMode,
+    });
+    if (!matched) return dropSilently('chain-tail drop (not a device command)');
+    console.log(`[voice-policy] chain-tail command accepted device=${deviceId} text="${matched.slice(0, 80)}"`);
+    return matched !== text ? { rewrittenText: matched } : null;
+  }
+  const { verdict, reason, words } = evaluateContinuation({
+    text,
+    prevReplyText: followup.prevReplyText ?? null,
+    prevUserText: followup.prevUserText ?? null,
+  });
+  const mode = getVoicePolicyConfig().continuationGate;
+  const enforceable = mode === 'enforce' && followup.disposition !== 'required';
+  console.log(`[voice-policy] continuation gate verdict=${verdict} reason=${reason} words=${words} mode=${mode} enforced=${enforceable && verdict === 'reject'} disposition=${followup.disposition ?? '?'} device=${deviceId} text="${preview}"`);
+  if (verdict === 'reject' && enforceable) {
+    const matched = await matchChainedDeviceCommand({
+      text, prevUserText: followup.prevUserText ?? null, userId, deviceId, conversationMode,
+    });
+    if (matched) return matched !== text ? { rewrittenText: matched } : null;
+    return dropSilently('continuation reject', { reason });
+  }
+  return null;
 }
 
 /**

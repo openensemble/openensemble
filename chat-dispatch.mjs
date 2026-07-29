@@ -35,6 +35,7 @@ import {
   tryVoiceProposalReply,
   tryVoiceTimerIntent,
   tryVoiceControlIntent,
+  tryVoiceFollowupGate,
   tryApprovalIntercept,
   wasRecentStopIntent,
 } from './chat-dispatch/voice-preprocess.mjs';
@@ -245,9 +246,43 @@ async function armConversationFollowup({ source, deviceId, conversationMode, ac 
   if (ac?.signal?.aborted) return;
   try {
     const { armFollowupAfterDrain } = await import('./ws-handler.mjs');
-    armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
+    armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true, disposition: 'open' });
   } catch (e) {
     console.warn('[chat] fast-path conversation re-arm failed:', e.message);
+  }
+}
+
+/**
+ * Terminal-disposition chain tail (voice-conversation-policy phase 1). A
+ * handled device command ("turn off the kitchen", "set a timer", "volume
+ * down") gets a ~2 s window at a much higher bar instead of the 8 s
+ * conversation re-arm: only another parsed device command may use it —
+ * tryVoiceFollowupGate silently drops everything else. Chaining works
+ * ("…and the porch"); the hijack window doesn't open. With the policy
+ * disabled by config, each call site falls back to ITS OWN pre-disposition
+ * behavior: HA/timer used the conversation-mode 8 s re-arm
+ * (fallbackConversationRearm: true); control intents deliberately armed
+ * nothing at all and must keep arming nothing.
+ */
+async function armTerminalChainTail({ source, deviceId, conversationMode, ac = null, fallbackConversationRearm = false }) {
+  if (source !== 'voice-device' || !deviceId) return;
+  if (ac?.signal?.aborted) return;
+  try {
+    const [{ armFollowupAfterDrain }, { isVoicePolicyEnabled, DISPOSITION_WINDOW_MS }] =
+      await Promise.all([import('./ws-handler.mjs'), import('./lib/voice-policy.mjs')]);
+    if (!isVoicePolicyEnabled()) {
+      if (fallbackConversationRearm && conversationMode) {
+        armFollowupAfterDrain(deviceId, { windowMs: 8000, conversation: true });
+      }
+      return;
+    }
+    armFollowupAfterDrain(deviceId, {
+      windowMs: DISPOSITION_WINDOW_MS.terminal,
+      disposition: 'terminal',
+      chainTail: true,
+    });
+  } catch (e) {
+    console.warn('[chat] terminal chain-tail arm failed:', e.message);
   }
 }
 
@@ -435,6 +470,7 @@ function normalizeToolPlan(plan) {
  * @param {boolean} [opts.conversationMode]          voice-device conversation mode (re-arm follow-up windows after every reply)
  * @param {boolean} [opts.bargeIn]                   voice-device speech-barge turn (transcript may carry reply-bleed prefix)
  * @param {boolean} [opts.recentReplyStop]           a reply was just stopped — stop intents spare the ambient/AirPlay bed
+ * @param {{chainTail?: boolean, disposition?: string|null, prevReplyText?: string|null, prevUserText?: string|null}|null} [opts.followup]  follow-up-window capture context (voice-conversation-policy)
  * @param {(ev: {type: string, [k: string]: any}) => void} opts.onEvent
  * @param {() => void} [opts.onBroadcast]
  * @param {(fromUserId: string, agentId: string, notify: object) => void} [opts.onNotify]
@@ -481,6 +517,11 @@ export async function handleChatMessage({
   // True when this utterance arrived as/just after a reply was stopped — a
   // "stop" intent then targets the reply and SPARES the ambient/AirPlay bed.
   recentReplyStop = false,
+  // Non-null when the connection layer identified this capture as a
+  // follow-up-window fire (voice-conversation-policy): { chainTail,
+  // disposition, prevReplyText, prevUserText }. Consulted by
+  // tryVoiceFollowupGate after the deterministic command parsers.
+  followup = null,
   onEvent,
   onBroadcast = () => {},
   onNotify    = () => {},
@@ -787,6 +828,22 @@ export async function handleChatMessage({
     turnStore.sessionEpoch = currentSessionEpoch;
   }
 
+  // Follow-up-window gate (voice-conversation-policy). Runs BEFORE the
+  // send-time durability write for the same reason the empty-wake guard
+  // below does: a silently rejected in-window capture (room conversation,
+  // fleet TTS, noise) must leave no trace in chat history or future LLM
+  // context. Also owns the in-window empty-capture case — the normal
+  // empty-wake apology would violate the window silence contract. May
+  // rewrite the transcript (elliptical chain "and the porch" → "turn off
+  // the porch") so the real handlers below fire on a parseable utterance.
+  if (followup && source === 'voice-device') {
+    const gate = await tryVoiceFollowupGate({
+      source, deviceId, userId, userText: rawText, agentId, onEvent, followup, conversationMode,
+    });
+    if (gate?.handled) return;
+    if (gate?.rewrittenText) rawText = gate.rewrittenText;
+  }
+
   // False-positive wake/noise turns are deliberately ephemeral. Handle them
   // before the send-time durability write so a one-character STT fragment
   // cannot leave a permanent `running` row (and so these non-commands still
@@ -1029,26 +1086,40 @@ export async function handleChatMessage({
     if (_vTrace) console.log(`[voice-trace] timer-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
     await persistEarlyHandledTurn();
     if (timerResult.awaitReplyMs && deviceId) {
-      // Disambiguation question ("the 5 or 10 minute one?") — the pending pick
-      // expires server-side, so the mic must reopen for the full TTL even when
-      // conversation mode is off; a wake word can't be required to answer.
+      // Disambiguation question ("the 5 or 10 minute one?") — use the policy's
+      // bounded required window even though the pending choice itself lives
+      // longer server-side. A wake word is not required to answer.
       try {
-        const { armFollowupAfterDrain } = await import('./ws-handler.mjs');
-        armFollowupAfterDrain(deviceId, { windowMs: timerResult.awaitReplyMs });
+        const [{ armFollowupAfterDrain }, { DISPOSITION_WINDOW_MS }] = await Promise.all([
+          import('./ws-handler.mjs'),
+          import('./lib/voice-policy.mjs'),
+        ]);
+        armFollowupAfterDrain(deviceId, {
+          windowMs: DISPOSITION_WINDOW_MS.required,
+          disposition: 'required',
+        });
       } catch (e) {
         console.warn('[chat] timer-disambig follow-up arm failed:', e.message);
       }
     } else {
-      // "Set a timer for ten minutes" mid-conversation is an answer, not an
-      // exit — keep listening like any other completed reply.
-      await armConversationFollowup({ source, deviceId, conversationMode });
+      // Timer create/extend/cancel is a terminal device command
+      // (voice-conversation-policy): a short command-only chain tail
+      // ("…and set another for the pasta") instead of the conversation
+      // re-arm that kept the mic open on the room.
+      await armTerminalChainTail({ source, deviceId, conversationMode, fallbackConversationRearm: true });
     }
     return;
   }
   if (_vTrace) console.log(`[voice-trace] timer-intent: miss device=${deviceId}`);
-  if (tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode, bargeIn, recentReplyStop })) {
+  const controlResult = tryVoiceControlIntent({ source, rawText, deviceId, userId, agentId, onEvent, conversationMode, bargeIn, recentReplyStop });
+  if (controlResult) {
     if (_vTrace) console.log(`[voice-trace] control-intent: HANDLED device=${deviceId} text="${(rawText || '').slice(0, 60)}"`);
     await persistEarlyHandledTurn();
+    // Chainable device commands (volume/mute/pause/…) get the terminal chain
+    // tail; stop / conversation_end carry no disposition and end the exchange.
+    if (controlResult.disposition === 'terminal') {
+      await armTerminalChainTail({ source, deviceId, conversationMode });
+    }
     return;
   }
   if (_vTrace) console.log(`[voice-trace] control-intent: miss device=${deviceId} text="${(rawText || '').slice(0, 60)}" — falling through to LLM`);
@@ -1242,11 +1313,19 @@ export async function handleChatMessage({
     && labVerifierAllowedTools.length === 1
     && labVerifierAllowedTools[0] === 'ha_call_service';
   // Answer-type fast-paths whose handled reply should keep a conversation-mode
-  // exchange open (see armConversationFollowup). Everything else in the chain
-  // ends or owns its own flow.
+  // exchange open (see armConversationFollowup) — informational answers, i.e.
+  // `open` disposition. HA moved OUT of this set (voice-conversation-policy):
+  // a device-control command is `terminal` and gets the command-only chain
+  // tail instead, which is the fix for "turn off the kitchen" leaving an 8 s
+  // conversation window open on the room. Completed routines are terminal
+  // too; a routine with run_prompt owns its nested question flow instead.
   const CONVERSATION_REARM_FASTPATHS = new Set([
-    tryHaFastpath, tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
+    tryTriviaFastpath, tryCalendarFastpath, tryLocalIntentFastpath,
   ]);
+  const TERMINAL_FASTPATHS = new Set([tryHaFastpath, tryRoutineFastpath]);
+  // (The follow-up window gate runs much earlier — before the send-time
+  // durability write — so silently dropped in-window captures never touch
+  // session history. See tryVoiceFollowupGate call above.)
   const INTERCEPTORS = (documentRequest || _readOnlyTurn) ? [] : [
     // The verifier may not enter any pre-model path outside its authenticated
     // server tool allowlist. Transcription, slash commands, finance extraction,
@@ -1303,6 +1382,9 @@ export async function handleChatMessage({
     // own finally re-arms — arming here too would double-send the window.
     if (!r.followupPrompt && CONVERSATION_REARM_FASTPATHS.has(handler)) {
       await armConversationFollowup({ source, deviceId, conversationMode, ac });
+    }
+    if (!r.followupPrompt && TERMINAL_FASTPATHS.has(handler)) {
+      await armTerminalChainTail({ source, deviceId, conversationMode, ac, fallbackConversationRearm: true });
     }
     if (r.followupPrompt) {
       // The nested prompt becomes the active owner for the same agent. Release

@@ -5,6 +5,8 @@
 
 import { getOrchestrationPolicy, getRequestedOrchestrationPolicy } from '../lib/orchestration-policy.mjs';
 import { getMainWss } from './main-wss.mjs';
+import { log } from '../logger.mjs';
+import { fleetSpeechActiveElsewhere, isVoicePolicyEnabled } from '../lib/voice-policy.mjs';
 
 // Monotonic per-user/per-agent watermark for live chat/session events. A
 // session load captures this value BEFORE its async disk read; if the browser
@@ -138,30 +140,73 @@ export function closeDeviceSockets(deviceId) {
  *     legacy audio.
  * Returns true if the window was sent or scheduled.
  */
-export function armFollowupAfterDrain(deviceId, { windowMs = 5000, conversation = false } = {}) {
+export function armFollowupAfterDrain(deviceId, { windowMs = 5000, conversation = false, disposition = null, chainTail = false } = {}) {
   if (!getMainWss() || !deviceId) return false;
   for (const client of getMainWss().clients) {
     if (client.readyState !== client.OPEN || client._deviceId !== deviceId) continue;
     // Tag with the turn the window belongs to (resolved at SEND time — the
-    // firmware drops a window whose turn it has already moved past).
+    // firmware drops a window whose turn it has already moved past). Older
+    // firmware ignores the extra `disposition` field and uses windowMs alone.
     const payload = () => ({
       type: 'await_followup', windowMs,
       ...(conversation ? { conversation: true } : {}),
+      ...(disposition ? { disposition } : {}),
       ...(client._activeVoiceTurn?.id ? { turn_id: client._activeVoiceTurn.id } : {}),
     });
+    // Resolved at SEND time like the turn tag: window bookkeeping for the
+    // dispatch-side gate (chain tail / continuation check), plus the two
+    // fleet-policy telemetry signals the design doc tunes on — windows
+    // suppressed because another device is speaking, and windows that expired
+    // with nothing captured (the harmless case that should dominate).
+    const armNow = () => {
+      // `required` windows are exempt: the assistant asked the user a
+      // question (timer disambig, pending clarification) and the exchange
+      // hangs if the window never opens — another device talking is a worse
+      // reason to strand it than the risk of capturing that device's audio,
+      // which the transcript self-audio check still covers.
+      if (isVoicePolicyEnabled() && disposition !== 'required') {
+        const speakingDevice = fleetSpeechActiveElsewhere(client._userId, deviceId);
+        if (speakingDevice) {
+          log.info('voice', 'followup window suppressed (fleet tts active)', {
+            deviceId, speakingDevice, disposition: disposition ?? null, windowMs,
+          });
+          return;
+        }
+      }
+      const armedAt = Date.now();
+      client._followupArmedUntil = armedAt + windowMs + 1000;
+      client._followupWindow = {
+        disposition: disposition ?? null,
+        chainTail: !!chainTail,
+        windowMs,
+        armedAt,
+        until: armedAt + windowMs + 1500,
+        captured: false,
+      };
+      log.info('voice', 'followup window armed', {
+        deviceId, disposition: disposition ?? null, windowMs, chainTail: !!chainTail,
+        conversation: !!conversation,
+      });
+      const expiry = setTimeout(() => {
+        const w = client._followupWindow;
+        if (w && w.armedAt === armedAt && !w.captured) {
+          log.info('voice', 'followup window expired unused', {
+            deviceId, disposition: disposition ?? null, windowMs, chainTail: !!chainTail,
+          });
+        }
+      }, windowMs + 2500);
+      expiry.unref?.();
+      sendToDevice(deviceId, payload());
+    };
     const streamer = client._ttsStreamer;
     if (streamer && !streamer.closed && !streamer.aborted) {
       streamer.onClosed((clean) => {
         if (!clean) return;
-        if (client.readyState === client.OPEN) {
-          client._followupArmedUntil = Date.now() + windowMs + 1000;
-          sendToDevice(deviceId, payload());
-        }
+        if (client.readyState === client.OPEN) armNow();
       });
       return true;
     }
-    client._followupArmedUntil = Date.now() + windowMs + 1000;
-    sendToDevice(deviceId, payload());
+    armNow();
     return true;
   }
   return false;

@@ -18,6 +18,7 @@ import {
   applyVoiceDeviceTtsHold,
   isVoiceOutputSuppressed,
 } from './voice-stt.mjs';
+import { noteFleetSpeech, noteFleetSpeechEnd } from '../lib/voice-policy.mjs';
 
 const OE_DEFAULT_VOICE_STATE = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
 
@@ -91,6 +92,13 @@ export function speakAnnouncement(ws, devicePrefs, entry) {
     ws._lastVoiceActivityAt = Date.now();
     if (cfg.ttsProvider !== 'pocket-tts') {
       // Legacy path: device accumulates the token and pulls /api/tts itself.
+      // Fleet registry: the text is matchable against other devices' captures
+      // even though the emission end time is only approximate here. Also the
+      // continuation-gate context: a follow-up after an announcement should
+      // be judged against the announcement, not a stale earlier reply.
+      noteFleetSpeech(ws._userId, ws._deviceId, entry.text);
+      noteFleetSpeechEnd(ws._userId, ws._deviceId);
+      ws._lastReplySpoken = entry.text;
       sendToDevice(ws._deviceId, { type: 'token', text: entry.text, agent: 'system' });
       sendToDevice(ws._deviceId, { type: 'done', agent: 'system' });
       return;
@@ -129,13 +137,16 @@ export function speakAnnouncement(ws, devicePrefs, entry) {
     applyVoiceDeviceTtsHold(ws, streamer);
     streamer.onClosed((clean) => {
       ws._lastVoiceActivityAt = Date.now();
+      noteFleetSpeechEnd(ws._userId, ws._deviceId);
       if (clean && devicePrefs?.conversation_mode) {
         // Conversation devices get a short window after an announcement —
         // "make another one" / "show it on the TV" flows naturally.
-        armFollowupAfterDrain(ws._deviceId, { windowMs: 8000, conversation: true });
+        armFollowupAfterDrain(ws._deviceId, { windowMs: 8000, conversation: true, disposition: 'open' });
       }
     });
     log.info('voice', 'speaking announcement', { deviceId: ws._deviceId, kind: entry.kind, chars: entry.text.length });
+    noteFleetSpeech(ws._userId, ws._deviceId, entry.text);
+    ws._lastReplySpoken = entry.text;
     streamer.pushText(entry.text.endsWith('.') || entry.text.endsWith('!') || entry.text.endsWith('?') ? `${entry.text} ` : `${entry.text}. `);
     streamer.finish();
   } catch (e) {

@@ -38,6 +38,13 @@ import {
   nextSessionSnapshotSeq,
   orchestrationPolicyForClient,
 } from './delivery.mjs';
+import {
+  hasFollowupCaptureSignature,
+  isVoicePolicyEnabled,
+  matchesFleetSpeech,
+  noteFleetSpeech,
+  noteFleetSpeechEnd,
+} from '../lib/voice-policy.mjs';
 const OE_DEFAULT_VOICE_STATE = path.join(os.homedir(), '.openensemble', 'models', 'tts', 'pocket-tts', 'default-voice.safetensors');
 
 // Bound from parent: boot id, caps, device recovery, voice config timing
@@ -435,6 +442,31 @@ export function onConnection(ws, req) {
         agent: typeof msg.agent === 'string' && msg.agent ? msg.agent.slice(0, 64) : null,
         chunks: [], bytes: 0, gaps: 0, nextSeq: null, startedAt: Date.now(), ttl,
       };
+      // Voice-conversation-policy: classify the capture at its START — the
+      // transcript's chat frame arrives seconds later (after STT), long past
+      // a short window's expiry. A VAD-triggered follow-up fire reaches us
+      // with wake_avg_prob === 255 exactly (the firmware emulates a committed
+      // wake with pending_prob = 255 on a window fire); a real wake carries
+      // its true sliding-window average. Snapshot onto the STT session; the
+      // synthesized chat frame below carries it into dispatch.
+      if (isVoicePolicyEnabled()) {
+        const fwin = ws._followupWindow ?? null;
+        if (fwin && !fwin.consumed && Date.now() <= fwin.until) {
+          fwin.captured = true;
+          // Either way the window is spent: a 255 fire IS the follow-up
+          // capture; any other value is a real wake, which closes the
+          // firmware window on commit (set_followup_until_us(0)) — mirror
+          // that here so a later frame can't be misclassified against a
+          // window the device already closed.
+          fwin.consumed = true;
+          if (msg.wake_avg_prob === 255) {
+            ws._sttSession.followupCapture = {
+              chainTail: !!fwin.chainTail,
+              disposition: fwin.disposition ?? null,
+            };
+          }
+        }
+      }
       return;
     }
     if (msg.type === 'stt_abort') {
@@ -494,7 +526,7 @@ export function onConnection(ws, req) {
           const turnTag = s.turnId ? { turn_id: s.turnId } : {};
           ws.send(JSON.stringify({ type: 'token', text: 'Saved.', agent: 'system', ...turnTag }));
           ws.send(JSON.stringify({ type: 'done', agent: 'system', ...turnTag }));
-          armFollowupAfterDrain(ws._deviceId, { windowMs: 15000, conversation: true });
+          armFollowupAfterDrain(ws._deviceId, { windowMs: 15000, conversation: true, disposition: 'required' });
           return;
         }
       } catch (e) {
@@ -526,6 +558,7 @@ export function onConnection(ws, req) {
         ...(s.agent ? { agent: s.agent } : {}),
         ...(s.wakeSlot !== null ? { wake_slot: s.wakeSlot } : {}),
         ...(s.wakeAvgProb !== null ? { wake_avg_prob: s.wakeAvgProb } : {}),
+        ...(s.followupCapture ? { followup_capture: s.followupCapture } : {}),
         ...(s.turnId ? { turn_id: s.turnId } : {}),
       }), false);
       return;
@@ -848,6 +881,72 @@ export function onConnection(ws, req) {
       // transcript with a sliver of the interrupted reply's audio, so intent
       // matchers relax their bare-word anchors ("…Paris. Stop." still stops).
       const bargeIn = msg.barge === true;
+      // ── Voice-conversation-policy: follow-up capture context ──────────────
+      // Streaming captures were classified at stt_begin and carry
+      // `followup_capture` on the synthesized frame. Direct ESP chat uses the
+      // same wake_avg_prob === 255 signature. Android TV has no wake score, so
+      // its markerless frame counts only while that connection has a live
+      // central server window. The arrival grace covers utterance + STT time.
+      // A transcript matching what the fleet was just SPEAKING is our own TTS
+      // heard by another device — discarded silently (phase 2), before any
+      // turn/streamer wiring.
+      let followupCtx = null;
+      if (ws._deviceId && isVoicePolicyEnabled()) {
+        let cap = (msg.followup_capture && typeof msg.followup_capture === 'object')
+          ? {
+              chainTail: msg.followup_capture.chainTail === true,
+              disposition: typeof msg.followup_capture.disposition === 'string'
+                ? msg.followup_capture.disposition : null,
+            }
+          : null;
+        const followupPlatform = ws._platform
+          || getDevice(ws._userId, ws._deviceId)?.platform
+          || null;
+        const hasFollowupSignal = hasFollowupCaptureSignature({
+          wakeAvgProb: msg.wake_avg_prob,
+          platform: followupPlatform,
+        });
+        if (!cap && !bargeIn && hasFollowupSignal) {
+          const fwin = ws._followupWindow ?? null;
+          if (fwin && !fwin.consumed && Date.now() <= fwin.until + 15_000) {
+            fwin.captured = true;
+            fwin.consumed = true;
+            cap = { chainTail: !!fwin.chainTail, disposition: fwin.disposition ?? null };
+          }
+        } else if (!cap && ws._followupWindow && !ws._followupWindow.consumed
+                   && Number.isInteger(msg.wake_avg_prob)) {
+          // A real wake landed while our window record was live: the firmware
+          // closed its window on commit — spend the server record too so the
+          // direct-chat grace period can't misclassify a later frame.
+          ws._followupWindow.captured = true;
+          ws._followupWindow.consumed = true;
+        }
+        if (cap) {
+          const transcript = typeof msg.text === 'string' ? msg.text.trim() : '';
+          // Own device excluded: the user echoing part of OUR just-spoken
+          // reply ("the 10 minute one") is an answer, not self-audio.
+          const selfDevice = transcript
+            ? matchesFleetSpeech(ws._userId, transcript, { excludeDeviceId: ws._deviceId })
+            : null;
+          if (selfDevice) {
+            log.info('voice', 'followup self-audio dropped', {
+              deviceId: ws._deviceId, matchedDevice: selfDevice,
+              textLen: transcript.length, chainTail: cap.chainTail,
+            });
+            try { ws.send(JSON.stringify({ type: 'done', agent: 'system', ...(deviceTurnId ? { turn_id: deviceTurnId } : {}) })); } catch {}
+            return;
+          }
+          followupCtx = {
+            ...cap,
+            prevReplyText: ws._lastReplySpoken || null,
+            prevUserText: ws._lastVoiceUserText || null,
+          };
+          log.info('voice', 'followup capture', {
+            deviceId: ws._deviceId, chainTail: cap.chainTail,
+            disposition: cap.disposition ?? null, textLen: transcript.length,
+          });
+        }
+      }
       // wake_avg_prob is uint8 (0..255), 255 = ~1.0. Logged so app.log can be
       // grep'd for marginal-vs-confident wake fires when tuning per-slot cutoffs.
       if (ws._deviceId && wakeSlot !== null && Number.isInteger(msg.wake_avg_prob)) {
@@ -947,6 +1046,13 @@ export function onConnection(ws, req) {
         // recorded with a null turnId (stop on a socket with no active turn,
         // e.g. after reconnect) blanket-drops this turn's audio for 30s.
         ws._voiceOutputSuppression = null;
+        // Fresh turn = fresh spoken-reply accumulator. The PREVIOUS turn's
+        // text was already captured into followupCtx above (continuation
+        // gate context) before this reset. _lastVoiceUserText updates here —
+        // after the avg-prob gate — so gated noise wakes can't pollute the
+        // continuation context.
+        ws._lastReplySpoken = '';
+        if (typeof msg.text === 'string' && msg.text.trim()) ws._lastVoiceUserText = msg.text;
         log.info('voice', 'voice turn started', {
           deviceId: voiceTurn.deviceId,
           turnId: voiceTurn.id,
@@ -1000,7 +1106,11 @@ export function onConnection(ws, req) {
           });
           ws._ttsStreamer = ttsStreamer;
           applyVoiceDeviceTtsHold(ws, ttsStreamer);
-          ttsStreamer.onClosed(() => { ws._lastVoiceActivityAt = Date.now(); });
+          ttsStreamer.onClosed(() => {
+            ws._lastVoiceActivityAt = Date.now();
+            // Fleet self-audio registry: this device is done emitting.
+            noteFleetSpeechEnd(ws._userId, ws._deviceId);
+          });
         }
       } catch (e) { log.warn('voice-tts', 'streamer setup failed', { error: e.message }); ttsStreamer = null; }
 
@@ -1090,6 +1200,9 @@ export function onConnection(ws, req) {
         // a reply was cut by a wake-barge is aimed at the REPLY — the stop
         // intent must not also kill the ambient/AirPlay bed underneath.
         recentReplyStop: bargeIn || (Date.now() - (ws._replyStoppedAt ?? 0) < 8000),
+        // Follow-up-window capture context (voice-conversation-policy) —
+        // consumed by tryVoiceFollowupGate in the interceptor chain.
+        followup: followupCtx,
         // Chat events fan out two ways:
         //   (1) Back to the originating ws — the device gets TTS chunks,
         //       status updates, etc. regardless of whose user is "acting."
@@ -1124,7 +1237,14 @@ export function onConnection(ws, req) {
             // the streamer; pass status/other events through unchanged.
             if (voiceSuppressed || staleVoiceTurn || voiceSilent) {
               try { ttsStreamer.abort(); } catch {}
-            } else if (e?.type === 'token' && typeof e.text === 'string') ttsStreamer.pushText(e.text);
+            } else if (e?.type === 'token' && typeof e.text === 'string') {
+              // Spoken-reply tracking: continuation-gate context for the next
+              // follow-up, and the fleet self-audio registry other devices'
+              // captures are compared against.
+              ws._lastReplySpoken = (ws._lastReplySpoken ?? '') + e.text;
+              noteFleetSpeech(ws._userId, ws._deviceId, e.text);
+              ttsStreamer.pushText(e.text);
+            }
             else if (e?.type === 'done') ttsStreamer.finish();
             else if (isUserStopTerminal) {
               // User said stop (or barge-in cancelled the turn). Flush any
@@ -1157,11 +1277,25 @@ export function onConnection(ws, req) {
                   ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
                 }
               } else if (isVoiceOrigin && isUserStopTerminal) {
+                // Terminal for a stopped legacy reply — close the fleet
+                // 'emitting' state or it would only expire via the staleness
+                // bound while suppressing other devices' windows.
+                noteFleetSpeechEnd(ws._userId, ws._deviceId);
                 ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
               } else if (isVoiceOrigin && e?.type === 'error' && typeof e.message === 'string' && e.message.trim()) {
+                noteFleetSpeechEnd(ws._userId, ws._deviceId);
                 ws.send(JSON.stringify({ type: 'token', text: VOICE_ERROR_FALLBACK, agent: e.agent ?? 'system', ...turnTag }));
                 ws.send(JSON.stringify({ type: 'done', agent: e.agent ?? 'system', ...turnTag }));
               } else {
+                // Legacy device-TTS path: the device speaks the token stream
+                // itself — mirror the streamer path's spoken-reply/fleet
+                // tracking so policy context doesn't depend on the provider.
+                if (isVoiceOrigin && e?.type === 'token' && typeof e.text === 'string') {
+                  ws._lastReplySpoken = (ws._lastReplySpoken ?? '') + e.text;
+                  noteFleetSpeech(ws._userId, ws._deviceId, e.text);
+                } else if (isVoiceOrigin && e?.type === 'done') {
+                  noteFleetSpeechEnd(ws._userId, ws._deviceId);
+                }
                 ws.send(JSON.stringify(isVoiceOrigin && voiceTurn?.id ? { ...e, ...turnTag } : e));
               }
             } catch {}
@@ -1263,6 +1397,10 @@ export function onConnection(ws, req) {
       try { ws._ttsStreamer.abort(); } catch {}
       ws._ttsStreamer = null;
     }
+    // A disconnected device is not emitting; leaving the fleet 'emitting'
+    // flag set would suppress every other device's follow-up windows until
+    // the staleness bound expires it.
+    if (ws._deviceId) noteFleetSpeechEnd(ws._userId, ws._deviceId);
     clearVoiceDeviceTtsHold(ws);
     dropSttSession(ws, ws._sttSession ? 'socket closed' : null);
     // A device socket dropping mid-turn used to orphan the LLM turn — tokens
