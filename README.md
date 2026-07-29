@@ -96,16 +96,21 @@ Currently the only supported hardware is the **Seeed reSpeaker XVF3800 4-Mic Arr
 
 - Linux (tested on Debian-family LXCs and VMs); macOS works for local dev
 - Node.js ≥ 18 (the installer pulls one via `nvm` if missing)
-- `build-essential`, `python3`, `python3-full`, `zip`, `bubblewrap`, `git`, `ffmpeg`, `openssl` (installer offers to install them — `git` is required for in-app auto-update; if you grabbed the source as a zip instead of cloning, install `git` and run `git clone` over the install dir or auto-update will be disabled)
+- `build-essential`, `python3`, `python3-full`, `zip`, `bubblewrap`, `git`, `ffmpeg`, `openssl` (installer offers to install them — `git` is required for in-app auto-update; if you grabbed the source as a zip instead of cloning, install `git` and run `git clone --depth 1` over the install dir or auto-update will be disabled)
 - **For voice devices (beta, optional):** a **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. This is currently the only supported hardware. Other voice-hardware combinations may work but aren't tested or shipped with matching firmware. Chrome or Edge browser required for the in-app flash wizard (WebUSB + Web Serial).
 
 ## Install
 
 ```bash
-git clone https://github.com/openensemble/openensemble.git
+git clone --depth 1 https://github.com/openensemble/openensemble.git
 cd openensemble
 ./install.sh
 ```
+
+`--depth 1` fetches just the current revision (~7 MB instead of ~96 MB) — the
+rest is superseded device-firmware images nobody needs to flash. In-app
+auto-update works normally on a shallow clone. Drop the flag if you want the
+full history for development.
 
 The installer:
 

@@ -18,10 +18,15 @@ description: >-
 ## Install
 
 ```bash
-git clone https://github.com/openensemble/openensemble.git
+git clone --depth 1 https://github.com/openensemble/openensemble.git
 cd openensemble
 ./install.sh
 ```
+
+`--depth 1` fetches just the current revision (~7 MB instead of ~96 MB) — the
+rest is superseded device-firmware images nobody needs to flash. In-app
+auto-update works normally on a shallow clone. Drop the flag if you want the
+full history for development.
 
 The installer:
 
