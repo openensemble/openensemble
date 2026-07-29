@@ -14,6 +14,22 @@ When you message the Coordinator, it:
 
 You can have multiple delegations chained — *"Research the latest AI news and email it to me"* might delegate to the Researcher first, then to Email.
 
+## Background worker teams
+
+For a long, divisible outcome, the Coordinator can start one detached coordinator
+worker and let it assign independent child workstreams. If you give an explicit
+count — for example, *"use 6 agents to audit these sources"* — that count means
+six child workers; the detached coordinator is additional. Without a count, the
+coordinator chooses the smallest useful team, normally two to four children.
+
+Requested team size and concurrency are separate. OpenEnsemble creates the full
+team plan and reserves every lane's scope up front, then queues lanes that exceed
+the shared concurrency limit. The task card shows requested, active, queued, and
+completed workers. A user-specified team may contain up to 12 children by
+default; owners can lower that ceiling with
+`OPENENSEMBLE_MAX_WORKSTREAMS_PER_OUTCOME`. Requests above the configured
+ceiling are reported explicitly rather than silently reduced.
+
 ## Direct chat vs. delegation
 
 This is the most important Coordinator concept:

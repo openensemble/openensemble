@@ -10,7 +10,10 @@ import { getTurnContext, iterateInTurnContext } from '../../lib/turn-abort-conte
 import { getToolRouterContext } from '../../lib/tool-router-context.mjs';
 import { createLinkedAbortController, isAbortError } from '../../lib/abort-utils.mjs';
 import { isEphemeralReadOnlyTool } from '../../lib/ephemeral-tool-cache.mjs';
-import { unlockParallelWorkGate } from '../../lib/parallel-work-gate.mjs';
+import {
+  MAX_PARALLEL_WORKSTREAMS,
+  unlockParallelWorkGate,
+} from '../../lib/parallel-work-gate.mjs';
 import {
   canonicalWorkClaimKey,
   claimWork,
@@ -63,8 +66,11 @@ function _parseCallerSession(callerAgentId) {
 // it from its own direct chat OR from an ephemeral delegation (the coordinator
 // asking "how's your work going"). Workers are LEAVES: they cannot hire workers.
 const MAX_WORKERS_PER_AGENT = 5;
-const MAX_WORKSTREAMS_PER_CALL = 4;
+const MAX_ADAPTIVE_WORKSTREAMS = Math.min(4, MAX_PARALLEL_WORKSTREAMS);
+const MAX_DECLARED_WORKSTREAMS = 12;
 const MAX_WORKSTREAM_RESULT_CHARS = 10_000;
+const MIN_WORKSTREAM_RESULT_CHARS = 2_000;
+const MAX_PARALLEL_RESULT_CHARS = 40_000;
 // Admission for this feature's child lanes. A coordinator's provider loop is
 // suspended while its parallel_work tool awaits them, so these are the added
 // concurrent model streams. Other subsystems retain their own existing caps.
@@ -80,6 +86,7 @@ const PARALLEL_TEAM_DEADLINE_MS = Math.max(
   ),
 );
 const MAX_WORKSTREAM_TOOL_LOOPS = 16;
+const MAX_PARALLEL_TEAM_TOOL_LOOPS = 64;
 
 /** @type {Map<string, {active:number, waiters:Array<any>}>} */
 const workstreamSlots = new Map();
@@ -186,7 +193,7 @@ async function _parallelChildTools() {
   });
 }
 
-function _makeParallelChild(baseAgent, ownerKey, item, tools) {
+function _makeParallelChild(baseAgent, ownerKey, item, tools, teamSize) {
   const id = `ephemeral_workstream_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
   const childContract = [
     '## Coordinated child workstream',
@@ -213,6 +220,7 @@ function _makeParallelChild(baseAgent, ownerKey, item, tools) {
     maxToolLoops: Math.min(
       MAX_WORKSTREAM_TOOL_LOOPS,
       Math.max(1, Number(baseAgent?.maxToolLoops) || MAX_WORKSTREAM_TOOL_LOOPS),
+      Math.max(1, Math.floor(MAX_PARALLEL_TEAM_TOOL_LOOPS / Math.max(1, teamSize))),
     ),
     maxTokens: Math.min(4_096, Math.max(512, Number(baseAgent?.maxTokens) || 4_096)),
     tools,
@@ -240,9 +248,16 @@ function _makeParallelChild(baseAgent, ownerKey, item, tools) {
   return child;
 }
 
-function _parallelItems(args) {
+function _normalizedWorkstreamCount(value) {
+  const count = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN);
+  return Number.isSafeInteger(count) && count >= 2 ? count : null;
+}
+
+function _parallelItems(args, maxItems) {
   const raw = Array.isArray(args?.work_items) ? args.work_items : [];
-  if (raw.length < 2 || raw.length > MAX_WORKSTREAMS_PER_CALL) return [];
+  if (raw.length < 2 || raw.length > maxItems) return [];
   const allowedModes = new Set(['exclusive', 'shared', 'verification']);
   const items = [];
   for (const item of raw) {
@@ -270,6 +285,54 @@ function _parallelItems(args) {
     });
   }
   return items;
+}
+
+function _expectedWorkstreamCount(baseAgent) {
+  const assessment = baseAgent?._parallelWorkGate?.assessment;
+  const assessedExplicit = ['structured', 'route-text'].includes(assessment?.laneCountSource)
+    ? _normalizedWorkstreamCount(assessment?.effectiveLanes)
+    : null;
+  // An over-limit request is intentionally represented by the gate's effective
+  // count so the configured safety cap is visible rather than silently applied.
+  if (assessment?.requestExceedsLimit === true && assessedExplicit !== null) {
+    return { count: assessedExplicit, source: assessment.laneCountSource };
+  }
+  const structured = _normalizedWorkstreamCount(baseAgent?.requestedWorkstreams);
+  if (structured !== null) return { count: structured, source: 'structured' };
+  if (assessedExplicit !== null) {
+    return { count: assessedExplicit, source: assessment.laneCountSource };
+  }
+  return null;
+}
+
+function _parallelConcurrency(args, itemCount) {
+  if (args?.max_parallelism == null) {
+    return { ok: true, value: Math.min(itemCount, MAX_ADAPTIVE_WORKSTREAMS) };
+  }
+  const requested = typeof args.max_parallelism === 'number'
+    ? args.max_parallelism
+    : (
+      typeof args.max_parallelism === 'string' && /^\d+$/.test(args.max_parallelism.trim())
+        ? Number(args.max_parallelism.trim())
+        : NaN
+    );
+  if (!Number.isSafeInteger(requested) || requested < 1 || requested > itemCount) {
+    return {
+      ok: false,
+      reason: `max_parallelism must be a whole number from 1 to the ${itemCount} requested work_items. No workstreams were started.`,
+    };
+  }
+  return { ok: true, value: requested };
+}
+
+function _workstreamResultCharLimit(itemCount) {
+  return Math.max(
+    MIN_WORKSTREAM_RESULT_CHARS,
+    Math.min(
+      MAX_WORKSTREAM_RESULT_CHARS,
+      Math.floor(MAX_PARALLEL_RESULT_CHARS / Math.max(1, itemCount)),
+    ),
+  );
 }
 
 async function* _claimWorkTool(args) {
@@ -353,13 +416,79 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
     };
     return;
   }
-  const items = _parallelItems(args);
+
+  const rawItemCount = Array.isArray(args?.work_items) ? args.work_items.length : 0;
+  if (rawItemCount > MAX_PARALLEL_WORKSTREAMS) {
+    yield {
+      type: 'result',
+      text: `parallel_work received ${rawItemCount} work_items, above this server's per-outcome safety cap of ${MAX_PARALLEL_WORKSTREAMS}. No workstreams were started; keep the requested count visible and replan within the cap.`,
+      isError: true,
+    };
+    return;
+  }
+  // Validate the complete plan shape before looking up runtime agent metadata.
+  // This keeps malformed calls fail-closed even if their router context is
+  // unavailable, while exact-count enforcement below still uses that context.
+  const items = _parallelItems(args, MAX_PARALLEL_WORKSTREAMS);
   if (items.length < 2) {
     yield {
       type: 'result',
-      text: 'parallel_work needs 2–4 complete, genuinely independent work_items, each with label, task, and claim.kind/key. Handle a single or dependent step directly.',
+      text: 'parallel_work needs at least 2 complete, genuinely independent work_items, each with label, task, and claim.kind/key. No workstreams were started.',
       isError: true,
     };
+    return;
+  }
+
+  const router = getToolRouterContext();
+  const { effectiveAgentId: parsedOwner } = _parseCallerSession(callerAgentId);
+  const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+  const durableAgents = getAgentsForUser(userId);
+  const baseAgent = router?.agent
+    || durableAgents.find(agent => agent.id === parsedOwner)
+    || durableAgents.find(agent => callerAgentId?.endsWith?.(`_${agent.id}`))
+    || durableAgents[0];
+  const ownerKey = baseAgent?.workerOwnerId || parsedOwner || baseAgent?.id;
+  if (!baseAgent || !ownerKey) {
+    if (items.length > MAX_ADAPTIVE_WORKSTREAMS) {
+      yield {
+        type: 'result',
+        text: `Adaptive parallel_work plans may use 2–${MAX_ADAPTIVE_WORKSTREAMS} work_items, but received ${items.length}. No workstreams were started; an explicit larger count requires its coordinator metadata.`,
+        isError: true,
+      };
+      return;
+    }
+    yield { type: 'result', text: 'parallel_work could not resolve the calling agent.', isError: true };
+    return;
+  }
+
+  const expectedCount = _expectedWorkstreamCount(baseAgent);
+  if (expectedCount?.count > MAX_PARALLEL_WORKSTREAMS) {
+    yield {
+      type: 'result',
+      text: `This outcome requests ${expectedCount.count} child workstreams, above this server's per-outcome safety cap of ${MAX_PARALLEL_WORKSTREAMS}. No workstreams were started; preserve the request and report the limit instead of silently reducing it.`,
+      isError: true,
+    };
+    return;
+  }
+  if (expectedCount && rawItemCount !== expectedCount.count) {
+    yield {
+      type: 'result',
+      text: `This outcome requires exactly ${expectedCount.count} child workstreams (${expectedCount.source} count), but parallel_work received ${rawItemCount} work_items. No workstreams were started; submit one complete non-overlapping item for every requested child.`,
+      isError: true,
+    };
+    return;
+  }
+  if (!expectedCount && rawItemCount > MAX_ADAPTIVE_WORKSTREAMS) {
+    yield {
+      type: 'result',
+      text: `Adaptive parallel_work plans may use 2–${MAX_ADAPTIVE_WORKSTREAMS} work_items, but received ${rawItemCount}. No workstreams were started; use the fewest useful adaptive lanes unless the user explicitly requested a count.`,
+      isError: true,
+    };
+    return;
+  }
+  const concurrencyPlan = _parallelConcurrency(args, items.length);
+  if (!concurrencyPlan.ok) {
+    yield { type: 'result', text: concurrencyPlan.reason, isError: true };
     return;
   }
   const seenClaims = new Map();
@@ -378,19 +507,6 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
     return;
   }
 
-  const router = getToolRouterContext();
-  const { effectiveAgentId: parsedOwner } = _parseCallerSession(callerAgentId);
-  const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
-  const durableAgents = getAgentsForUser(userId);
-  const baseAgent = router?.agent
-    || durableAgents.find(agent => agent.id === parsedOwner)
-    || durableAgents.find(agent => callerAgentId?.endsWith?.(`_${agent.id}`))
-    || durableAgents[0];
-  const ownerKey = baseAgent?.workerOwnerId || parsedOwner || baseAgent?.id;
-  if (!baseAgent || !ownerKey) {
-    yield { type: 'result', text: 'parallel_work could not resolve the calling agent.', isError: true };
-    return;
-  }
   const childTools = await _parallelChildTools();
   if (!childTools.length) {
     yield { type: 'result', text: 'parallel_work has no safe child tools available in this turn.', isError: true };
@@ -403,7 +519,7 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
     userId,
     childCount: items.length,
     maxCalls: 1,
-    maxChildren: MAX_WORKSTREAMS_PER_CALL,
+    maxChildren: MAX_PARALLEL_WORKSTREAMS,
     deadlineMs: PARALLEL_TEAM_DEADLINE_MS,
   });
   if (!reservation.ok) {
@@ -450,17 +566,13 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
   );
   deadlineTimer.unref?.();
   const signal = teamAbort.signal;
-  const requested = Number.parseInt(args?.max_parallelism, 10);
-  const concurrency = Math.max(
-    1,
-    Math.min(items.length, MAX_WORKSTREAMS_PER_CALL, Number.isFinite(requested) ? requested : items.length),
-  );
+  const concurrency = concurrencyPlan.value;
   const goal = String(args?.goal || 'the assigned task').trim().slice(0, 500);
-  yield {
-    type: 'token',
-    text: `Starting ${items.length} independent workstreams (${concurrency} at a time) for ${goal}…\n`,
-  };
-
+  const sharedCapacity = Math.min(items.length, MAX_PARALLEL_LANES_PER_USER);
+  const scheduling = [
+    `local concurrency cap ${concurrency}`,
+    `shared user capacity ${sharedCapacity}`,
+  ].join('; ');
   const results = Array(plannedItems.length);
   let cursor = 0;
   const runOne = async index => {
@@ -469,7 +581,13 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
     try {
       await _acquireWorkstreamSlot(userId, signal);
       acquired = true;
-      const child = _makeParallelChild(baseAgent, ownerKey, item, childTools);
+      const child = _makeParallelChild(
+        baseAgent,
+        ownerKey,
+        item,
+        childTools,
+        plannedItems.length,
+      );
       const text = await bg.dispatchEphemeral(child, item.task, userId, {
         taskId: item.taskId,
         preRegistered: true,
@@ -502,6 +620,13 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
     }
   };
   try {
+    // Keep the first yield inside the cleanup boundary. Consumers may close an
+    // async generator while it is paused at this progress token; the linked
+    // abort listener and deadline timer must still be released in that case.
+    yield {
+      type: 'token',
+      text: `Starting ${items.length} independent workstreams (${scheduling}; excess lanes queue) for ${goal}…\n`,
+    };
     const runners = Array.from({ length: concurrency }, async () => {
       while (true) {
         const index = cursor++;
@@ -523,10 +648,11 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
     baseAgent,
     completed === plannedItems.length ? 'completed' : (completed ? 'partial' : 'failed-lanes'),
   );
+  const resultCharLimit = _workstreamResultCharLimit(plannedItems.length);
   const sections = results.map((result, index) => {
     if (!result) return `## ${plannedItems[index].label}\n\nWorkstream did not return a result.`;
-    const body = String(result.text || '').slice(0, MAX_WORKSTREAM_RESULT_CHARS);
-    const suffix = String(result.text || '').length > MAX_WORKSTREAM_RESULT_CHARS
+    const body = String(result.text || '').slice(0, resultCharLimit);
+    const suffix = String(result.text || '').length > resultCharLimit
       ? '\n\n[Workstream result truncated for coordinator context.]'
       : '';
     const status = result.status === 'done' ? '' : ` (${result.status})`;
@@ -686,8 +812,21 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield { type: 'result', text: 'Workers are individual contributors and cannot hire their own workers. Do the job directly, then report back to whoever assigned it.' };
     return;
   }
-  const task = args.task;
+  const task = args?.task;
   if (!task) { yield { type: 'result', text: 'Missing task — describe the complete job for the worker.' }; return; }
+  const hasWorkerCount = args?.worker_count != null;
+  const requestedWorkstreams = hasWorkerCount
+    ? _normalizedWorkstreamCount(args.worker_count)
+    : null;
+  if (hasWorkerCount
+      && (requestedWorkstreams === null || requestedWorkstreams > MAX_DECLARED_WORKSTREAMS)) {
+    yield {
+      type: 'result',
+      text: `worker_count must be a whole number from 2 to ${MAX_DECLARED_WORKSTREAMS}. No worker was started; do not silently substitute another count.`,
+      isError: true,
+    };
+    return;
+  }
 
   const ownerAgent = agents.find(a => a.id === ownerKey);
   if (!ownerAgent) { yield { type: 'result', text: `Couldn't resolve your own agent record (${ownerKey}) to staff a worker.` }; return; }
@@ -697,6 +836,12 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   const label = args.label || (task.length > 56 ? task.slice(0, 56) + '…' : task);
   const workerId = `ephemeral_worker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
   const workerAgent = { ...ownerAgent, id: workerId, ephemeral: true, workerOwnerId: ownerKey };
+  if (requestedWorkstreams !== null) {
+    workerAgent.requestedWorkstreams = requestedWorkstreams;
+  } else {
+    // Never leak an earlier detached run's explicit sizing into an adaptive job.
+    delete workerAgent.requestedWorkstreams;
+  }
   // No human is watching the worker's session. A server-owned fast path may
   // provide execution-only guidance with already-satisfied orchestration
   // removed; model-controlled tool arguments can never set that override.
@@ -753,7 +898,12 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     yield { type: 'result', text: `This job already has a background worker (${tid}). Do NOT call spawn_worker again for this request; reply to the user now and use check_workers later for status.` };
     return;
   }
-  yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}. It's running now — I can check on it anytime with check_workers, and its report will land here when it's done.` };
+  const countNote = requestedWorkstreams === null
+    ? ''
+    : (requestedWorkstreams > MAX_PARALLEL_WORKSTREAMS
+      ? ` The request specified ${requestedWorkstreams} child workers; this server's per-outcome safety cap is ${MAX_PARALLEL_WORKSTREAMS}, so the coordinator will use ${MAX_PARALLEL_WORKSTREAMS} and must report that limit visibly.`
+      : ` It is required to create exactly ${requestedWorkstreams} child workstreams; the coordinator does not count toward that total.`);
+  yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}.${countNote} It's running now — I can check on it anytime with check_workers, and its report will land here when it's done.` };
 }
 
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null, internalOptions = null) {

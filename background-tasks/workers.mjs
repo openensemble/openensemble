@@ -181,6 +181,9 @@ export function spawnWorker({
   const taskRecord = {
     agentId: workerAgent.id, userId, agentName: workerName, agentEmoji: emoji,
     startedAt: Date.now(), summary, ownerKey, isWorker: true, phase: 'queued',
+    requestedWorkstreams: Number.isSafeInteger(workerAgent.requestedWorkstreams)
+      ? workerAgent.requestedWorkstreams
+      : null,
     // chipOwnerId doubles as the report target on completion (_onComplete gets
     // it as a parameter) — keep it on the record too so the restart journal
     // knows which chat to notify when this worker dies with the process.
@@ -282,7 +285,9 @@ export function spawnWorker({
       const scheduledNote = getScheduledNote();
       // Admission already selected every required capability for a contract
       // worker. A remembered plan could silently remove one of them.
-      const rememberedPlan = completionContract
+      const hasExplicitWorkerCount = Number.isSafeInteger(workerAgent.requestedWorkstreams)
+        && workerAgent.requestedWorkstreams >= 2;
+      const rememberedPlan = completionContract || hasExplicitWorkerCount
         ? null
         : matchToolPlan(userId, { agentId: workerAgent.id, phrase: originalTask });
       const workerRec = activeTasks.get(taskId);

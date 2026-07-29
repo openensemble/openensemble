@@ -40,7 +40,10 @@ export default async function* execute(name, args, userId, agentId) {
   if (name === 'request_tools') {
     const { getToolRouterContext } = await import('../../lib/tool-router-context.mjs');
     const { expandToolsByReason } = await import('../../lib/tool-router.mjs');
-    const { isParallelWorkGateLocked } = await import('../../lib/parallel-work-gate.mjs');
+    const {
+      describeParallelWorkLaneRequirement,
+      isParallelWorkGateLocked,
+    } = await import('../../lib/parallel-work-gate.mjs');
     const ctx = getToolRouterContext();
     if (!ctx) {
       // No per-turn routing context — nothing was trimmed, so there's nothing
@@ -49,9 +52,12 @@ export default async function* execute(name, args, userId, agentId) {
       return;
     }
     if (isParallelWorkGateLocked(ctx.agent)) {
+      const laneRequirement = describeParallelWorkLaneRequirement(
+        ctx.agent?._parallelWorkGate?.assessment,
+      );
       yield {
         type: 'result',
-        text: 'Tool recovery is locked until the mandatory parallel-work preflight completes. Call parallel_work with 2–4 non-overlapping claimed lanes first.',
+        text: `Tool recovery is locked until the mandatory parallel-work preflight completes. Call parallel_work with ${laneRequirement} non-overlapping claimed lanes first.`,
         isError: true,
       };
       return;

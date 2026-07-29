@@ -764,6 +764,9 @@ function taskState(taskId, extra = {}) {
     phase: rec.phase || 'running',
     ownerKey: rec.ownerKey || null,
     isWorker: !!rec.isWorker,
+    requestedWorkstreams: Number.isSafeInteger(rec.requestedWorkstreams)
+      ? rec.requestedWorkstreams
+      : null,
     continuation: rec.autoContinue ? { enabled: true, parentAgentId: rec.coordinatorAgentId || null } : null,
     canCancel: typeof rec.abort === 'function' && rec.status !== 'cancelling',
     cancelling: rec.status === 'cancelling',

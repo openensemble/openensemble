@@ -15,8 +15,11 @@ import { getTurnContext } from '../lib/turn-abort-context.mjs';
 import { currentTaskContext } from '../lib/task-proxy-context.mjs';
 import { filterToolsForMcpPolicy, getMcpToolPolicy } from '../lib/mcp-tool-policy.mjs';
 import {
+  classifyClearlySplittableWork,
+  describeParallelWorkLaneRequirement,
   installParallelWorkGate,
   isParallelWorkGateLocked,
+  isRootDetachedWorker,
 } from '../lib/parallel-work-gate.mjs';
 import {
   getTurn, beginTurn, recordSpan, recordError, finishTurn,
@@ -221,7 +224,20 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       log.info('chat', 'stripped autonomous/control-plane tools on isolated run', { agentId: agent.id, removed: before - agent.tools.length });
     }
   }
-  const userToolPlanResult = applyUserToolPlan(agent, turnOpts?.toolPlan, userId);
+  const _parallelTaskContext = currentTaskContext();
+  const _prePlanParallelAssessment = classifyClearlySplittableWork(routeText, {
+    requestedWorkstreams: agent?.requestedWorkstreams,
+  });
+  // Remembered tool plans are hints, whereas a mandatory detached-team
+  // preflight is a current scheduling decision. Do not let a stale mode:none
+  // or narrow selected plan remove parallel_work before the gate is installed.
+  const _preserveParallelSurface = isRootDetachedWorker(agent, _parallelTaskContext)
+    && _prePlanParallelAssessment.required;
+  const userToolPlanResult = applyUserToolPlan(
+    agent,
+    _preserveParallelSurface ? null : turnOpts?.toolPlan,
+    userId,
+  );
   if (userToolPlanResult) {
     recomposeAgentPromptForTools(agent);
     // Populate the router store for ANY agent that still carries request_tools
@@ -550,7 +566,11 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const _parallelWorkGate = installParallelWorkGate({
     agent,
     routeText,
-    taskContext: currentTaskContext(),
+    taskContext: _parallelTaskContext,
+    recoverableTools: _routerStore?.fullTools
+      || _trim?.fullTools
+      || userToolPlanResult?.fullTools
+      || [],
   });
   if (_parallelWorkGate.locked) {
     if (_routerStore) {
@@ -1124,11 +1144,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // retry once with an explicit correction. A second refusal fails closed
   // instead of letting a detached worker report an answer it never gathered.
   if (!errored && isParallelWorkGateLocked(agent)) {
+    const laneRequirement = describeParallelWorkLaneRequirement(
+      agent?._parallelWorkGate?.assessment,
+    );
     const retryNote = [
       '',
       '',
       '[System correction: Your prior draft did not complete the mandatory parallel-work preflight.',
-      'Do not answer the task yet. Call parallel_work now with 2–4 centrally assigned, non-overlapping work items and distinct stable claims.',
+      `Do not answer the task yet. Call parallel_work now with ${laneRequirement} centrally assigned, non-overlapping work items and distinct stable claims.`,
       'This is a capability requirement for this detached outcome, not an optional recommendation.]',
     ].join('\n');
     const recoveryMessages = [...trimmed, withRetryNote(currentUserTurn, retryNote)];

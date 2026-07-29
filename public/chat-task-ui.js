@@ -299,25 +299,30 @@ function taskChipOverview(state, children) {
     ? state.coordination
     : {};
   const hasExplicitCoordination = Object.keys(coordination).length > 0;
-  if (!hasExplicitCoordination && !children.length) return [];
+  const requestedWorkers = taskChipNumber(state?.requestedWorkstreams);
+  if (!hasExplicitCoordination && !children.length && !(requestedWorkers > 0)) return [];
 
   const coordinatorCount = taskChipNumber(coordination.coordinatorCount ?? coordination.coordinators) ?? 1;
   const workerCount = taskChipNumber(
     coordination.workerCount ?? coordination.workers ?? coordination.total,
-  ) ?? children.length;
+  ) ?? (children.length || requestedWorkers || 0);
   const derivedActive = children.filter(child => !taskChipIsTerminal(child.status)).length;
   const derivedComplete = children.filter(child => taskChipStateClass(child.status) === 'done').length;
   const derivedFailed = children.filter(child => taskChipStateClass(child.status) === 'error').length;
+  const derivedQueued = children.filter(child => taskChipStateClass(child.status) === 'queued').length;
   const active = taskChipNumber(coordination.active) ?? derivedActive;
   const completed = taskChipNumber(coordination.completed) ?? derivedComplete;
   const failed = taskChipNumber(coordination.failed) ?? derivedFailed;
+  const queued = taskChipNumber(coordination.queued) ?? derivedQueued;
   const total = taskChipNumber(coordination.total ?? coordination.totalWorkItems);
+  const awaitingPlan = requestedWorkers > 0 && !hasExplicitCoordination && children.length === 0;
 
   const bits = [
     `${coordinatorCount} coordinator${coordinatorCount === 1 ? '' : 's'}`,
-    `${workerCount} worker${workerCount === 1 ? '' : 's'}`,
+    `${workerCount} worker${workerCount === 1 ? '' : 's'}${awaitingPlan ? ' requested' : ''}`,
     `${active} active`,
   ];
+  if (queued > 0) bits.push(`${queued} queued`);
   if (total !== null && total > 0) bits.push(`${completed}/${total} complete`);
   else if (completed > 0) bits.push(`${completed} complete`);
   if (failed > 0) bits.push(`${failed} failed`);
