@@ -9,7 +9,7 @@
     "test:watch": "vitest",
     "lint": "node scripts/danger-zone-lint.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "postinstall": "node scripts/fetch-models.mjs"
+    "postinstall": "node scripts/fetch-models.mjs && node scripts/fetch-voice-firmware.mjs"
   },
   "dependencies": {
     "@homebridge/ciao": "^1.3.9",

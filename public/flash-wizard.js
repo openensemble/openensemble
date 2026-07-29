@@ -123,14 +123,28 @@
   let _xvfDevice = null;
   let _xvfManifest = null;
 
+  // Firmware images are downloaded from GitHub Releases at install time rather
+  // than committed to git, so a 404 here nearly always means that fetch never
+  // ran — an offline install, or a pull that landed before it. A bare
+  // "HTTP 404" sends people hunting for a bug that isn't there.
+  function fetchError(url, status) {
+    if (status === 404 && url.startsWith('/firmware/')) {
+      return new Error(
+        `Firmware image missing on the server (${url.split('/').pop().split('?')[0]}). ` +
+        'Images are downloaded from GitHub Releases at install time, not stored in git. ' +
+        'On the OE server run: node scripts/fetch-voice-firmware.mjs'
+      );
+    }
+    return new Error(`Fetch ${url}: HTTP ${status}`);
+  }
   async function loadManifest(url) {
     const r = await fetch(url);
-    if (!r.ok) throw new Error(`Fetch ${url}: HTTP ${r.status}`);
+    if (!r.ok) throw fetchError(url, r.status);
     return await r.json();
   }
   async function loadBin(url) {
     const r = await fetch(url);
-    if (!r.ok) throw new Error(`Fetch ${url}: HTTP ${r.status}`);
+    if (!r.ok) throw fetchError(url, r.status);
     return await r.arrayBuffer();
   }
 

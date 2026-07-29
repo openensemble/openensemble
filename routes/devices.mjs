@@ -14,6 +14,7 @@ import { sendToDevice, isDeviceOnline, closeDeviceSockets } from '../ws-handler.
 import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { missingParts, readManifest, remediationHint } from '../lib/firmware-assets.mjs';
 import { USERS_DIR } from '../lib/paths.mjs';
 import {
   listAmbientFiles, saveAmbientFile, deleteAmbientFile, ambientFilePath,
@@ -804,11 +805,28 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'device_offline' }));
       return true;
     }
+    // Don't nudge a device into an OTA whose images aren't on disk. It would
+    // fetch a 404 mid-update and report a generic failure the admin can't act
+    // on. Firmware is fetched from GitHub Releases rather than committed, so
+    // "missing" is a normal state on a fresh clone (see lib/firmware-assets.mjs).
+    const missing = missingParts().filter(m => m.component === 'voice-device');
+    if (missing.length) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: 'firmware_unavailable',
+        missing: missing.map(m => `${m.file} (${m.problem})`),
+        hint: remediationHint(),
+      }));
+      return true;
+    }
+
     const sent = sendToDevice(id, { type: 'ota_check' });
     if (sent) {
       let target = null;
+      // Resolved off the module path, not process.cwd() — the server is not
+      // always started from the install dir.
       try {
-        const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'public', 'firmware', 'voice-device', 'manifest.json'), 'utf8'));
+        const manifest = readManifest('voice-device');
         target = typeof manifest.version === 'string' ? manifest.version : null;
       } catch {}
       recordDeviceOtaProgress(userId, id, {

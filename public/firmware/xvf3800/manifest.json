@@ -10,5 +10,6 @@
   "transferSize": 4096,
   "file": "xvf_ha_v1_0_7.bin",
   "size": 888832,
+  "sha256": "d1132b7e779818923072396315304a5dd2324aa56969b4111b30678f968a7c6a",
   "notes": "formatBCE HA variant: XVF is I²S master at 48 kHz stereo, ESP is slave. Matches the audio_io config in main firmware. The previously-served plain i2s_v1.0.7 was the wrong variant for this carrier (XVF expects ESP-master at 16 kHz; ESP firmware is configured slave-48k). Mute-button-hold DFU mode works for recovery; runtime DFU is preferred."
 }
