@@ -285,9 +285,12 @@ export function spawnWorker({
       const scheduledNote = getScheduledNote();
       // Admission already selected every required capability for a contract
       // worker. A remembered plan could silently remove one of them.
-      const hasExplicitWorkerCount = Number.isSafeInteger(workerAgent.requestedWorkstreams)
-        && workerAgent.requestedWorkstreams >= 2;
-      const rememberedPlan = completionContract || hasExplicitWorkerCount
+      const hasExplicitParallelRequest = workerAgent.parallelWorkRequested === true
+        || (
+          Number.isSafeInteger(workerAgent.requestedWorkstreams)
+          && workerAgent.requestedWorkstreams >= 2
+        );
+      const rememberedPlan = completionContract || hasExplicitParallelRequest
         ? null
         : matchToolPlan(userId, { agentId: workerAgent.id, phrase: originalTask });
       const workerRec = activeTasks.get(taskId);

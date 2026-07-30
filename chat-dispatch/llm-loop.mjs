@@ -28,6 +28,7 @@ import {
 import { interceptScheduling } from '../lib/scheduler-intent.mjs';
 import { armFollowupAfterDrain } from '../ws-handler.mjs';
 import { isVoicePolicyEnabled, DISPOSITION_WINDOW_MS } from '../lib/voice-policy.mjs';
+import { classifyClearlySplittableWork } from '../lib/parallel-work-gate.mjs';
 import { runWithTurnContext } from '../lib/turn-abort-context.mjs';
 import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
@@ -59,6 +60,10 @@ const DELEGATION_VERB_RE = /\b(?:delegate(?:\s+to)?|have\s+\w+\s+(?:email|send|m
 const COMPOUND_CONNECTIVE_RE = /\b(?:also\s+(?:delegate|have|email|send|tell|ask|make|create|generate|compile)|and\s+(?:also|then|email|send|tell|ask|delegate)|then\s+(?:email|send|tell|ask|delegate|have))\b/i;
 export function looksCompoundOrDelegation(text) {
   if (!text) return false;
+  // Explicit team requests must reach the coordinator so it can preserve the
+  // trusted count/authorization through spawn_worker → parallel_work. Direct
+  // specialist routing would otherwise lose that scheduling contract.
+  if (classifyClearlySplittableWork(text).required) return true;
   if (DELEGATION_VERB_RE.test(text)) return true;
   if (COMPOUND_CONNECTIVE_RE.test(text)) return true;
   // Long compound: 3+ sentences AND at least two distinct imperative verbs.

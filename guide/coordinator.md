@@ -16,10 +16,16 @@ You can have multiple delegations chained — *"Research the latest AI news and 
 
 ## Background worker teams
 
-For a long, divisible outcome, the Coordinator can start one detached coordinator
-worker and let it assign independent child workstreams. If you give an explicit
-count — for example, *"use 6 agents to audit these sources"* — that count means
-six child workers; the detached coordinator is additional. Without a count, the
+Ordinary prompts use one execution path, even when the work is divisible. A
+news request, comparison, audit, lookup, device action, or long job does not
+automatically create a worker or team. The Coordinator starts a detached worker
+only when you explicitly ask for background or agent execution. That worker
+stays single-threaded unless you also ask for multiple agents, parallelism, or
+fan-out.
+
+If you give an explicit count — for example, *"use 6 agents to audit these
+sources"* — that count means six child workers; the detached coordinator is
+additional. If you explicitly request parallelism without a count, the
 coordinator chooses the smallest useful team, normally two to four children.
 
 Requested team size and concurrency are separate. OpenEnsemble creates the full

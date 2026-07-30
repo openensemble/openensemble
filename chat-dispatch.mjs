@@ -660,6 +660,10 @@ export async function handleChatMessage({
       sideEffectAttemptId: _sideEffectAttemptId,
     }),
   });
+  if (!_isBackgroundContinuation && !_isolatedTaskRun && !_silent && !labVerifierTurn) {
+    const { enableForegroundToolReplayGuard } = await import('./lib/tool-replay-guard.mjs');
+    enableForegroundToolReplayGuard(turnStore);
+  }
   recordRouting({ toolPlan: toolPlan?.mode || 'auto' });
 
   // Correlate every outward event before it reaches WS/Telegram adapters. The

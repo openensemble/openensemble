@@ -73,9 +73,10 @@
     },
     {
       "type": "function",
+      "replayPolicy": "turn",
       "function": {
         "name": "ha_call_service",
-        "description": "Call a Home Assistant service to control one or more entities. Examples: turn lights on/off (light.turn_on), activate a scene (scene.turn_on), set thermostat (climate.set_temperature with data: {temperature: 70}), play media (media_player.media_play), open a cover (cover.open_cover).",
+        "description": "Call a Home Assistant service to control one or more entities. Execute each resolved service/entity/data action exactly once per user prompt; after an accepted, confirmed, or pending result, stop calling and answer the user. Examples: turn lights on/off (light.turn_on), activate a scene (scene.turn_on), set thermostat (climate.set_temperature with data: {temperature: 70}), play media (media_player.media_play), open a cover (cover.open_cover).",
         "parameters": {
           "type": "object",
           "properties": {

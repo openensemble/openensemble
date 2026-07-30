@@ -40,6 +40,10 @@ import { getTurnContext } from '../lib/turn-abort-context.mjs';
 import { getTurn } from '../lib/turn-trace-context.mjs';
 import { currentTaskContext, runInTaskContext } from '../lib/task-proxy-context.mjs';
 import {
+  reserveForegroundToolCall,
+} from '../lib/tool-replay-guard.mjs';
+import { toolCallAdvancesReplayEpoch } from '../lib/tool-replay-policy.mjs';
+import {
   consumeCoordinatorUpdateText,
   coordinatedToolBarrierText,
 } from '../lib/coordinator-directives.mjs';
@@ -350,6 +354,61 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // the LLM-visible dispatch yield.
   const mergedArgs = (args && typeof args === 'object') ? mergeDefaults(userId, name, args) : args;
 
+  // Foreground turns explicitly opt into a per-turn replay ledger at the chat
+  // boundary. Provider adapters can ask for the same call again in a later
+  // round—or emit duplicates concurrently—but they all funnel through this
+  // boundary. Internal/background turns do not enable the ledger because they
+  // may intentionally poll with identical arguments.
+  const advancesReplayEpoch = toolCallAdvancesReplayEpoch(
+    owningToolDef,
+    name,
+    mergedArgs,
+  );
+  // Inferred/default mutations are non-idempotent for the duration of an
+  // ordinary user turn. Only a manifest's explicit "mutation" policy opts a
+  // tool into A → other mutation → A re-execution (for example test → edit →
+  // test). Failed mutations remain reserved in the current state epoch because
+  // a transport error may have happened after the side effect committed.
+  const retainCompletedReplay = advancesReplayEpoch
+    && owningToolDef?.replayPolicy !== 'mutation';
+  const retainFailureReplay = advancesReplayEpoch;
+  const replayReservation = reserveForegroundToolCall({
+    userId,
+    agentId,
+    skillId: owningSkillId,
+    name,
+    args: mergedArgs,
+    advanceEpoch: advancesReplayEpoch,
+    // A turn-retained action may have committed even when its transport reports
+    // failure, so never retry the exact call automatically in this turn.
+    retainCompleted: retainCompletedReplay,
+    retainFailure: retainFailureReplay,
+  });
+  if (replayReservation && !replayReservation.owner) {
+    const prior = await replayReservation.wait;
+    log.warn('tool', 'suppressed duplicate tool call in one turn', {
+      tool: name,
+      userId,
+      agentId,
+    });
+    yield {
+      type: 'result',
+      text: [
+        prior.text,
+        `[Server replay guard: this exact ${name} call already ran earlier in this turn. It was not executed again. Use the result above and answer the user now.]`,
+      ].filter(Boolean).join('\n\n'),
+      _reusedToolResult: true,
+      ...(prior.isError ? { isError: true } : {}),
+    };
+    return;
+  }
+  let replayReservationSettled = false;
+  const settleReplayReservation = outcome => {
+    if (!replayReservation?.owner || replayReservationSettled) return false;
+    replayReservationSettled = replayReservation.complete(outcome);
+    return replayReservationSettled;
+  };
+
   // Ephemeral-delegation memoization: same (toolName, args) within one
   // delegated session returns the prior result, skipping skill execution +
   // the LLM turn that would parse the round-trip. Only fires for the small
@@ -362,7 +421,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       log.info('tool', 'ephemeral cache hit', { tool: name, agentId });
       const update = consumeCoordinatorUpdateText();
       const control = update ? `\n\n${update}` : '';
-      yield { type: 'result', text: `[cached from earlier ${name} this session]\n${hit.text}${control}` };
+      const cachedText = `[cached from earlier ${name} this session]\n${hit.text}${control}`;
+      settleReplayReservation({ text: cachedText, isError: false, status: 'success' });
+      yield { type: 'result', text: cachedText };
       return;
     }
   }
@@ -405,6 +466,10 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     // Tool-error tagging — runs for ALL agents (not just ephemeral). Tag the
     // result so the trace reads ok:false and the bottom counts a failure.
     if (value?.type === 'result' && typeof value.text === 'string') {
+      if (value.isError === true) {
+        _resultWasError = true;
+        _lastErrText = value.text;
+      }
       const norm = normalizeToolResult(value.text);
       if (norm.isError) {
         _resultWasError = true;
@@ -672,7 +737,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           if (backgrounded) {
             // Inform the coordinator's LLM the tool was backgrounded — its turn
             // ends gracefully with this message in place of the real result.
-            yield { type: 'result', text: `${displayName} is running in the background (task ${watcherId}). The result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
+            const deferredText = `${displayName} is running in the background (task ${watcherId}). The result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.`;
+            settleReplayReservation({ text: deferredText, isError: false, status: 'accepted' });
+            yield { type: 'result', text: deferredText };
             yield { type: '__hide_turn', reason: 'bg_chip', taskId: watcherId };
 
             // Detached worker: continue draining iter, push to chip, finalize
@@ -1240,7 +1307,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           kind: 'tool',
           cancel: cancelBackgroundOwner,
         });
-        yield { type: 'result', text: `\`${name}\` is running in the background (task ${wid}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.` };
+        const deferredText = `\`${name}\` is running in the background (task ${wid}). Its result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.`;
+        settleReplayReservation({ text: deferredText, isError: false, status: 'accepted' });
+        yield { type: 'result', text: deferredText };
         yield { type: '__hide_turn', reason: 'bg_chip', taskId: wid };
 
         let ownerTerminal = {
@@ -1461,6 +1530,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
         ...(isStructured && Array.isArray(winner._images) ? { _images: winner._images } : {}),
       });
     }
+    settleReplayReservation({
+      text: _resultWasError ? _lastErrText : _lastResultText,
+      isError: _resultWasError,
+      status: _resultWasError ? 'failure' : 'success',
+    });
     log.info('tool', 'tool complete', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart });
 
     // Phase-3 intent learner: record AFTER completion and ONLY on success.
@@ -1508,6 +1582,7 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   } catch (e) {
     if (isAbortError(e, toolAbort.signal)) {
       const cancellation = abortError(toolAbort.signal, `Tool ${name} cancelled`);
+      settleReplayReservation({ text: cancellation.message, isError: true, status: 'uncertain' });
       log.info('tool', 'tool cancelled', {
         skill: owningSkillId,
         tool: name,
@@ -1523,7 +1598,9 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     toolExecutionSettled = true;
     console.error(`[skills] Runtime error in tool "${name}":`, e.message);
     log.error('tool', 'tool threw', { skill: owningSkillId, tool: name, userId, agentId, durationMs: Date.now() - _toolStart, err: e.message });
-    yield { type: 'result', text: `Tool error (${name}): ${e.message}`, isError: true };
+    const errorText = `Tool error (${name}): ${e.message}`;
+    settleReplayReservation({ text: errorText, isError: true, status: 'uncertain' });
+    yield { type: 'result', text: errorText, isError: true };
 
     // Phase-3: count the failure. Fire-and-forget so the user's bubble lands
     // immediately. On threshold trip we emit a tool_failure proposal (the
@@ -1531,6 +1608,11 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     // refine vs a diagnostic). Shared with the caught-and-returned-error path.
     _reportToolFailure(e.message);
   } finally {
+    settleReplayReservation({
+      text: `Tool ${name} ended before returning a result.`,
+      isError: true,
+      status: 'uncertain',
+    });
     if (!toolExecutionTransferred) {
       // A consumer can abandon a streaming tool at a yield without aborting the
       // whole turn (provider teardown, policy stop, etc.). Signal the skill's

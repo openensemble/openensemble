@@ -285,6 +285,7 @@
     },
     {
       "type": "function",
+      "replayPolicy": "mutation",
       "function": {
         "name": "coder_run_command",
         "description": "Execute a short-lived shell command in the active project directory. Returns stdout, stderr, and exit code. Use for commands that finish on their own — e.g. `npm install`, `npm test`, `npm run build`, `tsc`, `eslint`, `pytest`, `pip install`, `git status`, `node scripts/seed.mjs`. The sandbox is torn down when the command returns, so anything long-running dies the moment this tool finishes; DO NOT use it for `node server.mjs`, `npm run dev`, `npm start`, `flask run`, `rails s`, `python -m http.server`, `nodemon`, or anything with `--watch` — those are for coder_start_server. Default timeout is 30s; if a legitimate one-off might run longer (large `npm install`, slow build), raise the timeout (max 300).",

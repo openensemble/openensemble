@@ -176,6 +176,7 @@ export async function trySingletonCompoundBackground({
       'spawn_worker', { task: userText, label }, userId, `${userId}_${agentId}`,
       {
         completionContract,
+        trustedUserText: userText,
         ...(executionTask ? { executionTask } : {}),
       },
     )[Symbol.asyncIterator]();

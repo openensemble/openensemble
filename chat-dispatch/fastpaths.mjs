@@ -54,17 +54,22 @@ async function persistFastpath(sessionKey, messages, onEvent, agentId, label) {
 //
 // Supported verbs: turn on/off/toggle, activate/run (scenes/scripts), lock/
 // unlock, open/close, "set X to N%" (light brightness, fan percentage),
-// "set X to N degrees" (climate temperature). Each maps to a domain-aware
-// service call below. New verbs go in classifyHaIntent → executeHaIntent.
+// "set X to N degrees" (climate temperature), and "set X to fan/cool/heat/
+// dry/auto/off mode". Each maps to one domain-aware service call below. New
+// verbs go in classifyHaIntent → executeHaIntent.
 
 const HA_VERB_RE      = /^(turn\s+on|turn\s+off|toggle|activate|run|lock|unlock|open|close)\s+(.+?)\s*$/i;
 const HA_SET_PCT_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:%|percent)\s*$/i;
 const HA_SET_DEG_RE   = /^set\s+(.+?)\s+to\s+(\d+)\s*(?:degrees?|deg)\s*$/i;
+const HA_SET_MODE_RE  = /^set\s+(.+?)\s+to\s+(fan(?:[\s_-]+only)?|cool(?:ing)?|heat(?:ing)?|dry|auto|off)(?:\s+mode)?\s*$/i;
 
 function hasHaIntentSyntax(text) {
   if (typeof text !== 'string') return false;
   const trimmed = text.trim().replace(/[.,!?]+$/, '');
-  return HA_VERB_RE.test(trimmed) || HA_SET_PCT_RE.test(trimmed) || HA_SET_DEG_RE.test(trimmed);
+  return HA_VERB_RE.test(trimmed)
+    || HA_SET_PCT_RE.test(trimmed)
+    || HA_SET_DEG_RE.test(trimmed)
+    || HA_SET_MODE_RE.test(trimmed);
 }
 
 // The HA skill + its service-call tool. Used to mirror the exact gates
@@ -214,6 +219,31 @@ async function classifyHaIntent(text, userId, suppressLearning = false) {
     };
   }
 
+  // "set window AC to fan mode" — deterministic climate HVAC mode.
+  const mm = trimmed.match(HA_SET_MODE_RE);
+  if (mm) {
+    const phrase = mm[1];
+    const requested = mm[2].toLowerCase().replace(/[\s_-]+/g, '_');
+    const mode = requested === 'fan' || requested === 'fan_only'
+      ? 'fan_only'
+      : requested === 'cooling'
+        ? 'cool'
+        : requested === 'heating'
+          ? 'heat'
+          : requested;
+    const hit = await resolvePhrase(phrase, userId, suppressLearning);
+    if (!hit || hit.domain !== 'climate') return null;
+    return {
+      entity_id: hit.entity_id,
+      domain: hit.domain,
+      friendly_name: hit.friendly_name,
+      verb: `set to ${mode}`,
+      serviceDomain: 'climate',
+      service: 'set_hvac_mode',
+      data: { hvac_mode: mode },
+    };
+  }
+
   return null;
 }
 
@@ -233,9 +263,12 @@ async function executeHaIntent(intent) {
     data: intent.data || {},
   });
   if (!result.accepted) {
-    // A timed-out POST may already have reached HA. Own the turn without
-    // claiming success or falling through to a second service call.
-    if (/timeout/i.test(result.error || '')) {
+    // A timed-out or failed transport may already have delivered the POST.
+    // Own the turn without claiming success or falling through to a second
+    // service call; a retry is safe only when the user starts a new turn.
+    if (/timeout|connection failed|socket|reset|econnreset|epipe|aborted|premature|closed/i.test(
+      result.error || '',
+    )) {
       return {
         text: `Home Assistant did not confirm the request for ${intent.friendly_name}; it may still complete.`,
         pending: true,
@@ -261,6 +294,7 @@ async function executeHaIntent(intent) {
   else if (intent.data?.percentage != null)           confirm = `${intent.friendly_name} at ${intent.data.percentage}%.`;
   else if (intent.data?.volume_level != null)         confirm = `${intent.friendly_name} volume ${Math.round(intent.data.volume_level * 100)}%.`;
   else if (intent.data?.temperature != null)          confirm = `${intent.friendly_name} set to ${intent.data.temperature}°.`;
+  else if (intent.data?.hvac_mode != null)             confirm = `${intent.friendly_name} set to ${intent.data.hvac_mode === 'fan_only' ? 'fan' : intent.data.hvac_mode} mode.`;
   else                                                confirm = `Done.`;
   return { text: confirm };
 }

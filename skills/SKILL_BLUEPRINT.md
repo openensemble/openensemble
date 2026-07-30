@@ -193,6 +193,18 @@ Only set `readOnly: true` on a tool that is a pure data-fetch: no side effects, 
 
 A tool without `readOnly: true` still works normally in live turns — the flag has no effect on ordinary use. It only means no follow-up lead can be registered against it: `ctx.registerLead` is rejected at registration and reports that honestly back to the calling skill (it never claims it'll check back and then silently drop the follow-up).
 
+### replayPolicy (optional — protects a non-idempotent live action)
+
+Foreground chat turns coalesce exact repeated reads while observable state is
+unchanged, and retain exact repeated actions for the full turn by default.
+`"replayPolicy": "turn"` documents that a send, toggle, purchase, or other
+non-idempotent action must never run twice in one user turn. Use
+`"replayPolicy": "mutation"` only when the tool changes state but may
+legitimately run again after a different mutation (for example, a test command
+after an edit). Failed mutations stay reserved within the same state epoch
+because a transport error may occur after the action commits. This policy is
+independent of `readOnly`; it does not authorize unattended execution.
+
 To make an empty lookup genuinely useful later, register a lead only after the
 user explicitly asks for a follow-up. Return the helper's `announce` line so the
 user knows whether tracking was actually stored:

@@ -15,9 +15,14 @@ import {
 import { createLinkedAbortController, isAbortError } from '../../lib/abort-utils.mjs';
 import { isEphemeralReadOnlyTool } from '../../lib/ephemeral-tool-cache.mjs';
 import {
+  classifyClearlySplittableWork,
+  explicitParallelLaneCounts,
+  explicitParallelLaneRequests,
+  explicitlyRequestsAgentExecution,
   MAX_PARALLEL_WORKSTREAMS,
   unlockParallelWorkGate,
 } from '../../lib/parallel-work-gate.mjs';
+import { getTurn, getTurnRestartContext } from '../../lib/turn-trace-context.mjs';
 import {
   canonicalWorkClaimKey,
   claimWork,
@@ -94,6 +99,8 @@ const MAX_PARALLEL_TEAM_TOOL_LOOPS = 64;
 
 /** @type {Map<string, {active:number, waiters:Array<any>}>} */
 const workstreamSlots = new Map();
+/** @type {WeakMap<object, {mode:string|null,count:number,reservedExactOutcomes?:Set<string>}>} */
+const fallbackTurnAgentLaunchStates = new WeakMap();
 
 function _slotState(userId) {
   let state = workstreamSlots.get(userId);
@@ -257,6 +264,175 @@ function _normalizedWorkstreamCount(value) {
     ? value
     : (typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN);
   return Number.isSafeInteger(count) && count >= 2 ? count : null;
+}
+
+const COUNT_SCOPE_STOP_WORDS = new Set([
+  'agent', 'agents', 'worker', 'workers', 'workstream', 'workstreams',
+  'use', 'using', 'run', 'spawn', 'hire', 'launch', 'start', 'create',
+  'assign', 'delegate', 'exactly', 'for', 'to', 'on', 'and', 'or', 'the',
+  'a', 'an', 'this', 'that', 'these', 'those', 'with', 'please',
+]);
+
+function _countScopeTokens(text) {
+  return new Set(
+    String(text || '')
+      .toLowerCase()
+      .match(/[a-z0-9]+/g)
+      ?.filter(token => token.length > 2
+        && !/^\d+$/.test(token)
+        && !COUNT_SCOPE_STOP_WORDS.has(token))
+      ?? [],
+  );
+}
+
+function _resolveExactWorkerOutcome(count, task, label, trustedUserText) {
+  const requests = explicitParallelLaneRequests(trustedUserText);
+  const matching = requests
+    .map((request, index) => ({ ...request, index }))
+    .filter(request => request.count === count);
+  if (!matching.length) return null;
+  if (requests.length === 1) return matching[0];
+
+  const outcomeTokens = _countScopeTokens(`${label || ''} ${task || ''}`);
+  if (!outcomeTokens.size) return null;
+  const scores = requests.map((request, index) => {
+    const contextTokens = _countScopeTokens(request.context);
+    let score = 0;
+    for (const token of outcomeTokens) {
+      if (contextTokens.has(token)) score += 1;
+    }
+    return { ...request, index, score };
+  });
+  const matchingScore = Math.max(
+    0,
+    ...scores.filter(row => row.count === count).map(row => row.score),
+  );
+  const otherScore = Math.max(
+    0,
+    ...scores.filter(row => row.count !== count).map(row => row.score),
+  );
+  if (matchingScore <= 0 || matchingScore <= otherScore) return null;
+
+  const bestMatches = scores.filter(row =>
+    row.count === count && row.score === matchingScore);
+  // Equal counts can describe separate outcomes. Never guess which occurrence
+  // a vague worker task is meant to consume, because doing so can spend the
+  // wrong outcome and admit a later duplicate.
+  return bestMatches.length === 1 ? bestMatches[0] : null;
+}
+
+function _exactOutcomeId(request) {
+  return `${request.index}:${request.count}:${request.context}`;
+}
+
+function _reserveAgentExecution(router, {
+  kind,
+  trustedUserText,
+  exactOutcome = null,
+}) {
+  const exactRequests = explicitParallelLaneRequests(trustedUserText);
+  const max = kind === 'spawn_worker'
+    ? Math.max(1, exactRequests.length)
+    : 1;
+  let state = null;
+  if (router) {
+    state = router.agentLaunchState
+      || (router.agentLaunchState = { mode: null, count: 0 });
+  } else {
+    // Tool routing is an optimization and may fail. Interactive turns retain
+    // their trusted initiating text on the turn trace, so use that same
+    // server-owned object as a fail-closed launch ledger instead of silently
+    // allowing every model-emitted delegation call.
+    const restartText = String(getTurnRestartContext()?.text || '').trim();
+    const turn = getTurn();
+    if (restartText && turn && typeof turn === 'object') {
+      state = fallbackTurnAgentLaunchStates.get(turn);
+      if (!state) {
+        state = { mode: null, count: 0 };
+        fallbackTurnAgentLaunchStates.set(turn, state);
+      }
+    }
+  }
+  if (!state) return { ok: true, count: 1, max: 1, state: null };
+  if (state.mode && state.mode !== kind) {
+    return {
+      ok: false,
+      reason: `This request already has one ${state.mode === 'spawn_worker' ? 'background coordinator' : 'specialist execution'} path. Do not start a second agent path; use the existing result.`,
+      state,
+      max,
+    };
+  }
+
+  if (kind === 'spawn_worker' && exactRequests.length) {
+    const validOutcome = exactOutcome
+      && exactRequests.some((request, index) =>
+        index === exactOutcome.index
+        && request.count === exactOutcome.count
+        && request.context === exactOutcome.context);
+    if (!validOutcome) {
+      return {
+        ok: false,
+        reason: 'The requested worker could not be matched to one exact named outcome. No worker was started; keep each agent count with its outcome.',
+        state,
+        max,
+      };
+    }
+    const outcomeId = _exactOutcomeId(exactOutcome);
+    const reservedOutcomes = state.reservedExactOutcomes instanceof Set
+      ? state.reservedExactOutcomes
+      : (state.reservedExactOutcomes = new Set());
+    if (reservedOutcomes.has(outcomeId)) {
+      return {
+        ok: false,
+        reason: `The explicitly requested ${exactOutcome.count}-agent outcome already has a coordinator. No additional worker was started; start only an unconsumed named outcome.`,
+        state,
+        max,
+      };
+    }
+    state.mode = kind;
+    reservedOutcomes.add(outcomeId);
+    state.count = reservedOutcomes.size;
+    return {
+      ok: true,
+      count: state.count,
+      max,
+      remaining: Math.max(0, max - state.count),
+      outcomeId,
+      state,
+    };
+  }
+
+  if (state.count >= max) {
+    return {
+      ok: false,
+      reason: kind === 'spawn_worker'
+        ? 'Every explicitly requested background outcome already has a coordinator. No additional worker was started.'
+        : 'The allowed agent executions for this request are already running or complete. Do not start another agent path.',
+      state,
+      max,
+    };
+  }
+  state.mode = kind;
+  state.count += 1;
+  return {
+    ok: true,
+    count: state.count,
+    max,
+    remaining: Math.max(0, max - state.count),
+    state,
+  };
+}
+
+function _releaseAgentExecution(reservation) {
+  const state = reservation?.state;
+  if (!state || reservation?.ok !== true) return;
+  if (reservation.outcomeId && state.reservedExactOutcomes instanceof Set) {
+    state.reservedExactOutcomes.delete(reservation.outcomeId);
+    state.count = state.reservedExactOutcomes.size;
+  } else {
+    state.count = Math.max(0, state.count - 1);
+  }
+  if (state.count === 0) state.mode = null;
 }
 
 function _parallelItems(args, maxItems) {
@@ -466,6 +642,20 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
   }
 
   const expectedCount = _expectedWorkstreamCount(baseAgent);
+  const explicitlyRequested = expectedCount !== null
+    || baseAgent?.parallelWorkRequested === true
+    || (
+      baseAgent?._parallelWorkGate?.assessment?.required === true
+      && baseAgent._parallelWorkGate.assessment.reasons?.includes('explicit-parallelism')
+    );
+  if (!explicitlyRequested) {
+    yield {
+      type: 'result',
+      text: 'parallel_work was not started because the user did not explicitly request parallel agents for this outcome. Complete it on this single worker.',
+      isError: true,
+    };
+    return;
+  }
   if (expectedCount?.count > MAX_PARALLEL_WORKSTREAMS) {
     yield {
       type: 'result',
@@ -833,15 +1023,99 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   }
   const task = args?.task;
   if (!task) { yield { type: 'result', text: 'Missing task — describe the complete job for the worker.' }; return; }
+  const router = getToolRouterContext();
+  const trustedUserText = getTurnRestartContext()?.text
+    || (
+      router?.agent?.ephemeral !== true
+        ? String(router?.routeText || '')
+        : ''
+    )
+    || String(internalOptions?.trustedUserText || '');
+  const serverAuthorizedCompound = internalOptions?.completionContract != null;
+  const hasInteractiveAdmissionContext = Boolean(
+    router || String(getTurnRestartContext()?.text || '').trim(),
+  );
+  if (hasInteractiveAdmissionContext
+      && !serverAuthorizedCompound
+      && !explicitlyRequestsAgentExecution(trustedUserText)) {
+    yield {
+      type: 'result',
+      text: 'No worker was started because this is an ordinary prompt. Complete it directly in the current execution path; workers require an explicit user request for background or agent execution.',
+      isError: true,
+    };
+    return;
+  }
+  const parallelAssessment = classifyClearlySplittableWork(trustedUserText);
+  const trustedLaneCounts = explicitParallelLaneCounts(trustedUserText);
+  let exactOutcome = null;
   const hasWorkerCount = args?.worker_count != null;
-  const requestedWorkstreams = hasWorkerCount
+  const modelRequestedWorkstreams = hasWorkerCount
     ? _normalizedWorkstreamCount(args.worker_count)
     : null;
   if (hasWorkerCount
-      && (requestedWorkstreams === null || requestedWorkstreams > MAX_DECLARED_WORKSTREAMS)) {
+      && (modelRequestedWorkstreams === null || modelRequestedWorkstreams > MAX_DECLARED_WORKSTREAMS)) {
     yield {
       type: 'result',
       text: `worker_count must be a whole number from 2 to ${MAX_DECLARED_WORKSTREAMS}. No worker was started; do not silently substitute another count.`,
+      isError: true,
+    };
+    return;
+  }
+  if (hasWorkerCount && trustedLaneCounts.length === 0) {
+    yield {
+      type: 'result',
+      text: 'worker_count was not accepted because the user did not explicitly request an exact number of agents. No worker was started.',
+      isError: true,
+    };
+    return;
+  }
+  if (hasWorkerCount && !trustedLaneCounts.includes(modelRequestedWorkstreams)) {
+    yield {
+      type: 'result',
+      text: `worker_count ${modelRequestedWorkstreams} does not match any exact agent count in the user's request (${trustedLaneCounts.join(', ')}). No worker was started.`,
+      isError: true,
+    };
+    return;
+  }
+  if (hasWorkerCount && trustedLaneCounts.length > 1) {
+    exactOutcome = _resolveExactWorkerOutcome(
+      modelRequestedWorkstreams,
+      task,
+      args?.label,
+      trustedUserText,
+    );
+  }
+  if (hasWorkerCount && trustedLaneCounts.length > 1 && !exactOutcome) {
+    yield {
+      type: 'result',
+      text: `worker_count ${modelRequestedWorkstreams} does not match this outcome's scoped count in the user's multi-outcome request. No worker was started; keep each count with its named outcome.`,
+      isError: true,
+    };
+    return;
+  }
+  if (trustedLaneCounts.length === 1) {
+    exactOutcome = _resolveExactWorkerOutcome(
+      hasWorkerCount ? modelRequestedWorkstreams : trustedLaneCounts[0],
+      task,
+      args?.label,
+      trustedUserText,
+    );
+  }
+  if (!hasWorkerCount && trustedLaneCounts.length > 1) {
+    yield {
+      type: 'result',
+      text: `This prompt gives separate exact agent counts (${trustedLaneCounts.join(', ')}). Pass the count for this specific outcome as worker_count; no worker was started.`,
+      isError: true,
+    };
+    return;
+  }
+  const requestedWorkstreams = hasWorkerCount
+    ? modelRequestedWorkstreams
+    : (trustedLaneCounts[0] ?? null);
+  if (requestedWorkstreams !== null && requestedWorkstreams > MAX_PARALLEL_WORKSTREAMS) {
+    yield {
+      type: 'result',
+      text: `The user requested ${requestedWorkstreams} agents, above this server's per-outcome safety cap of ${MAX_PARALLEL_WORKSTREAMS}. No worker was started; report the limit instead of silently reducing the request.`,
       isError: true,
     };
     return;
@@ -855,10 +1129,11 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   const label = args.label || (task.length > 56 ? task.slice(0, 56) + '…' : task);
   const workerId = `ephemeral_worker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
   const workerAgent = { ...ownerAgent, id: workerId, ephemeral: true, workerOwnerId: ownerKey };
+  workerAgent.parallelWorkRequested = parallelAssessment.required === true;
   if (requestedWorkstreams !== null) {
     workerAgent.requestedWorkstreams = requestedWorkstreams;
   } else {
-    // Never leak an earlier detached run's explicit sizing into an adaptive job.
+    // Never leak an earlier detached run's explicit sizing into this job.
     delete workerAgent.requestedWorkstreams;
   }
   // No human is watching the worker's session. A server-owned fast path may
@@ -877,6 +1152,19 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   } catch { /* direct non-turn caller */ }
 
   const { spawnWorkerIdempotently } = await import('../../lib/worker-spawn-idempotency.mjs');
+  const launchReservation = _reserveAgentExecution(router, {
+    kind: 'spawn_worker',
+    trustedUserText,
+    exactOutcome,
+  });
+  if (!launchReservation.ok) {
+    yield {
+      type: 'result',
+      text: launchReservation.reason,
+      isError: true,
+    };
+    return;
+  }
   let admitted;
   try {
     admitted = await spawnWorkerIdempotently({
@@ -906,6 +1194,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       }),
     });
   } catch (error) {
+    _releaseAgentExecution(launchReservation);
     if (error?.code === 'WORKER_CAPACITY') {
       yield { type: 'result', text: error.message };
       return;
@@ -913,18 +1202,27 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     throw error;
   }
   const tid = admitted.taskId;
+  const moreExplicitOutcomes = launchReservation.remaining > 0;
   if (admitted.duplicate) {
+    if (!moreExplicitOutcomes) suppressToolForTurn('spawn_worker');
     suppressToolForTurn('check_workers');
-    yield { type: 'result', text: `This job already has a background worker (${tid}). Do NOT call spawn_worker or check_workers again in this turn; reply to the user now. Its report will post automatically, and check_workers is for a later user status request.` };
+    yield {
+      type: 'result',
+      text: moreExplicitOutcomes
+        ? `This job already has a background worker (${tid}). Start only the remaining explicitly counted outcome; do not call check_workers in this turn.`
+        : `This job already has a background worker (${tid}). Do NOT call spawn_worker or check_workers again in this turn; reply to the user now. Its report will post automatically, and check_workers is for a later user status request.`,
+    };
     return;
   }
   const countNote = requestedWorkstreams === null
     ? ''
-    : (requestedWorkstreams > MAX_PARALLEL_WORKSTREAMS
-      ? ` The request specified ${requestedWorkstreams} child workers; this server's per-outcome safety cap is ${MAX_PARALLEL_WORKSTREAMS}, so the coordinator will use ${MAX_PARALLEL_WORKSTREAMS} and must report that limit visibly.`
-      : ` It is required to create exactly ${requestedWorkstreams} child workstreams; the coordinator does not count toward that total.`);
+    : ` It is required to create exactly ${requestedWorkstreams} child workstreams; the coordinator does not count toward that total.`;
+  if (!moreExplicitOutcomes) suppressToolForTurn('spawn_worker');
   suppressToolForTurn('check_workers');
-  yield { type: 'result', text: `Hired a background worker (${tid}) on: ${label}.${countNote} This is a verified launch receipt: do NOT call check_workers in this turn. Reply to the user now; the report will post automatically when complete. Use check_workers only after a later user status request.` };
+  yield {
+    type: 'result',
+    text: `Hired a background worker (${tid}) on: ${label}.${countNote} This is a verified launch receipt: do NOT call check_workers in this turn. ${moreExplicitOutcomes ? 'Start only the remaining explicitly counted outcome, then reply.' : 'Reply to the user now; the report will post automatically when complete.'} Use check_workers only after a later user status request.`,
+  };
 }
 
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null, internalOptions = null) {
@@ -1104,6 +1402,36 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
       yield { type: 'result', text: `Handoff target '${handoffTo}' not found — no pipeline was started. Pick a valid agent for handoff_to, or delegate normally and route the result yourself.` };
       return;
     }
+  }
+
+  const askRouter = getToolRouterContext();
+  const trustedAskText = getTurnRestartContext()?.text
+    || (
+      askRouter?.agent?.ephemeral !== true
+        ? String(askRouter?.routeText || '')
+        : ''
+    );
+  const askAssessment = askRouter?.parallelWorkAssessment
+    || classifyClearlySplittableWork(trustedAskText);
+  if (askAssessment.required) {
+    yield {
+      type: 'result',
+      text: 'This request explicitly asks for parallel agents. Do not fan out with ask_agent calls; start one coordinator with spawn_worker so the requested team size and concurrency limit are preserved.',
+      isError: true,
+    };
+    return;
+  }
+  const askReservation = _reserveAgentExecution(askRouter, {
+    kind: 'ask_agent',
+    trustedUserText: trustedAskText,
+  });
+  if (!askReservation.ok) {
+    yield {
+      type: 'result',
+      text: askReservation.reason,
+      isError: true,
+    };
+    return;
   }
 
   // ── Decide sync vs background ──────────────────────────────────────────

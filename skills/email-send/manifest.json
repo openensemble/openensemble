@@ -9,6 +9,7 @@
   "tools": [
     {
       "type": "function",
+      "replayPolicy": "turn",
       "function": {
         "name": "email_user",
         "description": "Email the user (or a specified recipient) DIRECTLY — sends from the user's primary connected account, with NO hand-off to an email agent. Use it to DELIVER a result you produced or were asked to send: a briefing, a research summary, an alert, a reminder. Send-only: for reading, triage, labels, search, or bulk inbox operations, that is the email specialist's job (delegate or use the full email tools).",

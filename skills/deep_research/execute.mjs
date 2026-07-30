@@ -11,9 +11,34 @@ import { saveResearchVersion, researchAudience } from '../../lib/doc-store.mjs';
 import { BASE_DIR } from '../../lib/paths.mjs';
 import { broadcastToUsers } from '../../routes/_helpers/broadcast.mjs';
 import { abortError, isAbortError, raceWithAbort } from '../../lib/abort-utils.mjs';
+import { getToolRouterContext } from '../../lib/tool-router-context.mjs';
+import { getTurnRestartContext } from '../../lib/turn-trace-context.mjs';
+import { classifyClearlySplittableWork } from '../../lib/parallel-work-gate.mjs';
 
 const CFG_PATH = path.join(BASE_DIR, 'config.json');
 const USERS_DIR = path.join(BASE_DIR, 'users');
+
+/**
+ * A detached coordinator's mandatory parallel_work wave consumes the user's
+ * fan-out authorization. Restored domain tools may finish or synthesize the
+ * outcome, but cannot reuse the same request to start another independent
+ * team.
+ */
+export function resolveDeepResearchParallelAssessment(router, trustedText = '') {
+  const assessment = router?.parallelWorkAssessment
+    || classifyClearlySplittableWork(trustedText);
+  const gate = router?.agent?._parallelWorkGate;
+  if (gate?.required === true && gate.state === 'satisfied') {
+    return {
+      ...assessment,
+      required: false,
+      reasons: [],
+      family: 'single',
+      fanoutAuthorizationConsumed: true,
+    };
+  }
+  return assessment;
+}
 
 function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError(signal, 'Deep research cancelled');
@@ -358,6 +383,29 @@ async function* execResearchSearch(topic, depth = 'standard', urls = [], userId,
   yield { type: 'result', text: output };
 }
 
+async function* execSingleAgentResearchDocument(topic, depth, userId, signal = null) {
+  let finalText = '';
+  for await (const chunk of execResearchSearch(topic, depth ?? 'deep', [], userId, signal)) {
+    throwIfAborted(signal);
+    if (chunk?.type === 'result') finalText = String(chunk.text || '');
+    else yield chunk;
+  }
+  throwIfAborted(signal);
+  if (!finalText) {
+    yield { type: 'result', text: `Deep research on "${topic}" returned no findings.`, isError: true };
+    return;
+  }
+  const title = `Deep Research: ${topic.slice(0, 100)}`;
+  const tags = topic.toLowerCase().split(/\s+/).filter(word => word.length > 3).slice(0, 5);
+  const saveResult = execSaveResearch(title, finalText, tags, userId);
+  let docId = null;
+  try { docId = JSON.parse(saveResult).id; } catch { /* return the findings even if save metadata is malformed */ }
+  yield {
+    type: 'result',
+    text: `Deep research complete on "${topic}" using one execution path and saved as document ${docId ?? '(save failed)'}.\n\n${finalText}`,
+  };
+}
+
 // ── Document storage helpers ─────────────────────────────────────────────────
 function getUserResearchDir(userId) {
   const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -492,7 +540,7 @@ function execDeleteResearch(documentId, userId) {
 }
 
 // ── Parallel deep research ───────────────────────────────────────────────────
-// Decomposes a topic into 3-7 distinct sub-angles, spawns one ephemeral worker
+// Decomposes a topic into 2-4 distinct sub-angles, spawns one ephemeral worker
 // agent per angle in parallel, then synthesizes their sub-reports into a single
 // saved document. Workers are pure in-memory agents — no session JSONL writes,
 // no cortex reads/writes, stripped tool set.
@@ -576,9 +624,9 @@ function makeEphemeralPlanner(caller) {
     tools: [], // no tools — the planner just returns JSON
     ephemeral: true,
     systemPrompt: [
-      `You decompose a research topic into 3 to 7 distinct sub-angles for parallel investigation.`,
+      `You decompose a research topic into 2 to 4 distinct sub-angles for parallel investigation.`,
       `Each angle must be a genuinely different dimension (not a rewording of the topic).`,
-      `If the topic is narrow and cannot be meaningfully decomposed, return fewer than 3 angles.`,
+      `If the topic is narrow and cannot be meaningfully decomposed, return fewer than 2 angles.`,
       ``,
       `Output ONLY valid JSON, no prose, no markdown fencing. Exact shape:`,
       `{"angles":[{"title":"short 2-4 word label","query":"focused standalone research question"}]}`,
@@ -627,7 +675,7 @@ async function planAngles(topic, caller, userId, signal = null) {
     // Validate each angle has title + query
     return parsed.angles
       .filter(a => a && typeof a.title === 'string' && typeof a.query === 'string')
-      .slice(0, 7);
+      .slice(0, 4);
   } catch (e) {
     rethrowCancellation(e, signal);
     console.warn('[deep_research_parallel] planner failed:', e.message);
@@ -696,9 +744,9 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId, signal
   throwIfAborted(signal);
 
   // Phase 2: Decide
-  if (!angles || angles.length < 3) {
+  if (!angles || angles.length < 2) {
     yield { type: 'token', text: `Topic is narrow (${angles?.length ?? 0} angles) — falling through to single-pass research.\n\n` };
-    for await (const chunk of execResearchSearch(topic, depth ?? 'deep', [], userId, signal)) {
+    for await (const chunk of execSingleAgentResearchDocument(topic, depth, userId, signal)) {
       throwIfAborted(signal);
       yield chunk;
     }
@@ -830,6 +878,31 @@ export default async function* execute(name, args, userId = 'default', agentId =
       return;
     }
     case 'deep_research_parallel': {
+      const router = getToolRouterContext();
+      const assessment = resolveDeepResearchParallelAssessment(
+        router,
+        getTurnRestartContext()?.text || '',
+      );
+      if (!assessment.required) {
+        for await (const chunk of execSingleAgentResearchDocument(
+          args.topic,
+          args.depth ?? 'deep',
+          userId,
+          signal,
+        )) {
+          throwIfAborted(signal);
+          yield chunk;
+        }
+        return;
+      }
+      if (assessment.requestedLanes !== null) {
+        yield {
+          type: 'result',
+          text: 'An exact agent count must run through the coordinator worker so the requested count can be preserved. Use spawn_worker with the complete research outcome.',
+          isError: true,
+        };
+        return;
+      }
       for await (const chunk of execResearchParallel(args.topic, args.depth, userId, agentId, signal)) {
         throwIfAborted(signal);
         yield chunk;

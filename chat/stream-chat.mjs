@@ -208,7 +208,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   if (voiceCtx) {
     voiceContext.enterWith({ source: voiceCtx.source ?? null, deviceId: voiceCtx.deviceId ?? null });
   }
-  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, matchedSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>, labVerifierForeground?: boolean, labProviderRequestCap?: number} | null} */
+  /** @type {{agent: any, fullTools: any[], initiallyIncludedSkills: Set<string>, keptSkills?: Set<string>, matchedSkills?: Set<string>, addedSkills: Set<string>, recoveryLoads?: any[], initialToolNames?: Set<string>, routeText?: string, parallelWorkAssessment?: any, agentLaunchState?: {mode:string|null,count:number}, labVerifierForeground?: boolean, labProviderRequestCap?: number} | null} */
   let _routerStore = null;
   let _executionResolution = null;
   // A task must never create a task. On any autonomous run strip the task /
@@ -227,6 +227,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const _parallelTaskContext = currentTaskContext();
   const _prePlanParallelAssessment = classifyClearlySplittableWork(routeText, {
     requestedWorkstreams: agent?.requestedWorkstreams,
+    explicitParallelism: agent?.parallelWorkRequested === true,
+    allowTextRequest: agent?.ephemeral !== true,
   });
   // Remembered tool plans are hints, whereas a mandatory detached-team
   // preflight is a current scheduling decision. Do not let a stale mode:none
@@ -257,6 +259,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         addedSkills: new Set(),
         recoveryLoads: [],
         initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
+        routeText,
+        parallelWorkAssessment: _prePlanParallelAssessment,
         labVerifierForeground: labVerifierTurn,
         labProviderRequestCap,
       };
@@ -481,6 +485,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       addedSkills: new Set(),
       recoveryLoads: [],
       initialToolNames: new Set((agent.tools ?? []).map(t => t.function?.name).filter(Boolean)),
+      routeText,
+      parallelWorkAssessment: _prePlanParallelAssessment,
       labVerifierForeground: labVerifierTurn,
       labProviderRequestCap,
     };

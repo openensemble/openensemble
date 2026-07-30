@@ -7,6 +7,7 @@
  * - truncateToolResult(): cap tool output length
  * - compressOllamaHistory(): trim older tool/message content past a budget
  */
+import { consumeForegroundToolReplaySignal } from '../lib/tool-replay-guard.mjs';
 
 // ── LoopGuard — smart tool-loop stall detection ──────────────────────────────
 // Replaces the hard MAX_LOOPS cap as the primary safeguard. All provider
@@ -18,6 +19,7 @@ export class LoopGuard {
     this.count = 0;
     this.recentSigs = [];
     this.consecutiveErrors = 0;
+    this.forceFinalRound = false;
     this.WINDOW = 4;        // identical-call window
     this.ERROR_WINDOW = 5;  // consecutive all-error iterations before break
     // Wall-clock budget: a model legally alternating two non-erroring calls
@@ -46,7 +48,8 @@ export class LoopGuard {
    * earlier rounds are synthesized instead of being stranded at the ceiling.
    */
   isFinalRound() {
-    return this.maxLoops > 0 && this.count === this.maxLoops;
+    return this.forceFinalRound
+      || (this.maxLoops > 0 && this.count === this.maxLoops);
   }
   /**
    * Call after tool execution, before `continue`.
@@ -58,6 +61,14 @@ export class LoopGuard {
     const sig = calls.map(c => `${c.name}:${c.args}`).join('|');
     this.recentSigs.push(sig);
     if (this.recentSigs.length > this.WINDOW) this.recentSigs.shift();
+    // The execution boundary already reused an immediately preceding exact
+    // call instead of running it again. Give the provider one tool-free round
+    // to synthesize the answer now, rather than waiting for the legacy
+    // four-round stall detector to emit "Stopped".
+    if (consumeForegroundToolReplaySignal()) {
+      this.forceFinalRound = true;
+      return { stalled: false, reason: '' };
+    }
     // Identical-call stall
     if (this.recentSigs.length === this.WINDOW &&
         this.recentSigs.every(s => s === this.recentSigs[0])) {
