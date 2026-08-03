@@ -212,7 +212,30 @@ async function loadBraveApiKeyStatus() {
       status.textContent = 'No API key configured.';
       if (clearBtn) clearBtn.style.display = 'none';
     }
+    const modeSel = $('webSearchModeSelect');
+    if (modeSel) {
+      modeSel.value = cfg.webSearchMode === 'native-only' ? 'native-only' : 'auto';
+      if (!modeSel._bound) {
+        modeSel._bound = true;
+        modeSel.addEventListener('change', saveWebSearchMode);
+      }
+    }
   } catch { status.textContent = 'Status check failed.'; }
+}
+
+async function saveWebSearchMode() {
+  const modeSel = $('webSearchModeSelect');
+  if (!modeSel) return;
+  try {
+    const r = await fetch('/api/provider-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ webSearchMode: modeSel.value }),
+    });
+    if (!r.ok) { showToast(`Failed to save web search mode (${r.status})`); return; }
+    showToast(modeSel.value === 'native-only'
+      ? 'Brave search turned off — models with built-in search keep searching'
+      : 'Web search set to Auto (Brave fallback allowed)');
+  } catch { showToast('Failed to save web search mode'); }
 }
 
 async function saveBraveApiKey() {

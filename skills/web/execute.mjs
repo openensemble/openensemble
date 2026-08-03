@@ -23,6 +23,23 @@ function getBraveKey() {
   return null;
 }
 
+// Server-wide web search mode (Settings → Brave Search API). 'native-only'
+// turns the Brave fallback off entirely: models with built-in web search still
+// search natively (the provider layer swaps this tool out before the model
+// ever sees it), and models without it get the message below instead of a
+// billed Brave call.
+function getWebSearchMode() {
+  try {
+    const cfg = JSON.parse(readFileSync(path.join(BASE_DIR, 'config.json'), 'utf8'));
+    return cfg.webSearchMode === 'native-only' ? 'native-only' : 'auto';
+  } catch { return 'auto'; }
+}
+
+const NATIVE_ONLY_MESSAGE =
+  'Web search is unavailable: this server is set to "model-native only" web search '
+  + '(Settings → Brave Search API), and this model has no built-in web search. '
+  + 'Do not retry this tool; answer from what you know and say you could not search the web.';
+
 function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError(signal, 'Web request cancelled');
 }
@@ -37,6 +54,7 @@ const MAX_FETCH_REDIRECTS = 5;
 
 async function execWebSearch(query, count = 5, signal = null) {
   throwIfAborted(signal);
+  if (getWebSearchMode() === 'native-only') return NATIVE_ONLY_MESSAGE;
   const key = getBraveKey();
   if (!key) return 'Error: Brave API key not configured in config.json';
   const n = Math.min(count || 5, 10);

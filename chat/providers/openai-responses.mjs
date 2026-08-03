@@ -453,9 +453,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // dynamic pages — exactly the failure we kept hitting. Routing everything
     // through the native tool keeps the answer streaming and avoids the OE fetch.
     const nativeSearch = nativeWebSearch(wsProvider, agent.model);
+    // Coordinated workstream children deliberately KEEP native search: they are
+    // the highest-volume searchers (news/price fan-outs), and forcing them onto
+    // the Brave function tool ran up real per-call API charges on models whose
+    // hosted search is included in the subscription. Cost: a child that only
+    // searches natively has no function-tool rounds for mid-turn coordinator
+    // updates to piggyback on — claim_work/report_progress rounds still provide
+    // injection points, so redirect_worker degrades softly rather than breaking.
     const useNativeSearch = !labCodexRelay
       && !nativeSearchDisabled
-      && agent._coordinatedWorkstream !== true
       && nativeSearch?.kind === 'responses'
       && agent.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
     if (useNativeSearch) {

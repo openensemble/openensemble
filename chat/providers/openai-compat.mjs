@@ -70,7 +70,9 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
     // Gated to agents that already hold Brave web_search — never a new grant.
     const { useNative, functionTools, nativeTool } =
       resolveNativeWebSearch(providerKey, agent.model, agent.tools || [], {
-        disabled: finalRound || nativeSearchDisabled || agent._coordinatedWorkstream === true,
+        // Workstream children keep native search too — they're the heaviest
+        // searchers, and Brave bills per call (see openai-responses.mjs).
+        disabled: finalRound || nativeSearchDisabled,
       });
     const compatFnTools = !finalRound && functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))

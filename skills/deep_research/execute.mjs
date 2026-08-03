@@ -137,6 +137,15 @@ function releaseBraveSlot() {
 
 async function braveSearch(query, count = 5, signal = null) {
   throwIfAborted(signal);
+  // Server-wide kill switch (Settings → Brave Search API → mode). Deep research
+  // is Brave-backed by construction, so in native-only mode it reports why it
+  // cannot run instead of silently billing Brave.
+  try {
+    const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+    if (cfg.webSearchMode === 'native-only') {
+      return { error: 'Web search is set to "model-native only" in Settings; the Brave-backed deep research search is turned off' };
+    }
+  } catch {}
   const key = getBraveKey();
   if (!key) return { error: 'Brave API key not configured' };
   const n = Math.min(count || 5, 10);

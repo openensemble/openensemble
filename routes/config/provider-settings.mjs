@@ -99,6 +99,10 @@ export async function tryHandleProviderSettings(req, res) {
         ollamaLocalUrl:    cfg.cortex?.ollamaLocalUrl    ?? '',
         ollamaLocalKeySet: !!cfg.cortex?.ollamaLocalApiKey,
         braveKeySet:  !!cfg.braveApiKey,
+        // 'auto' = model's built-in web search when the provider supports it,
+        // Brave otherwise. 'native-only' = never call Brave (built-in search
+        // still works; models without it lose web search).
+        webSearchMode: cfg.webSearchMode === 'native-only' ? 'native-only' : 'auto',
         ttsKeySet:    !!cfg.ttsApiKey,
         ttsApiUrl:    cfg.ttsApiUrl   ?? '',
         ttsModel:     cfg.ttsModel    ?? '',
@@ -219,6 +223,11 @@ export async function tryHandleProviderSettings(req, res) {
           if (body.braveApiKey !== undefined) {
             if (body.braveApiKey) cfg.braveApiKey = body.braveApiKey;
             else delete cfg.braveApiKey;
+          }
+          // Web search mode — 'auto' (Brave fallback allowed) or 'native-only'
+          // (never call Brave; models with built-in search still search).
+          if (body.webSearchMode === 'auto' || body.webSearchMode === 'native-only') {
+            cfg.webSearchMode = body.webSearchMode;
           }
 
           // OpenAI-compat provider keys (openaiApiKey, deepseekApiKey, …)

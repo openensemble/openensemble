@@ -1435,6 +1435,15 @@
                 style="display:none;background:none;border:1px solid var(--red,#e05c5c);color:var(--red,#e05c5c);border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer">Clear</button>
             </div>
             <div id="braveApiKeyStatus" style="font-size:11px;color:var(--muted);margin-top:4px">Loading…</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+              <label for="webSearchModeSelect" style="font-size:12px;color:var(--text)">Web search mode</label>
+              <select id="webSearchModeSelect"
+                style="flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px">
+                <option value="auto">Auto — model's built-in search when available, Brave otherwise</option>
+                <option value="native-only">Model-native only — never use Brave (no per-search charges)</option>
+              </select>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">"Model-native only" turns off billed Brave searches in chat. Models with built-in web search (ChatGPT, Grok, Claude, Perplexity) keep searching; models without it lose web search, and Brave-backed Deep Research stops working. The News drawer always uses Brave (it doesn't go through a model).</div>
           </div>
 
           <div id="homeAssistantRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px;display:none">

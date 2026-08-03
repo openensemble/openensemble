@@ -6,6 +6,9 @@
 export async function handleRequest(req, res, cfg) {
   if (!req.url.startsWith('/api/news') || req.method !== 'GET') return false;
 
+  // Deliberately NOT gated on webSearchMode: the News drawer never goes
+  // through an LLM, so there is no native-search alternative — it is Brave
+  // or nothing, and its call volume is one request per drawer open.
   const key = process.env.BRAVE_API_KEY || cfg.braveApiKey;
   if (!key) {
     res.writeHead(503, { 'Content-Type': 'application/json' });

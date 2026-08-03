@@ -86,7 +86,9 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
     // round-trip instead of search→result→synthesize.
     const { useNative, functionTools, nativeTool } =
       resolveNativeWebSearch('openrouter', agent.model, agent.tools || [], {
-        disabled: finalRound || nativeSearchDisabled || agent._coordinatedWorkstream === true,
+        // Workstream children keep native search too — they're the heaviest
+        // searchers, and Brave bills per call (see openai-responses.mjs).
+        disabled: finalRound || nativeSearchDisabled,
       });
     const orFnTools = !finalRound && functionTools?.length
       ? compressToolDefs(functionTools).map(t => ({ type: 'function', function: t.function }))

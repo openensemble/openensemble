@@ -90,7 +90,9 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
     // tool is appended after (a few uncached tokens, negligible).
     const { useNative, functionTools, nativeTool } =
       resolveNativeWebSearch('anthropic', agent.model, agent.tools || [], {
-        disabled: finalRound || nativeSearchDisabled || agent._coordinatedWorkstream === true,
+        // Workstream children keep native search too — they're the heaviest
+        // searchers, and Brave bills per call (see openai-responses.mjs).
+        disabled: finalRound || nativeSearchDisabled,
       });
     let anthropicTools = !finalRound && functionTools?.length
       ? toAnthropicTools(functionTools)
