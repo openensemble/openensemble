@@ -34,9 +34,13 @@ COMPUTE_TYPE = (
 )
 PORT = int(os.environ.get("FW_PORT", "5154"))
 DOWNLOAD_DIR = os.environ.get("FW_DOWNLOAD_DIR") or None
+# Concurrent transcriptions. Weights are shared across workers; the extra cost
+# is per-stream activation memory, so raise this only against a measurement on
+# the actual card (it shares the GPU with the rest of OE).
+NUM_WORKERS = max(1, int(os.environ.get("FW_NUM_WORKERS", "1")))
 
 print(
-    f"[faster-whisper-server] loading {MODEL} on {DEVICE} ({COMPUTE_TYPE}) ...",
+    f"[faster-whisper-server] loading {MODEL} on {DEVICE} ({COMPUTE_TYPE}, {NUM_WORKERS} worker(s)) ...",
     flush=True,
 )
 try:
@@ -45,6 +49,11 @@ try:
         device=DEVICE,
         compute_type=COMPUTE_TYPE,
         download_root=DOWNLOAD_DIR,
+        # How many transcriptions CTranslate2 will run at once. The default of 1
+        # serializes every caller regardless of how many HTTP threads arrive.
+        # Each concurrent stream costs its own activation buffers on top of the
+        # shared weights — measure before raising (see NUM_WORKERS below).
+        num_workers=NUM_WORKERS,
     )
 except Exception as e:
     print(
@@ -63,8 +72,15 @@ def root():
     return "faster-whisper"
 
 
+# NOT `async def` — deliberately. model.transcribe() is a blocking GPU call, and
+# an async handler runs it directly on the event loop: concurrent requests would
+# serialize behind it and even the health check would stall mid-transcription.
+# A plain `def` handler is dispatched to Starlette's threadpool, so requests
+# actually overlap (up to FW_NUM_WORKERS, which is what CTranslate2 will run
+# concurrently — the threadpool alone is not enough, calls queue inside the
+# model otherwise).
 @app.post("/v1/audio/transcriptions")
-async def transcribe(
+def transcribe(
     file: UploadFile = File(...),
     model: str = Form(None),
     language: str = Form(None),
@@ -75,7 +91,8 @@ async def transcribe(
 ):
     # faster-whisper accepts a file path or BinaryIO; BytesIO works because
     # the underlying PyAV/ffmpeg pipeline handles arbitrary containers.
-    raw = await file.read()
+    # Sync read: this handler is not a coroutine (see above).
+    raw = file.file.read()
     audio_buf = io.BytesIO(raw)
     # verbose_json + word-level timestamps are needed for callers doing
     # offline segmentation (training-data builds, subtitle generation,
