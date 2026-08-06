@@ -108,6 +108,26 @@ export function sendToDevice(deviceId, msg) {
 }
 
 /**
+ * If this device has a reply paused for a barge verify right now, return
+ * { userId, turnId }; otherwise null.
+ *
+ * The barge arbiter runs on the device but transcribes over HTTP (/api/stt),
+ * which carries no turn or device context of its own. This is how that
+ * stateless request finds the turn it belongs to, so a capture can be checked
+ * against the words the device is in the middle of speaking.
+ */
+export function getDeviceBargeVerify(deviceId) {
+  if (!getMainWss() || !deviceId) return null;
+  for (const client of getMainWss().clients) {
+    if (client.readyState !== client.OPEN || client._deviceId !== deviceId) continue;
+    const streamer = client._ttsStreamer;
+    if (!streamer?.paused) return null;
+    return { userId: client._userId, turnId: streamer.turnId ?? null };
+  }
+  return null;
+}
+
+/**
  * Force-close every live WebSocket belonging to `deviceId`. Called after a
  * device is revoked/unpaired so a stolen or revoked device token can't keep
  * an already-established socket alive (chat, STT, TTS) until it happens to

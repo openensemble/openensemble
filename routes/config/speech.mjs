@@ -755,8 +755,46 @@ export async function tryHandleSpeechRoutes(req, res) {
       const { transcript, raw: sttRaw } = await transcribeAudio(audioBuf, {
         mime: audioMime, name: audioName, lang,
       });
+
+      // Barge self-audio suppression.
+      //
+      // The device's barge arbiter commits on ANY non-empty, non-filler
+      // transcript (main.c transcript_is_filler catches only grunts), so a
+      // reply bleeding back through the mic interrupts the reply that is
+      // speaking it — observed 2026-08-06, where "Sure." killed its own story
+      // mid-sentence. Returning an empty transcript steers that into the
+      // firmware's existing "not real -> resume" branch, so the reply survives
+      // with no firmware change and no protocol change.
+      //
+      // Scoped hard: only for a device whose reply is paused for a barge
+      // verify at this instant. Dictation, wake commands and every non-device
+      // caller take the untouched path above.
+      let effectiveTranscript = transcript;
+      if (transcript) {
+        try {
+          const { findDeviceByTokenAnyUser } = await import('../../lib/voice-devices.mjs');
+          const found = findDeviceByTokenAnyUser(getAuthToken(req));
+          const deviceId = found?.device?.id ?? null;
+          if (deviceId) {
+            const { getDeviceBargeVerify } = await import('../../ws-handler/delivery.mjs');
+            const barge = getDeviceBargeVerify(deviceId);
+            if (barge) {
+              const { matchesOwnSpeech } = await import('../../lib/voice-policy.mjs');
+              if (matchesOwnSpeech(barge.userId, deviceId, transcript)) {
+                effectiveTranscript = '';
+                console.log(`[stt] barge self-audio suppressed device=${deviceId} `
+                  + `turn=${barge.turnId ?? 'none'} heard=${JSON.stringify(transcript.slice(0, 48))}`);
+              }
+            }
+          }
+        } catch (e) {
+          // Never let this check fail the transcription it is attached to —
+          // a thrown lookup would turn a working STT call into a 500.
+          console.warn('[stt] barge self-audio check skipped:', e.message);
+        }
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ transcript, raw: sttRaw }));
+      res.end(JSON.stringify({ transcript: effectiveTranscript, raw: sttRaw }));
     } catch (e) { safeError(res, e); }
     return true;
   }
