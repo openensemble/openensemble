@@ -9,6 +9,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { BASE_DIR } from '../../lib/paths.mjs';
 import { signManifestString, supportsSecureUpdates, getUpdatePublicKeyPem } from '../../lib/node-update-signing.mjs';
 import { resolveWriteTargetSync } from '../../lib/write-target.mjs';
+import { turnTraceContext } from '../../lib/turn-trace-context.mjs';
 
 // ── State ────────────────────────────────────────────────────────────────────
 // Connected AND disconnected nodes both live in `nodes`. Disconnected entries
@@ -212,7 +213,20 @@ function notifyCoordinator(userId, message) {
       const sessionKey = String(coordId).startsWith(`${userId}_`)
         ? String(coordId)
         : `${userId}_${coordId}`;
-      _appendToSession(sessionKey, { role: 'system', content: message, ts: Date.now() });
+      // A node coming back is out-of-band: it is NOT part of whatever chat turn
+      // happens to be in flight. appendToSession stamps writes with the ambient
+      // turn's identity and may even replace that turn's pending user row, and
+      // now that this key matches the turn's real sessionKey (it never did with
+      // the bare id) an unlucky notice could be attributed to — or overwrite —
+      // an unrelated message. Detach from the turn store before writing.
+      //
+      // Fire-and-forget, so the rejection must be handled here too: the
+      // enclosing try/catch only sees synchronous throws, and an unhandled
+      // rejection from a background notice surfaces far from its cause.
+      const row = { role: 'system', content: message, ts: Date.now() };
+      Promise.resolve(
+        turnTraceContext.run(undefined, () => _appendToSession(sessionKey, row)),
+      ).catch(e => console.warn('[nodes] coordinator notice write failed:', e?.message || e));
     }
   } catch (e) {
     console.warn('[nodes] Failed to notify coordinator:', e.message);
