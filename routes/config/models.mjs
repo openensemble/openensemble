@@ -14,6 +14,28 @@ const GROK_BASE = 'https://api.x.ai/v1';
 const OLLAMA_DEFAULT = 'https://ollama.com/api';
 const LMS_DEFAULT = 'http://127.0.0.1:1234';
 const COMPAT_PROVIDERS = OPENAI_COMPAT_PROVIDERS;
+// A provider REJECTING our credentials (401/403) is a configuration state, not
+// a server fault: the honest model list for a key that cannot authenticate is
+// an empty one, which is exactly what the no-key and provider-disabled paths
+// already return. Throwing instead turned every Settings load into a 500 and
+// filled error.log with identical stack traces — a stored key that is blank,
+// malformed, or unentitled (an xAI SuperGrok login carries no api.x.ai access)
+// produced thousands of them. Network faults and 5xx still surface, because
+// those are transient and genuinely actionable.
+const AUTH_REJECTION_STATUSES = new Set([401, 403]);
+
+function respondEmptyOnAuthRejection(res, provider, status) {
+  if (!AUTH_REJECTION_STATUSES.has(status)) return false;
+  log.warn('config', 'provider rejected our credentials for its model list', {
+    provider,
+    status,
+    hint: 'Stored API key is missing, malformed, or not entitled for API access. Re-enter it in Settings → Providers.',
+  });
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify([]));
+  return true;
+}
+
 const PERPLEXITY_STATIC_MODELS = [
   { id: 'sonar', name: 'Sonar' },
   { id: 'sonar-pro', name: 'Sonar Pro' },
@@ -51,7 +73,10 @@ export async function tryHandleModelRoutes(req, res) {
           headers: { 'Authorization': `Bearer ${key}` },
           signal: AbortSignal.timeout(10000),
         });
-        if (!resp.ok) throw new Error(`xAI API ${resp.status}`);
+        if (!resp.ok) {
+          if (respondEmptyOnAuthRejection(res, 'grok', resp.status)) return true;
+          throw new Error(`xAI API ${resp.status}`);
+        }
         const data = await resp.json();
         const list = data.models ?? data.data ?? [];
         const models = list
@@ -99,7 +124,10 @@ export async function tryHandleModelRoutes(req, res) {
             headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
             signal: AbortSignal.timeout(10000),
           });
-          if (!r.ok) throw new Error(`Anthropic API ${r.status}`);
+          if (!r.ok) {
+            if (respondEmptyOnAuthRejection(res, 'anthropic', r.status)) return true;
+            throw new Error(`Anthropic API ${r.status}`);
+          }
           const data = await r.json();
           allModels = allModels.concat(data.data ?? []);
           afterId = data.has_more ? data.last_id : null;
@@ -144,7 +172,10 @@ export async function tryHandleModelRoutes(req, res) {
         do {
           const url = `https://api.fireworks.ai/v1/accounts/fireworks/models?pageSize=200${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
           const r = await fetch(url, { headers: { 'Authorization': `Bearer ${key}` }, signal: AbortSignal.timeout(10000) });
-          if (!r.ok) throw new Error(`Fireworks API ${r.status}`);
+          if (!r.ok) {
+            if (respondEmptyOnAuthRejection(res, 'fireworks', r.status)) return true;
+            throw new Error(`Fireworks API ${r.status}`);
+          }
           const data = await r.json();
           allModels = allModels.concat(data.models ?? []);
           pageToken = data.nextPageToken ?? null;
@@ -200,7 +231,10 @@ export async function tryHandleModelRoutes(req, res) {
           headers: { 'Authorization': `Bearer ${key}` },
           signal: AbortSignal.timeout(10000),
         });
-        if (!r.ok) throw new Error(`OpenRouter API ${r.status}`);
+        if (!r.ok) {
+          if (respondEmptyOnAuthRejection(res, 'openrouter', r.status)) return true;
+          throw new Error(`OpenRouter API ${r.status}`);
+        }
         const data = await r.json();
         const models = (data.data ?? [])
           .filter(m => m.architecture?.modality?.includes('text'))
@@ -305,7 +339,10 @@ export async function tryHandleModelRoutes(req, res) {
           headers: { 'Authorization': `Bearer ${key}` },
           signal: AbortSignal.timeout(15000),
         });
-        if (!r.ok) throw new Error(`${provCfg.displayName} API ${r.status}: ${await r.text()}`);
+        if (!r.ok) {
+          if (respondEmptyOnAuthRejection(res, provCfg.displayName, r.status)) return true;
+          throw new Error(`${provCfg.displayName} API ${r.status}: ${await r.text()}`);
+        }
         const data = await r.json();
         // Handle both OpenAI shape ({ data: [...] }) and alternate ({ models: [...] })
         const raw = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
