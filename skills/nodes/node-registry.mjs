@@ -201,7 +201,18 @@ function notifyCoordinator(userId, message) {
   try {
     const coordId = _getCoordinator(userId);
     if (coordId) {
-      _appendToSession(coordId, { role: 'system', content: message, ts: Date.now() });
+      // Assignments store the BARE agent id ("sydney"), but sessions.mjs only
+      // resolves a per-user path for a scoped "<userId>_<agentId>" key —
+      // anything else falls back to the global sessions/ directory. Passing the
+      // bare id therefore wrote every node up/down notice to an orphan file the
+      // coordinator never reads (10k+ entries accumulated), so the agent could
+      // not see that a node had dropped. Same scoping as
+      // roles/auto-background.mjs _resolveAttributionAgent. Tolerates an
+      // already-scoped id in case an assignment is stored that way.
+      const sessionKey = String(coordId).startsWith(`${userId}_`)
+        ? String(coordId)
+        : `${userId}_${coordId}`;
+      _appendToSession(sessionKey, { role: 'system', content: message, ts: Date.now() });
     }
   } catch (e) {
     console.warn('[nodes] Failed to notify coordinator:', e.message);
