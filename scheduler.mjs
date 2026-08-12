@@ -657,6 +657,22 @@ async function runTask(task, broadcast, opts = {}) {
     if (succeeded) log.info('scheduler', 'task main complete', { taskId: task.id, label: task.label, durationMs });
     else           log.error('scheduler', 'task failed', { taskId: task.id, label: task.label, durationMs, attempts: MAX_ATTEMPTS, err: lastError });
 
+    // A schedule the user set up has now given up entirely. Until this, that
+    // was a log line only — the task simply stopped producing output and
+    // nothing said why. Deduped per task so an hourly schedule that keeps
+    // failing reports once per window, not every run.
+    if (!succeeded && userId && userId !== 'default') {
+      import('./lib/user-alerts.mjs')
+        .then(({ alertUserOfFailure }) => alertUserOfFailure(userId, {
+          title: `Scheduled task failed: ${task.label}`,
+          detail: `It didn't complete after ${MAX_ATTEMPTS} attempts.${lastError ? ` Last error: ${String(lastError).slice(0, 200)}` : ''}`,
+          remedy: 'It will run again on its normal schedule. Ask me to check it if this keeps happening.',
+          dedupKey: `scheduled-task-failed:${task.id}`,
+          meta: { taskId: task.id, attempts: MAX_ATTEMPTS },
+        }))
+        .catch(e => log.warn('scheduler', 'failure alert failed', { taskId: task.id, err: e?.message || String(e) }));
+    }
+
     // Hand finalization to the barrier. `onContinue` reacts to background
     // results (no-op when nothing backgrounded); `onFinalize` stamps the task
     // exactly once when the group truly drains. A scheduled task "succeeded"

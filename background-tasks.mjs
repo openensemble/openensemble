@@ -421,7 +421,12 @@ function _voiceOrigin() {
   try {
     const tc = getTurnContext();
     return { voiceDeviceId: tc?.deviceId ?? null, voiceConversation: !!tc?.conversationMode };
-  } catch { return { voiceDeviceId: null, voiceConversation: false }; }
+  } catch (e) {
+    // Losing the device here silently costs the user the WAITING ring and the
+    // spoken completion — the task still runs, so nothing else surfaces it.
+    console.warn('[background-tasks] voice origin capture failed, task will not announce:', e?.message || e);
+    return { voiceDeviceId: null, voiceConversation: false };
+  }
 }
 
 // Root task graph for nested delegation. Existing ids remain intact:

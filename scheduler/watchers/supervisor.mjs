@@ -105,11 +105,41 @@ async function tickOne(record, handlerOverride = null) {
     // ordinary per-user skill disablement for already-persisted watchers.
     if (record.skillId) {
       let enabled = false;
+      let lookupError = null;
       try {
         const roles = await import('../../roles.mjs');
         enabled = roles.isSkillRuntimeEnabledForUser(record.skillId, record.userId);
-      } catch { enabled = false; }
+      } catch (e) { lookupError = e; enabled = false; }
       if (!enabled) {
+        // Stay fail-closed, but never let a CRASH masquerade as a policy
+        // decision: the user-facing copy says the skill is "no longer
+        // permitted", which is false when the lookup itself threw. Without
+        // this the monitor was cancelled permanently and nothing recorded why.
+        if (lookupError) {
+          log.error('watchers', 'skill permission lookup threw — cancelling fail-closed', {
+            id: record.id, userId: record.userId, skillId: record.skillId,
+            err: lookupError?.message || String(lookupError),
+          });
+        } else {
+          log.info('watchers', 'monitor cancelled — skill not runtime-enabled', {
+            id: record.id, userId: record.userId, skillId: record.skillId,
+          });
+        }
+        // The user set this monitor up and it is now gone; silently dropping it
+        // means they only find out by noticing the absence of something.
+        import('../../lib/user-alerts.mjs')
+          .then(({ alertUserOfFailure }) => alertUserOfFailure(record.userId, {
+            title: `Monitor stopped: ${record.label || record.kind}`,
+            detail: lookupError
+              ? `I couldn't verify permission for the "${record.skillId}" skill, so I stopped the monitor to be safe.`
+              : `The "${record.skillId}" skill is no longer enabled, so this monitor can't run.`,
+            remedy: lookupError
+              ? 'This may be temporary — ask me to set it up again and I\'ll retry.'
+              : `Re-enable the "${record.skillId}" skill and ask me to set the monitor up again.`,
+            dedupKey: `watcher-cancelled:${record.skillId}:${lookupError ? 'fault' : 'disabled'}`,
+            meta: { watcherId: record.id, skillId: record.skillId },
+          }))
+          .catch(e => log.warn('watchers', 'cancellation alert failed', { id: record.id, err: e?.message || String(e) }));
         finalizeWatcher(record, 'cancelled', `Monitor stopped: skill "${record.skillId}" is no longer permitted.`);
         return;
       }
@@ -478,7 +508,32 @@ async function managedPreferenceDeliveryAllowed(record, { immediate = false } = 
     return isSafeInformationalWatcher(record)
       ? await authorization.preferenceSafeAutoWatcherIsAuthorized(record.userId, record)
       : await authorization.preferenceApprovedWatcherIsAuthorized(record.userId, record);
-  } catch { return false; }
+  } catch (e) {
+    // Denying on a throw is correct; discarding the reason is not. A silent
+    // false here is indistinguishable from a legitimate authorization refusal,
+    // so a real fault would stop every approved monitor from delivering with
+    // nothing in the logs to explain it.
+    log.error('watchers', 'managed preference delivery authorization threw — denying', {
+      id: record?.id ?? null, userId: record?.userId ?? null,
+      skillId: record?.skillId ?? null,
+      originType: record?.personalizationOrigin?.type ?? null,
+      err: e?.message || String(e),
+    });
+    // A fault here stops an approved monitor from ever delivering. The monitor
+    // stays alive and keeps finding results, so nothing else would tell them.
+    if (record?.userId) {
+      import('../../lib/user-alerts.mjs')
+        .then(({ alertUserOfFailure }) => alertUserOfFailure(record.userId, {
+          title: `Couldn't deliver an update from "${record.label || record.kind}"`,
+          detail: 'A check failed while confirming this monitor was still approved to send, so I held the update back.',
+          remedy: 'The monitor is still running. If updates stay missing, ask me to re-approve it.',
+          dedupKey: `managed-delivery-fault:${record.id}`,
+          meta: { watcherId: record.id, skillId: record.skillId },
+        }))
+        .catch(err => log.warn('watchers', 'delivery-fault alert failed', { err: err?.message || String(err) }));
+    }
+    return false;
+  }
 }
 
 export async function deliverManagedPreferenceUpdate(record, value, { dispatchApproved = false } = {}) {
