@@ -191,6 +191,66 @@ function isAgentRestartCommand(command) {
     || /\bsudo\s+oe\s+change-access\b/.test(c);
 }
 
+// Guard against a failure mode seen in the wild: a generated script ran
+// `set -eu` … `pct set <id> -memory <n>` … `pct reboot <id>`. The reboot's
+// shutdown half completed, then it exited 255 on a monitor-socket timeout.
+// Under errexit the script died right there — before its own wait loop, before
+// re-reading the config, and crucially before anything restarted the guest.
+// The container stayed down until a human started it by hand, and the agent
+// reported the pre-change reading it had captured earlier as the outcome.
+//
+// Two distinct hazards, both worth catching before dispatch:
+//   1. An unguarded guest stop/reboot under errexit — if it exits non-zero
+//      after stopping, the guest is stranded with no recovery path.
+//   2. A restart paired with a change that already hotplugs. memory, cores,
+//      swap and balloon all apply live via `pct set`/`qm set`, so the restart
+//      buys nothing and only risks (1).
+const GUEST_STOP_RE = /\b(?:pct|qm)\s+(?:reboot|stop|shutdown|reset)\b/;
+const HOTPLUG_SET_RE = /\b(?:pct|qm)\s+set\b[^\n]*\s-(?:memory|cores|swap|balloon)\b/;
+
+function guestRestartHazard(command) {
+  const text = String(command || '');
+  if (!GUEST_STOP_RE.test(text)) return null;
+
+  // Only lines that would actually abort the script count. A stop already
+  // defused with `|| true` / `|| :`, or used as a condition, is fine.
+  const liveStops = text.split('\n').filter((line) => {
+    const l = line.trim();
+    if (!l || l.startsWith('#')) return false;
+    if (!GUEST_STOP_RE.test(l)) return false;
+    if (/\|\|\s*(?:true|:)(?:\s|;|$)/.test(l)) return false;
+    if (/^(?:if|while|until|elif)\b/.test(l)) return false;
+    return true;
+  });
+  if (!liveStops.length) return null;
+
+  // `set -e`, `set -eu`, `set -euo pipefail`, `set -o errexit` — but not
+  // `set -u` or `set -o pipefail` on their own.
+  const errexit = /^\s*set\s+-[a-zA-Z]*e/m.test(text)
+    || /^\s*set\s+-o\s+errexit\b/m.test(text);
+
+  if (HOTPLUG_SET_RE.test(text)) {
+    return 'Refusing to run: this script changes memory/cores/swap and then '
+      + 'restarts the guest. Those settings hotplug — `pct set`/`qm set` applies '
+      + 'them to the live cgroup immediately, so the restart is unnecessary and '
+      + 'risks stranding the guest if it fails partway. Drop the '
+      + `${liveStops[0].trim().split(/\s+/).slice(0, 2).join(' ')} line and verify instead from the host with `
+      + '`pct config <id>` plus /sys/fs/cgroup/lxc/<id>/memory.max.';
+  }
+
+  if (errexit) {
+    return 'Refusing to run: this script stops or reboots a guest while `set -e` '
+      + 'is active. If that command exits non-zero after the guest is already '
+      + 'down (a monitor-socket timeout does exactly this), the script aborts '
+      + 'before it can restart or verify anything, leaving the guest off with no '
+      + 'recovery path. Either guard the stop with `|| true` and check the state '
+      + 'yourself afterwards, or use an explicit `stop` then `start` with a wait '
+      + 'loop rather than a single `reboot`.';
+  }
+
+  return null;
+}
+
 function shellEscape(s) {
   // single-quote escape for bash
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -314,6 +374,9 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     const { node_id, command, timeout = 60, label: providedLabel = null } = args;
     if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!command) { yield { type: 'result', text: 'This tool needs a command. Call it again with command specified.' }; return; }
+
+    const restartHazard = guestRestartHazard(command);
+    if (restartHazard) { yield { type: 'result', text: restartHazard }; return; }
 
     // Phase-11c: log the invocation for the location_fact outcome measurer.
     // Fire-and-forget — never blocks dispatch.
