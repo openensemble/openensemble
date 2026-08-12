@@ -1140,7 +1140,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // replaced with the corrected reply. `canRecover` only gates whether the
   // recovery passes run — it no longer suppresses streaming.
   const canRecover = Boolean(_routerStore);
-  let { assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* bindToolRouterContext(
+  let { assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages } = yield* bindToolRouterContext(
     consumeProvider(providerGen, { suppressText: false }),
     _routerStore,
   );
@@ -1173,7 +1173,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         suppressText: false,
         providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
       }), _routerStore);
-      ({ assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
+      ({ assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
       usage = mergeProviderUsage(_priorUsage, _r.usage);
       modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
       turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
@@ -1245,7 +1245,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
             suppressText: false,
             providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
           }), _routerStore);
-          ({ assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
+          ({ assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
           usage = mergeProviderUsage(_priorUsage, _r.usage);
           modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
           turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
@@ -1301,7 +1301,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
           suppressText: false,
           providerCallOrdinalOffset: _priorModelCalls?.length ?? 0,
         }), _routerStore);
-        ({ assistantContent, errored, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
+        ({ assistantContent, errored, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, hideTurn, hideTaskId } = _r);
         usage = mergeProviderUsage(_priorUsage, _r.usage);
         modelCalls = [...(_priorModelCalls || []), ...(_r.modelCalls || [])];
         turnImages = [...(turnImages || []), ...(_r.turnImages || [])];
@@ -1434,6 +1434,10 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // cross-agent reads, monitorable classify, history build). Watch this
     // to catch regressions in the concurrent pre-LLM kickoff above.
     preLlmMs: _llmStart - _streamChatStart,
+    // The provider's own failure text on an errored turn. Logged here because
+    // the trace's error field falls back to a generic placeholder, which made
+    // every provider failure look identical in app.log.
+    ...(providerError ? { providerError } : {}),
     bytes: assistantContent ? (typeof assistantContent === 'string' ? assistantContent.length : JSON.stringify(assistantContent).length) : 0,
     // Pre-LLM payload composition (chars; ÷4 ≈ tokens). Lets us audit
     // prompt/tool/history bloat from app.log without re-running the turn.
@@ -1546,9 +1550,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   };
   if (errored) {
     log.error('chat', 'llm turn errored', _llmMeta);
+    // consumeProvider returns empty content on the error path, so without
+    // providerError here the trace records the bare placeholder and the real
+    // reason (rate limit, 5xx, malformed tool call) is lost for good.
     const baseTraceError = turnOpts?.documentRequest
-      ? (compactDocumentFallback(assistantContent) || 'Provider turn errored')
-      : (assistantContent || 'Provider turn errored');
+      ? (compactDocumentFallback(assistantContent) || providerError || 'Provider turn errored')
+      : (assistantContent || providerError || 'Provider turn errored');
     const identityDurabilityWarning = toolIdentityDurabilityWarning(toolIdentityAnomalies);
     const traceError = identityDurabilityWarning
       ? `${baseTraceError} ${identityDurabilityWarning}`

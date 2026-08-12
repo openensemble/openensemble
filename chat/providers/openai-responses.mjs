@@ -43,6 +43,19 @@ import {
 // Keep the lab-only request ceiling shared across provider-generator restarts
 // and recovery calls. The trace cap is non-enumerated and cannot leak into
 // durable trace output.
+// Provider-side failures that are pure capacity/availability and carry no
+// information about the request itself, so an identical resend is reasonable.
+// Deliberately narrow: anything caused by OUR payload (bad request, context
+// length, content filter, auth) must surface immediately rather than retry.
+const TRANSIENT_STREAM_ERROR_CODES = new Set([
+  'server_is_overloaded',
+  'server_error',
+  'service_unavailable',
+  'rate_limit_exceeded',
+]);
+const MAX_TRANSIENT_STREAM_RETRIES = 2;
+const TRANSIENT_STREAM_RETRY_BASE_MS = 1_000;
+
 const labRequestsByTurn = new WeakMap();
 const LAB_MAX_OBSERVED_OUTPUT_TOKENS_PER_RESPONSE = 4_096;
 const LAB_DEFAULT_PROVIDER_REQUEST_CAP = 4;
@@ -421,6 +434,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   // today) — without it, every web-search turn would die instead of degrading.
   let nativeSearchDisabled = false;
   let reasoningDisabled = false;
+  // Capacity errors arrive as an SSE `error` event INSIDE a 200 response, so
+  // postWithRetry (which only sees HTTP status) never retries them. Left
+  // alone, a momentarily overloaded backend kills the whole turn and the user
+  // has to retype. Bounded in-place resend instead — see the handler below.
+  let transientStreamRetries = 0;
+  let retryTransientStream = false;
   // Native image generation costs real money per call and a confused agent
   // can loop it (a delegated "generate then attach" turn produced 8 Grand
   // Canyon images hunting for a file handle). Hard cap per turn; once hit,
@@ -789,7 +808,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       if (finalized) loopTerminalWasLast = false;
       if (t && !seenEventTypes.has(t)) {
         seenEventTypes.add(t);
-        if (!/^response\.(output_text\.(delta|done|annotation\.added)|output_item\.(added|done)|function_call_arguments\.(delta|done)|created|in_progress|completed|incomplete|failed|content_part\.(added|done)|web_search_call\.(in_progress|searching|completed)|image_generation_call\.(in_progress|generating|partial_image|completed)|reasoning_summary_part\.(added|done)|reasoning_summary_text\.(delta|done))$/.test(t)) {
+        // `error` is a KNOWN top-level event (handled below) — without it here
+        // every provider-side failure also printed "unknown SSE event type",
+        // which reads as an unhandled protocol gap and sent diagnosis the
+        // wrong way.
+        if (t !== 'error'
+            && !/^response\.(output_text\.(delta|done|annotation\.added)|output_item\.(added|done)|function_call_arguments\.(delta|done)|created|in_progress|completed|incomplete|failed|content_part\.(added|done)|web_search_call\.(in_progress|searching|completed)|image_generation_call\.(in_progress|generating|partial_image|completed)|reasoning_summary_part\.(added|done)|reasoning_summary_text\.(delta|done))$/.test(t)) {
           console.log(`[${tag}] unknown SSE event type: ${t}`, JSON.stringify(ev).slice(0, 300));
         }
       }
@@ -939,12 +963,40 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         const reason = ev.response?.incomplete_details?.reason;
         const msg = ev.response?.error?.message ?? ev.error?.message
           ?? (reason ? `response incomplete (${reason})` : 'response incomplete or failed');
+        const code = String(ev.response?.error?.code ?? ev.error?.code ?? '');
         usageCardinalityValid = false;
+        // Retry a transient capacity failure in place, but ONLY while this
+        // response is still empty. Once a token, tool call, or image has
+        // landed, a resend would duplicate work the user already saw or that
+        // already committed a side effect — surface the error instead.
+        const nothingEmittedYet = !textContent
+          && toolCalls.size === 0
+          && generatedImages.length === 0;
+        if (TRANSIENT_STREAM_ERROR_CODES.has(code)
+            && nothingEmittedYet
+            && transientStreamRetries < MAX_TRANSIENT_STREAM_RETRIES) {
+          transientStreamRetries++;
+          console.warn(`[${tag}] transient stream error (${code}); resending — attempt ${transientStreamRetries}/${MAX_TRANSIENT_STREAM_RETRIES}`);
+          retryTransientStream = true;
+          break;
+        }
         if (textContent.trim()) yield { type: 'replace', text: '' };
         yield usageTelemetry();
         yield { type: 'error', message: `${displayName}: ${msg}` };
         return;
       }
+    }
+
+    // Transient capacity failure with an empty response: back off and resend
+    // the same request. Must run BEFORE the per-request stream validation
+    // below, which would otherwise reject this round as a truncated stream.
+    if (retryTransientStream) {
+      retryTransientStream = false;
+      await new Promise(resolve => setTimeout(
+        resolve, TRANSIENT_STREAM_RETRY_BASE_MS * transientStreamRetries,
+      ));
+      if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+      continue;
     }
 
     // Validate THIS request before executing tools or accepting final text.

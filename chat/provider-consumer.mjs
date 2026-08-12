@@ -160,11 +160,16 @@ export async function* consumeProvider(providerGen, {
 } = {}) {
   let assistantContent = '';
   let errored = false;
+  // The provider's own failure text, kept for the turn log/trace.
+  let providerError = null;
   // Phase-14 chip-replaces-turn: tools may yield `__hide_turn` to indicate
   // their result is a backgrounded task with a live chat chip — the
   // assistant's text reply for this turn is redundant and should be hidden.
   let hideTurn = false;
   let hideTaskId = null;
+  // Provider-call ordinal that set `hideTurn`. The chip may only replace the
+  // turn while it IS the turn's last act; see the release in `tool_call`.
+  let hideAtCall = null;
   const toolsUsed = [];
   const toolEvents = [];
   const toolIdentityAnomalies = [];
@@ -288,7 +293,12 @@ export async function* consumeProvider(providerGen, {
           : null,
       };
     }
-    if (event.type === '__hide_turn') { hideTurn = true; hideTaskId = event.taskId || null; continue; }
+    if (event.type === '__hide_turn') {
+      hideTurn = true;
+      hideTaskId = event.taskId || null;
+      hideAtCall = _providerCallCount;
+      continue;
+    }
     // Tool-produced images: collect for turn persistence (sync delegations'
     // image bubbles used to vanish on reload — nothing wrote them to the
     // session). Hidden turns skip persisting them (the chip/agent_report owns
@@ -302,6 +312,18 @@ export async function* consumeProvider(providerGen, {
       });
     }
     if (event.type === 'tool_call' && event.name) {
+      // Chip-replaces-turn holds only while the chip is the turn's last act.
+      // A tool call from a LATER provider round means the model saw the
+      // backgrounded result and kept working — the chip covers one command,
+      // not the multi-step job, so its eventual answer is the real update and
+      // must be streamed and stored. Siblings batched in the hiding round
+      // share its ordinal and leave the hide intact, so the stale post-handoff
+      // "I'll check back" completion is still suppressed.
+      if (hideTurn && hideAtCall != null && _providerCallCount > hideAtCall) {
+        hideTurn = false;
+        hideTaskId = null;
+        hideAtCall = null;
+      }
       if (providerToolCallId) {
         const priorName = _providerToolCallsById.get(providerToolCallId);
         if (priorName) {
@@ -442,16 +464,28 @@ export async function* consumeProvider(providerGen, {
     if (!(isVisibleText && (suppressText || hideTurn))) {
       yield sanitizeDocumentToolEvent(event);
     }
-    if (event.type === 'error') { errored = true; break; }
+    if (event.type === 'error') {
+      errored = true;
+      // Keep WHY the turn died. Without this the caller only knows `errored`
+      // and every failure is logged and traced as the placeholder "Provider
+      // turn errored", which leaves a rate limit, a 500, and a malformed tool
+      // call indistinguishable after the fact.
+      providerError = String(event.message || '').slice(0, 500) || null;
+      break;
+    }
   }
   } catch (e) {
     errored = true;
     if (e?.name !== 'AbortError') {
-      yield { type: 'error', message: String(e?.message || e || 'Provider stream failed').slice(0, 500) };
+      const message = String(e?.message || e || 'Provider stream failed').slice(0, 500);
+      providerError = message;
+      yield { type: 'error', message };
+    } else {
+      providerError = 'Provider stream aborted';
     }
   }
   return errored
-    ? { assistantContent: '', errored: true, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
-    : { assistantContent, errored: false, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages };
+    ? { assistantContent: '', errored: true, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
+    : { assistantContent, errored: false, providerError: null, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages };
 }
 
