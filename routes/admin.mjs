@@ -41,6 +41,7 @@ import {
 } from '../lib/update.mjs';
 import { broadcastToUsers } from '../ws-handler.mjs';
 import { encryptBackup, decryptBackup, isEncryptedBackup } from '../lib/backup-crypto.mjs';
+import { buildEmailSubjectHeader } from '../lib/email-headers.mjs';
 import { resolveWriteTargetSync } from '../lib/write-target.mjs';
 
 // ── Rate limiting for invite redemption ────────────────────────────────────
@@ -1029,7 +1030,7 @@ async function sendInviteEmail(adminUserId, to, inviteUrl, role) {
     const token = await getAccessToken('gmail', adminUserId, account.id);
     const boundary = `b_${Date.now().toString(36)}`;
     const raw = [
-      `To: ${to}`, `Subject: ${subject}`, `MIME-Version: 1.0`,
+      `To: ${to}`, buildEmailSubjectHeader(subject), `MIME-Version: 1.0`,
       `Content-Type: multipart/alternative; boundary="${boundary}"`, ``,
       `--${boundary}`, `Content-Type: text/plain; charset=utf-8`, ``, body, ``,
       `--${boundary}`, `Content-Type: text/html; charset=utf-8`, ``, html, ``,

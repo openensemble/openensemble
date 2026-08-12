@@ -19,6 +19,7 @@ import {
   clearPendingFor as clearPendingApproval,
 } from '../../lib/pending-approvals.mjs';
 import { emailLabelsEnabled, recordLabelings, recordCorrection, removeCorrection, suggestLabels, summary as labelLearningSummary } from '../../lib/email-label-memory.mjs';
+import { buildEmailSubjectHeader } from '../../lib/email-headers.mjs';
 import { USERS_DIR } from '../../lib/paths.mjs';
 
 const SKILL_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -57,7 +58,7 @@ export function buildGmailRawMessage(args, attachments = [], {
     : null;
   const headers = [
     `To: ${args?.to ?? ''}`,
-    `Subject: ${args?.subject ?? ''}`,
+    buildEmailSubjectHeader(args?.subject),
     'MIME-Version: 1.0',
   ];
 
@@ -189,7 +190,7 @@ export async function gmailReply(args, userId, accountId, markDispatchStarted = 
   const references = String(gmailHeader(headers, 'References')).replace(/[\r\n]+/g, ' ').trim();
   const replyHeaders = [
     `To: ${to}`,
-    `Subject: ${subject}`,
+    buildEmailSubjectHeader(subject),
     providerMessageId ? `In-Reply-To: ${providerMessageId}` : null,
     providerMessageId ? `References: ${references ? `${references} ` : ''}${providerMessageId}` : null,
     'MIME-Version: 1.0',

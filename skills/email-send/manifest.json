@@ -16,7 +16,7 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "subject": { "type": "string", "description": "Plain ASCII subject line (no emoji or non-ASCII characters)." },
+            "subject": { "type": "string", "description": "Email subject line. Unicode text and emoji are supported." },
             "body": { "type": "string", "description": "Plain-text email body. Omit when using body_doc_id. When you also pass html_body, this is the plain-text fallback part." },
             "html_body": { "type": "string", "description": "Optional HTML email body for a formatted/branded message (notification cards, rich reports). Sent as a real text/html part alongside `body` (pass a short plain-text `body` as the fallback). Lets ANY agent send HTML directly — no hand-off to the email specialist needed." },
             "body_doc_id": { "type": "string", "description": "Deliver a large, ALREADY-WRITTEN body by reference instead of pasting it into `body`: a 'research:doc_xxx' or 'documents:doc_xxx' handle. The doc's text becomes the inline email body (markdown auto-rendered to HTML), and the transient handoff doc is deleted after a successful send. Use this for briefings/reports you (or another agent) saved — never re-type long content into `body`." },

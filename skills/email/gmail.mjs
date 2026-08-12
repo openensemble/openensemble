@@ -12,6 +12,7 @@
  */
 
 import { getAccessToken as getGoogleAccessToken } from '../../lib/google-auth.mjs';
+import { buildEmailSubjectHeader } from '../../lib/email-headers.mjs';
 
 const BASE_URL   = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
@@ -260,7 +261,7 @@ async function cmdReply(args) {
   // header/body break and the recipient gets a body-less email.
   const headers = [
     `To: ${to}`,
-    `Subject: ${replySubject}`,
+    buildEmailSubjectHeader(replySubject),
     msgId ? `In-Reply-To: ${msgId}` : null,
     msgId ? `References: ${refs ? refs + ' ' : ''}${msgId}` : (refs ? `References: ${refs}` : null),
     `MIME-Version: 1.0`,
@@ -603,7 +604,7 @@ async function cmdCompose(args) {
   const boundary  = `boundary_${Date.now().toString(36)}`;
   const rawEmail  = [
     `To: ${to}`,
-    `Subject: ${subject}`,
+    buildEmailSubjectHeader(subject),
     `MIME-Version: 1.0`,
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     ``,
