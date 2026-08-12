@@ -6,6 +6,7 @@
 import { randomBytes } from 'crypto';
 import { log } from '../logger.mjs';
 import { abortChat } from '../chat-dispatch.mjs';
+import { endTurn } from '../lib/voice-turn-journal.mjs';
 
 export const STT_SESSION_MAX_BYTES = 512 * 1024;   // 16 s @ 16 kHz mono s16 = fw capture ceiling
 export const STT_SESSION_TTL_MS = 25_000;
@@ -21,6 +22,13 @@ export function dropSttSession(ws, reason) {
     log.info('voice', 'stt session dropped', {
       deviceId: ws._deviceId ?? null, turnId: s.turnId, reason, bytes: s.bytes,
     });
+    // A dropped capture is a turn the user experienced as "it ignored me".
+    // 'device abort (no speech)' is the benign one — the device heard nothing
+    // after the wake — so it gets its own outcome rather than being lumped in
+    // with TTL expiry and overflow, which are genuine losses.
+    endTurn(s.turnId,
+      reason === 'device abort (no speech)' ? 'no_speech' : 'stt_dropped',
+      { failStage: 'capture', error: reason, sttBytes: s.bytes });
   }
 }
 

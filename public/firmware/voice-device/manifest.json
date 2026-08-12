@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.89-bargelog",
+  "version": "0.2.92-selfheal",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
@@ -30,7 +30,7 @@
       "name": "app",
       "offset": "0x20000",
       "file": "oe_voice_device.bin",
-      "sha256": "4dd777bafc86c1ec2e0f342d05c88ade53d67a9e484e37a453b9563faabc29e3"
+      "sha256": "3654e43f650c101dd8ec2ff7852f39d66c9abf8bc3e177ba3fbded1363b72d76"
     },
     {
       "name": "wakewords",

@@ -17,6 +17,8 @@ import {
 } from '../routes/_helpers.mjs';
 import { getVoiceRef } from '../lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from '../lib/voice-tts-stream.mjs';
+import { beginTurn, noteTurn, endTurn } from '../lib/voice-turn-journal.mjs';
+import { recordLinkEvent } from '../lib/voice-connectivity-journal.mjs';
 import { getSessionMeta, setSessionDeviceId, adoptSession } from '../routes/_helpers/auth-sessions.mjs';
 import {
   submitCredential, cancelCredential, cancelPendingCredentialPrompts,
@@ -248,6 +250,14 @@ export function onConnection(ws, req) {
   async function sendInitialData() {
     console.log('[ws] client connected, user:', ws._userId, 'device:', ws._deviceId ?? '-', 'source:', ws._clientSource ?? '-');
     log.info('ws', 'client connected', { userId: ws._userId, deviceId: ws._deviceId ?? null, source: ws._clientSource ?? null });
+    // Session clock for the matching disconnect row — without it a link event
+    // pair says a device reconnected but not how briefly it stayed.
+    ws._linkOpenedAt = Date.now();
+    recordLinkEvent('connect', {
+      deviceId: ws._deviceId ?? null,
+      userId: ws._userId ?? null,
+      source: ws._clientSource ?? null,
+    });
     // Voice devices get nothing here. They only upstream wake-word/STT
     // chats and consume control + TTS frames (firmware oe_client/oe_ws.c
     // handle_message; main.c has no agent_list handler and never reads
@@ -442,6 +452,25 @@ export function onConnection(ws, req) {
         agent: typeof msg.agent === 'string' && msg.agent ? msg.agent.slice(0, 64) : null,
         chunks: [], bytes: 0, gaps: 0, nextSeq: null, startedAt: Date.now(), ttl,
       };
+      // Open the turn journal row here rather than at makeVoiceTurn: this is
+      // the first point the device-minted turn_id and the wake score exist
+      // together, and a turn that dies during capture (TTL, overflow, no
+      // speech) never reaches makeVoiceTurn at all — those are exactly the
+      // turns worth counting.
+      beginTurn({
+        id: ws._sttSession.turnId,
+        deviceId: ws._deviceId,
+        authUserId: ws._userId ?? null,
+        agentId: ws._sttSession.agent,
+        wakeSlot: ws._sttSession.wakeSlot,
+        startedAt: ws._sttSession.startedAt,
+      });
+      noteTurn(ws._sttSession.turnId, {
+        wakeAvgProb255: ws._sttSession.wakeAvgProb,
+        wakeAvgProb: Number.isInteger(ws._sttSession.wakeAvgProb)
+          ? Math.round((ws._sttSession.wakeAvgProb / 255) * 1000) / 1000
+          : null,
+      }, 'capture');
       // Voice-conversation-policy: classify the capture at its START — the
       // transcript's chat frame arrives seconds later (after STT), long past
       // a short window's expiry. A VAD-triggered follow-up fire reaches us
@@ -471,7 +500,23 @@ export function onConnection(ws, req) {
     }
     if (msg.type === 'stt_abort') {
       // Device VAD saw no speech after the wake — nothing to transcribe.
-      if (ws._deviceId) dropSttSession(ws, 'device abort (no speech)');
+      // Record the VAD account BEFORE dropping the session: dropSttSession
+      // closes the journal row, so anything noted after it lands nowhere.
+      // A no_speech abort is a real turn outcome (the user woke the device and
+      // it heard nothing), and peakEnergy vs energyThreshold is what says
+      // whether they were genuinely silent or merely under the bar.
+      if (ws._deviceId) {
+        const sid = ws._sttSession?.turnId ?? null;
+        if (sid && typeof msg.end_reason === 'string') {
+          noteTurn(sid, {
+            sttEndReason: msg.end_reason.slice(0, 24),
+            sttSpeechMs: Number.isInteger(msg.speech_ms) ? msg.speech_ms : null,
+            sttPeakEnergy: Number.isInteger(msg.peak_energy) ? msg.peak_energy : null,
+            sttEnergyThreshold: Number.isInteger(msg.energy_threshold) ? msg.energy_threshold : null,
+          }, 'capture');
+        }
+        dropSttSession(ws, 'device abort (no speech)');
+      }
       return;
     }
     if (msg.type === 'stt_end') {
@@ -505,6 +550,55 @@ export function onConnection(ws, req) {
         deviceId: ws._deviceId, turnId: s.turnId, bytes: s.bytes, gaps: s.gaps,
         ms: Date.now() - s.startedAt,
       });
+      // The device's account of why it stopped listening (fw >= 0.2.91).
+      // end_reason 'silence' with speechMs well under captureMs, or a
+      // peakEnergy sitting near energyThreshold, is the fingerprint of a turn
+      // truncated by a pause rather than finished by the user — the thing
+      // that is otherwise indistinguishable server-side. Absent on older
+      // firmware, in which case these stay null rather than guessing.
+      noteTurn(s.turnId, {
+        sttBytes: s.bytes,
+        sttGaps: s.gaps,
+        sttCaptureMs: Date.now() - s.startedAt,
+        sttSamples: Number.isInteger(msg.samples) ? msg.samples : null,
+        sttEndReason: typeof msg.end_reason === 'string' ? msg.end_reason.slice(0, 24) : null,
+        sttSpeechMs: Number.isInteger(msg.speech_ms) ? msg.speech_ms : null,
+        sttPeakEnergy: Number.isInteger(msg.peak_energy) ? msg.peak_energy : null,
+        sttEnergyThreshold: Number.isInteger(msg.energy_threshold) ? msg.energy_threshold : null,
+      }, 'transcribe');
+      // Debug capture of the exact audio STT is about to see. Disarmed unless
+      // ~/voice-captures/ENABLED exists; see lib/voice-capture.mjs. The device
+      // only reports a per-chunk mean-square, which cannot separate "loud" from
+      // "clipped" — the sidecar's sample-level analysis can.
+      let _capturePath = null;
+      try {
+        const { isCaptureEnabled, captureTurn } = await import('../lib/voice-capture.mjs');
+        if (isCaptureEnabled()) {
+          const { wavWrapPcm16kMono } = await import('../lib/stt.mjs');
+          _capturePath = captureTurn(wavWrapPcm16kMono(pcm), pcm, {
+            ts: Date.now(),
+            turnId: s.turnId ?? null,
+            deviceId: ws._deviceId ?? null,
+            userId: ws._userId ?? null,
+            agent: s.agent ?? null,
+            wakeSlot: s.wakeSlot ?? null,
+            wakeAvgProb: s.wakeAvgProb ?? null,
+            followupCapture: s.followupCapture ?? null,
+            sttBytes: s.bytes,
+            sttGaps: s.gaps,
+            sttCaptureMs: Date.now() - s.startedAt,
+            deviceReported: {
+              samples: Number.isInteger(msg.samples) ? msg.samples : null,
+              endReason: typeof msg.end_reason === 'string' ? msg.end_reason.slice(0, 24) : null,
+              speechMs: Number.isInteger(msg.speech_ms) ? msg.speech_ms : null,
+              peakEnergy: Number.isInteger(msg.peak_energy) ? msg.peak_energy : null,
+              energyThreshold: Number.isInteger(msg.energy_threshold) ? msg.energy_threshold : null,
+            },
+          });
+        }
+      } catch (e) {
+        log.warn('voice', 'turn capture failed', { error: e.message });
+      }
       // Explicit per-device wake-word training mode. Creating
       // wake-captures-manual/ENABLE-<deviceId> records pause-separated WAVs
       // and acknowledges each sample instead of dispatching it to chat. There
@@ -533,11 +627,31 @@ export function onConnection(ws, req) {
         log.warn('voice', 'manual wake capture failed', { error: e.message });
       }
       let transcript = '';
+      const _sttStartedAt = Date.now();
       try {
         const { transcribeAudio, wavWrapPcm16kMono } = await import('../lib/stt.mjs');
         ({ transcript } = await transcribeAudio(wavWrapPcm16kMono(pcm), {}));
+        noteTurn(s.turnId, {
+          sttTranscribeMs: Date.now() - _sttStartedAt,
+          transcriptChars: (transcript || '').length,
+        }, 'dispatch');
+        if (_capturePath) {
+          const { attachTranscript } = await import('../lib/voice-capture.mjs');
+          attachTranscript(_capturePath, transcript, {
+            sttTranscribeMs: Date.now() - _sttStartedAt,
+          });
+        }
       } catch (e) {
         log.warn('voice', 'stream stt failed', { deviceId: ws._deviceId, turnId: s.turnId, error: e.message });
+        if (_capturePath) {
+          const { attachTranscript } = await import('../lib/voice-capture.mjs');
+          attachTranscript(_capturePath, null, { sttError: e.message });
+        }
+        endTurn(s.turnId, 'stt_failed', {
+          failStage: 'transcribe',
+          sttTranscribeMs: Date.now() - _sttStartedAt,
+          error: e.message,
+        });
         // The device is in THINKING awaiting this turn — unblock it with the
         // same spoken fallback + terminal the chat error path uses.
         try {
@@ -1061,6 +1175,15 @@ export function onConnection(ws, req) {
           agentId: voiceTurn.agentId,
           wakeSlot: voiceTurn.wakeSlot,
         });
+        // Routing is only resolved here, so backfill the journal row opened at
+        // stt_begin — that row was created before we knew which user the slot
+        // routed to or which agent would answer.
+        noteTurn(voiceTurn.id, {
+          effectiveUserId: voiceTurn.effectiveUserId,
+          agentId: voiceTurn.agentId,
+          wakeSlot: voiceTurn.wakeSlot,
+          dispatchStartedAt: Date.now(),
+        }, 'dispatch');
       }
       // Server-side voice TTS streaming: when the device advertises the
       // capability (msg.tts_stream) and the provider is Pocket TTS, the server
@@ -1344,12 +1467,34 @@ export function onConnection(ws, req) {
         });
         try { ttsStreamer.abort({ close: true, sendDone: true }); } catch {}
         ws._ttsStreamer = null;
+        noteTurn(voiceTurn?.id ?? null, { noTerminalFromLlm: true });
+      }
+      // Close the journal row. 'suppressed' means the reply was produced but
+      // deliberately not spoken (stop / barge-in / fleet self-audio), which is
+      // a correct outcome and must not be counted as a failure; 'completed'
+      // means audio was actually delivered to the device.
+      if (voiceTurn?.id) {
+        const suppressed = isVoiceOutputSuppressed(ws, voiceTurn);
+        endTurn(voiceTurn.id, suppressed ? 'suppressed' : 'completed', {
+          replyChars: (ws._lastReplySpoken ?? '').length,
+          ttsAborted: !!ttsStreamer?.aborted,
+          ttsFinished: !!ttsStreamer?.finished,
+        });
       }
       return;
     }
    } catch (e) {
     // Never let a malformed message kill the process. Log and notify the client.
     console.error('[ws] handler error:', e?.stack ?? e?.message ?? e);
+    // A throw here is the "it just didn't answer" case. Record it against the
+    // turn before the recovery path below hides it behind a spoken fallback.
+    try {
+      if (messageVoiceTurn?.id) {
+        endTurn(messageVoiceTurn.id, 'handler_error', {
+          failStage: 'dispatch', error: e?.message ?? String(e),
+        });
+      }
+    } catch {}
     try {
       if (ws._deviceId && msg?.type === 'chat') {
         // Voice devices drop bare `error` frames (firmware only speaks
@@ -1390,6 +1535,17 @@ export function onConnection(ws, req) {
     // code 1006 = abnormal (no close frame: network drop / TCP RST); 1000/1001 = clean.
     console.log(`[ws] client disconnected device=${ws._deviceId ?? '-'} user=${ws._userId} code=${code ?? '?'}${r ? ' reason=' + r : ''}`);
     log.info('ws', 'client disconnected', { userId: ws._userId, deviceId: ws._deviceId ?? null, code: code ?? null, reason: r || null });
+    // hadActiveTurn is the one that matters for "it stopped answering": a drop
+    // with a turn in flight is a user-visible failure, a drop while idle is not.
+    recordLinkEvent('disconnect', {
+      deviceId: ws._deviceId ?? null,
+      userId: ws._userId ?? null,
+      code: code ?? null,
+      reason: r || null,
+      sessionMs: ws._linkOpenedAt ? Date.now() - ws._linkOpenedAt : null,
+      hadActiveTurn: !!ws._activeVoiceTurn,
+      hadSttSession: !!ws._sttSession,
+    });
     // Kill any in-flight TTS streamer: frames were only droppable (isOpen()
     // guards), but the active Pocket fetch + ffmpeg kept running for up to
     // the 60 s synth timeout per orphaned sentence.
@@ -1420,6 +1576,7 @@ export function onConnection(ws, req) {
           abortChat(turn.effectiveUserId, turn.agentId);
           _activeVoiceTurnByKey.delete(key);
           log.info('voice', 'aborted turn on device disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });
+          endTurn(turn.id, 'aborted_disconnect', { failStage: 'dispatch' });
         } catch { /* best-effort */ }
       } else {
         log.info('voice', 'skipped stale turn abort on disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });

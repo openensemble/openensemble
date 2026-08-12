@@ -37,6 +37,7 @@ import { getActiveTasks as getActiveBgTasks } from './background-tasks.mjs';
 import { projectActiveTasksForWire } from './lib/background-task-wire.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer, getSessionEpoch } from './sessions.mjs';
 import { markAlarmFired, markAlarmAcked } from './lib/alarms.mjs';
+import { recordLinkEvent } from './lib/voice-connectivity-journal.mjs';
 import { handleTvCommandResult, handleTvState } from './lib/tv-commands.mjs';
 import { buildDashboardData } from './lib/tv-dashboard.mjs';
 import { initNodeWss, initTerminalWss } from './routes/nodes.mjs';
@@ -336,6 +337,17 @@ export function initWs(httpServer, { allowAuxiliary = true } = {}) {
         // close so we can tell whether OE's heartbeat is dropping a device vs.
         // the device dropping itself.
         log.info('ws', 'terminating unresponsive client', { userId: client._userId, deviceId: client._deviceId ?? null, missedPongs: client._missedPongs, intervalMs: WS_PING_INTERVAL });
+        // Distinct from a device-initiated close: this is OE deciding the
+        // device is gone. If these cluster on one device it points at the
+        // link or the device's WS task, not at the wake path.
+        recordLinkEvent('terminated_unresponsive', {
+          deviceId: client._deviceId ?? null,
+          userId: client._userId ?? null,
+          missedPongs: client._missedPongs,
+          intervalMs: WS_PING_INTERVAL,
+          sessionMs: client._linkOpenedAt ? Date.now() - client._linkOpenedAt : null,
+          hadActiveTurn: !!client._activeVoiceTurn,
+        });
         client.terminate();
         continue;
       }
