@@ -34,6 +34,7 @@ import { log } from '../logger.mjs';
 import { getSpecialistTrim } from './slash-commands.mjs';
 import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
 import { getTurn, recordRouting } from '../lib/turn-trace-context.mjs';
+import { isRetrySafeControlTool } from '../chat/recovery.mjs';
 
 // ── Specialist router (pre-LLM) ───────────────────────────────────────────────
 // Skip the coordinator's reasoning turn when the user's message clearly
@@ -471,6 +472,22 @@ export async function buildSchedulerNote({ userId, agentId, userText, skipInterc
 
 // ── Retriable error patterns for provider failover ──────────────────────
 const RETRIABLE_RE = /\b(5\d{2}|timeout|timed out|rate limit|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|overloaded(?:_error)?)\b/i;
+const RETRIABLE_PROVIDER_CODES = new Set([
+  'server_is_overloaded',
+  'server_error',
+  'service_unavailable',
+  'rate_limit_exceeded',
+]);
+
+function isRetriableProviderFailure(error) {
+  if (error?.retryable === false) return false;
+  const providerCode = String(
+    error?.providerCode ?? error?.code ?? error?.cause?.code ?? '',
+  ).toLowerCase();
+  return error?.retryable === true
+    || RETRIABLE_PROVIDER_CODES.has(providerCode)
+    || RETRIABLE_RE.test(String(error?.message || ''));
+}
 
 // Only arm when the reply actually ENDS by asking the user something — a "?"
 // earlier in the reply is usually rhetorical or embedded and would open a
@@ -557,11 +574,13 @@ export async function runLlmTurn({
   // no shared import, for the same test-mock reasons.
   const _attachments = Array.isArray(attachments) ? attachments : (attachment ? [attachment] : []);
   let streamBuf = '';
-  // Once a tool has been invoked this attempt, a side effect (email_send, an HA
-  // service call, a purchase) may already have executed — so we must NOT re-run
-  // the whole turn on a fallback provider, or that tool fires twice. Tracked on
-  // both the emit callback and the yielded stream to be robust to either path.
-  let toolInvoked = false;
+  // Once a potentially effectful tool has been invoked this attempt, a side
+  // effect (email_send, an HA service call, a purchase) may already have
+  // executed — so we must NOT re-run the whole turn on a fallback provider, or
+  // that tool fires twice. Pure in-memory discovery (`request_tools`) is the
+  // one exact exception. Track both callback and yielded events so either
+  // provider path remains safe.
+  let effectfulToolInvoked = false;
   // The built-in scheduler can create/cancel/reschedule before narration starts.
   // Provider failover within this attempt is safe (the scheduler note is reused),
   // but a user Retry would execute that mutation again, so terminal failures
@@ -569,7 +588,7 @@ export async function runLlmTurn({
   const preLlmSideEffectCommitted = getTurn()?.preLlmSideEffectCommitted === true;
   let callbackError = null;
 
-  async function emitTurnFailure(event, retryable = !toolInvoked) {
+  async function emitTurnFailure(event, retryable = !effectfulToolInvoked) {
     const message = String(event?.message || 'The turn failed before completion.');
     retryable = retryable === true && !preLlmSideEffectCommitted;
     // Silent/internal turns deliberately have no pending session row. Their
@@ -613,7 +632,7 @@ export async function runLlmTurn({
       awaitSlowTools: toolPlan?.mode === 'selected',
     }, async () => {
     for await (const event of streamChat(agentObj, userText, ac.signal, (e) => {
-      if (e.type === 'tool_call') toolInvoked = true;
+      if (e.type === 'tool_call' && !isRetrySafeControlTool(e.name)) effectfulToolInvoked = true;
       if (e.type === 'error') { callbackError = e; return; }
       onEvent({ ...e, agent: agentId });
     }, userId ?? 'default', _attachments, schedulerNote, silent, { source, deviceId }, {
@@ -630,7 +649,7 @@ export async function runLlmTurn({
       if (event.type === 'error') { streamError ??= { ...event }; continue; }
       if (streamError) continue;
       if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
-      if (event.type === 'tool_call') toolInvoked = true;
+      if (event.type === 'tool_call' && !isRetrySafeControlTool(event.name)) effectfulToolInvoked = true;
       // Accumulate stream content for persistence buffer
       if (event.type === 'token')   streamBuf += event.text;
       if (event.type === 'replace') streamBuf = event.text;
@@ -650,7 +669,7 @@ export async function runLlmTurn({
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
       if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel
-          && RETRIABLE_RE.test(failoverError.message ?? '') && !toolInvoked) {
+          && isRetriableProviderFailure(failoverError) && !effectfulToolInvoked) {
         console.log(`[failover] Primary ${scopedAgent.provider}/${scopedAgent.model} failed: ${failoverError.message} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         // Voice devices TTS every token — never speak provider/model names
         // (spoken errors are provider-agnostic by rule). Web keeps the
@@ -663,14 +682,14 @@ export async function runLlmTurn({
           model: fo.fallbackModel,
         };
         const fallbackError = await runStream(fallbackAgent);
-        if (fallbackError) await emitTurnFailure(fallbackError, !toolInvoked && fallbackError.retryable !== false);
+        if (fallbackError) await emitTurnFailure(fallbackError, !effectfulToolInvoked && fallbackError.retryable !== false);
       } else {
         // No failover (not configured, or a tool already ran this turn — re-running
         // would double-execute its side effects). Emit the original error.
-        if (toolInvoked && fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel) {
+        if (effectfulToolInvoked && fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel) {
           console.log(`[failover] skipped — a tool already ran this turn; re-running on ${fo.fallbackProvider}/${fo.fallbackModel} could double-execute side effects`);
         }
-        await emitTurnFailure(failoverError, !toolInvoked && failoverError.retryable !== false);
+        await emitTurnFailure(failoverError, !effectfulToolInvoked && failoverError.retryable !== false);
       }
     }
   } catch (e) {
@@ -692,7 +711,8 @@ export async function runLlmTurn({
       // Attempt failover on thrown errors too (e.g. fetch failures)
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
-      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel && RETRIABLE_RE.test(e.message ?? '') && !toolInvoked) {
+      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel
+          && isRetriableProviderFailure(e) && !effectfulToolInvoked) {
         console.log(`[failover] Primary threw: ${enrichedMessage} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         // Voice devices TTS every token — never speak provider/model names
         // (spoken errors are provider-agnostic by rule). Web keeps the
@@ -701,17 +721,17 @@ export async function runLlmTurn({
         try {
           const fallbackAgent = { ...scopedAgent, provider: fo.fallbackProvider, model: fo.fallbackModel };
           const fallbackError = await runStream(fallbackAgent);
-          if (fallbackError) await emitTurnFailure(fallbackError, !toolInvoked && fallbackError.retryable !== false);
+          if (fallbackError) await emitTurnFailure(fallbackError, !effectfulToolInvoked && fallbackError.retryable !== false);
         } catch (e2) {
           if (e2.name !== 'AbortError') {
             const cause2 = e2?.cause?.code || e2?.cause?.message;
             const msg2 = cause2 && !e2.message?.includes(cause2) ? `${e2.message} (${cause2})` : e2.message;
-            await emitTurnFailure({ type: 'error', message: msg2 }, !toolInvoked);
+            await emitTurnFailure({ type: 'error', message: msg2 }, !effectfulToolInvoked);
           }
         }
       } else {
         const storageFailure = e?.code === 'SESSION_CLEARED' || /persist|session.*clear|storage/i.test(enrichedMessage || '');
-        await emitTurnFailure({ type: 'error', message: enrichedMessage, ...(storageFailure ? { code: 'persistence_failed' } : {}) }, !toolInvoked && !storageFailure);
+        await emitTurnFailure({ type: 'error', message: enrichedMessage, ...(storageFailure ? { code: 'persistence_failed' } : {}) }, !effectfulToolInvoked && !storageFailure);
       }
     } else if (!silent) {
       await failPendingTurn(scopedSessionKey, 'Stopped by user', {

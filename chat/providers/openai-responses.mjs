@@ -964,6 +964,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         const msg = ev.response?.error?.message ?? ev.error?.message
           ?? (reason ? `response incomplete (${reason})` : 'response incomplete or failed');
         const code = String(ev.response?.error?.code ?? ev.error?.code ?? '');
+        const retryable = TRANSIENT_STREAM_ERROR_CODES.has(code);
         usageCardinalityValid = false;
         // Retry a transient capacity failure in place, but ONLY while this
         // response is still empty. Once a token, tool call, or image has
@@ -972,7 +973,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         const nothingEmittedYet = !textContent
           && toolCalls.size === 0
           && generatedImages.length === 0;
-        if (TRANSIENT_STREAM_ERROR_CODES.has(code)
+        if (retryable
             && nothingEmittedYet
             && transientStreamRetries < MAX_TRANSIENT_STREAM_RETRIES) {
           transientStreamRetries++;
@@ -982,7 +983,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         }
         if (textContent.trim()) yield { type: 'replace', text: '' };
         yield usageTelemetry();
-        yield { type: 'error', message: `${displayName}: ${msg}` };
+        yield {
+          type: 'error',
+          message: `${displayName}: ${msg}`,
+          ...(code ? { providerCode: code } : {}),
+          ...(retryable ? { retryable: true } : {}),
+        };
         return;
       }
     }

@@ -88,6 +88,7 @@ import {
   MISSING_TOOL_NOTICE,
   IN_PROGRESS_NOTICE,
   withRetryNote,
+  isRetrySafeControlTool,
   RECOVERY_NOTE_EXCLUDED_TOOLS,
   AUTONOMOUS_TASK_CREATION_TOOLS,
 } from './recovery.mjs';
@@ -1565,7 +1566,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // emitted media. Persist every completed tool result and collected image
     // even without final narration. The durable result tells a later retry
     // what already happened so it cannot blindly repeat the effect.
-    const hasDurableEffects = toolsUsed.length > 0
+    const hasDurableEffects = toolsUsed.some(tool => !isRetrySafeControlTool(tool?.name))
       || (turnImages?.length ?? 0) > 0
       || (toolIdentityAnomalies?.length ?? 0) > 0;
     let persistenceError = null;

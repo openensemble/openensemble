@@ -22,5 +22,16 @@ export function withRetryNote(userTurn, retryNote) {
     : { ...userTurn, content: `${String(userTurn.content || '')}${retryNote}` };
 }
 
+// Exact, fail-closed allowlist for control calls that only reshape the current
+// in-memory provider/tool surface. These calls are safe to repeat after a
+// provider failure and do not need failed-turn effect evidence on disk.
+//
+// Keep this distinct from the broader routing/control-tool sets elsewhere:
+// several of those include delivery or worker-management calls with real
+// durable effects. Unknown and unnamed tools deliberately return false.
+export function isRetrySafeControlTool(name) {
+  return name === 'request_tools';
+}
+
 export const RECOVERY_NOTE_EXCLUDED_TOOLS = new Set(['request_tools', 'web_search', 'email_user']);
 export const AUTONOMOUS_TASK_CREATION_TOOLS = new Set(['schedule_task', 'set_reminder', 'set_alarm']);

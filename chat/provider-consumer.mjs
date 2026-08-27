@@ -479,7 +479,17 @@ export async function* consumeProvider(providerGen, {
     if (e?.name !== 'AbortError') {
       const message = String(e?.message || e || 'Provider stream failed').slice(0, 500);
       providerError = message;
-      yield { type: 'error', message };
+      // A quarantined tool-result identity means we cannot prove which local
+      // invocation produced the completion evidence. Keep the anomaly durable
+      // and explicitly block whole-turn retry/failover, even when the thrown
+      // text happens to resemble a transient provider failure. This is
+      // especially important for request_tools: that control call is normally
+      // retry-safe, but an identity-integrity failure is not.
+      yield {
+        type: 'error',
+        message,
+        ...(toolIdentityAnomalies.length ? { retryable: false } : {}),
+      };
     } else {
       providerError = 'Provider stream aborted';
     }
@@ -488,4 +498,3 @@ export async function* consumeProvider(providerGen, {
     ? { assistantContent: '', errored: true, providerError, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn: false, hideTaskId: null, usage, turnImages }
     : { assistantContent, errored: false, providerError: null, toolsUsed, toolEvents, toolIdentityAnomalies, modelCalls, hideTurn, hideTaskId, usage, turnImages };
 }
-

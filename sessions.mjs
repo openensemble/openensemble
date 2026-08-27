@@ -602,29 +602,82 @@ export function failPendingTurn(agentId, message, { status = 'failed', retryable
   if (!turnId) return Promise.resolve(false);
   const expectedEpoch = turn?.sessionKey === agentId ? turn.sessionEpoch : null;
   return withSessionWriteLock(agentId, async () => {
-    if (expectedEpoch && getSessionEpoch(agentId) !== expectedEpoch) return false;
+    // Clear is an authoritative terminal boundary, not a storage failure. Its
+    // epoch rotation intentionally removes the old row, so report the failure
+    // as handled without repopulating the cleared transcript.
+    if (expectedEpoch && getSessionEpoch(agentId) !== expectedEpoch) return true;
     const p = sessionPath(agentId);
     let lines;
     try { lines = (await fsp.readFile(p, 'utf8')).split('\n').filter(Boolean); }
     catch (e) { if (e.code === 'ENOENT') return false; throw e; }
-    let idx = -1;
-    let pending = null;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const row = JSON.parse(lines[i]);
-        if (row?.pendingTurn === turnId) { idx = i; pending = row; break; }
-      } catch { /* ignore malformed legacy line */ }
+    const rows = lines.map(line => {
+      try { return JSON.parse(line); } catch { return null; }
+    });
+
+    // A whole-turn marker is authoritative. Re-observing its failure (or a
+    // late error after a completed turn) must never rewrite history or be
+    // mislabeled as failed storage.
+    if (rows.some(row => row?.role === TURN_TERMINAL_ROLE && rowMatchesTurn(row, turn))) {
+      return true;
     }
-    if (idx === -1 || !pending) return false;
+
+    let idx = -1;
+    let user = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      if (row?.role === 'user' && row.pendingTurn === turnId) {
+        idx = i;
+        user = row;
+        break;
+      }
+    }
+
+    // Provider-error durability can commit real tool/media evidence before
+    // the outer failure finalizer runs. That successful append consumes the
+    // pending tag and leaves this same turn at reply_persisted. Continue the
+    // state transition in place instead of treating the absent tag as failed
+    // I/O. Already-failed finalizing rows are accepted for idempotence.
+    if (idx === -1) {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i];
+        if (row?.role === 'user'
+            && rowMatchesTurn(row, turn)
+            && row.terminalPending === true
+            && ['reply_persisted', 'failed', 'stopped'].includes(row.turnStatus)) {
+          idx = i;
+          user = row;
+          break;
+        }
+      }
+    }
+    if (idx === -1 || !user) return false;
+
     const failedUser = {
-      ...pending,
+      ...user,
       pendingTurn: undefined,
       turnStatus: status,
       terminalPending: true,
       retryable: retryable === true,
-      excludeFromModel: true,
+      // A pending-only failed turn has no assistant protocol to preserve and
+      // stays out of future model history. When tool evidence was already
+      // persisted, retain the user's existing visibility so its assistant/tool
+      // rows never become an orphaned protocol fragment.
+      ...(user.turnStatus === 'running' ? { excludeFromModel: true } : {}),
     };
     delete failedUser.pendingTurn;
+    lines[idx] = JSON.stringify(failedUser);
+
+    const existingError = rows.some(row =>
+      row?.role === 'turn_error' && rowMatchesTurn(row, turn));
+    if (existingError) {
+      // A prior serialized caller already committed this failure. Preserve
+      // its first status/message/retryability as the authoritative outcome.
+      if (['failed', 'stopped'].includes(user.turnStatus)) return true;
+      await atomicRewrite(p, lines.join('\n') + '\n');
+      _lineCounts.set(agentId, lines.length);
+      return true;
+    }
+
     const errorRow = applyTurnMetadata([{
       role: 'turn_error',
       content: String(message || 'Turn failed'),
@@ -634,7 +687,14 @@ export function failPendingTurn(agentId, message, { status = 'failed', retryable
       ...(partial ? { assistantPartial: String(partial) } : {}),
       ts: Date.now(),
     }], turn)[0];
-    lines.splice(idx, 1, JSON.stringify(failedUser), JSON.stringify(errorRow));
+
+    // Keep previously persisted assistant/tool evidence in its original order
+    // and place the failure after the last row belonging to this turn.
+    let errorInsertIdx = idx + 1;
+    for (let i = idx + 1; i < rows.length; i++) {
+      if (rowMatchesTurn(rows[i], turn)) errorInsertIdx = i + 1;
+    }
+    lines.splice(errorInsertIdx, 0, JSON.stringify(errorRow));
     await atomicRewrite(p, lines.join('\n') + '\n');
     _lineCounts.set(agentId, lines.length);
     return true;
