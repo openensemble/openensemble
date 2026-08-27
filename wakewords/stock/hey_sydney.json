@@ -7,7 +7,7 @@
   "trained_languages": [
     "en"
   ],
-  "version": 6,
+  "version": 7,
   "micro": {
     "feature_step_size": 10,
     "sliding_window_size": 5,
