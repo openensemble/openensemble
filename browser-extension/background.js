@@ -33,12 +33,20 @@ const FIELD_WATCH_PICKER_TTL_MS = 5 * 60_000;
 const FIELD_WATCH_POLL_INTERVAL_MS = 60_000;
 const CONFIRMATION_TTL_MS = 60_000;
 const EXTENSION_UI_DOCUMENTS = new Set(['popup.html', 'sidepanel.html']);
+const AD_BLOCK_RULESET_ID = 'oe_ads';
+const AD_BLOCK_ENABLED_KEY = 'adBlockingEnabled';
+const AD_BLOCK_LEARNED_RULES_KEY = 'adBlockLearnedRules';
+const AD_BLOCK_MAX_LEARNED_RULES = 200;
+const AD_BLOCK_MAX_RULES_PER_FRAME = 50;
 let _pendingConfirmation = null;
 let _pendingConfirmationResolve = null;
 let _fieldWatchPollInFlight = false;
 let _lastFieldWatchPollAt = 0;
 let _suggestionMatchers = [];
 let _activeSuggestion = null;
+let _adBlockRuleMutationTail = Promise.resolve();
+let _adBlockBroadcastTail = Promise.resolve();
+let _adBlockPreferenceTail = Promise.resolve();
 
 // A Chrome side panel is extension UI, but Chrome may still attach its host
 // tab to MessageSender.tab.  Therefore `sender.tab` cannot distinguish the
@@ -79,6 +87,330 @@ async function setStatus(patch) {
   _status = { ..._status, ...patch };
   // Broadcast to any open popup. Errors are silent — popup may not be open.
   try { await chrome.runtime.sendMessage({ type: 'status', status: _status }); } catch {}
+}
+
+function httpHostname(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (url.protocol === 'http:' || url.protocol === 'https:') return url.hostname.toLowerCase();
+    if (url.protocol === 'blob:') return httpHostname(url.pathname);
+    return null;
+  } catch { return null; }
+}
+
+function isAdBlockContentSender(sender) {
+  const runtimeId = String(chrome?.runtime?.id || '');
+  return Boolean(
+    runtimeId
+    && sender?.id === runtimeId
+    && Number.isInteger(Number(sender?.tab?.id))
+    && httpHostname(sender?.tab?.url)
+    && !isExtensionUiSender(sender),
+  );
+}
+
+function validLearnedAdSelector(value) {
+  const selector = typeof value === 'string' ? value.trim() : '';
+  if (!selector || selector.length > 420) return null;
+  if (/[{},\r\n@]/.test(selector) || selector.includes(',')) return null;
+  if (/:(?:has|is|where|not)\s*\(/i.test(selector)) return null;
+  if (/^\s*(?:html|body|head|main)(?:\s|$|[.#[:])/i.test(selector)) return null;
+  if (!/^[A-Za-z0-9_#\.\-\[\]="'():>+~\\\s]+$/.test(selector)) return null;
+  return selector;
+}
+
+function normalizeLearnedAdRules(value) {
+  if (!Array.isArray(value)) return [];
+  const normalized = [];
+  const ids = new Set();
+  for (const row of value) {
+    const id = typeof row?.id === 'string' ? row.id.slice(0, 100) : '';
+    const siteHost = httpHostname(`https://${String(row?.siteHost || '')}/`);
+    const frameHost = httpHostname(`https://${String(row?.frameHost || '')}/`);
+    const selector = validLearnedAdSelector(row?.selector);
+    const createdAt = Number(row?.createdAt);
+    if (!id || ids.has(id) || !siteHost || !frameHost || !selector || !Number.isFinite(createdAt)) continue;
+    ids.add(id);
+    normalized.push({ id, siteHost, frameHost, selector, createdAt });
+    if (normalized.length >= AD_BLOCK_MAX_LEARNED_RULES) break;
+  }
+  return normalized;
+}
+
+async function getLearnedAdRules() {
+  const stored = await chrome.storage.local.get(AD_BLOCK_LEARNED_RULES_KEY);
+  return normalizeLearnedAdRules(stored?.[AD_BLOCK_LEARNED_RULES_KEY]);
+}
+
+async function storeLearnedAdRules(rules) {
+  const normalized = normalizeLearnedAdRules(rules)
+    .sort((a, b) => Number(b.createdAt) - Number(a.createdAt))
+    .slice(0, AD_BLOCK_MAX_LEARNED_RULES);
+  await chrome.storage.local.set({ [AD_BLOCK_LEARNED_RULES_KEY]: normalized });
+  return normalized;
+}
+
+async function getAdBlockingEnabled() {
+  const stored = await chrome.storage.local.get(AD_BLOCK_ENABLED_KEY);
+  return stored?.[AD_BLOCK_ENABLED_KEY] !== false;
+}
+
+async function performAdBlockRefresh({ siteHost = null } = {}) {
+  const [enabled, rules, tabs] = await Promise.all([
+    getAdBlockingEnabled(),
+    getLearnedAdRules(),
+    chrome.tabs.query({}).catch(() => []),
+  ]);
+  for (const tab of tabs) {
+    const tabSiteHost = httpHostname(tab?.url);
+    if (!tab?.id || !tabSiteHost || (siteHost && tabSiteHost !== siteHost)) continue;
+    const siteRules = rules
+      .filter(rule => rule.siteHost === tabSiteHost)
+      .map(rule => ({ id: rule.id, frameHost: rule.frameHost, selector: rule.selector }));
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'oe_adblock_refresh',
+        enabled,
+        siteHost: tabSiteHost,
+        rules: siteRules,
+      });
+    } catch {}
+  }
+}
+
+function broadcastAdBlockRefresh(options = {}) {
+  const pending = _adBlockBroadcastTail.then(() => performAdBlockRefresh(options));
+  _adBlockBroadcastTail = pending.then(() => undefined, () => undefined);
+  return pending;
+}
+
+async function performAdBlockingPreference(enabled, { persist = true } = {}) {
+  const api = chrome?.declarativeNetRequest;
+  if (!api?.updateEnabledRulesets) {
+    throw new Error('This browser does not provide Manifest V3 network filtering.');
+  }
+  await api.updateEnabledRulesets(enabled
+    ? { enableRulesetIds: [AD_BLOCK_RULESET_ID] }
+    : { disableRulesetIds: [AD_BLOCK_RULESET_ID] });
+  if (persist) await chrome.storage.local.set({ [AD_BLOCK_ENABLED_KEY]: enabled === true });
+  await broadcastAdBlockRefresh();
+  return enabled === true;
+}
+
+function queueAdBlockingPreference(operation) {
+  const pending = _adBlockPreferenceTail.then(operation);
+  _adBlockPreferenceTail = pending.then(() => undefined, () => undefined);
+  return pending;
+}
+
+function applyAdBlockingPreference(enabled, options = {}) {
+  return queueAdBlockingPreference(() => performAdBlockingPreference(enabled, options));
+}
+
+function reconcileAdBlockingPreference() {
+  return queueAdBlockingPreference(async () => {
+    const stored = await chrome.storage.local.get(AD_BLOCK_ENABLED_KEY);
+    const hasPreference = typeof stored?.[AD_BLOCK_ENABLED_KEY] === 'boolean';
+    const enabled = hasPreference ? stored[AD_BLOCK_ENABLED_KEY] : true;
+    if (!chrome?.declarativeNetRequest?.updateEnabledRulesets) return enabled;
+    await performAdBlockingPreference(enabled, { persist: false });
+    if (!hasPreference) await chrome.storage.local.set({ [AD_BLOCK_ENABLED_KEY]: true });
+    return enabled;
+  });
+}
+
+function adBlockScopeForSender(sender) {
+  const siteHost = httpHostname(sender?.tab?.url);
+  const frameHost = httpHostname(sender?.url) || httpHostname(sender?.origin) || siteHost;
+  return siteHost && frameHost ? { siteHost, frameHost } : null;
+}
+
+async function adBlockStateForSender(sender) {
+  const scope = adBlockScopeForSender(sender);
+  if (!scope) return { ok: false, error: 'ad rules are available only on web pages' };
+  const [enabled, rules] = await Promise.all([getAdBlockingEnabled(), getLearnedAdRules()]);
+  return {
+    ok: true,
+    enabled,
+    siteHost: scope.siteHost,
+    frameHost: scope.frameHost,
+    rules: rules
+      .filter(rule => rule.siteHost === scope.siteHost && rule.frameHost === scope.frameHost)
+      .map(rule => ({ id: rule.id, selector: rule.selector })),
+  };
+}
+
+function newLearnedAdRuleId() {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  const randomPart = randomUuid?.replace(/-/g, '') || Math.random().toString(36).slice(2, 14);
+  return `ad_${Date.now().toString(36)}_${randomPart}`;
+}
+
+function mutateLearnedAdRules(mutator) {
+  const pending = _adBlockRuleMutationTail.then(async () => {
+    const current = await getLearnedAdRules();
+    const mutation = await mutator(current);
+    const stored = await storeLearnedAdRules(mutation.rules);
+    await broadcastAdBlockRefresh({ siteHost: mutation.siteHost });
+    return { ...mutation, rules: stored };
+  });
+  _adBlockRuleMutationTail = pending.then(() => undefined, () => undefined);
+  return pending;
+}
+
+async function saveLearnedAdRule({ tab, info, selection }) {
+  const siteHost = httpHostname(tab?.url);
+  const frameHost = httpHostname(`https://${String(selection?.frameHost || '')}/`)
+    || httpHostname(selection?.frameUrl)
+    || httpHostname(selection?.frameOrigin)
+    || httpHostname(info?.frameUrl)
+    || siteHost;
+  const selector = validLearnedAdSelector(selection?.selector);
+  if (!siteHost || !frameHost || !selector) throw new Error('the learned ad rule was not safely scoped');
+  const now = Date.now();
+  const { learned } = await mutateLearnedAdRules(rules => {
+    const duplicate = rules.find(rule => (
+      rule.siteHost === siteHost && rule.frameHost === frameHost && rule.selector === selector
+    ));
+    const learned = duplicate
+      ? { ...duplicate, createdAt: now }
+      : { id: newLearnedAdRuleId(), siteHost, frameHost, selector, createdAt: now };
+    const otherRules = rules.filter(rule => rule.id !== learned.id);
+    const keepInFrame = new Set(otherRules
+      .filter(rule => rule.siteHost === siteHost && rule.frameHost === frameHost)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, AD_BLOCK_MAX_RULES_PER_FRAME - 1)
+      .map(rule => rule.id));
+    return {
+      learned,
+      siteHost,
+      rules: [learned, ...otherRules.filter(rule => (
+        rule.siteHost !== siteHost
+        || rule.frameHost !== frameHost
+        || keepInFrame.has(rule.id)
+      ))],
+    };
+  });
+  return learned;
+}
+
+async function removeLearnedAdRule(ruleId, scope = null) {
+  const id = String(ruleId || '').slice(0, 100);
+  const { existing } = await mutateLearnedAdRules(rules => {
+    const existing = rules.find(rule => rule.id === id);
+    if (!existing) throw new Error('that learned ad rule no longer exists');
+    if (scope && (existing.siteHost !== scope.siteHost || existing.frameHost !== scope.frameHost)) {
+      throw new Error('that learned ad rule belongs to a different site');
+    }
+    return {
+      existing,
+      siteHost: existing.siteHost,
+      rules: rules.filter(rule => rule.id !== id),
+    };
+  });
+  return existing;
+}
+
+async function clearLearnedAdRulesForSite(siteHost) {
+  const normalizedSiteHost = httpHostname(`https://${String(siteHost || '')}/`);
+  if (!normalizedSiteHost) throw new Error('open a web page first');
+  const { removed } = await mutateLearnedAdRules(rules => ({
+    removed: rules.filter(rule => rule.siteHost === normalizedSiteHost).length,
+    siteHost: normalizedSiteHost,
+    rules: rules.filter(rule => rule.siteHost !== normalizedSiteHost),
+  }));
+  return removed;
+}
+
+async function activeAdBlockStatus() {
+  const [enabled, rules, activeTabs] = await Promise.all([
+    getAdBlockingEnabled(),
+    getLearnedAdRules(),
+    chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []),
+  ]);
+  const tab = activeTabs?.[0] || null;
+  const siteHost = httpHostname(tab?.url);
+  const siteRules = siteHost ? rules.filter(rule => rule.siteHost === siteHost) : [];
+  let matchedCount = null;
+  if (enabled && tab?.id && siteHost) {
+    try {
+      const response = await chrome.tabs.sendMessage(
+        tab.id,
+        { type: 'oe_adblock_get_status' },
+        { frameId: 0 },
+      );
+      if (Number.isFinite(Number(response?.matchedCount))) matchedCount = Number(response.matchedCount);
+    } catch {}
+  }
+  return {
+    ok: true,
+    enabled,
+    networkAvailable: Boolean(chrome?.declarativeNetRequest?.updateEnabledRulesets),
+    siteHost,
+    learnedSiteCount: siteRules.length,
+    matchedCount,
+    lastRuleId: siteRules.sort((a, b) => b.createdAt - a.createdAt)[0]?.id || null,
+  };
+}
+
+async function notifyAdBlockFrame(tabId, frameId, message) {
+  if (!tabId) return;
+  try {
+    await chrome.tabs.sendMessage(
+      tabId,
+      message,
+      Number.isInteger(Number(frameId)) ? { frameId: Number(frameId) } : undefined,
+    );
+  } catch {}
+}
+
+async function blockAdFromContextMenu(info, tab) {
+  const frameId = Number.isInteger(Number(info?.frameId)) ? Number(info.frameId) : 0;
+  if (!tab?.id || !httpHostname(tab.url)) return;
+  if (!await getAdBlockingEnabled()) {
+    await notifyAdBlockFrame(tab.id, frameId, {
+      type: 'oe_adblock_notice',
+      message: 'Ad blocking is off. Turn it on in the OE Bridge popup first.',
+    });
+    return;
+  }
+  let selection;
+  try {
+    selection = await chrome.tabs.sendMessage(
+      tab.id,
+      { type: 'oe_adblock_block_context_target' },
+      { frameId },
+    );
+  } catch {
+    selection = null;
+  }
+  if (!selection?.ok) {
+    await notifyAdBlockFrame(tab.id, frameId, {
+      type: 'oe_adblock_notice',
+      message: selection?.error || 'OE could not identify that item. Reload the page and try again.',
+    });
+    return;
+  }
+  try {
+    const learned = await saveLearnedAdRule({ tab, info, selection });
+    await notifyAdBlockFrame(tab.id, frameId, {
+      type: 'oe_adblock_rule_saved',
+      ruleId: learned.id,
+      siteHost: learned.siteHost,
+    });
+    if (frameId !== 0) {
+      await notifyAdBlockFrame(tab.id, 0, {
+        type: 'oe_adblock_notice',
+        message: `Blocked this ad and learned it for ${learned.siteHost}. Use the popup to undo it.`,
+        isError: false,
+      });
+    }
+  } catch (error) {
+    await notifyAdBlockFrame(tab.id, frameId, {
+      type: 'oe_adblock_notice',
+      message: error?.message || String(error),
+    });
+  }
 }
 
 async function listTabsSnapshot() {
@@ -3867,6 +4199,16 @@ async function setupContextMenus() {
   if (!chrome?.contextMenus?.create) return;
   try { await chrome.contextMenus.removeAll(); } catch {}
   try {
+    chrome.contextMenus.create({
+      id: 'oe-block-ad',
+      title: 'Block this ad with OE',
+      contexts: ['all'],
+    });
+    chrome.contextMenus.create({
+      id: 'oe-ad-separator',
+      type: 'separator',
+      contexts: ['all'],
+    });
     chrome.contextMenus.create({ id: 'oe-ask-selection', title: 'Ask OE about this selection', contexts: ['selection'] });
     chrome.contextMenus.create({ id: 'oe-ask-page', title: 'Summarize this page with OE', contexts: ['page'] });
     chrome.contextMenus.create({ id: 'oe-ask-image', title: 'Ask OE about this image', contexts: ['image'] });
@@ -3875,9 +4217,23 @@ async function setupContextMenus() {
   } catch {}
 }
 
+if (chrome?.contextMenus?.onShown?.addListener) {
+  chrome.contextMenus.onShown.addListener((_info, tab) => {
+    const visible = Boolean(httpHostname(tab?.url));
+    Promise.all([
+      chrome.contextMenus.update('oe-block-ad', { visible }),
+      chrome.contextMenus.update('oe-ad-separator', { visible }),
+    ]).then(() => chrome.contextMenus.refresh?.()).catch(() => {});
+  });
+}
+
 if (chrome?.contextMenus?.onClicked?.addListener) {
   chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     try {
+      if (info.menuItemId === 'oe-block-ad') {
+        await blockAdFromContextMenu(info, tab);
+        return;
+      }
       await openPanelForTab(tab);
       if (info.menuItemId === 'oe-ask-selection') {
         await sendOneShotContext({
@@ -3926,6 +4282,87 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         config: { serverUrl: cfg.serverUrl, name: cfg.name, paired: Boolean(cfg.browserCredential) },
         lease: await getLease(),
       });
+      return;
+    }
+    if (msg?.type === 'adblock_content_ready') {
+      if (!isAdBlockContentSender(_sender)) {
+        sendResponse({ ok: false, error: 'ad rules are available only to OE content scripts' });
+        return;
+      }
+      sendResponse(await adBlockStateForSender(_sender));
+      return;
+    }
+    if (msg?.type === 'get_adblock_status') {
+      if (!isExtensionUiSender(_sender)) {
+        sendResponse({ ok: false, error: 'ad-block settings are available only in extension UI' });
+        return;
+      }
+      sendResponse(await activeAdBlockStatus());
+      return;
+    }
+    if (msg?.type === 'set_adblock_enabled') {
+      if (!isExtensionUiSender(_sender)) {
+        sendResponse({ ok: false, error: 'ad blocking can be changed only in extension UI' });
+        return;
+      }
+      try {
+        await applyAdBlockingPreference(msg.enabled === true);
+        sendResponse(await activeAdBlockStatus());
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+    if (msg?.type === 'adblock_remove_learned_rule') {
+      try {
+        if (isExtensionUiSender(_sender)) {
+          await removeLearnedAdRule(msg.ruleId);
+        } else {
+          if (!isAdBlockContentSender(_sender)) throw new Error('learned ad rules can be removed only from the page or extension UI');
+          const scope = adBlockScopeForSender(_sender);
+          if (!scope) throw new Error('the page no longer matches that learned ad rule');
+          await removeLearnedAdRule(msg.ruleId, scope);
+        }
+        sendResponse({ ok: true });
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+    if (msg?.type === 'adblock_undo_last') {
+      if (!isExtensionUiSender(_sender)) {
+        sendResponse({ ok: false, error: 'learned ad rules can be changed only in extension UI' });
+        return;
+      }
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const siteHost = httpHostname(tab?.url);
+        if (!siteHost) throw new Error('open a web page first');
+        const rules = (await getLearnedAdRules())
+          .filter(rule => rule.siteHost === siteHost)
+          .sort((a, b) => b.createdAt - a.createdAt);
+        if (!rules.length) throw new Error('this site has no learned ad rules');
+        await removeLearnedAdRule(rules[0].id);
+        sendResponse(await activeAdBlockStatus());
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+    if (msg?.type === 'adblock_clear_site') {
+      if (!isExtensionUiSender(_sender)) {
+        sendResponse({ ok: false, error: 'learned ad rules can be changed only in extension UI' });
+        return;
+      }
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const siteHost = httpHostname(tab?.url);
+        if (!siteHost) throw new Error('open a web page first');
+        const removed = await clearLearnedAdRulesForSite(siteHost);
+        sendResponse({ ...(await activeAdBlockStatus()), removed });
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || String(error) });
+      }
       return;
     }
     if (msg?.type === 'get_pending_confirmation') {
@@ -4502,18 +4939,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // inject the content scripts programmatically so they work immediately
 // without needing the user to refresh.
 async function injectContentScriptsIntoAllTabs() {
-  const scripts = ['content-banner.js', 'content-observe.js', 'content-field-picker.js'];
+  const scripts = [
+    { file: 'content-adblock.js', allFrames: true },
+    { file: 'content-banner.js', allFrames: false },
+    { file: 'content-observe.js', allFrames: false },
+    { file: 'content-field-picker.js', allFrames: false },
+  ];
   let tabs = [];
   try { tabs = await chrome.tabs.query({}); } catch { return; }
   for (const t of tabs) {
     if (!t.id || !t.url) continue;
     // Skip non-injectable origins.
     if (/^(chrome|edge|brave|about|chrome-extension|moz-extension):/i.test(t.url)) continue;
-    for (const f of scripts) {
+    for (const script of scripts) {
       try {
         await chrome.scripting.executeScript({
-          target: { tabId: t.id, allFrames: false },
-          files: [f],
+          target: { tabId: t.id, allFrames: script.allFrames },
+          files: [script.file],
         });
       } catch { /* tab refused (private file://, restricted page) — skip silently */ }
     }
@@ -4522,13 +4964,25 @@ async function injectContentScriptsIntoAllTabs() {
 
 // Kick off on service worker startup. Chrome MV3 may park the worker; on
 // wake, the onAlarm or onStartup hooks below will re-fire this.
-chrome.runtime.onStartup.addListener(() => { _shouldReconnect = true; connect(); injectContentScriptsIntoAllTabs(); });
-chrome.runtime.onInstalled.addListener(() => { _shouldReconnect = true; connect(); injectContentScriptsIntoAllTabs(); setupContextMenus(); });
+chrome.runtime.onStartup.addListener(() => {
+  _shouldReconnect = true;
+  connect();
+  reconcileAdBlockingPreference().catch(error => console.warn('[OE Bridge] ad-block preference sync failed:', error?.message || error));
+  injectContentScriptsIntoAllTabs();
+});
+chrome.runtime.onInstalled.addListener(() => {
+  _shouldReconnect = true;
+  connect();
+  reconcileAdBlockingPreference().catch(error => console.warn('[OE Bridge] ad-block preference sync failed:', error?.message || error));
+  injectContentScriptsIntoAllTabs();
+  setupContextMenus();
+});
 loadSuggestionMatchers().catch(() => {});
 // Also fire on every SW boot (not just onInstalled/onStartup, which
 // don't fire on a normal cold start of a docked extension).
 injectContentScriptsIntoAllTabs();
 setupContextMenus();
+reconcileAdBlockingPreference().catch(error => console.warn('[OE Bridge] ad-block preference sync failed:', error?.message || error));
 
 // Keepalive. Guarded against chrome.alarms being undefined — happens when
 // the extension was first registered before the `alarms` permission was
@@ -4561,6 +5015,18 @@ if (typeof chrome?.alarms?.create === 'function') {
 export const __test = Object.freeze({
   getConfig,
   isExtensionUiSender,
+  isAdBlockContentSender,
+  validLearnedAdSelector,
+  normalizeLearnedAdRules,
+  getAdBlockingEnabled,
+  applyAdBlockingPreference,
+  reconcileAdBlockingPreference,
+  adBlockStateForSender,
+  saveLearnedAdRule,
+  removeLearnedAdRule,
+  clearLearnedAdRulesForSite,
+  activeAdBlockStatus,
+  blockAdFromContextMenu,
   authorize,
   dispatch,
   grantLease,
@@ -4606,6 +5072,9 @@ export const __test = Object.freeze({
     _learningRunLoaded = true;
     _learningInspectionSnapshot = null;
     _learningCommandTail = Promise.resolve();
+    _adBlockRuleMutationTail = Promise.resolve();
+    _adBlockBroadcastTail = Promise.resolve();
+    _adBlockPreferenceTail = Promise.resolve();
     _observations = new Map();
     _fieldWatchPollInFlight = false;
     _lastFieldWatchPollAt = 0;
@@ -4614,6 +5083,7 @@ export const __test = Object.freeze({
       await chrome.storage.local.remove([
         'leaseDenyBefore', LEARNING_RUN_DENY_KEY, 'watchMode', 'neverReadDomains', 'token',
         'browserCredential', 'pendingBrowserCredential', 'browserSuggestionMatchers',
+        AD_BLOCK_ENABLED_KEY, AD_BLOCK_LEARNED_RULES_KEY,
       ]);
     } catch {}
   },

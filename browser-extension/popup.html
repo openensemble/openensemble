@@ -32,12 +32,32 @@
     #actionConfirmation { margin:0 0 12px;padding:10px;border:1px solid #f59e0b;border-radius:8px;background:#fff7ed; }
     #actionConfirmation p { margin:4px 0 8px;line-height:1.4;color:#713f12; }
     #popupConfirmationOrigin { font-size:10px;color:#78716c;word-break:break-word; }
+    .adblock { margin: 0 0 12px; padding: 10px; border: 1px solid #bbd7c1; border-radius: 8px; background: #f4fbf5; }
+    .adblock-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .adblock-head strong { color: #14532d; }
+    .adblock-toggle { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 600; color: #166534; white-space: nowrap; }
+    .adblock-toggle input { width: auto; margin: 0; }
+    #adBlockStatus { margin-top: 6px; color: #4b5563; font-size: 11px; line-height: 1.4; }
+    #adBlockActions[hidden] { display: none; }
+    #adBlockActions button { padding: 6px; font-size: 11px; }
   </style>
 </head>
 <body>
   <h1><img src="icons/oe-bridge-32.png" alt="">OpenEnsemble Bridge</h1>
 
   <div id="status" class="status idle">…</div>
+
+  <section class="adblock" aria-labelledby="adBlockHeading">
+    <div class="adblock-head">
+      <strong id="adBlockHeading">Local ad blocking</strong>
+      <label class="adblock-toggle"><input id="adBlockEnabled" type="checkbox" aria-label="Local ad blocking"> <span id="adBlockToggleLabel">On</span></label>
+    </div>
+    <div id="adBlockStatus" aria-live="polite">Loading ad-block settings…</div>
+    <div id="adBlockActions" class="row" hidden>
+      <button id="adBlockUndo">Undo last</button>
+      <button id="adBlockClearSite">Clear this site</button>
+    </div>
+  </section>
 
   <section id="actionConfirmation" hidden aria-label="Confirm browser action">
     <b>OE is waiting for you</b>

@@ -52,6 +52,21 @@ The toolbar badge is the authoritative lease indicator. `ON` means a lease is
 active; the pause symbol means navigation suspended it. Closing the browser
 clears session leases.
 
+## Local ad blocking
+
+The Bridge popup includes a local ad-blocking switch. When it is on, a bundled
+Manifest V3 ruleset blocks known third-party advertising requests without
+sending request details or matches to OE. It never blocks a top-level
+navigation and does not depend on pairing or an agent tab lease.
+
+For an ad the bundled rules miss, right-click the ad and choose **Block this ad
+with OE**. Bridge saves only a bounded, site-scoped element selector and applies
+it on later visits to that site. The on-page confirmation offers **Undo**; the
+popup can also undo the latest learned rule or clear all learned rules for the
+current site. Turning ad blocking off keeps learned rules but stops applying
+them until it is turned back on. Reload the page after changing the switch so
+already-started network requests reflect the new setting.
+
 ## Field watches
 
 The Bridge side panel can watch a value you explicitly select. The confirmation

@@ -18,6 +18,8 @@ const $ = (id) => document.getElementById(id);
 // value).
 let _fieldsPopulated = false;
 let _popupConfirmationId = null;
+let _adBlockBusy = false;
+let _adBlockReloadHint = false;
 
 function populateFields(config) {
   if (_fieldsPopulated || !config) return;
@@ -303,6 +305,95 @@ function renderPopupConfirmation(confirmation) {
   $('popupConfirmationOrigin').textContent = [confirmation.pageTitle, confirmation.origin].filter(Boolean).join(' · ');
 }
 
+function renderAdBlock(status) {
+  if (!status?.ok) return;
+  const enabledInput = $('adBlockEnabled');
+  const statusEl = $('adBlockStatus');
+  const actions = $('adBlockActions');
+  const undo = $('adBlockUndo');
+  const clear = $('adBlockClearSite');
+  statusEl.style.color = '#4b5563';
+  enabledInput.checked = status.enabled === true;
+  $('adBlockToggleLabel').textContent = status.enabled ? 'On' : 'Off';
+  enabledInput.disabled = _adBlockBusy || status.networkAvailable === false;
+  const count = Math.max(0, Number(status.learnedSiteCount) || 0);
+  if (status.networkAvailable === false) {
+    statusEl.textContent = 'This browser does not expose Manifest V3 network filtering.';
+  } else if (!status.enabled) {
+    statusEl.textContent = 'Off. Turn it on to block known ad requests and apply anything you teach it.'
+      + (_adBlockReloadHint ? ' Reload this page to restore requests that were already blocked.' : '');
+  } else {
+    const learned = count
+      ? ` ${count} learned rule${count === 1 ? '' : 's'} also block ads on ${status.siteHost || 'this site'}.`
+      : '';
+    const matched = Number.isFinite(Number(status.matchedCount)) && Number(status.matchedCount) > 0
+      ? ` ${Number(status.matchedCount)} learned ad element${Number(status.matchedCount) === 1 ? '' : 's'} hidden in the main page now.`
+      : '';
+    statusEl.textContent = `Known ad requests are blocked locally.${learned}${matched} Right-click a missed ad and choose “Block this ad with OE” so it learns for this site.`
+      + (_adBlockReloadHint ? ' Reload this page to apply the network setting to every request.' : '');
+  }
+  actions.hidden = count === 0;
+  undo.disabled = _adBlockBusy || !status.lastRuleId;
+  clear.disabled = _adBlockBusy || count === 0;
+}
+
+function showAdBlockError(text) {
+  $('adBlockStatus').textContent = text || 'Ad-block settings could not be changed.';
+  $('adBlockStatus').style.color = '#8a2424';
+}
+
+async function setAdBlockBusy(busy) {
+  _adBlockBusy = busy;
+  for (const id of ['adBlockEnabled', 'adBlockUndo', 'adBlockClearSite']) $(id).disabled = busy;
+}
+
+$('adBlockEnabled').addEventListener('change', async () => {
+  const desired = $('adBlockEnabled').checked;
+  $('adBlockToggleLabel').textContent = desired ? 'On' : 'Off';
+  await setAdBlockBusy(true);
+  $('adBlockStatus').style.color = '#4b5563';
+  $('adBlockStatus').textContent = desired ? 'Turning local ad blocking on…' : 'Turning local ad blocking off…';
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'set_adblock_enabled', enabled: desired });
+    if (!response?.ok) throw new Error(response?.error || 'ad-block setting failed');
+    _adBlockReloadHint = true;
+    await setAdBlockBusy(false);
+    renderAdBlock(response);
+  } catch (error) {
+    await setAdBlockBusy(false);
+    $('adBlockEnabled').checked = !desired;
+    $('adBlockToggleLabel').textContent = desired ? 'Off' : 'On';
+    showAdBlockError(error?.message || String(error));
+  }
+});
+
+$('adBlockUndo').addEventListener('click', async () => {
+  await setAdBlockBusy(true);
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'adblock_undo_last' });
+    if (!response?.ok) throw new Error(response?.error || 'undo failed');
+    await setAdBlockBusy(false);
+    renderAdBlock(response);
+  } catch (error) {
+    await setAdBlockBusy(false);
+    showAdBlockError(error?.message || String(error));
+  }
+});
+
+$('adBlockClearSite').addEventListener('click', async () => {
+  if (!confirm('Remove every ad rule OE learned for this site?')) return;
+  await setAdBlockBusy(true);
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'adblock_clear_site' });
+    if (!response?.ok) throw new Error(response?.error || 'clear failed');
+    await setAdBlockBusy(false);
+    renderAdBlock(response);
+  } catch (error) {
+    await setAdBlockBusy(false);
+    showAdBlockError(error?.message || String(error));
+  }
+});
+
 $('popupConfirmationApprove').addEventListener('click', async () => {
   if (!_popupConfirmationId) return;
   const id = _popupConfirmationId;
@@ -456,15 +547,20 @@ if (chatInput) {
 }
 
 async function refresh() {
-  const [resp, confirmation] = await Promise.all([
+  const [resp, confirmation, adBlock] = await Promise.all([
     chrome.runtime.sendMessage({ type: 'get_status' }),
     chrome.runtime.sendMessage({ type: 'get_pending_confirmation' }).catch(() => null),
+    chrome.runtime.sendMessage({ type: 'get_adblock_status' }).catch(() => null),
   ]);
   if (!resp) return;
   populateFields(resp.config);   // no-op after first call
   renderStatus(resp.status);
   renderLease(resp.lease);
   renderPopupConfirmation(confirmation?.confirmation || null);
+  if (!_adBlockBusy && adBlock?.ok) {
+    $('adBlockStatus').style.color = '#4b5563';
+    renderAdBlock(adBlock);
+  }
 }
 
 // On every popup open, restore the saved chat history into the reply

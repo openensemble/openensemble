@@ -16,6 +16,10 @@ Chrome / Edge extension connecting your local OE server to your browser. All ser
 
 The puzzle-piece icon appears in your toolbar. Pin it.
 
+After updating an already loaded checkout or replacing an extracted download,
+press **Reload** on the extension card, then reload any open pages where you
+want the new content script and context-menu action.
+
 ## Configure
 
 1. Click the extension icon to open the popup.
@@ -33,6 +37,20 @@ credential from **Settings → Browser**. Re-pairing preserves an existing
 disabled state unless you explicitly turn access back on.
 
 ## What it does
+
+Local ad blocking is enabled by default and works independently of pairing or
+an OE tab lease. A bundled Manifest V3 ruleset blocks known third-party ad
+requests before they load; requests, matches, and learned rules are never sent
+to the OE server. Use the **Local ad blocking** switch in the popup to turn the
+feature on or off, then reload the current page so its already-started network
+requests reflect the new setting.
+
+When the bundled list misses a page element, right-click the ad and choose
+**Block this ad with OE**. The extension hides it immediately and saves a
+bounded cosmetic selector for that top-level site and frame host, so matching
+elements are hidden on later visits. It does not save visible page text, images,
+or a page snapshot. The confirmation toast can undo the new rule, and the popup
+can undo the latest rule or clear every learned rule for the current site.
 
 Command tiers (enforced by the broker in `background.js`):
 
@@ -55,6 +73,9 @@ Other explicit, no-lease actions include selection/page/image/screenshot/PDF que
 ## Security notes
 
 - LAN-only by design — extension talks only to the OE server URL you set.
+- Ad filtering and right-click learning stay inside the extension. The bundled
+  rules are local, top-level navigation is never blocked, and no ad telemetry is
+  sent to OE.
 - The extension connects only to the paired OE server; any model/provider use follows that OE profile's normal provider configuration.
 - Leases can only be created by a click in the extension's own UI, never by the server or page content. They live in `storage.session` (cleared on browser restart), use a deny tombstone if storage fails, and are revocable from the popup or banner.
 - The browser-owned toolbar badge is the authoritative lease indicator (`ON` active, pause symbol suspended); page banners are a helpful secondary indicator that a hostile page could remove.
