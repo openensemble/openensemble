@@ -35,6 +35,11 @@ import {
   rollbackUserTopologyTransition,
 } from '../chat-dispatch/slot-registry.mjs';
 
+// Roles a child account may hold as a primary category. Shared by create and
+// edit: a stored primary role grants that role's tools directly, so both paths
+// have to clamp it identically.
+const CHILD_SAFE_SKILL_CATEGORIES = ['deep_research', 'web', 'image_generator'];
+
 function setRoleAssignmentForUser(roleId, agentId, userId) {
   return setRoleAssignment(roleId, agentId || null, userId);
 }
@@ -269,7 +274,6 @@ export async function handle(req, res) {
       const caller = getUser(authId);
       if (caller?.role === 'child') {
         const CHILD_SAFE_TOOLSETS = ['web', null, undefined, ''];
-        const CHILD_SAFE_SKILL_CATEGORIES = ['deep_research', 'web', 'image_generator'];
         if (!CHILD_SAFE_TOOLSETS.includes(toolSet)) toolSet = 'web';
         if (skillCategory && !CHILD_SAFE_SKILL_CATEGORIES.includes(skillCategory)) skillCategory = null;
         // Child can't set a custom system prompt — it must use buildSystemPrompt
@@ -278,6 +282,17 @@ export async function handle(req, res) {
         // under the same invariant: a child can't author prompt text.
         systemPrompt = undefined;
         personality = undefined;
+      }
+      // skillCategory is now PERSISTED on the agent record, and a stored primary
+      // role grants that role's tools directly (roles.mjs resolveAgentTools ->
+      // primaryTools) without requiring the skill to be in the account's enabled
+      // `skills` list — which is the check the skillAssignments path goes through.
+      // So it has to be gated the same way /api/roles/assign is, or any account
+      // could self-grant a role's tools just by naming it at create time.
+      if (skillCategory && !visibleRoleForUser(authId, skillCategory)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: `Unknown or unavailable role: ${skillCategory}` }));
+        return true;
       }
       topologyTransition = tryAcquireUserTopologyTransition(authId);
       if (!topologyTransition) {
@@ -288,7 +303,7 @@ export async function handle(req, res) {
       const agent = await runWithUserTopologyLease(topologyTransition.lease, async () => {
         const { getRequestedOrchestrationPolicy, completePendingPrimary } = await import('../lib/orchestration-policy.mjs');
         const needsPrimaryCompletion = getRequestedOrchestrationPolicy(authId).pendingPrimary === true;
-        const created = createCustomAgent({ name, emoji, description, model, provider, toolSet, systemPrompt, personality, maxTokens, contextSize, ownerId: authId });
+        const created = createCustomAgent({ name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, personality, maxTokens, contextSize, ownerId: authId });
         // reasoningEffort is account-specific: persist the creator's choice as a
         // per-user override rather than on the shared agent record.
         if (reasoningEffort !== 'auto') {
@@ -368,6 +383,38 @@ export async function handle(req, res) {
           res.writeHead(400); res.end(JSON.stringify({ error: 'personality must be a string of 2000 characters or fewer' })); return true;
         }
         uiChanges.personality = (changes.personality ?? '').trim();
+      }
+      // Role (primary skill category). Create-only until now, which is why
+      // guide/roles.md's "change Role in the edit panel" did not work and why a
+      // second Coder could only be made by stealing the assignment.
+      if ('skillCategory' in changes) {
+        const sc = changes.skillCategory || null;
+        if (sc && !visibleRoleForUser(authId, sc)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: `Unknown or unavailable role: ${sc}` }));
+          return true;
+        }
+        if (sc && getUser(authId)?.role === 'child' && !CHILD_SAFE_SKILL_CATEGORIES.includes(sc)) {
+          res.writeHead(403);
+          res.end(JSON.stringify({ error: 'That role is not available on this account.' }));
+          return true;
+        }
+        // The role belongs to the agent record, not to a viewer. Editing it via
+        // a per-user override would let a non-owner grant themselves a role's
+        // tools on a shared agent, so require ownership outright.
+        const ownsAgent = loadCustomAgents().find(a => a.id === agentMatch[1] && a.ownerId === authId);
+        if (!ownsAgent) {
+          res.writeHead(403);
+          res.end(JSON.stringify({ error: 'Only the agent owner can change its role.' }));
+          return true;
+        }
+        uiChanges.skillCategory = sc;
+        // Claim the role assignment only when nobody holds it. Never steal it
+        // from another agent — that silent theft is the original bug, and the
+        // durable category above is what actually grants the tools.
+        if (sc && !getRoleAssignments(authId)[sc]) {
+          await setRoleAssignmentForUser(sc, agentMatch[1], authId);
+        }
       }
       if (changes.model)     globalChanges.model     = changes.model;
       if (changes.provider)  globalChanges.provider  = changes.provider;

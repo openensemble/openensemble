@@ -111,12 +111,28 @@ export default async function* execute(name, args, userId, agentId) {
       const caller = getAgentsForUser(userId).find(a => a.id === callerRealId);
       if (caller) { inheritedModel = caller.model; inheritedProvider = caller.provider; }
     }
+    // Persist the role as this agent's DURABLE primary category, not just as the
+    // single-valued skillAssignments entry. Without it, creating a second agent
+    // for a role silently strips the first one (the assignment map holds one
+    // agent per role), which is what blocked having a front-end and a back-end
+    // coder. Mirrors the same fix in routes/agents.mjs.
+    let durableRole = null;
+    if (roleId) {
+      const { listRoles } = await import('../../roles.mjs');
+      // Only a role this account can actually see: a stored primary category
+      // grants its tools directly, so it must not become a way to name a skill
+      // the user was never given.
+      const visible = listRoles(userId, { includeDisabled: true })
+        .find(r => r.id === roleId && !r.hidden);
+      if (visible) durableRole = roleId;
+    }
     const agent = createCustomAgent({
       name: agentName,
       emoji: args.emoji || '🤖',
       description: args.description || '',
       model: args.model || inheritedModel,
       provider: args.provider || inheritedProvider,
+      skillCategory: durableRole,
       ownerId: userId,
     });
     if (roleId) {

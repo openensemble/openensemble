@@ -16,6 +16,7 @@ import {
   formatCompoundContractFailure,
 } from '../lib/compound-workflow-contract.mjs';
 import { getOrchestrationPolicy } from '../lib/orchestration-policy.mjs';
+import { stableAgentRef } from '../lib/agent-ref.mjs';
 import { iterateUntilAbort } from '../lib/abortable-async-iterator.mjs';
 import { registerWatcher, pushWatcherStatus, completeWatcher } from '../scheduler/watchers.mjs';
 import {
@@ -621,15 +622,9 @@ export function describeBackgroundWorkForSession(userId, sessionAgentId = null) 
   return lines.join(' | ');
 }
 
-export function _stableAgentRef(userId, value) {
-  let raw = String(value || '');
-  const scopedPrefix = `${userId}_`;
-  if (raw.startsWith(scopedPrefix)) raw = raw.slice(scopedPrefix.length);
-  const ephemeral = raw.match(/^ephemeral_worker_[^_]+_[^_]+_(.+)$/)
-    || raw.match(/^ephemeral_deleg_d\d+_\d+_[a-z0-9]+_(.+)$/)
-    || raw.match(/^ephemeral_deleg_\d+_[a-z0-9]+_(.+)$/);
-  return ephemeral?.[1] || raw;
-}
+// Canonical implementation now lives in lib/agent-ref.mjs so the coder skill
+// can share it without importing this module's scheduler/worker graph.
+export const _stableAgentRef = stableAgentRef;
 
 /**
  * Active autonomous work whose durable owner/session points at an agent.

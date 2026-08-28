@@ -704,7 +704,10 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       yield { type: 'result', text: 'Error: dest_path must be an absolute Unix-style path starting with "/".' }; return;
     }
 
-    const info = getActiveProjectInfo(userId);
+    // Pass agentId so a coder agent deploying its OWN project gets its own
+    // pointer. The nodes agent is usually a different agent with no pointer of
+    // its own, which falls back to the user's most recent project.
+    const info = getActiveProjectInfo(userId, agentId);
     if (!info) {
       yield { type: 'result', text: 'No active coder project. Use coder_create_project or coder_switch_project first, then try again.' };
       return;

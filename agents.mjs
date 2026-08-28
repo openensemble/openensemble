@@ -129,13 +129,18 @@ function pickAgentId(name, ownerId) {
   return slug;
 }
 
-export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', systemPrompt, personality, maxTokens, contextSize, ownerId = null }) {
+export function createCustomAgent({ name, emoji = '🤖', description, model, provider, toolSet = 'web', skillCategory = null, systemPrompt, personality, maxTokens, contextSize, ownerId = null }) {
   const id = pickAgentId(name, ownerId);
   const agent = {
     id, name, emoji,
     model:    model    ?? getCoordinatorModel().model,
     provider: provider ?? getCoordinatorModel().provider,
     toolSet,
+    // Primary role. Grants this agent the role's tools directly (roles.mjs
+    // resolveAgentTools), independently of the single-valued skillAssignments
+    // map — that map still names ONE default routing target per role, but two
+    // agents may now both BE coders.
+    ...(skillCategory ? { skillCategory } : {}),
     description,
     systemPrompt: systemPrompt ?? buildSystemPrompt(name, emoji, description),
     // Personality is stored separately from systemPrompt and injected as its

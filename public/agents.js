@@ -326,14 +326,15 @@ async function openNewAgentModal(agent = null) {
   $('aPersonality').value = agent?.personality ?? '';
   $('aToolSet').value = agent?.toolSet ?? 'web';
 
-  // Populate role picker (creation only). Includes both built-in roles
-  // (s.service === true) AND user-installed custom skills (userScope set
-  // and non-service). Custom skills are first-class assignments via the
-  // same skillAssignments map, so picking one at creation time has the
-  // same effect as assigning it later via Settings → Skills.
+  // Populate role picker. Shown for BOTH create and edit — the role used to be
+  // hidden while editing, which is why guide/roles.md's "change Role in the edit
+  // panel" was impossible and why a second Coder could only be made by stealing
+  // the role assignment. Still hidden during single-assistant onboarding, which
+  // picks the role for you. Includes built-in roles (s.service === true) AND
+  // user-installed custom skills (userScope set and non-service).
   const roleLabel = $('aRoleLabel');
   const roleSel = $('aRole');
-  if (agent || pendingSingle) {
+  if (pendingSingle) {
     roleLabel.style.display = 'none';
     roleSel.value = '';
   } else {
@@ -361,6 +362,9 @@ async function openNewAgentModal(agent = null) {
         for (const s of customs) g.appendChild(addOpt(s));
         roleSel.appendChild(g);
       }
+      // Preselect after the options land, or the edit panel opens showing
+      // "General Assistant" for an agent that already has a role.
+      roleSel.value = agent?.skillCategory ?? '';
     }).catch(() => {});
   }
 
@@ -401,7 +405,7 @@ $('btnCreateAgent').addEventListener('click', async () => {
   if (!name) { $('aName').focus(); return; }
   const [model, provider] = $('aModel').value.split('||');
   const pendingSingle = !editingAgentId && isPendingSingleAssistantOnboarding();
-  const selectedRole = (!editingAgentId && !pendingSingle) ? ($('aRole').value || null) : null;
+  const selectedRole = pendingSingle ? null : ($('aRole').value || null);
   const maxTokensRaw = parseInt($('aMaxTokens').value, 10);
   const maxTokens = maxTokensRaw >= 256 ? maxTokensRaw : null;
   const contextSizeRaw = parseInt($('aContextSize').value, 10);
@@ -409,7 +413,10 @@ $('btnCreateAgent').addEventListener('click', async () => {
   const payload = { name, emoji: $('aEmoji').value.trim() || '🤖', description: desc, model, provider, toolSet: $('aToolSet').value };
   // Always send — PATCH uses 'in changes' so an emptied field clears the stored value.
   payload.personality = $('aPersonality').value.trim();
-  if (selectedRole) payload.skillCategory = selectedRole;
+  // On edit, always send it — PATCH uses `in changes`, so omitting the field
+  // would make "back to General Assistant" impossible to save.
+  if (editingAgentId) payload.skillCategory = selectedRole;
+  else if (selectedRole) payload.skillCategory = selectedRole;
   // Always send — PATCH uses 'in changes' to detect clears. For POST, null is harmless.
   payload.maxTokens = maxTokens;
   payload.contextSize = contextSize;

@@ -5,12 +5,14 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmdirSync,
-         readdirSync, statSync, appendFileSync, rmSync, realpathSync, openSync, closeSync } from 'fs';
+         readdirSync, statSync, appendFileSync, rmSync, realpathSync, openSync, closeSync,
+         renameSync } from 'fs';
 import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execFile, spawn, execSync } from 'child_process';
 import { getLanAddress } from '../../discovery.mjs';
+import { stableAgentRef } from '../../lib/agent-ref.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -105,8 +107,95 @@ function buildSandboxArgs(projectDir, command) {
   return args;
 }
 
-// ── Per-user active project tracking ─────────────────────────────────────────
+// ── Per-AGENT active project tracking ────────────────────────────────────────
+// Keyed by (user, agent) rather than by user alone: a household can run several
+// coder agents (a front-end one and a back-end one), and a single user-wide
+// pointer meant whichever agent switched last silently owned every subsequent
+// file write. Ephemeral delegation sessions collapse onto the agent they were
+// spawned for (see lib/agent-ref.mjs), so a Coordinator delegation to coder1
+// lands in coder1's project, not in a blank one.
 const _activeProject = new Map();
+// Last project any agent of this user selected. Only consulted by
+// getActiveProjectInfo for cross-skill reads (the nodes skill deploys "what the
+// coder is working on" from a *different* agent, which has no pointer of its
+// own). Never consulted for file/shell resolution — that stays strict.
+const _lastActiveProject = new Map();
+
+function projectKey(userId, agentId) {
+  const ref = agentId ? stableAgentRef(userId, agentId) : '__user__';
+  return `${userId}\u0000${ref}`;
+}
+
+// ── Pointer persistence ──────────────────────────────────────────────────────
+// The pointers used to live only in memory, so every server restart left every
+// coder agent with "No active project" until it switched again — mid-task, with
+// no indication why. They are cheap, per-user, and rewritten only when an agent
+// creates/switches/deletes, so persist them.
+function _pointerPath(userId) {
+  return path.join(BASE_DIR, 'users', _safeUserId(userId), 'coder-active-projects.json');
+}
+
+const _pointersLoaded = new Set();
+
+function _loadPointers(userId) {
+  if (_pointersLoaded.has(userId)) return;
+  _pointersLoaded.add(userId);   // set first: a malformed file must not retry every call
+  try {
+    const raw = JSON.parse(readFileSync(_pointerPath(userId), 'utf8'));
+    for (const [ref, project] of Object.entries(raw?.agents ?? {})) {
+      if (typeof project === 'string') _activeProject.set(`${userId}\u0000${ref}`, project);
+    }
+    if (typeof raw?.last === 'string') _lastActiveProject.set(userId, raw.last);
+  } catch { /* absent or corrupt — start empty, same as a cold process */ }
+}
+
+function _savePointers(userId) {
+  try {
+    const prefix = `${userId}\u0000`;
+    const agents = {};
+    for (const [key, project] of _activeProject) {
+      if (key.startsWith(prefix)) agents[key.slice(prefix.length)] = project;
+    }
+    const p = _pointerPath(userId);
+    mkdirSync(path.dirname(p), { recursive: true });
+    // temp+rename: a crash mid-write would otherwise leave a truncated file that
+    // silently drops every agent's pointer on the next boot.
+    const tmp = `${p}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ agents, last: _lastActiveProject.get(userId) ?? null }, null, 2));
+    renameSync(tmp, p);
+  } catch (e) {
+    console.warn('[coder] could not persist active projects:', e.message);
+  }
+}
+
+function getPointer(userId, agentId) {
+  _loadPointers(userId);
+  return _activeProject.get(projectKey(userId, agentId)) ?? null;
+}
+
+function getLastPointer(userId) {
+  _loadPointers(userId);
+  return _lastActiveProject.get(userId) ?? null;
+}
+
+function setPointer(userId, agentId, name) {
+  _loadPointers(userId);
+  _activeProject.set(projectKey(userId, agentId), name);
+  _lastActiveProject.set(userId, name);
+  _savePointers(userId);
+}
+
+// A deleted project clears it for EVERY agent pointing at it, not just the
+// caller — the directory is gone for all of them.
+function clearPointersForProject(userId, name) {
+  _loadPointers(userId);
+  const prefix = `${userId}\u0000`;
+  for (const [key, project] of _activeProject) {
+    if (project === name && key.startsWith(prefix)) _activeProject.delete(key);
+  }
+  if (_lastActiveProject.get(userId) === name) _lastActiveProject.delete(userId);
+  _savePointers(userId);
+}
 
 // ── Dangerous command patterns ───────────────────────────────────────────────
 const BLOCKED_COMMANDS = [
@@ -152,9 +241,9 @@ function getWorkspace(userId) {
   return resolved;
 }
 
-function getProjectDir(userId) {
+function getProjectDir(userId, agentId) {
   const ws = getWorkspace(userId);
-  const project = _activeProject.get(userId);
+  const project = getPointer(userId, agentId);
   if (!project) throw new Error('No active project. Use coder_create_project or coder_switch_project first.');
   const dir = path.join(ws, project);
   if (!existsSync(dir)) throw new Error(`Project "${project}" not found in workspace.`);
@@ -164,9 +253,9 @@ function getProjectDir(userId) {
 // Snapshot of the current coder state for a user — used by the nodes skill to
 // deploy whatever the coder is currently working on. Returns null if no project
 // is active yet. Never throws: callers handle the "nothing to push" case.
-export function getActiveProjectInfo(userId) {
+export function getActiveProjectInfo(userId, agentId = null) {
   try {
-    const project = _activeProject.get(userId);
+    const project = getPointer(userId, agentId) ?? getLastPointer(userId);
     if (!project) return null;
     const workspace = getWorkspace(userId);
     const dir = path.join(workspace, project);
@@ -338,8 +427,11 @@ const WALK_SKIP_SEGMENTS = new Set([
 
 // ── Tool implementations ─────────────────────────────────────────────────────
 
-async function listProjects(userId) {
+async function listProjects(userId, agentId) {
   const ws = getWorkspace(userId);
+  // Pointers are per-agent now, so an agent has to be able to see whether it
+  // holds one at all — otherwise "no active project" errors look arbitrary.
+  const active = getPointer(userId, agentId);
   const entries = readdirSync(ws, { withFileTypes: true }).filter(e => e.isDirectory());
   if (!entries.length) return `Workspace: ${ws}\nNo projects yet. Use coder_create_project to create one.`;
 
@@ -352,12 +444,12 @@ async function listProjects(userId) {
       const firstLines = content.split('\n').slice(0, 5).join('\n');
       summary = '\n  ' + firstLines.replace(/\n/g, '\n  ');
     }
-    lines.push(`📁 ${e.name}${summary}`);
+    lines.push(`📁 ${e.name}${e.name === active ? '  ← your active project' : ''}${summary}`);
   }
   return `Workspace: ${ws}\n\n` + lines.join('\n\n');
 }
 
-async function createProject(name, userId) {
+async function createProject(name, userId, agentId) {
   validateProjectName(name);
   const ws = getWorkspace(userId);
   const dir = path.join(ws, name);
@@ -367,19 +459,19 @@ async function createProject(name, userId) {
   const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
   const logContent = `# ${name}\n\nCreated: ${ts}\n`;
   writeFileSync(path.join(dir, 'PROJECT_LOG.md'), logContent);
-  _activeProject.set(userId, name);
+  setPointer(userId, agentId, name);
   appendWorkspaceLog(`Created project "${name}"`, userId);
   return `Created project "${name}" and set it as active.\nWorkspace: ${dir}`;
 }
 
-async function switchProject(name, userId) {
+async function switchProject(name, userId, agentId) {
   validateProjectName(name);
   const ws = getWorkspace(userId);
   const dir = path.join(ws, name);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) {
     throw new Error(`Project "${name}" not found in workspace.`);
   }
-  _activeProject.set(userId, name);
+  setPointer(userId, agentId, name);
   appendLog(dir, 'Switched to this project');
 
   // Return recent log entries for context
@@ -392,7 +484,7 @@ async function switchProject(name, userId) {
 
   // Include pending todos FIRST so they aren't cut off by context truncation.
   // The model needs to see what's still pending before anything else.
-  const todos = _readTodos(userId);
+  const todos = _readTodos(userId, agentId);
   const pending = todos.filter(t => t.status !== 'completed');
   const todoBlock = pending.length
     ? '\n\nPending todos (resume from here):\n' + _renderTodos(pending)
@@ -403,7 +495,7 @@ async function switchProject(name, userId) {
   return `Switched to project "${name}".${todoBlock}${logTail}`;
 }
 
-async function deleteProject(name, userId) {
+async function deleteProject(name, userId, agentId) {
   validateProjectName(name);
   const ws = getWorkspace(userId);
   const dir = path.join(ws, name);
@@ -412,15 +504,15 @@ async function deleteProject(name, userId) {
   }
   rmSync(dir, { recursive: true, force: true });
   // Clear active project if it was the one deleted
-  if (_activeProject.get(userId) === name) _activeProject.delete(userId);
+  clearPointersForProject(userId, name);
   appendWorkspaceLog(`Deleted project "${name}"`, userId);
   // Alias cascade-delete: handled by skill-alias-framework via manifest's
   // cascade_on_tools entry on coder_delete_project. No explicit call here.
   return `Deleted project "${name}" and all its contents.`;
 }
 
-async function readProjectFile(filePath, offset, limit, userId) {
-  const dir = getProjectDir(userId);
+async function readProjectFile(filePath, offset, limit, userId, agentId) {
+  const dir = getProjectDir(userId, agentId);
   const abs = safePath(dir, filePath);
   if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
@@ -433,8 +525,8 @@ async function readProjectFile(filePath, offset, limit, userId) {
   return slice.map((l, i) => `${String(start + i + 1).padStart(5)} │ ${l}`).join('\n');
 }
 
-async function writeProjectFile(filePath, content, userId) {
-  const dir = getProjectDir(userId);
+async function writeProjectFile(filePath, content, userId, agentId) {
+  const dir = getProjectDir(userId, agentId);
   const abs = safePath(dir, filePath);
   mkdirSync(path.dirname(abs), { recursive: true });
   writeFileSync(abs, content);
@@ -442,8 +534,8 @@ async function writeProjectFile(filePath, content, userId) {
   return `Wrote ${filePath}`;
 }
 
-async function editProjectFile(filePath, oldStr, newStr, userId) {
-  const dir = getProjectDir(userId);
+async function editProjectFile(filePath, oldStr, newStr, userId, agentId) {
+  const dir = getProjectDir(userId, agentId);
   const abs = safePath(dir, filePath);
   if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
@@ -459,8 +551,8 @@ async function editProjectFile(filePath, oldStr, newStr, userId) {
   return `Edited ${filePath}`;
 }
 
-async function deleteProjectFile(filePath, userId) {
-  const dir = getProjectDir(userId);
+async function deleteProjectFile(filePath, userId, agentId) {
+  const dir = getProjectDir(userId, agentId);
   const abs = safePath(dir, filePath);
   if (!existsSync(abs)) throw new Error(`Not found: ${filePath}`);
 
@@ -479,10 +571,10 @@ async function deleteProjectFile(filePath, userId) {
 
 // Streaming shell executor: yields `{type:'token'}` chunks live and a final
 // `{type:'result'}` event with the full (capped) output for the tool loop.
-async function* runCommand(command, timeout, userId, signal = null) {
+async function* runCommand(command, timeout, userId, agentId, signal = null) {
   throwIfCancelled(signal);
   let dir;
-  try { dir = getProjectDir(userId); }
+  try { dir = getProjectDir(userId, agentId); }
   catch (e) { yield { type: 'result', text: `Error: ${e.message}` }; return; }
 
   if (isCommandBlocked(command)) {
@@ -637,12 +729,12 @@ function clearServerState(projectDir) {
   }
 }
 
-async function startServer(command, port, userId, signal = null) {
+async function startServer(command, port, userId, agentId, signal = null) {
   // Admission is cancellable, but the persistent child is deliberately not
   // wired to the task signal. Once spawned it is project-owned and remains up
   // until coder_stop_server, even if the launching turn later gets cancelled.
   throwIfCancelled(signal);
-  const dir = getProjectDir(userId);
+  const dir = getProjectDir(userId, agentId);
   if (!BWRAP_BIN) {
     throw new Error('Shell execution unavailable: sandbox (bwrap) not installed on server.');
   }
@@ -697,8 +789,8 @@ async function startServer(command, port, userId, signal = null) {
   return `Started server${urlNote} (pid ${child.pid}). Logs at .run/server.log. Use coder_server_status or coder_stop_server.`;
 }
 
-async function stopServer(userId) {
-  const dir = getProjectDir(userId);
+async function stopServer(userId, agentId) {
+  const dir = getProjectDir(userId, agentId);
   const pid = readServerPid(dir);
   if (!pid) return 'No server is running for this project.';
   if (!isPidAlive(pid)) {
@@ -720,8 +812,8 @@ async function stopServer(userId) {
   return `Stopped server (pid ${pid}).`;
 }
 
-async function serverStatus(userId, logLines = 20) {
-  const dir = getProjectDir(userId);
+async function serverStatus(userId, agentId, logLines = 20) {
+  const dir = getProjectDir(userId, agentId);
   const pid = readServerPid(dir);
   let meta = null;
   try { meta = JSON.parse(readFileSync(serverMetaPath(dir), 'utf8')); } catch {}
@@ -766,11 +858,11 @@ async function serverStatus(userId, logLines = 20) {
 // Apply a list of {old_string, new_string, replace_all?} edits to a single file
 // atomically — every edit must succeed against the staged buffer or nothing is
 // written. Mirrors Claude Code's MultiEdit semantics.
-async function multiEditProjectFile(filePath, edits, userId) {
+async function multiEditProjectFile(filePath, edits, userId, agentId) {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new Error('edits must be a non-empty array.');
   }
-  const dir = getProjectDir(userId);
+  const dir = getProjectDir(userId, agentId);
   const abs = safePath(dir, filePath);
   if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
@@ -800,13 +892,13 @@ async function multiEditProjectFile(filePath, edits, userId) {
 
 // Project-local TODO list. Lives at <project>/.openensemble/todos.json so it survives
 // across turns and is scoped per-project.
-function _todosPath(userId) {
-  const dir = getProjectDir(userId);
+function _todosPath(userId, agentId) {
+  const dir = getProjectDir(userId, agentId);
   return path.join(dir, '.openensemble', 'todos.json');
 }
 
-function _readTodos(userId) {
-  const p = _todosPath(userId);
+function _readTodos(userId, agentId) {
+  const p = _todosPath(userId, agentId);
   if (!existsSync(p)) return [];
   try { return JSON.parse(readFileSync(p, 'utf8')) || []; } catch { return []; }
 }
@@ -817,7 +909,7 @@ function _renderTodos(todos) {
   return todos.map(t => `${icon(t.status)} [${t.id}] ${t.content}`).join('\n');
 }
 
-async function todoWrite(todos, userId) {
+async function todoWrite(todos, userId, agentId) {
   // Models sometimes serialize the array as a JSON string — parse it transparently.
   if (typeof todos === 'string') {
     try { todos = JSON.parse(todos); } catch { throw new Error('todos must be an array.'); }
@@ -829,19 +921,19 @@ async function todoWrite(todos, userId) {
       throw new Error('Each todo needs id (string), content (string), and status (pending|in_progress|completed).');
     }
   }
-  const p = _todosPath(userId);
+  const p = _todosPath(userId, agentId);
   mkdirSync(path.dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(todos, null, 2));
   return _renderTodos(todos);
 }
 
-async function todoRead(userId) {
-  return _renderTodos(_readTodos(userId));
+async function todoRead(userId, agentId) {
+  return _renderTodos(_readTodos(userId, agentId));
 }
 
-async function listFiles(directory, pattern, userId, signal = null) {
+async function listFiles(directory, pattern, userId, agentId, signal = null) {
   throwIfCancelled(signal);
-  const dir = getProjectDir(userId);
+  const dir = getProjectDir(userId, agentId);
   const base = directory ? safePath(dir, directory) : dir;
   if (!existsSync(base)) throw new Error(`Directory not found: ${directory ?? '.'}`);
 
@@ -881,9 +973,9 @@ async function listFiles(directory, pattern, userId, signal = null) {
   return results.length ? results.join('\n') : 'Empty directory.';
 }
 
-async function searchFiles(pattern, searchPath, glob, userId, signal = null) {
+async function searchFiles(pattern, searchPath, glob, userId, agentId, signal = null) {
   throwIfCancelled(signal);
-  const dir = getProjectDir(userId);
+  const dir = getProjectDir(userId, agentId);
   const base = searchPath ? safePath(dir, searchPath) : dir;
 
   const args = ['--no-heading', '--line-number', '--color', 'never', '-e', pattern];
@@ -915,31 +1007,31 @@ async function searchFiles(pattern, searchPath, glob, userId, signal = null) {
 // single `{type:'result'}` event. Plain async tools are wrapped into one final
 // `{type:'result'}` event so the caller (`roles.mjs::executeToolStreaming`)
 // can relay them uniformly.
-export async function* executeSkillTool(name, args, userId = 'default', _agentId, ctx) {
+export async function* executeSkillTool(name, args, userId = 'default', agentId, ctx) {
   const signal = ctx?.signal ?? null;
   if (name === 'coder_run_command') {
-    yield* runCommand(args.command, args.timeout, userId, signal);
+    yield* runCommand(args.command, args.timeout, userId, agentId, signal);
     return;
   }
   let text;
   try {
     switch (name) {
-      case 'coder_list_projects':  text = await listProjects(userId); break;
-      case 'coder_create_project': text = await createProject(args.name, userId); break;
-      case 'coder_switch_project': text = await switchProject(args.name, userId); break;
-      case 'coder_delete_project': text = await deleteProject(args.name, userId); break;
-      case 'coder_read_file':      text = await readProjectFile(args.path, args.offset, args.limit, userId); break;
-      case 'coder_write_file':     text = await writeProjectFile(args.path, args.content, userId); break;
-      case 'coder_edit_file':      text = await editProjectFile(args.path, args.old_string, args.new_string, userId); break;
-      case 'coder_multi_edit':     text = await multiEditProjectFile(args.file_path, args.edits, userId); break;
-      case 'coder_delete_file':    text = await deleteProjectFile(args.path, userId); break;
-      case 'coder_list_files':     text = await listFiles(args.directory, args.pattern, userId, signal); break;
-      case 'coder_search':         text = await searchFiles(args.pattern, args.path, args.glob, userId, signal); break;
-      case 'coder_todo_write':     text = await todoWrite(args.todos, userId); break;
-      case 'coder_todo_read':      text = await todoRead(userId); break;
-      case 'coder_start_server':   text = await startServer(args.command, args.port, userId, signal); break;
-      case 'coder_stop_server':    text = await stopServer(userId); break;
-      case 'coder_server_status':  text = await serverStatus(userId, args.lines); break;
+      case 'coder_list_projects':  text = await listProjects(userId, agentId); break;
+      case 'coder_create_project': text = await createProject(args.name, userId, agentId); break;
+      case 'coder_switch_project': text = await switchProject(args.name, userId, agentId); break;
+      case 'coder_delete_project': text = await deleteProject(args.name, userId, agentId); break;
+      case 'coder_read_file':      text = await readProjectFile(args.path, args.offset, args.limit, userId, agentId); break;
+      case 'coder_write_file':     text = await writeProjectFile(args.path, args.content, userId, agentId); break;
+      case 'coder_edit_file':      text = await editProjectFile(args.path, args.old_string, args.new_string, userId, agentId); break;
+      case 'coder_multi_edit':     text = await multiEditProjectFile(args.file_path, args.edits, userId, agentId); break;
+      case 'coder_delete_file':    text = await deleteProjectFile(args.path, userId, agentId); break;
+      case 'coder_list_files':     text = await listFiles(args.directory, args.pattern, userId, agentId, signal); break;
+      case 'coder_search':         text = await searchFiles(args.pattern, args.path, args.glob, userId, agentId, signal); break;
+      case 'coder_todo_write':     text = await todoWrite(args.todos, userId, agentId); break;
+      case 'coder_todo_read':      text = await todoRead(userId, agentId); break;
+      case 'coder_start_server':   text = await startServer(args.command, args.port, userId, agentId, signal); break;
+      case 'coder_stop_server':    text = await stopServer(userId, agentId); break;
+      case 'coder_server_status':  text = await serverStatus(userId, agentId, args.lines); break;
       default: text = null;
     }
   } catch (e) {

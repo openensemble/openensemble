@@ -33,6 +33,35 @@ const TOOL_SETS_COMPAT = {
   web: 'general', general: 'general', gmail: 'email', email: 'email', none: 'none',
 };
 
+/**
+ * An agent's effective primary category. Highest precedence first:
+ *
+ *   1. A `coordinator` assignment. A multi-role Jarvis stays the coordinator
+ *      regardless of JSON key order — single mode relies on this.
+ *   2. The agent's OWN stored role. It is an explicit choice made in the agent
+ *      editor, so it outranks the routing layer. Previously any assignment won,
+ *      so assigning a custom skill to a Coder made that skill the primary
+ *      category and silently stripped the entire coder tool surface. Skipped
+ *      when the stored role names a manifest that no longer exists, so a
+ *      dangling category can't blank out an otherwise-working agent.
+ *   3. An assigned service role, then any other assignment (key order).
+ *   4. toolSet back-compat.
+ *
+ * This never REMOVES tools: resolveAgentTools unions the primary role's tools
+ * with those of every assigned role, so an agent that is both a stored Coder
+ * and an assigned Email agent keeps both surfaces whichever way this resolves.
+ * What it decides is the agent's identity — its roster label, its role-specific
+ * prompt guidance, and which bundled tools follow it.
+ */
+function effectivePrimaryCategory(storedCategory, toolSet, assignedIds, userId) {
+  if (assignedIds.includes('coordinator')) return 'coordinator';
+  if (storedCategory && getRoleManifest(storedCategory, userId)) return storedCategory;
+  return assignedIds.find(id => getRoleManifest(id, userId)?.service)
+    ?? assignedIds[0]
+    ?? storedCategory
+    ?? TOOL_SETS_COMPAT[toolSet ?? 'web'];
+}
+
 const CHILD_SAFETY_PREFIX = `IMPORTANT: You are talking with a child. These rules are non-negotiable and apply at all times:
 
 - Be educational, encouraging, and age-appropriate in all responses.
@@ -153,14 +182,7 @@ export function getAgentsForUser(userId) {
     const assigned = Object.entries(skillAssignmentsForDesc)
       .filter(([id, owner]) => owner === a.id && enabledSkillIds.has(id))
       .map(([id]) => id);
-    // A multi-role Jarvis remains the coordinator regardless of JSON key order.
-    // Otherwise a coder assignment placed first silently turns the same agent
-    // into a specialist and disables coordinator routing.
-    // (Single mode relies on this: the primary holds every enabled skill.)
-    const roleSkillId = assigned.includes('coordinator')
-      ? 'coordinator'
-      : (assigned.find(id => getRoleManifest(id, userId)?.service) ?? assigned[0]);
-    return roleSkillId ?? a.skillCategory ?? TOOL_SETS_COMPAT[a.toolSet ?? 'web'];
+    return effectivePrimaryCategory(a.skillCategory, a.toolSet, assigned, userId);
   };
   // Compact format: `<id>=<name>(<role>)`. Cut from "'agent_x' (Name 📬) handles:
   // Email (All Accounts) — Unified email access across Gmail, Microsoft/Exchange,
@@ -181,11 +203,11 @@ export function getAgentsForUser(userId) {
     const assignedSkillIds = Object.entries(skillAssignments)
       .filter(([id, owner]) => owner === a.id && enabledSkillIds.has(id))
       .map(([id]) => id);
-    // Coordinator wins over key order — see effectiveSkillCategory above.
-    const roleSkillId = assignedSkillIds.includes('coordinator')
-      ? 'coordinator'
-      : (assignedSkillIds.find(id => getRoleManifest(id, userId)?.service) ?? assignedSkillIds[0]);
-    const skillCategory = roleSkillId ?? withOverrides.skillCategory ?? TOOL_SETS_COMPAT[withOverrides.toolSet ?? 'web'];
+    // Same rule as effectiveSkillCategory above — shared so the delegate roster
+    // label and the resolved toolset can never disagree.
+    const skillCategory = effectivePrimaryCategory(
+      withOverrides.skillCategory, withOverrides.toolSet, assignedSkillIds, userId,
+    );
 
     // Resolve tools FIRST so we can key SPA injection off actual tool presence
     // rather than role assignment. This is what gives coordinators web guidance
