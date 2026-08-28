@@ -2323,28 +2323,36 @@ async function todoRead(userId, agentId, signal = null) {
   }, signal);
 }
 
+// Match one project-relative path against a caller-supplied glob.
+//
+// Deliberately `path.matchesGlob` over a filesystem-walking glob helper: this
+// is pure string matching, so it cannot be induced to traverse a symlink the
+// sandboxed shell planted inside the checkout. The walk below stays the single
+// filesystem path, keeping the O_NOFOLLOW/`safePath` guarantees intact.
+function matchesProjectGlob(relativePath, pattern) {
+  try {
+    return path.matchesGlob(relativePath, pattern);
+  } catch (e) {
+    throw new Error(`Invalid glob pattern ${JSON.stringify(pattern)}: ${e.message}`);
+  }
+}
+
 async function listFiles(directory, pattern, userId, agentId, signal = null) {
   throwIfCancelled(signal);
   const dir = getProjectDir(userId, agentId);
   const base = directory ? safePath(dir, directory) : dir;
   if (!existsSync(base)) throw new Error(`Directory not found: ${directory ?? '.'}`);
-
-  if (pattern) {
-    // Use find with glob-like pattern
-    return new Promise((resolve, reject) => {
-      execFile('/usr/bin/find', [base, '-name', pattern, '-type', 'f', '-not', '-path', '*/.git/*'],
-        { timeout: 10000, maxBuffer: 512 * 1024, ...(signal ? { signal } : {}) },
-        (err, stdout) => {
-          if (signal?.aborted || err?.name === 'AbortError') return reject(cancellationError(signal));
-          if (!stdout?.trim()) return resolve('No files matched.');
-          const lines = stdout.trim().split('\n').map(f => path.relative(dir, f)).sort();
-          resolve(lines.join('\n'));
-        });
-    });
+  if (pattern != null && typeof pattern !== 'string') {
+    throw new Error('pattern must be a string.');
   }
 
-  // Recursive listing (skip .git, node_modules)
-  const results = [];
+  // One traversal for both modes. The pattern branch used to shell out to
+  // `find -name`, which matches the BASENAME only — so every documented
+  // example (`**/*.js`, `src/**/*.ts`) silently returned "No files matched"
+  // on a project that did contain matches, which reads identically to an
+  // empty project. Filtering this walk honours the documented glob contract.
+  const listing = [];   // tree view, unpatterned mode
+  const matches = [];   // files matching `pattern`
   async function walk(d, depth = 0) {
     throwIfCancelled(signal);
     if (depth > 8) return;
@@ -2352,17 +2360,37 @@ async function listFiles(directory, pattern, userId, agentId, signal = null) {
     for (const e of entries) {
       throwIfCancelled(signal);
       if (e.name === '.git' || e.name === 'node_modules') continue;
-      const rel = path.relative(dir, path.join(d, e.name));
+      const abs = path.join(d, e.name);
+      const rel = path.relative(dir, abs);
       if (e.isDirectory()) {
-        results.push(`📁 ${rel}/`);
-        await walk(path.join(d, e.name), depth + 1);
+        listing.push(`📁 ${rel}/`);
+        await walk(abs, depth + 1);
       } else {
-        results.push(`   ${rel}`);
+        listing.push(`   ${rel}`);
+        // Glob against the path relative to the directory being listed, so
+        // `directory:"src"` + `pattern:"*.jsx"` behaves as the caller expects,
+        // while the reported path stays project-relative as before.
+        if (pattern && matchesProjectGlob(path.relative(base, abs), pattern)) {
+          matches.push(rel);
+        }
       }
     }
   }
   await walk(base);
-  return results.length ? results.join('\n') : 'Empty directory.';
+
+  if (pattern) {
+    if (!matches.length) {
+      // Never let "no match" read as "empty project" — that ambiguity is what
+      // sent agents off recreating files that already existed.
+      const scope = directory ? `"${directory}"` : 'the project root';
+      return `No files matched ${JSON.stringify(pattern)} under ${scope}. `
+        + `Patterns are matched against paths relative to that directory `
+        + `(use "**/" to cross directories, e.g. "**/*.js"). `
+        + `Call coder_list_files without a pattern to see everything.`;
+    }
+    return matches.sort().join('\n');
+  }
+  return listing.length ? listing.join('\n') : 'Empty directory.';
 }
 
 async function searchFiles(pattern, searchPath, glob, userId, agentId, signal = null) {

@@ -390,7 +390,7 @@
             },
             "pattern": {
               "type": "string",
-              "description": "Glob pattern to filter results (e.g. '**/*.js', 'src/**/*.ts')."
+              "description": "Glob pattern to filter results, matched against paths relative to `directory` (e.g. '**/*.js', 'src/**/*.ts'). `*` does not cross directory boundaries — use `**/` to search subdirectories. Omit to list everything."
             }
           },
           "required": []
