@@ -16,6 +16,28 @@ There are three account roles:
 
 The new user can sign in immediately at the same URL — they pick their profile from the user picker on login.
 
+## Role permissions and the Coordinator
+
+The **Allowed roles** list is the account's authorization boundary. For a
+regular adult user with an explicit role allowlist, allowing the Coordinator
+role **and assigning it to one of that user's agents** also allows the hidden
+orchestration tools that make that role work: agent delegation, bounded
+background workers, and background-task status. They are dependencies of the
+Coordinator rather than separate checkboxes.
+
+In an agent ensemble, the Coordinator can delegate to the user's own
+specialists. In single-assistant mode, named-agent delegation is unavailable,
+but the primary assistant can still use private background workers and inspect
+their status. Child accounts never inherit these hidden permissions.
+
+**Lock tool activation** prevents the user from changing their tool and role
+setup; it does not revoke capabilities an administrator already granted.
+Blocking the Coordinator role is the reliable way to revoke orchestration
+access. For explicitly restricted users, removing its valid agent assignment
+also removes the implied hidden-tool grant. An unrestricted legacy account
+must first be given an explicit allowlist if these capabilities need to be
+denied individually.
+
 ## Invites
 
 If you want someone else to set their own password, use **Settings → Users → Generate Invite**. Pick a role, optionally an email; OpenEnsemble produces an invite link (and emails it if you provided an address). The link is single-use and expires.

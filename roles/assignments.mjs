@@ -39,21 +39,35 @@ function _readGlobalAssignments() {
   catch { return {}; }
 }
 
-// null = unrestricted; Set = the complete account-level capability ceiling.
-// Missing/unreadable profiles are fail-closed. Children require an explicit
-// array. Regular users retain legacy unrestricted behavior only when the field
-// is null/absent; once an array is present it is authoritative, including [].
+/**
+ * Resolve the effective account-level capability ceiling.
+ *
+ * `null` means unrestricted; a Set is authoritative. Missing or unreadable
+ * profiles fail closed, children always require an explicit array, and regular
+ * users retain legacy unrestricted behavior only while `allowedSkills` is
+ * null/absent.
+ *
+ * One dependency closure is intentional: an adult account authorized for the
+ * visible Coordinator role also receives its hidden `delegate` and
+ * `active-agents` implementation skills after the coordinator assignment is
+ * proven to name an agent owned by that account. Those hidden skills cannot be
+ * granted in the admin UI, but Coordinator cannot fulfill its advertised
+ * orchestration contract without them. The implication is an authorization
+ * rule, independent of `skillsLocked`, visible-skill activation, and single vs
+ * ensemble mode. Runtime policy separately removes named-agent delegation in
+ * single mode. Child accounts never receive this implication.
+ *
+ * @param {any} user
+ * @returns {Set<string>|null}
+ */
 export function _allowedSkillIdsForProfile(user) {
   if (!user) return new Set();
   if (user.role === 'owner' || user.role === 'admin') return null;
   if (Array.isArray(user.allowedSkills)) {
     const allowed = new Set(user.allowedSkills);
-    // `delegate` and the coordinator's roster are hidden implementation
-    // skills, so normal account provisioning never puts them in allowedSkills.
-    // Derive them only for a regular account with a valid, owned coordinator.
-    // Single mode still needs the worker/status subset; its resolver and
-    // executor separately suppress cross-agent ask_agent. Child accounts
-    // remain strictly bounded by their explicit parent-managed allowlist.
+    // Derive the hidden dependencies only for an adult account with a valid,
+    // owned coordinator. Do not weaken this to assignment existence alone: an
+    // arbitrary or stale agent id must never become a capability grant.
     if (user.role !== 'child' && allowed.has('coordinator')) {
       const owned = listAgents().filter(agent => agent?.ownerId === user.id);
       const coordinatorId = user.skillAssignments?.coordinator;

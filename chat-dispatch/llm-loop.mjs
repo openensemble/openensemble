@@ -88,11 +88,35 @@ const AGENT_DESCRIPTOR_STOPWORDS = new Set([
   'project', 'projects', 'with', 'that', 'this', 'the', 'and', 'for', 'from', 'into',
 ]);
 
+// Keep the broad length cutoff so ordinary short words cannot become routing
+// signals, but admit technical terms users naturally put in specialist
+// descriptions. Aliases make API/APIs and DB/database symmetric.
+const AGENT_DESCRIPTOR_TOKEN_ALIASES = new Map([
+  ['api', 'api'],
+  ['apis', 'api'],
+  ['ui', 'ui'],
+  ['ux', 'ux'],
+  ['css', 'css'],
+  ['db', 'database'],
+  ['database', 'database'],
+  ['sql', 'sql'],
+  ['js', 'js'],
+  ['ts', 'ts'],
+]);
+
+const AGENT_DESCRIPTOR_SHORT_TECHNICAL_TOKENS = new Set([
+  'api', 'ui', 'ux', 'css', 'sql', 'js', 'ts',
+]);
+
 function descriptorTokens(value) {
   return new Set(String(value || '').toLowerCase()
     .replace(/\bfront[ -]?end\b/g, 'frontend')
     .replace(/\bback[ -]?end\b/g, 'backend')
-    .match(/[a-z0-9]+/g)?.filter(token => token.length >= 4 && !AGENT_DESCRIPTOR_STOPWORDS.has(token)) ?? []);
+    .match(/[a-z0-9]+/g)
+    ?.map(token => AGENT_DESCRIPTOR_TOKEN_ALIASES.get(token) ?? token)
+    .filter(token =>
+      !AGENT_DESCRIPTOR_STOPWORDS.has(token)
+      && (token.length >= 4 || AGENT_DESCRIPTOR_SHORT_TECHNICAL_TOKENS.has(token))) ?? []);
 }
 
 export function selectAgentByExplicitOrDescription(

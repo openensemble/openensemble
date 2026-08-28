@@ -7,7 +7,7 @@ An agent is one configurable participant in your ensemble. They're cheap to make
 - **Name and emoji** — how you identify them in the sidebar and in cross-agent delegations.
 - **Role** — the persona and workflow rules they follow (see **Roles**). Determines which built-in skills they're allowed to use.
 - **Model** — one model from one enabled provider. Can be changed any time.
-- **Description** — a short hint of what this agent is for; the Coordinator uses it when deciding who to delegate to.
+- **Description** — a short routing hint; include specific words you expect to use in requests (for example, `UI`, `CSS`, `API`, or `database`). The Coordinator uses those terms when deciding who to delegate to.
 - **Personality** — optional; how the agent talks. "Warm and playful, loves a good pun", "dry and blunt, zero fluff", "explains like a patient teacher". It shapes tone and style in every reply (voice included) without changing what the agent can do — capabilities stay with the role and tools.
 - **Tools** — the specific skill tools this agent has unlocked. Roles set sensible defaults; you can adjust per-agent.
 

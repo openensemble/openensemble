@@ -253,6 +253,7 @@ async function loadUserManagement() {
         <details style="margin-bottom:6px">
           <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Allowed roles (unchecked = blocked)</summary>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;padding:6px" id="roleAllowGrid_${u.id}">${roleChecks}</div>
+          ${u.role === 'user' ? `<div style="font-size:10px;color:var(--muted);padding:0 6px 6px">When Coordinator is allowed and assigned to one of this user's agents, it includes hidden orchestration tools: agent delegation, bounded background workers, and task status. In single-assistant mode, named-agent delegation is off, but workers and status remain available. Locking tool activation does not revoke these granted capabilities.</div>` : ''}
         </details>
         <details style="margin-bottom:6px">
           <summary style="font-size:11px;color:var(--muted);cursor:pointer;user-select:none">Allowed tools (unchecked = blocked)</summary>

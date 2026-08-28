@@ -7,6 +7,7 @@
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmdirSync,
   readdirSync, statSync, appendFileSync, rmSync, realpathSync, openSync, closeSync,
+  readSync, writeSync, fstatSync, chmodSync, lstatSync, constants as fsConstants,
 } from 'fs';
 import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
@@ -60,11 +61,22 @@ function throwIfCancelled(signal) {
   if (signal?.aborted) throw cancellationError(signal);
 }
 
-function signalProcessTree(child, detached, processSignal) {
-  if (detached && Number.isInteger(child?.pid)) {
-    try { process.kill(-child.pid, processSignal); return; } catch {}
+function validatedSignalPid(value) {
+  return Number.isSafeInteger(value) && value > 1 && value <= 2_147_483_647
+    ? value
+    : null;
+}
+
+export function signalProcessTree(child, detached, processSignal) {
+  const pid = validatedSignalPid(child?.pid);
+  // Never let an ambiguous PID reach process.kill or ChildProcess.kill. In
+  // particular, negating 0 or -1 would turn a group signal into kill(0/1).
+  if (pid == null) return false;
+  if (detached) {
+    try { process.kill(-pid, processSignal); return true; } catch {}
   }
-  try { child?.kill(processSignal); } catch {}
+  try { return child.kill(processSignal) !== false; } catch {}
+  return false;
 }
 
 function buildSandboxArgs(projectDir, command) {
@@ -365,11 +377,28 @@ export function validateProjectName(name) {
 
 const PROJECT_LOCK_TIMEOUT_MS = 310_000;
 const PROJECT_LOCK_STALE_MS = 10 * 60_000;
+const SERVER_CONTROL_LOCK_TIMEOUT_MS = 30_000;
 
-function projectMutationLockPath(userId, name) {
+function coderLockPath(userId, name, kind) {
   validateProjectName(name);
   const digest = createHash('sha256').update(name).digest('hex');
-  return path.join(BASE_DIR, 'users', _safeUserId(userId), '.coder-locks', `project-${digest}.lock`);
+  return path.join(BASE_DIR, 'users', _safeUserId(userId), '.coder-locks', `${kind}-${digest}.lock`);
+}
+
+function projectMutationLockPath(userId, name) {
+  return coderLockPath(userId, name, 'project');
+}
+
+function serverControlLockPath(userId, name) {
+  return coderLockPath(userId, name, 'server');
+}
+
+function assertProjectIdentity(userId, name, expectedIdentity) {
+  const current = resolveUserProjectDir(userId, name);
+  if (current.identity !== expectedIdentity) {
+    throw new Error(`Project "${name}" was deleted or replaced while this operation was waiting. Retry against the current project.`);
+  }
+  return current;
 }
 
 /**
@@ -377,22 +406,50 @@ function projectMutationLockPath(userId, name) {
  * The lock lives outside the project so project deletion cannot remove it.
  */
 export function withCoderProjectLock(userId, name, fn, opts = {}) {
+  const signal = opts.signal ?? null;
   return withFileLock(projectMutationLockPath(userId, name), async () => {
+    throwIfCancelled(signal);
     if (opts.expectedIdentity) {
-      const current = resolveUserProjectDir(userId, name);
-      if (current.identity !== opts.expectedIdentity) {
-        throw new Error(`Project "${name}" was deleted or replaced while this operation was waiting. Retry against the current project.`);
-      }
+      assertProjectIdentity(userId, name, opts.expectedIdentity);
     }
     return fn();
   }, {
     timeoutMs: opts.timeoutMs ?? PROJECT_LOCK_TIMEOUT_MS,
     staleMs: opts.staleMs ?? PROJECT_LOCK_STALE_MS,
+    signal,
   });
 }
 
-function withProjectContextLock(userId, context, fn) {
-  return withCoderProjectLock(userId, context.project, fn, { expectedIdentity: context.identity });
+/**
+ * Serialize only persistent-server lifecycle state for a project. This lock is
+ * deliberately separate from the broad project mutation lock so status and
+ * stop remain available while a build or test command owns the checkout.
+ */
+export function withCoderServerLock(userId, name, fn, opts = {}) {
+  const signal = opts.signal ?? null;
+  return withFileLock(serverControlLockPath(userId, name), () => {
+    throwIfCancelled(signal);
+    return fn();
+  }, {
+    timeoutMs: opts.timeoutMs ?? SERVER_CONTROL_LOCK_TIMEOUT_MS,
+    staleMs: opts.staleMs ?? PROJECT_LOCK_STALE_MS,
+    signal,
+  });
+}
+
+function withProjectContextLock(userId, context, fn, signal = null) {
+  return withCoderProjectLock(userId, context.project, fn, {
+    expectedIdentity: context.identity,
+    signal,
+  });
+}
+
+function withProjectContextServerLock(userId, context, fn, signal = null) {
+  return withCoderServerLock(userId, context.project, () => {
+    throwIfCancelled(signal);
+    const current = assertProjectIdentity(userId, context.project, context.identity);
+    return fn(current.dir);
+  }, { signal });
 }
 
 // Resolve the absolute directory for a user's project, with ownership +
@@ -625,11 +682,73 @@ export async function deleteUserProject(userId, name) {
   return deleteProject(name, userId);
 }
 
+const PROJECT_LOG_READ_MAX_BYTES = 256 * 1024;
+
+function openProjectLogNoFollow(projectDir, flags, mode = undefined) {
+  let dirFd = null;
+  let fileFd = null;
+  let transferred = false;
+  try {
+    // Anchor the lookup to an already-open project directory. O_NOFOLLOW on
+    // both components prevents a project-controlled symlink from turning OE's
+    // host-side activity log into an arbitrary read or append primitive.
+    dirFd = openSync(projectDir,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    if (!fstatSync(dirFd).isDirectory()) return null;
+    fileFd = openSync(
+      `/proc/self/fd/${dirFd}/PROJECT_LOG.md`,
+      flags | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      mode,
+    );
+    const fileStat = fstatSync(fileFd);
+    if (!fileStat.isFile()) return null;
+    transferred = true;
+    return { fd: fileFd, stat: fileStat };
+  } catch {
+    return null;
+  } finally {
+    if (dirFd != null) try { closeSync(dirFd); } catch {}
+    if (fileFd != null && !transferred) try { closeSync(fileFd); } catch {}
+  }
+}
+
+function readProjectLog(projectDir, { tail = false } = {}) {
+  const opened = openProjectLogNoFollow(projectDir, fsConstants.O_RDONLY);
+  if (!opened) return '';
+  try {
+    if (opened.stat.size <= 0) return '';
+    const bytes = Math.min(opened.stat.size, PROJECT_LOG_READ_MAX_BYTES);
+    const buffer = Buffer.alloc(bytes);
+    const offset = tail ? Math.max(0, opened.stat.size - bytes) : 0;
+    const read = readSync(opened.fd, buffer, 0, bytes, offset);
+    return buffer.subarray(0, read).toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    try { closeSync(opened.fd); } catch {}
+  }
+}
+
 function appendLog(projectDir, entry) {
-  const logPath = path.join(projectDir, 'PROJECT_LOG.md');
-  const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
-  const line = `\n- **${ts}** — ${entry}\n`;
-  appendFileSync(logPath, line);
+  const opened = openProjectLogNoFollow(
+    projectDir,
+    fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT,
+    0o600,
+  );
+  if (!opened) return false;
+  try {
+    const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
+    const line = `\n- **${ts}** — ${entry}\n`;
+    writeSync(opened.fd, line);
+    return true;
+  } catch {
+    // Activity logging is audit context, not the operation's commit point. A
+    // failed append must not turn a completed mutation or server stop into a
+    // misleading tool failure.
+    return false;
+  } finally {
+    try { closeSync(opened.fd); } catch {}
+  }
 }
 
 function appendWorkspaceLog(entry, userId) {
@@ -671,7 +790,7 @@ function isCommandBlocked(command) {
 const WALK_SKIP_SEGMENTS = new Set([
   'node_modules', '.git', '.venv', 'venv', '__pycache__', '.next',
   'dist', 'build', '.cache', '.turbo', '.parcel-cache', '.pytest_cache',
-  '.run', // coder_start_server runtime state (pid/log/meta) — not source
+  '.run', // legacy coder_start_server runtime state — not source
 ]);
 
 // ── Tool implementations ─────────────────────────────────────────────────────
@@ -686,10 +805,9 @@ async function listProjects(userId, agentId) {
 
   const lines = [];
   for (const e of entries) {
-    const logPath = path.join(ws, e.name, 'PROJECT_LOG.md');
     let summary = '';
-    if (existsSync(logPath)) {
-      const content = readFileSync(logPath, 'utf8');
+    const content = readProjectLog(path.join(ws, e.name));
+    if (content) {
       const firstLines = content.split('\n').slice(0, 5).join('\n');
       summary = '\n  ' + firstLines.replace(/\n/g, '\n  ');
     }
@@ -698,9 +816,11 @@ async function listProjects(userId, agentId) {
   return `Workspace: ${ws}\n\n` + lines.join('\n\n');
 }
 
-async function createProject(name, userId, agentId) {
+async function createProject(name, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   validateProjectName(name);
   return withCoderProjectLock(userId, name, async () => {
+    throwIfCancelled(signal);
     const ws = getWorkspace(userId);
     const dir = path.join(ws, name);
     if (existsSync(dir)) throw new Error(`Project "${name}" already exists.`);
@@ -712,27 +832,29 @@ async function createProject(name, userId, agentId) {
     setPointer(userId, agentId, name);
     appendWorkspaceLog(`Created project "${name}"`, userId);
     return `Created project "${name}" and set it as active.\nWorkspace: ${dir}`;
-  });
+  }, { signal });
 }
 
-async function switchProject(name, userId, agentId) {
+async function switchProject(name, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   validateProjectName(name);
   return withCoderProjectLock(userId, name, async () => {
+    throwIfCancelled(signal);
     const { dir } = resolveUserProjectDir(userId, name);
     setPointer(userId, agentId, name);
     appendLog(dir, 'Switched to this project');
 
     // Return recent log entries for context.
-    const logPath = path.join(dir, 'PROJECT_LOG.md');
     let logTail = '';
-    if (existsSync(logPath)) {
-      const lines = readFileSync(logPath, 'utf8').split('\n');
+    const logContent = readProjectLog(dir, { tail: true });
+    if (logContent) {
+      const lines = logContent.split('\n');
       logTail = '\n\nRecent activity:\n' + lines.slice(-10).join('\n');
     }
 
     // Include this durable agent's pending todos first. The unlocked helper is
     // used because this function already holds the project mutation lock.
-    const todos = _readTodosUnlocked(dir, userId, agentId);
+    const todos = _readTodosUnlocked(dir, userId, agentId, signal);
     const pending = todos.filter(t => t.status !== 'completed');
     const todoBlock = pending.length
       ? '\n\nPending todos (resume from here):\n' + _renderTodos(pending)
@@ -741,26 +863,32 @@ async function switchProject(name, userId, agentId) {
         : '';
 
     return `Switched to project "${name}".${todoBlock}${logTail}`;
-  });
+  }, { signal });
 }
 
-async function deleteProject(name, userId, agentId) {
+async function deleteProject(name, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   validateProjectName(name);
   return withCoderProjectLock(userId, name, async () => {
-    const { dir } = resolveUserProjectDir(userId, name);
-    const pid = readServerPid(dir);
-    if (pid && isPidAlive(pid)) {
-      throw new Error(`Project "${name}" has a running server (pid ${pid}). Stop it before deleting the project.`);
-    }
-    if (pid) clearServerState(dir);
-    rmSync(dir, { recursive: true, force: true });
-    clearPointersForProject(userId, name);
-    _projectMetaCache.delete(dir);
-    appendWorkspaceLog(`Deleted project "${name}"`, userId);
-    // Alias cascade-delete: handled by skill-alias-framework via manifest's
-    // cascade_on_tools entry on coder_delete_project. No explicit call here.
-    return `Deleted project "${name}" and all its contents.`;
-  });
+    throwIfCancelled(signal);
+    const current = resolveUserProjectDir(userId, name);
+    const context = { project: name, ...current };
+    // Lock order is always project -> server. Stop/status take only the server
+    // lock, so they can remain responsive during commands without racing this
+    // destructive lifecycle transition.
+    return withCoderServerLock(userId, name, async () => {
+      throwIfCancelled(signal);
+      const runtimePaths = assertServerInactiveForDeletion(userId, context);
+      rmSync(context.dir, { recursive: true, force: true });
+      rmSync(runtimePaths.dir, { recursive: true, force: true });
+      clearPointersForProject(userId, name);
+      _projectMetaCache.delete(context.dir);
+      appendWorkspaceLog(`Deleted project "${name}"`, userId);
+      // Alias cascade-delete: handled by skill-alias-framework via manifest's
+      // cascade_on_tools entry on coder_delete_project. No explicit call here.
+      return `Deleted project "${name}" and all its contents.`;
+    }, { signal });
+  }, { signal });
 }
 
 async function readProjectFile(filePath, offset, limit, userId, agentId) {
@@ -778,10 +906,12 @@ async function readProjectFile(filePath, offset, limit, userId, agentId) {
   return `Revision: ${fileRevision(content)}\n${numbered}`;
 }
 
-async function writeProjectFile(filePath, content, expectedRevision, userId, agentId) {
+async function writeProjectFile(filePath, content, expectedRevision, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   if (typeof content !== 'string') throw new Error('content must be a string.');
   const context = getProjectContext(userId, agentId);
   return withProjectContextLock(userId, context, async () => {
+    throwIfCancelled(signal);
     const abs = safePath(context.dir, filePath);
     const exists = existsSync(abs);
     const previous = exists ? readFileSync(abs, 'utf8') : null;
@@ -808,12 +938,14 @@ async function writeProjectFile(filePath, content, expectedRevision, userId, age
     const revision = fileRevision(content);
     appendLog(context.dir, `Wrote \`${filePath}\` (${content.split('\n').length} lines)`);
     return `Wrote ${filePath} (revision ${revision})`;
-  });
+  }, signal);
 }
 
-async function editProjectFile(filePath, oldStr, newStr, userId, agentId) {
+async function editProjectFile(filePath, oldStr, newStr, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   const context = getProjectContext(userId, agentId);
   return withProjectContextLock(userId, context, async () => {
+    throwIfCancelled(signal);
     const abs = safePath(context.dir, filePath);
     if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
@@ -827,12 +959,14 @@ async function editProjectFile(filePath, oldStr, newStr, userId, agentId) {
     const preview = oldStr.length > 60 ? oldStr.slice(0, 60) + '…' : oldStr;
     appendLog(context.dir, `Edited \`${filePath}\` — replaced "${preview}"`);
     return `Edited ${filePath} (revision ${fileRevision(updated)})`;
-  });
+  }, signal);
 }
 
-async function deleteProjectFile(filePath, userId, agentId) {
+async function deleteProjectFile(filePath, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   const context = getProjectContext(userId, agentId);
   return withProjectContextLock(userId, context, async () => {
+    throwIfCancelled(signal);
     const abs = safePath(context.dir, filePath);
     if (!existsSync(abs)) throw new Error(`Not found: ${filePath}`);
 
@@ -847,7 +981,7 @@ async function deleteProjectFile(filePath, userId, agentId) {
     unlinkSync(abs);
     appendLog(context.dir, `Deleted file \`${filePath}\``);
     return `Deleted ${filePath}`;
-  });
+  }, signal);
 }
 
 // Streaming shell executor: yields `{type:'token'}` chunks live and a final
@@ -995,11 +1129,12 @@ async function* runCommand(command, timeout, userId, agentId, signal = null) {
   if (signal?.aborted) forwardAbort();
 
   const producer = withProjectContextLock(userId, context, async () => {
+    throwIfCancelled(controller.signal);
     for await (const event of runCommandUnlocked(command, timeout, context.dir, controller.signal)) {
       queue.push(event);
       wake();
     }
-  }).catch(e => {
+  }, controller.signal).catch(e => {
     producerError = e;
   }).finally(() => {
     producerDone = true;
@@ -1031,31 +1166,348 @@ async function* runCommand(command, timeout, userId, agentId, signal = null) {
 // coder_run_command's sandbox uses --unshare-pid, so its PID namespace collapses
 // when the tool call returns — any backgrounded process dies with it. To run a
 // persistent dev server (node/python/whatever), start it in its own long-lived
-// bwrap that we detach from OE's event loop. One server per project; state
-// lives in <project>/.run/ so we can stop/status it across tool calls.
+// bwrap that we detach from OE's event loop. One server per project. PID,
+// process-incarnation metadata, and logs live outside the project bind so code
+// inside the sandbox can never choose which host process OE will signal.
 
-function serverStateDir(projectDir) { return path.join(projectDir, '.run'); }
-function serverPidPath(projectDir)  { return path.join(serverStateDir(projectDir), 'server.pid'); }
-function serverLogPath(projectDir)  { return path.join(serverStateDir(projectDir), 'server.log'); }
-function serverMetaPath(projectDir) { return path.join(serverStateDir(projectDir), 'server.meta.json'); }
+const SERVER_STATE_VERSION = 3;
+const SERVER_STATE_MAX_BYTES = 64 * 1024;
+const SERVER_COMMAND_MAX_BYTES = 16 * 1024;
+const SERVER_LOG_TAIL_MAX_BYTES = 256 * 1024;
+const SERVER_STOP_GRACE_MS = 2_000;
+const SERVER_KILL_WAIT_MS = 2_000;
+const LINUX_BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function readServerPid(projectDir) {
+export function getCoderServerRuntimePaths(userId, project) {
+  validateProjectName(project);
+  const digest = createHash('sha256').update(project).digest('hex');
+  const dir = path.join(
+    BASE_DIR, 'users', _safeUserId(userId), '.coder-runtime', 'servers', digest,
+  );
+  return {
+    dir,
+    statePath: path.join(dir, 'server-state.json'),
+    logPath: path.join(dir, 'server.log'),
+  };
+}
+
+function ensureServerRuntimeDir(paths) {
+  mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
+  chmodSync(paths.dir, 0o700);
+}
+
+function legacyServerPaths(projectDir) {
+  const dir = path.join(projectDir, '.run');
+  return {
+    pidPath: path.join(dir, 'server.pid'),
+    metaPath: path.join(dir, 'server.meta.json'),
+    logPath: path.join(dir, 'server.log'),
+  };
+}
+
+function legacyServerState(projectDir) {
+  const paths = legacyServerPaths(projectDir);
+  const hasEntry = value => {
+    try { lstatSync(value); return true; } catch { return false; }
+  };
+  return {
+    paths,
+    present: hasEntry(paths.pidPath) || hasEntry(paths.metaPath),
+  };
+}
+
+function legacyServerRefusal(projectDir) {
+  const legacy = legacyServerState(projectDir);
+  if (!legacy.present) return null;
+  return 'Untrusted legacy server state exists in .run. OE did not signal its PID because project files are sandbox-writable. Restart OpenEnsemble to terminate any legacy sandbox, remove the old .run/server.pid and .run/server.meta.json files, then retry.';
+}
+
+function strictServerPid(value) {
+  return validatedSignalPid(value);
+}
+
+function readLinuxBootId() {
+  if (process.platform !== 'linux') {
+    return { kind: 'unverified', reason: 'Linux boot identity is unavailable.' };
+  }
   try {
-    const raw = readFileSync(serverPidPath(projectDir), 'utf8').trim();
-    const pid = Number.parseInt(raw, 10);
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
-  } catch { return null; }
-}
-function isPidAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-function clearServerState(projectDir) {
-  for (const p of [serverPidPath(projectDir), serverMetaPath(projectDir)]) {
-    try { unlinkSync(p); } catch {}
+    const id = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim().toLowerCase();
+    if (!LINUX_BOOT_ID_RE.test(id)) {
+      return { kind: 'unverified', reason: 'Malformed Linux boot identity.' };
+    }
+    return { kind: 'present', id };
+  } catch (e) {
+    return { kind: 'unverified', reason: `Could not read Linux boot identity: ${e.message}` };
   }
 }
 
-async function startServerUnlocked(command, port, dir, signal = null) {
+function readLinuxProcessStartTicks(pid) {
+  if (process.platform !== 'linux' || strictServerPid(pid) == null) {
+    return { kind: 'unverified', reason: 'Linux /proc process identity is unavailable.' };
+  }
+  try {
+    const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = raw.lastIndexOf(')');
+    if (close < 0) return { kind: 'unverified', reason: 'Malformed /proc process metadata.' };
+    const fields = raw.slice(close + 1).trim().split(/\s+/);
+    const ticks = fields[19];
+    if (!/^\d{1,32}$/.test(ticks || '')) {
+      return { kind: 'unverified', reason: 'Malformed /proc process start time.' };
+    }
+    return { kind: 'present', ticks };
+  } catch (e) {
+    if (e?.code === 'ENOENT' || e?.code === 'ESRCH') return { kind: 'missing' };
+    return { kind: 'unverified', reason: `Could not read /proc process identity: ${e.message}` };
+  }
+}
+
+function validateServerState(raw, context) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, reason: 'state is not an object' };
+  }
+  const pid = strictServerPid(raw.pid);
+  if (raw.version !== SERVER_STATE_VERSION) return { ok: false, reason: 'unsupported state version' };
+  if (pid == null) return { ok: false, reason: 'PID is not a safe integer greater than 1' };
+  if (typeof raw.processStartTicks !== 'string' || !/^\d{1,32}$/.test(raw.processStartTicks)) {
+    return { ok: false, reason: 'process start ticks are missing or malformed' };
+  }
+  if (typeof raw.bootId !== 'string' || !LINUX_BOOT_ID_RE.test(raw.bootId)) {
+    return { ok: false, reason: 'Linux boot identity is missing or malformed' };
+  }
+  if (typeof raw.project !== 'string' || typeof raw.projectIdentity !== 'string') {
+    return { ok: false, reason: 'project identity is missing' };
+  }
+  if (typeof raw.command !== 'string' || typeof raw.startedAt !== 'string') {
+    return { ok: false, reason: 'server metadata is incomplete' };
+  }
+  if (Buffer.byteLength(raw.command, 'utf8') > SERVER_COMMAND_MAX_BYTES) {
+    return { ok: false, reason: 'server command exceeds the safe metadata limit' };
+  }
+  if (raw.port !== null && (!Number.isInteger(raw.port) || raw.port < 1 || raw.port > 65_535)) {
+    return { ok: false, reason: 'port is malformed' };
+  }
+  const state = {
+    version: SERVER_STATE_VERSION,
+    project: raw.project,
+    projectIdentity: raw.projectIdentity,
+    pid,
+    processStartTicks: raw.processStartTicks,
+    bootId: raw.bootId.toLowerCase(),
+    command: raw.command,
+    port: raw.port,
+    startedAt: raw.startedAt,
+  };
+  if (state.project !== context.project || state.projectIdentity !== context.identity) {
+    return { ok: true, kind: 'project-mismatch', state };
+  }
+  return { ok: true, kind: 'valid', state };
+}
+
+function readAuthoritativeServerState(userId, context) {
+  const paths = getCoderServerRuntimePaths(userId, context.project);
+  let st;
+  try { st = statSync(paths.statePath); }
+  catch (e) {
+    if (e?.code === 'ENOENT') return { kind: 'missing', paths };
+    return { kind: 'corrupt', paths, reason: e.message };
+  }
+  if (!st.isFile() || st.size > SERVER_STATE_MAX_BYTES) {
+    return { kind: 'corrupt', paths, reason: 'state file is not a bounded regular file' };
+  }
+  let raw;
+  try { raw = JSON.parse(readFileSync(paths.statePath, 'utf8')); }
+  catch (e) { return { kind: 'corrupt', paths, reason: e.message }; }
+  const validated = validateServerState(raw, context);
+  if (!validated.ok) return { kind: 'corrupt', paths, reason: validated.reason };
+  return { kind: validated.kind, paths, state: validated.state };
+}
+
+function inspectServerProcess(state) {
+  const boot = readLinuxBootId();
+  if (boot.kind === 'unverified') return boot;
+  if (boot.id !== state.bootId) {
+    return { kind: 'boot-changed', observedBootId: boot.id };
+  }
+  const observed = readLinuxProcessStartTicks(state.pid);
+  if (observed.kind === 'missing') return { kind: 'exited' };
+  if (observed.kind === 'unverified') return observed;
+  if (observed.ticks !== state.processStartTicks) {
+    return { kind: 'pid-reused', observedTicks: observed.ticks };
+  }
+  return { kind: 'running' };
+}
+
+function serializeServerState(state) {
+  const serialized = JSON.stringify(state, null, 2);
+  if (Buffer.byteLength(serialized, 'utf8') > SERVER_STATE_MAX_BYTES) {
+    throw new Error(`server metadata exceeds ${SERVER_STATE_MAX_BYTES} bytes`);
+  }
+  return serialized;
+}
+
+function validateServerStartInputs(command, port, context) {
+  if (typeof command !== 'string' || command.trim().length === 0) {
+    throw new Error('Server command must be a non-empty string.');
+  }
+  const commandBytes = Buffer.byteLength(command, 'utf8');
+  if (commandBytes > SERVER_COMMAND_MAX_BYTES) {
+    throw new Error(`Server command is too large (max ${SERVER_COMMAND_MAX_BYTES} UTF-8 bytes).`);
+  }
+  const normalizedPort = port == null ? null : port;
+  if (normalizedPort !== null
+      && (!Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65_535)) {
+    throw new Error('Server port must be an integer from 1 through 65535.');
+  }
+
+  // Check the worst-sized dynamic fields before spawning. This guarantees the
+  // authoritative document produced after spawn always fits the reader's cap,
+  // including JSON escaping within the command.
+  serializeServerState({
+    version: SERVER_STATE_VERSION,
+    project: context.project,
+    projectIdentity: context.identity,
+    command,
+    port: normalizedPort,
+    pid: 2_147_483_647,
+    processStartTicks: '9'.repeat(32),
+    bootId: '00000000-0000-0000-0000-000000000000',
+    startedAt: '9999-12-31T23:59:59.999Z',
+  });
+  return { command, port: normalizedPort };
+}
+
+function clearAuthoritativeServerState(paths, { removeLog = false } = {}) {
+  // A corrupt state path may be a directory or symlink. It is inside OE's
+  // host-only runtime root, so remove the entry without following it.
+  try { rmSync(paths.statePath, { recursive: true, force: true }); } catch {}
+  if (removeLog) {
+    try { rmSync(paths.logPath, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function readLogTail(logPath, logLines = 20) {
+  const wantedLines = Math.max(1, Math.min(Number(logLines) || 20, 500));
+  let fd = null;
+  try {
+    const st = statSync(logPath);
+    if (!st.isFile() || st.size <= 0) return '';
+    const bytes = Math.min(st.size, SERVER_LOG_TAIL_MAX_BYTES);
+    const buffer = Buffer.alloc(bytes);
+    fd = openSync(logPath, 'r');
+    const read = readSync(fd, buffer, 0, bytes, st.size - bytes);
+    const text = buffer.subarray(0, read).toString('utf8');
+    const lines = text.split(/\r?\n/);
+    return lines.slice(-wantedLines).join('\n');
+  } catch {
+    return '';
+  } finally {
+    if (fd != null) try { closeSync(fd); } catch {}
+  }
+}
+
+function signalVerifiedServerProcess(state, processSignal) {
+  const before = inspectServerProcess(state);
+  if (before.kind !== 'running') return { sent: false, status: before };
+  try {
+    // coder_start_server uses detached:true, so the sandbox is its own process
+    // group. Signal the group only after verifying the leader incarnation.
+    process.kill(-state.pid, processSignal);
+    return { sent: true, status: before };
+  } catch (e) {
+    if (e?.code === 'ESRCH') return { sent: false, status: inspectServerProcess(state) };
+    return { sent: false, status: { kind: 'unverified', reason: e.message } };
+  }
+}
+
+async function waitForServerProcessExit(state, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const status = inspectServerProcess(state);
+    if (status.kind !== 'running') return status;
+    if (Date.now() >= deadline) return status;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+function freshChildHasExited(child) {
+  return !child || child.exitCode != null || child.signalCode != null;
+}
+
+function waitForFreshChildExit(child, timeoutMs) {
+  if (freshChildHasExited(child)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let settled = false;
+    let timer = null;
+    const finish = exited => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      child.removeListener('close', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once('exit', onExit);
+    child.once('close', onExit);
+    timer = setTimeout(() => finish(freshChildHasExited(child)), timeoutMs);
+    // Close the event-registration race if the child exited synchronously.
+    if (freshChildHasExited(child)) finish(true);
+  });
+}
+
+async function terminateFreshServerChild(child) {
+  if (freshChildHasExited(child)) return { kind: 'exited' };
+  if (validatedSignalPid(child?.pid) == null) return { kind: 'unverified' };
+  // Before state is committed this ChildProcess is freshly spawned and owned by
+  // this call. It is safe to use the handle/process group directly even when
+  // /proc identity collection failed; persisted PIDs never get this treatment.
+  signalProcessTree(child, true, 'SIGTERM');
+  if (await waitForFreshChildExit(child, SERVER_STOP_GRACE_MS)) return { kind: 'exited' };
+  signalProcessTree(child, true, 'SIGKILL');
+  if (await waitForFreshChildExit(child, SERVER_KILL_WAIT_MS)) return { kind: 'exited' };
+  return { kind: 'unverified' };
+}
+
+function freshCleanupNote(result, pid) {
+  const safePid = validatedSignalPid(pid);
+  return result.kind === 'exited'
+    ? ' The spawned process was terminated and reaped.'
+    : ` Cleanup could not verify that${safePid == null ? ' the spawned process' : ` pid ${safePid}`} exited.`;
+}
+
+function inactiveServerState(userId, context, { action }) {
+  let record = readAuthoritativeServerState(userId, context);
+  if (record.kind === 'missing') {
+    const legacyRefusal = legacyServerRefusal(context.dir);
+    if (legacyRefusal) throw new Error(`${legacyRefusal} Refusing to ${action}.`);
+    return record;
+  }
+  if (record.kind === 'corrupt') {
+    throw new Error(`Authoritative server state is invalid (${record.reason}); refusing to ${action}.`);
+  }
+  const processState = inspectServerProcess(record.state);
+  if (processState.kind === 'running') {
+    const ownership = record.kind === 'valid'
+      ? `project "${context.project}"`
+      : 'a replaced project incarnation';
+    throw new Error(`A server is already running for ${ownership} (pid ${record.state.pid}). Stop it before you ${action}.`);
+  }
+  if (processState.kind === 'unverified') {
+    throw new Error(`Server process identity could not be verified (${processState.reason}); refusing to ${action}.`);
+  }
+  clearAuthoritativeServerState(record.paths);
+  record = { kind: 'missing', paths: record.paths };
+  const legacyRefusal = legacyServerRefusal(context.dir);
+  if (legacyRefusal) throw new Error(`${legacyRefusal} Refusing to ${action}.`);
+  return record;
+}
+
+function assertServerInactiveForDeletion(userId, context) {
+  const record = inactiveServerState(userId, context, { action: 'delete the project' });
+  return record.paths;
+}
+
+async function startServerUnlocked(command, port, userId, context, signal = null) {
   // Admission is cancellable, but the persistent child is deliberately not
   // wired to the task signal. Once spawned it is project-owned and remains up
   // until coder_stop_server, even if the launching turn later gets cancelled.
@@ -1066,120 +1518,211 @@ async function startServerUnlocked(command, port, dir, signal = null) {
   if (isCommandBlocked(command)) {
     throw new Error('BLOCKED: This command was rejected by safety filters.');
   }
-
-  const existingPid = readServerPid(dir);
-  if (existingPid && isPidAlive(existingPid)) {
-    throw new Error(`A server is already running for this project (pid ${existingPid}). Stop it first with coder_stop_server.`);
+  // Without a Linux process-incarnation token OE must never persist a PID that
+  // a later turn could signal after reuse.
+  const managerProcess = readLinuxProcessStartTicks(process.pid);
+  const boot = readLinuxBootId();
+  if (managerProcess.kind !== 'present' || boot.kind !== 'present') {
+    const reason = managerProcess.kind !== 'present'
+      ? managerProcess.reason
+      : boot.reason;
+    throw new Error(`Cannot safely manage server processes: ${reason || 'Linux process identity is unavailable.'}`);
   }
-  // Stale pid file — process died on its own. Clean up before re-starting.
-  if (existingPid) clearServerState(dir);
+
+  const prior = inactiveServerState(userId, context, { action: 'start another server' });
+  const paths = prior.paths;
+  ensureServerRuntimeDir(paths);
 
   // Truncate previous log so status/logs views start fresh for this run.
-  mkdirSync(serverStateDir(dir), { recursive: true });
-  const logPath = serverLogPath(dir);
-  writeFileSync(logPath, '');
-  const logFd = openSync(logPath, 'a');
+  writeFileSync(paths.logPath, '', { mode: 0o600 });
+  chmodSync(paths.logPath, 0o600);
+  const logFd = openSync(paths.logPath, 'a', 0o600);
 
-  const child = spawn(BWRAP_BIN, buildSandboxArgs(dir, command), {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    env: { PATH: SANDBOX_PATH, HOME: dir, LANG: 'C.UTF-8', TERM: 'xterm-256color' },
-  });
-  closeSync(logFd);
-  // unref so the node event loop doesn't keep waiting on the sandbox.
-  child.unref();
+  let child;
+  try {
+    child = spawn(BWRAP_BIN, buildSandboxArgs(context.dir, command), {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: { PATH: SANDBOX_PATH, HOME: context.dir, LANG: 'C.UTF-8', TERM: 'xterm-256color' },
+    });
+  } finally {
+    try { closeSync(logFd); } catch {}
+  }
 
   // If bwrap fails to spawn at all we get an 'error' event; catch the first
   // one synchronously-ish so we don't leave stale state behind.
   let spawnErr = null;
   child.once('error', (e) => { spawnErr = e; });
+  // unref so the node event loop doesn't keep waiting on the sandbox.
+  try {
+    child.unref();
+  } catch (e) {
+    const cleanup = await terminateFreshServerChild(child);
+    throw new Error(`Failed to detach spawned server: ${e.message}.${freshCleanupNote(cleanup, child.pid)}`);
+  }
   await new Promise(r => setTimeout(r, 50));
-  if (spawnErr) throw new Error(`Failed to start server: ${spawnErr.message}`);
+  if (spawnErr) {
+    // Node reports an OS-level spawn failure with no PID; there is no process
+    // to reap in that case. A rare post-spawn error with a PID still gets the
+    // same bounded cleanup as every other pre-commit failure.
+    if (strictServerPid(child.pid) == null) {
+      throw new Error(`Failed to start server: ${spawnErr.message}.`);
+    }
+    const cleanup = await terminateFreshServerChild(child);
+    throw new Error(`Failed to start server: ${spawnErr.message}.${freshCleanupNote(cleanup, child.pid)}`);
+  }
+
+  const pid = strictServerPid(child.pid);
+  const observed = readLinuxProcessStartTicks(pid);
+  if (pid == null) {
+    const cleanup = await terminateFreshServerChild(child);
+    throw new Error(`Spawned server returned an invalid host PID.${freshCleanupNote(cleanup, child.pid)}`);
+  }
+  if (observed.kind === 'missing') {
+    await terminateFreshServerChild(child);
+    const tail = readLogTail(paths.logPath, 20);
+    throw new Error(`Server exited before its process identity could be recorded.${tail ? `\n${tail}` : ''}`);
+  }
+  if (observed.kind !== 'present') {
+    const cleanup = await terminateFreshServerChild(child);
+    throw new Error(`Spawned server identity could not be verified (${observed.reason || 'unknown /proc error'}).${freshCleanupNote(cleanup, pid)}`);
+  }
 
   const meta = {
+    version: SERVER_STATE_VERSION,
+    project: context.project,
+    projectIdentity: context.identity,
     command,
-    port: port != null ? Number(port) : null,
-    pid: child.pid,
+    port,
+    pid,
+    processStartTicks: observed.ticks,
+    bootId: boot.id,
     startedAt: new Date().toISOString(),
   };
   try {
-    atomicWriteSync(serverMetaPath(dir), JSON.stringify(meta, null, 2));
-    atomicWriteSync(serverPidPath(dir), String(child.pid));
+    atomicWriteSync(paths.statePath, serializeServerState(meta), { mode: 0o600 });
   } catch (e) {
-    signalProcessTree(child, true, 'SIGTERM');
-    clearServerState(dir);
-    throw e;
+    const final = await terminateFreshServerChild(child);
+    clearAuthoritativeServerState(paths);
+    throw new Error(`Failed to persist authoritative server state: ${e.message}.${freshCleanupNote(final, pid)}`);
   }
-  appendLog(dir, `Started server \`${command.length > 80 ? command.slice(0, 80) + '…' : command}\` (pid ${child.pid}${port ? `, port ${port}` : ''})`);
+  appendLog(context.dir, `Started server \`${command.length > 80 ? command.slice(0, 80) + '…' : command}\` (pid ${pid}${port ? `, port ${port}` : ''})`);
 
   // Report the server's LAN IP, not "localhost" — the browser user is on a
   // different machine than the OE server, so "localhost" resolves to their
   // desktop instead of here and yields connection refused.
-  const lanIp = getLanAddress();
-  const url = port ? `http://${lanIp}:${port}` : null;
+  let lanIp = null;
+  try { lanIp = getLanAddress(); } catch {}
+  const url = port && lanIp ? `http://${lanIp}:${port}` : null;
   const urlNote = url ? ` at ${url}` : '';
-  return `Started server${urlNote} (pid ${child.pid}). Logs at .run/server.log. Use coder_server_status or coder_stop_server.`;
+  return `Started server${urlNote} (pid ${pid}). Use coder_server_status to view logs or coder_stop_server to stop it.`;
 }
 
 async function startServer(command, port, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   const context = getProjectContext(userId, agentId);
-  return withProjectContextLock(userId, context,
-    () => startServerUnlocked(command, port, context.dir, signal));
+  const validated = validateServerStartInputs(command, port, context);
+  // Starting changes both checkout-owned runtime files and server lifecycle
+  // state, so it takes the locks in the canonical project -> server order.
+  return withProjectContextLock(userId, context, () => {
+    throwIfCancelled(signal);
+    return withProjectContextServerLock(userId, context, () => {
+      throwIfCancelled(signal);
+      return startServerUnlocked(validated.command, validated.port, userId, context, signal);
+    }, signal);
+  }, signal);
 }
 
-async function stopServerUnlocked(dir) {
-  const pid = readServerPid(dir);
-  if (!pid) return 'No server is running for this project.';
-  if (!isPidAlive(pid)) {
-    clearServerState(dir);
-    return `No running server (pid ${pid} was stale — cleaned up).`;
+async function stopServerUnlocked(userId, context) {
+  const record = readAuthoritativeServerState(userId, context);
+  if (record.kind === 'missing') {
+    const legacyRefusal = legacyServerRefusal(context.dir);
+    if (legacyRefusal) return legacyRefusal;
+    return 'No server is running for this project.';
   }
-  try { process.kill(pid, 'SIGTERM'); } catch {}
-  // Grace period; if still alive, SIGKILL.
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 100));
-    if (!isPidAlive(pid)) break;
+  if (record.kind === 'corrupt') {
+    throw new Error(`Authoritative server state is invalid (${record.reason}); no PID was signaled.`);
   }
-  if (isPidAlive(pid)) {
-    try { process.kill(pid, 'SIGKILL'); } catch {}
-    await new Promise(r => setTimeout(r, 200));
+  if (record.kind === 'project-mismatch') {
+    throw new Error('Authoritative server state belongs to a replaced project incarnation; no PID was signaled.');
   }
-  clearServerState(dir);
-  appendLog(dir, `Stopped server (pid ${pid})`);
-  return `Stopped server (pid ${pid}).`;
+
+  let processState = inspectServerProcess(record.state);
+  if (processState.kind === 'exited' || processState.kind === 'pid-reused' || processState.kind === 'boot-changed') {
+    clearAuthoritativeServerState(record.paths);
+    const detail = processState.kind === 'pid-reused'
+      ? 'its PID was reused'
+      : processState.kind === 'boot-changed'
+        ? 'the host rebooted'
+        : 'it already exited';
+    return `No running server (recorded process ${detail}; stale state cleaned up).`;
+  }
+  if (processState.kind === 'unverified') {
+    throw new Error(`Server process identity could not be verified (${processState.reason}); no PID was signaled.`);
+  }
+
+  const term = signalVerifiedServerProcess(record.state, 'SIGTERM');
+  processState = term.sent
+    ? await waitForServerProcessExit(record.state, SERVER_STOP_GRACE_MS)
+    : term.status;
+  if (processState.kind === 'running') {
+    const killed = signalVerifiedServerProcess(record.state, 'SIGKILL');
+    processState = killed.sent
+      ? await waitForServerProcessExit(record.state, SERVER_KILL_WAIT_MS)
+      : killed.status;
+  }
+  if (processState.kind === 'running' || processState.kind === 'unverified') {
+    const reason = processState.reason ? `: ${processState.reason}` : '';
+    throw new Error(`Could not verify that server pid ${record.state.pid} stopped${reason}. State was retained.`);
+  }
+
+  clearAuthoritativeServerState(record.paths);
+  appendLog(context.dir, `Stopped server (pid ${record.state.pid})`);
+  return `Stopped server (pid ${record.state.pid}).`;
 }
 
 async function stopServer(userId, agentId) {
   const context = getProjectContext(userId, agentId);
-  return withProjectContextLock(userId, context, () => stopServerUnlocked(context.dir));
+  return withProjectContextServerLock(userId, context,
+    () => stopServerUnlocked(userId, context));
 }
 
-async function serverStatusUnlocked(dir, logLines = 20) {
-  const pid = readServerPid(dir);
-  let meta = null;
-  try { meta = JSON.parse(readFileSync(serverMetaPath(dir), 'utf8')); } catch {}
-
-  if (!pid || !isPidAlive(pid)) {
-    if (pid) clearServerState(dir);
-    // Still show tail of previous log if available — often the interesting bit.
-    let tail = '';
-    try {
-      const log = readFileSync(serverLogPath(dir), 'utf8');
-      const lines = log.split(/\r?\n/);
-      const slice = lines.slice(-Math.max(1, Math.min(logLines, 500)));
-      if (slice.some(Boolean)) tail = `\n--- last log lines ---\n${slice.join('\n')}`;
-    } catch {}
-    return `No server is running for this project.${tail}`;
+async function serverStatusUnlocked(userId, context, logLines = 20) {
+  const record = readAuthoritativeServerState(userId, context);
+  if (record.kind === 'missing') {
+    const legacy = legacyServerState(context.dir);
+    if (legacy.present) {
+      // Never open project-writable legacy paths here: server.log could itself
+      // be a symlink chosen to make the host read outside the project.
+      return legacyServerRefusal(context.dir);
+    }
+    const tail = readLogTail(record.paths.logPath, logLines);
+    return `No server is running for this project.${tail ? `\n--- last log lines ---\n${tail}` : ''}`;
+  }
+  if (record.kind === 'corrupt') {
+    throw new Error(`Authoritative server state is invalid (${record.reason}); refusing to trust its PID.`);
+  }
+  if (record.kind === 'project-mismatch') {
+    throw new Error('Authoritative server state belongs to a replaced project incarnation; refusing to trust its PID.');
   }
 
-  const { command = '(unknown)', port = null, startedAt = '(unknown)' } = meta ?? {};
-  let tail = '';
-  try {
-    const log = readFileSync(serverLogPath(dir), 'utf8');
-    const lines = log.split(/\r?\n/);
-    const slice = lines.slice(-Math.max(1, Math.min(logLines, 500)));
-    tail = slice.join('\n');
-  } catch {}
+  const processState = inspectServerProcess(record.state);
+  if (processState.kind === 'exited' || processState.kind === 'pid-reused' || processState.kind === 'boot-changed') {
+    clearAuthoritativeServerState(record.paths);
+    const detail = processState.kind === 'pid-reused'
+      ? 'its PID was reused'
+      : processState.kind === 'boot-changed'
+        ? 'the host rebooted'
+        : 'it exited';
+    const tail = readLogTail(record.paths.logPath, logLines);
+    return `No server is running for this project (recorded process ${detail}; stale state cleaned up).${tail ? `\n--- last log lines ---\n${tail}` : ''}`;
+  }
+  if (processState.kind === 'unverified') {
+    throw new Error(`Server process identity could not be verified (${processState.reason}); refusing to report it as running.`);
+  }
+
+  const { pid, command, port, startedAt } = record.state;
+  const tail = readLogTail(record.paths.logPath, logLines);
 
   const portLine = port ? `port: ${port}` : '';
   const urlLine = port ? `url: http://${getLanAddress()}:${port}` : '';
@@ -1198,19 +1741,21 @@ async function serverStatusUnlocked(dir, logLines = 20) {
 
 async function serverStatus(userId, agentId, logLines = 20) {
   const context = getProjectContext(userId, agentId);
-  return withProjectContextLock(userId, context,
-    () => serverStatusUnlocked(context.dir, logLines));
+  return withProjectContextServerLock(userId, context,
+    () => serverStatusUnlocked(userId, context, logLines));
 }
 
 // Apply a list of {old_string, new_string, replace_all?} edits to a single file
 // atomically — every edit must succeed against the staged buffer or nothing is
 // written. Mirrors Claude Code's MultiEdit semantics.
-async function multiEditProjectFile(filePath, edits, userId, agentId) {
+async function multiEditProjectFile(filePath, edits, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new Error('edits must be a non-empty array.');
   }
   const context = getProjectContext(userId, agentId);
   return withProjectContextLock(userId, context, async () => {
+    throwIfCancelled(signal);
     const abs = safePath(context.dir, filePath);
     if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
@@ -1236,7 +1781,7 @@ async function multiEditProjectFile(filePath, edits, userId, agentId) {
     atomicWriteSync(abs, content);
     appendLog(context.dir, `Multi-edited \`${filePath}\` (${edits.length} edits)`);
     return `Applied ${edits.length} edit${edits.length === 1 ? '' : 's'} to ${filePath} (revision ${fileRevision(content)})`;
-  });
+  }, signal);
 }
 
 // TODOs are scoped to (project, durable agent). A shared legacy todos.json is
@@ -1264,7 +1809,8 @@ function _parseTodosFile(p) {
   } catch { return null; }
 }
 
-function _readTodosUnlocked(projectDir, userId, agentId) {
+function _readTodosUnlocked(projectDir, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   const p = _todosPathForDir(projectDir, userId, agentId);
   if (existsSync(p)) return _parseTodosFile(p) ?? [];
 
@@ -1273,6 +1819,7 @@ function _readTodosUnlocked(projectDir, userId, agentId) {
   const legacy = _parseTodosFile(legacyPath);
   if (!legacy) return [];
   // Preserve even an empty legacy list as proof that this agent migrated.
+  throwIfCancelled(signal);
   mkdirSync(path.dirname(p), { recursive: true });
   atomicWriteSync(p, JSON.stringify(legacy, null, 2));
   return legacy;
@@ -1284,7 +1831,8 @@ function _renderTodos(todos) {
   return todos.map(t => `${icon(t.status)} [${t.id}] ${t.content}`).join('\n');
 }
 
-async function todoWrite(todos, userId, agentId) {
+async function todoWrite(todos, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   // Models sometimes serialize the array as a JSON string — parse it transparently.
   if (typeof todos === 'string') {
     try { todos = JSON.parse(todos); } catch { throw new Error('todos must be an array.'); }
@@ -1298,17 +1846,21 @@ async function todoWrite(todos, userId, agentId) {
   }
   const context = getProjectContext(userId, agentId);
   return withProjectContextLock(userId, context, async () => {
+    throwIfCancelled(signal);
     const p = _todosPathForDir(context.dir, userId, agentId);
     mkdirSync(path.dirname(p), { recursive: true });
     atomicWriteSync(p, JSON.stringify(todos, null, 2));
     return _renderTodos(todos);
-  });
+  }, signal);
 }
 
-async function todoRead(userId, agentId) {
+async function todoRead(userId, agentId, signal = null) {
+  throwIfCancelled(signal);
   const context = getProjectContext(userId, agentId);
-  return withProjectContextLock(userId, context,
-    async () => _renderTodos(_readTodosUnlocked(context.dir, userId, agentId)));
+  return withProjectContextLock(userId, context, async () => {
+    throwIfCancelled(signal);
+    return _renderTodos(_readTodosUnlocked(context.dir, userId, agentId, signal));
+  }, signal);
 }
 
 async function listFiles(directory, pattern, userId, agentId, signal = null) {
@@ -1397,18 +1949,18 @@ export async function* executeSkillTool(name, args, userId = 'default', agentId,
   try {
     switch (name) {
       case 'coder_list_projects':  text = await listProjects(userId, agentId); break;
-      case 'coder_create_project': text = await createProject(args.name, userId, agentId); break;
-      case 'coder_switch_project': text = await switchProject(args.name, userId, agentId); break;
-      case 'coder_delete_project': text = await deleteProject(args.name, userId, agentId); break;
+      case 'coder_create_project': text = await createProject(args.name, userId, agentId, signal); break;
+      case 'coder_switch_project': text = await switchProject(args.name, userId, agentId, signal); break;
+      case 'coder_delete_project': text = await deleteProject(args.name, userId, agentId, signal); break;
       case 'coder_read_file':      text = await readProjectFile(args.path, args.offset, args.limit, userId, agentId); break;
-      case 'coder_write_file':     text = await writeProjectFile(args.path, args.content, args.expected_revision, userId, agentId); break;
-      case 'coder_edit_file':      text = await editProjectFile(args.path, args.old_string, args.new_string, userId, agentId); break;
-      case 'coder_multi_edit':     text = await multiEditProjectFile(args.file_path, args.edits, userId, agentId); break;
-      case 'coder_delete_file':    text = await deleteProjectFile(args.path, userId, agentId); break;
+      case 'coder_write_file':     text = await writeProjectFile(args.path, args.content, args.expected_revision, userId, agentId, signal); break;
+      case 'coder_edit_file':      text = await editProjectFile(args.path, args.old_string, args.new_string, userId, agentId, signal); break;
+      case 'coder_multi_edit':     text = await multiEditProjectFile(args.file_path, args.edits, userId, agentId, signal); break;
+      case 'coder_delete_file':    text = await deleteProjectFile(args.path, userId, agentId, signal); break;
       case 'coder_list_files':     text = await listFiles(args.directory, args.pattern, userId, agentId, signal); break;
       case 'coder_search':         text = await searchFiles(args.pattern, args.path, args.glob, userId, agentId, signal); break;
-      case 'coder_todo_write':     text = await todoWrite(args.todos, userId, agentId); break;
-      case 'coder_todo_read':      text = await todoRead(userId, agentId); break;
+      case 'coder_todo_write':     text = await todoWrite(args.todos, userId, agentId, signal); break;
+      case 'coder_todo_read':      text = await todoRead(userId, agentId, signal); break;
       case 'coder_start_server':   text = await startServer(args.command, args.port, userId, agentId, signal); break;
       case 'coder_stop_server':    text = await stopServer(userId, agentId); break;
       case 'coder_server_status':  text = await serverStatus(userId, agentId, args.lines); break;
