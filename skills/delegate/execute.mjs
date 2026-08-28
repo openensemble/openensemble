@@ -23,6 +23,7 @@ import {
   unlockParallelWorkGate,
 } from '../../lib/parallel-work-gate.mjs';
 import { getTurn, getTurnRestartContext } from '../../lib/turn-trace-context.mjs';
+import { stableAgentRef } from '../../lib/agent-ref.mjs';
 import {
   canonicalWorkClaimKey,
   claimWork,
@@ -48,24 +49,77 @@ const MAX_DELEGATION_DEPTH = 2;
 // chat-dispatch.mjs:290 for session isolation (so two users chatting with
 // the same-named agent don't share state). Strip that prefix so the agent
 // lookup below finds the raw agent record by its real id.
-function _parseCallerSession(callerAgentId) {
+function _parseCallerSession(callerAgentId, userId) {
   if (!callerAgentId) return { effectiveAgentId: null, depth: 0 };
-  // New format with explicit depth marker.
-  let m = String(callerAgentId).match(/^ephemeral_deleg_d(\d+)_\d+_[a-z0-9]+_(.+)$/);
-  if (m) return { effectiveAgentId: m[2], depth: parseInt(m[1], 10) };
-  // Legacy format (no depth marker) — treat as depth 1.
-  m = String(callerAgentId).match(/^ephemeral_deleg_\d+_[a-z0-9]+_(.+)$/);
-  if (m) return { effectiveAgentId: m[1], depth: 1 };
-  // Detached owner clones and their bounded parallel children retain the
-  // stable owner id as the final suffix.
-  m = String(callerAgentId).match(/^ephemeral_(?:worker|workstream)_[^_]+_[^_]+_(.+)$/);
-  if (m) return { effectiveAgentId: m[1], depth: 1 };
-  // Direct (non-ephemeral) caller — may carry a `user_<id>_` prefix from
-  // chat-dispatch's per-user session-key wrapper. Strip it so the agents
-  // lookup finds the bare agent id.
-  m = String(callerAgentId).match(/^user_[a-z0-9]+_(.+)$/);
-  if (m) return { effectiveAgentId: m[1], depth: 0 };
-  return { effectiveAgentId: callerAgentId, depth: 0 };
+  const raw = String(callerAgentId);
+  const scoped = raw.startsWith(`${userId}_`) ? raw.slice(userId.length + 1) : raw;
+  const explicitDepth = scoped.match(/^ephemeral_deleg_d(\d+)_/);
+  const wrapped = /^ephemeral_(?:deleg|router|worker|workstream)_/.test(scoped);
+  let effectiveAgentId = stableAgentRef(userId, raw);
+  // Compatibility for old callers/tests that supplied a scoped session key
+  // without the matching authenticated user id. Real dispatch always takes
+  // the canonical path above.
+  if (effectiveAgentId === raw) {
+    const legacyScoped = raw.match(/^user_[a-z0-9]+_(.+)$/);
+    if (legacyScoped) effectiveAgentId = legacyScoped[1];
+  }
+  return {
+    effectiveAgentId,
+    depth: explicitDepth ? parseInt(explicitDepth[1], 10) : (wrapped ? 1 : 0),
+  };
+}
+
+function _callerHasWrapper(callerAgentId, userId, kind) {
+  const raw = String(callerAgentId || '');
+  const scoped = raw.startsWith(`${userId}_`) ? raw.slice(userId.length + 1) : raw;
+  return scoped.startsWith(`ephemeral_${kind}_`);
+}
+
+function _resolveAgentReference(rawReference, agents, roleAssignments, visibleRoles) {
+  const raw = String(rawReference || '');
+  const needle = raw.toLowerCase();
+  let resolved = agents.find(candidate => candidate.id === raw)
+    ?? agents.find(candidate => candidate.name?.toLowerCase() === needle)
+    ?? agents.find(candidate => candidate.id.toLowerCase().endsWith('_' + needle));
+  if (resolved) return resolved;
+
+  // A role name/id refers to that role's configured default. This matters
+  // when several durable agents share a role (for example front-end and
+  // back-end Coders): generic "coder" delegation must agree with normal
+  // intent routing instead of depending on roster order.
+  const requestedRole = visibleRoles.find(role =>
+    role.id?.toLowerCase() === needle || role.name?.toLowerCase() === needle);
+  const defaultAgentId = requestedRole ? roleAssignments[requestedRole.id] : null;
+  if (defaultAgentId) {
+    resolved = agents.find(candidate => candidate.id === defaultAgentId);
+    if (resolved) return resolved;
+  }
+
+  resolved = agents.find(candidate => candidate.role?.toLowerCase() === needle)
+    ?? agents.find(candidate => candidate.skillCategory?.toLowerCase() === needle);
+  if (resolved) return resolved;
+
+  if (/^agent_[a-z0-9_]+$/i.test(raw)) {
+    const stripped = raw.replace(/^agent_/i, '').toLowerCase();
+    // Hex suffixes are 8 chars of [0-9a-f] — leave those to the exact-id path
+    // above. Retry only when the stripped form looks like a name or role.
+    if ((stripped && stripped.length !== 8) || /[g-z_]/.test(stripped)) {
+      resolved = agents.find(candidate => candidate.name?.toLowerCase() === stripped)
+        ?? agents.find(candidate => candidate.id.toLowerCase() === stripped);
+      if (resolved) return resolved;
+      const strippedRole = visibleRoles.find(role =>
+        role.id?.toLowerCase() === stripped || role.name?.toLowerCase() === stripped);
+      const strippedDefaultId = strippedRole ? roleAssignments[strippedRole.id] : null;
+      if (strippedDefaultId) {
+        resolved = agents.find(candidate => candidate.id === strippedDefaultId);
+        if (resolved) return resolved;
+      }
+      return agents.find(candidate => candidate.role?.toLowerCase() === stripped)
+        ?? agents.find(candidate => candidate.skillCategory?.toLowerCase() === stripped)
+        ?? null;
+    }
+  }
+  return null;
 }
 
 // ── Agent-owned background workers (manager/employee model) ──────────────────
@@ -567,7 +621,7 @@ async function* _redirectWorkerTool(args, userId, callerAgentId) {
   const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
   const agents = getAgentsForUser(userId);
   const singleMode = agents.length === 1 && agents[0]?._rosterSolo === true;
-  const { effectiveAgentId: ownerKey } = _parseCallerSession(callerAgentId);
+  const { effectiveAgentId: ownerKey } = _parseCallerSession(callerAgentId, userId);
   const bg = await import('../../background-tasks.mjs');
   const result = bg.redirectTaskWork(userId, taskId, directive, {
     ownerKey: singleMode ? null : ownerKey,
@@ -620,7 +674,7 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
   }
 
   const router = getToolRouterContext();
-  const { effectiveAgentId: parsedOwner } = _parseCallerSession(callerAgentId);
+  const { effectiveAgentId: parsedOwner } = _parseCallerSession(callerAgentId, userId);
   const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
   const durableAgents = getAgentsForUser(userId);
   const baseAgent = router?.agent
@@ -879,7 +933,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
   // The owner is the STABLE agent behind whatever session is calling — strip the
   // ephemeral/direct-chat wrapper so every incarnation resolves the same workers.
-  const { effectiveAgentId: ownerKey } = _parseCallerSession(callerAgentId);
+  const { effectiveAgentId: ownerKey } = _parseCallerSession(callerAgentId, userId);
   const agents = getAgentsForUser(userId);
   const singleMode = agents.length === 1 && agents[0]?._rosterSolo === true;
   const liveWorkers = () => singleMode
@@ -1017,7 +1071,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     };
     return;
   }
-  if (String(callerAgentId || '').startsWith('ephemeral_worker_')) {
+  if (_callerHasWrapper(callerAgentId, userId, 'worker')) {
     yield { type: 'result', text: 'Workers are individual contributors and cannot hire their own workers. Do the job directly, then report back to whoever assigned it.' };
     return;
   }
@@ -1274,7 +1328,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // the normal ask_agent contract.
   const { getOrchestrationPolicy } = await import('../../lib/orchestration-policy.mjs');
   if (getOrchestrationPolicy(userId).mode === 'single') {
-    const isWorker = String(callerAgentId || '').startsWith('ephemeral_worker_');
+    const isWorker = _callerHasWrapper(callerAgentId, userId, 'worker');
     yield {
       type: 'result',
       text: isWorker
@@ -1293,10 +1347,13 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // Dynamic imports — by the time this executes, all modules are fully initialized
   const { streamChat } = await import('../../chat.mjs');
   const { getAgentsForUser } = await import('../../routes/_helpers.mjs');
+  const { getRoleAssignments, listRoles } = await import('../../roles.mjs');
   const { isAgentBusy, waitForAgentIdle, markAgentBusy } = await import('../../chat-dispatch.mjs');
   const { getScheduledNote } = await import('../../lib/scheduled-context.mjs');
 
   const agents = getAgentsForUser(userId);
+  const roleAssignments = getRoleAssignments(userId);
+  const visibleRoles = listRoles(userId);
   // Accept either the real id (agent_2dfdf5ca) or the display name.
   // Some models (notably gpt-5.x via the Codex backend) hallucinate names even
   // when the tool description lists real ids, so we fall back through several
@@ -1306,31 +1363,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   //   3. id ends with _<needle> (rare hand-typed id endings)
   //   4. needle stripped of an "agent_" prefix — the model often invents
   //      "agent_<name>" by extrapolating the hex pattern; strip and match by name
-  let agent = agents.find(a => a.id === agent_id);
-  if (!agent) {
-    const raw = String(agent_id);
-    const needle = raw.toLowerCase();
-    agent = agents.find(a => a.name?.toLowerCase() === needle)
-         ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle))
-         // LLMs frequently pass the agent's ROLE (e.g. "coder" instead of
-         // the coder agent's hex id). Accept that — there's usually one agent per role
-         // on a given install, and if multiple exist we take the first
-         // (matches the implicit "default agent for role" mental model).
-         ?? agents.find(a => a.role?.toLowerCase() === needle)
-         ?? agents.find(a => a.skillCategory?.toLowerCase() === needle);
-    if (!agent && /^agent_[a-z0-9_]+$/i.test(raw)) {
-      const stripped = raw.replace(/^agent_/i, '').toLowerCase();
-      // Hex suffixes are 8 chars of [0-9a-f] — leave those to the exact-id
-      // path above (already failed). Only retry when the stripped form looks
-      // like a name (has at least one non-hex char, or is too long/short for
-      // our 4-byte hex IDs).
-      if (stripped && stripped.length !== 8 || /[g-z_]/.test(stripped)) {
-        agent = agents.find(a => a.name?.toLowerCase() === stripped)
-             ?? agents.find(a => a.id.toLowerCase() === stripped)
-             ?? agents.find(a => a.role?.toLowerCase() === stripped);
-      }
-    }
-  }
+  const agent = _resolveAgentReference(agent_id, agents, roleAssignments, visibleRoles);
   if (!agent) { yield { type: 'result', text: `Agent '${agent_id}' not found or not available.` }; return; }
 
   // ── Delegation-chain enforcement ───────────────────────────────────────
@@ -1339,7 +1372,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   //      sidestep the hierarchy by calling each other directly.
   //   2. Max chain depth is MAX_DELEGATION_DEPTH (=2). Beyond that we're
   //      either in a loop or the LLM is getting confused.
-  const { effectiveAgentId: callerEffectiveId, depth: currentDepth } = _parseCallerSession(callerAgentId);
+  const { effectiveAgentId: callerEffectiveId, depth: currentDepth } = _parseCallerSession(callerAgentId, userId);
   const callerAgent = callerEffectiveId
     ? agents.find(a => a.id === callerEffectiveId)
     : null;
@@ -1392,12 +1425,7 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
   // instead of finding out after the producer already ran.
   let handoffTarget = null;
   if (doHandoff) {
-    const needle = handoffTo.toLowerCase();
-    handoffTarget = agents.find(a => a.id === handoffTo)
-      ?? agents.find(a => a.name?.toLowerCase() === needle)
-      ?? agents.find(a => a.id.toLowerCase().endsWith('_' + needle))
-      ?? agents.find(a => a.role?.toLowerCase() === needle)
-      ?? agents.find(a => a.skillCategory?.toLowerCase() === needle);
+    handoffTarget = _resolveAgentReference(handoffTo, agents, roleAssignments, visibleRoles);
     if (!handoffTarget) {
       yield { type: 'result', text: `Handoff target '${handoffTo}' not found — no pipeline was started. Pick a valid agent for handoff_to, or delegate normally and route the result yourself.` };
       return;

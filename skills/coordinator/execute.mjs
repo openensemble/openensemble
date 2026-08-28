@@ -2,9 +2,9 @@
 // `oe_describe_platform`. Pulled out of the coordinator SPA so it doesn't
 // ship on every turn — most turns don't need this content. Keep it factual
 // and stable; refresh when the platform's capabilities change shape.
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs';
+import { writeFileSync, mkdirSync, rmSync } from 'fs';
 import path from 'path';
-import { CFG_PATH, userSkillsDir } from '../../lib/paths.mjs';
+import { userSkillsDir } from '../../lib/paths.mjs';
 
 const PLATFORM_KNOWLEDGE = `# OpenEnsemble platform
 
@@ -102,7 +102,11 @@ export default async function* execute(name, args, userId, agentId) {
   if (name === 'create_agent') {
     const agentName = args.name?.trim();
     if (!agentName) { yield { type: 'result', text: 'name is required.' }; return; }
-    const { createCustomAgent } = await import('../../agents.mjs');
+    const {
+      createCustomAgent,
+      deleteCustomAgent,
+      validatePrimarySkillCategory,
+    } = await import('../../agents.mjs');
     const { broadcastAgentList, getAgentsForUser } = await import('../../routes/_helpers.mjs');
     const roleId = args.role_id?.trim() || undefined;
     let inheritedModel, inheritedProvider;
@@ -111,36 +115,66 @@ export default async function* execute(name, args, userId, agentId) {
       const caller = getAgentsForUser(userId).find(a => a.id === callerRealId);
       if (caller) { inheritedModel = caller.model; inheritedProvider = caller.provider; }
     }
-    // Persist the role as this agent's DURABLE primary category, not just as the
-    // single-valued skillAssignments entry. Without it, creating a second agent
-    // for a role silently strips the first one (the assignment map holds one
-    // agent per role), which is what blocked having a front-end and a back-end
-    // coder. Mirrors the same fix in routes/agents.mjs.
-    let durableRole = null;
-    if (roleId) {
-      const { listRoles } = await import('../../roles.mjs');
-      // Only a role this account can actually see: a stored primary category
-      // grants its tools directly, so it must not become a way to name a skill
-      // the user was never given.
-      const visible = listRoles(userId, { includeDisabled: true })
-        .find(r => r.id === roleId && !r.hidden);
-      if (visible) durableRole = roleId;
+    const roleValidation = await validatePrimarySkillCategory(userId, roleId);
+    if (!roleValidation.ok) {
+      yield { type: 'result', text: roleValidation.error, isError: true };
+      return;
     }
-    const agent = createCustomAgent({
-      name: agentName,
-      emoji: args.emoji || '🤖',
-      description: args.description || '',
-      model: args.model || inheritedModel,
-      provider: args.provider || inheritedProvider,
-      skillCategory: durableRole,
-      ownerId: userId,
-    });
-    if (roleId) {
-      const { setRoleAssignment } = await import('../../roles.mjs');
-      setRoleAssignment(roleId, agent.id, userId);
+    const durableRole = roleValidation.skillCategory;
+    const {
+      tryAcquireUserTopologyTransition,
+      runWithUserTopologyLease,
+      finishUserTopologyTransition,
+      rollbackUserTopologyTransition,
+    } = await import('../../chat-dispatch/slot-registry.mjs');
+    const topologyTransition = tryAcquireUserTopologyTransition(userId);
+    if (!topologyTransition) {
+      yield {
+        type: 'result',
+        text: 'Another reply or account setup change is active. Try again when it finishes.',
+        isError: true,
+      };
+      return;
     }
-    broadcastAgentList();
-    const roleNote = roleId ? ` and assigned to the "${roleId}" role` : '';
+    let agent = null;
+    let createdAgent = null;
+    try {
+      agent = await runWithUserTopologyLease(topologyTransition.lease, async () => {
+        const created = createCustomAgent({
+          name: agentName,
+          emoji: args.emoji || '🤖',
+          description: args.description || '',
+          model: args.model || inheritedModel,
+          provider: args.provider || inheritedProvider,
+          skillCategory: durableRole,
+          ownerId: userId,
+        });
+        createdAgent = created;
+        if (durableRole) {
+          const { getDurableRoleAssignment, setRoleAssignment } = await import('../../roles.mjs');
+          if (!getDurableRoleAssignment(durableRole, userId)) {
+            setRoleAssignment(durableRole, created.id, userId);
+          }
+        }
+        return created;
+      });
+      finishUserTopologyTransition(topologyTransition);
+    } catch (error) {
+      if (createdAgent) {
+        try { await deleteCustomAgent(createdAgent.id); } catch {}
+        try {
+          const { clearRoleAssignmentsForAgent } = await import('../../roles.mjs');
+          clearRoleAssignmentsForAgent(createdAgent.id, userId);
+        } catch {}
+      }
+      rollbackUserTopologyTransition(topologyTransition);
+      yield { type: 'result', text: `Could not create agent: ${error.message}`, isError: true };
+      return;
+    }
+    try { broadcastAgentList(); } catch (error) {
+      console.warn('[coordinator] post-create roster broadcast failed:', error.message);
+    }
+    const roleNote = durableRole ? ` with the "${durableRole}" primary role` : '';
     yield { type: 'result', text: `Agent "${agent.name}" (${agent.emoji}) created successfully${roleNote}.` };
     return;
   }
@@ -226,7 +260,8 @@ export default async function* execute(name, args, userId, agentId) {
       yield { type: 'result', text: 'Deleting roles requires admin privileges.' };
       return;
     }
-    const { listRoles, removeRoleManifest } = await import('../../roles.mjs');
+    const { listRoles, removeRoleManifest, setRoleAssignment } = await import('../../roles.mjs');
+    const { clearCustomAgentPrimaryRolesForRole } = await import('../../agents.mjs');
     const roleName = args.name?.trim().toLowerCase();
     const role = listRoles(userId).find(s => s.service && s.name.toLowerCase() === roleName);
     if (!role) {
@@ -246,13 +281,8 @@ export default async function* execute(name, args, userId, agentId) {
     }
     rmSync(skillDir, { recursive: true, force: true });
     removeRoleManifest(role.id, userId);
-    try {
-      const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
-      if (cfg.skillAssignments) {
-        delete cfg.skillAssignments[role.id];
-        writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2));
-      }
-    } catch {}
+    clearCustomAgentPrimaryRolesForRole(role.id, userId);
+    setRoleAssignment(role.id, null, userId);
     yield { type: 'result', text: `Role "${role.name}" has been deleted.` };
     return;
   }
@@ -265,8 +295,18 @@ export default async function* execute(name, args, userId, agentId) {
       return;
     }
     const isPrivileged = user.role === 'admin' || user.role === 'owner';
-    const { listRoles, getRoleAssignments, setRoleAssignment } = await import('../../roles.mjs');
-    const { getAgentsForUser, loadCustomAgents } = await import('../../routes/_helpers.mjs');
+    const {
+      getDurableRoleAssignment,
+      isSkillRuntimeEnabledForUser,
+      listRoles,
+      setRoleAssignment,
+    } = await import('../../roles.mjs');
+    const { broadcastAgentList, loadCustomAgents } = await import('../../routes/_helpers.mjs');
+    const {
+      getCustomAgentRecord,
+      updateCustomAgent,
+      validatePrimarySkillCategory,
+    } = await import('../../agents.mjs');
     const roleName  = args.role_name?.trim().toLowerCase();
     const agentName = args.agent_name?.trim().toLowerCase();
     const role = listRoles(userId).find(s => s.service && s.name.toLowerCase() === roleName);
@@ -274,34 +314,75 @@ export default async function* execute(name, args, userId, agentId) {
       yield { type: 'result', text: `No role named "${args.role_name}" found. Use list_roles to see available roles.` };
       return;
     }
-    if (!isPrivileged) {
-      const userSkills = user.skills ?? [];
-      if (!userSkills.includes(role.id)) {
-        yield { type: 'result', text: `You don't have permission to assign the "${role.name}" role.` };
-        return;
-      }
+    if (!isSkillRuntimeEnabledForUser(role.id, userId)) {
+      yield { type: 'result', text: `The "${role.name}" role is disabled for this account.`, isError: true };
+      return;
     }
-    const allAgents = getAgentsForUser(userId);
-    const agent = allAgents.find(a => a.name.toLowerCase() === agentName);
+    const ownedAgents = loadCustomAgents().filter(a => a.ownerId === userId);
+    const agent = ownedAgents.find(a => a.name.toLowerCase() === agentName);
     if (!agent) {
       yield { type: 'result', text: `No agent named "${args.agent_name}" found.` };
       return;
     }
-    if (!isPrivileged) {
-      const ownedAgent = loadCustomAgents().find(a => a.id === agent.id && a.ownerId === userId);
-      if (!ownedAgent) {
-        yield { type: 'result', text: 'You can only assign roles to agents you own.' };
-        return;
+    const prev = getDurableRoleAssignment(role.id, userId);
+    if (!isPrivileged && user.skillsLocked && prev !== agent.id) {
+      yield { type: 'result', text: 'Your tools are managed by an administrator.', isError: true };
+      return;
+    }
+    const currentPrimary = agent.skillCategory ?? null;
+    const { getRoleManifest } = await import('../../roles.mjs');
+    const needsBackfill = !currentPrimary
+      || currentPrimary === 'general'
+      || !getRoleManifest(currentPrimary, userId);
+    if (prev === agent.id && !needsBackfill) {
+      yield { type: 'result', text: `${role.icon ?? ''} ${role.name} is already assigned to ${agent.emoji ?? ''} ${agent.name}.` };
+      return;
+    }
+    const policy = await validatePrimarySkillCategory(
+      userId,
+      role.id,
+      { currentSkillCategory: agent.skillCategory ?? null, allowUnchanged: false },
+    );
+    if (!policy.ok) {
+      yield { type: 'result', text: policy.error, isError: true };
+      return;
+    }
+    const {
+      tryAcquireUserTopologyTransition,
+      runWithUserTopologyLease,
+      finishUserTopologyTransition,
+      rollbackUserTopologyTransition,
+    } = await import('../../chat-dispatch/slot-registry.mjs');
+    const topologyTransition = tryAcquireUserTopologyTransition(userId);
+    if (!topologyTransition) {
+      yield { type: 'result', text: 'Another reply or account setup change is active. Try again when it finishes.', isError: true };
+      return;
+    }
+    let backfillStarted = false;
+    try {
+      await runWithUserTopologyLease(topologyTransition.lease, async () => {
+        if (needsBackfill) {
+          if (!updateCustomAgent(agent.id, { skillCategory: role.id })) {
+            throw new Error('Agent disappeared before its primary role could be saved');
+          }
+          backfillStarted = true;
+        }
+        setRoleAssignment(role.id, agent.id, userId);
+      });
+      finishUserTopologyTransition(topologyTransition);
+    } catch (error) {
+      if (backfillStarted) {
+        try { updateCustomAgent(agent.id, { skillCategory: currentPrimary }); } catch {}
       }
+      try { setRoleAssignment(role.id, prev, userId); } catch {}
+      rollbackUserTopologyTransition(topologyTransition);
+      yield { type: 'result', text: `Could not assign role: ${error.message}`, isError: true };
+      return;
     }
-    const prev = getRoleAssignments(userId)[role.id];
-    setRoleAssignment(role.id, agent.id, userId);
-    if (user.skills && !user.skills.includes(role.id)) {
-      user.skills.push(role.id);
-      const { saveUser } = await import('../../routes/_helpers.mjs');
-      saveUser(user);
+    try { broadcastAgentList(); } catch (error) {
+      console.warn('[coordinator] post-assignment roster broadcast failed:', error.message);
     }
-    const prevAgent = prev ? allAgents.find(a => a.id === prev) : null;
+    const prevAgent = prev ? getCustomAgentRecord(prev, userId) : null;
     const from = prevAgent ? ` (previously ${prevAgent.name})` : '';
     yield { type: 'result', text: `${role.icon ?? ''} ${role.name} is now assigned to ${agent.emoji ?? ''} ${agent.name}${from}.` };
     return;

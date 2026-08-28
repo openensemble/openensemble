@@ -51,6 +51,7 @@ import {
 import { log } from './logger.mjs';
 import { listAgents } from './agents.mjs';
 import { normalizeOrchestrationPolicy } from './lib/orchestration-policy-core.mjs';
+import { stableAgentRef } from './lib/agent-ref.mjs';
 import { getTurnContext } from './lib/turn-abort-context.mjs';
 import { currentTaskContext, runInTaskContext } from './lib/task-proxy-context.mjs';
 import {
@@ -646,8 +647,7 @@ export function isSkillRuntimeEnabledForUser(skillId, userId, agentId = null) {
   if (wrap.manifest?.category === 'delegate') return true;
   if (wrap.manifest?.bundled_with_role && enabled.has(wrap.manifest.bundled_with_role)) return true;
   if (agentId) {
-    const prefix = `${userId}_`;
-    const bare = String(agentId).startsWith(prefix) ? String(agentId).slice(prefix.length) : String(agentId);
+    const bare = stableAgentRef(userId, agentId);
     const agent = listAgents().find(candidate => candidate.ownerId === userId && candidate.id === bare);
     if (agent?.skillCategory === skillId) return true;
   }
@@ -698,6 +698,7 @@ function getBundledRoleTools(roleIds, allowedSkillIds = null, userId = null) {
 // Resolve what tools an agent gets based on its skillCategory and the user's enabled roles
 export function resolveAgentTools(skillCategory, userSkills, agentId = null, userId = null) {
   const allowedSkillIds = accountAllowedSkillIds(userId);
+  const stableAgentId = agentId ? stableAgentRef(userId, agentId) : null;
   // getUserEnabledSkills backfills enabled_by_default skills for historical
   // profiles. For a child that storage convenience must never widen the
   // runtime capability surface beyond the parent-managed allowedSkills list.
@@ -712,18 +713,20 @@ export function resolveAgentTools(skillCategory, userSkills, agentId = null, use
   function isAssignedTo(skillId) {
     const owner = assignments[skillId];
     if (!owner) return false;
-    if (owner === agentId) return true;
+    if (owner === stableAgentId) return true;
     // "coordinator" alias: assign to whoever owns the coordinator skill
-    if (owner === 'coordinator' && coordinatorId && coordinatorId === agentId) return true;
+    if (owner === 'coordinator' && coordinatorId && coordinatorId === stableAgentId) return true;
     return false;
   }
 
-  // Utility roles: unassigned → all agents; assigned → only their agent
+  // Built-in utility roles retain their historical ambient behavior. Custom
+  // utilities follow the Settings UI contract: until assigned, no agent can
+  // use them.
   const utilityTools = userSkills.filter(s => {
     const m = getRoleManifest(s, userId);
     if (m?.category !== 'utility') return false;
     const owner = assignments[s];
-    return owner ? isAssignedTo(s) : true;
+    return owner ? isAssignedTo(s) : !(m.custom === true || m.createdBy === userId);
   }).flatMap(id => getRoleTools(id, userId));
 
   // Service roles (email, finance, etc.): assignment-based only — no implicit category lock

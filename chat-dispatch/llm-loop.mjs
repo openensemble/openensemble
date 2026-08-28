@@ -35,6 +35,7 @@ import { getSpecialistTrim } from './slash-commands.mjs';
 import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
 import { getTurn, recordRouting } from '../lib/turn-trace-context.mjs';
 import { isRetrySafeControlTool } from '../chat/recovery.mjs';
+import { stableAgentRef } from '../lib/agent-ref.mjs';
 
 // ── Specialist router (pre-LLM) ───────────────────────────────────────────────
 // Skip the coordinator's reasoning turn when the user's message clearly
@@ -80,7 +81,54 @@ export function looksCompoundOrDelegation(text) {
   return false;
 }
 
-function classifySpecialistIntent(text, userId, currentAgentId) {
+const AGENT_DESCRIPTOR_STOPWORDS = new Set([
+  'agent', 'assistant', 'specialist', 'expert', 'dedicated', 'handles', 'handle',
+  'coding', 'coder', 'code', 'developer', 'development', 'software', 'tasks',
+  'work', 'help', 'build', 'create', 'implement', 'fix', 'application', 'applications',
+  'project', 'projects', 'with', 'that', 'this', 'the', 'and', 'for', 'from', 'into',
+]);
+
+function descriptorTokens(value) {
+  return new Set(String(value || '').toLowerCase()
+    .replace(/\bfront[ -]?end\b/g, 'frontend')
+    .replace(/\bback[ -]?end\b/g, 'backend')
+    .match(/[a-z0-9]+/g)?.filter(token => token.length >= 4 && !AGENT_DESCRIPTOR_STOPWORDS.has(token)) ?? []);
+}
+
+export function selectAgentByExplicitOrDescription(
+  text,
+  agents,
+  serviceRoleIds,
+  coordinatorId = null,
+  { reportAmbiguity = false } = {},
+) {
+  const t = String(text || '').trim().toLowerCase().replace(/\bfront[ -]?end\b/g, 'frontend').replace(/\bback[ -]?end\b/g, 'backend');
+  const eligible = (Array.isArray(agents) ? agents : []).filter(agent =>
+    agent?.id && agent.id !== coordinatorId && serviceRoleIds.has(agent.skillCategory));
+  const exact = eligible.filter(agent => {
+    const escaped = String(agent.id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9_])${escaped}([^a-z0-9_]|$)`, 'i').test(t);
+  });
+  if (exact.length === 1) return { agent: exact[0], strategy: 'exact-agent' };
+  if (exact.length > 1) {
+    return reportAmbiguity ? { ambiguous: true, strategy: 'multiple-explicit-agents' } : null;
+  }
+  const queryTokens = descriptorTokens(t);
+  const ranked = eligible.map(agent => {
+    // Free-text names are often ordinary nouns (Data, Shopper, Test). Treat
+    // durable ids as explicit targets above, and use the user-authored routing
+    // description—not a coincidental name token—for implicit specialization.
+    const tokens = descriptorTokens(agent.description || '');
+    return { agent, score: [...tokens].filter(token => queryTokens.has(token)).length };
+  }).filter(hit => hit.score > 0).sort((a, b) => b.score - a.score);
+  if (!ranked.length) return null;
+  if (ranked[1] && ranked[0].score === ranked[1].score) {
+    return reportAmbiguity ? { ambiguous: true, strategy: 'ambiguous-agent-description' } : null;
+  }
+  return { agent: ranked[0].agent, strategy: 'agent-description' };
+}
+
+export function classifySpecialistIntent(text, userId, currentAgentId) {
   if (!text) return null;
   // Normalize for matching: lowercase, strip apostrophes, collapse whitespace.
   // Lets patterns be written once for "what's"/"whats"/"what is" rather than
@@ -91,9 +139,22 @@ function classifySpecialistIntent(text, userId, currentAgentId) {
   if (!t) return null;
   const assignments = getRoleAssignments(userId);
   const coordAgentId = assignments?.coordinator;
-  if (!coordAgentId || currentAgentId !== coordAgentId) return null;
+  const stableCurrent = stableAgentRef(userId, currentAgentId);
+  if (!coordAgentId || stableCurrent !== coordAgentId) return null;
+  const agents = getAgentsForUser(userId);
+  const roles = listRoles(userId);
+  const direct = selectAgentByExplicitOrDescription(
+    t, agents, new Set(roles.filter(role => role.service).map(role => role.id)), coordAgentId,
+    { reportAmbiguity: true },
+  );
+  if (direct?.ambiguous) return direct;
+  if (direct) {
+    const target = direct.agent;
+    const manifest = roles.find(role => role.id === target.skillCategory);
+    return { skillId: target.skillCategory, agentId: target.id, name: target.name || manifest?.name || target.id, strategy: direct.strategy };
+  }
   const matches = [];
-  for (const m of listRoles(userId)) {
+  for (const m of roles) {
     if (!m.service || !Array.isArray(m.intent_patterns) || m.intent_patterns.length === 0) continue;
     const rawOwner = assignments[m.id];
     if (!rawOwner) continue;
@@ -114,7 +175,10 @@ function classifySpecialistIntent(text, userId, currentAgentId) {
       }
     }
   }
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length === 1) return matches[0];
+  return matches.length > 1
+    ? { ambiguous: true, strategy: 'multiple-role-patterns' }
+    : null;
 }
 
 /**
@@ -152,17 +216,33 @@ export async function runSpecialistRoute({
     console.log('[chat] specialist-router: skipped (compound/delegation message)');
     return null;
   }
+  // Every fast-routing source—including learned overrides—belongs to the
+  // coordinator. Direct specialist chats must stay on their durable session so
+  // follow-ups retain history and an old override cannot yank them elsewhere.
+  const coordinatorId = getRoleAssignments(userId)?.coordinator;
+  if (!coordinatorId || stableAgentRef(userId, agentId) !== coordinatorId) return null;
   try {
-    /** @type {{ skillId: string, agentId: string, name: string, strategy?: string, sim?: number, phrase?: string } | null} */
+    /** @type {{ skillId?: string|null, agentId?: string, name?: string, strategy?: string, sim?: number, phrase?: string, ambiguous?: boolean } | null} */
     let route = null;
 
-    // Phase-6 routing overrides: take precedence over the classifier. These
-    // are populated via the proposal accept flow when the user has
-    // redirected similar phrasings to a specific agent enough times. Skip
-    // override when it targets the current agent (no-op routing) or when the
-    // forced agent isn't visible to this user.
-    const override = matchRoutingOverride(userId, userText);
-    if (override?.forcedAgent && override.forcedAgent !== agentId) {
+    // Classify first so an explicit durable id always beats a learned routing
+    // override, and so ambiguous agent/role mentions can fail closed before an
+    // embedding fallback guesses one target. Non-explicit classifier results
+    // are still applied after overrides below.
+    const classified = classifySpecialistIntent(userText, userId, agentId);
+    if (classified && 'ambiguous' in classified && classified.ambiguous) {
+      console.log(`[chat] specialist-router: skipped (${classified.strategy || 'ambiguous target'})`);
+      return null;
+    }
+    if (classified?.strategy === 'exact-agent') route = classified;
+
+    // Phase-6 routing overrides take precedence over inferred description,
+    // regex, and embedding routes, but never over an explicit durable id.
+    // They are populated via the proposal accept flow when the user has
+    // redirected similar phrasings to a specific agent enough times. Skip an
+    // override when it targets the current agent or is no longer visible.
+    const override = route ? null : matchRoutingOverride(userId, userText);
+    if (override?.forcedAgent && override.forcedAgent !== stableAgentRef(userId, agentId)) {
       const forced = getAgentsForUser(userId).find(a => a.id === override.forcedAgent);
       if (forced) {
         route = {
@@ -176,7 +256,7 @@ export async function runSpecialistRoute({
       }
     }
 
-    if (!route) route = classifySpecialistIntent(userText, userId, agentId);
+    if (!route) route = classified;
     // Embedding fallback: when regex misses, try semantic similarity against
     // the loaded intent_examples. Catches paraphrases regex can't enumerate.
     // ~20ms added cost only when we'd otherwise fall through to the coordinator.
@@ -185,7 +265,27 @@ export async function runSpecialistRoute({
         const { classifyByEmbedding } = await import('../lib/specialist-embed-router.mjs');
         const emb = await classifyByEmbedding(userText, userId, agentId);
         if (emb) {
-          route = { skillId: emb.skillId, agentId: emb.agentId, name: emb.name, strategy: 'embed', sim: emb.sim };
+          const agents = getAgentsForUser(userId);
+          const assignments = getRoleAssignments(userId);
+          const refined = selectAgentByExplicitOrDescription(
+            userText,
+            agents,
+            new Set([emb.skillId]),
+            assignments?.coordinator ?? null,
+            { reportAmbiguity: true },
+          );
+          if (refined?.ambiguous) {
+            console.log(`[chat] specialist-router: skipped (${refined.strategy || 'ambiguous embedded target'})`);
+            return null;
+          }
+          const target = refined?.agent;
+          route = {
+            skillId: emb.skillId,
+            agentId: target?.id ?? emb.agentId,
+            name: target?.name ?? emb.name,
+            strategy: target ? 'embed+agent-description' : 'embed',
+            sim: emb.sim,
+          };
           console.log(`[chat] embed-router: → ${emb.name} (${emb.skillId}) sim=${emb.sim.toFixed(3)} via "${emb.phrase}"`);
         }
       } catch (e) {

@@ -4,7 +4,7 @@
  */
 
 import { getNodes, getNode, sendCommand, sendCommandStreaming, setReadableFolders, isPathAllowed, setParentHost, getParentHost, waitForNodeReconnect } from './node-registry.mjs';
-import { getActiveProjectInfo } from '../coder/execute.mjs';
+import { resolveActiveProjectInfo, withCoderProjectLock } from '../coder/execute.mjs';
 import { generatePairingCode, PAIRING_CODE_TTL_SECONDS } from '../../routes/nodes/pairing.mjs';
 import { getLanAddress } from '../../discovery.mjs';
 import { spawn } from 'child_process';
@@ -697,28 +697,37 @@ export async function* executeSkillTool(name, args, userId, agentId) {
   }
 
   if (name === 'node_push_project') {
-    const { node_id, dest_path, clean = false } = args;
+    const { node_id, dest_path, clean = false, project = null, source_agent_id = null } = args;
     if (!node_id)   { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!dest_path) { yield { type: 'result', text: 'This tool needs a dest_path. Call it again with dest_path specified.' }; return; }
     if (typeof dest_path !== 'string' || !dest_path.startsWith('/')) {
       yield { type: 'result', text: 'Error: dest_path must be an absolute Unix-style path starting with "/".' }; return;
     }
 
-    // Pass agentId so a coder agent deploying its OWN project gets its own
-    // pointer. The nodes agent is usually a different agent with no pointer of
-    // its own, which falls back to the user's most recent project.
-    const info = getActiveProjectInfo(userId, agentId);
-    if (!info) {
-      yield { type: 'result', text: 'No active coder project. Use coder_create_project or coder_switch_project first, then try again.' };
+    const selection = resolveActiveProjectInfo(userId, {
+      agentId,
+      project,
+      sourceAgentId: source_agent_id,
+    });
+    if (!selection.ok) {
+      yield { type: 'result', text: `Project selection failed: ${selection.message}` };
       return;
     }
+    const info = selection.info;
+    const fallbackNote = info.fallback ? `Source selection: ${info.selectionNotice}.\n` : '';
 
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list.` }; return; }
 
     let tarBuf;
-    try { tarBuf = await tarProject(info.dir); }
-    catch (e) { yield { type: 'result', text: `Failed to package project: ${e.message}` }; return; }
+    try {
+      // Package a stable snapshot. Coder writes/commands/deletes on the same
+      // project wait until tar has finished reading it.
+      tarBuf = await withCoderProjectLock(userId, info.project, () => tarProject(info.dir), {
+        expectedIdentity: info.identity,
+      });
+    }
+    catch (e) { yield { type: 'result', text: `${fallbackNote}Failed to package project: ${e.message}` }; return; }
 
     const b64 = tarBuf.toString('base64');
 
@@ -733,10 +742,11 @@ export async function* executeSkillTool(name, args, userId, agentId) {
       const out = [];
       if (result.stdout) out.push(result.stdout.trim());
       if (result.stderr) out.push(`STDERR:\n${result.stderr.trim()}`);
+      if (info.fallback) out.push(fallbackNote.trim());
       out.push(`Exit ${result.exitCode} (${result.duration}ms) • sent ${tarBuf.length} bytes compressed from "${info.project}" → ${node.hostname}:${dest_path}`);
       yield { type: 'result', text: out.filter(Boolean).join('\n\n') };
     } catch (e) {
-      yield { type: 'result', text: `Push failed: ${e.message}` };
+      yield { type: 'result', text: `${fallbackNote}Push failed: ${e.message}` };
     }
     return;
   }

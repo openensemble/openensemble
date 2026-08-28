@@ -7,6 +7,7 @@ import { readFileSync, existsSync, readdirSync, mkdirSync, watch } from 'fs';
 import { randomBytes } from 'crypto';
 import path from 'path';
 import { CFG_PATH, USERS_DIR, readConfig } from './lib/paths.mjs';
+import { isReservedAgentId } from './lib/agent-ref.mjs';
 import { withLock, atomicWriteSync } from './routes/_helpers/io-lock.mjs';
 // Simple in-process caches — invalidated on write or file change
 let _customAgentsCache = null; // cache of ALL agents across all user files
@@ -76,6 +77,117 @@ export function loadCustomAgents() {
   } catch { return (_customAgentsCache = []); }
 }
 
+/**
+ * Return the durable agent record exactly as stored in agents.json. Runtime
+ * roster projection may replace skillCategory in single-assistant mode, so
+ * editor and lifecycle code must use this accessor instead of getAgent().
+ */
+export function getCustomAgentRecord(id, ownerId = null) {
+  const agent = findAgentById(id);
+  if (!agent || (ownerId && agent.ownerId !== ownerId)) return null;
+  return { ...agent };
+}
+
+/** Deterministic fallback for the one default routing pointer of a role. */
+export function findDurablePrimaryRoleAgent(roleId, ownerId, { excludeAgentId = null } = {}) {
+  if (!roleId || !ownerId) return null;
+  return loadUserAgents(ownerId)
+    .filter(agent => agent?.ownerId === ownerId
+      && agent.id !== excludeAgentId
+      && agent.skillCategory === roleId)
+    .sort((a, b) => {
+      const left = String(a.id);
+      const right = String(b.id);
+      return left < right ? -1 : (left > right ? 1 : 0);
+    })[0] ?? null;
+}
+
+/**
+ * Remove a deleted role from durable agent records. A null owner clears a
+ * global role from every account; a user id confines cleanup to that account.
+ */
+export function clearCustomAgentPrimaryRolesForRole(roleId, ownerId = null) {
+  if (!roleId) return 0;
+  const ownerIds = ownerId
+    ? [ownerId]
+    : (existsSync(USERS_DIR)
+      ? readdirSync(USERS_DIR, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => entry.name)
+      : []);
+  let cleared = 0;
+  for (const id of ownerIds) {
+    const list = loadUserAgents(id);
+    let changed = false;
+    const next = list.map(agent => {
+      if (agent?.skillCategory !== roleId) return agent;
+      const copy = { ...agent };
+      delete copy.skillCategory;
+      changed = true;
+      cleared++;
+      return copy;
+    });
+    if (changed) saveUserAgents(id, next);
+  }
+  return cleared;
+}
+
+export const CHILD_SAFE_PRIMARY_ROLE_IDS = Object.freeze([
+  'deep_research', 'web', 'image_generator',
+]);
+
+/**
+ * Validate a durable primary-role mutation against the same account policy for
+ * HTTP and chat creation/editing. Returning an unchanged value is deliberate:
+ * disabling or locking a role must not make an unrelated agent edit erase it.
+ */
+export async function validatePrimarySkillCategory(
+  userId,
+  requestedRole,
+  { currentSkillCategory = null, allowUnchanged = true } = {},
+) {
+  if (requestedRole != null && typeof requestedRole !== 'string') {
+    return { ok: false, status: 400, error: 'skillCategory must be a role id or null' };
+  }
+  const normalized = typeof requestedRole === 'string' && requestedRole.trim()
+    ? requestedRole.trim()
+    : null;
+  if (normalized && normalized.length > 128) {
+    return { ok: false, status: 400, error: 'skillCategory is too long' };
+  }
+  const current = typeof currentSkillCategory === 'string' && currentSkillCategory.trim()
+    ? currentSkillCategory.trim()
+    : null;
+  if (allowUnchanged && normalized === current) {
+    return { ok: true, skillCategory: normalized, unchanged: true };
+  }
+
+  const [{ getUser }, roles] = await Promise.all([
+    import('./routes/_helpers.mjs'),
+    import('./roles.mjs'),
+  ]);
+  const user = getUser(userId);
+  if (!user) return { ok: false, status: 404, error: 'User not found' };
+  const privileged = user.role === 'owner' || user.role === 'admin';
+  if (!privileged && user.skillsLocked) {
+    return { ok: false, status: 403, error: 'Your tools are managed by an administrator' };
+  }
+  if (!normalized) return { ok: true, skillCategory: null, unchanged: false };
+  if (user.role === 'child' && !CHILD_SAFE_PRIMARY_ROLE_IDS.includes(normalized)) {
+    return { ok: false, status: 403, error: 'That role is not available on this account.' };
+  }
+  const role = roles.listRoles(userId, { includeDisabled: true })
+    .find(item => item.id === normalized && item.service === true
+      && !item.hidden && item.category !== 'delegate');
+  if (!role) {
+    return { ok: false, status: 400, error: `Unknown or unavailable role: ${normalized}` };
+  }
+  if (!roles.isSkillRuntimeEnabledForUser(normalized, userId)) {
+    return { ok: false, status: 403, error: `Role is disabled for this account: ${normalized}` };
+  }
+  return { ok: true, skillCategory: normalized, role, unchanged: false };
+}
+
 // O(1) id lookup for the hot paths (getAgent runs per chat dispatch,
 // getCoordinatorModel per reasoning-effort resolution). First-writer-wins on
 // a duplicate id, matching what .find() over the flattened array returned.
@@ -120,7 +232,8 @@ function pickAgentId(name, ownerId) {
     .replace(/[^\p{L}\p{N}]+/gu, '_')
     .replace(/^_+|_+$/g, '');
   const hexId = () => 'agent_' + randomBytes(4).toString('hex');
-  if (!slug || slug.length < 2 || RESERVED_AGENT_IDS.has(slug)) return hexId();
+  if (!slug || slug.length < 2 || RESERVED_AGENT_IDS.has(slug)
+      || isReservedAgentId(ownerId, slug)) return hexId();
   if (/^[a-z0-9_]+$/.test(slug) === false) return hexId();
   // Collision check across THIS user's roster + the global roster. Agent IDs
   // are globally unique by convention (skillAssignments stores raw ids).

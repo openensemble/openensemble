@@ -4,15 +4,19 @@
  * sandboxed to a configurable workspace directory.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmdirSync,
-         readdirSync, statSync, appendFileSync, rmSync, realpathSync, openSync, closeSync,
-         renameSync } from 'fs';
+import {
+  readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmdirSync,
+  readdirSync, statSync, appendFileSync, rmSync, realpathSync, openSync, closeSync,
+} from 'fs';
 import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execFile, spawn, execSync } from 'child_process';
+import { createHash } from 'crypto';
 import { getLanAddress } from '../../discovery.mjs';
 import { stableAgentRef } from '../../lib/agent-ref.mjs';
+import { withFileLock, withFileLockSync } from '../../lib/file-lock.mjs';
+import { atomicWriteSync } from '../../routes/_helpers/io-lock.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -115,10 +119,9 @@ function buildSandboxArgs(projectDir, command) {
 // spawned for (see lib/agent-ref.mjs), so a Coordinator delegation to coder1
 // lands in coder1's project, not in a blank one.
 const _activeProject = new Map();
-// Last project any agent of this user selected. Only consulted by
-// getActiveProjectInfo for cross-skill reads (the nodes skill deploys "what the
-// coder is working on" from a *different* agent, which has no pointer of its
-// own). Never consulted for file/shell resolution — that stays strict.
+const _pointerUpdatedAt = new Map();
+// Retained for migration/UI context. Cross-agent deploy selection does not use
+// this value: it now resolves an explicit source or fails closed on ambiguity.
 const _lastActiveProject = new Map();
 
 function projectKey(userId, agentId) {
@@ -135,66 +138,135 @@ function _pointerPath(userId) {
   return path.join(BASE_DIR, 'users', _safeUserId(userId), 'coder-active-projects.json');
 }
 
-const _pointersLoaded = new Set();
+function _pointerLockPath(userId) {
+  return `${_pointerPath(userId)}.lock`;
+}
 
-function _loadPointers(userId) {
-  if (_pointersLoaded.has(userId)) return;
-  _pointersLoaded.add(userId);   // set first: a malformed file must not retry every call
+function _clearPointerCacheForUser(userId) {
+  const prefix = `${userId}\u0000`;
+  for (const key of _activeProject.keys()) {
+    if (key.startsWith(prefix)) _activeProject.delete(key);
+  }
+  for (const key of _pointerUpdatedAt.keys()) {
+    if (key.startsWith(prefix)) _pointerUpdatedAt.delete(key);
+  }
+  _lastActiveProject.delete(userId);
+}
+
+// Always reload the tiny pointer document. This avoids a second OE process
+// overwriting another agent's newer pointer with a stale in-memory snapshot.
+function _loadPointersFresh(userId) {
+  _clearPointerCacheForUser(userId);
   try {
     const raw = JSON.parse(readFileSync(_pointerPath(userId), 'utf8'));
     for (const [ref, project] of Object.entries(raw?.agents ?? {})) {
-      if (typeof project === 'string') _activeProject.set(`${userId}\u0000${ref}`, project);
+      if (typeof project !== 'string') continue;
+      try { validateProjectName(project); } catch { continue; }
+      const key = `${userId}\u0000${ref}`;
+      _activeProject.set(key, project);
+      const at = Number(raw?.updatedAt?.[ref]);
+      _pointerUpdatedAt.set(key, Number.isFinite(at) && at >= 0 ? at : 0);
     }
     if (typeof raw?.last === 'string') _lastActiveProject.set(userId, raw.last);
   } catch { /* absent or corrupt — start empty, same as a cold process */ }
 }
 
-function _savePointers(userId) {
-  try {
-    const prefix = `${userId}\u0000`;
-    const agents = {};
-    for (const [key, project] of _activeProject) {
-      if (key.startsWith(prefix)) agents[key.slice(prefix.length)] = project;
-    }
-    const p = _pointerPath(userId);
-    mkdirSync(path.dirname(p), { recursive: true });
-    // temp+rename: a crash mid-write would otherwise leave a truncated file that
-    // silently drops every agent's pointer on the next boot.
-    const tmp = `${p}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ agents, last: _lastActiveProject.get(userId) ?? null }, null, 2));
-    renameSync(tmp, p);
-  } catch (e) {
-    console.warn('[coder] could not persist active projects:', e.message);
+function _savePointersUnlocked(userId) {
+  const prefix = `${userId}\u0000`;
+  const agents = {};
+  const updatedAt = {};
+  for (const [key, project] of _activeProject) {
+    if (!key.startsWith(prefix)) continue;
+    const ref = key.slice(prefix.length);
+    agents[ref] = project;
+    updatedAt[ref] = _pointerUpdatedAt.get(key) ?? 0;
   }
+  const p = _pointerPath(userId);
+  mkdirSync(path.dirname(p), { recursive: true });
+  atomicWriteSync(p, JSON.stringify({
+    version: 2,
+    agents,
+    updatedAt,
+    last: _lastActiveProject.get(userId) ?? null,
+  }, null, 2));
+}
+
+function _validPointerProject(userId, project) {
+  try {
+    validateProjectName(project);
+    const dir = path.join(getDefaultWorkspace(userId), project);
+    return existsSync(dir) && statSync(dir).isDirectory();
+  } catch { return false; }
+}
+
+function _recomputeLastPointerUnlocked(userId) {
+  const prefix = `${userId}\u0000`;
+  const candidates = [];
+  for (const [key, project] of _activeProject) {
+    if (!key.startsWith(prefix) || !_validPointerProject(userId, project)) continue;
+    candidates.push({
+      ref: key.slice(prefix.length),
+      project,
+      updatedAt: _pointerUpdatedAt.get(key) ?? 0,
+    });
+  }
+  candidates.sort((a, b) => b.updatedAt - a.updatedAt
+    || a.ref.localeCompare(b.ref)
+    || a.project.localeCompare(b.project));
+  if (candidates.length) _lastActiveProject.set(userId, candidates[0].project);
+  else _lastActiveProject.delete(userId);
 }
 
 function getPointer(userId, agentId) {
-  _loadPointers(userId);
+  _loadPointersFresh(userId);
   return _activeProject.get(projectKey(userId, agentId)) ?? null;
 }
 
-function getLastPointer(userId) {
-  _loadPointers(userId);
-  return _lastActiveProject.get(userId) ?? null;
-}
-
 function setPointer(userId, agentId, name) {
-  _loadPointers(userId);
-  _activeProject.set(projectKey(userId, agentId), name);
-  _lastActiveProject.set(userId, name);
-  _savePointers(userId);
+  validateProjectName(name);
+  return withFileLockSync(_pointerLockPath(userId), () => {
+    _loadPointersFresh(userId);
+    const key = projectKey(userId, agentId);
+    const latest = Math.max(0, ...[..._pointerUpdatedAt.entries()]
+      .filter(([candidate]) => candidate.startsWith(`${userId}\u0000`))
+      .map(([, at]) => Number(at) || 0));
+    _activeProject.set(key, name);
+    _pointerUpdatedAt.set(key, Math.max(Date.now(), latest + 1));
+    _lastActiveProject.set(userId, name);
+    _savePointersUnlocked(userId);
+  });
 }
 
 // A deleted project clears it for EVERY agent pointing at it, not just the
 // caller — the directory is gone for all of them.
 function clearPointersForProject(userId, name) {
-  _loadPointers(userId);
-  const prefix = `${userId}\u0000`;
-  for (const [key, project] of _activeProject) {
-    if (project === name && key.startsWith(prefix)) _activeProject.delete(key);
-  }
-  if (_lastActiveProject.get(userId) === name) _lastActiveProject.delete(userId);
-  _savePointers(userId);
+  return withFileLockSync(_pointerLockPath(userId), () => {
+    _loadPointersFresh(userId);
+    const prefix = `${userId}\u0000`;
+    for (const [key, project] of _activeProject) {
+      if (project !== name || !key.startsWith(prefix)) continue;
+      _activeProject.delete(key);
+      _pointerUpdatedAt.delete(key);
+    }
+    _recomputeLastPointerUnlocked(userId);
+    _savePointersUnlocked(userId);
+  });
+}
+
+/** Remove durable per-agent coder state after an agent is deleted. */
+export function clearActiveProjectForAgent(userId, agentId) {
+  if (!userId || !agentId) return false;
+  return withFileLockSync(_pointerLockPath(userId), () => {
+    _loadPointersFresh(userId);
+    const key = projectKey(userId, agentId);
+    const removed = _activeProject.delete(key);
+    _pointerUpdatedAt.delete(key);
+    if (removed) {
+      _recomputeLastPointerUnlocked(userId);
+      _savePointersUnlocked(userId);
+    }
+    return removed;
+  });
 }
 
 // ── Dangerous command patterns ───────────────────────────────────────────────
@@ -241,27 +313,19 @@ function getWorkspace(userId) {
   return resolved;
 }
 
-function getProjectDir(userId, agentId) {
-  const ws = getWorkspace(userId);
+function getProjectContext(userId, agentId) {
   const project = getPointer(userId, agentId);
   if (!project) throw new Error('No active project. Use coder_create_project or coder_switch_project first.');
-  const dir = path.join(ws, project);
-  if (!existsSync(dir)) throw new Error(`Project "${project}" not found in workspace.`);
-  return dir;
+  try {
+    const { workspace, dir, identity } = resolveUserProjectDir(userId, project);
+    return { project, workspace, dir, identity };
+  } catch {
+    throw new Error(`Project "${project}" not found in workspace. Switch to an existing project first.`);
+  }
 }
 
-// Snapshot of the current coder state for a user — used by the nodes skill to
-// deploy whatever the coder is currently working on. Returns null if no project
-// is active yet. Never throws: callers handle the "nothing to push" case.
-export function getActiveProjectInfo(userId, agentId = null) {
-  try {
-    const project = getPointer(userId, agentId) ?? getLastPointer(userId);
-    if (!project) return null;
-    const workspace = getWorkspace(userId);
-    const dir = path.join(workspace, project);
-    if (!existsSync(dir)) return null;
-    return { project, workspace, dir };
-  } catch { return null; }
+function getProjectDir(userId, agentId) {
+  return getProjectContext(userId, agentId).dir;
 }
 
 function safePath(base, userPath) {
@@ -299,6 +363,38 @@ export function validateProjectName(name) {
   if (name.length > 100) throw new Error('Project name too long (max 100 chars).');
 }
 
+const PROJECT_LOCK_TIMEOUT_MS = 310_000;
+const PROJECT_LOCK_STALE_MS = 10 * 60_000;
+
+function projectMutationLockPath(userId, name) {
+  validateProjectName(name);
+  const digest = createHash('sha256').update(name).digest('hex');
+  return path.join(BASE_DIR, 'users', _safeUserId(userId), '.coder-locks', `project-${digest}.lock`);
+}
+
+/**
+ * Exclusive project lock shared by coder mutations and deployment snapshots.
+ * The lock lives outside the project so project deletion cannot remove it.
+ */
+export function withCoderProjectLock(userId, name, fn, opts = {}) {
+  return withFileLock(projectMutationLockPath(userId, name), async () => {
+    if (opts.expectedIdentity) {
+      const current = resolveUserProjectDir(userId, name);
+      if (current.identity !== opts.expectedIdentity) {
+        throw new Error(`Project "${name}" was deleted or replaced while this operation was waiting. Retry against the current project.`);
+      }
+    }
+    return fn();
+  }, {
+    timeoutMs: opts.timeoutMs ?? PROJECT_LOCK_TIMEOUT_MS,
+    staleMs: opts.staleMs ?? PROJECT_LOCK_STALE_MS,
+  });
+}
+
+function withProjectContextLock(userId, context, fn) {
+  return withCoderProjectLock(userId, context.project, fn, { expectedIdentity: context.identity });
+}
+
 // Resolve the absolute directory for a user's project, with ownership +
 // path-traversal guards so HTTP routes can safely expose it. Throws on invalid
 // name or missing directory; the caller decides how to surface the error.
@@ -316,7 +412,153 @@ export function resolveUserProjectDir(userId, name) {
   if (realDir !== realWs && !realDir.startsWith(realWs + path.sep)) {
     throw new Error('Project path escapes workspace.');
   }
-  return { workspace: realWs, dir: realDir };
+  const projectStat = statSync(realDir);
+  const identity = `${projectStat.dev}:${projectStat.ino}:${projectStat.birthtimeMs}`;
+  return { workspace: realWs, dir: realDir, identity };
+}
+
+function _projectInfo(userId, project, selection, selectionNotice, extra = {}) {
+  try {
+    const { workspace, dir, identity } = resolveUserProjectDir(userId, project);
+    return {
+      ok: true,
+      info: {
+        project,
+        workspace,
+        dir,
+        identity,
+        selection,
+        fallback: selection === 'single-project-fallback',
+        selectionNotice,
+        ...extra,
+      },
+    };
+  } catch (e) {
+    return { ok: false, reason: 'not_found', message: e.message, projects: [] };
+  }
+}
+
+/**
+ * Resolve a project for a cross-skill operation such as node_push_project.
+ * Never guesses between agents: an unpointed caller receives a compatibility
+ * fallback only when all valid pointers collapse to one distinct project.
+ */
+export function resolveActiveProjectInfo(userId, {
+  agentId = null,
+  project = null,
+  sourceAgentId = null,
+  allowSingleFallback = true,
+} = {}) {
+  try {
+    if (project != null && sourceAgentId != null) {
+      return {
+        ok: false,
+        reason: 'invalid_selection',
+        projects: [],
+        message: 'Specify either project or source_agent_id, not both.',
+      };
+    }
+
+    if (project != null) {
+      validateProjectName(project);
+      return _projectInfo(
+        userId,
+        project,
+        'explicit-project',
+        `explicit project "${project}"`,
+      );
+    }
+
+    _loadPointersFresh(userId);
+    const prefix = `${userId}\u0000`;
+    if (sourceAgentId != null) {
+      const sourceRef = stableAgentRef(userId, sourceAgentId);
+      if (!sourceRef) {
+        return { ok: false, reason: 'invalid_selection', projects: [], message: 'source_agent_id is empty.' };
+      }
+      const selected = _activeProject.get(`${prefix}${sourceRef}`);
+      if (!selected) {
+        return {
+          ok: false,
+          reason: 'no_pointer',
+          projects: [],
+          message: `Agent "${sourceRef}" has no active coder project. Switch that agent to a project or specify project explicitly.`,
+        };
+      }
+      const result = _projectInfo(
+        userId,
+        selected,
+        'explicit-agent',
+        `active project of agent "${sourceRef}"`,
+        { sourceAgentRef: sourceRef },
+      );
+      if (!result.ok) {
+        result.message = `Agent "${sourceRef}" points to missing project "${selected}". Switch it to an existing project first.`;
+      }
+      return result;
+    }
+
+    const callerKey = projectKey(userId, agentId);
+    const callerRef = callerKey.slice(prefix.length);
+    const callerProject = _activeProject.get(callerKey);
+    if (callerProject) {
+      const result = _projectInfo(
+        userId,
+        callerProject,
+        'caller',
+        `calling agent "${callerRef}"`,
+        { sourceAgentRef: callerRef },
+      );
+      if (!result.ok) {
+        result.message = `Your active coder project "${callerProject}" no longer exists. Switch to an existing project before deploying.`;
+      }
+      return result;
+    }
+
+    const candidates = new Map();
+    for (const [key, candidateProject] of _activeProject) {
+      if (!key.startsWith(prefix) || !_validPointerProject(userId, candidateProject)) continue;
+      const ref = key.slice(prefix.length);
+      if (!candidates.has(candidateProject)) candidates.set(candidateProject, []);
+      candidates.get(candidateProject).push(ref);
+    }
+    const projects = [...candidates.keys()].sort((a, b) => a.localeCompare(b));
+    if (allowSingleFallback && projects.length === 1) {
+      const selected = projects[0];
+      const refs = candidates.get(selected).sort((a, b) => a.localeCompare(b));
+      return _projectInfo(
+        userId,
+        selected,
+        'single-project-fallback',
+        `automatic single-project fallback to "${selected}" (active for ${refs.join(', ')})`,
+        { sourceAgentRefs: refs },
+      );
+    }
+    if (projects.length > 1) {
+      const details = projects.map(name => `- ${name} (agents: ${candidates.get(name).sort().join(', ')})`).join('\n');
+      return {
+        ok: false,
+        reason: 'ambiguous',
+        projects,
+        message: `Multiple active coder projects are available; refusing to guess which one to deploy. Specify project or source_agent_id.\n${details}`,
+      };
+    }
+    return {
+      ok: false,
+      reason: 'none',
+      projects: [],
+      message: 'No active coder project. Use coder_create_project or coder_switch_project first, then try again.',
+    };
+  } catch (e) {
+    return { ok: false, reason: 'error', projects: [], message: e.message };
+  }
+}
+
+// Compatibility wrapper for older internal consumers. Ambiguity is represented
+// as null instead of reviving the former "most recently selected" guess.
+export function getActiveProjectInfo(userId, agentId = null) {
+  const result = resolveActiveProjectInfo(userId, { agentId });
+  return result.ok ? result.info : null;
 }
 
 // List all top-level projects in this user's workspace with cheap metadata
@@ -392,12 +634,19 @@ function appendLog(projectDir, entry) {
 
 function appendWorkspaceLog(entry, userId) {
   try {
-    const ws = getWorkspace(userId);
-    const logPath = path.join(ws, 'WORKSPACE_LOG.md');
-    const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
-    if (!existsSync(logPath)) writeFileSync(logPath, '# Workspace Log\n');
-    appendFileSync(logPath, `\n- **${ts}** — ${entry}\n`);
+    const lockPath = path.join(BASE_DIR, 'users', _safeUserId(userId), '.coder-locks', 'workspace-log.lock');
+    withFileLockSync(lockPath, () => {
+      const ws = getWorkspace(userId);
+      const logPath = path.join(ws, 'WORKSPACE_LOG.md');
+      const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
+      if (!existsSync(logPath)) atomicWriteSync(logPath, '# Workspace Log\n');
+      appendFileSync(logPath, `\n- **${ts}** — ${entry}\n`);
+    });
   } catch { /* don't fail the operation over logging */ }
+}
+
+function fileRevision(content) {
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 
 function isCommandBlocked(command) {
@@ -451,64 +700,67 @@ async function listProjects(userId, agentId) {
 
 async function createProject(name, userId, agentId) {
   validateProjectName(name);
-  const ws = getWorkspace(userId);
-  const dir = path.join(ws, name);
-  if (existsSync(dir)) throw new Error(`Project "${name}" already exists.`);
+  return withCoderProjectLock(userId, name, async () => {
+    const ws = getWorkspace(userId);
+    const dir = path.join(ws, name);
+    if (existsSync(dir)) throw new Error(`Project "${name}" already exists.`);
 
-  mkdirSync(dir, { recursive: true });
-  const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
-  const logContent = `# ${name}\n\nCreated: ${ts}\n`;
-  writeFileSync(path.join(dir, 'PROJECT_LOG.md'), logContent);
-  setPointer(userId, agentId, name);
-  appendWorkspaceLog(`Created project "${name}"`, userId);
-  return `Created project "${name}" and set it as active.\nWorkspace: ${dir}`;
+    mkdirSync(dir, { recursive: true });
+    const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
+    const logContent = `# ${name}\n\nCreated: ${ts}\n`;
+    atomicWriteSync(path.join(dir, 'PROJECT_LOG.md'), logContent);
+    setPointer(userId, agentId, name);
+    appendWorkspaceLog(`Created project "${name}"`, userId);
+    return `Created project "${name}" and set it as active.\nWorkspace: ${dir}`;
+  });
 }
 
 async function switchProject(name, userId, agentId) {
   validateProjectName(name);
-  const ws = getWorkspace(userId);
-  const dir = path.join(ws, name);
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-    throw new Error(`Project "${name}" not found in workspace.`);
-  }
-  setPointer(userId, agentId, name);
-  appendLog(dir, 'Switched to this project');
+  return withCoderProjectLock(userId, name, async () => {
+    const { dir } = resolveUserProjectDir(userId, name);
+    setPointer(userId, agentId, name);
+    appendLog(dir, 'Switched to this project');
 
-  // Return recent log entries for context
-  const logPath = path.join(dir, 'PROJECT_LOG.md');
-  let logTail = '';
-  if (existsSync(logPath)) {
-    const lines = readFileSync(logPath, 'utf8').split('\n');
-    logTail = '\n\nRecent activity:\n' + lines.slice(-10).join('\n');
-  }
+    // Return recent log entries for context.
+    const logPath = path.join(dir, 'PROJECT_LOG.md');
+    let logTail = '';
+    if (existsSync(logPath)) {
+      const lines = readFileSync(logPath, 'utf8').split('\n');
+      logTail = '\n\nRecent activity:\n' + lines.slice(-10).join('\n');
+    }
 
-  // Include pending todos FIRST so they aren't cut off by context truncation.
-  // The model needs to see what's still pending before anything else.
-  const todos = _readTodos(userId, agentId);
-  const pending = todos.filter(t => t.status !== 'completed');
-  const todoBlock = pending.length
-    ? '\n\nPending todos (resume from here):\n' + _renderTodos(pending)
-    : todos.length
-      ? '\n\nAll todos completed.'
-      : '';
+    // Include this durable agent's pending todos first. The unlocked helper is
+    // used because this function already holds the project mutation lock.
+    const todos = _readTodosUnlocked(dir, userId, agentId);
+    const pending = todos.filter(t => t.status !== 'completed');
+    const todoBlock = pending.length
+      ? '\n\nPending todos (resume from here):\n' + _renderTodos(pending)
+      : todos.length
+        ? '\n\nAll todos completed.'
+        : '';
 
-  return `Switched to project "${name}".${todoBlock}${logTail}`;
+    return `Switched to project "${name}".${todoBlock}${logTail}`;
+  });
 }
 
 async function deleteProject(name, userId, agentId) {
   validateProjectName(name);
-  const ws = getWorkspace(userId);
-  const dir = path.join(ws, name);
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-    throw new Error(`Project "${name}" not found in workspace.`);
-  }
-  rmSync(dir, { recursive: true, force: true });
-  // Clear active project if it was the one deleted
-  clearPointersForProject(userId, name);
-  appendWorkspaceLog(`Deleted project "${name}"`, userId);
-  // Alias cascade-delete: handled by skill-alias-framework via manifest's
-  // cascade_on_tools entry on coder_delete_project. No explicit call here.
-  return `Deleted project "${name}" and all its contents.`;
+  return withCoderProjectLock(userId, name, async () => {
+    const { dir } = resolveUserProjectDir(userId, name);
+    const pid = readServerPid(dir);
+    if (pid && isPidAlive(pid)) {
+      throw new Error(`Project "${name}" has a running server (pid ${pid}). Stop it before deleting the project.`);
+    }
+    if (pid) clearServerState(dir);
+    rmSync(dir, { recursive: true, force: true });
+    clearPointersForProject(userId, name);
+    _projectMetaCache.delete(dir);
+    appendWorkspaceLog(`Deleted project "${name}"`, userId);
+    // Alias cascade-delete: handled by skill-alias-framework via manifest's
+    // cascade_on_tools entry on coder_delete_project. No explicit call here.
+    return `Deleted project "${name}" and all its contents.`;
+  });
 }
 
 async function readProjectFile(filePath, offset, limit, userId, agentId) {
@@ -522,61 +774,86 @@ async function readProjectFile(filePath, offset, limit, userId, agentId) {
   const end = start + (limit ?? 2000);
   const slice = lines.slice(start, end);
 
-  return slice.map((l, i) => `${String(start + i + 1).padStart(5)} │ ${l}`).join('\n');
+  const numbered = slice.map((l, i) => `${String(start + i + 1).padStart(5)} │ ${l}`).join('\n');
+  return `Revision: ${fileRevision(content)}\n${numbered}`;
 }
 
-async function writeProjectFile(filePath, content, userId, agentId) {
-  const dir = getProjectDir(userId, agentId);
-  const abs = safePath(dir, filePath);
-  mkdirSync(path.dirname(abs), { recursive: true });
-  writeFileSync(abs, content);
-  appendLog(dir, `Wrote \`${filePath}\` (${content.split('\n').length} lines)`);
-  return `Wrote ${filePath}`;
+async function writeProjectFile(filePath, content, expectedRevision, userId, agentId) {
+  if (typeof content !== 'string') throw new Error('content must be a string.');
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context, async () => {
+    const abs = safePath(context.dir, filePath);
+    const exists = existsSync(abs);
+    const previous = exists ? readFileSync(abs, 'utf8') : null;
+    const currentRevision = exists ? fileRevision(previous) : null;
+    const expected = typeof expectedRevision === 'string' ? expectedRevision.trim() : null;
+
+    if (!exists && expected) {
+      throw new Error(`Revision conflict for ${filePath}: the file no longer exists. Re-read project state before writing.`);
+    }
+    if (exists && previous !== content) {
+      if (!expected) {
+        throw new Error(`Refusing to overwrite existing file ${filePath} without expected_revision. Read the file first and pass its Revision value, or use coder_edit_file.`);
+      }
+      if (expected !== currentRevision) {
+        throw new Error(`Revision conflict for ${filePath}: expected ${expected}, current ${currentRevision}. Re-read the file and merge your changes.`);
+      }
+    }
+    if (exists && previous === content) {
+      return `No change to ${filePath} (revision ${currentRevision})`;
+    }
+
+    mkdirSync(path.dirname(abs), { recursive: true });
+    atomicWriteSync(abs, content);
+    const revision = fileRevision(content);
+    appendLog(context.dir, `Wrote \`${filePath}\` (${content.split('\n').length} lines)`);
+    return `Wrote ${filePath} (revision ${revision})`;
+  });
 }
 
 async function editProjectFile(filePath, oldStr, newStr, userId, agentId) {
-  const dir = getProjectDir(userId, agentId);
-  const abs = safePath(dir, filePath);
-  if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context, async () => {
+    const abs = safePath(context.dir, filePath);
+    if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
-  const content = readFileSync(abs, 'utf8');
-  const count = content.split(oldStr).length - 1;
-  if (count === 0) throw new Error(`old_string not found in ${filePath}.`);
-  if (count > 1) throw new Error(`old_string found ${count} times in ${filePath} — must be unique. Provide more context.`);
+    const content = readFileSync(abs, 'utf8');
+    const count = content.split(oldStr).length - 1;
+    if (count === 0) throw new Error(`old_string not found in ${filePath}.`);
+    if (count > 1) throw new Error(`old_string found ${count} times in ${filePath} — must be unique. Provide more context.`);
 
-  const updated = content.replace(oldStr, newStr);
-  writeFileSync(abs, updated);
-  const preview = oldStr.length > 60 ? oldStr.slice(0, 60) + '…' : oldStr;
-  appendLog(dir, `Edited \`${filePath}\` — replaced "${preview}"`);
-  return `Edited ${filePath}`;
+    const updated = content.replace(oldStr, newStr);
+    atomicWriteSync(abs, updated);
+    const preview = oldStr.length > 60 ? oldStr.slice(0, 60) + '…' : oldStr;
+    appendLog(context.dir, `Edited \`${filePath}\` — replaced "${preview}"`);
+    return `Edited ${filePath} (revision ${fileRevision(updated)})`;
+  });
 }
 
 async function deleteProjectFile(filePath, userId, agentId) {
-  const dir = getProjectDir(userId, agentId);
-  const abs = safePath(dir, filePath);
-  if (!existsSync(abs)) throw new Error(`Not found: ${filePath}`);
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context, async () => {
+    const abs = safePath(context.dir, filePath);
+    if (!existsSync(abs)) throw new Error(`Not found: ${filePath}`);
 
-  const s = statSync(abs);
-  if (s.isDirectory()) {
-    const entries = readdirSync(abs);
-    if (entries.length > 0) throw new Error(`Directory "${filePath}" is not empty. Remove its contents first.`);
-    rmdirSync(abs);
-    appendLog(dir, `Deleted empty directory \`${filePath}\``);
-    return `Deleted directory ${filePath}`;
-  }
-  unlinkSync(abs);
-  appendLog(dir, `Deleted file \`${filePath}\``);
-  return `Deleted ${filePath}`;
+    const s = statSync(abs);
+    if (s.isDirectory()) {
+      const entries = readdirSync(abs);
+      if (entries.length > 0) throw new Error(`Directory "${filePath}" is not empty. Remove its contents first.`);
+      rmdirSync(abs);
+      appendLog(context.dir, `Deleted empty directory \`${filePath}\``);
+      return `Deleted directory ${filePath}`;
+    }
+    unlinkSync(abs);
+    appendLog(context.dir, `Deleted file \`${filePath}\``);
+    return `Deleted ${filePath}`;
+  });
 }
 
 // Streaming shell executor: yields `{type:'token'}` chunks live and a final
 // `{type:'result'}` event with the full (capped) output for the tool loop.
-async function* runCommand(command, timeout, userId, agentId, signal = null) {
+async function* runCommandUnlocked(command, timeout, dir, signal = null) {
   throwIfCancelled(signal);
-  let dir;
-  try { dir = getProjectDir(userId, agentId); }
-  catch (e) { yield { type: 'result', text: `Error: ${e.message}` }; return; }
-
   if (isCommandBlocked(command)) {
     yield { type: 'result', text: 'BLOCKED: This command was rejected by safety filters. Dangerous system operations are not allowed.' };
     return;
@@ -697,6 +974,59 @@ async function* runCommand(command, timeout, userId, agentId, signal = null) {
   yield { type: 'result', text: (full || '(no output)') + tail };
 }
 
+// Hold the project lock for the full lifetime of the child while preserving
+// live token streaming to the tool loop. Commands, git, builds, and file tools
+// therefore cannot mutate the same checkout concurrently.
+async function* runCommand(command, timeout, userId, agentId, signal = null) {
+  throwIfCancelled(signal);
+  let context;
+  try { context = getProjectContext(userId, agentId); }
+  catch (e) { yield { type: 'result', text: `Error: ${e.message}` }; return; }
+
+  const queue = [];
+  let wakeWaiter = null;
+  let producerDone = false;
+  let producerError = null;
+  const controller = new AbortController();
+  const wake = () => { if (wakeWaiter) { wakeWaiter(); wakeWaiter = null; } };
+  const wait = () => new Promise(resolve => { wakeWaiter = resolve; });
+  const forwardAbort = () => controller.abort(cancellationError(signal));
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  if (signal?.aborted) forwardAbort();
+
+  const producer = withProjectContextLock(userId, context, async () => {
+    for await (const event of runCommandUnlocked(command, timeout, context.dir, controller.signal)) {
+      queue.push(event);
+      wake();
+    }
+  }).catch(e => {
+    producerError = e;
+  }).finally(() => {
+    producerDone = true;
+    wake();
+  });
+
+  try {
+    while (!producerDone || queue.length) {
+      while (queue.length) yield queue.shift();
+      if (!producerDone) await wait();
+    }
+    await producer;
+    if (producerError) {
+      if (signal?.aborted || producerError?.name === 'AbortError') throw cancellationError(signal);
+      yield { type: 'result', text: `Error: ${producerError.message}` };
+    }
+  } finally {
+    signal?.removeEventListener('abort', forwardAbort);
+    // A consumer that stops reading is a cancellation boundary.
+    if (!producerDone && !controller.signal.aborted) {
+      const error = new Error('Coder command stream closed before completion.');
+      error.name = 'AbortError';
+      controller.abort(error);
+    }
+  }
+}
+
 // ── Long-running processes (dev servers) ─────────────────────────────────────
 // coder_run_command's sandbox uses --unshare-pid, so its PID namespace collapses
 // when the tool call returns — any backgrounded process dies with it. To run a
@@ -704,11 +1034,7 @@ async function* runCommand(command, timeout, userId, agentId, signal = null) {
 // bwrap that we detach from OE's event loop. One server per project; state
 // lives in <project>/.run/ so we can stop/status it across tool calls.
 
-function serverStateDir(projectDir) {
-  const d = path.join(projectDir, '.run');
-  if (!existsSync(d)) mkdirSync(d, { recursive: true });
-  return d;
-}
+function serverStateDir(projectDir) { return path.join(projectDir, '.run'); }
 function serverPidPath(projectDir)  { return path.join(serverStateDir(projectDir), 'server.pid'); }
 function serverLogPath(projectDir)  { return path.join(serverStateDir(projectDir), 'server.log'); }
 function serverMetaPath(projectDir) { return path.join(serverStateDir(projectDir), 'server.meta.json'); }
@@ -729,12 +1055,11 @@ function clearServerState(projectDir) {
   }
 }
 
-async function startServer(command, port, userId, agentId, signal = null) {
+async function startServerUnlocked(command, port, dir, signal = null) {
   // Admission is cancellable, but the persistent child is deliberately not
   // wired to the task signal. Once spawned it is project-owned and remains up
   // until coder_stop_server, even if the launching turn later gets cancelled.
   throwIfCancelled(signal);
-  const dir = getProjectDir(userId, agentId);
   if (!BWRAP_BIN) {
     throw new Error('Shell execution unavailable: sandbox (bwrap) not installed on server.');
   }
@@ -750,6 +1075,7 @@ async function startServer(command, port, userId, agentId, signal = null) {
   if (existingPid) clearServerState(dir);
 
   // Truncate previous log so status/logs views start fresh for this run.
+  mkdirSync(serverStateDir(dir), { recursive: true });
   const logPath = serverLogPath(dir);
   writeFileSync(logPath, '');
   const logFd = openSync(logPath, 'a');
@@ -776,8 +1102,14 @@ async function startServer(command, port, userId, agentId, signal = null) {
     pid: child.pid,
     startedAt: new Date().toISOString(),
   };
-  writeFileSync(serverMetaPath(dir), JSON.stringify(meta, null, 2));
-  writeFileSync(serverPidPath(dir), String(child.pid));
+  try {
+    atomicWriteSync(serverMetaPath(dir), JSON.stringify(meta, null, 2));
+    atomicWriteSync(serverPidPath(dir), String(child.pid));
+  } catch (e) {
+    signalProcessTree(child, true, 'SIGTERM');
+    clearServerState(dir);
+    throw e;
+  }
   appendLog(dir, `Started server \`${command.length > 80 ? command.slice(0, 80) + '…' : command}\` (pid ${child.pid}${port ? `, port ${port}` : ''})`);
 
   // Report the server's LAN IP, not "localhost" — the browser user is on a
@@ -789,8 +1121,13 @@ async function startServer(command, port, userId, agentId, signal = null) {
   return `Started server${urlNote} (pid ${child.pid}). Logs at .run/server.log. Use coder_server_status or coder_stop_server.`;
 }
 
-async function stopServer(userId, agentId) {
-  const dir = getProjectDir(userId, agentId);
+async function startServer(command, port, userId, agentId, signal = null) {
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context,
+    () => startServerUnlocked(command, port, context.dir, signal));
+}
+
+async function stopServerUnlocked(dir) {
   const pid = readServerPid(dir);
   if (!pid) return 'No server is running for this project.';
   if (!isPidAlive(pid)) {
@@ -812,8 +1149,12 @@ async function stopServer(userId, agentId) {
   return `Stopped server (pid ${pid}).`;
 }
 
-async function serverStatus(userId, agentId, logLines = 20) {
-  const dir = getProjectDir(userId, agentId);
+async function stopServer(userId, agentId) {
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context, () => stopServerUnlocked(context.dir));
+}
+
+async function serverStatusUnlocked(dir, logLines = 20) {
   const pid = readServerPid(dir);
   let meta = null;
   try { meta = JSON.parse(readFileSync(serverMetaPath(dir), 'utf8')); } catch {}
@@ -855,6 +1196,12 @@ async function serverStatus(userId, agentId, logLines = 20) {
   ].filter(Boolean).join('\n');
 }
 
+async function serverStatus(userId, agentId, logLines = 20) {
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context,
+    () => serverStatusUnlocked(context.dir, logLines));
+}
+
 // Apply a list of {old_string, new_string, replace_all?} edits to a single file
 // atomically — every edit must succeed against the staged buffer or nothing is
 // written. Mirrors Claude Code's MultiEdit semantics.
@@ -862,45 +1209,73 @@ async function multiEditProjectFile(filePath, edits, userId, agentId) {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new Error('edits must be a non-empty array.');
   }
-  const dir = getProjectDir(userId, agentId);
-  const abs = safePath(dir, filePath);
-  if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context, async () => {
+    const abs = safePath(context.dir, filePath);
+    if (!existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
-  let content = readFileSync(abs, 'utf8');
-  for (let i = 0; i < edits.length; i++) {
-    const { old_string, new_string, replace_all } = edits[i];
-    if (typeof old_string !== 'string' || typeof new_string !== 'string') {
-      throw new Error(`Edit #${i + 1}: old_string and new_string must be strings.`);
+    let content = readFileSync(abs, 'utf8');
+    for (let i = 0; i < edits.length; i++) {
+      const { old_string, new_string, replace_all } = edits[i];
+      if (typeof old_string !== 'string' || typeof new_string !== 'string') {
+        throw new Error(`Edit #${i + 1}: old_string and new_string must be strings.`);
+      }
+      if (old_string === new_string) {
+        throw new Error(`Edit #${i + 1}: old_string and new_string are identical.`);
+      }
+      if (replace_all) {
+        if (!content.includes(old_string)) throw new Error(`Edit #${i + 1}: old_string not found.`);
+        content = content.split(old_string).join(new_string);
+      } else {
+        const count = content.split(old_string).length - 1;
+        if (count === 0) throw new Error(`Edit #${i + 1}: old_string not found.`);
+        if (count > 1) throw new Error(`Edit #${i + 1}: old_string found ${count} times — must be unique or set replace_all:true.`);
+        content = content.replace(old_string, new_string);
+      }
     }
-    if (old_string === new_string) {
-      throw new Error(`Edit #${i + 1}: old_string and new_string are identical.`);
-    }
-    if (replace_all) {
-      if (!content.includes(old_string)) throw new Error(`Edit #${i + 1}: old_string not found.`);
-      content = content.split(old_string).join(new_string);
-    } else {
-      const count = content.split(old_string).length - 1;
-      if (count === 0) throw new Error(`Edit #${i + 1}: old_string not found.`);
-      if (count > 1) throw new Error(`Edit #${i + 1}: old_string found ${count} times — must be unique or set replace_all:true.`);
-      content = content.replace(old_string, new_string);
-    }
-  }
-  writeFileSync(abs, content);
-  appendLog(dir, `Multi-edited \`${filePath}\` (${edits.length} edits)`);
-  return `Applied ${edits.length} edit${edits.length === 1 ? '' : 's'} to ${filePath}`;
+    atomicWriteSync(abs, content);
+    appendLog(context.dir, `Multi-edited \`${filePath}\` (${edits.length} edits)`);
+    return `Applied ${edits.length} edit${edits.length === 1 ? '' : 's'} to ${filePath} (revision ${fileRevision(content)})`;
+  });
 }
 
-// Project-local TODO list. Lives at <project>/.openensemble/todos.json so it survives
-// across turns and is scoped per-project.
-function _todosPath(userId, agentId) {
-  const dir = getProjectDir(userId, agentId);
-  return path.join(dir, '.openensemble', 'todos.json');
+// TODOs are scoped to (project, durable agent). A shared legacy todos.json is
+// copied into each agent's namespace on first read so upgrades do not strand
+// existing plans and one agent cannot consume the migration for another.
+function _todoAgentRef(userId, agentId) {
+  return stableAgentRef(userId, agentId) || '__user__';
 }
 
-function _readTodos(userId, agentId) {
-  const p = _todosPath(userId, agentId);
-  if (!existsSync(p)) return [];
-  try { return JSON.parse(readFileSync(p, 'utf8')) || []; } catch { return []; }
+function _todosPathForDir(projectDir, userId, agentId) {
+  const ref = _todoAgentRef(userId, agentId);
+  const safeRef = ref.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'agent';
+  const suffix = createHash('sha256').update(ref).digest('hex').slice(0, 12);
+  return path.join(projectDir, '.openensemble', 'todos', `${safeRef}-${suffix}.json`);
+}
+
+function _legacyTodosPath(projectDir) {
+  return path.join(projectDir, '.openensemble', 'todos.json');
+}
+
+function _parseTodosFile(p) {
+  try {
+    const value = JSON.parse(readFileSync(p, 'utf8'));
+    return Array.isArray(value) ? value : null;
+  } catch { return null; }
+}
+
+function _readTodosUnlocked(projectDir, userId, agentId) {
+  const p = _todosPathForDir(projectDir, userId, agentId);
+  if (existsSync(p)) return _parseTodosFile(p) ?? [];
+
+  const legacyPath = _legacyTodosPath(projectDir);
+  if (!existsSync(legacyPath)) return [];
+  const legacy = _parseTodosFile(legacyPath);
+  if (!legacy) return [];
+  // Preserve even an empty legacy list as proof that this agent migrated.
+  mkdirSync(path.dirname(p), { recursive: true });
+  atomicWriteSync(p, JSON.stringify(legacy, null, 2));
+  return legacy;
 }
 
 function _renderTodos(todos) {
@@ -921,14 +1296,19 @@ async function todoWrite(todos, userId, agentId) {
       throw new Error('Each todo needs id (string), content (string), and status (pending|in_progress|completed).');
     }
   }
-  const p = _todosPath(userId, agentId);
-  mkdirSync(path.dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(todos, null, 2));
-  return _renderTodos(todos);
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context, async () => {
+    const p = _todosPathForDir(context.dir, userId, agentId);
+    mkdirSync(path.dirname(p), { recursive: true });
+    atomicWriteSync(p, JSON.stringify(todos, null, 2));
+    return _renderTodos(todos);
+  });
 }
 
 async function todoRead(userId, agentId) {
-  return _renderTodos(_readTodos(userId, agentId));
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context,
+    async () => _renderTodos(_readTodosUnlocked(context.dir, userId, agentId)));
 }
 
 async function listFiles(directory, pattern, userId, agentId, signal = null) {
@@ -1021,7 +1401,7 @@ export async function* executeSkillTool(name, args, userId = 'default', agentId,
       case 'coder_switch_project': text = await switchProject(args.name, userId, agentId); break;
       case 'coder_delete_project': text = await deleteProject(args.name, userId, agentId); break;
       case 'coder_read_file':      text = await readProjectFile(args.path, args.offset, args.limit, userId, agentId); break;
-      case 'coder_write_file':     text = await writeProjectFile(args.path, args.content, userId, agentId); break;
+      case 'coder_write_file':     text = await writeProjectFile(args.path, args.content, args.expected_revision, userId, agentId); break;
       case 'coder_edit_file':      text = await editProjectFile(args.path, args.old_string, args.new_string, userId, agentId); break;
       case 'coder_multi_edit':     text = await multiEditProjectFile(args.file_path, args.edits, userId, agentId); break;
       case 'coder_delete_file':    text = await deleteProjectFile(args.path, userId, agentId); break;

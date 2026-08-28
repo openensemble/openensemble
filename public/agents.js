@@ -294,6 +294,7 @@ const EMOJI_PICKS = ['🤖','🔬','📧','📈','🎯','🛠','📝','🎓','�
   '💻','⌨️','🖥️','🐛','🔧','⚙️','🧬','🔮','🦊','🐙','🦉','👾','🥷','🧙‍♂️','🌙','🔥'];
 
 let editingAgentId = null;
+let rolePickerRequestId = 0;
 
 // Wrapper for the event-delegation harness — looks up the agent record by id
 // and forwards to openNewAgentModal. Replaces inline `agents.find(x=>x.id==='id')`.
@@ -307,6 +308,31 @@ async function openNewAgentModal(agent = null) {
     showToast(SINGLE_MODE_AGENT_CREATION_MESSAGE);
     return;
   }
+  const roleRequestId = ++rolePickerRequestId;
+  // WebSocket roster broadcasts intentionally carry runtime-projected agents.
+  // Re-read the editor wire shape before editing so a projected coordinator
+  // identity can never be written back over the durable primary role.
+  if (agent) {
+    $('btnCreateAgent').disabled = true;
+    try {
+      const response = await fetch('/api/agents', { cache: 'no-store' });
+      const body = await response.json().catch(() => null);
+      if (!response.ok || !Array.isArray(body)) {
+        throw new Error(body?.error || `Could not load agent settings (HTTP ${response.status})`);
+      }
+      if (roleRequestId !== rolePickerRequestId) return;
+      const fresh = body.find(item => item.id === agent.id);
+      if (!fresh || !Object.prototype.hasOwnProperty.call(fresh, 'primarySkillCategory')) {
+        throw new Error('Agent role data is incomplete. Refresh the page and try again.');
+      }
+      agent = fresh;
+    } catch (error) {
+      if (roleRequestId === rolePickerRequestId) {
+        showToast(error?.message || 'Could not load agent settings');
+      }
+      return;
+    }
+  }
   // Refresh provider model lists in the background, then re-populate if already open
   const refresh = () => {
     if ($('newAgentModal').classList.contains('open')) _populateAgentModelSelect(agent, { preserveCurrent: true });
@@ -319,7 +345,8 @@ async function openNewAgentModal(agent = null) {
   $('newAgentModalTitle').innerHTML = agent
     ? `${icon('pencil', 16)} Edit ${escHtml(agent.name)}`
     : `${icon('sparkles', 16)} ${pendingSingle ? 'Your Assistant' : 'New Agent'}`;
-  $('btnCreateAgent').textContent = agent ? 'Save Changes' : (pendingSingle ? 'Create Assistant' : 'Create Agent');
+  const saveButton = $('btnCreateAgent');
+  saveButton.textContent = agent ? 'Save Changes' : (pendingSingle ? 'Create Assistant' : 'Create Agent');
   $('aName').value   = agent?.name    ?? '';
   $('aEmoji').value  = agent?.emoji   ?? '🤖';
   $('aDesc').value   = agent?.description ?? '';
@@ -330,42 +357,69 @@ async function openNewAgentModal(agent = null) {
   // hidden while editing, which is why guide/roles.md's "change Role in the edit
   // panel" was impossible and why a second Coder could only be made by stealing
   // the role assignment. Still hidden during single-assistant onboarding, which
-  // picks the role for you. Includes built-in roles (s.service === true) AND
-  // user-installed custom skills (userScope set and non-service).
+  // picks the role for you. Only service roles are durable primaries. Custom
+  // executable skills keep their one-owner composition through role assignment.
   const roleLabel = $('aRoleLabel');
   const roleSel = $('aRole');
   if (pendingSingle) {
     roleLabel.style.display = 'none';
+    roleSel.dataset.loadState = 'hidden';
+    roleSel.disabled = true;
     roleSel.value = '';
+    saveButton.disabled = false;
   } else {
     roleLabel.style.display = '';
-    roleSel.innerHTML = '<option value="">— General Assistant —</option>';
-    fetch('/api/roles').then(r => r.json()).then(skills => {
-      const visible = skills.filter(s => !s.hidden && s.category !== 'delegate');
-      const roles = visible.filter(s => s.service);
-      const customs = visible.filter(s => !!s.userScope && !s.service);
+    roleSel.dataset.loadState = 'loading';
+    roleSel.disabled = true;
+    roleSel.innerHTML = '<option value="">Loading roles…</option>';
+    saveButton.disabled = true;
+    fetch('/api/roles', { cache: 'no-store' }).then(async response => {
+      const body = await response.json().catch(() => null);
+      if (!response.ok || !Array.isArray(body)) {
+        throw new Error(body?.error || `Could not load roles (HTTP ${response.status})`);
+      }
+      return body;
+    }).then(skills => {
+      if (roleRequestId !== rolePickerRequestId) return;
+      if (agent && !Object.prototype.hasOwnProperty.call(agent, 'primarySkillCategory')) {
+        throw new Error('Agent role data is incomplete. Refresh the page and try again.');
+      }
+      const durableRole = agent?.primarySkillCategory ?? '';
+      const roles = skills.filter(s => s.service && !s.hidden && s.category !== 'delegate'
+        && (s.enabled || s.id === durableRole));
       const addOpt = (s) => {
         const opt = document.createElement('option');
         opt.value = s.id;
-        opt.textContent = `${s.icon ?? ''} ${s.name}`.trim();
+        opt.textContent = `${s.icon ?? ''} ${s.name}${s.enabled ? '' : ' (unavailable)'}`.trim();
         return opt;
       };
+      roleSel.innerHTML = '<option value="">— General Assistant —</option>';
       if (roles.length) {
         const g = document.createElement('optgroup');
         g.label = 'Roles';
         for (const s of roles) g.appendChild(addOpt(s));
         roleSel.appendChild(g);
       }
-      if (customs.length) {
-        const g = document.createElement('optgroup');
-        g.label = 'Custom skills';
-        for (const s of customs) g.appendChild(addOpt(s));
-        roleSel.appendChild(g);
-      }
       // Preselect after the options land, or the edit panel opens showing
       // "General Assistant" for an agent that already has a role.
-      roleSel.value = agent?.skillCategory ?? '';
-    }).catch(() => {});
+      if (durableRole && !roles.some(s => s.id === durableRole)) {
+        const unavailable = document.createElement('option');
+        unavailable.value = durableRole;
+        unavailable.textContent = `${durableRole} (unavailable)`;
+        roleSel.appendChild(unavailable);
+      }
+      roleSel.value = durableRole;
+      roleSel.dataset.loadState = 'ready';
+      roleSel.disabled = false;
+      saveButton.disabled = false;
+    }).catch(error => {
+      if (roleRequestId !== rolePickerRequestId) return;
+      roleSel.dataset.loadState = 'error';
+      roleSel.disabled = true;
+      roleSel.innerHTML = '<option value="">Roles unavailable — reopen to retry</option>';
+      saveButton.disabled = true;
+      showToast(error?.message || 'Could not load roles');
+    });
   }
 
   const picker = $('emojiPicker');
@@ -405,6 +459,10 @@ $('btnCreateAgent').addEventListener('click', async () => {
   if (!name) { $('aName').focus(); return; }
   const [model, provider] = $('aModel').value.split('||');
   const pendingSingle = !editingAgentId && isPendingSingleAssistantOnboarding();
+  if (!pendingSingle && $('aRole').dataset.loadState !== 'ready') {
+    showToast('Wait for roles to finish loading, then try again.');
+    return;
+  }
   const selectedRole = pendingSingle ? null : ($('aRole').value || null);
   const maxTokensRaw = parseInt($('aMaxTokens').value, 10);
   const maxTokens = maxTokensRaw >= 256 ? maxTokensRaw : null;
@@ -441,16 +499,6 @@ $('btnCreateAgent').addEventListener('click', async () => {
       if (!response.ok) throw new Error(created.error || `Could not create agent (HTTP ${response.status})`);
       if (!created?.id) throw new Error('The server created an invalid agent record.');
 
-      // The server already receives skillCategory in the create payload. Keep
-      // this compatibility request for older servers without making creation
-      // success depend on the best-effort follow-up.
-      if (selectedRole) {
-        fetch('/api/roles/assign', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ skillId: selectedRole, agentId: created.id }),
-        }).catch(() => {});
-      }
-
       // Choose the active tab from the projected roster. A new non-primary
       // agent is parked in single mode, so its raw id must never become the
       // browser's active (invisible) agent.
@@ -479,7 +527,7 @@ $('btnCreateAgent').addEventListener('click', async () => {
   } catch (e) {
     showToast(e?.message || 'Could not save agent');
   } finally {
-    button.disabled = false;
+    button.disabled = !pendingSingle && $('aRole').dataset.loadState !== 'ready';
     button.textContent = idleLabel;
   }
 });

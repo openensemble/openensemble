@@ -2033,6 +2033,7 @@ async function handleDelete(args, userId) {
   if (!skillId?.trim()) return 'id is required.';
 
   const { getRoleManifest, listAllRoles, removeRoleManifest, clearExecutorCache } = await import('../../roles.mjs');
+  const { clearCustomAgentPrimaryRolesForRole } = await import('../../agents.mjs');
 
   let manifest = getRoleManifest(skillId, userId);
   if (manifest && !manifest.custom) {
@@ -2067,6 +2068,7 @@ async function handleDelete(args, userId) {
 
   removeRoleManifest(skillId, ownerId);
   clearExecutorCache(skillId, ownerId);
+  clearCustomAgentPrimaryRolesForRole(skillId, ownerId);
 
   // Remove the paired drawer plugin (if any). Safe no-op when no drawer exists.
   const drawerRemoval = await removeDrawerForSkill(ownerId, skillId);

@@ -9,6 +9,7 @@ import path from 'path';
 import { CFG_PATH, USERS_DIR } from '../lib/paths.mjs';
 import { listAgents } from '../agents.mjs';
 import { normalizeOrchestrationPolicy } from '../lib/orchestration-policy-core.mjs';
+import { stableAgentRef } from '../lib/agent-ref.mjs';
 import { log } from '../logger.mjs';
 import { _readUserProfile } from './user-profile.mjs';
 
@@ -45,7 +46,27 @@ function _readGlobalAssignments() {
 export function _allowedSkillIdsForProfile(user) {
   if (!user) return new Set();
   if (user.role === 'owner' || user.role === 'admin') return null;
-  if (Array.isArray(user.allowedSkills)) return new Set(user.allowedSkills);
+  if (Array.isArray(user.allowedSkills)) {
+    const allowed = new Set(user.allowedSkills);
+    // `delegate` and the coordinator's roster are hidden implementation
+    // skills, so normal account provisioning never puts them in allowedSkills.
+    // Derive them only for a regular account with a valid, owned coordinator.
+    // Single mode still needs the worker/status subset; its resolver and
+    // executor separately suppress cross-agent ask_agent. Child accounts
+    // remain strictly bounded by their explicit parent-managed allowlist.
+    if (user.role !== 'child' && allowed.has('coordinator')) {
+      const owned = listAgents().filter(agent => agent?.ownerId === user.id);
+      const coordinatorId = user.skillAssignments?.coordinator;
+      // The assignment is canonical for legacy agents created before durable
+      // skillCategory persistence; ownership prevents an arbitrary id grant.
+      const hasCoordinator = owned.some(agent => agent?.id === coordinatorId);
+      if (hasCoordinator) {
+        allowed.add('delegate');
+        allowed.add('active-agents');
+      }
+    }
+    return allowed;
+  }
   if (user.role === 'child') return new Set();
   return user.allowedSkills == null ? null : new Set();
 }
@@ -145,6 +166,11 @@ function _projectAssignmentsForOrchestration(user, raw) {
   ]);
   for (const skillId of enabledSkills) {
     const manifest = getRoleManifest(skillId, user?.id);
+    // User-created executable skills retain explicit one-agent ownership in
+    // single mode. The raw-assignment loop above already projects an assigned
+    // custom skill onto the primary; merely enabling one must not resurrect an
+    // intentionally unassigned tool bundle.
+    if (manifest?.custom === true || manifest?.createdBy === user?.id) continue;
     const runtimeEnabled = !manifest || isSkillRuntimeEnabledForUser(skillId, user?.id);
     if (runtimeEnabled && (!allowed || allowed.has(skillId))) projected[skillId] = primary;
   }
@@ -163,7 +189,7 @@ export function getRoleAssignment(roleId, userId) {
  */
 export function getAgentRoles(agentId, userId) {
   if (!agentId) return [];
-  const bare = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  const bare = stableAgentRef(userId, agentId);
   const assignments = getRoleAssignments(userId);
   const out = [];
   for (const [roleId, assignedAgentId] of Object.entries(assignments)) {
@@ -184,7 +210,7 @@ export function getAgentRoles(agentId, userId) {
  */
 export function getAgentAssignedSkills(agentId, userId) {
   if (!agentId) return [];
-  const bare = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  const bare = stableAgentRef(userId, agentId);
   const assignments = getRoleAssignments(userId);
   return Object.entries(assignments)
     .filter(([id, assigned]) => {
@@ -198,9 +224,10 @@ export function getAgentAssignedSkills(agentId, userId) {
 
 /**
  * May this agent run the pre-LLM fast-path for `skillId` (skip the LLM and
- * execute the skill's intent directly)? The coordinator may fast-path ANY
- * skill — it owns every cross-agent handoff. A specialist may fast-path only
- * the skills it's actually assigned (for example, specialist -> email).
+ * execute the skill's intent directly)? The coordinator may fast-path any
+ * built-in skill because it owns cross-agent handoff; user-created skills
+ * still require explicit assignment. A specialist may fast-path only the
+ * skills it's actually assigned (for example, specialist -> email).
  * A non-owner specialist (e.g. the deep-research agent) is denied, so a
  * paraphrase like "give me the latest US news" can't fire email_list — it
  * falls through to the agent's LLM, which escalates to the coordinator.
@@ -208,9 +235,21 @@ export function getAgentAssignedSkills(agentId, userId) {
  */
 export function agentCanFastpathSkill(agentId, skillId, userId) {
   if (!agentId || !skillId) return false;
-  const bare = userId && agentId.startsWith(userId + '_') ? agentId.slice(userId.length + 1) : agentId;
+  const bare = stableAgentRef(userId, agentId);
   const coordinatorId = getRoleAssignment('coordinator', userId);
-  if (coordinatorId && bare === coordinatorId) return true;
+  if (coordinatorId && bare === coordinatorId) {
+    const manifest = getRoleManifest(skillId, userId);
+    const isUserSkill = manifest?.custom === true || manifest?.createdBy === userId;
+    if (!isUserSkill) return true;
+    // A custom skill's assignment is its capability boundary. The coordinator
+    // may orchestrate built-ins broadly, but it cannot fast-path an unassigned
+    // custom tool—or one owned by another ensemble specialist—behind the tool
+    // resolver's back. Single mode projects an explicit raw assignment onto
+    // the primary, so that intended ownership still works there.
+    if (!isSkillRuntimeEnabledForUser(skillId, userId)) return false;
+    const owner = getRoleAssignment(skillId, userId);
+    return owner === bare || (owner === 'coordinator' && coordinatorId === bare);
+  }
   return getAgentAssignedSkills(agentId, userId).includes(skillId);
 }
 

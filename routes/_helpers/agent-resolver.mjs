@@ -57,8 +57,7 @@ function effectivePrimaryCategory(storedCategory, toolSet, assignedIds, userId) 
   if (assignedIds.includes('coordinator')) return 'coordinator';
   if (storedCategory && getRoleManifest(storedCategory, userId)) return storedCategory;
   return assignedIds.find(id => getRoleManifest(id, userId)?.service)
-    ?? assignedIds[0]
-    ?? storedCategory
+    ?? assignedIds.find(id => getRoleManifest(id, userId))
     ?? TOOL_SETS_COMPAT[toolSet ?? 'web'];
 }
 

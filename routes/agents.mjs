@@ -13,9 +13,18 @@ import {
   getAgent, loadCustomAgents, updateAgentMeta, invalidateModelOverridesCache, listRoles,
   BASE_DIR,
 } from './_helpers.mjs';
-import { createCustomAgent, deleteCustomAgent, updateCustomAgent } from '../agents.mjs';
 import {
-  onRoleEnabled, getRoleAssignments, setRoleAssignment, clearRoleAssignmentsForAgent,
+  clearCustomAgentPrimaryRolesForRole,
+  createCustomAgent,
+  deleteCustomAgent,
+  findDurablePrimaryRoleAgent,
+  getCustomAgentRecord,
+  updateCustomAgent,
+  validatePrimarySkillCategory,
+} from '../agents.mjs';
+import {
+  onRoleEnabled, getRoleAssignments, getDurableRoleAssignment,
+  setRoleAssignment, clearRoleAssignmentsForAgent,
   getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools,
   isSkillRuntimeEnabledForUser,
 } from '../roles.mjs';
@@ -35,13 +44,26 @@ import {
   rollbackUserTopologyTransition,
 } from '../chat-dispatch/slot-registry.mjs';
 
-// Roles a child account may hold as a primary category. Shared by create and
-// edit: a stored primary role grants that role's tools directly, so both paths
-// have to clamp it identically.
-const CHILD_SAFE_SKILL_CATEGORIES = ['deep_research', 'web', 'image_generator'];
-
 function setRoleAssignmentForUser(roleId, agentId, userId) {
   return setRoleAssignment(roleId, agentId || null, userId);
+}
+
+function agentToEditorWire(agent, userId) {
+  const raw = getCustomAgentRecord(agent?.id, userId);
+  return {
+    ...agentToWire(agent),
+    // Never derive this field from the runtime/projected roster: in single
+    // mode every effective role can point at the primary assistant.
+    primarySkillCategory: raw?.skillCategory ?? null,
+  };
+}
+
+function replacementDefaultForRole(roleId, userId, excludeAgentId = null) {
+  return findDurablePrimaryRoleAgent(roleId, userId, { excludeAgentId })?.id ?? null;
+}
+
+function restoreRoleAssignment(roleId, agentId, userId) {
+  if (roleId) setRoleAssignmentForUser(roleId, agentId, userId);
 }
 
 function visibleRoleForUser(userId, skillId) {
@@ -155,7 +177,8 @@ export async function handle(req, res) {
   if (req.url === '/api/agents' && req.method === 'GET') {
     const callerUserId = requireAuth(req, res); if (!callerUserId) return true;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(getAgentsForUser(callerUserId).map(agentToWire)));
+    res.end(JSON.stringify(getAgentsForUser(callerUserId)
+      .map(agent => agentToEditorWire(agent, callerUserId))));
     return true;
   }
 
@@ -250,6 +273,11 @@ export async function handle(req, res) {
   if (req.url === '/api/agents' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
     let topologyTransition = null;
+    let createdAgent = null;
+    let previousRoleOwner = null;
+    let previousCoordinatorOwner = null;
+    let previousOrchestration;
+    let hadPreviousOrchestration = false;
     try {
       // Per-user agent cap — guard against runaway creation from a compromised
       // or misbehaving account.
@@ -272,10 +300,14 @@ export async function handle(req, res) {
       // Child accounts: clamp toolSet/skillCategory to a safe whitelist. A child cannot
       // create an agent that pulls in coder/nodes/email/admin tools via skillCategory.
       const caller = getUser(authId);
+      previousCoordinatorOwner = getDurableRoleAssignment('coordinator', authId);
+      hadPreviousOrchestration = Object.prototype.hasOwnProperty.call(caller ?? {}, 'orchestration');
+      previousOrchestration = hadPreviousOrchestration
+        ? JSON.parse(JSON.stringify(caller.orchestration))
+        : undefined;
       if (caller?.role === 'child') {
         const CHILD_SAFE_TOOLSETS = ['web', null, undefined, ''];
         if (!CHILD_SAFE_TOOLSETS.includes(toolSet)) toolSet = 'web';
-        if (skillCategory && !CHILD_SAFE_SKILL_CATEGORIES.includes(skillCategory)) skillCategory = null;
         // Child can't set a custom system prompt — it must use buildSystemPrompt
         // so the safety prefix and identity template apply cleanly. Personality
         // is prompt text too (same jailbreak-suffix vector), so it's clamped
@@ -283,17 +315,13 @@ export async function handle(req, res) {
         systemPrompt = undefined;
         personality = undefined;
       }
-      // skillCategory is now PERSISTED on the agent record, and a stored primary
-      // role grants that role's tools directly (roles.mjs resolveAgentTools ->
-      // primaryTools) without requiring the skill to be in the account's enabled
-      // `skills` list — which is the check the skillAssignments path goes through.
-      // So it has to be gated the same way /api/roles/assign is, or any account
-      // could self-grant a role's tools just by naming it at create time.
-      if (skillCategory && !visibleRoleForUser(authId, skillCategory)) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: `Unknown or unavailable role: ${skillCategory}` }));
+      const roleValidation = await validatePrimarySkillCategory(authId, skillCategory);
+      if (!roleValidation.ok) {
+        res.writeHead(roleValidation.status ?? 400);
+        res.end(JSON.stringify({ error: roleValidation.error }));
         return true;
       }
+      skillCategory = roleValidation.skillCategory;
       topologyTransition = tryAcquireUserTopologyTransition(authId);
       if (!topologyTransition) {
         res.writeHead(409);
@@ -304,40 +332,54 @@ export async function handle(req, res) {
         const { getRequestedOrchestrationPolicy, completePendingPrimary } = await import('../lib/orchestration-policy.mjs');
         const needsPrimaryCompletion = getRequestedOrchestrationPolicy(authId).pendingPrimary === true;
         const created = createCustomAgent({ name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, personality, maxTokens, contextSize, ownerId: authId });
+        createdAgent = created;
         // reasoningEffort is account-specific: persist the creator's choice as a
         // per-user override rather than on the shared agent record.
         if (reasoningEffort !== 'auto') {
           await saveUserAgentOverride(authId, created.id, { reasoningEffort });
         }
-        if (skillCategory) setRoleAssignment(skillCategory, created.id, authId);
+        if (skillCategory) {
+          previousRoleOwner = getDurableRoleAssignment(skillCategory, authId);
+          // A durable category grants the role to every matching specialist.
+          // The single routing default stays with its current owner; only the
+          // first specialist claims an unowned default.
+          if (!previousRoleOwner) {
+            setRoleAssignment(skillCategory, created.id, authId);
+          }
+        }
         // New accounts request single mode before an agent exists. Primary
         // selection is part of this create transaction: returning success with
         // a still-pending policy lets a retry create a second agent and strands
         // onboarding permanently.
         if (needsPrimaryCompletion) {
-          try {
-            if (!(await completePendingPrimary(authId, created.id))) {
-              throw new Error('pending primary was not completed');
-            }
-          } catch (e) {
-            try { await deleteCustomAgent(created.id); } catch {}
-            try { clearRoleAssignmentsForAgent(created.id, authId); } catch {}
-            try {
-              await modifyUser(authId, user => {
-                if (user.agentOverrides) delete user.agentOverrides[created.id];
-              });
-            } catch {}
-            throw new Error(`Could not finish single-agent onboarding: ${e.message}`);
+          if (!(await completePendingPrimary(authId, created.id))) {
+            throw new Error('Could not finish single-agent onboarding: pending primary was not completed');
           }
         }
         return created;
       });
       finishUserTopologyTransition(topologyTransition);
       topologyTransition = null;
-      broadcastAgentList();
+      try { broadcastAgentList(); } catch (e) { console.warn('[agents] post-create roster broadcast failed:', e.message); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(agentToWire({ ...agent, reasoningEffort })));
+      res.end(JSON.stringify(agentToEditorWire({ ...agent, reasoningEffort }, authId)));
     } catch (e) {
+      // Creation spans agents.json, profile/config assignments and an optional
+      // per-user override. Compensate every durable write while the topology
+      // writer is still held so a failed request cannot leave a ghost agent.
+      if (createdAgent) {
+        try { await deleteCustomAgent(createdAgent.id); } catch {}
+        try { clearRoleAssignmentsForAgent(createdAgent.id, authId); } catch {}
+        try { restoreRoleAssignment(createdAgent.skillCategory, previousRoleOwner, authId); } catch {}
+        try { restoreRoleAssignment('coordinator', previousCoordinatorOwner, authId); } catch {}
+        try {
+          await modifyUser(authId, user => {
+            if (user.agentOverrides) delete user.agentOverrides[createdAgent.id];
+            if (hadPreviousOrchestration) user.orchestration = previousOrchestration;
+            else delete user.orchestration;
+          });
+        } catch {}
+      }
       res.writeHead(e?.code === 'ORCHESTRATION_BUSY' ? 409 : 400);
       res.end(JSON.stringify({ error: e.message }));
     } finally {
@@ -350,6 +392,9 @@ export async function handle(req, res) {
   const agentMatch = req.url.match(/^\/api\/agents\/([\w-]+)$/);
   if (agentMatch && req.method === 'PATCH') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    let topologyTransition = null;
+    let roleMutation = null;
+    let roleMutationStarted = false;
     try {
       const changes = JSON.parse(await readBody(req));
       // Existence check BEFORE any mutation — updateAgentMeta/saveUserAgentOverride
@@ -358,6 +403,7 @@ export async function handle(req, res) {
       if (!getAgent(agentMatch[1])) {
         res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return true;
       }
+      const rawOwnedAgent = getCustomAgentRecord(agentMatch[1], authId);
       const uiChanges = {};
       const globalChanges = {};
       if (changes.name)     uiChanges.name     = changes.name;
@@ -388,32 +434,34 @@ export async function handle(req, res) {
       // guide/roles.md's "change Role in the edit panel" did not work and why a
       // second Coder could only be made by stealing the assignment.
       if ('skillCategory' in changes) {
-        const sc = changes.skillCategory || null;
-        if (sc && !visibleRoleForUser(authId, sc)) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: `Unknown or unavailable role: ${sc}` }));
-          return true;
-        }
-        if (sc && getUser(authId)?.role === 'child' && !CHILD_SAFE_SKILL_CATEGORIES.includes(sc)) {
-          res.writeHead(403);
-          res.end(JSON.stringify({ error: 'That role is not available on this account.' }));
-          return true;
-        }
         // The role belongs to the agent record, not to a viewer. Editing it via
         // a per-user override would let a non-owner grant themselves a role's
         // tools on a shared agent, so require ownership outright.
-        const ownsAgent = loadCustomAgents().find(a => a.id === agentMatch[1] && a.ownerId === authId);
-        if (!ownsAgent) {
+        if (!rawOwnedAgent) {
           res.writeHead(403);
           res.end(JSON.stringify({ error: 'Only the agent owner can change its role.' }));
           return true;
         }
-        uiChanges.skillCategory = sc;
-        // Claim the role assignment only when nobody holds it. Never steal it
-        // from another agent — that silent theft is the original bug, and the
-        // durable category above is what actually grants the tools.
-        if (sc && !getRoleAssignments(authId)[sc]) {
-          await setRoleAssignmentForUser(sc, agentMatch[1], authId);
+        const roleValidation = await validatePrimarySkillCategory(
+          authId,
+          changes.skillCategory,
+          { currentSkillCategory: rawOwnedAgent.skillCategory ?? null },
+        );
+        if (!roleValidation.ok) {
+          res.writeHead(roleValidation.status ?? 400);
+          res.end(JSON.stringify({ error: roleValidation.error }));
+          return true;
+        }
+        if (!roleValidation.unchanged) {
+          const oldRole = rawOwnedAgent.skillCategory ?? null;
+          const newRole = roleValidation.skillCategory;
+          uiChanges.skillCategory = newRole;
+          roleMutation = {
+            oldRole,
+            newRole,
+            oldOwner: oldRole ? getDurableRoleAssignment(oldRole, authId) : null,
+            newOwner: newRole ? getDurableRoleAssignment(newRole, authId) : null,
+          };
         }
       }
       if (changes.model)     globalChanges.model     = changes.model;
@@ -429,48 +477,99 @@ export async function handle(req, res) {
         }
         globalChanges.contextSize = cs;
       }
-      if (Object.keys(uiChanges).length) {
-        const ownedCustom = loadCustomAgents().find(a => a.id === agentMatch[1] && a.ownerId === authId);
-        if (ownedCustom) {
-          updateCustomAgent(agentMatch[1], uiChanges);
-          // Clear any stale per-user overrides for fields now canonical on the agent
-          await modifyUser(authId, u => {
-            if (u.agentOverrides?.[agentMatch[1]]) {
-              for (const k of Object.keys(uiChanges)) delete u.agentOverrides[agentMatch[1]][k];
-            }
-          });
-        } else {
-          await saveUserAgentOverride(authId, agentMatch[1], uiChanges); // fire-and-forget made the change look reverted on a fast reload
-        }
-      }
-      // Per-user reasoning effort: scoped to the calling account, applied over
-      // the agent via getAgentsForUser's agentOverrides merge at chat time.
-      if ('reasoningEffort' in changes) {
-        await saveUserAgentOverride(authId, agentMatch[1], {
-          reasoningEffort: normalizeReasoningEffort(changes.reasoningEffort, 'auto'),
-        });
-      }
+      // Validate global-write authority before changing the durable primary;
+      // otherwise a rejected model edit could still commit a role mutation.
       if (Object.keys(globalChanges).length) {
-        // Global agent config (model/provider/maxTokens/contextSize) may only be
-        // changed by the agent's owner (or a privileged user). Non-owners can
-        // still set per-user fields like reasoningEffort above. The old guard
-        // (`customRec?.ownerId && …`) skipped entirely when the id matched no
-        // custom record — built-in agents and ownerless legacy records were
-        // globally writable by ANY authenticated user, children included.
         const customRec = loadCustomAgents().find(a => a.id === agentMatch[1]);
         const ownsIt = Boolean(customRec && customRec.ownerId === authId);
         if (!ownsIt && !isPrivileged(authId)) {
           res.writeHead(403); res.end(JSON.stringify({ error: 'Not your agent' })); return true;
         }
-        await updateAgentMeta(agentMatch[1], globalChanges);
+      }
+      if (roleMutation) {
+        topologyTransition = tryAcquireUserTopologyTransition(authId);
+        if (!topologyTransition) {
+          res.writeHead(409);
+          res.end(JSON.stringify({ error: 'Another reply or account setup change is active. Try again when it finishes.' }));
+          return true;
+        }
+      }
+
+      const applyChanges = async () => {
+        if (Object.keys(uiChanges).length) {
+          if (rawOwnedAgent) {
+            if (!updateCustomAgent(agentMatch[1], uiChanges)) {
+              throw new Error('Agent disappeared before the update could be saved');
+            }
+            roleMutationStarted = Boolean(roleMutation);
+
+            if (roleMutation) {
+              const { oldRole, newRole, oldOwner, newOwner } = roleMutation;
+              // Relinquish only an old default actually owned by this agent,
+              // and keep it routed to another same-role specialist if one exists.
+              if (oldRole && oldRole !== newRole && oldOwner === agentMatch[1]) {
+                setRoleAssignmentForUser(
+                  oldRole,
+                  replacementDefaultForRole(oldRole, authId, agentMatch[1]),
+                  authId,
+                );
+              }
+              // Editing a durable category never steals an existing routing
+              // default. The new specialist claims it only when it is vacant.
+              if (newRole && !newOwner) {
+                setRoleAssignmentForUser(newRole, agentMatch[1], authId);
+              }
+            }
+
+          // Clear any stale per-user overrides for fields now canonical on the agent
+            await modifyUser(authId, u => {
+              if (u.agentOverrides?.[agentMatch[1]]) {
+                for (const k of Object.keys(uiChanges)) delete u.agentOverrides[agentMatch[1]][k];
+              }
+            });
+          } else {
+            await saveUserAgentOverride(authId, agentMatch[1], uiChanges); // fire-and-forget made the change look reverted on a fast reload
+          }
+        }
+
+        // Per-user reasoning effort: scoped to the calling account, applied over
+        // the agent via getAgentsForUser's agentOverrides merge at chat time.
+        if ('reasoningEffort' in changes) {
+          await saveUserAgentOverride(authId, agentMatch[1], {
+            reasoningEffort: normalizeReasoningEffort(changes.reasoningEffort, 'auto'),
+          });
+        }
+        if (Object.keys(globalChanges).length) {
+          await updateAgentMeta(agentMatch[1], globalChanges);
+        }
+      };
+      if (topologyTransition) {
+        await runWithUserTopologyLease(topologyTransition.lease, applyChanges);
+        finishUserTopologyTransition(topologyTransition);
+        topologyTransition = null;
+        roleMutationStarted = false;
+      } else {
+        await applyChanges();
       }
       const base = getAgent(agentMatch[1]);
       if (!base) { res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return true; }
       const userOverrides = getUser(authId)?.agentOverrides?.[agentMatch[1]] ?? {};
-      broadcastAgentList();
+      try { broadcastAgentList(); } catch (e) { console.warn('[agents] post-edit roster broadcast failed:', e.message); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(agentToWire({ ...base, ...userOverrides })));
-    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+      res.end(JSON.stringify(agentToEditorWire({ ...base, ...userOverrides }, authId)));
+    } catch (e) {
+      if (roleMutationStarted && roleMutation) {
+        try { updateCustomAgent(agentMatch[1], { skillCategory: roleMutation.oldRole }); } catch {}
+        try { restoreRoleAssignment(roleMutation.oldRole, roleMutation.oldOwner, authId); } catch {}
+        if (roleMutation.newRole !== roleMutation.oldRole) {
+          try { restoreRoleAssignment(roleMutation.newRole, roleMutation.newOwner, authId); } catch {}
+        }
+      }
+      res.writeHead(e?.code === 'ORCHESTRATION_BUSY' ? 409 : 400);
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      if (topologyTransition) rollbackUserTopologyTransition(topologyTransition);
+    }
     return true;
   }
 
@@ -521,6 +620,10 @@ export async function handle(req, res) {
           throw error;
         }
 
+        const defaultRoleIds = listRoles(ownerId, { includeDisabled: true })
+          .filter(role => getDurableRoleAssignment(role.id, ownerId) === agentMatch[1])
+          .map(role => role.id);
+
         // Durable agent removal is the transaction's commit point. Every
         // destructive precheck above runs first, while topology cleanup below
         // is compensating repair. In particular, do not cancel watchers or
@@ -558,6 +661,24 @@ export async function handle(req, res) {
           if (removedAssignments > 0) console.log(`[agents] cleared ${removedAssignments} assignment(s) for deleted agent "${agentMatch[1]}"`);
         } catch (e) {
           warnCleanup('role-assignment cleanup', e);
+        }
+        for (const roleId of defaultRoleIds) {
+          try {
+            setRoleAssignmentForUser(
+              roleId,
+              replacementDefaultForRole(roleId, ownerId, agentMatch[1]),
+              ownerId,
+            );
+          } catch (e) {
+            warnCleanup(`role-default repair (${roleId})`, e);
+          }
+        }
+
+        try {
+          const { clearActiveProjectForAgent } = await import('../skills/coder/execute.mjs');
+          clearActiveProjectForAgent(ownerId, agentMatch[1]);
+        } catch (e) {
+          warnCleanup('coder project-pointer cleanup', e);
         }
 
         // Persisted watchers are part of the deleted agent's topology. Cancel
@@ -670,21 +791,113 @@ export async function handle(req, res) {
 
   if (req.url === '/api/roles/assign' && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
+    let topologyTransition = null;
+    let primaryBackfill = null;
+    let primaryBackfillStarted = false;
+    let oldAssignment = null;
+    let assignmentRoleId = null;
     try {
       const { skillId, agentId } = JSON.parse(await readBody(req));
-      // Allow non-admin users to assign a role only to their own custom agents.
-      // A null/absent agentId is an UNASSIGN of their own per-user assignment —
-      // always allowed (the old gate 403'd it, so non-admins could never clear
-      // an assignment they had made).
-      if (!isPrivileged(authId) && agentId != null) {
-        const { loadCustomAgents } = await import('../agents.mjs');
-        const ownedAgent = loadCustomAgents().find(a => a.id === agentId && a.ownerId === authId);
-        if (!ownedAgent) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return true; }
+      if (typeof skillId !== 'string' || !skillId.trim() || skillId.length > 128) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'A valid skillId is required' })); return true;
       }
-      await setRoleAssignmentForUser(skillId, agentId, authId);
-      broadcastAgentList();
-      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }));
-    } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+      if (agentId != null && (typeof agentId !== 'string' || !agentId)) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'agentId must be a non-empty string or null' })); return true;
+      }
+      const roleId = skillId.trim();
+      assignmentRoleId = roleId;
+      const role = visibleRoleForUser(authId, roleId);
+      if (!role || role.category === 'delegate') {
+        res.writeHead(404); res.end(JSON.stringify({ error: 'Role or skill not found' })); return true;
+      }
+      if (agentId != null && !isSkillRuntimeEnabledForUser(roleId, authId)) {
+        res.writeHead(403); res.end(JSON.stringify({ error: 'That role or skill is disabled for this account' })); return true;
+      }
+      const targetAgent = agentId == null ? null : getCustomAgentRecord(agentId, authId);
+      if (agentId != null && !targetAgent) {
+        res.writeHead(403); res.end(JSON.stringify({ error: 'You can only assign roles to agents you own' })); return true;
+      }
+
+      topologyTransition = tryAcquireUserTopologyTransition(authId);
+      if (!topologyTransition) {
+        res.writeHead(409);
+        res.end(JSON.stringify({ error: 'Another reply or account setup change is active. Try again when it finishes.' }));
+        return true;
+      }
+      oldAssignment = getDurableRoleAssignment(roleId, authId);
+      const assignmentUser = getUser(authId);
+      if (!isPrivileged(authId) && assignmentUser?.skillsLocked
+          && oldAssignment !== (agentId ?? null)) {
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Your tools are managed by an administrator' })); return true;
+      }
+      if (targetAgent && role.service) {
+        const currentPrimary = targetAgent.skillCategory ?? null;
+        const currentPrimaryManifest = currentPrimary
+          ? getRoleManifest(currentPrimary, authId)
+          : null;
+        const needsBackfill = !currentPrimary
+          || currentPrimary === 'general'
+          || !currentPrimaryManifest;
+        if (oldAssignment === targetAgent.id && !needsBackfill) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, assignment: oldAssignment }));
+          return true;
+        }
+        // Service assignments obey the same child/lock/allow/enable policy as
+        // a durable primary, even when an existing different primary means this
+        // assignment remains secondary.
+        const policy = await validatePrimarySkillCategory(
+          authId,
+          roleId,
+          { currentSkillCategory: targetAgent.skillCategory ?? null, allowUnchanged: false },
+        );
+        if (!policy.ok) {
+          res.writeHead(policy.status ?? 400); res.end(JSON.stringify({ error: policy.error })); return true;
+        }
+        if (needsBackfill) {
+          primaryBackfill = { agentId: targetAgent.id, oldRole: currentPrimary, newRole: roleId };
+        }
+      }
+
+      // A pure no-op leaves the durable files untouched. The short-lived
+      // topology lease above makes this decision against a stable snapshot.
+      if (oldAssignment === (agentId ?? null) && !primaryBackfill) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, assignment: oldAssignment }));
+        return true;
+      }
+      const assignment = await runWithUserTopologyLease(topologyTransition.lease, async () => {
+        if (primaryBackfill) {
+          if (!updateCustomAgent(primaryBackfill.agentId, { skillCategory: primaryBackfill.newRole })) {
+            throw new Error('Agent disappeared before its primary role could be saved');
+          }
+          primaryBackfillStarted = true;
+        }
+        // Explicit drawer/API unassignment is a user choice and remains null.
+        // Automatic replacement is reserved for lifecycle loss (primary role
+        // change or agent deletion), where the old default disappears.
+        const nextAssignment = agentId ?? null;
+        setRoleAssignmentForUser(roleId, nextAssignment, authId);
+        return nextAssignment;
+      });
+      finishUserTopologyTransition(topologyTransition);
+      topologyTransition = null;
+      primaryBackfillStarted = false;
+      try { broadcastAgentList(); } catch (e) { console.warn('[roles] post-assignment roster broadcast failed:', e.message); }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, assignment }));
+    } catch (e) {
+      if (primaryBackfillStarted && primaryBackfill) {
+        try { updateCustomAgent(primaryBackfill.agentId, { skillCategory: primaryBackfill.oldRole }); } catch {}
+      }
+      if (topologyTransition) {
+        try { restoreRoleAssignment(assignmentRoleId, oldAssignment, authId); } catch {}
+      }
+      res.writeHead(e?.code === 'ORCHESTRATION_BUSY' ? 409 : 400);
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      if (topologyTransition) rollbackUserTopologyTransition(topologyTransition);
+    }
     return true;
   }
 
@@ -815,6 +1028,7 @@ export async function handle(req, res) {
       const skillDir = path.join(BASE_DIR, 'skills', id);
       fs.rmSync(skillDir, { recursive: true, force: true });
       removeRoleManifest(id);
+      clearCustomAgentPrimaryRolesForRole(id);
       await modifyConfig(cfg => { if (cfg.skillAssignments) delete cfg.skillAssignments[id]; });
       // Cascade per-user assignments too — stale profile.skillAssignments
       // entries kept pointing at the deleted role.
