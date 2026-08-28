@@ -204,6 +204,7 @@ export function saveConfig(cfg) {
  * @property {number} [newsDefaultTopic]
  * @property {object} [telegram]
  * @property {string} [telegramChatId]         legacy; superseded by telegram.chatId
+ * @property {'websocket'|'telegram'|'email'|'voice'|'all'} [reminderChannel]
  * @property {string} [reminderEmailId]
  * @property {string} [reminderVoiceDeviceId]
  * @property {string[]} [allowedSkills]        restricts which skills user can enable

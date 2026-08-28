@@ -41,7 +41,7 @@
     "coder_list_projects", "coder_create_project",
     "coder_switch_project", "coder_delete_project", "coder_read_file",
     "coder_write_file", "coder_edit_file", "coder_multi_edit", "coder_delete_file",
-    "coder_run_command", "coder_start_server", "coder_stop_server", "coder_server_status",
+    "coder_run_command", "coder_start_server", "coder_stop_server", "coder_server_status", "coder_clear_legacy_server_state",
     "coder_list_files", "coder_search",
     "coder_todo_write", "coder_todo_read",
     "skill_add_rule", "skill_remove_rule", "skill_list_rules",
@@ -266,7 +266,7 @@
       "type": "function",
       "function": {
         "name": "coder_todo_read",
-        "description": "Read this durable agent's TODO list for the active project. Legacy project-wide TODOs are copied into the agent namespace on first read.",
+        "description": "Read this durable agent's host-owned TODO list for the active project. Legacy project TODOs are safely copied into the agent namespace on first read.",
         "parameters": { "type": "object", "properties": {}, "required": [] }
       }
     },
@@ -355,6 +355,24 @@
             }
           },
           "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "replayPolicy": "mutation",
+      "function": {
+        "name": "coder_clear_legacy_server_state",
+        "description": "After OpenEnsemble has been restarted, safely quarantine obsolete project-writable .run/server.pid and .run/server.meta.json entries so the project can start a new server or be deleted. This tool never reads or signals the legacy PID. Use only when coder_stop_server or coder_server_status reports untrusted legacy state.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "confirmed_restarted": {
+              "type": "boolean",
+              "description": "Must be true to confirm OpenEnsemble was restarted after the legacy server was last used."
+            }
+          },
+          "required": ["confirmed_restarted"]
         }
       }
     },

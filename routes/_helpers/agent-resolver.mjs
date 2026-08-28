@@ -439,17 +439,29 @@ export function getAgentsForUser(userId) {
       ? `## Personality\n\n${expandTemplates(personalityText)}\n\nLet this personality shape the tone and style of every reply, spoken (voice) replies included. Where it conflicts with default style guidance like "be concise and direct", the personality wins. It never overrides tool-use rules, role instructions, or safety guidance.`
       : '';
     // Universal parallel-tools guidance — applies to any agent with 2+ tools.
-    // The provider layer submits tool calls emitted together in one assistant
-    // turn concurrently. Individual tools may still serialize calls that share
-    // a mutable resource, so the prompt must not promise physical parallelism.
+    // Provider adapters dispatch calls emitted in one assistant turn together,
+    // but individual tools may still serialize calls that share a mutable
+    // resource. Keep the strong batching rule for proven-independent work and
+    // narrow the exception to the coder's shared checkout instead of weakening
+    // every agent's latency guidance.
     const delegationBatchExample = rosterSolo
       ? ''
       : '\n- Multiple `ask_agent` delegations to different specialists: one turn (background dispatch handles them).';
+    // `parallelSafeRead` is stronger than merely `readOnly`: it is the manifest
+    // owner's explicit statement that independent reads are safe to submit as a
+    // batch. Name those tools as concrete, current examples when available.
+    const parallelSafeReadNames = [...new Set(tools
+      .filter(tool => tool?.parallelSafeRead === true)
+      .map(tool => tool.function?.name ?? tool.name)
+      .filter(Boolean))];
+    const parallelSafeReadExample = parallelSafeReadNames.length
+      ? `\n- Independent calls to explicitly parallel-safe read tools available here (${parallelSafeReadNames.map(name => `\`${name}\``).join(', ')}): one turn.`
+      : '';
     const coderCommandBatchGuidance = tools.some(t => t.function?.name === 'coder_run_command')
-      ? '\n\n**Coder command exception:** `coder_run_command` calls from this agent share the active project\'s exclusive mutation lock. Do not batch multiple long-running commands for the same project: they serialize and later calls may time out while waiting. Combine quick read-only shell inspections into one command when practical, and sequence builds/tests when their order or lock wait matters. File read/search tools may be batched with each other when no project mutation is running; do not batch them alongside a command that may modify the checkout.'
+      ? '\n\n**Coder shared-project exception (this overrides the batching rule for these calls):** `coder_run_command` calls from this agent share the active project\'s exclusive mutation lock. You MUST NOT batch multiple long-running commands for that project: the runtime submits them together, but they serialize and later calls may time out while waiting. You also MUST NOT batch project file reads/searches alongside a `coder_run_command` that may modify the checkout. You MUST still batch independent `coder_read_file`, `coder_list_files`, and `coder_search` calls with each other when no project mutation is running. Combine quick read-only shell inspections into one command when practical, and sequence builds/tests when their order or lock wait matters.'
       : '';
     const parallelToolsGuidance = tools.length > 1
-      ? `## Parallel tool use\n\nWhen the next step needs multiple independent pieces of information that do not share a mutable resource, emit those tool calls in a single assistant turn. The runtime submits them together, saving an LLM round-trip. Resource-scoped tools may deliberately serialize internally, so do not assume every submitted call executes at the same time.\n\n**Patterns that SHOULD be batched into one turn:**\n- Reading several known files with the available file-reading tool — one turn.\n- Listing and searching independently with the available list/search tools — one turn.${delegationBatchExample}\n\n**Sequence across turns when there is a causal dependency or shared-resource constraint** — e.g. "find a file matching X, then read it" needs the find result before the read. If you find yourself reading known files over and over, one per turn, stop and batch them.${coderCommandBatchGuidance}`
+      ? `## Parallel tool use (REQUIRED for independent calls)\n\nWhen the next step needs multiple tool calls whose inputs are already known, whose outputs do not depend on one another, and which do not touch the same mutable resource, you MUST emit all of them in a single assistant turn. The runtime submits calls emitted together concurrently, saving an LLM round-trip. Emitting one call, waiting for its result, and then emitting another is forbidden when there is no causal dependency or shared-resource constraint. Submitted together does not promise simultaneous completion: resource-scoped tools may deliberately serialize internally.\n\n**Patterns that MUST be batched into one turn:**\n- Reading several known files with the available file-reading tool — one turn.\n- Listing and searching independently with the available list/search tools — one turn.${parallelSafeReadExample}${delegationBatchExample}\n\n**Only sequence across turns when there is a causal dependency or shared-resource constraint** — e.g. "find a file matching X, then read it" needs the find result before the read. If you find yourself reading known files over and over, one per turn, stop and batch them.${coderCommandBatchGuidance}`
       : '';
     // Universal server-URL guidance. OpenEnsemble runs on a server the user
     // reaches over the LAN from a different machine, so "localhost"/"127.0.0.1"

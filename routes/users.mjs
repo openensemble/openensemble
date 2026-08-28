@@ -41,6 +41,7 @@ const AUTH_RATE_MAX = 5;
 // Hard cap defends against burst attacks that cycle distinct IPs/userIds
 // inside the 5-minute prune interval below.
 const AUTH_RATE_MAP_CAP = 10000;
+const REMINDER_CHANNELS = new Set(['websocket', 'telegram', 'email', 'voice', 'all']);
 
 function isAuthRateLimited(key) {
   const now = Date.now();
@@ -305,6 +306,11 @@ export async function handle(req, res) {
       const snap = loadUsers();
       const snapIdx = snap.findIndex(u => u.id === targetId);
       if (snapIdx === -1) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+      if (changes.reminderChannel !== undefined && !REMINDER_CHANNELS.has(changes.reminderChannel)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'reminderChannel must be one of: websocket, telegram, email, voice, all' }));
+        return true;
+      }
       if (changes.role !== undefined) {
         if (authRole !== 'owner') { res.writeHead(403); res.end(JSON.stringify({ error: 'Only the owner can change roles' })); return true; }
         if (snap[snapIdx].role === 'owner') { res.writeHead(403); res.end(JSON.stringify({ error: 'Cannot change the owner role' })); return true; }

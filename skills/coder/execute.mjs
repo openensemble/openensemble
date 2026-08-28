@@ -7,13 +7,14 @@
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmdirSync,
   readdirSync, statSync, appendFileSync, rmSync, realpathSync, openSync, closeSync,
-  readSync, writeSync, fstatSync, chmodSync, lstatSync, constants as fsConstants,
+  readSync, writeSync, fstatSync, fchmodSync, chmodSync, lstatSync, renameSync,
+  constants as fsConstants,
 } from 'fs';
 import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execFile, spawn, execSync } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { getLanAddress } from '../../discovery.mjs';
 import { stableAgentRef } from '../../lib/agent-ref.mjs';
 import { withFileLock, withFileLockSync } from '../../lib/file-lock.mjs';
@@ -684,37 +685,88 @@ export async function deleteUserProject(userId, name) {
 
 const PROJECT_LOG_READ_MAX_BYTES = 256 * 1024;
 
-function openProjectLogNoFollow(projectDir, flags, mode = undefined) {
+function anchoredProjectSegment(segment) {
+  return typeof segment === 'string'
+    && segment.length > 0
+    && segment !== '.'
+    && segment !== '..'
+    && !segment.includes('/')
+    && !segment.includes('\\');
+}
+
+function openProjectDirectoryNoFollow(projectDir, segments = []) {
+  if (!segments.every(anchoredProjectSegment)) {
+    return { kind: 'unsafe', reason: 'invalid project path segment' };
+  }
   let dirFd = null;
+  let transferred = false;
+  try {
+    dirFd = openSync(projectDir,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    if (!fstatSync(dirFd).isDirectory()) {
+      return { kind: 'unsafe', reason: 'project path is not a directory' };
+    }
+    for (const segment of segments) {
+      let nextFd = null;
+      try {
+        nextFd = openSync(
+          `/proc/self/fd/${dirFd}/${segment}`,
+          fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+        );
+        if (!fstatSync(nextFd).isDirectory()) {
+          throw new Error(`${segment} is not a directory`);
+        }
+      } catch (e) {
+        if (nextFd != null) try { closeSync(nextFd); } catch {}
+        throw e;
+      }
+      closeSync(dirFd);
+      dirFd = nextFd;
+    }
+    transferred = true;
+    return { kind: 'opened', fd: dirFd };
+  } catch (e) {
+    return e?.code === 'ENOENT'
+      ? { kind: 'missing' }
+      : { kind: 'unsafe', reason: e.message };
+  } finally {
+    if (dirFd != null && !transferred) try { closeSync(dirFd); } catch {}
+  }
+}
+
+function openProjectFileNoFollow(projectDir, segments, flags, mode = undefined) {
+  if (!Array.isArray(segments) || segments.length === 0 || !segments.every(anchoredProjectSegment)) {
+    return { kind: 'unsafe', reason: 'invalid project file path' };
+  }
+  const parent = openProjectDirectoryNoFollow(projectDir, segments.slice(0, -1));
+  if (parent.kind !== 'opened') return parent;
   let fileFd = null;
   let transferred = false;
   try {
-    // Anchor the lookup to an already-open project directory. O_NOFOLLOW on
-    // both components prevents a project-controlled symlink from turning OE's
-    // host-side activity log into an arbitrary read or append primitive.
-    dirFd = openSync(projectDir,
-      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
-    if (!fstatSync(dirFd).isDirectory()) return null;
     fileFd = openSync(
-      `/proc/self/fd/${dirFd}/PROJECT_LOG.md`,
+      `/proc/self/fd/${parent.fd}/${segments.at(-1)}`,
       flags | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
       mode,
     );
     const fileStat = fstatSync(fileFd);
-    if (!fileStat.isFile()) return null;
+    if (!fileStat.isFile()) return { kind: 'unsafe', reason: 'path is not a regular file' };
     transferred = true;
-    return { fd: fileFd, stat: fileStat };
-  } catch {
-    return null;
+    return { kind: 'opened', fd: fileFd, stat: fileStat };
+  } catch (e) {
+    return e?.code === 'ENOENT'
+      ? { kind: 'missing' }
+      : { kind: 'unsafe', reason: e.message };
   } finally {
-    if (dirFd != null) try { closeSync(dirFd); } catch {}
+    try { closeSync(parent.fd); } catch {}
     if (fileFd != null && !transferred) try { closeSync(fileFd); } catch {}
   }
 }
 
 function readProjectLog(projectDir, { tail = false } = {}) {
-  const opened = openProjectLogNoFollow(projectDir, fsConstants.O_RDONLY);
-  if (!opened) return '';
+  const opened = openProjectFileNoFollow(
+    projectDir, ['PROJECT_LOG.md'], fsConstants.O_RDONLY,
+  );
+  if (opened.kind !== 'opened') return '';
   try {
     if (opened.stat.size <= 0) return '';
     const bytes = Math.min(opened.stat.size, PROJECT_LOG_READ_MAX_BYTES);
@@ -730,12 +782,12 @@ function readProjectLog(projectDir, { tail = false } = {}) {
 }
 
 function appendLog(projectDir, entry) {
-  const opened = openProjectLogNoFollow(
-    projectDir,
+  const opened = openProjectFileNoFollow(
+    projectDir, ['PROJECT_LOG.md'],
     fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT,
     0o600,
   );
-  if (!opened) return false;
+  if (opened.kind !== 'opened') return false;
   try {
     const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z/, '');
     const line = `\n- **${ts}** — ${entry}\n`;
@@ -840,7 +892,9 @@ async function switchProject(name, userId, agentId, signal = null) {
   validateProjectName(name);
   return withCoderProjectLock(userId, name, async () => {
     throwIfCancelled(signal);
-    const { dir } = resolveUserProjectDir(userId, name);
+    const current = resolveUserProjectDir(userId, name);
+    const context = { project: name, ...current };
+    const { dir } = current;
     setPointer(userId, agentId, name);
     appendLog(dir, 'Switched to this project');
 
@@ -852,9 +906,9 @@ async function switchProject(name, userId, agentId, signal = null) {
       logTail = '\n\nRecent activity:\n' + lines.slice(-10).join('\n');
     }
 
-    // Include this durable agent's pending todos first. The unlocked helper is
-    // used because this function already holds the project mutation lock.
-    const todos = _readTodosUnlocked(dir, userId, agentId, signal);
+    // Include this durable agent's pending todos first. The helper is used
+    // directly because this function already holds the project mutation lock.
+    const todos = _readTodosUnderProjectLock(context, userId, agentId, signal);
     const pending = todos.filter(t => t.status !== 'completed');
     const todoBlock = pending.length
       ? '\n\nPending todos (resume from here):\n' + _renderTodos(pending)
@@ -881,6 +935,11 @@ async function deleteProject(name, userId, agentId, signal = null) {
       const runtimePaths = assertServerInactiveForDeletion(userId, context);
       rmSync(context.dir, { recursive: true, force: true });
       rmSync(runtimePaths.dir, { recursive: true, force: true });
+      // TODO state is generation-scoped, so stale data could not attach to a
+      // replacement project. Remove all generations for the deleted name as
+      // best-effort housekeeping without making an already-completed project
+      // deletion look like it failed.
+      try { _removeTodoRuntimeProjectState(userId, name); } catch {}
       clearPointersForProject(userId, name);
       _projectMetaCache.delete(context.dir);
       appendWorkspaceLog(`Deleted project "${name}"`, userId);
@@ -1196,30 +1255,88 @@ function ensureServerRuntimeDir(paths) {
   chmodSync(paths.dir, 0o700);
 }
 
-function legacyServerPaths(projectDir) {
-  const dir = path.join(projectDir, '.run');
-  return {
-    pidPath: path.join(dir, 'server.pid'),
-    metaPath: path.join(dir, 'server.meta.json'),
-    logPath: path.join(dir, 'server.log'),
-  };
-}
-
 function legacyServerState(projectDir) {
-  const paths = legacyServerPaths(projectDir);
-  const hasEntry = value => {
-    try { lstatSync(value); return true; } catch { return false; }
-  };
-  return {
-    paths,
-    present: hasEntry(paths.pidPath) || hasEntry(paths.metaPath),
-  };
+  const runDir = openProjectDirectoryNoFollow(projectDir, ['.run']);
+  if (runDir.kind === 'missing') return { present: false, entries: [] };
+  if (runDir.kind !== 'opened') {
+    // Old coder versions followed a project-controlled .run symlink, so its
+    // presence is ambiguous legacy state. Refuse without traversing it.
+    return { present: true, unsafeContainer: true, entries: ['.run'] };
+  }
+  const entries = [];
+  try {
+    for (const name of ['server.pid', 'server.meta.json']) {
+      try {
+        lstatSync(`/proc/self/fd/${runDir.fd}/${name}`);
+        entries.push(name);
+      } catch (e) {
+        if (e?.code !== 'ENOENT') {
+          return { present: true, unsafeContainer: true, entries: [name] };
+        }
+      }
+    }
+  } finally {
+    try { closeSync(runDir.fd); } catch {}
+  }
+  return { present: entries.length > 0, entries };
 }
 
 function legacyServerRefusal(projectDir) {
   const legacy = legacyServerState(projectDir);
   if (!legacy.present) return null;
-  return 'Untrusted legacy server state exists in .run. OE did not signal its PID because project files are sandbox-writable. Restart OpenEnsemble to terminate any legacy sandbox, remove the old .run/server.pid and .run/server.meta.json files, then retry.';
+  return 'Untrusted legacy server state exists in .run. OE did not read or signal its PID because project files are sandbox-writable. Restart OpenEnsemble to terminate any legacy sandbox, then call coder_clear_legacy_server_state with confirmed_restarted=true before retrying.';
+}
+
+function legacyQuarantineSuffix() {
+  return `${Date.now()}-${randomBytes(4).toString('hex')}`;
+}
+
+function quarantineLegacyServerState(projectDir) {
+  const before = legacyServerState(projectDir);
+  if (!before.present) return [];
+  const suffix = legacyQuarantineSuffix();
+  const quarantined = [];
+
+  if (before.unsafeContainer) {
+    const project = openProjectDirectoryNoFollow(projectDir);
+    if (project.kind !== 'opened') {
+      throw new Error(`Could not safely open the project for legacy cleanup (${project.reason || project.kind}).`);
+    }
+    try {
+      const source = `/proc/self/fd/${project.fd}/.run`;
+      const targetName = `.run.legacy-quarantine-${suffix}`;
+      lstatSync(source);
+      renameSync(source, `/proc/self/fd/${project.fd}/${targetName}`);
+      quarantined.push(targetName);
+    } finally {
+      try { closeSync(project.fd); } catch {}
+    }
+  } else {
+    const runDir = openProjectDirectoryNoFollow(projectDir, ['.run']);
+    if (runDir.kind !== 'opened') {
+      throw new Error(`Legacy .run state changed during cleanup (${runDir.reason || runDir.kind}).`);
+    }
+    try {
+      for (const name of ['server.pid', 'server.meta.json']) {
+        const source = `/proc/self/fd/${runDir.fd}/${name}`;
+        try { lstatSync(source); }
+        catch (e) {
+          if (e?.code === 'ENOENT') continue;
+          throw e;
+        }
+        const targetName = `${name}.legacy-quarantine-${suffix}`;
+        renameSync(source, `/proc/self/fd/${runDir.fd}/${targetName}`);
+        quarantined.push(path.join('.run', targetName));
+      }
+    } finally {
+      try { closeSync(runDir.fd); } catch {}
+    }
+  }
+
+  if (legacyServerState(projectDir).present) {
+    throw new Error('Legacy server state changed during cleanup; no PID was read or signaled. Retry after confirming the server is stopped.');
+  }
+  return quarantined;
 }
 
 function strictServerPid(value) {
@@ -1507,6 +1624,36 @@ function assertServerInactiveForDeletion(userId, context) {
   return record.paths;
 }
 
+function clearStaleAuthoritativeStateForLegacyCleanup(userId, context) {
+  const record = readAuthoritativeServerState(userId, context);
+  if (record.kind === 'missing') return;
+  if (record.kind === 'corrupt' || record.kind === 'project-mismatch') {
+    throw new Error('Authoritative server state must be resolved before clearing legacy state.');
+  }
+  const processState = inspectServerProcess(record.state);
+  if (processState.kind === 'running' || processState.kind === 'unverified') {
+    throw new Error('A current server may still be running; stop or resolve it before clearing legacy state.');
+  }
+  clearAuthoritativeServerState(record.paths);
+}
+
+async function clearLegacyServerState(userId, agentId, confirmedRestarted, signal = null) {
+  throwIfCancelled(signal);
+  if (confirmedRestarted !== true) {
+    throw new Error('Refusing legacy cleanup until confirmed_restarted=true. Restart OpenEnsemble first so any legacy sandbox is terminated.');
+  }
+  const context = getProjectContext(userId, agentId);
+  return withProjectContextLock(userId, context, () =>
+    withProjectContextServerLock(userId, context, () => {
+      throwIfCancelled(signal);
+      clearStaleAuthoritativeStateForLegacyCleanup(userId, context);
+      const quarantined = quarantineLegacyServerState(context.dir);
+      if (!quarantined.length) return 'No legacy server state was present.';
+      appendLog(context.dir, `Quarantined legacy server state: ${quarantined.join(', ')}`);
+      return `Quarantined legacy server state (${quarantined.join(', ')}). No legacy PID was read or signaled. You may now start a server or delete the project.`;
+    }, signal), signal);
+}
+
 async function startServerUnlocked(command, port, userId, context, signal = null) {
   // Admission is cancellable, but the persistent child is deliberately not
   // wired to the task signal. Once spawned it is project-owned and remains up
@@ -1784,45 +1931,366 @@ async function multiEditProjectFile(filePath, edits, userId, agentId, signal = n
   }, signal);
 }
 
-// TODOs are scoped to (project, durable agent). A shared legacy todos.json is
-// copied into each agent's namespace on first read so upgrades do not strand
-// existing plans and one agent cannot consume the migration for another.
+// TODOs are scoped to (project incarnation, durable agent). Their authoritative
+// state lives outside the project bind: code running inside bwrap must not be
+// able to redirect an OE host write through .openensemble symlinks. The old
+// project-local files are read once through anchored O_NOFOLLOW descriptors and
+// copied into the host-only namespace for compatibility.
+const TODO_STATE_VERSION = 1;
+const TODO_STATE_MAX_BYTES = 256 * 1024;
+
 function _todoAgentRef(userId, agentId) {
   return stableAgentRef(userId, agentId) || '__user__';
 }
 
-function _todosPathForDir(projectDir, userId, agentId) {
+function _todoAgentFileName(userId, agentId) {
   const ref = _todoAgentRef(userId, agentId);
   const safeRef = ref.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'agent';
   const suffix = createHash('sha256').update(ref).digest('hex').slice(0, 12);
-  return path.join(projectDir, '.openensemble', 'todos', `${safeRef}-${suffix}.json`);
+  return `${safeRef}-${suffix}.json`;
 }
 
-function _legacyTodosPath(projectDir) {
-  return path.join(projectDir, '.openensemble', 'todos.json');
+function _todoRuntimeComponents(userId, project, projectIdentity, agentId) {
+  validateProjectName(project);
+  if (typeof projectIdentity !== 'string' || !projectIdentity) {
+    throw new Error('Project identity is required for TODO state.');
+  }
+  const projectDigest = createHash('sha256').update(project).digest('hex');
+  const generationDigest = createHash('sha256').update(projectIdentity).digest('hex');
+  const userRoot = path.join(BASE_DIR, 'users', _safeUserId(userId));
+  const directorySegments = ['.coder-runtime', 'todos', projectDigest, generationDigest];
+  const dir = path.join(userRoot, ...directorySegments);
+  return {
+    userRoot,
+    directorySegments,
+    projectDigest,
+    generationDigest,
+    dir,
+    stateFile: _todoAgentFileName(userId, agentId),
+  };
 }
 
-function _parseTodosFile(p) {
+export function getCoderTodoRuntimePaths(userId, project, projectIdentity, agentId) {
+  const components = _todoRuntimeComponents(userId, project, projectIdentity, agentId);
+  return {
+    projectDir: path.join(
+      components.userRoot, '.coder-runtime', 'todos', components.projectDigest,
+    ),
+    dir: components.dir,
+    statePath: path.join(components.dir, components.stateFile),
+  };
+}
+
+function _openUserRuntimeDirectoryNoFollow(userId, segments, { create = false } = {}) {
+  if (!Array.isArray(segments) || !segments.every(anchoredProjectSegment)) {
+    return { kind: 'unsafe', reason: 'invalid runtime path segment' };
+  }
+  const userRoot = path.join(BASE_DIR, 'users', _safeUserId(userId));
+  let dirFd = null;
+  let transferred = false;
   try {
-    const value = JSON.parse(readFileSync(p, 'utf8'));
-    return Array.isArray(value) ? value : null;
-  } catch { return null; }
+    dirFd = openSync(userRoot,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    if (!fstatSync(dirFd).isDirectory()) {
+      return { kind: 'unsafe', reason: 'user runtime root is not a directory' };
+    }
+    for (const segment of segments) {
+      const childPath = `/proc/self/fd/${dirFd}/${segment}`;
+      let nextFd = null;
+      let created = false;
+      try {
+        nextFd = openSync(childPath,
+          fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      } catch (e) {
+        if (e?.code !== 'ENOENT' || !create) throw e;
+        try {
+          mkdirSync(childPath, { mode: 0o700 });
+          created = true;
+        } catch (mkdirError) {
+          if (mkdirError?.code !== 'EEXIST') throw mkdirError;
+        }
+        nextFd = openSync(childPath,
+          fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      }
+      try {
+        if (!fstatSync(nextFd).isDirectory()) {
+          throw new Error(`${segment} is not a directory`);
+        }
+        // These directories are OE-owned and never exposed through the project
+        // bind. Keep new and pre-existing runtime components private.
+        if (created || segment === '.coder-runtime' || segments[0] === '.coder-runtime') {
+          fchmodSync(nextFd, 0o700);
+        }
+      } catch (e) {
+        try { closeSync(nextFd); } catch {}
+        throw e;
+      }
+      closeSync(dirFd);
+      dirFd = nextFd;
+    }
+    transferred = true;
+    return { kind: 'opened', fd: dirFd };
+  } catch (e) {
+    return e?.code === 'ENOENT'
+      ? { kind: 'missing' }
+      : { kind: 'unsafe', reason: e.message };
+  } finally {
+    if (dirFd != null && !transferred) try { closeSync(dirFd); } catch {}
+  }
 }
 
-function _readTodosUnlocked(projectDir, userId, agentId, signal = null) {
-  throwIfCancelled(signal);
-  const p = _todosPathForDir(projectDir, userId, agentId);
-  if (existsSync(p)) return _parseTodosFile(p) ?? [];
+function _sameFileSnapshot(before, after) {
+  return before.dev === after.dev
+    && before.ino === after.ino
+    && before.size === after.size
+    && before.mtimeNs === after.mtimeNs
+    && before.ctimeNs === after.ctimeNs;
+}
 
-  const legacyPath = _legacyTodosPath(projectDir);
-  if (!existsSync(legacyPath)) return [];
-  const legacy = _parseTodosFile(legacyPath);
-  if (!legacy) return [];
-  // Preserve even an empty legacy list as proof that this agent migrated.
+function _readBoundedUtf8FileDescriptor(fd, label) {
+  const before = fstatSync(fd, { bigint: true });
+  if (!before.isFile()) throw new Error(`${label} is not a regular file.`);
+  if (before.size > BigInt(TODO_STATE_MAX_BYTES)) {
+    throw new Error(`${label} exceeds the ${TODO_STATE_MAX_BYTES}-byte safety limit.`);
+  }
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const remaining = TODO_STATE_MAX_BYTES + 1 - total;
+    if (remaining <= 0) {
+      throw new Error(`${label} exceeds the ${TODO_STATE_MAX_BYTES}-byte safety limit.`);
+    }
+    const chunk = Buffer.alloc(Math.min(64 * 1024, remaining));
+    const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    total += bytesRead;
+  }
+  if (total > TODO_STATE_MAX_BYTES) {
+    throw new Error(`${label} exceeds the ${TODO_STATE_MAX_BYTES}-byte safety limit.`);
+  }
+  const after = fstatSync(fd, { bigint: true });
+  if (!_sameFileSnapshot(before, after) || after.size !== BigInt(total)) {
+    throw new Error(`${label} changed while it was being read; retry.`);
+  }
+  return Buffer.concat(chunks, total).toString('utf8');
+}
+
+function _validatedTodos(value, label = 'todos') {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
+  const valid = new Set(['pending', 'in_progress', 'completed']);
+  for (const todo of value) {
+    if (!todo || typeof todo !== 'object' || Array.isArray(todo)
+        || typeof todo.id !== 'string' || typeof todo.content !== 'string'
+        || !valid.has(todo.status)) {
+      throw new Error(`Each ${label} entry needs id (string), content (string), and status (pending|in_progress|completed).`);
+    }
+  }
+  return value;
+}
+
+function _parseTodoJson(raw, label) {
+  let value;
+  try { value = JSON.parse(raw); }
+  catch { throw new Error(`${label} is not valid JSON.`); }
+  return _validatedTodos(value, label);
+}
+
+function _readProjectTodoMigration(projectDir, segments, label) {
+  const opened = openProjectFileNoFollow(projectDir, segments, fsConstants.O_RDONLY);
+  if (opened.kind === 'missing') return { kind: 'missing' };
+  if (opened.kind !== 'opened') {
+    throw new Error(`Refusing to migrate ${label}: the project path is not a safe regular file (${opened.reason || opened.kind}).`);
+  }
+  try {
+    const raw = _readBoundedUtf8FileDescriptor(opened.fd, label);
+    return { kind: 'present', todos: _parseTodoJson(raw, label) };
+  } finally {
+    try { closeSync(opened.fd); } catch {}
+  }
+}
+
+function _openTodoStateFile(userId, components) {
+  const directory = _openUserRuntimeDirectoryNoFollow(
+    userId, components.directorySegments, { create: false },
+  );
+  if (directory.kind !== 'opened') return directory;
+  let fileFd = null;
+  let transferred = false;
+  try {
+    fileFd = openSync(
+      `/proc/self/fd/${directory.fd}/${components.stateFile}`,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    if (!fstatSync(fileFd).isFile()) {
+      return { kind: 'unsafe', reason: 'TODO state is not a regular file' };
+    }
+    transferred = true;
+    return { kind: 'opened', fd: fileFd };
+  } catch (e) {
+    return e?.code === 'ENOENT'
+      ? { kind: 'missing' }
+      : { kind: 'unsafe', reason: e.message };
+  } finally {
+    try { closeSync(directory.fd); } catch {}
+    if (fileFd != null && !transferred) try { closeSync(fileFd); } catch {}
+  }
+}
+
+function _readAuthoritativeTodos(userId, context, agentId) {
+  const components = _todoRuntimeComponents(
+    userId, context.project, context.identity, agentId,
+  );
+  const opened = _openTodoStateFile(userId, components);
+  if (opened.kind === 'missing') return { kind: 'missing', components };
+  if (opened.kind !== 'opened') {
+    throw new Error(`Authoritative TODO state is unsafe (${opened.reason || opened.kind}).`);
+  }
+  try {
+    const rawText = _readBoundedUtf8FileDescriptor(opened.fd, 'Authoritative TODO state');
+    let raw;
+    try { raw = JSON.parse(rawText); }
+    catch { throw new Error('Authoritative TODO state is not valid JSON.'); }
+    const agentRef = _todoAgentRef(userId, agentId);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+        || raw.version !== TODO_STATE_VERSION
+        || raw.project !== context.project
+        || raw.projectIdentity !== context.identity
+        || raw.agentRef !== agentRef) {
+      throw new Error('Authoritative TODO state does not match this project generation and durable agent.');
+    }
+    return {
+      kind: 'present',
+      components,
+      todos: _validatedTodos(raw.todos, 'Authoritative TODO state todos'),
+    };
+  } finally {
+    try { closeSync(opened.fd); } catch {}
+  }
+}
+
+function _serializeAuthoritativeTodos(context, userId, agentId, todos) {
+  const serialized = JSON.stringify({
+    version: TODO_STATE_VERSION,
+    project: context.project,
+    projectIdentity: context.identity,
+    agentRef: _todoAgentRef(userId, agentId),
+    todos,
+  }, null, 2);
+  if (Buffer.byteLength(serialized, 'utf8') > TODO_STATE_MAX_BYTES) {
+    throw new Error(`TODO state exceeds the ${TODO_STATE_MAX_BYTES}-byte safety limit.`);
+  }
+  return serialized;
+}
+
+function _writeAuthoritativeTodos(userId, context, agentId, todos) {
+  const components = _todoRuntimeComponents(
+    userId, context.project, context.identity, agentId,
+  );
+  const serialized = _serializeAuthoritativeTodos(context, userId, agentId, todos);
+  const directory = _openUserRuntimeDirectoryNoFollow(
+    userId, components.directorySegments, { create: true },
+  );
+  if (directory.kind !== 'opened') {
+    throw new Error(`Could not safely open the TODO runtime directory (${directory.reason || directory.kind}).`);
+  }
+  const tempName = `.${components.stateFile}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  const tempPath = `/proc/self/fd/${directory.fd}/${tempName}`;
+  const statePath = `/proc/self/fd/${directory.fd}/${components.stateFile}`;
+  let tempFd = null;
+  try {
+    try {
+      const existing = lstatSync(statePath);
+      if (!existing.isFile()) {
+        throw new Error('Authoritative TODO state is not a regular file; refusing to replace it.');
+      }
+    } catch (e) {
+      if (e?.code !== 'ENOENT') throw e;
+    }
+    tempFd = openSync(
+      tempPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
+        | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      0o600,
+    );
+    fchmodSync(tempFd, 0o600);
+    const bytes = Buffer.from(serialized, 'utf8');
+    let offset = 0;
+    while (offset < bytes.length) {
+      offset += writeSync(tempFd, bytes, offset, bytes.length - offset);
+    }
+    closeSync(tempFd);
+    tempFd = null;
+    // The directory descriptor pins every parent component. If an external
+    // host process swaps the final entry after the lstat above, rename replaces
+    // that entry itself and still cannot follow it outside this directory.
+    renameSync(tempPath, statePath);
+  } catch (e) {
+    if (tempFd != null) try { closeSync(tempFd); } catch {}
+    try { unlinkSync(tempPath); } catch {}
+    throw e;
+  } finally {
+    try { closeSync(directory.fd); } catch {}
+  }
+}
+
+function _removeTodoRuntimeProjectState(userId, project) {
+  validateProjectName(project);
+  const projectDigest = createHash('sha256').update(project).digest('hex');
+  const parent = _openUserRuntimeDirectoryNoFollow(
+    userId, ['.coder-runtime', 'todos'], { create: false },
+  );
+  if (parent.kind === 'missing') return;
+  if (parent.kind !== 'opened') {
+    throw new Error(`Could not safely open the TODO runtime root (${parent.reason || parent.kind}).`);
+  }
+  const source = `/proc/self/fd/${parent.fd}/${projectDigest}`;
+  const tombstoneName = `.${projectDigest}.deleted-${randomBytes(6).toString('hex')}`;
+  const tombstone = `/proc/self/fd/${parent.fd}/${tombstoneName}`;
+  try {
+    try { lstatSync(source); }
+    catch (e) {
+      if (e?.code === 'ENOENT') return;
+      throw e;
+    }
+    renameSync(source, tombstone);
+    rmSync(tombstone, { recursive: true, force: true });
+  } finally {
+    try { closeSync(parent.fd); } catch {}
+  }
+}
+
+function _readTodosUnderProjectLock(context, userId, agentId, signal = null) {
   throwIfCancelled(signal);
-  mkdirSync(path.dirname(p), { recursive: true });
-  atomicWriteSync(p, JSON.stringify(legacy, null, 2));
-  return legacy;
+  const authoritative = _readAuthoritativeTodos(userId, context, agentId);
+  if (authoritative.kind === 'present') return authoritative.todos;
+
+  const candidates = [
+    {
+      segments: ['.openensemble', 'todos', _todoAgentFileName(userId, agentId)],
+      label: 'legacy per-agent TODO state',
+    },
+    {
+      segments: ['.openensemble', 'todos.json'],
+      label: 'legacy shared TODO state',
+    },
+  ];
+  for (const candidate of candidates) {
+    throwIfCancelled(signal);
+    const migrated = _readProjectTodoMigration(
+      context.dir, candidate.segments, candidate.label,
+    );
+    if (migrated.kind === 'missing') continue;
+    // Preserve an empty list as a migration marker for this exact agent.
+    throwIfCancelled(signal);
+    _writeAuthoritativeTodos(userId, context, agentId, migrated.todos);
+    return migrated.todos;
+  }
+  // Absence is also a completed migration result. Persist it so project code
+  // cannot inject a newly-created "legacy" plan after this agent's first read.
+  throwIfCancelled(signal);
+  _writeAuthoritativeTodos(userId, context, agentId, []);
+  return [];
 }
 
 function _renderTodos(todos) {
@@ -1837,19 +2305,11 @@ async function todoWrite(todos, userId, agentId, signal = null) {
   if (typeof todos === 'string') {
     try { todos = JSON.parse(todos); } catch { throw new Error('todos must be an array.'); }
   }
-  if (!Array.isArray(todos)) throw new Error('todos must be an array.');
-  const valid = ['pending', 'in_progress', 'completed'];
-  for (const t of todos) {
-    if (!t || typeof t.id !== 'string' || typeof t.content !== 'string' || !valid.includes(t.status)) {
-      throw new Error('Each todo needs id (string), content (string), and status (pending|in_progress|completed).');
-    }
-  }
+  _validatedTodos(todos);
   const context = getProjectContext(userId, agentId);
   return withProjectContextLock(userId, context, async () => {
     throwIfCancelled(signal);
-    const p = _todosPathForDir(context.dir, userId, agentId);
-    mkdirSync(path.dirname(p), { recursive: true });
-    atomicWriteSync(p, JSON.stringify(todos, null, 2));
+    _writeAuthoritativeTodos(userId, context, agentId, todos);
     return _renderTodos(todos);
   }, signal);
 }
@@ -1859,7 +2319,7 @@ async function todoRead(userId, agentId, signal = null) {
   const context = getProjectContext(userId, agentId);
   return withProjectContextLock(userId, context, async () => {
     throwIfCancelled(signal);
-    return _renderTodos(_readTodosUnlocked(context.dir, userId, agentId, signal));
+    return _renderTodos(_readTodosUnderProjectLock(context, userId, agentId, signal));
   }, signal);
 }
 
@@ -1964,6 +2424,7 @@ export async function* executeSkillTool(name, args, userId = 'default', agentId,
       case 'coder_start_server':   text = await startServer(args.command, args.port, userId, agentId, signal); break;
       case 'coder_stop_server':    text = await stopServer(userId, agentId); break;
       case 'coder_server_status':  text = await serverStatus(userId, agentId, args.lines); break;
+      case 'coder_clear_legacy_server_state': text = await clearLegacyServerState(userId, agentId, args.confirmed_restarted, signal); break;
       default: text = null;
     }
   } catch (e) {
