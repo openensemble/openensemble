@@ -2323,74 +2323,181 @@ async function todoRead(userId, agentId, signal = null) {
   }, signal);
 }
 
-// Match one project-relative path against a caller-supplied glob.
-//
-// Deliberately `path.matchesGlob` over a filesystem-walking glob helper: this
-// is pure string matching, so it cannot be induced to traverse a symlink the
-// sandboxed shell planted inside the checkout. The walk below stays the single
-// filesystem path, keeping the O_NOFOLLOW/`safePath` guarantees intact.
-function matchesProjectGlob(relativePath, pattern) {
-  try {
-    return path.matchesGlob(relativePath, pattern);
-  } catch (e) {
-    throw new Error(`Invalid glob pattern ${JSON.stringify(pattern)}: ${e.message}`);
+// ── Glob matching ────────────────────────────────────────────────────────────
+// Hand-rolled instead of `path.matchesGlob`, for two reasons:
+//   1. That helper only exists from Node 20.17/22.5, and OpenEnsemble supports
+//      Node >= 18 (README, install.sh MIN_NODE_MAJOR). On a supported install
+//      every non-empty pattern would throw "is not a function".
+//   2. It inherits minimatch's leading-dot exclusion, so `*.js` silently drops
+//      `.eslintrc.js`. `find -name` matched dotfiles and nothing documents an
+//      exclusion, so hidden files stay matchable here.
+// Character classes (`[abc]`) are treated literally rather than compiled, so no
+// caller-supplied text can reach the RegExp engine unescaped.
+const GLOB_MAX_PATTERN_LENGTH = 512;
+const GLOB_CACHE_LIMIT = 200;
+const _globCache = new Map();
+
+function globToRegExp(pattern) {
+  let out = '^';
+  let braceDepth = 0;
+  let i = 0;
+  while (i < pattern.length) {
+    const c = pattern[i];
+    if (c === '*') {
+      if (pattern[i + 1] === '*') {
+        // `**/` spans zero or more whole segments; a trailing `**` spans the rest.
+        // `[^/]+` (not `[^/]*`) keeps the repetition unambiguous — no nested
+        // quantifier that could backtrack pathologically.
+        if (pattern[i + 2] === '/') { out += '(?:[^/]+\\/)*'; i += 3; continue; }
+        out += '.*'; i += 2; continue;
+      }
+      out += '[^/]*'; i += 1; continue;
+    }
+    if (c === '?') { out += '[^/]'; i += 1; continue; }
+    if (c === '{') { out += '(?:'; braceDepth += 1; i += 1; continue; }
+    if (c === '}' && braceDepth > 0) { out += ')'; braceDepth -= 1; i += 1; continue; }
+    if (c === ',' && braceDepth > 0) { out += '|'; i += 1; continue; }
+    out += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    i += 1;
   }
+  if (braceDepth !== 0) throw new Error('unbalanced { }');
+  return new RegExp(`${out}$`);
+}
+
+function compileProjectGlob(pattern) {
+  if (typeof pattern !== 'string') throw new Error('pattern must be a string.');
+  if (!pattern.length) throw new Error('pattern must not be empty.');
+  if (pattern.length > GLOB_MAX_PATTERN_LENGTH) {
+    throw new Error(`pattern too long (max ${GLOB_MAX_PATTERN_LENGTH} characters).`);
+  }
+  const cached = _globCache.get(pattern);
+  if (cached) return cached;
+  let compiled;
+  try { compiled = globToRegExp(pattern); }
+  catch (e) { throw new Error(`Invalid glob pattern ${JSON.stringify(pattern)}: ${e.message}`); }
+  if (_globCache.size >= GLOB_CACHE_LIMIT) _globCache.clear();
+  _globCache.set(pattern, compiled);
+  return compiled;
+}
+
+// Bounds. The pattern branch used to inherit `find`'s 10s/512KiB limits; running
+// in-process, it has to impose its own or a pathological tree stalls the server.
+const LIST_MAX_ENTRIES = 50_000;
+const LIST_TIME_BUDGET_MS = 10_000;
+const LIST_MAX_OUTPUT_CHARS = 512 * 1024;
+// Depth is a stack guard, not a search limit: the old cap of 8 silently hid
+// `a/b/c/d/e/f/g/h/i/deep.js` from `**/*.js`. Hitting this is reported.
+const LIST_MAX_DEPTH = 64;
+
+function listPathSegments(directory) {
+  if (!directory) return [];
+  return String(directory).split('/').filter(segment => segment.length && segment !== '.');
+}
+
+function capListOutput(text) {
+  if (text.length <= LIST_MAX_OUTPUT_CHARS) return text;
+  return `${text.slice(0, LIST_MAX_OUTPUT_CHARS)}\n… output truncated at ${LIST_MAX_OUTPUT_CHARS} characters.`;
 }
 
 async function listFiles(directory, pattern, userId, agentId, signal = null) {
   throwIfCancelled(signal);
   const dir = getProjectDir(userId, agentId);
-  const base = directory ? safePath(dir, directory) : dir;
-  if (!existsSync(base)) throw new Error(`Directory not found: ${directory ?? '.'}`);
-  if (pattern != null && typeof pattern !== 'string') {
-    throw new Error('pattern must be a string.');
-  }
+  if (pattern != null && typeof pattern !== 'string') throw new Error('pattern must be a string.');
+  const matcher = pattern ? compileProjectGlob(pattern) : null;
 
-  // One traversal for both modes. The pattern branch used to shell out to
-  // `find -name`, which matches the BASENAME only — so every documented
-  // example (`**/*.js`, `src/**/*.ts`) silently returned "No files matched"
-  // on a project that did contain matches, which reads identically to an
-  // empty project. Filtering this walk honours the documented glob contract.
-  const listing = [];   // tree view, unpatterned mode
-  const matches = [];   // files matching `pattern`
-  async function walk(d, depth = 0) {
-    throwIfCancelled(signal);
-    if (depth > 8) return;
-    const entries = await readdir(d, { withFileTypes: true });
-    for (const e of entries) {
-      throwIfCancelled(signal);
-      if (e.name === '.git' || e.name === 'node_modules') continue;
-      const abs = path.join(d, e.name);
-      const rel = path.relative(dir, abs);
-      if (e.isDirectory()) {
-        listing.push(`📁 ${rel}/`);
-        await walk(abs, depth + 1);
-      } else {
-        listing.push(`   ${rel}`);
-        // Glob against the path relative to the directory being listed, so
-        // `directory:"src"` + `pattern:"*.jsx"` behaves as the caller expects,
-        // while the reported path stays project-relative as before.
-        if (pattern && matchesProjectGlob(path.relative(base, abs), pattern)) {
-          matches.push(rel);
+  // Descriptor-anchored traversal. The previous walk re-entered directories by
+  // PATHNAME after a single up-front check, so a concurrent process inside the
+  // project could swap an already-enumerated directory for a symlink and read
+  // files outside the checkout. Every descent here is an O_NOFOLLOW open
+  // relative to the parent's own descriptor, so a swapped entry fails instead
+  // of resolving.
+  const segments = listPathSegments(directory);
+  const opened = openProjectDirectoryNoFollow(dir, segments);
+  if (opened.kind === 'missing') throw new Error(`Directory not found: ${directory ?? '.'}`);
+  if (opened.kind !== 'opened') {
+    throw new Error(`Refusing to list ${directory ?? '.'}: ${opened.reason || opened.kind}`);
+  }
+  const displayPrefix = segments.length ? `${segments.join('/')}/` : '';
+
+  const listing = [];
+  const matches = [];
+  const deadline = Date.now() + LIST_TIME_BUDGET_MS;
+  let visited = 0;
+  let unreadable = 0;
+  let truncated = false;
+
+  async function walk(fd, relative, depth) {
+    let entries = null;
+    try {
+      entries = await readdir(`/proc/self/fd/${fd}`, { withFileTypes: true });
+    } catch {
+      // One unreadable directory must not discard every valid result found
+      // elsewhere — `find` reported what it could reach and so does this.
+      unreadable += 1;
+      return;
+    } finally {
+      if (entries === null) { try { closeSync(fd); } catch {} }
+    }
+    try {
+      entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const entry of entries) {
+        throwIfCancelled(signal);
+        if (truncated) break;
+        if (entry.name === '.git' || entry.name === 'node_modules') continue;
+        visited += 1;
+        if (visited > LIST_MAX_ENTRIES || Date.now() > deadline) { truncated = true; break; }
+
+        const rel = relative ? `${relative}/${entry.name}` : entry.name;
+        const shown = `${displayPrefix}${rel}`;
+
+        if (entry.isDirectory()) {
+          if (!matcher) listing.push(`📁 ${shown}/`);
+          if (depth + 1 > LIST_MAX_DEPTH) { truncated = true; break; }
+          let childFd = null;
+          try {
+            childFd = openSync(`/proc/self/fd/${fd}/${entry.name}`,
+              fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+          } catch {
+            // Unreadable, or swapped for a symlink between readdir and open.
+            unreadable += 1;
+            continue;
+          }
+          await walk(childFd, rel, depth + 1);
+          continue;
         }
+        // Match against the path relative to the LISTED directory, so
+        // directory:"src" + pattern:"*.jsx" behaves as written, while the
+        // reported path stays project-relative.
+        if (!matcher) listing.push(`   ${shown}`);
+        else if (entry.isFile() && matcher.test(rel)) matches.push(shown);
       }
+    } finally {
+      try { closeSync(fd); } catch {}
     }
   }
-  await walk(base);
 
-  if (pattern) {
-    if (!matches.length) {
-      // Never let "no match" read as "empty project" — that ambiguity is what
-      // sent agents off recreating files that already existed.
-      const scope = directory ? `"${directory}"` : 'the project root';
-      return `No files matched ${JSON.stringify(pattern)} under ${scope}. `
-        + `Patterns are matched against paths relative to that directory `
-        + `(use "**/" to cross directories, e.g. "**/*.js"). `
-        + `Call coder_list_files without a pattern to see everything.`;
-    }
-    return matches.sort().join('\n');
+  await walk(opened.fd, '', 0);
+
+  const notes = [];
+  if (unreadable) {
+    notes.push(`${unreadable} ${unreadable === 1 ? 'directory was' : 'directories were'} unreadable and skipped`);
   }
-  return listing.length ? listing.join('\n') : 'Empty directory.';
+  if (truncated) notes.push(`search stopped early after ${visited} entries`);
+  const suffix = notes.length ? `\n\n(${notes.join('; ')})` : '';
+
+  if (matcher) {
+    if (!matches.length) {
+      // Never let "no match" read as "empty project" — that ambiguity sent
+      // agents off recreating files that already existed.
+      const scope = directory ? JSON.stringify(directory) : 'the project root';
+      return `No files matched ${JSON.stringify(pattern)} under ${scope}. `
+        + 'Patterns match paths relative to that directory; use "**/" to cross '
+        + 'directories (e.g. "**/*.js"). Call coder_list_files without a pattern '
+        + `to see everything.${suffix}`;
+    }
+    return capListOutput(matches.sort().join('\n')) + suffix;
+  }
+  return (listing.length ? capListOutput(listing.join('\n')) : 'Empty directory.') + suffix;
 }
 
 async function searchFiles(pattern, searchPath, glob, userId, agentId, signal = null) {
