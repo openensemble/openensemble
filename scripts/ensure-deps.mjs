@@ -24,10 +24,16 @@ import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import {
+  dependencyFingerprint,
+  markDependencyStateUncertain,
+  readDependencyStatus,
+  recordInstalledDependencyState,
+  writeDependencyStatus,
+} from '../lib/dependency-state.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const STATUS_PATH = path.join(ROOT, 'dep-status.json');
 const LOG_PATH = path.join(ROOT, 'last-dep-install.log');
 
 // A generous but bounded ceiling: native modules in this project
@@ -39,7 +45,7 @@ function log(...a) { console.log('[ensure-deps]', ...a); }
 
 function writeStatus(status) {
   try {
-    fs.writeFileSync(STATUS_PATH, JSON.stringify(status, null, 2));
+    writeDependencyStatus(status, ROOT);
   } catch (e) {
     log(`Could not write dep-status.json: ${e.message}`);
   }
@@ -78,24 +84,94 @@ function listMissing() {
   return missing;
 }
 
+const markUncertainOnly = process.argv.includes('--mark-uncertain');
+if (markUncertainOnly) {
+  try {
+    markDependencyStateUncertain({
+      source: 'external-dependency-install',
+      reason: 'Dependency installation started but has not completed successfully.',
+    }, ROOT);
+    log('Marked dependency state as pending reconciliation.');
+  } catch (error) {
+    // Like --record-installed, this marker is best-effort. The package manager
+    // command still needs to run; a later pre-start check will retry if needed.
+    log(`Could not mark dependency state as uncertain: ${error.message}`);
+  }
+  process.exit(0);
+}
+
 const missing = listMissing();
+const expectedFingerprint = dependencyFingerprint(ROOT);
+const previousStatus = readDependencyStatus(ROOT);
+const recordOnly = process.argv.includes('--record-installed');
 
 if (missing === null) {
   process.exit(0);
 }
 
-if (!missing.length) {
-  writeStatus({ ok: true, checkedAt: new Date().toISOString(), missing: [] });
+if (recordOnly) {
+  if (missing.length) {
+    writeStatus({
+      ok: false,
+      source: 'record-installed',
+      failedAt: new Date().toISOString(),
+      reason: 'Cannot record dependency state while direct dependencies are missing.',
+      missing,
+      dependencyFingerprint: previousStatus?.dependencyFingerprint ?? null,
+      expectedDependencyFingerprint: expectedFingerprint,
+    });
+    // Installers and update wrappers use this mode after npm succeeds. The
+    // marker is an optimization, not part of the installed dependency tree,
+    // so a missing package or unwritable status file must not turn a successful
+    // npm install into a failed upgrade. Pre-start will retry reconciliation.
+    process.exit(0);
+  }
+  try {
+    recordInstalledDependencyState({ recordedAt: new Date().toISOString(), missing: [] }, ROOT);
+    log('Recorded installed dependency state.');
+    process.exit(0);
+  } catch (error) {
+    log(`Could not record installed dependency state: ${error.message}`);
+    process.exit(0);
+  }
+}
+
+const fingerprintChanged = previousStatus?.dependencyFingerprint !== expectedFingerprint;
+if (!missing.length && !fingerprintChanged && previousStatus?.ok === true) {
+  writeStatus({
+    ...previousStatus,
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    missing: [],
+    dependencyFingerprint: expectedFingerprint,
+  });
   process.exit(0);
 }
 
-log(`Missing ${missing.length} dependencies: ${missing.slice(0, 6).join(', ')}${missing.length > 6 ? '…' : ''}`);
-log('Running npm install --prefer-offline --no-audit --no-fund…');
+if (missing.length) {
+  log(`Missing ${missing.length} dependencies: ${missing.slice(0, 6).join(', ')}${missing.length > 6 ? '…' : ''}`);
+}
+if (fingerprintChanged) {
+  log('Dependency manifests changed since the last successful install.');
+}
+if (previousStatus?.ok === false) {
+  log('The previous dependency install was incomplete; reconciling again.');
+}
+log('Running npm install --prefer-offline --no-save --no-audit --no-fund…');
+
+try {
+  markDependencyStateUncertain({
+    source: 'pre-start-reconciliation',
+    reason: 'Dependency reconciliation started but has not completed successfully.',
+  }, ROOT);
+} catch (error) {
+  log(`Could not mark dependency state as uncertain: ${error.message}`);
+}
 
 const { cmd, env } = npmInvocation();
 const r = spawnSync(
   cmd,
-  ['install', '--prefer-offline', '--no-audit', '--no-fund', '--no-progress'],
+  ['install', '--prefer-offline', '--no-save', '--no-audit', '--no-fund', '--no-progress'],
   { cwd: ROOT, env, encoding: 'utf8', timeout: INSTALL_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 },
 );
 
@@ -110,7 +186,20 @@ const stillMissing = listMissing() || [];
 
 if (r.status === 0 && stillMissing.length === 0) {
   log('Dependencies installed.');
-  writeStatus({ ok: true, installedAt: new Date().toISOString(), installed: missing });
+  try {
+    recordInstalledDependencyState({ installed: missing, missing: [] }, ROOT);
+  } catch (error) {
+    log(`Dependencies installed, but state could not be recorded: ${error.message}`);
+    writeStatus({
+      ok: false,
+      source: 'pre-start-reconciliation',
+      failedAt: new Date().toISOString(),
+      reason: `Dependencies installed, but state could not be recorded: ${error.message}`,
+      missing: [],
+      dependencyFingerprint: previousStatus?.dependencyFingerprint ?? null,
+      expectedDependencyFingerprint: expectedFingerprint,
+    });
+  }
   process.exit(0);
 }
 
@@ -127,11 +216,14 @@ const reason = timedOut
 log(`${reason}. ${stillMissing.length} dependencies still missing: ${stillMissing.slice(0, 6).join(', ')}${stillMissing.length > 6 ? '…' : ''}`);
 writeStatus({
   ok: false,
+  source: 'pre-start-reconciliation',
   failedAt: new Date().toISOString(),
   reason,
   npmExit: r.status ?? null,
   timedOut: !!timedOut,
   missing: stillMissing,
+  dependencyFingerprint: previousStatus?.dependencyFingerprint ?? null,
+  expectedDependencyFingerprint: expectedFingerprint,
   logTail: combined.split('\n').slice(-40).join('\n'),
 });
 process.exit(0);

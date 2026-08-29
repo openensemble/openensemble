@@ -11,6 +11,7 @@
 import os from 'os';
 import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
+import { loadTransformers } from '../lib/transformers-runtime-policy.mjs';
 
 const MODEL_ID = 'Xenova/nomic-embed-text-v1';
 const CACHE_DIR = path.join(USERS_DIR, '..', 'models');
@@ -21,7 +22,7 @@ let _pipelineReady = false;
 export async function initBuiltinEmbed() {
   if (_pipelinePromise) return _pipelinePromise;
   _pipelinePromise = (async () => {
-    const { pipeline, env } = await import('@huggingface/transformers');
+    const { pipeline, env } = await loadTransformers();
     env.cacheDir = CACHE_DIR;
     // Allow local cache hits; don't hit the hub at runtime if weights already
     // downloaded during `npm install`. If cache is missing, transformers.js

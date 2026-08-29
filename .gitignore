@@ -163,9 +163,3 @@ wake-captures-manual/
 tv-app/
 # dated firmware/source backups (foo.bak-0.2.xx)
 *.bak-*
-# Device firmware images — fetched from GitHub Releases at install time by
-# scripts/fetch-voice-firmware.mjs, never committed. Each is ~2.4 MB and a new
-# one lands every publish, so committing them grew .git by ~2.4 MB per release
-# with no way to reclaim it short of a history rewrite. manifest.json stays
-# tracked: it pins the version and the sha256 the fetcher verifies against.
-public/firmware/**/*.bin

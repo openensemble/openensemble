@@ -36,6 +36,9 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      - name: Verify bundled voice firmware
+        run: node scripts/fetch-voice-firmware.mjs --check
+
       - name: Install deps (no model fetch)
         run: npm ci --ignore-scripts
 

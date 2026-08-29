@@ -11,6 +11,7 @@
  */
 
 import path from 'path';
+import { loadTransformers } from '../lib/transformers-runtime-policy.mjs';
 
 const MODEL_PATH = process.argv[2];
 if (!MODEL_PATH) {
@@ -27,7 +28,7 @@ const TESTS = [
 ];
 
 async function main() {
-  const { pipeline } = await import('@huggingface/transformers');
+  const { pipeline } = await loadTransformers();
   console.log(`[verify] loading ${MODEL_PATH}…`);
   const pipe = await pipeline('text-generation', path.resolve(MODEL_PATH));
 

@@ -13,14 +13,16 @@ import {
 import { readFile, readdir, stat } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { execFile, spawn, execSync } from 'child_process';
+import { execFile, execFileSync, spawn, execSync } from 'child_process';
 import { createHash, randomBytes } from 'crypto';
 import { getLanAddress } from '../../discovery.mjs';
 import { stableAgentRef } from '../../lib/agent-ref.mjs';
 import { withFileLock, withFileLockSync } from '../../lib/file-lock.mjs';
 import { atomicWriteSync } from '../../routes/_helpers/io-lock.mjs';
+import { compileProjectGlob } from './project-glob.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const CODER_LIST_WALKER = path.join(BASE_DIR, 'scripts', 'coder-list-walk.py');
 
 // ── Sandbox detection (bubblewrap) ───────────────────────────────────────────
 // Shell commands are wrapped in bwrap so the coder process can only see its
@@ -31,6 +33,21 @@ const BWRAP_BIN = (() => {
     const p = execSync('command -v bwrap', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     return p || null;
   } catch { return null; }
+})();
+const PYTHON3_BIN = (() => {
+  try {
+    const executable = execSync('command -v python3', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (!executable) return null;
+    execFileSync(executable, [
+      '-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 7) else 1)',
+    ], { stdio: 'ignore' });
+    return executable;
+  } catch {
+    return null;
+  }
 })();
 if (!BWRAP_BIN) {
   console.warn('[coder] bubblewrap (bwrap) not found — coder shell commands will be refused. Install with: sudo apt install bubblewrap');
@@ -2323,181 +2340,375 @@ async function todoRead(userId, agentId, signal = null) {
   }, signal);
 }
 
-// ── Glob matching ────────────────────────────────────────────────────────────
-// Hand-rolled instead of `path.matchesGlob`, for two reasons:
-//   1. That helper only exists from Node 20.17/22.5, and OpenEnsemble supports
-//      Node >= 18 (README, install.sh MIN_NODE_MAJOR). On a supported install
-//      every non-empty pattern would throw "is not a function".
-//   2. It inherits minimatch's leading-dot exclusion, so `*.js` silently drops
-//      `.eslintrc.js`. `find -name` matched dotfiles and nothing documents an
-//      exclusion, so hidden files stay matchable here.
-// Character classes (`[abc]`) are treated literally rather than compiled, so no
-// caller-supplied text can reach the RegExp engine unescaped.
-const GLOB_MAX_PATTERN_LENGTH = 512;
-const GLOB_CACHE_LIMIT = 200;
-const _globCache = new Map();
-
-function globToRegExp(pattern) {
-  let out = '^';
-  let braceDepth = 0;
-  let i = 0;
-  while (i < pattern.length) {
-    const c = pattern[i];
-    if (c === '*') {
-      if (pattern[i + 1] === '*') {
-        // `**/` spans zero or more whole segments; a trailing `**` spans the rest.
-        // `[^/]+` (not `[^/]*`) keeps the repetition unambiguous — no nested
-        // quantifier that could backtrack pathologically.
-        if (pattern[i + 2] === '/') { out += '(?:[^/]+\\/)*'; i += 3; continue; }
-        out += '.*'; i += 2; continue;
-      }
-      out += '[^/]*'; i += 1; continue;
-    }
-    if (c === '?') { out += '[^/]'; i += 1; continue; }
-    if (c === '{') { out += '(?:'; braceDepth += 1; i += 1; continue; }
-    if (c === '}' && braceDepth > 0) { out += ')'; braceDepth -= 1; i += 1; continue; }
-    if (c === ',' && braceDepth > 0) { out += '|'; i += 1; continue; }
-    out += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    i += 1;
-  }
-  if (braceDepth !== 0) throw new Error('unbalanced { }');
-  return new RegExp(`${out}$`);
-}
-
-function compileProjectGlob(pattern) {
-  if (typeof pattern !== 'string') throw new Error('pattern must be a string.');
-  if (!pattern.length) throw new Error('pattern must not be empty.');
-  if (pattern.length > GLOB_MAX_PATTERN_LENGTH) {
-    throw new Error(`pattern too long (max ${GLOB_MAX_PATTERN_LENGTH} characters).`);
-  }
-  const cached = _globCache.get(pattern);
-  if (cached) return cached;
-  let compiled;
-  try { compiled = globToRegExp(pattern); }
-  catch (e) { throw new Error(`Invalid glob pattern ${JSON.stringify(pattern)}: ${e.message}`); }
-  if (_globCache.size >= GLOB_CACHE_LIMIT) _globCache.clear();
-  _globCache.set(pattern, compiled);
-  return compiled;
-}
-
-// Bounds. The pattern branch used to inherit `find`'s 10s/512KiB limits; running
-// in-process, it has to impose its own or a pathological tree stalls the server.
+// ── Bounded, descriptor-anchored project listing ─────────────────────────────
+// Python is an install prerequisite and exposes portable scandir(fd) + openat
+// APIs that Node 18 does not. The helper receives only an already-open project
+// root, streams length-prefixed records, and never follows descendant symlinks.
 const LIST_MAX_ENTRIES = 50_000;
 const LIST_TIME_BUDGET_MS = 10_000;
-const LIST_MAX_OUTPUT_CHARS = 512 * 1024;
-// Depth is a stack guard, not a search limit: the old cap of 8 silently hid
-// `a/b/c/d/e/f/g/h/i/deep.js` from `**/*.js`. Hitting this is reported.
+const LIST_MAX_OUTPUT_BYTES = 512 * 1024;
 const LIST_MAX_DEPTH = 64;
+const LIST_WALKER_FRAME_MAX_BYTES = 1024 * 1024;
+const LIST_WALKER_HARD_GRACE_MS = 500;
+const LIST_WALKER_STDERR_MAX_BYTES = 8 * 1024;
 
-function listPathSegments(directory) {
-  if (!directory) return [];
-  return String(directory).split('/').filter(segment => segment.length && segment !== '.');
+function resolveListStart(context, directory) {
+  if (directory != null && typeof directory !== 'string') {
+    throw new Error('directory must be a string.');
+  }
+  const requested = directory ? safePath(context.dir, directory) : context.dir;
+  let canonical;
+  try {
+    canonical = realpathSync(requested);
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error(`Directory not found: ${directory ?? '.'}`);
+    throw error;
+  }
+  if (canonical !== context.dir && !canonical.startsWith(context.dir + path.sep)) {
+    throw new Error(`Directory ${JSON.stringify(directory)} resolves outside the active project.`);
+  }
+  if (!statSync(canonical).isDirectory()) throw new Error(`Not a directory: ${directory ?? '.'}`);
+
+  const canonicalRelative = path.relative(context.dir, canonical);
+  const segments = canonicalRelative ? canonicalRelative.split(path.sep).filter(Boolean) : [];
+  if (!segments.every(segment => segment !== '.' && segment !== '..'
+    && !segment.includes(path.sep) && !segment.includes('\0'))) {
+    throw new Error(`Invalid directory: ${directory ?? '.'}`);
+  }
+  const logicalRelative = path.relative(context.dir, requested);
+  const displayPrefix = logicalRelative ? `${logicalRelative.split(path.sep).join('/')}/` : '';
+  return { segments, displayPrefix };
 }
 
-function capListOutput(text) {
-  if (text.length <= LIST_MAX_OUTPUT_CHARS) return text;
-  return `${text.slice(0, LIST_MAX_OUTPUT_CHARS)}\n… output truncated at ${LIST_MAX_OUTPUT_CHARS} characters.`;
+function openListProjectRoot(context) {
+  const opened = openProjectDirectoryNoFollow(context.dir, []);
+  if (opened.kind !== 'opened') {
+    throw new Error(`Could not safely open the active project (${opened.reason || opened.kind}).`);
+  }
+  const rootStat = fstatSync(opened.fd);
+  const identity = `${rootStat.dev}:${rootStat.ino}:${rootStat.birthtimeMs}`;
+  if (identity !== context.identity) {
+    try { closeSync(opened.fd); } catch {}
+    throw new Error(`Project "${context.project}" was replaced while listing files. Retry.`);
+  }
+  return opened.fd;
+}
+
+function emptyWalkerSummary() {
+  return {
+    visited: 0,
+    entry_limit: false,
+    time_limit: false,
+    unreadable_directories: 0,
+    unreadable_entries: 0,
+    depth_skipped: 0,
+  };
+}
+
+function validatedWalkerSummary(value) {
+  if (!value || typeof value !== 'object') throw new Error('walker returned an invalid summary');
+  const summary = emptyWalkerSummary();
+  for (const key of ['visited', 'unreadable_directories', 'unreadable_entries', 'depth_skipped']) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0) {
+      throw new Error(`walker returned an invalid ${key}`);
+    }
+    summary[key] = value[key];
+  }
+  for (const key of ['entry_limit', 'time_limit']) {
+    if (typeof value[key] !== 'boolean') throw new Error(`walker returned an invalid ${key}`);
+    summary[key] = value[key];
+  }
+  return summary;
+}
+
+function validWalkerPath(relative) {
+  if (!relative || relative.includes('\0') || path.posix.isAbsolute(relative)) return false;
+  return relative.split('/').every(segment => segment && segment !== '.' && segment !== '..');
+}
+
+function escapeListedPath(value) {
+  let output = '';
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (character === '\\') {
+      output += '\\\\';
+    } else if (character === '\n') {
+      output += '\\n';
+    } else if (character === '\r') {
+      output += '\\r';
+    } else if (character === '\t') {
+      output += '\\t';
+    } else if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)
+      || codePoint === 0x2028 || codePoint === 0x2029
+      || codePoint === 0x061c || codePoint === 0x200e || codePoint === 0x200f
+      || (codePoint >= 0x202a && codePoint <= 0x202e)
+      || (codePoint >= 0x2066 && codePoint <= 0x2069)) {
+      output += `\\u{${codePoint.toString(16).padStart(4, '0')}}`;
+    } else {
+      output += character;
+    }
+  }
+  return output;
+}
+
+function runProjectListWalker(context, segments, signal, onEntry) {
+  if (!PYTHON3_BIN) {
+    return Promise.reject(new Error('Python 3.7 or newer is required for safe project listing.'));
+  }
+  let rootFd;
+  try { rootFd = openListProjectRoot(context); }
+  catch (error) { return Promise.reject(error); }
+
+  let child;
+  try {
+    child = spawn(PYTHON3_BIN, [
+      '-I', '-S', CODER_LIST_WALKER,
+      String(LIST_MAX_ENTRIES), String(LIST_MAX_DEPTH), String(LIST_TIME_BUDGET_MS),
+      ...segments,
+    ], { stdio: ['ignore', 'pipe', 'pipe', rootFd] });
+  } catch (error) {
+    try { closeSync(rootFd); } catch {}
+    return Promise.reject(error);
+  }
+  try { closeSync(rootFd); } catch {}
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pending = Buffer.alloc(0);
+    let summary = null;
+    let helperError = null;
+    let callbackError = null;
+    let protocolError = null;
+    let stderr = '';
+    let timedOut = false;
+    let consumerStopped = false;
+    let abortKillTimer = null;
+
+    const hardTimer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch {}
+    }, LIST_TIME_BUDGET_MS + LIST_WALKER_HARD_GRACE_MS);
+    hardTimer.unref?.();
+
+    const cleanup = () => {
+      clearTimeout(hardTimer);
+      if (abortKillTimer) clearTimeout(abortKillTimer);
+      signal?.removeEventListener?.('abort', onAbort);
+    };
+    const settle = (error, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const stopChild = () => { try { child.kill('SIGTERM'); } catch {} };
+    const onAbort = () => {
+      stopChild();
+      abortKillTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 250);
+      abortKillTimer.unref?.();
+    };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+
+    const failProtocol = (message) => {
+      protocolError ||= new Error(`Project-list walker protocol error: ${message}`);
+      stopChild();
+    };
+    const handleFrame = (type, payload) => {
+      if (consumerStopped || protocolError) return;
+      if (type === 0x44 || type === 0x46 || type === 0x4f) { // D / F / O
+        if (summary) return failProtocol('entry received after summary');
+        const relative = payload.toString('utf8');
+        if (!validWalkerPath(relative)) return failProtocol('unsafe entry path');
+        try {
+          if (onEntry(String.fromCharCode(type), relative) === false) {
+            consumerStopped = true;
+            stopChild();
+          }
+        } catch (error) {
+          callbackError = error;
+          stopChild();
+        }
+        return;
+      }
+      if (type === 0x53) { // S
+        if (summary) return failProtocol('duplicate summary');
+        try { summary = validatedWalkerSummary(JSON.parse(payload.toString('utf8'))); }
+        catch (error) { failProtocol(error.message); }
+        return;
+      }
+      if (type === 0x45) { helperError = payload.toString('utf8') || 'unknown walker failure'; return; } // E
+      failProtocol(`unknown frame type ${type}`);
+    };
+
+    child.stdout.on('data', (chunk) => {
+      if (settled || protocolError) return;
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let offset = 0;
+      while (pending.length - offset >= 5) {
+        const type = pending[offset];
+        const length = pending.readUInt32BE(offset + 1);
+        if (length > LIST_WALKER_FRAME_MAX_BYTES) {
+          failProtocol(`oversized frame (${length} bytes)`);
+          break;
+        }
+        if (pending.length - offset < 5 + length) break;
+        handleFrame(type, pending.subarray(offset + 5, offset + 5 + length));
+        offset += 5 + length;
+        if (consumerStopped || protocolError || callbackError) break;
+      }
+      pending = offset ? pending.subarray(offset) : pending;
+      if (pending.length > LIST_WALKER_FRAME_MAX_BYTES + 5) failProtocol('oversized buffered frame');
+    });
+    child.stderr.on('data', (chunk) => {
+      if (Buffer.byteLength(stderr) >= LIST_WALKER_STDERR_MAX_BYTES) return;
+      stderr += chunk.toString('utf8');
+      if (Buffer.byteLength(stderr) > LIST_WALKER_STDERR_MAX_BYTES) {
+        stderr = Buffer.from(stderr).subarray(0, LIST_WALKER_STDERR_MAX_BYTES).toString('utf8');
+      }
+    });
+    child.once('error', error => settle(error));
+    child.once('close', (code, processSignal) => {
+      if (signal?.aborted) return settle(cancellationError(signal));
+      if (callbackError) return settle(callbackError);
+      if (protocolError) return settle(protocolError);
+      if (helperError) return settle(new Error(`Project-list walker failed: ${helperError}`));
+      if (timedOut) {
+        const partial = summary || emptyWalkerSummary();
+        partial.time_limit = true;
+        return settle(null, partial);
+      }
+      if (consumerStopped) return settle(null, summary || emptyWalkerSummary());
+      if (pending.length) return settle(new Error('Project-list walker returned a truncated frame.'));
+      if (code !== 0 || processSignal) {
+        const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
+        return settle(new Error(`Project-list walker exited unexpectedly (${code ?? processSignal})${detail}`));
+      }
+      if (!summary) return settle(new Error('Project-list walker returned no completion summary.'));
+      return settle(null, summary);
+    });
+  });
+}
+
+function addBoundedRecord(records, state, sortKey, line) {
+  const lineBytes = Buffer.byteLength(line, 'utf8');
+  const extra = lineBytes + (records.length ? 1 : 0);
+  if (state.bodyBytes + extra > LIST_MAX_OUTPUT_BYTES) {
+    state.outputLimit = true;
+    return false;
+  }
+  records.push({ sortKey, line, lineBytes });
+  state.bodyBytes += extra;
+  return true;
+}
+
+function incompleteReasons(state) {
+  const reasons = [];
+  if (state.timeLimit) reasons.push('the 10-second time limit was reached');
+  if (state.entryLimit) reasons.push(`the ${LIST_MAX_ENTRIES.toLocaleString()}-entry limit was reached`);
+  if (state.outputLimit) reasons.push('the 512 KiB output limit was reached');
+  if (state.unreadableDirectories) {
+    reasons.push(`${state.unreadableDirectories} ${state.unreadableDirectories === 1 ? 'directory' : 'directories'} could not be read and ${state.unreadableDirectories === 1 ? 'was' : 'were'} skipped`);
+  }
+  if (state.unreadableEntries) {
+    reasons.push(`${state.unreadableEntries} ${state.unreadableEntries === 1 ? 'entry' : 'entries'} disappeared, could not be inspected, or could not be represented safely`);
+  }
+  if (state.depthSkipped) {
+    reasons.push(`${state.depthSkipped} ${state.depthSkipped === 1 ? 'directory' : 'directories'} exceeded the ${LIST_MAX_DEPTH}-level depth guard`);
+  }
+  return reasons;
+}
+
+function renderBoundedRecords(records, state, noticeForReasons) {
+  records.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
+  let reasons = incompleteReasons(state);
+  let notice = reasons.length ? noticeForReasons(reasons) : '';
+  let noticeBytes = notice ? Buffer.byteLength(notice, 'utf8') + (records.length ? 2 : 0) : 0;
+  if (state.bodyBytes + noticeBytes > LIST_MAX_OUTPUT_BYTES && !state.outputLimit) {
+    state.outputLimit = true;
+    reasons = incompleteReasons(state);
+    notice = noticeForReasons(reasons);
+    noticeBytes = Buffer.byteLength(notice, 'utf8') + (records.length ? 2 : 0);
+  }
+  while (records.length && state.bodyBytes + noticeBytes > LIST_MAX_OUTPUT_BYTES) {
+    const removed = records.pop();
+    state.bodyBytes -= removed.lineBytes + (records.length ? 1 : 0);
+    if (!state.outputLimit) state.outputLimit = true;
+    reasons = incompleteReasons(state);
+    notice = noticeForReasons(reasons);
+    noticeBytes = Buffer.byteLength(notice, 'utf8') + (records.length ? 2 : 0);
+  }
+  const body = records.map(record => record.line).join('\n');
+  return body + (notice ? `${body ? '\n\n' : ''}${notice}` : '');
 }
 
 async function listFiles(directory, pattern, userId, agentId, signal = null) {
   throwIfCancelled(signal);
-  const dir = getProjectDir(userId, agentId);
+  const context = getProjectContext(userId, agentId);
   if (pattern != null && typeof pattern !== 'string') throw new Error('pattern must be a string.');
-  const matcher = pattern ? compileProjectGlob(pattern) : null;
+  const hasPattern = pattern != null;
+  const matcher = hasPattern ? compileProjectGlob(pattern) : null;
+  const { segments, displayPrefix } = resolveListStart(context, directory);
+  const records = [];
+  const state = {
+    bodyBytes: 0,
+    outputLimit: false,
+    timeLimit: false,
+    entryLimit: false,
+    unreadableDirectories: 0,
+    unreadableEntries: 0,
+    depthSkipped: 0,
+  };
 
-  // Descriptor-anchored traversal. The previous walk re-entered directories by
-  // PATHNAME after a single up-front check, so a concurrent process inside the
-  // project could swap an already-enumerated directory for a symlink and read
-  // files outside the checkout. Every descent here is an O_NOFOLLOW open
-  // relative to the parent's own descriptor, so a swapped entry fails instead
-  // of resolving.
-  const segments = listPathSegments(directory);
-  const opened = openProjectDirectoryNoFollow(dir, segments);
-  if (opened.kind === 'missing') throw new Error(`Directory not found: ${directory ?? '.'}`);
-  if (opened.kind !== 'opened') {
-    throw new Error(`Refusing to list ${directory ?? '.'}: ${opened.reason || opened.kind}`);
-  }
-  const displayPrefix = segments.length ? `${segments.join('/')}/` : '';
-
-  const listing = [];
-  const matches = [];
-  const deadline = Date.now() + LIST_TIME_BUDGET_MS;
-  let visited = 0;
-  let unreadable = 0;
-  let truncated = false;
-
-  async function walk(fd, relative, depth) {
-    let entries = null;
-    try {
-      entries = await readdir(`/proc/self/fd/${fd}`, { withFileTypes: true });
-    } catch {
-      // One unreadable directory must not discard every valid result found
-      // elsewhere — `find` reported what it could reach and so does this.
-      unreadable += 1;
-      return;
-    } finally {
-      if (entries === null) { try { closeSync(fd); } catch {} }
+  const summary = await runProjectListWalker(context, segments, signal, (kind, relative) => {
+    throwIfCancelled(signal);
+    const shown = `${displayPrefix}${relative}`;
+    const escapedShown = escapeListedPath(shown);
+    if (hasPattern) {
+      if (kind !== 'F' || !matcher.test(relative)) return true;
+      return addBoundedRecord(records, state, shown, escapedShown);
     }
-    try {
-      entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-      for (const entry of entries) {
-        throwIfCancelled(signal);
-        if (truncated) break;
-        if (entry.name === '.git' || entry.name === 'node_modules') continue;
-        visited += 1;
-        if (visited > LIST_MAX_ENTRIES || Date.now() > deadline) { truncated = true; break; }
+    const line = kind === 'D' ? `📁 ${escapedShown}/` : `   ${escapedShown}`;
+    return addBoundedRecord(records, state, shown, line);
+  });
+  state.timeLimit ||= summary.time_limit;
+  state.entryLimit ||= summary.entry_limit;
+  state.unreadableDirectories += summary.unreadable_directories;
+  state.unreadableEntries += summary.unreadable_entries;
+  state.depthSkipped += summary.depth_skipped;
 
-        const rel = relative ? `${relative}/${entry.name}` : entry.name;
-        const shown = `${displayPrefix}${rel}`;
-
-        if (entry.isDirectory()) {
-          if (!matcher) listing.push(`📁 ${shown}/`);
-          if (depth + 1 > LIST_MAX_DEPTH) { truncated = true; break; }
-          let childFd = null;
-          try {
-            childFd = openSync(`/proc/self/fd/${fd}/${entry.name}`,
-              fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
-          } catch {
-            // Unreadable, or swapped for a symlink between readdir and open.
-            unreadable += 1;
-            continue;
-          }
-          await walk(childFd, rel, depth + 1);
-          continue;
-        }
-        // Match against the path relative to the LISTED directory, so
-        // directory:"src" + pattern:"*.jsx" behaves as written, while the
-        // reported path stays project-relative.
-        if (!matcher) listing.push(`   ${shown}`);
-        else if (entry.isFile() && matcher.test(rel)) matches.push(shown);
-      }
-    } finally {
-      try { closeSync(fd); } catch {}
+  const reasons = incompleteReasons(state);
+  const scope = directory ? JSON.stringify(directory) : 'the project root';
+  if (hasPattern) {
+    if (!records.length && reasons.length) {
+      return `No matching files were returned from the portion searched for ${JSON.stringify(pattern)} under ${scope}. `
+        + `Search incomplete: ${reasons.join('; ')}. Matching files may exist in unsearched locations; `
+        + 'retry with a narrower directory or pattern.';
     }
-  }
-
-  await walk(opened.fd, '', 0);
-
-  const notes = [];
-  if (unreadable) {
-    notes.push(`${unreadable} ${unreadable === 1 ? 'directory was' : 'directories were'} unreadable and skipped`);
-  }
-  if (truncated) notes.push(`search stopped early after ${visited} entries`);
-  const suffix = notes.length ? `\n\n(${notes.join('; ')})` : '';
-
-  if (matcher) {
-    if (!matches.length) {
-      // Never let "no match" read as "empty project" — that ambiguity sent
-      // agents off recreating files that already existed.
-      const scope = directory ? JSON.stringify(directory) : 'the project root';
+    if (!records.length) {
       return `No files matched ${JSON.stringify(pattern)} under ${scope}. `
         + 'Patterns match paths relative to that directory; use "**/" to cross '
-        + 'directories (e.g. "**/*.js"). Call coder_list_files without a pattern '
-        + `to see everything.${suffix}`;
+        + 'directories (e.g. "**/*.js"). Nested .git and node_modules trees are excluded; set '
+        + '`directory` to one of those directories to inspect it explicitly. Call coder_list_files '
+        + 'without a pattern for an unfiltered listing (large listings may still be partial).';
     }
-    return capListOutput(matches.sort().join('\n')) + suffix;
+    return renderBoundedRecords(
+      records,
+      state,
+      currentReasons => `(Partial results: ${currentReasons.join('; ')}. Additional matching files may exist.)`,
+    );
   }
-  return (listing.length ? capListOutput(listing.join('\n')) : 'Empty directory.') + suffix;
+  if (!records.length && reasons.length) {
+    return `No entries were returned from the portion listed under ${scope}, but the listing is incomplete: `
+      + `${reasons.join('; ')}. Files or directories may exist in unsearched locations.`;
+  }
+  if (!records.length) return 'Empty directory.';
+  return renderBoundedRecords(
+    records,
+    state,
+    currentReasons => `(Partial listing: ${currentReasons.join('; ')}. Additional files or directories may exist.)`,
+  );
 }
 
 async function searchFiles(pattern, searchPath, glob, userId, agentId, signal = null) {

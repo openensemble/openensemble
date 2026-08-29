@@ -34,6 +34,7 @@ const SERVER_ENTRY = process.env.OE_LAUNCH_TARGET
 const ENSURE_DEPS = path.join(SCRIPTS_DIR, 'ensure-deps.mjs');
 const STATUS_PATH = path.join(ROOT, 'dep-status.json');
 const PORT = Number(process.env.PORT) || 3737;
+const DEPENDENCY_RETRY_COOLDOWN_MS = 60_000;
 
 const DEP_ERROR_CODES = new Set(['ERR_MODULE_NOT_FOUND', 'ERR_DLOPEN_FAILED']);
 function isDependencyLoadFailure(err) {
@@ -48,6 +49,33 @@ function readStatus() {
 }
 
 // ── main ─────────────────────────────────────────────────────────────────
+// start.sh and the systemd unit normally run this check before launch, but a
+// standalone in-app update re-execs launch.mjs directly. Keep the built-in-only
+// launcher self-sufficient so lockfile-only security updates are reconciled on
+// that first restart too. In the normal paths this is a cheap fingerprint hit.
+const priorDependencyStatus = readStatus();
+const priorFailureAt = Date.parse(priorDependencyStatus?.failedAt || '');
+const dependencyFailureIsRecent = priorDependencyStatus?.ok === false
+  && priorDependencyStatus?.source === 'pre-start-reconciliation'
+  && Number.isFinite(priorFailureAt)
+  && Date.now() - priorFailureAt < DEPENDENCY_RETRY_COOLDOWN_MS;
+if (dependencyFailureIsRecent) {
+  log('dependency preflight already failed recently; skipping an immediate duplicate install attempt.');
+} else {
+  try {
+    const dependencyCheck = spawnSync(process.execPath, [ENSURE_DEPS], {
+      cwd: ROOT,
+      stdio: 'inherit',
+      env: process.env,
+    });
+    if (dependencyCheck.error) {
+      log(`dependency preflight could not run: ${dependencyCheck.error.message}`);
+    }
+  } catch (error) {
+    log(`dependency preflight could not run: ${error.message}`);
+  }
+}
+
 try {
   await import(SERVER_ENTRY);
   // Resolved → server.mjs ran its top-level (listen is scheduled). The open

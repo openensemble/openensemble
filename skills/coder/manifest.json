@@ -380,17 +380,17 @@
       "type": "function",
       "function": {
         "name": "coder_list_files",
-        "description": "List files in the active project, optionally filtered by glob pattern.",
+        "description": "List files in the active project, optionally filtered by glob pattern. Recursive traversal excludes nested .git and node_modules directories; set `directory` to one of those directories to inspect it explicitly. Results may be partial when safety limits are reached. Backslashes and control or bidirectional characters in displayed paths use C-style escaping.",
         "parameters": {
           "type": "object",
           "properties": {
             "directory": {
               "type": "string",
-              "description": "Subdirectory to list (relative to project root). Defaults to project root."
+              "description": "Subdirectory to list (relative to project root). Defaults to project root. An explicitly selected .git or node_modules directory can be inspected, though nested occurrences remain excluded."
             },
             "pattern": {
               "type": "string",
-              "description": "Glob pattern to filter results, matched against paths relative to `directory` (e.g. '**/*.js', 'src/**/*.ts'). `*` does not cross directory boundaries — use `**/` to search subdirectories. Omit to list everything."
+              "description": "Glob pattern matched against paths relative to `directory` (e.g. '**/*.js', 'src/**/*.ts'). Supports `*`, `?`, character classes (`[abc]`, `[a-z]`, `[!a]`), brace alternatives/ranges (`*.{js,ts}`, `file{1..3}.txt`), and `**` as a complete path component. Dotfiles are included. `*` and non-component `**` do not cross directory boundaries; use `**/` for subdirectories. Extglobs such as `@(a|b)` are rejected. Maximum 512 characters. Omit to list everything."
             }
           },
           "required": []

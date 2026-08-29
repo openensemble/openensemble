@@ -12,7 +12,7 @@ description: >-
 
 - Linux (tested on Debian-family LXCs and VMs); macOS works for local dev
 - Node.js ≥ 18 (the installer pulls one via `nvm` if missing)
-- `build-essential`, `python3`, `python3-full`, `zip`, `bubblewrap`, `git`,
+- `build-essential`, Python ≥ 3.7 (`python3` and `python3-full`), `zip`, `bubblewrap`, `git`,
   `ffmpeg`, `openssl` — the installer offers to install them
 
 ## Install
@@ -23,10 +23,11 @@ cd openensemble
 ./install.sh
 ```
 
-`--depth 1` fetches just the current revision (~7 MB instead of ~96 MB) — the
-rest is superseded device-firmware images nobody needs to flash. In-app
-auto-update works normally on a shallow clone. Drop the flag if you want the
-full history for development.
+`--depth 1` fetches the current revision, including the bundled voice-device
+firmware (~11 MB total instead of ~96 MB of history). Older commits contain
+superseded firmware images nobody needs to flash. In-app auto-update works
+normally on a shallow clone. Drop the flag if you want the full history for
+development.
 
 The installer:
 

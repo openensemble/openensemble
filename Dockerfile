@@ -23,6 +23,7 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY . .
 RUN mkdir -p /opt/openensemble-plugins \
     && cp -a plugins/markets plugins/news /opt/openensemble-plugins/ \
+    && node scripts/fetch-voice-firmware.mjs --check \
     && npm rebuild --omit=dev && node scripts/fetch-models.mjs \
     && chmod 755 scripts/docker-entrypoint.sh
 

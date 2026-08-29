@@ -8,6 +8,13 @@
 (function () {
   const VENDOR_XVF_DFU = 0x20b1;
   const ESP_BAUD = 921600;
+  const ESP_FLASH_LAYOUT = [
+    ['bootloader', '0x0', 'bootloader.bin'],
+    ['partition-table', '0x8000', 'partition-table.bin'],
+    ['ota-data', '0x10000', 'ota_data_initial.bin'],
+    ['app', '0x20000', 'oe_voice_device.bin'],
+    ['wakewords', '0x620000', 'wakewords.bin'],
+  ];
 
   // ── Capability check ─────────────────────────────────────────────────────
   function browserCaps() {
@@ -123,16 +130,13 @@
   let _xvfDevice = null;
   let _xvfManifest = null;
 
-  // Firmware images are downloaded from GitHub Releases at install time rather
-  // than committed to git, so a 404 here nearly always means that fetch never
-  // ran — an offline install, or a pull that landed before it. A bare
-  // "HTTP 404" sends people hunting for a bug that isn't there.
+  // Firmware ships in the OE checkout. A 404 means that installation is
+  // incomplete, not that the browser needs to fetch an external release.
   function fetchError(url, status) {
     if (status === 404 && url.startsWith('/firmware/')) {
       return new Error(
         `Firmware image missing on the server (${url.split('/').pop().split('?')[0]}). ` +
-        'Images are downloaded from GitHub Releases at install time, not stored in git. ' +
-        'On the OE server run: node scripts/fetch-voice-firmware.mjs'
+        'Restore public/firmware from the current OpenEnsemble revision and restart the server.'
       );
     }
     return new Error(`Fetch ${url}: HTTP ${status}`);
@@ -142,10 +146,71 @@
     if (!r.ok) throw fetchError(url, r.status);
     return await r.json();
   }
-  async function loadBin(url) {
+  function validSha256(value) {
+    return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+  }
+  function validateXvfManifest(manifest) {
+    const valid = manifest?.chip === 'xvf3800'
+      && manifest.version === '1.0.7'
+      && manifest.variant === 'ha_inthost_lr48_sqr_i2c'
+      && JSON.stringify(manifest.acceptedVendorIds) === JSON.stringify([8369, 10374])
+      && manifest.transport === 'dfu'
+      && manifest.preferInterface === 'Upgrade'
+      && manifest.forceAlt === 1
+      && manifest.transferSize === 4096
+      && manifest.file === 'xvf_ha_v1_0_7.bin'
+      && manifest.size === 888832
+      && validSha256(manifest.sha256);
+    if (!valid) throw new Error('The bundled XVF3800 manifest is invalid or unsupported; refusing to flash.');
+    return manifest;
+  }
+  function validateEspManifest(manifest) {
+    const layout = Array.isArray(manifest?.parts)
+      ? manifest.parts.map(part => [part.name, part.offset, part.file])
+      : [];
+    const valid = manifest?.chip === 'esp32s3'
+      && typeof manifest.version === 'string' && !!manifest.version
+      && manifest.baud === ESP_BAUD
+      && manifest.flashSettings?.flashMode === 'dio'
+      && manifest.flashSettings?.flashSize === '8MB'
+      && manifest.flashSettings?.flashFreq === '80m'
+      && JSON.stringify(layout) === JSON.stringify(ESP_FLASH_LAYOUT)
+      && manifest.parts.every(part => validSha256(part.sha256));
+    if (!valid) throw new Error('The bundled ESP32-S3 manifest is invalid or unsupported; refusing to flash.');
+    return manifest;
+  }
+  function embeddedEspAppVersion(buf) {
+    if (buf.byteLength < 0x50) return '';
+    let version = '';
+    for (const byte of new Uint8Array(buf, 0x30, 0x20)) {
+      if (byte === 0) break;
+      version += String.fromCharCode(byte);
+    }
+    return version;
+  }
+  async function verifyFirmwareBuffer(buf, metadata, url) {
+    const file = url.split('/').pop().split('?')[0];
+    if (metadata?.size != null && buf.byteLength !== metadata.size) {
+      throw new Error(`Firmware size check failed for ${file}: expected ${metadata.size}, got ${buf.byteLength}`);
+    }
+    const expected = String(metadata?.sha256 || '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expected)) {
+      throw new Error(`Firmware manifest has no valid SHA-256 for ${file}`);
+    }
+    if (!globalThis.crypto?.subtle) {
+      throw new Error('This browser cannot verify firmware integrity (Web Crypto unavailable).');
+    }
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', buf);
+    const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    if (actual !== expected) {
+      throw new Error(`Firmware integrity check failed for ${file}; refusing to flash it.`);
+    }
+    return buf;
+  }
+  async function loadBin(url, metadata) {
     const r = await fetch(url);
     if (!r.ok) throw fetchError(url, r.status);
-    return await r.arrayBuffer();
+    return verifyFirmwareBuffer(await r.arrayBuffer(), metadata, url);
   }
 
   function renderStage1Intro() {
@@ -181,7 +246,7 @@
 
   window.flashWizardConnectXvf = async function () {
     try {
-      _xvfManifest = await loadManifest('/firmware/xvf3800/manifest.json?v=6');
+      _xvfManifest = validateXvfManifest(await loadManifest('/firmware/xvf3800/manifest.json?v=6'));
       const filters = (_xvfManifest.acceptedVendorIds || []).map(v => ({ vendorId: v }));
       const dev = await navigator.usb.requestDevice({ filters });
       _xvfDevice = dev;
@@ -219,10 +284,13 @@
   window.flashWizardDoXvf = async function () {
     const btn = document.querySelector('[data-action="flashWizardDoXvf"]');
     if (btn) btn.disabled = true;
+    let dfu = null;
     try {
+      log('Fetching and verifying firmware…');
+      const bin = await loadBin('/firmware/xvf3800/' + _xvfManifest.file, _xvfManifest);
       const { WebDFU } = await import('/vendor/webdfu/webdfu.js?v=5');
       log('Opening device…');
-      const dfu = new WebDFU(_xvfDevice, {
+      dfu = new WebDFU(_xvfDevice, {
         transferSize: _xvfManifest.transferSize,
       });
       await dfu.open({
@@ -231,8 +299,6 @@
         log,
       });
       log(`Claimed DFU target: ${dfu.interfaceName} (iface ${dfu.interfaceNumber} alt ${dfu.alternateSetting}, active=${dfu.altSetActual})`);
-      log('Fetching firmware…');
-      const bin = await loadBin('/firmware/xvf3800/' + _xvfManifest.file);
       log(`Downloading ${bin.byteLength} bytes…`);
       setProgress(0, '0%');
       let nextLogPct = 10;
@@ -249,11 +315,12 @@
       });
       setProgress(100, 'Done.');
       log('XVF3800 flashed. The device should be re-enumerating now.');
-      try { await dfu.close(); } catch (_) {}
       renderStage2Intro();
     } catch (e) {
       log('ERROR: ' + (e?.message || e));
       if (btn) btn.disabled = false;
+    } finally {
+      try { if (dfu) await dfu.close(); } catch (_) {}
     }
   };
 
@@ -287,7 +354,7 @@
 
   window.flashWizardConnectEsp = async function () {
     try {
-      _espManifest = await loadManifest('/firmware/voice-device/manifest.json?v=3');
+      _espManifest = validateEspManifest(await loadManifest('/firmware/voice-device/manifest.json?v=3'));
       _espPort = await navigator.serial.requestPort({});
       await renderStage2Flash();
     } catch (e) {
@@ -375,7 +442,10 @@
       log('Fetching firmware bins…');
       const fileArray = [];
       for (const part of _espManifest.parts) {
-        const buf = await loadBin('/firmware/voice-device/' + part.file);
+        const buf = await loadBin('/firmware/voice-device/' + part.file, part);
+        if (part.name === 'app' && embeddedEspAppVersion(buf) !== _espManifest.version) {
+          throw new Error('ESP32-S3 application version does not match its manifest; refusing to flash.');
+        }
         fileArray.push({
           data: arrayBufferToBinaryString(buf),
           address: Number(part.offset),

@@ -72,6 +72,11 @@ ensure_build_tools() {
   command -v make     &>/dev/null || need+=(make)
   command -v g++      &>/dev/null || need+=(g++)
   command -v python3  &>/dev/null || need+=(python3)
+  if command -v python3 &>/dev/null \
+    && ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 7) else 1)' &>/dev/null; then
+    error "Python 3.7 or newer is required (found $(python3 --version 2>&1))."
+    exit 1
+  fi
   command -v zip      &>/dev/null || need+=(zip)
   command -v bwrap    &>/dev/null || need+=(bubblewrap)
   command -v git      &>/dev/null || need+=(git)
@@ -115,6 +120,10 @@ ensure_build_tools() {
   elif command -v zypper  &>/dev/null; then $SUDO zypper install -y -t pattern devel_basis && $SUDO zypper install -y python3 zip bubblewrap git poppler-tools ripgrep psmisc ffmpeg openssl
   else
     error "No supported package manager found. Install build-essential, python3, python3-full (or python3 + python3-venv + python3-pip), zip, bubblewrap, git, poppler-utils, ripgrep, psmisc, and ffmpeg manually and re-run."
+    exit 1
+  fi
+  if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 7) else 1)' &>/dev/null; then
+    error "Python 3.7 or newer is required for safe coder project traversal."
     exit 1
   fi
   success "Build tools installed"
@@ -264,6 +273,27 @@ if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   set -u
 fi
 
+# Use npm from the same installation as the selected Node binary. This matters
+# for nvm installs and system shells whose PATH also contains a different npm.
+resolve_node_npm() {
+  local node_path node_dir npm_path
+  node_path="$(command -v node 2>/dev/null || true)"
+  [[ -n "$node_path" ]] || { error "Node.js is unavailable after prerequisite setup."; return 1; }
+  node_dir="$(CDPATH= cd "$(dirname "$node_path")" 2>/dev/null && pwd -P)"
+  NODE_BIN="$node_dir/$(basename "$node_path")"
+  npm_path="$node_dir/npm"
+  if [[ ! -x "$npm_path" ]]; then
+    npm_path="$(command -v npm 2>/dev/null || true)"
+  fi
+  [[ -n "$npm_path" && -x "$npm_path" ]] || {
+    error "npm was not found next to $NODE_BIN or on PATH."
+    return 1
+  }
+  NPM_BIN="$npm_path"
+  export PATH="$node_dir${PATH:+:$PATH}"
+}
+resolve_node_npm
+
 # ─── Copy Application Files ───────────────────────────────────────────────────
 header "Installing OpenEnsemble"
 
@@ -412,21 +442,64 @@ header "Installing Dependencies"
 ensure_build_tools
 info "Running npm install (this may take a minute)..."
 cd "$INSTALL_DIR"
-npm install --prefer-offline 2>&1 | grep -v '^npm warn\|^npm notice' || npm install
-success "Dependencies installed"
 
-# `npm install` often rewrites package-lock.json on a fresh install (different
-# npm version, platform-specific deps, peer-dep resolution drift). The
-# committed lockfile is authoritative for what gets shipped; the on-disk
-# rewrite just dirtied a tracked file and would block the in-app "Software
-# Update" button for non-developers. Discard the rewrite so the working tree
-# stays clean. node_modules is unaffected — npm only reads the lockfile at
-# install time, not at runtime.
-if [ -d "$INSTALL_DIR/.git" ] && command -v git &>/dev/null; then
-  if ! git -C "$INSTALL_DIR" diff --quiet -- package-lock.json 2>/dev/null; then
-    git -C "$INSTALL_DIR" checkout -- package-lock.json 2>/dev/null && \
-      info "Reverted post-install package-lock.json rewrite (working tree stays clean)"
+# Preserve an operator's existing lockfile edit exactly. Only a lockfile that
+# was clean before npm may be restored to the committed version afterwards.
+INSTALL_LOCK_TRACKED=false
+INSTALL_LOCK_STARTED_CLEAN=true
+INSTALL_LOCK_EXISTED=false
+INSTALL_LOCK_BACKUP=""
+if [[ -d "$INSTALL_DIR/.git" ]] && command -v git &>/dev/null; then
+  INSTALL_LOCK_TRACKED=true
+  INSTALL_LOCK_STATUS="$(git -C "$INSTALL_DIR" status --porcelain=v1 -- package-lock.json)"
+  [[ -f "$INSTALL_DIR/package-lock.json" ]] && INSTALL_LOCK_EXISTED=true
+  if [[ -n "$INSTALL_LOCK_STATUS" ]]; then
+    INSTALL_LOCK_STARTED_CLEAN=false
+    INSTALL_LOCK_BACKUP="$(mktemp "${TMPDIR:-/tmp}/oe-install-package-lock.XXXXXX")"
+    if $INSTALL_LOCK_EXISTED; then cp -p "$INSTALL_DIR/package-lock.json" "$INSTALL_LOCK_BACKUP"; fi
   fi
+fi
+
+restore_install_lock() {
+  $INSTALL_LOCK_TRACKED || return 0
+  if ! $INSTALL_LOCK_STARTED_CLEAN; then
+    if $INSTALL_LOCK_EXISTED; then
+      cp -p "$INSTALL_LOCK_BACKUP" "$INSTALL_DIR/package-lock.json"
+    else
+      rm -f -- "$INSTALL_DIR/package-lock.json"
+    fi
+    info "Preserved pre-existing package-lock.json edit"
+    return 0
+  fi
+
+  local lock_status
+  lock_status="$(git -C "$INSTALL_DIR" status --porcelain=v1 -- package-lock.json)"
+  [[ -z "$lock_status" ]] && return 0
+  if [[ "$lock_status" == " M package-lock.json" && -f "$INSTALL_DIR/package-lock.json" ]]; then
+    git -C "$INSTALL_DIR" checkout -- package-lock.json
+    info "Reverted npm-generated package-lock.json rewrite (working tree stays clean)"
+    return 0
+  fi
+  warn "package-lock.json changed unexpectedly during npm install; leaving it untouched."
+  return 1
+}
+
+NPM_INSTALL_OK=false
+"$NODE_BIN" scripts/ensure-deps.mjs --mark-uncertain
+if "$NPM_BIN" install --prefer-offline --no-save; then NPM_INSTALL_OK=true; fi
+restore_install_lock || true
+if [[ -n "$INSTALL_LOCK_BACKUP" ]]; then
+  rm -f -- "$INSTALL_LOCK_BACKUP"
+  INSTALL_LOCK_BACKUP=""
+fi
+if ! $NPM_INSTALL_OK; then
+  error "npm install failed. Existing package-lock.json edits were preserved."
+  exit 1
+fi
+success "Dependencies installed"
+if ! "$NODE_BIN" scripts/ensure-deps.mjs --record-installed; then
+  error "Dependencies installed, but their state marker could not be recorded."
+  exit 1
 fi
 
 # ─── Create start.sh ─────────────────────────────────────────────────────────
@@ -532,15 +605,36 @@ SERVICE
         # tool that does want dbus (loginctl, gdbus, etc.) finds it without
         # waiting for pam_systemd. Harmless if already running.
         systemctl --user start dbus.socket 2>/dev/null || true
+        SERVICE_ACTION_OK=false
         if systemctl --user daemon-reload \
-          && systemctl --user enable --now openensemble.service \
+          && systemctl --user enable openensemble.service; then
+          if [[ "$SERVICE_WAS_ACTIVE" == "true" ]]; then
+            # `enable --now` is a no-op for an already-running unit. An
+            # explicit restart is required for an install.sh rerun to load the
+            # newly copied source and regenerated unit.
+            info "Restarting the active OpenEnsemble service onto the new code..."
+            systemctl --user restart openensemble.service && SERVICE_ACTION_OK=true
+          else
+            systemctl --user start openensemble.service && SERVICE_ACTION_OK=true
+          fi
+        fi
+        if $SERVICE_ACTION_OK \
           && systemctl --user is-enabled --quiet openensemble.service \
           && systemctl --user is-active --quiet openensemble.service; then
           HAVE_SERVICE=true
-          success "Systemd service installed and started"
+          if [[ "$SERVICE_WAS_ACTIVE" == "true" ]]; then
+            success "Systemd service updated and restarted"
+          else
+            success "Systemd service installed and started"
+          fi
         else
           if [[ "$SERVICE_WAS_ENABLED" != "true" && "$SERVICE_WAS_ACTIVE" != "true" ]]; then
             systemctl --user disable --now openensemble.service 2>/dev/null || true
+          fi
+          if [[ "$SERVICE_WAS_ACTIVE" == "true" ]]; then
+            error "The existing systemd service could not be restarted onto the new code."
+            error "Check: systemctl --user status openensemble.service"
+            exit 1
           fi
           warn "Systemd service setup did not complete; starting without auto-start."
         fi
@@ -730,10 +824,20 @@ echo ""
 # the server running via `systemctl --user start`.
 SERVER_AUTOSTARTED=false
 if [[ "${HAVE_SERVICE:-false}" != "true" ]]; then
-  # start.sh cd's into INSTALL_DIR then `exec node server.mjs`, so the live
-  # cmdline is the relative path — match the same regex the systemd unit uses
-  # rather than a literal absolute path that would never hit.
-  if pgrep -f "node .*server\.mjs" >/dev/null 2>&1; then
+  # server.mjs writes its real process ID after launch.mjs imports it. Check
+  # that install-scoped PID instead of a global cmdline pattern, which can miss
+  # launch.mjs or mistake another OpenEnsemble checkout for this one.
+  server_pid_is_live() {
+    local server_pid="" server_args=""
+    [[ -r "$INSTALL_DIR/server.pid" ]] || return 1
+    read -r server_pid < "$INSTALL_DIR/server.pid" || return 1
+    [[ "$server_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$server_pid" 2>/dev/null || return 1
+    server_args="$(ps -p "$server_pid" -o args= 2>/dev/null || true)"
+    [[ "$server_args" == *node* \
+      && ( "$server_args" == *scripts/launch.mjs* || "$server_args" == *server.mjs* ) ]]
+  }
+  if server_pid_is_live; then
     SERVER_AUTOSTARTED=true
   else
     info "Starting OpenEnsemble in the background..."
@@ -742,7 +846,7 @@ if [[ "${HAVE_SERVICE:-false}" != "true" ]]; then
     # installs take longer than a steady-state restart (skills/agents load).
     for _ in $(seq 1 15); do
       sleep 1
-      if pgrep -f "node .*server\.mjs" >/dev/null 2>&1; then
+      if server_pid_is_live; then
         SERVER_AUTOSTARTED=true; break
       fi
     done

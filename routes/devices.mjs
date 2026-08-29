@@ -805,10 +805,9 @@ export async function handle(req, res) {
       res.end(JSON.stringify({ error: 'device_offline' }));
       return true;
     }
-    // Don't nudge a device into an OTA whose images aren't on disk. It would
-    // fetch a 404 mid-update and report a generic failure the admin can't act
-    // on. Firmware is fetched from GitHub Releases rather than committed, so
-    // "missing" is a normal state on a fresh clone (see lib/firmware-assets.mjs).
+    // Don't nudge a device into an OTA whose bundled image is missing or
+    // corrupt. It would fail mid-update with a generic error instead of the
+    // actionable checkout-repair hint returned here.
     const missing = missingParts().filter(m => m.component === 'voice-device');
     if (missing.length) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
