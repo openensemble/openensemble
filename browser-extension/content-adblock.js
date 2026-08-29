@@ -302,6 +302,17 @@
 
   function setState(state) {
     if (!state?.ok) return;
+    // A paused site keeps its learned rules on disk but applies nothing here,
+    // and takes the list-driven cosmetic layer down with it. The bundled rules
+    // and stylesheets are excluded declaratively; only element collapsing and
+    // learned rules need telling.
+    if (state.paused === true) {
+      enabled = false;
+      learnedRules = [];
+      globalThis.__oeCosmeticDisable?.();
+      scheduleApply(0);
+      return;
+    }
     enabled = state.enabled === true;
     if (typeof state.siteHost === 'string' && state.siteHost) currentSiteHost = state.siteHost.toLowerCase();
     if (typeof state.frameHost === 'string' && state.frameHost) currentFrameHost = state.frameHost.toLowerCase();

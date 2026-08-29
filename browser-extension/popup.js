@@ -305,6 +305,12 @@ function renderPopupConfirmation(confirmation) {
   $('popupConfirmationOrigin').textContent = [confirmation.pageTitle, confirmation.origin].filter(Boolean).join(' · ');
 }
 
+const AD_BLOCK_TIER_INPUTS = {
+  ads: 'adBlockTierAds',
+  trackers: 'adBlockTierTrackers',
+  annoyances: 'adBlockTierAnnoyances',
+};
+
 function renderAdBlock(status) {
   if (!status?.ok) return;
   const enabledInput = $('adBlockEnabled');
@@ -312,29 +318,90 @@ function renderAdBlock(status) {
   const actions = $('adBlockActions');
   const undo = $('adBlockUndo');
   const clear = $('adBlockClearSite');
+  const tiers = $('adBlockTiers');
+  const pauseRow = $('adBlockPauseRow');
+  const pause = $('adBlockPause');
   statusEl.style.color = '#4b5563';
   enabledInput.checked = status.enabled === true;
   $('adBlockToggleLabel').textContent = status.enabled ? 'On' : 'Off';
   enabledInput.disabled = _adBlockBusy || status.networkAvailable === false;
+
+  const available = status.networkAvailable !== false;
+  const paused = status.paused === true;
   const count = Math.max(0, Number(status.learnedSiteCount) || 0);
-  if (status.networkAvailable === false) {
+  const blocked = Math.max(0, Number(status.blockedCount) || 0);
+
+  for (const [tier, id] of Object.entries(AD_BLOCK_TIER_INPUTS)) {
+    const input = $(id);
+    input.checked = status.tiers?.[tier] === true;
+    input.disabled = _adBlockBusy || !status.enabled || !available;
+  }
+  tiers.hidden = !available;
+  pauseRow.hidden = !available || !status.siteHost;
+  pause.textContent = paused ? `Resume blocking on ${status.siteHost}` : 'Pause on this site';
+  pause.disabled = _adBlockBusy || !status.enabled;
+
+  if (!available) {
     statusEl.textContent = 'This browser does not expose Manifest V3 network filtering.';
   } else if (!status.enabled) {
-    statusEl.textContent = 'Off. Turn it on to block known ad requests and apply anything you teach it.'
+    statusEl.textContent = 'Off. Turn it on to block ads and trackers and apply anything you teach it.'
       + (_adBlockReloadHint ? ' Reload this page to restore requests that were already blocked.' : '');
+  } else if (paused) {
+    statusEl.textContent = `Paused on ${status.siteHost}. Nothing is blocked or hidden here until you resume.`
+      + (_adBlockReloadHint ? ' Reload this page to apply the change.' : '');
   } else {
     const learned = count
-      ? ` ${count} learned rule${count === 1 ? '' : 's'} also block ads on ${status.siteHost || 'this site'}.`
+      ? ` ${count} learned rule${count === 1 ? '' : 's'} also apply on ${status.siteHost || 'this site'}.`
       : '';
-    const matched = Number.isFinite(Number(status.matchedCount)) && Number(status.matchedCount) > 0
-      ? ` ${Number(status.matchedCount)} learned ad element${Number(status.matchedCount) === 1 ? '' : 's'} hidden in the main page now.`
+    const onThisPage = status.countersAvailable && blocked
+      ? ` ${blocked} request${blocked === 1 ? '' : 's'} blocked on this page.`
       : '';
-    statusEl.textContent = `Known ad requests are blocked locally.${learned}${matched} Right-click a missed ad and choose “Block this ad with OE” so it learns for this site.`
+    statusEl.textContent = `Blocking locally.${onThisPage}${learned} Right-click anything it misses and choose “Block this ad with OE”.`
       + (_adBlockReloadHint ? ' Reload this page to apply the network setting to every request.' : '');
   }
+
+  renderBlockedDomains(status);
+
+  const filters = status.filters;
+  $('adBlockFilterInfo').textContent = filters?.counts
+    ? `Filter lists built ${filters.generated} · `
+      + `${(filters.counts.tiers?.ads + filters.counts.tiers?.trackers + filters.counts.tiers?.annoyances).toLocaleString()} network rules · `
+      + `${filters.counts.siteHosts.toLocaleString()} sites with specific rules`
+    : '';
+
   actions.hidden = count === 0;
   undo.disabled = _adBlockBusy || !status.lastRuleId;
   clear.disabled = _adBlockBusy || count === 0;
+}
+
+/**
+ * Rebuild the hand-blocked domain list. Rows are built with DOM calls rather
+ * than markup so a stored hostname can never be interpreted as HTML.
+ */
+function renderBlockedDomains(status) {
+  const section = $('adBlockDomains');
+  const list = $('adBlockDomainList');
+  const domains = Array.isArray(status.blockedDomains) ? status.blockedDomains : [];
+  section.hidden = status.networkAvailable === false;
+  $('adBlockDomainInput').disabled = _adBlockBusy || !status.enabled;
+  $('adBlockDomainAdd').querySelector('button').disabled = _adBlockBusy || !status.enabled;
+
+  list.replaceChildren();
+  for (const host of domains) {
+    const row = document.createElement('li');
+    const label = document.createElement('code');
+    label.textContent = host;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    remove.disabled = _adBlockBusy || !status.enabled;
+    remove.addEventListener('click', () => runAdBlockAction(
+      { type: 'set_adblock_domain_blocked', host, blocked: false },
+      `Unblocking ${host}…`,
+    ));
+    row.append(label, remove);
+    list.append(row);
+  }
 }
 
 function showAdBlockError(text) {
@@ -344,8 +411,68 @@ function showAdBlockError(text) {
 
 async function setAdBlockBusy(busy) {
   _adBlockBusy = busy;
-  for (const id of ['adBlockEnabled', 'adBlockUndo', 'adBlockClearSite']) $(id).disabled = busy;
+  const ids = ['adBlockEnabled', 'adBlockUndo', 'adBlockClearSite', 'adBlockPause',
+    'adBlockDomainInput', ...Object.values(AD_BLOCK_TIER_INPUTS)];
+  for (const id of ids) $(id).disabled = busy;
+  for (const button of $('adBlockDomains').querySelectorAll('button')) button.disabled = busy;
 }
+
+/** Shared wrapper for the ad-block controls: keep the panel busy, restore the
+ * previous rendering if the worker rejects the change. */
+async function runAdBlockAction(message, pending) {
+  await setAdBlockBusy(true);
+  $('adBlockStatus').style.color = '#4b5563';
+  if (pending) $('adBlockStatus').textContent = pending;
+  try {
+    const response = await chrome.runtime.sendMessage(message);
+    if (!response?.ok) throw new Error(response?.error || 'that change was not applied');
+    _adBlockReloadHint = true;
+    await setAdBlockBusy(false);
+    renderAdBlock(response);
+    return true;
+  } catch (error) {
+    await setAdBlockBusy(false);
+    showAdBlockError(error?.message || String(error));
+    try {
+      const status = await chrome.runtime.sendMessage({ type: 'get_adblock_status' });
+      if (status?.ok) {
+        const reported = $('adBlockStatus').textContent;
+        renderAdBlock(status);
+        showAdBlockError(reported);
+      }
+    } catch {}
+    return false;
+  }
+}
+
+for (const [tier, id] of Object.entries(AD_BLOCK_TIER_INPUTS)) {
+  $(id).addEventListener('change', () => runAdBlockAction(
+    { type: 'set_adblock_tier', tier, enabled: $(id).checked },
+    'Applying…',
+  ));
+}
+
+$('adBlockDomainAdd').addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = $('adBlockDomainInput');
+  // Accept a pasted URL as readily as a bare hostname.
+  const raw = input.value.trim().replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0].replace(/^www\./i, '');
+  if (!raw) return;
+  const added = await runAdBlockAction(
+    { type: 'set_adblock_domain_blocked', host: raw, blocked: true },
+    `Blocking ${raw}…`,
+  );
+  // Leave a rejected entry in the box so the typo is visible and editable.
+  if (added) input.value = '';
+});
+
+$('adBlockPause').addEventListener('click', () => {
+  const resuming = $('adBlockPause').textContent.startsWith('Resume');
+  return runAdBlockAction(
+    { type: 'set_adblock_paused', paused: !resuming },
+    resuming ? 'Resuming…' : 'Pausing…',
+  );
+});
 
 $('adBlockEnabled').addEventListener('change', async () => {
   const desired = $('adBlockEnabled').checked;

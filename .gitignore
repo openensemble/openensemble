@@ -153,7 +153,11 @@ revert-*.md
 revert-*.patch
 MIGRATION_per-user-encryption.md
 
-# Browser extension — kept out of the repo until fully developed (see commit msg)
+# Browser extension build inputs and browser-generated metadata
+browser-extension/.filter-cache/
+browser-extension/_metadata/
+!browser-extension/tools/
+!browser-extension/tools/**
 
 # voice-device wake-capture audio (per-device personal recordings)
 wake-captures/

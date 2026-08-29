@@ -1,0 +1,10 @@
+[
+  { "id": 1, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/google-analytics.js" } }, "condition": { "urlFilter": "||google-analytics.com/analytics.js", "resourceTypes": ["script"] } },
+  { "id": 2, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/google-analytics.js" } }, "condition": { "urlFilter": "||google-analytics.com/ga.js", "resourceTypes": ["script"] } },
+  { "id": 3, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/google-analytics.js" } }, "condition": { "urlFilter": "||googletagmanager.com/gtm.js", "resourceTypes": ["script"] } },
+  { "id": 4, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/google-analytics.js" } }, "condition": { "urlFilter": "||googletagmanager.com/gtag/js", "resourceTypes": ["script"] } },
+  { "id": 5, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/googletag.js" } }, "condition": { "urlFilter": "||googletagservices.com/tag/js/gpt.js", "resourceTypes": ["script"] } },
+  { "id": 6, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/googletag.js" } }, "condition": { "urlFilter": "||securepubads.g.doubleclick.net/tag/js/gpt.js", "resourceTypes": ["script"] } },
+  { "id": 7, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/googletag.js" } }, "condition": { "urlFilter": "||googlesyndication.com/tag/js/gpt.js", "resourceTypes": ["script"] } },
+  { "id": 8, "priority": 2500, "action": { "type": "redirect", "redirect": { "extensionPath": "/surrogates/ad-status.js" } }, "condition": { "urlFilter": "||doubleclick.net/instream/ad_status.js", "resourceTypes": ["script"] } }
+]

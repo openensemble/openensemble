@@ -131,6 +131,43 @@ export async function handle(req, res) {
     return true;
   }
 
+  // ── Bundled ad-filter lists: what shipped, and an explicit refresh ──────
+  // The extension itself never downloads a filter list. When the household
+  // wants fresher rules, OE fetches and reconverts them here instead, so the
+  // browser's only network peer stays OE.
+  if (req.url === '/api/browser/filters' && req.method === 'GET') {
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
+    const { readFilterBuildInfo } = await import('../lib/browser-filter-refresh.mjs');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, filters: readFilterBuildInfo() }));
+    return true;
+  }
+
+  if (req.url === '/api/browser/filters/refresh' && req.method === 'POST') {
+    const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;
+    // Refreshing makes outbound requests and rewrites files inside the OE
+    // install, so it is an admin action rather than a per-user one.
+    if (!isPrivileged(authId)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'only an OE admin can refresh the filter lists' }));
+      return true;
+    }
+    try {
+      const { refreshBrowserFilters } = await import('../lib/browser-filter-refresh.mjs');
+      const result = await refreshBrowserFilters();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        filters: result.buildInfo,
+        note: 'Reload OE Bridge on the browser’s extensions page to activate the new rules.',
+      }));
+    } catch (error) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: error?.message || String(error) }));
+    }
+    return true;
+  }
+
   // ── Browser extension status (lists connected extensions for this user) ─
   if (req.url === '/api/browser/status' && req.method === 'GET') {
     const authId = requireAuth(req, res, { allowMediaToken: false }); if (!authId) return true;

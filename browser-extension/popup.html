@@ -40,6 +40,28 @@
     #adBlockStatus { margin-top: 6px; color: #4b5563; font-size: 11px; line-height: 1.4; }
     #adBlockActions[hidden] { display: none; }
     #adBlockActions button { padding: 6px; font-size: 11px; }
+    .adblock-count { font-variant-numeric: tabular-nums; font-weight: 700; color: #14532d; }
+    .adblock-tiers { margin: 8px 0 0; padding: 8px 0 0; border-top: 1px solid #d5e8da; display: grid; gap: 5px; }
+    .adblock-tiers[hidden] { display: none; }
+    .adblock-tier { display: flex; align-items: flex-start; gap: 7px; margin: 0; font-size: 11px; color: #14532d; line-height: 1.35; }
+    .adblock-tier input { width: auto; margin: 1px 0 0; flex: none; }
+    .adblock-tier span { font-weight: 600; }
+    .adblock-tier em { display: block; font-style: normal; font-weight: 400; color: #4b5563; }
+    #adBlockPauseRow { margin-top: 8px; }
+    #adBlockPauseRow[hidden] { display: none; }
+    #adBlockPause { width: 100%; padding: 6px; font-size: 11px; }
+    #adBlockFilterInfo { margin-top: 6px; font-size: 10px; color: #6b7280; }
+    .adblock-domains { margin: 8px 0 0; padding: 8px 0 0; border-top: 1px solid #d5e8da; }
+    .adblock-domains[hidden] { display: none; }
+    .adblock-domains > label { display: block; font-size: 11px; font-weight: 600; color: #14532d; margin-bottom: 4px; }
+    .adblock-domain-add { display: flex; gap: 5px; }
+    .adblock-domain-add input { flex: 1; min-width: 0; padding: 5px 6px; font-size: 11px; border: 1px solid #bbd7c1; border-radius: 5px; }
+    .adblock-domain-add button { flex: none; padding: 5px 9px; font-size: 11px; }
+    #adBlockDomainList { list-style: none; margin: 6px 0 0; padding: 0; max-height: 108px; overflow-y: auto; }
+    #adBlockDomainList li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; font-size: 11px; color: #14532d; }
+    #adBlockDomainList code { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
+    #adBlockDomainList button { flex: none; padding: 2px 6px; font-size: 10px; }
+    #adBlockDomainHint { margin-top: 4px; font-size: 10px; color: #6b7280; }
   </style>
 </head>
 <body>
@@ -53,10 +75,38 @@
       <label class="adblock-toggle"><input id="adBlockEnabled" type="checkbox" aria-label="Local ad blocking"> <span id="adBlockToggleLabel">On</span></label>
     </div>
     <div id="adBlockStatus" aria-live="polite">Loading ad-block settings…</div>
+    <div id="adBlockTiers" class="adblock-tiers" hidden>
+      <label class="adblock-tier">
+        <input id="adBlockTierAds" type="checkbox">
+        <span>Ads<em>Banners, pop-ups, and sponsored placements.</em></span>
+      </label>
+      <label class="adblock-tier">
+        <input id="adBlockTierTrackers" type="checkbox">
+        <span>Trackers<em>Analytics and profiling scripts that follow you between sites.</em></span>
+      </label>
+      <label class="adblock-tier">
+        <input id="adBlockTierAnnoyances" type="checkbox">
+        <span>Cookie banners and nags<em>More intrusive; a few sites misbehave with this on.</em></span>
+      </label>
+    </div>
+    <div id="adBlockPauseRow" hidden>
+      <button id="adBlockPause" type="button">Pause on this site</button>
+    </div>
+    <div id="adBlockDomains" class="adblock-domains" hidden>
+      <label for="adBlockDomainInput">Block a domain everywhere</label>
+      <form id="adBlockDomainAdd" class="adblock-domain-add">
+        <input id="adBlockDomainInput" type="text" placeholder="log.byteoversea.com"
+               autocomplete="off" spellcheck="false" aria-label="Domain to block">
+        <button type="submit">Block</button>
+      </form>
+      <ul id="adBlockDomainList" aria-label="Domains you blocked"></ul>
+      <div id="adBlockDomainHint">Covers subdomains. Page addresses you type are never blocked.</div>
+    </div>
     <div id="adBlockActions" class="row" hidden>
       <button id="adBlockUndo">Undo last</button>
       <button id="adBlockClearSite">Clear this site</button>
     </div>
+    <div id="adBlockFilterInfo"></div>
   </section>
 
   <section id="actionConfirmation" hidden aria-label="Confirm browser action">

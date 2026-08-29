@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "OpenEnsemble Bridge",
   "short_name": "OE Bridge",
-  "version": "0.7.0",
-  "description": "Ask, clip, compare, block ads locally, teach browser procedures, watch fields, and run confirmed tasks with scoped access.",
-  "permissions": ["tabs", "storage", "scripting", "activeTab", "alarms", "sidePanel", "contextMenus", "declarativeNetRequestWithHostAccess"],
+  "version": "0.8.0",
+  "description": "Ask, clip, compare, block ads and trackers locally, teach browser procedures, watch fields, and run confirmed tasks with scoped access.",
+  "permissions": ["tabs", "storage", "scripting", "activeTab", "alarms", "sidePanel", "contextMenus", "declarativeNetRequestWithHostAccess", "declarativeNetRequestFeedback"],
   "omnibox": { "keyword": "oe" },
   "side_panel": { "default_path": "sidepanel.html" },
   "host_permissions": ["<all_urls>"],
@@ -14,13 +14,19 @@
   },
   "declarative_net_request": {
     "rule_resources": [
-      {
-        "id": "oe_ads",
-        "enabled": true,
-        "path": "rules/ads.json"
-      }
+      { "id": "oe_ads", "enabled": true, "path": "rules/ads.json" },
+      { "id": "oe_trackers", "enabled": true, "path": "rules/trackers.json" },
+      { "id": "oe_annoyances", "enabled": false, "path": "rules/annoyances.json" },
+      { "id": "oe_surrogates", "enabled": true, "path": "rules/surrogates.json" }
     ]
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["surrogates/*.js"],
+      "matches": ["<all_urls>"],
+      "use_dynamic_url": false
+    }
+  ],
   "icons": {
     "16": "icons/oe-bridge-16.png",
     "32": "icons/oe-bridge-32.png",
@@ -30,7 +36,7 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["content-adblock.js"],
+      "js": ["content-cosmetic.js", "content-adblock.js"],
       "run_at": "document_start",
       "all_frames": true,
       "match_about_blank": true,

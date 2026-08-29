@@ -7,12 +7,12 @@ Chrome / Edge extension connecting your local OE server to your browser. All ser
 ## Install
 
 1. In OE, open **Settings → Browser** and download **OE Bridge**, then extract
-   the ZIP. Developers working directly in the OE checkout may use the local
-   `browser-extension/` folder instead.
+   the ZIP. Developers may use the OE checkout's local `browser-extension/`
+   folder or clone the [standalone extension repository](https://github.com/openensemble/browser-extension).
 2. Open `chrome://extensions` (or `edge://extensions`).
 3. Toggle **Developer mode** in the top right.
-4. Click **Load unpacked** and select the extracted
-   `openensemble-bridge` folder (or the checkout's `browser-extension/` folder).
+4. Click **Load unpacked** and select the extracted `openensemble-bridge` folder
+   (or the root of a development checkout).
 
 The puzzle-piece icon appears in your toolbar. Pin it.
 
@@ -39,18 +39,51 @@ disabled state unless you explicitly turn access back on.
 ## What it does
 
 Local ad blocking is enabled by default and works independently of pairing or
-an OE tab lease. A bundled Manifest V3 ruleset blocks known third-party ad
-requests before they load; requests, matches, and learned rules are never sent
-to the OE server. Use the **Local ad blocking** switch in the popup to turn the
-feature on or off, then reload the current page so its already-started network
-requests reflect the new setting.
+an OE tab lease. Everything runs in the browser: requests, matches, learned
+rules, tier choices, and the pause list are never sent to the OE server, and the
+extension never downloads a filter list.
 
-When the bundled list misses a page element, right-click the ad and choose
-**Block this ad with OE**. The extension hides it immediately and saves a
-bounded cosmetic selector for that top-level site and frame host, so matching
-elements are hidden on later visits. It does not save visible page text, images,
-or a page snapshot. The confirmation toast can undo the new rule, and the popup
-can undo the latest rule or clear every learned rule for the current site.
+Blocking has four layers, all fed by the artifacts under `rules/` and `filters/`
+that `tools/build-filters.mjs` generates:
+
+1. **Network rules** — per-tier `declarativeNetRequest` rulesets. No rule ever
+   blocks a top-level navigation.
+2. **Element hiding** — a per-tier stylesheet applied to every site, plus
+   per-site rules bucketed so a page only loads the rules that can match it.
+   Both are registered at `document_start`, so hidden elements never paint.
+3. **Scriptlets** — `content-scriptlets.js` runs in the MAIN world for the sites
+   that need it, defusing anti-adblock walls and first-party ad insertion that
+   network and cosmetic rules cannot reach.
+4. **Element collapsing** — a blocked third-party image or frame is removed from
+   the layout instead of leaving a hole where the ad was.
+
+The popup carries a master switch, one toggle per tier (**Ads**, **Trackers**,
+**Cookie banners and nags** — the last off by default because it is the most
+likely to interfere with a site), a **Pause on this site** button, and a count of
+what was blocked on the current page. Reload the page after changing a setting so
+already-started requests reflect it.
+
+Domains can also be blocked by name from the popup, for telemetry endpoints no
+public list covers. Hand-added blocks are dynamic `declarativeNetRequest` rules
+at priority 4500 — above every list rule including its exceptions, below a site
+pause at 5000 — and like every other block they exclude `main_frame`, so a
+blocked domain still opens if it is typed into the address bar. The blocked and
+paused lists occupy separate dynamic rule-id ranges so neither sync clears the
+other's rules.
+
+Pausing a site is enforced on both halves: a dynamic `allowAllRequests` rule
+exempts the network layer, and every registered filter script carries the paused
+host in its `excludeMatches`, so nothing is hidden either.
+
+When the lists miss a page element, right-click the ad and choose **Block this ad
+with OE**. The extension hides it immediately and saves a bounded cosmetic
+selector for that top-level site and frame host, so matching elements are hidden
+on later visits. It does not save visible page text, images, or a page snapshot.
+The confirmation toast can undo the new rule, and the popup can undo the latest
+rule or clear every learned rule for the current site.
+
+Filter provenance, licensing, and how to rebuild the lists are documented in
+`rules/README.md`.
 
 Command tiers (enforced by the broker in `background.js`):
 
