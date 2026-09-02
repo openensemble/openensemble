@@ -7,6 +7,19 @@ Self-hosted, multi-user AI assistant platform. Run a team of specialist agents, 
 
 ![demo](docs/demo.gif)
 
+## Display dashboards
+
+**[Explore dashboards](https://openensemble.github.io/openensemble/dashboards)** · **[Read the complete guide](guide/dashboards.md)**
+
+Build up to 32 dashboards per profile for wall tablets, rooms, TVs, or ordinary browser tabs. Every dashboard keeps its own stable address, while optional swipe navigation lets you move through all of a profile's dashboards without typing another URL.
+
+- Customize sections, cards, page elements, text, themes, and colors.
+- Add Home Assistant controls, calendars, email summaries, and safe read-only widgets supplied by custom skills.
+- Hide built-in elements—including the greeting, status, clock, summary, navigation, and section headings—to make each display your own.
+- Open **Display dashboards** from either **Dashboard** entry inside OpenEnsemble to configure everything, then launch the finished display at its individual address.
+
+Dashboard addresses use the signed-in OpenEnsemble profile and are not public sharing links. A dedicated, least-privilege profile is recommended for unattended tablets.
+
 <img width="378" height="315" alt="welcome" src="https://github.com/user-attachments/assets/8cfb9a9a-70cc-467f-95e6-0e9cef88b3d5" />
 
 OpenEnsemble is a single Node.js server that serves a web UI on port 3737. Create the owner account, connect at least one model provider, create an agent, and start a conversation.
@@ -71,8 +84,6 @@ Use the built-in skill builder to add new capabilities at runtime. A blueprint s
 **Background scheduler.** Cron-like recurring tasks. Custom built-in LLM to set and parse tasks. (e.g. a daily news briefing, a nightly uploads-folder cleanup) plus one-shot tasks an agent schedules for itself.
 
 **Per-user everything.** Agents, custom skills, sessions, chat history, uploads, AI outputs, code projects, and settings are all stored under `users/{userId}/` — a fresh install with multiple accounts is fully isolated.
-
-**Display dashboards.** Build per-profile wall-tablet, room, or browser displays from either **Dashboard** entry in OE. Each dashboard has a stable address, fully removable sections and cards, optional page chrome, its own colors, and cards for Home Assistant, Calendar, Email, or safe declarative custom-skill widgets. Standalone displays can swipe through the profile's dashboards while every individual address keeps working. Normal OE sign-in and profile permissions still apply. See the [public dashboard overview](https://openensemble.github.io/openensemble/dashboards) or the [complete in-repo guide](guide/dashboards.md).
 
 ### Admin and advanced
 
