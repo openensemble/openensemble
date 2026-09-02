@@ -402,6 +402,15 @@ body.dashboard-sidebar-hidden .canvas-toolbar:has(.mobile-spaces[hidden]):has(.e
 .widget-metric strong, .widget-metric span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .widget-metric strong { color: var(--tone); font-size: 16px; font-variant-numeric: tabular-nums; font-weight: 660; letter-spacing: -.025em; }
 .widget-metric span { margin-top: 4px; color: var(--muted); font-size: 7px; }
+.nodes-widget-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 8px; }
+.nodes-widget-summary > div { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--text) 2.6%, transparent); padding: 8px 9px; }
+.nodes-widget-summary strong, .nodes-widget-summary span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nodes-widget-summary strong { color: var(--accent); font-size: 15px; font-variant-numeric: tabular-nums; font-weight: 680; }
+.nodes-widget-summary span { margin-top: 3px; color: var(--muted); font-size: 7px; }
+.nodes-widget-summary .needs-attention strong { color: var(--amber); }
+.node-widget-row { min-height: 44px; }
+.node-widget-dot { width: 8px; height: 8px; flex: 0 0 auto; border: 2px solid color-mix(in srgb, var(--tone) 38%, transparent); border-radius: 50%; background: var(--tone); box-shadow: 0 0 12px color-mix(in srgb, var(--tone) 34%, transparent); }
+.node-widget-status { max-width: 38%; overflow: hidden; color: var(--tone); font-size: 8px; font-weight: 740; text-overflow: ellipsis; white-space: nowrap; }
 .tone-lime { --tone: var(--lime); }.tone-sky { --tone: var(--sky); }.tone-violet { --tone: var(--violet); }
 .tone-amber, .tone-warning { --tone: var(--amber); }.tone-rose, .tone-danger { --tone: var(--rose); }
 .tone-cyan, .tone-good { --tone: var(--cyan); }.tone-muted { --tone: var(--muted); }

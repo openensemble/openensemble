@@ -23,7 +23,7 @@ async function loadDashboard() {
     <div class="dash-display-entry-icon">${icon('monitor-smartphone', 26)}</div>
     <div class="dash-display-entry-copy">
       <div class="dash-card-title">Display dashboards</div>
-      <div class="dash-card-meta">Create focused Home Assistant dashboards for wall tablets, rooms, or any browser, each with a stable address.</div>
+      <div class="dash-card-meta">Create customizable browser dashboards with home controls, schedules, messages, node status, and skill widgets—each with a stable address.</div>
     </div>
     <div class="dash-display-entry-actions">
       <button class="dash-tool-btn" data-action="openDashboardDisplays" data-args='["library"]'>Open studio</button>

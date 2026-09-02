@@ -19,10 +19,27 @@ import { turnTraceContext } from '../../lib/turn-trace-context.mjs';
 // Entries and the revocation list are persisted to nodes.json so a server
 // restart doesn't silently drop registered nodes from the UI until they
 // happen to reconnect.
-const nodes = new Map();           // nodeId → node entry
-const pendingCommands = new Map(); // cmdId → { resolve, reject, timer, chunks }
-const ptyCallbacks = new Map();    // ptyId → (msg) => void — browser WS relay
+const nodes = new Map();           // JSON [userId,nodeId] → node entry
+const pendingCommands = new Map(); // cmdId → { userId, nodeId, resolve, reject, timer, chunks }
+const ptyCallbacks = new Map();    // ptyId → { userId, nodeId, callback } — browser WS relay
 const revokedNodes = new Map();    // `${userId}:${nodeId}` → revokedAt ts — prevents re-registration after remove
+
+function nodeRegistryKey(userId, nodeId) {
+  return JSON.stringify([String(userId), String(nodeId)]);
+}
+
+function findNodeEntry(nodeId, userId = null) {
+  if (userId) return nodes.get(nodeRegistryKey(userId, nodeId)) || null;
+  let found = null;
+  for (const entry of nodes.values()) {
+    if (entry.nodeId !== nodeId) continue;
+    // Legacy internal callers that omit userId remain safe only while the id
+    // is unambiguous. Production socket paths always supply the owner.
+    if (found) return null;
+    found = entry;
+  }
+  return found;
+}
 
 // Upper bound on live stream bytes we retain per command in cmd.chunks. The
 // agent also caps what it streams; this is server-side defense so a noisy
@@ -102,8 +119,9 @@ export function loadPersistedNodes() {
     let loadedNodes = 0;
     for (const n of raw.nodes || []) {
       if (!n.nodeId || !n.userId) continue;
-      if (nodes.has(n.nodeId)) continue;
-      nodes.set(n.nodeId, {
+      const registryKey = nodeRegistryKey(n.userId, n.nodeId);
+      if (nodes.has(registryKey)) continue;
+      nodes.set(registryKey, {
         ws: null,
         userId: n.userId,
         nodeId: n.nodeId,
@@ -257,7 +275,7 @@ function scheduleAutoOnboarding(userId, nodeId, entry, info = {}) {
     return;
   }
   const timer = setTimeout(async () => {
-    const current = nodes.get(nodeId);
+    const current = findNodeEntry(nodeId, userId);
     if (!current || current.userId !== userId || !current.ws) return;
     try {
       const { runNodeOnboarding } = await import('../../lib/node-onboarding.mjs');
@@ -294,7 +312,7 @@ export function isRevoked(userId, nodeId) {
 }
 
 export function rememberNodeSessionToken(userId, nodeId, token) {
-  const entry = nodes.get(nodeId);
+  const entry = findNodeEntry(nodeId, userId);
   if (!entry || entry.userId !== userId || !token) return false;
   const tokenHash = hashToken(token);
   if (entry.tokenHash === tokenHash) return true;
@@ -367,8 +385,10 @@ export function registerNode(ws, userId, info) {
     }
   }
 
-  // Check if this is a reconnect (entry still in `nodes`, possibly marked disconnected)
-  const oldEntry = nodes.get(nodeId);
+  // A node id is only unique inside its owning profile. Common default host
+  // names (for example "ubuntu") may legitimately exist for several users.
+  const registryKey = nodeRegistryKey(userId, nodeId);
+  const oldEntry = nodes.get(registryKey);
   const restartCount = oldEntry?.restartCount ?? 0;
   const isReconnect = !!oldEntry;
 
@@ -376,7 +396,7 @@ export function registerNode(ws, userId, info) {
   // beat our unregister), force-close it before accepting the new socket.
   if (oldEntry?.ws && oldEntry.ws !== ws) {
     try { oldEntry.ws.close(4000, 'Replaced by new connection'); } catch {}
-    rejectPendingForNode(nodeId);
+    rejectPendingForNode(nodeId, userId);
   }
 
   const now = Date.now();
@@ -419,7 +439,7 @@ export function registerNode(ws, userId, info) {
     uptimeSince: now,
   };
 
-  nodes.set(nodeId, entry);
+  nodes.set(registryKey, entry);
   persistNodes();
 
   console.log(`[nodes] ${isReconnect ? 'Reconnected' : 'Registered'}: ${nodeId} (${info.hostname}) for user ${userId}`);
@@ -455,9 +475,8 @@ export function registerNode(ws, userId, info) {
 // Without that cascade the drawer looked clean while orphan monitors kept
 // ticking with "node not found".
 export function removeNode(nodeId, userId) {
-  const entry = nodes.get(nodeId);
+  const entry = findNodeEntry(nodeId, userId);
   if (!entry) return { removed: false, reason: 'not found' };
-  if (entry.userId !== userId) return { removed: false, reason: 'not owned by user' };
 
   // Profiles and health watchers created before node-id canonicalization may
   // still use the hostname. Preserve that exact alias before deleting the
@@ -465,8 +484,8 @@ export function removeNode(nodeId, userId) {
   // Do not treat the fallback value or a hostname still owned by another
   // registered node as an identity; either could erase that node's state.
   const hostname = typeof entry.hostname === 'string' ? entry.hostname : '';
-  const hostnameIsShared = hostname && [...nodes.entries()].some(([otherNodeId, other]) => (
-    otherNodeId !== nodeId
+  const hostnameIsShared = hostname && [...nodes.values()].some(other => (
+    other !== entry
     && other.userId === userId
     && typeof other.hostname === 'string'
     && other.hostname.toLowerCase() === hostname.toLowerCase()
@@ -485,8 +504,8 @@ export function removeNode(nodeId, userId) {
       entry.ws.close(4003, 'Revoked');
     }
   } catch {}
-  rejectPendingForNode(nodeId);
-  nodes.delete(nodeId);
+  rejectPendingForNode(nodeId, userId);
+  nodes.delete(nodeRegistryKey(userId, nodeId));
   persistNodes();
 
   // Cascade is best-effort and must not undo the registry removal. Fire and
@@ -500,9 +519,12 @@ export function removeNode(nodeId, userId) {
   return { removed: true, legacyNodeIds };
 }
 
-export function unregisterNode(nodeId) {
-  const entry = nodes.get(nodeId);
+export function unregisterNode(nodeId, userId = null, sourceWs = null) {
+  const entry = findNodeEntry(nodeId, userId);
   if (!entry) return;
+  // An old socket can emit close after a faster reconnect has already
+  // replaced it. Never let that late close mark the new connection offline.
+  if (sourceWs && entry.ws && entry.ws !== sourceWs) return;
   // Already marked disconnected — nothing to do (guards against double-fire
   // from both 'close' and a forced replacement).
   if (entry.health === 'disconnected' && !entry.ws) return;
@@ -518,13 +540,13 @@ export function unregisterNode(nodeId) {
   persistNodes();
 
   // Clean up pending commands
-  rejectPendingForNode(nodeId);
+  rejectPendingForNode(nodeId, entry.userId);
 
   // Tear down any live terminal (PTY) sessions bound to this node so the
   // browser xterm gets a real error/close instead of sitting "Connected" but
   // dead until the user notices.
   for (const [ptyId, cb] of ptyCallbacks) {
-    if (cb.nodeId !== nodeId) continue;
+    if (cb.nodeId !== nodeId || cb.userId !== entry.userId) continue;
     try {
       cb.callback({ type: 'pty_error', ptyId, message: `${entry.hostname} disconnected` });
     } catch {}
@@ -571,9 +593,9 @@ function looksLikeInteractivePrompt(text) {
   return null;
 }
 
-function rejectPendingForNode(nodeId) {
+function rejectPendingForNode(nodeId, userId) {
   for (const [cmdId, cmd] of pendingCommands) {
-    if (cmd.nodeId === nodeId) {
+    if (cmd.nodeId === nodeId && cmd.userId === userId) {
       clearTimeout(cmd.timer);
       cmd.reject(new Error('Node disconnected'));
       pendingCommands.delete(cmdId);
@@ -594,8 +616,8 @@ export function getNodes(userId) {
 
 export function getNode(nodeId, userId) {
   // Primary lookup: exact nodeId match.
-  let entry = nodes.get(nodeId);
-  if (!entry || entry.userId !== userId) {
+  let entry = findNodeEntry(nodeId, userId);
+  if (!entry) {
     // Fallback: hostname match (node_list displays "hostname (nodeId)"
     // so models frequently pass the hostname).
     entry = null;
@@ -604,7 +626,7 @@ export function getNode(nodeId, userId) {
       if (e.userId === userId && e.hostname?.toLowerCase() === needle) { entry = e; break; }
     }
   }
-  if (!entry || entry.userId !== userId) return null;
+  if (!entry) return null;
   return nodeToWire(entry);
 }
 
@@ -656,15 +678,15 @@ function nodeToWire(entry) {
 // Resolve a user-supplied node identifier (id or hostname) to the internal
 // entry. Match shape of getNode but returns the raw entry for mutation.
 function resolveNodeEntry(nodeId, userId) {
-  let entry = nodes.get(nodeId);
-  if (!entry || entry.userId !== userId) {
+  let entry = findNodeEntry(nodeId, userId);
+  if (!entry) {
     const needle = String(nodeId).toLowerCase();
     entry = null;
     for (const e of nodes.values()) {
       if (e.userId === userId && e.hostname?.toLowerCase() === needle) { entry = e; break; }
     }
   }
-  return entry && entry.userId === userId ? entry : null;
+  return entry;
 }
 
 // ── parent_host (hypervisor / storage backend pointer) ──────────────────────
@@ -794,10 +816,10 @@ export function isPathAllowed(nodeId, userId, requestedPath) {
 // without flapping signals into "is busy" rejections.
 const MAX_CONCURRENT_PER_NODE = 10;
 
-function countInflight(nodeId) {
+function countInflight(nodeId, userId) {
   let n = 0;
   for (const cmd of pendingCommands.values()) {
-    if (cmd.nodeId === nodeId) n++;
+    if (cmd.nodeId === nodeId && cmd.userId === userId) n++;
   }
   return n;
 }
@@ -817,7 +839,7 @@ function dispatchCommand(nodeId, userId, payload, { onChunk } = {}) {
       return reject(new Error(`Node "${entry.hostname}" is offline`));
     }
 
-    const inflight = countInflight(nodeId);
+    const inflight = countInflight(entry.nodeId, entry.userId);
     if (inflight >= MAX_CONCURRENT_PER_NODE) {
       return reject(new Error(
         `Node "${entry.hostname}" is busy (${inflight} commands already in flight, max ${MAX_CONCURRENT_PER_NODE}). ` +
@@ -837,7 +859,14 @@ function dispatchCommand(nodeId, userId, payload, { onChunk } = {}) {
     // caller's possibly-hostname input. Otherwise rejectPendingForNode
     // (called on disconnect with the canonical id) wouldn't match this
     // pending and the op would hang until timeout.
-    const pending = { resolve, reject, timer, nodeId: entry.nodeId, chunks: [] };
+    const pending = {
+      resolve,
+      reject,
+      timer,
+      nodeId: entry.nodeId,
+      userId: entry.userId,
+      chunks: [],
+    };
     if (onChunk) pending.onChunk = onChunk;
     pendingCommands.set(cmdId, pending);
 
@@ -860,9 +889,12 @@ export function sendCommandStreaming(nodeId, userId, payload, onChunk) {
 }
 
 // ── Message handling ─────────────────────────────────────────────────────────
-export function handleNodeMessage(nodeId, msg) {
-  const entry = nodes.get(nodeId);
+export function handleNodeMessage(nodeId, msg, userId = null, sourceWs = null) {
+  const entry = findNodeEntry(nodeId, userId);
   if (!entry) return;
+  // Ignore messages racing from a socket that registerNode already replaced.
+  if (sourceWs && entry.ws !== sourceWs) return;
+  const ownerId = entry.userId;
 
   switch (msg.type) {
     case 'cmd_result': {
@@ -870,7 +902,7 @@ export function handleNodeMessage(nodeId, msg) {
       // Ownership check: a paired node must only resolve its OWN pending
       // commands. Without this, any node could forge a cmd_result for another
       // node's cmdId and inject fabricated output.
-      if (!cmd || cmd.nodeId !== nodeId) return;
+      if (!cmd || cmd.nodeId !== nodeId || cmd.userId !== ownerId) return;
       clearTimeout(cmd.timer);
       pendingCommands.delete(msg.cmdId);
       cmd.resolve({
@@ -885,7 +917,7 @@ export function handleNodeMessage(nodeId, msg) {
     case 'cmd_stream': {
       const cmd = pendingCommands.get(msg.cmdId);
       // Ownership check (see cmd_result) — reject forged streams from other nodes.
-      if (!cmd || cmd.nodeId !== nodeId) return;
+      if (!cmd || cmd.nodeId !== nodeId || cmd.userId !== ownerId) return;
       // Bound the accumulated chunk buffer so a noisy command (journalctl -f,
       // cat /dev/urandom) can't grow server memory without limit.
       cmd._chunkBytes = (cmd._chunkBytes || 0) + (msg.data?.length || 0);
@@ -928,7 +960,7 @@ export function handleNodeMessage(nodeId, msg) {
     case 'status_result': {
       const cmd = pendingCommands.get(msg.cmdId);
       // Ownership check (see cmd_result) — reject forged status from other nodes.
-      if (!cmd || cmd.nodeId !== nodeId) return;
+      if (!cmd || cmd.nodeId !== nodeId || cmd.userId !== ownerId) return;
       clearTimeout(cmd.timer);
       pendingCommands.delete(msg.cmdId);
       // Resolve with the full status object (not stdout/stderr)
@@ -986,7 +1018,7 @@ export function handleNodeMessage(nodeId, msg) {
     case 'pty_started':
     case 'pty_error': {
       const cb = ptyCallbacks.get(msg.ptyId);
-      if (cb) cb.callback(msg);
+      if (cb && cb.nodeId === nodeId && cb.userId === ownerId) cb.callback(msg);
       break;
     }
 
@@ -1004,7 +1036,8 @@ export function startHeartbeat(intervalMs = 60000) {
 
   _heartbeatInterval = setInterval(() => {
     const now = Date.now();
-    for (const [nodeId, entry] of nodes) {
+    for (const entry of nodes.values()) {
+      const { nodeId } = entry;
       // Skip disconnected entries (kept in the map for UI display)
       if (!entry.ws || entry.ws.readyState !== entry.ws.OPEN) continue;
 
@@ -1037,15 +1070,15 @@ export function stopHeartbeat() {
 
 // ── PTY relay ───────────────────────────────────────────────────────────────
 export function sendPtyMessage(nodeId, userId, msg) {
-  const entry = nodes.get(nodeId);
-  if (!entry || entry.userId !== userId) return false;
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return false;
   if (!entry.ws || entry.ws.readyState !== entry.ws.OPEN) return false;
   try { entry.ws.send(JSON.stringify(msg)); return true; }
   catch { return false; }
 }
 
-export function registerPtyCallback(ptyId, nodeId, callback) {
-  ptyCallbacks.set(ptyId, { nodeId, callback });
+export function registerPtyCallback(ptyId, nodeId, userId, callback) {
+  ptyCallbacks.set(ptyId, { nodeId, userId, callback });
 }
 
 export function unregisterPtyCallback(ptyId) {
@@ -1056,15 +1089,8 @@ export function unregisterPtyCallback(ptyId) {
 // disconnected entries too (kept for UI display), so callers that need to
 // actually reach the agent — e.g. opening a PTY — must check this.
 export function isNodeConnected(nodeId, userId) {
-  const entry = nodes.get(nodeId);
-  if (!entry || entry.userId !== userId) {
-    // Allow hostname-form ids (getNode does the same fallback).
-    const needle = String(nodeId).toLowerCase();
-    for (const e of nodes.values()) {
-      if (e.userId === userId && e.hostname?.toLowerCase() === needle) {
-        return !!e.ws && e.ws.readyState === e.ws.OPEN;
-      }
-    }
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) {
     return false;
   }
   return !!entry.ws && entry.ws.readyState === entry.ws.OPEN;
@@ -1074,8 +1100,8 @@ export function isNodeConnected(nodeId, userId) {
 // Tells the agent to run its self-destruct script, then revokes + removes.
 // Returns { ok, error? }. Best-effort: if the node is offline, we just revoke.
 export function pushUninstall(nodeId, userId) {
-  const entry = nodes.get(nodeId);
-  if (!entry || entry.userId !== userId) return { ok: false, error: 'node not found' };
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return { ok: false, error: 'node not found' };
   try {
     if (entry.ws && entry.ws.readyState === entry.ws.OPEN) {
       entry.ws.send(JSON.stringify({ type: 'uninstall', message: 'Removed by user' }));
@@ -1139,8 +1165,8 @@ async function remediateMissingUpdateKey(entry) {
 // Tells a connected agent to re-download and restart itself. Fire-and-forget:
 // the agent ACKs via an `update_result` message, then exits (systemd restarts it).
 export function pushUpdate(nodeId, userId, url = null) {
-  const entry = nodes.get(nodeId);
-  if (!entry || entry.userId !== userId) return { ok: false, error: 'node not found' };
+  const entry = resolveNodeEntry(nodeId, userId);
+  if (!entry) return { ok: false, error: 'node not found' };
   if (!entry.ws || entry.ws.readyState !== entry.ws.OPEN) return { ok: false, error: 'node not connected' };
 
   // GATE: a legacy agent (pre-signing, no pinned public key) can't verify an

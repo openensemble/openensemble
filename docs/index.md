@@ -38,8 +38,8 @@ agent, and start a conversation.
   See [Voice devices]({{ site.baseurl }}/voice-devices).
 - **Display dashboards** — build fully customizable, per-profile wall-tablet
   and browser views with stable addresses, swipe navigation, Home Assistant
-  controls, calendars, email, and safe custom-skill widgets. See
-  [Display dashboards]({{ site.baseurl }}/dashboards).
+  controls, calendars, email, read-only node status, and safe custom-skill
+  widgets. See [Display dashboards]({{ site.baseurl }}/dashboards).
 - **Skills** — email, calendar, web research, expenses, scheduled tasks,
   remote nodes, MCP servers, and a built-in skill builder that creates new
   capabilities at runtime.

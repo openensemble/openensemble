@@ -51,7 +51,7 @@ const DASHBOARD_SWIPE_MIN_DISTANCE = 72;
 const DASHBOARD_SWIPE_MAX_DURATION_MS = 900;
 const DASHBOARD_SWIPE_DOMINANCE = 1.4;
 const DASHBOARD_SWIPE_EDGE_GUTTER = 24;
-const SAFE_WIDGET_ID = /^(?:builtin\.(?:calendar|email)|skill:[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)$/;
+const SAFE_WIDGET_ID = /^(?:builtin\.(?:calendar|email|nodes)|skill:[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)$/;
 const SECRET_WIDGET_CONFIG_KEY = /(?:secret|token|password|passwd|credential|cookie|authorization|api[_-]?key|private[_-]?key)/i;
 const UNASSIGNED_ID = 'unassigned';
 const focusModes = ['overview', 'rooms', 'devices'];
@@ -406,7 +406,7 @@ function normalizeWidgetDescriptor(raw) {
     widgetId,
     title: String(raw.title || raw.name || widgetId).slice(0, 80),
     description: String(raw.description || '').slice(0, 240),
-    icon: widgetIcons.has(icon) ? icon : widgetId.toLowerCase().includes('calendar') ? 'calendar' : widgetId.toLowerCase().includes('email') || widgetId.toLowerCase().includes('mail') ? 'mail' : 'package',
+    icon: widgetIcons.has(icon) ? icon : widgetId === 'builtin.calendar' ? 'calendar' : widgetId === 'builtin.email' ? 'mail' : widgetId === 'builtin.nodes' ? 'activity' : 'package',
     size: sizes.includes(raw.size || raw.defaultSize) ? (raw.size || raw.defaultSize) : 'standard',
     accent: accents.includes(raw.accent || raw.defaultAccent) ? (raw.accent || raw.defaultAccent) : 'violet',
     refreshSeconds: Math.max(WIDGET_MIN_REFRESH_SECONDS, Math.min(WIDGET_MAX_REFRESH_SECONDS, Number(raw.refreshSeconds) || WIDGET_DEFAULT_REFRESH_SECONDS)),
@@ -425,6 +425,7 @@ function widgetDescriptor(widgetId) {
 function widgetType(card) {
   if (card?.widgetId === 'builtin.calendar') return 'calendar';
   if (card?.widgetId === 'builtin.email') return 'email';
+  if (card?.widgetId === 'builtin.nodes') return 'nodes';
   return 'skill';
 }
 
@@ -900,7 +901,9 @@ function widgetCardFor(descriptor) {
     ? { days: 7, maxItems: 10, calendarIds: [], showLocation: false }
     : type === 'email'
       ? { accountId: '', maxItems: 8, showSnippet: false }
-      : {};
+      : type === 'nodes'
+        ? { maxItems: 8, showDetails: true }
+        : {};
   const config = cleanWidgetConfig({ ...fallback, ...descriptor.config });
   if (type === 'email' && !config.accountId && Array.isArray(descriptor?.options?.accounts)) {
     config.accountId = String(descriptor.options.accounts.find(account => account?.id)?.id || '').slice(0, 160);
@@ -911,7 +914,7 @@ function widgetCardFor(descriptor) {
     widgetId: descriptor.widgetId,
     title: '',
     size: sizes.includes(descriptor.size) ? descriptor.size : type === 'skill' ? 'standard' : 'wide',
-    accent: accents.includes(descriptor.accent) ? descriptor.accent : type === 'calendar' ? 'sky' : type === 'email' ? 'violet' : 'lime',
+    accent: accents.includes(descriptor.accent) ? descriptor.accent : type === 'calendar' ? 'sky' : type === 'email' ? 'violet' : type === 'nodes' ? 'cyan' : 'lime',
     config,
   };
 }
@@ -1182,8 +1185,11 @@ async function refreshWidgetCard(card, { force = false } = {}) {
   if (descriptor?.available === false) {
     const next = setWidgetState(card.id, {
       status: 'unavailable',
+      data: null,
       widgetId: card.widgetId,
       error: descriptor.reason || 'This widget is not available for this profile.',
+      stale: false,
+      fetchedAt: null,
       nextAt: Date.now() + widgetRefreshSeconds(card) * 1000,
     });
     if (app.layout) renderSections();
@@ -1225,10 +1231,15 @@ async function refreshWidgetCard(card, { force = false } = {}) {
     } catch (error) {
       if (dashboardSlug !== app.dashboardSlug || !dashboardHasCard(card.id, card.widgetId)) return null;
       const previous = widgetState(card);
+      const accessLost = [403, 404].includes(error.status);
       const next = setWidgetState(card.id, {
-        status: previous.data !== null ? 'ready' : [403, 404, 424].includes(error.status) ? 'unavailable' : 'error',
+        status: accessLost || (previous.data === null && error.status === 424)
+          ? 'unavailable'
+          : previous.data !== null ? 'ready' : 'error',
+        data: accessLost ? null : previous.data,
         error: String(error.message || 'Widget could not be refreshed.').slice(0, 500),
-        stale: previous.data !== null,
+        stale: !accessLost && previous.data !== null,
+        fetchedAt: accessLost ? null : previous.fetchedAt,
         nextAt: Date.now() + Math.min(60, widgetRefreshSeconds(card)) * 1000,
         widgetId: card.widgetId,
         inFlight: null,
@@ -2381,6 +2392,38 @@ function emailWidgetContent(card, data) {
   };
 }
 
+function nodesWidgetContent(card, data) {
+  const nodes = (Array.isArray(data?.nodes) ? data.nodes : []).slice(0, 20);
+  const total = Math.max(0, Number(data?.summary?.total) || nodes.length);
+  const online = Math.max(0, Number(data?.summary?.online) || 0);
+  const attention = Math.max(0, Number(data?.summary?.attention) || 0);
+  if (!nodes.length) {
+    return {
+      subtitle: 'No paired nodes',
+      body: `<div class="widget-empty">${ico('activity')}<strong>No nodes paired</strong><span>Pair a remote machine from OpenEnsemble → Nodes.</span></div>`,
+    };
+  }
+  const presentation = {
+    online: ['Online', 'good'],
+    recovered: ['Recovered', 'cyan'],
+    stale: ['Not responding', 'warning'],
+    offline: ['Offline', 'danger'],
+    unknown: ['Unknown', 'muted'],
+  };
+  const rows = nodes.map(node => {
+    const status = Object.prototype.hasOwnProperty.call(presentation, node?.status) ? node.status : 'unknown';
+    const [label, tone] = presentation[status];
+    const name = String(node?.name || 'Remote node').slice(0, 160);
+    const platform = String(node?.platform || '').slice(0, 40);
+    return `<div class="widget-row node-widget-row tone-${tone}"><span class="node-widget-dot" aria-hidden="true"></span><div class="widget-row-copy"><strong>${escapeHtml(name)}</strong>${platform ? `<small>${escapeHtml(platform)}</small>` : ''}</div><b class="node-widget-status">${escapeHtml(label)}</b></div>`;
+  }).join('');
+  const summary = `<div class="nodes-widget-summary"><div><strong>${online}</strong><span>Online</span></div><div${attention ? ' class="needs-attention"' : ''}><strong>${attention}</strong><span>Attention</span></div><div><strong>${total}</strong><span>Total</span></div></div>`;
+  return {
+    subtitle: attention ? `${online} online · ${attention} need attention` : `${online} of ${total} online`,
+    body: `${summary}<div class="widget-list nodes-widget-list">${rows}</div>`,
+  };
+}
+
 function widgetTone(value) {
   const tone = String(value || '').toLowerCase();
   const aliases = { neutral: 'muted', warn: 'warning', bad: 'danger', info: 'sky' };
@@ -2441,22 +2484,25 @@ function widgetStatusContent(card, state, descriptor) {
 function widgetCard(card) {
   const descriptor = widgetDescriptor(card.widgetId);
   const state = widgetState(card);
-  const title = card.title || descriptor?.title || (widgetType(card) === 'calendar' ? 'Calendar' : widgetType(card) === 'email' ? 'Email' : 'Skill widget');
-  const icon = descriptor?.icon || (widgetType(card, state.data) === 'calendar' ? 'calendar' : widgetType(card, state.data) === 'email' ? 'mail' : 'package');
+  const type = widgetType(card);
+  const title = card.title || descriptor?.title || (type === 'calendar' ? 'Calendar' : type === 'email' ? 'Email' : type === 'nodes' ? 'Nodes' : 'Skill widget');
+  const icon = descriptor?.icon || (type === 'calendar' ? 'calendar' : type === 'email' ? 'mail' : type === 'nodes' ? 'activity' : 'package');
   const statusContent = widgetStatusContent(card, state, descriptor);
-  const content = statusContent || (widgetType(card, state.data) === 'calendar'
+  const content = statusContent || (type === 'calendar'
     ? calendarWidgetContent(card, state.data)
-    : widgetType(card, state.data) === 'email'
+    : type === 'email'
       ? emailWidgetContent(card, state.data)
-      : skillWidgetContent(card, state.data));
+      : type === 'nodes'
+        ? nodesWidgetContent(card, state.data)
+        : skillWidgetContent(card, state.data));
   const classes = [
-    'device-card', 'dashboard-widget-card', `widget-${widgetType(card, state.data)}`,
+    'device-card', 'dashboard-widget-card', `widget-${type}`,
     `size-${card.size}`, `accent-${card.accent}`,
     ['error', 'unavailable'].includes(state.status) ? 'widget-unavailable' : 'on',
   ].filter(Boolean).join(' ');
   const draggable = app.editing;
   const editAction = app.editing ? ` data-action="edit-card" data-id="${escapeHtml(card.id)}"` : '';
-  const sourceUpdatedAt = widgetType(card, state.data) === 'skill' && state.data && typeof state.data === 'object'
+  const sourceUpdatedAt = type === 'skill' && state.data && typeof state.data === 'object'
     ? state.data.updatedAt
     : null;
   const updated = sourceUpdatedAt || state.fetchedAt
@@ -3525,7 +3571,7 @@ function renderPickerPanel() {
   const grouped = app.pickerMode === 'group';
   const canAdd = count > 0 && (!grouped || count >= 2);
   const suggestedTitle = groupTitleFor([...app.pickerSelection]);
-  const source = `<div class="picker-source" role="group" aria-label="Card source"><button type="button" data-action="picker-source" data-value="devices" class="${widgets ? '' : 'active'}" aria-pressed="${!widgets}">${ico('devices')}<span><strong>Devices</strong><small>Home Assistant controls</small></span></button><button type="button" data-action="picker-source" data-value="widgets" class="${widgets ? 'active' : ''}" aria-pressed="${widgets}">${ico('grid')}<span><strong>Widgets</strong><small>Calendar, email, and skills</small></span></button></div>`;
+  const source = `<div class="picker-source" role="group" aria-label="Card source"><button type="button" data-action="picker-source" data-value="devices" class="${widgets ? '' : 'active'}" aria-pressed="${!widgets}">${ico('devices')}<span><strong>Devices</strong><small>Home Assistant controls</small></span></button><button type="button" data-action="picker-source" data-value="widgets" class="${widgets ? 'active' : ''}" aria-pressed="${widgets}">${ico('grid')}<span><strong>Widgets</strong><small>Calendar, email, nodes, and skills</small></span></button></div>`;
   if (widgets) {
     const descriptor = widgetDescriptor(app.pickerWidgetId);
     const available = descriptor?.available !== false;
@@ -3635,6 +3681,12 @@ function widgetEditorFields(card, descriptor) {
     if (!counts.includes(maxItems)) counts.push(maxItems);
     return `<label class="field"><span class="field-label">Email account</span><select id="widgetEmailAccount"${accounts.length || currentAccount ? '' : ' disabled'}>${accounts.length ? '' : `<option value="" selected>No account connected</option>`}${missingCurrent}${accountOptions}</select><small class="field-help">Connect or rename accounts in OpenEnsemble email settings.</small></label><label class="field"><span class="field-label">Messages to show</span><select id="widgetEmailMaxItems">${counts.sort((a, b) => a - b).map(value => `<option value="${value}"${value === maxItems ? ' selected' : ''}>${value}</option>`).join('')}</select></label><label class="widget-check"><input type="checkbox" id="widgetEmailShowSnippet"${card.config?.showSnippet === true ? ' checked' : ''}><span><strong>Show message previews</strong><small>Include a short snippet below each subject.</small></span></label>`;
   }
+  if (type === 'nodes') {
+    const maxItems = Math.max(1, Math.min(20, Number(card.config?.maxItems) || 8));
+    const counts = [4, 8, 12, 20];
+    if (!counts.includes(maxItems)) counts.push(maxItems);
+    return `<label class="field"><span class="field-label">Nodes to show</span><select id="widgetNodesMaxItems">${counts.sort((a, b) => a - b).map(value => `<option value="${value}"${value === maxItems ? ' selected' : ''}>Up to ${value}</option>`).join('')}</select><small class="field-help">Nodes needing attention appear first.</small></label><label class="widget-check"><input type="checkbox" id="widgetNodesShowDetails"${card.config?.showDetails !== false ? ' checked' : ''}><span><strong>Show platform</strong><small>Include Linux, Windows, or macOS below each node name.</small></span></label><div class="panel-note widget-editor-note">This is a status-only card. It cannot run commands, install updates, restart, or shut down a node.</div>`;
+  }
   return `<div class="panel-note widget-editor-note">This skill controls the widget's read-only data. Its layout, name, size, and color stay specific to this dashboard.</div>`;
 }
 
@@ -3643,7 +3695,8 @@ function openWidgetCardEditor(found) {
   const { card, section } = found;
   const descriptor = widgetDescriptor(card.widgetId);
   app.panel = { type: 'widget-card', id: card.id };
-  const fallbackTitle = descriptor?.title || (widgetType(card) === 'calendar' ? 'Calendar' : widgetType(card) === 'email' ? 'Email' : 'Skill widget');
+  const type = widgetType(card);
+  const fallbackTitle = descriptor?.title || (type === 'calendar' ? 'Calendar' : type === 'email' ? 'Email' : type === 'nodes' ? 'Nodes' : 'Skill widget');
   const unavailable = descriptor?.available === false || (app.widgetCatalogLoaded && !app.widgetCatalogError && !descriptor);
   const body = `<div class="form"><label class="field"><span class="field-label">Display name</span><input id="cardTitle" maxlength="80" value="${escapeHtml(card.title)}" placeholder="${escapeHtml(fallbackTitle)}"></label><label class="field"><span class="field-label">Section</span><select id="cardSection">${app.layout.sections.map(item => `<option value="${escapeHtml(item.id)}"${item.id === section.id ? ' selected' : ''}>${escapeHtml(item.title)}</option>`).join('')}</select></label>${widgetEditorFields(card, descriptor)}<label class="field"><span class="field-label">Size</span><select id="cardSize">${sizes.map(value => `<option value="${value}"${value === card.size ? ' selected' : ''}>${value[0].toUpperCase() + value.slice(1)}</option>`).join('')}</select></label><div class="field"><span class="field-label">Accent</span>${accentOptions(card.accent)}</div>${unavailable ? `<div class="panel-note widget-editor-warning">${escapeHtml(descriptor?.reason || 'This widget is no longer available. You can keep its place or remove it.')}</div>` : ''}</div><div class="danger-zone"><button class="button danger" data-action="remove-card" data-id="${escapeHtml(card.id)}">${ico('trash')}Remove widget</button></div>`;
   panelShell('Customize widget', fallbackTitle, body, `<button class="button ghost" data-action="close-panel">Cancel</button><button class="button primary" data-action="save-widget-card" data-id="${escapeHtml(card.id)}">Save widget</button>`);
@@ -4283,6 +4336,9 @@ function saveWidgetCard(cardId) {
     config.accountId = accountId;
     config.maxItems = Math.max(1, Math.min(20, Number($('#widgetEmailMaxItems')?.value) || 8));
     config.showSnippet = $('#widgetEmailShowSnippet')?.checked === true;
+  } else if (type === 'nodes') {
+    config.maxItems = Math.max(1, Math.min(20, Number($('#widgetNodesMaxItems')?.value) || 8));
+    config.showDetails = $('#widgetNodesShowDetails')?.checked === true;
   }
   const destination = app.layout.sections.find(item => item.id === $('#cardSection')?.value);
   if (destination && destination.id !== section.id && destination.cards.length >= MAX_CARDS_PER_SECTION) {

@@ -8,6 +8,13 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-09-02
 
+**See remote-node health on a dashboard**
+Add a read-only Nodes card from **Add card → Widgets** to see which machines
+paired to the active profile are online, recently recovered, not responding, or
+offline. Attention states sort first, and the card never exposes node
+addresses, paths, access settings, or command controls. Node permission and
+access-schedule changes are rechecked on every refresh.
+
 **Swipe between display dashboards**
 On a standalone display, swipe left for the next dashboard or right for the
 previous one. Navigation follows the profile's saved dashboard order and wraps
@@ -19,8 +26,8 @@ stable address for browsers that should open one display directly.
 
 **A complete dashboard guide**
 The new **Display dashboards** Guide page covers creation, editing, cards,
-Calendar and Email, custom-skill widgets, colors, page elements, tablet setup,
-authentication, permissions, privacy, deletion, and troubleshooting.
+Calendar, Email, Nodes, custom-skill widgets, colors, page elements, tablet
+setup, authentication, permissions, privacy, deletion, and troubleshooting.
 
 ---
 

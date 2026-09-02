@@ -13,8 +13,12 @@ Self-hosted, multi-user AI assistant platform. Run a team of specialist agents, 
 
 Build up to 32 dashboards per profile for wall tablets, rooms, TVs, or ordinary browser tabs. Every dashboard keeps its own stable address, while optional swipe navigation lets you move through all of a profile's dashboards without typing another URL.
 
+![A customized OpenEnsemble dashboard showing Home Assistant controls, calendar, email, and remote-node status](docs/assets/display-dashboard.png)
+
+*One display can combine home controls with read-only Calendar, Email, Nodes, and custom-skill status cards.*
+
 - Customize sections, cards, page elements, text, themes, and colors.
-- Add Home Assistant controls, calendars, email summaries, and safe read-only widgets supplied by custom skills.
+- Add Home Assistant controls, calendars, email summaries, read-only remote-node status, and safe read-only widgets supplied by custom skills.
 - Hide built-in elements—including the greeting, status, clock, summary, navigation, and section headings—to make each display your own.
 - Open **Display dashboards** from either **Dashboard** entry inside OpenEnsemble to configure everything, then launch the finished display at its individual address.
 

@@ -75,12 +75,17 @@ Choose **Add card**, then select **Devices** or **Widgets**.
 | Home Assistant | Live entities, cameras, weather, grouped devices, and supported controls | Home Assistant configured in OE and Home Assistant access enabled for the profile |
 | Calendar | A read-only agenda beginning today | The `gcal` skill enabled and Google Calendar connected; choose Today or the next 3, 7, or 14 days |
 | Email | A read-only recent-inbox view | The `email` skill and Inbox feature enabled, plus a connected Gmail, Microsoft, or IMAP account; choose the account, item count, and whether to show snippets |
+| Nodes | Read-only availability and health for remote machines paired to this profile | The `nodes` skill enabled for a non-child profile; only that profile's paired nodes are shown |
 | Custom skill | A summary, metrics, or list rendered by OE | An enabled, user-scoped custom skill with a valid `dashboardWidgets` declaration |
 
 Each widget refreshes independently. If one source is unavailable, its card
 shows the problem without blanking the rest of the dashboard. If a refresh
 fails after a successful result, the card may continue showing that last result
 as stale until it can refresh.
+
+The Nodes card is status-only. It cannot run commands, install updates,
+restart, or shut down a node. Hostnames and health details are visible to
+anyone who can see the display.
 
 Custom-skill widgets are deliberately declarative: the skill returns bounded
 text, metrics, and list data, while OE owns the markup. A widget must bind to an
@@ -168,9 +173,9 @@ timeout in hours. Sessions are listed and revocable under **Settings → Profile
 
 ## Permissions and privacy
 
-Dashboard storage and addresses are profile-scoped. Calendar, Email, custom
-widgets, and Home Assistant data are checked against the signed-in profile's
-relevant permissions and access schedule whenever OE refreshes them.
+Dashboard storage and addresses are profile-scoped. Calendar, Email, Nodes,
+custom widgets, and Home Assistant data are checked against the signed-in
+profile's relevant permissions and access schedule whenever OE refreshes them.
 
 Owners and admins have Home Assistant runtime access automatically. A regular
 profile needs the `role_home_assistant` skill enabled. That access covers the
@@ -180,11 +185,11 @@ upstream limits. Hiding an entity or removing a card changes presentation—it
 does not revoke Home Assistant permission. There is currently no separate
 per-dashboard or per-entity view-only access list.
 
-If Calendar, Email, or custom-widget permission is revoked while a display is
-already open, a previously rendered result can remain on screen marked stale
-after its next failed refresh. Reload or close the display—or revoke that
-browser session—for immediate removal. Home Assistant state is cleared when OE
-detects that runtime access is unavailable.
+If Calendar, Email, Nodes, or custom-widget permission is revoked while a
+display is already open, its rendered data is cleared on the next refresh. A
+transient source or connection failure can retain the previous result marked
+stale. Reload or close the display—or revoke that browser session—when data
+must disappear immediately instead of waiting for that refresh.
 
 ## Delete or start over
 
@@ -202,6 +207,8 @@ narrower option when the cards are right but their focus organization is not.
   profile has runtime access, then refresh the dashboard.
 - Calendar or Email is unavailable: enable the matching skill and feature,
   connect an account, and reopen **Add card → Widgets**.
+- Nodes is unavailable: use a non-child profile, enable the `nodes` skill,
+  pair a remote machine, and reopen **Add card → Widgets**.
 - A custom widget is unavailable: confirm the custom skill is still enabled,
   its bound tool is read-only and non-destructive, and the local read-only
   sandbox is available.

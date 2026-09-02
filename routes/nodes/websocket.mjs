@@ -127,6 +127,10 @@ export function initNodeWss() {
           sessionCreatedAt: getSessionMeta(token)?.createdAt ?? null,
         });
 
+        // registerNode closes revoked identities. Do not authenticate or
+        // persist a session mapping for a registration it refused.
+        if (!nodeId) return;
+
         ws._nodeId = nodeId;
         ws._authenticated = true;
         rememberNodeSessionToken(ws._userId, nodeId, token);
@@ -146,12 +150,12 @@ export function initNodeWss() {
         return;
       }
 
-      handleNodeMessage(ws._nodeId, msg);
+      handleNodeMessage(ws._nodeId, msg, ws._userId, ws);
     });
 
     ws.on('close', () => {
       if (ws._nodeId) {
-        unregisterNode(ws._nodeId);
+        unregisterNode(ws._nodeId, ws._userId, ws);
       }
     });
 

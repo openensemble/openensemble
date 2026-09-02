@@ -48,20 +48,21 @@ export function initTerminalWss() {
     // Verify node ownership
     const node = getNode(nodeId, userId);
     if (!node) { ws.close(4003, 'Node not found'); return; }
+    const canonicalNodeId = node.nodeId;
 
     // getNode returns disconnected entries too (kept for UI display). Opening a
     // PTY to an offline node would send pty_start into the void and leave the
     // xterm hanging at "starting shell…" with no error. Reject up front.
-    if (!isNodeConnected(nodeId, userId)) { ws.close(4006, 'Node is offline'); return; }
+    if (!isNodeConnected(canonicalNodeId, userId)) { ws.close(4006, 'Node is offline'); return; }
 
     // Generate a unique PTY id
     const ptyId = `pty_${Date.now()}_${randomBytes(3).toString('hex')}`;
     ws._ptyId = ptyId;
-    ws._nodeId = nodeId;
+    ws._nodeId = canonicalNodeId;
     ws._userId = userId;
 
     // Register callback to relay PTY output from node agent → browser
-    registerPtyCallback(ptyId, nodeId, (msg) => {
+    registerPtyCallback(ptyId, canonicalNodeId, userId, (msg) => {
       if (ws.readyState !== ws.OPEN) return;
       if (msg.type === 'pty_output') {
         ws.send(msg.data); // send raw terminal data to xterm.js
@@ -89,12 +90,12 @@ export function initTerminalWss() {
           if (!ptyStarted) {
             // First resize = start PTY with initial size
             ptyStarted = true;
-            sendPtyMessage(nodeId, userId, {
+            sendPtyMessage(canonicalNodeId, userId, {
               type: 'pty_start', ptyId,
               cols: msg.cols || 80, rows: msg.rows || 24,
             });
           } else {
-            sendPtyMessage(nodeId, userId, {
+            sendPtyMessage(canonicalNodeId, userId, {
               type: 'pty_resize', ptyId,
               cols: msg.cols, rows: msg.rows,
             });
@@ -105,18 +106,18 @@ export function initTerminalWss() {
 
       // Plain text = terminal input
       if (ptyStarted) {
-        sendPtyMessage(nodeId, userId, { type: 'pty_input', ptyId, data });
+        sendPtyMessage(canonicalNodeId, userId, { type: 'pty_input', ptyId, data });
       }
     });
 
     ws.on('close', () => {
       unregisterPtyCallback(ptyId);
-      sendPtyMessage(nodeId, userId, { type: 'pty_kill', ptyId });
+      sendPtyMessage(canonicalNodeId, userId, { type: 'pty_kill', ptyId });
     });
 
     ws.on('error', () => {
       unregisterPtyCallback(ptyId);
-      sendPtyMessage(nodeId, userId, { type: 'pty_kill', ptyId });
+      sendPtyMessage(canonicalNodeId, userId, { type: 'pty_kill', ptyId });
     });
   });
 

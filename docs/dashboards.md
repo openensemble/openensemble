@@ -4,7 +4,8 @@ nav_order: 4
 permalink: /dashboards
 description: >-
   Build fully customizable, per-profile browser dashboards for wall tablets,
-  room displays, Home Assistant controls, calendars, email, and custom skills.
+  room displays, Home Assistant controls, calendars, email, nodes, and custom
+  skills.
 ---
 
 # Display dashboards
@@ -16,6 +17,10 @@ own dashboard library, and every dashboard gets a stable address such as
 
 [Get started with OpenEnsemble]({{ site.baseurl }}/getting-started){: .btn .btn-primary }
 [View the project on GitHub](https://github.com/openensemble/openensemble){: .btn }
+
+![A customized OpenEnsemble dashboard showing Home Assistant controls, calendar, email, and remote-node status]({{ site.baseurl }}/assets/display-dashboard.png)
+
+*One display can combine home controls with read-only Calendar, Email, Nodes, and custom-skill status cards.*
 
 ## One studio, as many views as you need
 
@@ -63,11 +68,13 @@ guidance.
 | **Home Assistant** | Live entity state, cameras, weather, grouped devices, and OE's supported controls |
 | **Calendar** | A read-only agenda for today or the next 3, 7, or 14 days |
 | **Email** | A read-only recent-inbox card with account, message-count, and snippet choices |
+| **Nodes** | Read-only availability and health for remote machines paired to the active profile |
 | **Custom skills** | Safe summary, metric, and list widgets declared by a user-scoped skill |
 
-Calendar and Email use their connected OE accounts and current profile
+Calendar, Email, and Nodes use the active profile's connected services and
 permissions. Each widget refreshes independently, so one unavailable source
-does not blank the rest of the display.
+does not blank the rest of the display. The Nodes card reports status only—it
+never runs commands or changes a node.
 
 Custom skills cannot inject HTML or JavaScript. They declare a widget bound to
 an exact read-only, non-destructive data tool; OE validates the result and owns
@@ -117,10 +124,10 @@ need to sign in again, and its session can be revoked at any time from
 Home Assistant access is profile-wide rather than scoped to a particular
 dashboard or hidden card. Owners and admins receive runtime access; regular
 profiles need the Home Assistant role enabled. The configured Home Assistant
-token can apply additional upstream limits. Calendar, Email, and custom-widget
-permissions are rechecked on refresh, but already-rendered data can remain
-visible as stale after access is revoked until the display reloads or its
-session is revoked.
+token can apply additional upstream limits. Calendar, Email, Nodes, and
+custom-widget permissions are rechecked on refresh. Revoked data is cleared on
+the next refresh; a transient provider failure can leave the previous result
+visible and marked stale.
 
 ## Keep direct addresses too
 

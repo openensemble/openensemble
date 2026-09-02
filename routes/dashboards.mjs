@@ -35,6 +35,7 @@ import {
 } from '../roles.mjs';
 import { validateSkillDashboardWidgets } from '../lib/dashboard-widgets.mjs';
 import { readOnlySkillSandboxAvailable } from '../lib/skill-subprocess.mjs';
+import { getNodes } from '../skills/nodes/node-registry.mjs';
 import {
   isCameraEntityId,
   isDashboardSlug,
@@ -614,6 +615,14 @@ function emailWidgetAllowed(userId) {
     && isSkillRuntimeEnabledForUser('email', userId);
 }
 
+function nodesWidgetAllowed(userId) {
+  const user = getUser(userId);
+  return !!user
+    && user.role !== 'child'
+    && !isUserTimeBlocked(userId)
+    && isSkillRuntimeEnabledForUser('nodes', userId);
+}
+
 function customWidgetDescriptor(userId, widgetId, { includeDisabled = true } = {}) {
   const parsed = typeof widgetId === 'string' ? widgetId.match(SKILL_WIDGET_ID) : null;
   if (!parsed) throw new DashboardHttpError(404, 'Dashboard widget not found.');
@@ -654,6 +663,12 @@ function requireWidgetAccess(userId, widgetId) {
       throw new DashboardHttpError(403, 'Email access is not available for this profile.');
     }
     return { source: 'email' };
+  }
+  if (widgetId === 'builtin.nodes') {
+    if (!nodesWidgetAllowed(userId)) {
+      throw new DashboardHttpError(403, 'Nodes access is not available for this profile.');
+    }
+    return { source: 'nodes' };
   }
   return { source: 'skill', ...customWidgetDescriptor(userId, widgetId) };
 }
@@ -713,6 +728,7 @@ async function handleWidgetCatalog(req, res, userId) {
 
   const canEmail = emailWidgetAllowed(userId);
   const accounts = canEmail ? listDashboardEmailAccounts(userId) : [];
+  const canNodes = nodesWidgetAllowed(userId);
   const widgets = [
     {
       widgetId: 'builtin.calendar',
@@ -739,6 +755,22 @@ async function handleWidgetCatalog(req, res, userId) {
       available: canEmail && accounts.length > 0,
       defaults: { accountId: accounts[0]?.id ?? '', maxItems: 8, showSnippet: false },
       options: { accounts },
+    },
+    {
+      widgetId: 'builtin.nodes',
+      source: 'builtin',
+      title: 'Nodes',
+      description: 'Read-only connection and health status for your paired remote machines.',
+      icon: 'activity',
+      defaultSize: 'wide',
+      defaultAccent: 'cyan',
+      refreshSeconds: 30,
+      available: canNodes,
+      ...(!canNodes ? {
+        reason: 'Nodes access is not available for this profile.',
+      } : {}),
+      defaults: { maxItems: 8, showDetails: true },
+      options: {},
     },
     ...customWidgetCatalog(userId),
   ];
@@ -790,6 +822,55 @@ function emailWidgetConfig(config) {
     throw new DashboardHttpError(400, 'Email widget showSnippet must be a boolean.');
   }
   return { accountId, maxItems, showSnippet };
+}
+
+function nodesWidgetConfig(config) {
+  exactConfig(config, new Set(['maxItems', 'showDetails']), 'Nodes');
+  const maxItems = config.maxItems ?? 8;
+  const showDetails = config.showDetails ?? true;
+  if (!Number.isSafeInteger(maxItems) || maxItems < 1 || maxItems > 20) {
+    throw new DashboardHttpError(400, 'Nodes widget maxItems must be an integer from 1 to 20.');
+  }
+  if (typeof showDetails !== 'boolean') {
+    throw new DashboardHttpError(400, 'Nodes widget showDetails must be a boolean.');
+  }
+  return { maxItems, showDetails };
+}
+
+function nodeStatus(health) {
+  if (health === 'healthy') return 'online';
+  if (health === 'recovered') return 'recovered';
+  if (health === 'stale') return 'stale';
+  if (health === 'disconnected') return 'offline';
+  return 'unknown';
+}
+
+function nodePlatform(platform) {
+  return ({
+    linux: 'Linux',
+    win32: 'Windows',
+    darwin: 'macOS',
+  })[String(platform || '').toLowerCase()] || '';
+}
+
+function nodesWidgetData(userId, config) {
+  const allNodes = getNodes(userId).map(node => ({
+    name: widgetText(node.hostname, 160, 'Remote node'),
+    status: nodeStatus(node.health),
+    ...(config.showDetails ? {
+      platform: nodePlatform(node.platform),
+    } : {}),
+  }));
+  const rank = { offline: 0, stale: 1, unknown: 2, recovered: 3, online: 4 };
+  allNodes.sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
+  return {
+    summary: {
+      total: allNodes.length,
+      online: allNodes.filter(node => ['online', 'recovered'].includes(node.status)).length,
+      attention: allNodes.filter(node => !['online', 'recovered'].includes(node.status)).length,
+    },
+    nodes: allNodes.slice(0, config.maxItems),
+  };
 }
 
 function calendarEndpoint(endpoint) {
@@ -926,6 +1007,10 @@ async function handleWidgetRuntime(req, res, userId, url, route) {
     if (!listDashboardEmailAccounts(userId).some(account => account.id === config.accountId)) {
       throw new DashboardHttpError(424, 'The selected email account is not connected.');
     }
+  } else if (access.source === 'nodes') {
+    const config = nodesWidgetConfig(card.config);
+    data = nodesWidgetData(userId, config);
+    requireWidgetAccess(userId, card.widgetId);
   } else {
     if (!readOnlySkillSandboxAvailable()) {
       throw new DashboardHttpError(503, CUSTOM_WIDGET_SANDBOX_UNAVAILABLE);
