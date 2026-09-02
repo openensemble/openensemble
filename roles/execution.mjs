@@ -10,6 +10,15 @@ import { getHiddenTools } from '../lib/skill-overrides.mjs';
 import { abortError } from '../lib/abort-utils.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
 import { evaluateMcpToolAccess } from '../lib/mcp-tool-policy.mjs';
+import { toolError } from '../lib/tool-error.mjs';
+import {
+  formatDeclaredSkillDashboardToolResult,
+  isSensitiveDashboardKey,
+  isSensitiveDashboardString,
+  normalizeSkillDashboardPayload,
+  validateSkillDashboardToolInvocation,
+  validateSkillDashboardWidgets,
+} from '../lib/dashboard-widgets.mjs';
 import {
   _manifests,
   resolveKey,
@@ -86,7 +95,7 @@ export function isSandboxedSkill(skillId, userId) {
 // the jail is a follow-up); failures throw so the normal tool-failure path runs.
 export async function runCustomSkillValue({
   userId, agentId, skillId, name, args, execSnapshotPath = null,
-  signal = getTurnContext()?.signal ?? null,
+  signal = getTurnContext()?.signal ?? null, timeoutMs = 60_000, readOnlyCtx = false,
 }) {
   const { runCustomSkillSandboxed } = await import('../lib/skill-subprocess.mjs');
   // Default-deny egress: the jail only gets network if the skill's manifest declares
@@ -94,7 +103,8 @@ export async function runCustomSkillValue({
   // can't exfiltrate anything it can read. See lib/skill-net-policy.mjs.
   const net = skillDeclaresNetwork(userId, skillId);
   const r = await runCustomSkillSandboxed({
-    userId, agentId, skillId, toolName: name, args, net, execSnapshotPath, signal,
+    userId, agentId, skillId, toolName: name, args, net, execSnapshotPath, signal, timeoutMs,
+    readOnlyCtx,
   });
   if (signal?.aborted) throw abortError(signal, `custom skill ${skillId}.${name} cancelled`);
   if (!r.ok) throw new Error(/** @type {any} */ (r).error || `custom skill ${skillId}.${name} failed`);
@@ -103,6 +113,15 @@ export async function runCustomSkillValue({
     if (text) return { type: 'result', text };
   }
   return r.result;
+}
+
+function renderDeclaredDashboardToolResult(manifest, name, raw) {
+  const formatted = formatDeclaredSkillDashboardToolResult(manifest, name, raw);
+  if (!formatted.matched) return raw;
+  if (formatted.ok === false) {
+    return toolError(`Dashboard widget tool returned invalid data: ${formatted.error}`);
+  }
+  return formatted.text;
 }
 
 /**
@@ -142,16 +161,126 @@ export async function executeRoleToolForSkillInternal(
     if (!shouldSandboxSkill(wrap) || !execSnapshotPath) {
       throw new Error(`reviewed safe-auto execution requires a sandboxed immutable snapshot for "${skillId}"`);
     }
-    return runCustomSkillValue({ userId, agentId, skillId, name, args, execSnapshotPath });
+    const raw = await runCustomSkillValue({ userId, agentId, skillId, name, args, execSnapshotPath });
+    return renderDeclaredDashboardToolResult(wrap.manifest, name, raw);
   }
-  if (shouldSandboxSkill(wrap)) return runCustomSkillValue({ userId, agentId, skillId, name, args });
+  if (shouldSandboxSkill(wrap)) {
+    const raw = await runCustomSkillValue({ userId, agentId, skillId, name, args });
+    return renderDeclaredDashboardToolResult(wrap.manifest, name, raw);
+  }
   const exec = await getExecutorByKey(key);
   if (!exec) return `Tool "${name}" could not load from skill "${skillId}".`;
-  return exec(name, args, userId, agentId, await buildCtx(userId, agentId, skillId));
+  const raw = await exec(name, args, userId, agentId, await buildCtx(userId, agentId, skillId));
+  return renderDeclaredDashboardToolResult(wrap.manifest, name, raw);
 }
 
 export async function executeRoleToolForSkill(skillId, name, args, userId = 'default', agentId = null) {
   return executeRoleToolForSkillInternal(skillId, name, args, userId, agentId);
+}
+
+const DASHBOARD_WIDGET_TIMEOUT_MS = 10_000;
+
+function safeDashboardWidgetConfig(value, depth = 0, budget = { nodes: 0 }) {
+  budget.nodes += 1;
+  if (budget.nodes > 160 || depth > 4) return false;
+  if (value === null || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string') {
+    return value.length <= 500 && !isSensitiveDashboardString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length <= 32
+      && value.every(item => safeDashboardWidgetConfig(item, depth + 1, budget));
+  }
+  if (!value || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const keys = Object.keys(value);
+  if (keys.length > 32) return false;
+  return keys.every(key => (
+    !!key && key.length <= 64
+    && key !== '__proto__' && key !== 'prototype' && key !== 'constructor'
+    && !isSensitiveDashboardKey(key)
+    && safeDashboardWidgetConfig(value[key], depth + 1, budget)
+  ));
+}
+
+function resolveDashboardWidgetExecution(skillId, widgetId, userId) {
+  const key = resolveKey(skillId, userId);
+  const wrap = key ? _manifests.get(key) : null;
+  if (!wrap || wrap.userId !== userId || wrap.manifest?.id !== skillId
+      || wrap.manifest?.custom !== true) {
+    throw new Error('Custom dashboard widget is unavailable.');
+  }
+  if (!isSkillAllowedForUser(skillId, userId)
+      || !isSkillRuntimeEnabledForUser(skillId, userId)) {
+    throw new Error('Custom dashboard widget is not permitted for this account.');
+  }
+  const checked = validateSkillDashboardWidgets(
+    wrap.manifest.dashboardWidgets,
+    wrap.manifest.tools ?? [],
+  );
+  if (!checked.ok) throw new Error('Custom dashboard widget declaration is invalid.');
+  const descriptor = checked.widgets.find(candidate => candidate.id === widgetId);
+  if (!descriptor) throw new Error('Custom dashboard widget is unavailable.');
+  const tool = wrap.manifest.tools?.find(candidate => candidate?.function?.name === descriptor.tool);
+  if (!tool || tool.readOnly !== true || tool.destructive === true) {
+    throw new Error('Custom dashboard widget tool is not read-only.');
+  }
+  if (getHiddenTools(userId, skillId).includes(descriptor.tool)) {
+    throw new Error('Custom dashboard widget tool is hidden by your settings.');
+  }
+  return { descriptor, tool, identity: JSON.stringify(descriptor) };
+}
+
+/**
+ * Execute one exact custom-skill dashboard widget. This entry point never does
+ * global tool-name resolution, always uses the owning user's sandbox (even
+ * when that user opted normal chat execution out of isolation), and accepts
+ * only a bounded namespaced config from the persisted dashboard card.
+ */
+export async function executeDashboardWidgetForSkill(
+  skillId, widgetId, config, userId = 'default', agentId = null,
+) {
+  if (!userId || userId === 'default'
+      || typeof skillId !== 'string' || typeof widgetId !== 'string') {
+    throw new Error('Custom dashboard widget identity is invalid.');
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)
+      || !safeDashboardWidgetConfig(config)
+      || Buffer.byteLength(JSON.stringify(config), 'utf8') > 8 * 1024) {
+    throw new Error('Custom dashboard widget config is invalid.');
+  }
+  const before = resolveDashboardWidgetExecution(skillId, widgetId, userId);
+  const invocation = validateSkillDashboardToolInvocation(
+    before.tool,
+    before.descriptor.args,
+    config,
+  );
+  if (invocation.ok === false) {
+    throw new Error(invocation.schemaError
+      ? `Custom dashboard widget tool schema is unsupported: ${invocation.schemaError}`
+      : 'Custom dashboard widget config does not satisfy the tool parameter schema.');
+  }
+  const raw = await runCustomSkillValue({
+    userId,
+    agentId,
+    skillId,
+    name: before.descriptor.tool,
+    args: { ...before.descriptor.args, config },
+    timeoutMs: DASHBOARD_WIDGET_TIMEOUT_MS,
+    readOnlyCtx: true,
+  });
+
+  // A disable, hidden-tool update, deletion, or manifest replacement while a
+  // slow provider call is running revokes the result before it reaches the UI.
+  const after = resolveDashboardWidgetExecution(skillId, widgetId, userId);
+  if (after.identity !== before.identity) {
+    throw new Error('Custom dashboard widget changed while it was refreshing.');
+  }
+  const normalized = normalizeSkillDashboardPayload(raw);
+  if (normalized.ok === false) throw new Error(normalized.error);
+  return { descriptor: after.descriptor, data: normalized.data };
 }
 
 /**
@@ -233,9 +362,15 @@ export async function executeRoleTool(name, args, userId = 'default', agentId = 
           return `Tool "${name}" is hidden by your settings.`;
         }
       }
-      if (shouldSandboxSkill(wrap)) return runCustomSkillValue({ userId, agentId, skillId, name, args });
+      if (shouldSandboxSkill(wrap)) {
+        const raw = await runCustomSkillValue({ userId, agentId, skillId, name, args });
+        return renderDeclaredDashboardToolResult(wrap.manifest, name, raw);
+      }
       const exec = await getExecutorByKey(key);
-      if (exec) return exec(name, args, userId, agentId, await buildCtx(userId, agentId, skillId));
+      if (exec) {
+        const raw = await exec(name, args, userId, agentId, await buildCtx(userId, agentId, skillId));
+        return renderDeclaredDashboardToolResult(wrap.manifest, name, raw);
+      }
       break;
     }
   }

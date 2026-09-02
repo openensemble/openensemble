@@ -37,6 +37,26 @@ If you ask the skill-builder to add a new tool to an existing skill, double-chec
 
 A skill can ship its own UI panel that opens as a drawer in the sidebar. Add a `drawer` block to the manifest with `html`, optional `css`, and an `initJs` function. The drawer auto-loads alongside built-in drawers — see existing drawers under `drawers/` for examples.
 
+## Dashboard widgets
+
+When you ask for an “at-a-glance,” dashboard, card, or tablet view, Skill
+Builder can add a declarative `dashboardWidgets` entry to a new or existing
+custom skill. Each widget is tied to one exact same-skill tool marked
+`readOnly:true`. OE renders a bounded summary, metrics, and list—custom skills
+cannot inject HTML or JavaScript into dashboards.
+
+Because these cards refresh unattended, OE runs their data tools with the
+skill/user filesystem mounted read-only and native network disabled. A custom
+widget reads local state; an ordinary user-triggered tool or approved watcher
+can refresh that state separately. Calendar and Email use OE's trusted built-in
+adapters instead.
+
+For an existing skill, ask the agent to update its widget. It can patch the
+data handler, add or mark the tool read-only with `skill_update_tool_def`, and
+add or replace the widget through `skill_update_manifest`; the skill does not
+need to be recreated. See **Display dashboards** in the Guide for adding the
+resulting card, configuring it, and understanding display-session privacy.
+
 ## User-scoped vs. system skills
 
 - `skills/{slug}/` — system-wide, available to all users (pre-bundled with OE).

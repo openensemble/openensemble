@@ -32,7 +32,8 @@
   <h1>OpenEnsemble</h1>
   <div class="mobile-view-toggle" id="mobileViewToggle">
     <button class="mv-btn active" id="mViewChat" data-action="switchView" data-args='["chat"]' aria-label="Chat view"><i data-lucide="message-square"></i></button>
-    <button class="mv-btn" id="mViewDesktop" data-action="switchView" data-args='["desktop"]' aria-label="Desktop view"><i data-lucide="layout-grid"></i></button>
+    <button class="mv-btn" id="mViewDashboard" data-action="openDashboard" aria-label="Dashboard"><i data-lucide="layout-dashboard"></i></button>
+    <button class="mv-btn" id="mViewDesktop" data-action="switchView" data-args='["desktop"]' aria-label="Workspace"><i data-lucide="folders"></i></button>
   </div>
   <div class="status-dot" id="statusDotMobile"></div>
   <button class="btn-menu" id="btnMenu" aria-label="Menu">⋮<span class="menu-dot" id="menuAttentionDot" style="display:none"></span></button>
@@ -178,7 +179,7 @@
         <i data-lucide="settings"></i>
         <span class="strip-tooltip">Settings</span>
       </button>
-      <button class="strip-btn" id="sbtnDash" data-action="toggleDrawer" data-args="[&quot;drawerDashboard&quot;, &quot;sbtnDash&quot;]" title="Dashboard">
+      <button class="strip-btn" id="sbtnDash" data-action="openDashboard" title="Dashboard">
         <i data-lucide="layout-dashboard"></i>
         <span class="strip-tooltip">Dashboard</span>
       </button>
@@ -232,13 +233,16 @@
       <div class="status-dot" id="statusDot"></div>
     </div>
 
-    <!-- View toggle (Chat / Desktop) -->
+    <!-- Primary views (Chat / Dashboard / Workspace) -->
     <div class="view-toggle" id="viewToggle">
       <button class="view-btn active" id="viewBtnChat" data-action="switchView" data-args="[&quot;chat&quot;]" title="Chat">
         <i data-lucide="message-square"></i>
       </button>
-      <button class="view-btn" id="viewBtnDesktop" data-action="switchView" data-args="[&quot;desktop&quot;]" title="Desktop">
-        <i data-lucide="layout-grid"></i>
+      <button class="view-btn" id="viewBtnDashboard" data-action="openDashboard" title="Dashboard">
+        <i data-lucide="layout-dashboard"></i>
+      </button>
+      <button class="view-btn" id="viewBtnDesktop" data-action="switchView" data-args="[&quot;desktop&quot;]" title="Workspace">
+        <i data-lucide="folders"></i>
       </button>
     </div>
 
@@ -288,7 +292,7 @@
       </div>
     </div>
 
-    <!-- Desktop view -->
+    <!-- Workspace view -->
     <div id="desktopView" class="desktop-view" style="display:none">
       <div id="desktopCategories" class="desktop-categories"></div>
       <div id="desktopBoard" class="desktop-widget-grid"></div>
@@ -656,7 +660,7 @@
             </div>
           </div>
           <nav class="exp-nav">
-            <button class="exp-nav-item active" id="expNav-dashboard"    data-action="showExpView" data-args="[&quot;dashboard&quot;]"><span class="exp-nav-icon"><i data-lucide="layout-dashboard"></i></span> Dashboard</button>
+            <button class="exp-nav-item active" id="expNav-dashboard"    data-action="showExpView" data-args="[&quot;dashboard&quot;]"><span class="exp-nav-icon"><i data-lucide="layout-dashboard"></i></span> Overview</button>
             <button class="exp-nav-item"        id="expNav-transactions" data-action="showExpView" data-args="[&quot;transactions&quot;]"><span class="exp-nav-icon"><i data-lucide="credit-card"></i></span> Transactions</button>
             <button class="exp-nav-item"        id="expNav-reports"      data-action="showExpView" data-args="[&quot;reports&quot;]"><span class="exp-nav-icon"><i data-lucide="bar-chart-2"></i></span> Reports</button>
             <button class="exp-nav-item"        id="expNav-import"       data-action="showExpView" data-args="[&quot;import&quot;]"><span class="exp-nav-icon"><i data-lucide="paperclip"></i></span> Import</button>
@@ -666,10 +670,10 @@
         <!-- Main -->
         <div class="exp-main">
 
-          <!-- Dashboard -->
+          <!-- Overview -->
           <div class="exp-view active" id="expView-dashboard">
             <div class="exp-view-hdr">
-              <h2 class="exp-view-title">Dashboard</h2>
+              <h2 class="exp-view-title">Overview</h2>
               <button class="exp-refresh-btn" data-action="loadExpDashboard">↻ Refresh</button>
             </div>
             <div class="exp-kpi-row">
@@ -1477,9 +1481,9 @@
             <div id="tvVideoSourcesBody"><div style="font-size:12px;color:var(--muted)">Loading…</div></div>
           </div>
           <div id="sessionExpiryRow" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:16px">
-            <div class="settings-section-title"><i data-lucide="timer" style="width:14px;height:14px"></i> Session Expiry</div>
+            <div class="settings-section-title"><i data-lucide="timer" style="width:14px;height:14px"></i> Session idle timeout</div>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
-              <label style="font-size:12px;color:var(--muted);flex:1">Hours (0 = never expire)</label>
+              <label style="font-size:12px;color:var(--muted);flex:1">Hours inactive (0 = off; browser sessions still expire after 7 days)</label>
               <input type="number" id="sessionExpiryInput" min="0" max="720" style="width:80px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px">
               <button data-action="saveSessionExpiry" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600">Save</button>
             </div>
@@ -1897,6 +1901,7 @@
 <script src="/memory-control.js"></script>
 <script src="/skill-permissions.js"></script>
 <script src="/agent-skills.js"></script>
+<script src="/dashboard-manager.js"></script>
 <script src="/dashboard.js"></script>
 <script src="/markets.js"></script>
 <script src="/inbox.js"></script>

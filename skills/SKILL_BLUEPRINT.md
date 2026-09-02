@@ -277,8 +277,8 @@ The activation tool must belong to the same manifest and have
 call `ctx.proposeMonitor` with the declared `watcherKind`, `skillId`, and
 `dedupKey`; the watcher itself owns fetching, domain matching, state, cadence,
 and delivery. Activation args are size-bounded and rejected if they contain
-credential-like fields or values. Keep credentials in `ctx.getCredential`,
-never in this manifest block.
+credential-like fields or values. Read credentials with
+`ctx.credentials.get(...)`; never put them in this manifest block.
 
 Because approval can outlive the current turn, preference-enabled execution is
 bound to an immutable code snapshot. Keep that executor self-contained: Node
@@ -935,7 +935,7 @@ Two distinct stores depending on what kind of value you're keeping:
 | API keys, passwords, OAuth tokens, webhook secrets | `lib/credentials.mjs` primitive | `users/<id>/credentials/<credId>.json`, encrypted with per-user key |
 | Non-secret config (URLs, IDs, user preferences, last-fetched timestamps) | Plaintext JSON in user dir | `users/<id>/usr_<skillId>-config.json` |
 
-**NEVER** write API keys / passwords / tokens to a plaintext config file. The credential primitive gives you AES-256-GCM at-rest encryption + a chat-prompt widget for getting the value from the user in the first place — no need to invent your own flow.
+**NEVER** write API keys / passwords / tokens to a plaintext config file. The credential primitive gives you AES-256-GCM encryption at rest, scoped to the user and skill.
 
 ### Secrets: the credential primitive
 
@@ -945,22 +945,10 @@ The executor's `ctx` parameter (5th arg) exposes the credential primitive — **
 export async function executeSkillTool(name, args, userId, agentId, ctx) {
   if (name === 'my_call') {
     // 1. Try the user's stored credential (decrypted on read).
-    let apiKey = await ctx.getCredential('myskill_api_key');
+    const apiKey = await ctx.credentials.get('myskill_api_key');
+    if (!apiKey) return 'Connect the API key in this skill\'s setup flow first.';
 
-    // 2. If missing, prompt via the chat widget. The plaintext value is sent
-    //    over the WS in a protected frame — it NEVER enters the LLM message
-    //    history, never gets logged, never echoes back. `persist: true`
-    //    stores it encrypted; the next call hits the fast path above.
-    if (!apiKey) {
-      apiKey = await ctx.requestCredential({
-        id:    'myskill_api_key',
-        label: 'My Service API key',
-        kind:  'api_key',
-        persist: true,
-      });
-    }
-
-    // 3. Use the value. Don't return it in the tool result — see below.
+    // 2. Use the value. Never return it in the tool result.
     const res = await fetch('https://api.myservice.com/...', {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -969,11 +957,13 @@ export async function executeSkillTool(name, args, userId, agentId, ctx) {
 }
 ```
 
-**If your tool result must reference the credential** (e.g. you're returning a command line that includes the key), mark it `{ isCredential: true, credentialId: 'myskill_api_key', ... }` so the per-provider substitution in `chat/providers/*.mjs` replaces it with a placeholder before the LLM sees it. The placeholder gets re-substituted at the next executor call. Without this flag, the plaintext key flows through the LLM history and shows up in chat logs.
-
-`kind` options:
-- `'api_key'` — persisted encrypted (default for long-lived creds)
-- `'sudo'` / `'confirm'` — held in RAM only, expires after use (for one-shot sensitive actions)
+Normal interactive tools may provision credentials through their explicit setup
+flow with `ctx.credentials.set(...)`; dashboard widget tools receive a reduced,
+read-only context with metadata-only `credentials.list` and no decrypted
+`credentials.get`. Never put a secret in a widget descriptor, widget config,
+return value, log line, or ordinary tool argument. If a widget depends on a
+remote provider, an ordinary tool or watcher must refresh secret-free local
+state for the widget to read later.
 
 ### Non-secret config
 
@@ -1060,9 +1050,96 @@ export default executeSkillTool;
 
 ---
 
+## Optional: dashboard widget
+
+A skill can contribute a compact, read-only card to the user's OE dashboards.
+Use this only when the user asks for a dashboard card, widget, or at-a-glance
+view. A dashboard widget is not a drawer: it has no skill-supplied HTML,
+JavaScript, CSS, actions, or arbitrary links. OE owns the renderer so a widget
+is safe in the main dashboard and on a wall tablet.
+
+Supported icon ids are: `activity`, `calendar`, `clock`, `cloud`, `cloud-sun`,
+`gauge`, `grid`, `house`, `light`, `mail`, `package`, `shield`, `sparkles`,
+`thermometer`, and `wifi`.
+
+Declare a dedicated pure data tool with top-level `readOnly: true`, then bind it
+in `dashboardWidgets`:
+
+```jsonc
+{
+  "tools": [{
+    "type": "function",
+    "readOnly": true,
+    "function": {
+      "name": "parcel_status_widget",
+      "description": "Return the user's current parcel summary for an OE dashboard card.",
+      "parameters": { "type": "object", "properties": {} }
+    }
+  }],
+  "dashboardWidgets": [{
+    "id": "parcel-status",
+    "title": "Deliveries",
+    "description": "Packages arriving soon",
+    "icon": "package",
+    "tool": "parcel_status_widget",
+    "args": {},
+    "refreshSeconds": 300,
+    "size": "standard",
+    "accent": "violet"
+  }]
+}
+```
+
+The bound tool receives its secret-free static `args` plus a namespaced
+`config` object saved with that dashboard card. It must return either a plain
+string (shown as the summary) or this bounded data shape:
+
+Static args and saved config reject credential-shaped field names and
+recognizable plaintext credential values. The bound parameter schema must use
+the supported bounded JSON-Schema subset; `pattern`, `format`, references, and
+unknown semantic keywords are rejected rather than treated as satisfied.
+
+```js
+return {
+  summary: 'Two packages are in transit',
+  metrics: [
+    { label: 'Arriving today', value: '1', tone: 'good' }
+  ],
+  items: [
+    { title: 'Coffee filters', subtitle: 'UPS · by 7 PM', value: 'Out for delivery', tone: 'info' }
+  ],
+  updatedAt: new Date().toISOString()
+};
+```
+
+Allowed tones are `neutral`, `good`, `warn`, `bad`, and `info`. OE bounds and
+escapes every string (up to 12 metrics and 20 items). Do not return HTML,
+Markdown, credentials, images, URLs, or action definitions. The runtime calls
+only the exact declared tool, preserves normal skill enable/permission gates,
+and forces user-authored widget code through the skill sandbox. Dashboard polls
+run with native network disabled and every normally writable skill/user mount
+remounted read-only. In this MVP a custom widget must derive its result from
+read-only local state (typically refreshed by an ordinary user-triggered tool
+or watcher); it cannot fetch a remote API or update files while rendering.
+Deployments configured with `OE_SKILL_SANDBOX_SOCKET` currently advertise
+custom widgets as unavailable because the dedicated-runner protocol cannot yet
+request read-only mounts; local sandbox execution remains supported.
+Local execution requires bubblewrap; without it the catalog marks custom
+widgets unavailable instead of advertising a card that cannot refresh.
+
+For an existing skill, call `skill_read_manifest` first so the current tools
+and every sibling `dashboardWidgets` entry can be preserved; the update tool
+replaces that array in full. Then read and patch the code to add a pure widget
+data handler. If it is a new handler, add its definition with
+`skill_update_tool_def({create_if_missing:true, readOnly:true, description, parameters, ...})`;
+otherwise mark the existing definition with `readOnly:true`. Then set
+`dashboardWidgets` with `skill_update_manifest`. Passing `dashboardWidgets: []`
+removes its widgets without deleting the skill. Existing dashboard cards stay
+in place and show “unavailable” until removed or the widget returns.
+
 ## Optional: drawer UI
 
-A skill may optionally ship a **drawer** — a small panel that opens from the left sidebar when the user clicks its button. Drawers are completely optional. Most skills don't need one. Only add a drawer when the user explicitly asks for a visual panel, a dashboard, a form, or some other UI surface that goes beyond what the chat stream can show.
+A skill may optionally ship a **drawer** — a small panel that opens from the left sidebar when the user clicks its button. Drawers are completely optional. Most skills don't need one. Add a drawer when the user explicitly asks for a sidebar panel, configuration form, or richer interactive UI. If they ask for a card on an OE dashboard, use the declarative dashboard widget contract above instead.
 
 Pass a `drawer` object to `skill_create` alongside the usual `id`, `name`, `tools`, `code`:
 

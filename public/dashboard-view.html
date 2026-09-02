@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="theme-color" id="dashboardThemeColor" content="#0d100f">
+  <title>Dashboard · OpenEnsemble</title>
+  <link rel="stylesheet" href="/dashboard-view.css">
+</head>
+<body class="oe-mode-pending dashboard-layout-pending">
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="i-house" viewBox="0 0 24 24"><path d="M3 10.8 12 3l9 7.8v9.4a.8.8 0 0 1-.8.8H3.8a.8.8 0 0 1-.8-.8z"/><path d="M9 21v-7h6v7"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1H9.6V21a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.87.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1V9.6H3a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.34-1.87l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3a1.7 1.7 0 0 0 1.1 1.6 1.7 1.7 0 0 0 1.87-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.15.36.36.7.6 1 .26.28.62.42 1 .4h.1v4H21a1.7 1.7 0 0 0-1.6.6Z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.7 15.1A9 9 0 0 1 8.9 3.3 9 9 0 1 0 20.7 15.1Z"/></symbol>
+    <symbol id="i-light" viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M8.1 14.5A7 7 0 1 1 16 14.4c-.7.6-1 1.3-1 2.1H9c0-.8-.3-1.5-.9-2Z"/></symbol>
+    <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10M18.4 5.6a9 9 0 1 1-12.8 0"/></symbol>
+    <symbol id="i-thermometer" viewBox="0 0 24 24"><path d="M14 14.8V5a4 4 0 0 0-8 0v9.8a6 6 0 1 0 8 0Z"/><path d="M10 11v7"/></symbol>
+    <symbol id="i-fan" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M12 10c-1-2.8.1-6.5 2.7-7.4 2.1-.7 3.9 1.1 3.4 3.3-.6 2.7-3.3 4.3-6.1 4.1ZM14 12c2.8-1 6.5.1 7.4 2.7.7 2.1-1.1 3.9-3.3 3.4-2.7-.6-4.3-3.3-4.1-6.1ZM12 14c1 2.8-.1 6.5-2.7 7.4-2.1.7-3.9-1.1-3.4-3.3.6-2.7 3.3-4.3 6.1-4.1ZM10 12c-2.8 1-6.5-.1-7.4-2.7-.7-2.1 1.1-3.9 3.3-3.4 2.7.6 4.3 3.3 4.1 6.1Z"/></symbol>
+    <symbol id="i-blinds" viewBox="0 0 24 24"><path d="M3 3h18M5 7h14v14H5zM5 11h14M5 15h14M5 19h14"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><circle cx="12" cy="14" r="4"/><circle cx="12" cy="7" r="1"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m12 3 1.4 4.1L17.5 8.5l-4.1 1.4L12 14l-1.4-4.1-4.1-1.4 4.1-1.4ZM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8ZM5 14l.8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8Z"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4.9 19a9 9 0 1 1 14.2 0"/><path d="m12 13 4-4M8 19h8"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-3 8-10V5l-8-3-8 3v7c0 7 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M5 12.6a11 11 0 0 1 14 0M8.5 16a6 6 0 0 1 7 0M12 20h.01M2 9a16 16 0 0 1 20 0"/></symbol>
+    <symbol id="i-grip" viewBox="0 0 24 24"><circle cx="8" cy="6" r="1"/><circle cx="16" cy="6" r="1"/><circle cx="8" cy="12" r="1"/><circle cx="16" cy="12" r="1"/><circle cx="8" cy="18" r="1"/><circle cx="16" cy="18" r="1"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="m4 20 4.5-1 10.8-10.8a2 2 0 0 0-2.8-2.8L5.7 16.2ZM14.5 7.5l2.8 2.8"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4ZM15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18.5 9A7 7 0 0 0 6.2 6.2L4 9M5.5 15A7 7 0 0 0 17.8 17.8L20 15"/></symbol>
+    <symbol id="i-droplet" viewBox="0 0 24 24"><path d="M12 2s7 7.5 7 13a7 7 0 0 1-14 0c0-5.5 7-13 7-13Z"/></symbol>
+    <symbol id="i-wind" viewBox="0 0 24 24"><path d="M3 8h10a3 3 0 1 0-3-3M3 12h16a3 3 0 1 1-3 3M3 16h7"/></symbol>
+    <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 6h6l2 2h10v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2ZM12 11v6M9 14h6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-door" viewBox="0 0 24 24"><path d="M4 21h16M6 21V4l11-2v19M13 12h.01"/></symbol>
+    <symbol id="i-rooms" viewBox="0 0 24 24"><path d="M3 20V8l9-5 9 5v12M8 20v-7h8v7M3 20h18"/></symbol>
+    <symbol id="i-devices" viewBox="0 0 24 24"><rect x="3" y="4" width="12" height="16" rx="2"/><path d="M18 8h3v10a2 2 0 0 1-2 2h-1M7 8h4M7 12h4M7 16h2"/></symbol>
+    <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></symbol>
+    <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M8 8H3V3M16 8h5V3M8 16H3v5M16 16h5v5"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></symbol>
+    <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></symbol>
+    <symbol id="i-package" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 8 9 5 9-5M3 8v8l9 5 9-5V8M12 13v8"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 7h3l1.4-2h7.2L17 7h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="4"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .5-8 6 6 0 0 0-11.4-1.5A4.8 4.8 0 0 0 7 18Z"/></symbol>
+    <symbol id="i-cloud-sun" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .5-8 6 6 0 0 0-11.4-1.5A4.8 4.8 0 0 0 7 18Z"/><path d="M15.5 3.5V2M20 5.5l1-1M19.5 9H22"/></symbol>
+    <symbol id="i-cloud-rain" viewBox="0 0 24 24"><path d="M7 15h10a4 4 0 0 0 .5-8 6 6 0 0 0-11.4-1.5A4.8 4.8 0 0 0 7 15Z"/><path d="m8 18-1 3M13 18l-1 3M18 18l-1 3"/></symbol>
+    <symbol id="i-cloud-snow" viewBox="0 0 24 24"><path d="M7 14h10a4 4 0 0 0 .5-8 6 6 0 0 0-11.4-1.5A4.8 4.8 0 0 0 7 14Z"/><path d="M8 18h.01M12 21h.01M16 18h.01"/></symbol>
+    <symbol id="i-cloud-lightning" viewBox="0 0 24 24"><path d="M7 14h10a4 4 0 0 0 .5-8 6 6 0 0 0-11.4-1.5A4.8 4.8 0 0 0 7 14Z"/><path d="m13 16-3 4h3l-1 3 4-5h-3Z"/></symbol>
+    <symbol id="i-fog" viewBox="0 0 24 24"><path d="M4 9h16M2 13h16M6 17h16"/></symbol>
+  </svg>
+
+  <div class="app-shell" id="dashboardThemeRoot">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand" id="dashboardBrand"><span class="brand-mark"><svg><use href="#i-house"></use></svg></span><div><strong>OpenEnsemble</strong><small>Dashboard</small></div></div>
+      <button class="dashboard-switcher" id="dashboardSwitcher" type="button" aria-label="Dashboard identity" disabled hidden>
+        <span class="dashboard-switcher-icon"><svg><use href="#i-grid"></use></svg></span>
+        <span class="dashboard-switcher-copy"><strong id="currentDashboardName">Home</strong><small id="currentDashboardOwner">Loading profile…</small></span>
+        <svg class="dashboard-switcher-chevron"><use href="#i-chevron-down"></use></svg>
+      </button>
+      <nav class="side-nav" aria-label="Dashboard navigation">
+        <div id="focusNavGroup">
+          <div class="nav-label nav-label-first">Focus</div>
+          <div id="focusModes"></div>
+        </div>
+        <div id="sectionNavGroup">
+          <div class="nav-label" id="contextNavLabel">Dashboard</div>
+          <div id="sideSections"></div>
+        </div>
+      </nav>
+      <div class="sidebar-foot" id="sidebarFoot">
+        <div class="ha-status" id="sidebarStatus"><span class="status-dot"></span><div><strong>Connecting</strong><small>Home Assistant</small></div></div>
+        <button class="icon-button" id="themeButton" title="Change base theme" aria-label="Change base theme"><svg><use href="#i-sun"></use></svg></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar" id="topbar">
+        <button class="icon-button mobile-menu" id="menuButton" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false"><svg><use href="#i-menu"></use></svg></button>
+        <div class="breadcrumbs"><span id="dashboardBreadcrumbName">Home</span><i></i><strong id="activeSpaceLabel">Overview</strong></div>
+        <nav class="dashboard-cycle" id="dashboardCycle" aria-label="Switch display dashboard" hidden>
+          <button class="icon-button" type="button" data-action="cycle-dashboard" data-direction="previous" aria-label="Previous dashboard" title="Previous dashboard"><svg><use href="#i-chevron-left"></use></svg></button>
+          <span id="dashboardCyclePosition" aria-live="polite">1 / 1</span>
+          <button class="icon-button" type="button" data-action="cycle-dashboard" data-direction="next" aria-label="Next dashboard" title="Next dashboard"><svg><use href="#i-chevron-right"></use></svg></button>
+        </nav>
+        <div class="top-actions">
+          <span class="save-status" id="saveStatus" aria-live="polite"></span>
+          <button class="button secondary" id="fullscreenButton" title="Fullscreen dashboard"><svg><use href="#i-maximize"></use></svg><span>Fullscreen</span></button>
+          <button class="button secondary" id="refreshButton"><svg><use href="#i-refresh"></use></svg><span>Refresh</span></button>
+          <button class="button secondary" id="customizeButton"><svg><use href="#i-sliders"></use></svg><span>Customize</span></button>
+          <button class="button primary" id="addDeviceButton"><svg><use href="#i-plus"></use></svg><span>Add card</span></button>
+        </div>
+      </header>
+
+      <div class="content" id="content">
+        <h1 class="visually-hidden" id="dashboardAccessibleTitle" hidden>Home dashboard</h1>
+        <section class="hero" id="hero">
+          <div id="heroCopy">
+            <div class="eyebrow" id="heroStatus"><span class="live-dot"></span><span id="connectionLabel">Live home</span></div>
+            <h1 id="greeting">Good evening.</h1>
+            <p id="dashboardTagline">Everything is in its place.</p>
+          </div>
+          <div class="hero-time" id="heroClock"><strong id="heroTime">—:—</strong><span id="heroDate">Loading</span></div>
+        </section>
+
+        <section class="summary-grid" id="summaryGrid" aria-label="Dashboard summary"></section>
+
+        <section class="canvas-toolbar">
+          <div class="mobile-spaces" id="mobileSpaces"></div>
+          <div class="edit-tools" id="editTools" hidden>
+            <button class="button ghost" id="addSectionButton"><svg><use href="#i-folder-plus"></use></svg>New section</button>
+            <button class="button ghost" id="dashboardStyleButton"><svg><use href="#i-settings"></use></svg>Dashboard settings</button>
+          </div>
+        </section>
+
+        <div class="sections" id="sections"></div>
+      </div>
+    </main>
+  </div>
+
+  <button class="icon-button floating-menu" id="floatingMenuButton" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" hidden><svg><use href="#i-menu"></use></svg></button>
+
+  <button class="fullscreen-exit" id="fullscreenExit" aria-label="Exit fullscreen" title="Exit fullscreen"><svg aria-hidden="true"><use href="#i-minimize"></use></svg></button>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <aside class="panel" id="panel" aria-hidden="true"></aside>
+  <section class="camera-viewer" id="cameraViewer" role="dialog" aria-modal="true" aria-labelledby="cameraViewerTitle" aria-describedby="cameraViewerStatus" aria-hidden="true" hidden>
+    <header class="camera-viewer-head">
+      <div><span><i></i><b id="cameraViewerKind">Camera viewer</b></span><h2 id="cameraViewerTitle">Camera</h2><p id="cameraViewerStatus" role="status" aria-live="polite">Connecting to camera…</p></div>
+      <button class="camera-viewer-close" data-action="close-camera" aria-label="Close full-screen camera"><svg aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="camera-viewer-stage">
+      <video id="cameraViewerVideo" muted autoplay playsinline></video>
+      <img id="cameraViewerImage" alt="" decoding="async">
+      <div class="camera-viewer-loading"><svg aria-hidden="true"><use href="#i-camera"></use></svg><span id="cameraViewerLoadingText">Connecting to camera…</span><button class="camera-viewer-retry" id="cameraViewerRetry" data-action="retry-camera-live" type="button" hidden><svg aria-hidden="true"><use href="#i-refresh"></use></svg>Retry live view</button></div>
+    </div>
+  </section>
+  <dialog class="device-dialog" id="deviceDialog" aria-labelledby="deviceDialogTitle" aria-describedby="deviceDialogState">
+    <div class="device-dialog-surface">
+      <header class="device-dialog-head">
+        <div class="device-dialog-heading">
+          <span>Expanded control</span>
+          <h2 id="deviceDialogTitle" tabindex="-1">Device</h2>
+          <p id="deviceDialogState" aria-live="polite">Loading current state</p>
+        </div>
+        <button class="device-dialog-close" data-action="close-device" aria-label="Close expanded control"><svg aria-hidden="true"><use href="#i-x"></use></svg></button>
+      </header>
+      <div class="device-dialog-card" id="deviceDialogCard"></div>
+    </div>
+  </dialog>
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+
+  <script type="module" src="/dashboard-view.js"></script>
+</body>
+</html>

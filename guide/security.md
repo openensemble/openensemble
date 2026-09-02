@@ -4,9 +4,32 @@ OpenEnsemble assumes you trust the people who have accounts on your install — 
 
 ## Authentication
 
-- Login uses session tokens carried in the `Authorization: Bearer …` header. Never in URLs (URLs leak via Referer headers and access logs).
-- Default session expiry is 30 days. Shorten it with `OE_SESSION_EXPIRY` (seconds) or in **Settings → System → Session Expiry**.
+- Normal browser login uses an HttpOnly, SameSite session cookie; browser JavaScript cannot read the token. Non-browser API clients continue to use `Authorization: Bearer …`. Session tokens are never placed in ordinary page URLs (URLs leak through referrers and access logs).
+- Browser sessions have a fixed seven-day maximum. **Settings → System → Session Expiry** or `OE_SESSION_EXPIRY` can add a shorter inactivity timeout, expressed in hours; `0` disables only that idle timeout, not the seven-day hard limit.
 - All sessions for a user are listable and revocable in **Settings → Profile → Active Sessions**.
+
+## Display dashboards
+
+Addresses such as `/dashboards/kitchen` are stable routes, not anonymous share
+links or kiosk-scoped credentials. The page shell contains no token, and its
+layout and live-data APIs require the browser's normal OE session. The active
+profile selects the dashboard library, even when another profile uses the same
+slug.
+
+A display session has the account's normal OE scope. Hiding cards or page
+elements is presentation, not authorization, so use a dedicated
+least-privilege profile and a device/browser lock for unattended screens.
+Home Assistant access is profile-wide rather than per dashboard: owners and
+admins receive runtime access automatically, while regular profiles need the
+`role_home_assistant` skill enabled. OE exposes normalized state, permitted
+camera views, and a fixed allowlist of controls; the configured Home Assistant
+token can restrict those operations further.
+
+Calendar, Email, and custom-widget access is rechecked during refresh. If one
+of those permissions is revoked while a display remains open, already-rendered
+data can remain visible as a stale result until reload. Reload or close the
+display, or revoke its session, when immediate removal matters. Home Assistant
+state is cleared when runtime access becomes unavailable.
 
 ## Roles
 

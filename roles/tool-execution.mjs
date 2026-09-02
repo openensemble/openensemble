@@ -48,6 +48,7 @@ import {
   coordinatedToolBarrierText,
 } from '../lib/coordinator-directives.mjs';
 import { evaluateMcpToolAccess } from '../lib/mcp-tool-policy.mjs';
+import { formatDeclaredSkillDashboardToolResult } from '../lib/dashboard-widgets.mjs';
 import {
   abortError,
   createLinkedAbortController,
@@ -235,6 +236,21 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
   // this is the authorization boundary, including delegated agents/workers.
   const owningToolDef = owningWrap.manifest.tools
     ?.find(tool => tool.function?.name === resolvedName) ?? null;
+  // Dashboard tools have one narrowly-declared structured result contract.
+  // Render that contract for ordinary chat here, while leaving every unrelated
+  // object-returning tool on the existing generic path.
+  const renderToolResultForChat = raw => {
+    const formatted = formatDeclaredSkillDashboardToolResult(
+      owningWrap.manifest,
+      resolvedName,
+      raw,
+    );
+    if (!formatted.matched) return raw;
+    if (formatted.ok === false) {
+      return toolError(`Dashboard widget tool returned invalid data: ${formatted.error}`);
+    }
+    return formatted.text;
+  };
   const mcpAccess = evaluateMcpToolAccess({
     name: resolvedName,
     toolDef: owningToolDef,
@@ -1334,12 +1350,14 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
           // Normalize structured tool results like the inline path does — otherwise
           // a delayed { text, _images, _notify } result becomes the string
           // "[object Object]" and its images/notifications are lost.
-          const structured = val && typeof val === 'object' && typeof val.text === 'string';
+          const renderedVal = renderToolResultForChat(val);
+          const structured = renderedVal && typeof renderedVal === 'object'
+            && typeof renderedVal.text === 'string';
           const processed = await _postProcessResult({
             type: 'result',
-            text: structured ? val.text : String(val ?? ''),
-            ...(structured && Array.isArray(val._images) ? { _images: val._images } : {}),
-            ...(structured && val._notify ? { _notify: val._notify } : {}),
+            text: structured ? renderedVal.text : String(renderedVal ?? ''),
+            ...(structured && Array.isArray(renderedVal._images) ? { _images: renderedVal._images } : {}),
+            ...(structured && renderedVal._notify ? { _notify: renderedVal._notify } : {}),
           });
           const completion = normalizeAutoBgCompletion(processed, name);
           ownerTerminal = {
@@ -1520,14 +1538,16 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
       // ancillary fields (`_images` for browser_screenshot, `_notify` for
       // existing patterns) so the chat dispatcher can forward them. Plain
       // strings still flow through unchanged.
-      const isStructured = winner && typeof winner === 'object' && typeof winner.text === 'string';
+      const renderedWinner = renderToolResultForChat(winner);
+      const isStructured = renderedWinner && typeof renderedWinner === 'object'
+        && typeof renderedWinner.text === 'string';
       if (toolAbort.signal.aborted) throw abortError(toolAbort.signal, `Tool ${name} cancelled`);
       toolExecutionSettled = true;
       yield await _postProcessResult({
         type: 'result',
-        text: isStructured ? winner.text : String(winner ?? ''),
-        ...(isStructured && winner._notify ? { _notify: winner._notify } : {}),
-        ...(isStructured && Array.isArray(winner._images) ? { _images: winner._images } : {}),
+        text: isStructured ? renderedWinner.text : String(renderedWinner ?? ''),
+        ...(isStructured && renderedWinner._notify ? { _notify: renderedWinner._notify } : {}),
+        ...(isStructured && Array.isArray(renderedWinner._images) ? { _images: renderedWinner._images } : {}),
       });
     }
     settleReplayReservation({

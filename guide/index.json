@@ -27,6 +27,7 @@
     {
       "title": "Daily use",
       "pages": [
+        { "slug": "dashboards", "title": "Display dashboards" },
         { "slug": "tasks",      "title": "Tasks & scheduler" },
         { "slug": "documents",  "title": "Documents & sharing" },
         { "slug": "expenses",   "title": "Expenses" },

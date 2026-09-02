@@ -1,20 +1,62 @@
 // ── Dashboard ─────────────────────────────────────────────────────────────────
-function openDashboard() { toggleDrawer('drawerDashboard', 'sbtnDash'); }
+function openDashboard() {
+  if (activeDrawerId === 'drawerDashboard') return;
+  toggleDrawer('drawerDashboard', 'sbtnDash');
+}
 function closeDashboard() { closeAllDrawers(); }
 
 async function loadDashboard() {
+  const editorFrame = document.querySelector('.dash-display-editor-frame');
+  if (editorFrame && typeof oeDisplayFlushEditor === 'function'
+      && !(await oeDisplayFlushEditor())) return;
   const body = $('dashBody');
-  body.innerHTML = '<div style="color:var(--muted);padding:20px">Loading…</div>';
-  let data;
-  try { data = await fetch('/api/dashboard').then(r => r.json()); }
-  catch { body.innerHTML = '<div style="color:var(--red);padding:20px">Failed to load dashboard.</div>'; return; }
+  body.classList.remove('dashboard-tool-open');
   body.innerHTML = '';
+
+  // Display dashboards are configured here in OE, while their stable browser
+  // URLs render only the configured view. Keep this entry first and independent
+  // of the operational metrics below so the studio remains reachable if one of
+  // those optional health sources is unavailable.
+  const displays = document.createElement('div');
+  displays.className = 'dash-card dash-display-entry';
+  displays.innerHTML = `
+    <div class="dash-display-entry-icon">${icon('monitor-smartphone', 26)}</div>
+    <div class="dash-display-entry-copy">
+      <div class="dash-card-title">Display dashboards</div>
+      <div class="dash-card-meta">Create focused Home Assistant dashboards for wall tablets, rooms, or any browser, each with a stable address.</div>
+    </div>
+    <div class="dash-display-entry-actions">
+      <button class="dash-tool-btn" data-action="openDashboardDisplays" data-args='["library"]'>Open studio</button>
+      <button class="dash-display-primary" data-action="openDashboardDisplays" data-args='["create"]'>${icon('plus', 14)} New dashboard</button>
+    </div>`;
+  body.appendChild(displays);
+  const renderIsCurrent = () => body.contains(displays);
+
+  const loading = document.createElement('div');
+  loading.className = 'dash-ops-loading';
+  loading.textContent = 'Loading operational dashboard…';
+  body.appendChild(loading);
+  let data;
+  try {
+    data = await fetch('/api/dashboard').then(r => {
+      if (!r.ok) throw new Error(`Dashboard HTTP ${r.status}`);
+      return r.json();
+    });
+  } catch {
+    if (!renderIsCurrent()) return;
+    loading.className = 'dash-ops-loading error';
+    loading.textContent = 'Operational cards could not be loaded. Display dashboard management is still available.';
+    return;
+  }
+  if (!renderIsCurrent()) return;
+  loading.remove();
 
   // System Health card (admin/owner only)
   const isPriv = _currentUser?.role === 'owner' || _currentUser?.role === 'admin';
   if (isPriv) {
     try {
       const health = await fetch('/api/admin/health').then(r => r.json());
+      if (!renderIsCurrent()) return;
       const hc = document.createElement('div');
       hc.className = 'dash-card';
       hc.style.borderColor = health.ok ? '#43b89c55' : '#e05c5c55';
@@ -92,6 +134,7 @@ async function loadDashboard() {
         </div>`;
       body.appendChild(hc);
     } catch {}
+    if (!renderIsCurrent()) return;
   }
 
   const mc = document.createElement('div');
@@ -134,6 +177,7 @@ async function loadDashboard() {
   if (_currentUser?.role === 'owner' || _currentUser?.role === 'admin') {
     try {
       const activity = await fetch('/api/admin/activity').then(r => r.json());
+      if (!renderIsCurrent()) return;
       const tc = document.createElement('div');
       tc.className = 'dash-card';
       tc.style.borderColor = '#43b89c55';
@@ -215,6 +259,7 @@ async function loadDashboard() {
       renderCard();
       body.appendChild(tc);
     } catch {}
+    if (!renderIsCurrent()) return;
   }
 
   // Local-First card (admin/owner only) — the complement of Token Usage: how
@@ -461,6 +506,7 @@ function openDashboardTool(tool) {
   if (!body) return;
   const cfg = DASH_TOOLS[tool];
   if (!cfg) return;
+  body.classList.add('dashboard-tool-open');
   body.innerHTML = `
     <div class="dash-tool-shell">
       <div class="dash-tool-head">

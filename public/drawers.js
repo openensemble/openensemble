@@ -35,6 +35,7 @@ function toggleDrawer(drawerId, btnId) {
   if (drawerId.startsWith('drawer_') && typeof runCustomDrawerInit === 'function') {
     runCustomDrawerInit(drawerId);
   }
+  if (typeof syncPrimaryViewToggle === 'function') syncPrimaryViewToggle();
 }
 
 function closeAllDrawers(resetActive = true) {
@@ -44,6 +45,7 @@ function closeAllDrawers(resetActive = true) {
   document.querySelectorAll('.strip-btn.active').forEach(b => b.classList.remove('active'));
   if (resetActive) activeDrawerId = null;
   if (wasMessages && typeof closeMessagesDrawer === 'function') closeMessagesDrawer();
+  if (typeof syncPrimaryViewToggle === 'function') syncPrimaryViewToggle();
 }
 
 // ── Mobile menu (bottom sheet) ────────────────────────────────────────────────

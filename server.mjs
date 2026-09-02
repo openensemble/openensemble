@@ -57,6 +57,7 @@ import { handle as handleDesktop }  from './routes/desktop.mjs';
 import { handle as handleMisc }     from './routes/misc.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
 import { handle as handleHealth, setRuntimeMetricsFn } from './routes/health.mjs';
+import { handle as handleDashboards } from './routes/dashboards.mjs';
 import { handle as handleOAuth }         from './routes/oauth.mjs';
 import { handle as handleMsOAuth }       from './routes/ms-oauth.mjs';
 import { handle as handleOpenAIOAuth }   from './routes/openai-oauth.mjs';
@@ -283,9 +284,48 @@ function versionedIndexHtml() {
   return _indexCache;
 }
 
+// The dashboard display is a deliberately separate, minimal shell. Keeping
+// it out of index.html means a wall tablet never loads OE chat, settings, or
+// the dashboard-management UI. Its assets share the same atomic build id as
+// the main shell so a restart cannot serve a mixed old/new renderer bundle.
+let _dashboardViewCache = null;
+function versionedDashboardViewHtml() {
+  const viewPath = path.join(UI_DIR, 'dashboard-view.html');
+  const st = fs.statSync(viewPath);
+  if (!_dashboardViewCache
+      || _dashboardViewCache.mtimeMs !== st.mtimeMs
+      || _dashboardViewCache.buildId !== UI_BUILD_ID) {
+    const raw = fs.readFileSync(viewPath, 'utf8');
+    const html = raw.replace(
+      /(src|href)="(\/dashboard-view\.(?:js|css))"/g,
+      `$1="$2?v=${UI_BUILD_ID}"`,
+    );
+    _dashboardViewCache = {
+      mtimeMs: st.mtimeMs,
+      buildId: UI_BUILD_ID,
+      html: Buffer.from(html),
+      etag: `"dash-${UI_BUILD_ID}-${Math.round(st.mtimeMs).toString(16)}"`,
+    };
+  }
+  return _dashboardViewCache;
+}
+
+function isDashboardViewPath(pathname) {
+  if (!pathname.startsWith('/dashboards/')) return false;
+  const encodedSlug = pathname.slice('/dashboards/'.length);
+  if (!encodedSlug || encodedSlug.includes('/')) return false;
+  try {
+    const slug = decodeURIComponent(encodedSlug);
+    return /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(slug);
+  } catch {
+    return false;
+  }
+}
+
 // ── Route dispatch order ─────────────────────────────────────────────────────
 const routeHandlers = [
   handleHealth,    // /health (public) + /api/admin/health (authed)
+  handleDashboards, // per-user dashboards + authenticated renderer compatibility APIs
   handlePlugins,   // must be early — delegates /api/* to plugin servers
   handleOAuth,          // /api/oauth/google/* — per-user Google OAuth flow
   handleMsOAuth,        // /api/oauth/microsoft/* — Microsoft OAuth flow
@@ -402,6 +442,24 @@ const httpServer = http.createServer(async (req, res) => {
   // identity. Strict req.url === '/' was 404'ing OAuth-success redirects
   // and any shared link with tracking params.
   const _pathname = req.url.split('?', 1)[0];
+  if (isDashboardViewPath(_pathname)) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { 'Content-Type': 'text/plain', Allow: 'GET, HEAD' });
+      res.end('Method not allowed');
+      return;
+    }
+    const view = versionedDashboardViewHtml();
+    if (notModified(req, res, view.etag, 'no-cache')) return;
+    res.writeHead(200, {
+      'Content-Type': 'text/html',
+      'Cache-Control': 'no-cache',
+      ETag: view.etag,
+      'X-Robots-Tag': 'noindex, nofollow, noarchive',
+    });
+    if (req.method === 'HEAD') res.end();
+    else res.end(view.html);
+    return;
+  }
   if (_pathname.startsWith('/invite/') || _pathname === '/' || _pathname === '/index.html') {
     const idx = versionedIndexHtml();
     if (notModified(req, res, idx.etag, 'no-cache')) return;

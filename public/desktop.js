@@ -1,26 +1,38 @@
-// ── Desktop View ──────────────────────────────────────────────────────────────
+// ── Workspace View ────────────────────────────────────────────────────────────
 let _desktopLoaded = false;
 let _currentDesktopView = 'chat'; // 'chat' or 'desktop'
 
+// Dashboard has two entry points (the main view switcher and the left rail),
+// but one canonical drawer/studio. Keep both view switchers aligned with that
+// drawer while retaining the older files/widgets surface as Workspace.
+function syncPrimaryViewToggle() {
+  const dashboardOpen = typeof activeDrawerId !== 'undefined'
+    && activeDrawerId === 'drawerDashboard';
+  const desktopActive = !dashboardOpen && _currentDesktopView === 'desktop';
+  const chatActive = !dashboardOpen && !desktopActive;
+  $('viewBtnChat')?.classList.toggle('active', chatActive);
+  $('mViewChat')?.classList.toggle('active', chatActive);
+  $('viewBtnDashboard')?.classList.toggle('active', dashboardOpen);
+  $('mViewDashboard')?.classList.toggle('active', dashboardOpen);
+  $('viewBtnDesktop')?.classList.toggle('active', desktopActive);
+  $('mViewDesktop')?.classList.toggle('active', desktopActive);
+}
+
 function switchView(mode) {
+  if (mode !== 'chat' && mode !== 'desktop') return;
   _currentDesktopView = mode;
+  if (typeof activeDrawerId !== 'undefined' && activeDrawerId === 'drawerDashboard') {
+    closeAllDrawers();
+  }
   const chatArea = document.querySelector('.chat-area');
   const inputArea = document.querySelector('.input-area');
   const desktopView = $('desktopView');
-
-  // Mobile header hosts its own copy of the toggle (the floating one is
-  // hidden ≤640px) — keep both in sync.
-  const mChat = $('mViewChat'), mDesk = $('mViewDesktop');
-  if (mChat) mChat.classList.toggle('active', mode !== 'desktop');
-  if (mDesk) mDesk.classList.toggle('active', mode === 'desktop');
 
   if (mode === 'desktop') {
     chatArea.style.display = 'none';
     inputArea.style.display = 'none';
     desktopView.style.display = 'block';
     const pill = $('agentPill'); if (pill) pill.style.display = 'none';
-    $('viewBtnChat').classList.remove('active');
-    $('viewBtnDesktop').classList.add('active');
     // Always reset to the top-level categories+board view on entry, so the
     // previous session's "items" drawer (e.g. Code Projects list) doesn't leak
     // through when the user toggles back to desktop mode.
@@ -31,9 +43,8 @@ function switchView(mode) {
     inputArea.style.display = '';
     desktopView.style.display = 'none';
     const pill = $('agentPill'); if (pill) pill.style.display = '';
-    $('viewBtnChat').classList.add('active');
-    $('viewBtnDesktop').classList.remove('active');
   }
+  syncPrimaryViewToggle();
 }
 
 // ── Category definitions ─────────────────────────────────────────────────────

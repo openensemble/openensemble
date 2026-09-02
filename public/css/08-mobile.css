@@ -151,7 +151,7 @@
 }
 .mobile-header h1 { font-size: 17px; font-weight: 700; color: var(--accent); margin-right: auto; }
 
-/* Chat/Desktop toggle in the mobile header (replaces the floating one) */
+/* Chat/Dashboard/Workspace switcher in the mobile header. */
 .mobile-view-toggle {
   display: none; gap: 2px; background: var(--bg3);
   border: 1px solid var(--border); border-radius: 8px; padding: 2px;

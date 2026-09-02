@@ -16,6 +16,7 @@ import {
 import { mayImportCustomCodeInProcess } from '../../lib/custom-code-policy.mjs';
 import { atomicWriteSync, withLock } from '../../routes/_helpers/io-lock.mjs';
 import { notifyUser } from '../../lib/personalization/notify.mjs';
+import { validateSkillDashboardWidgets } from '../../lib/dashboard-widgets.mjs';
 
 const BLUEPRINT = path.join(SKILLS_DIR, 'SKILL_BLUEPRINT.md');
 const CAPABILITIES = path.join(SKILLS_DIR, 'skill-builder', 'CAPABILITIES.md');
@@ -30,6 +31,49 @@ const CAPABILITIES = path.join(SKILLS_DIR, 'skill-builder', 'CAPABILITIES.md');
 // is optional except `id` and `name` — so the LLM can grow the draft as
 // the conversation reveals more, without ever needing a schema migration.
 const DRAFT_SCHEMA_VERSION = 1;
+
+/**
+ * Compare-and-swap one manifest generation under the shared per-file lock.
+ * Validation/smoke may await for seconds; callers therefore build a candidate
+ * from exact bytes, then refuse to overwrite a sibling update that committed
+ * while those checks were running.
+ *
+ * @param {{manifestPath:string, expectedBytes:string, nextBytes:string,
+ *          generationGuards?:Array<{path:string, bytes:string}>, beforeCommit?:()=>void,
+ *          applyLive:()=>void, restoreLive:()=>void}} options
+ */
+async function commitManifestGeneration({
+  manifestPath,
+  expectedBytes,
+  nextBytes,
+  generationGuards = [],
+  beforeCommit = () => {},
+  applyLive,
+  restoreLive,
+}) {
+  return withLock(manifestPath, () => {
+    let currentBytes;
+    try { currentBytes = readFileSync(manifestPath, 'utf8'); }
+    catch (error) { return { ok: false, error: `Could not re-read manifest.json: ${error.message}` }; }
+    if (currentBytes !== expectedBytes) return { ok: false, conflict: true };
+    for (const guard of generationGuards) {
+      let bytes;
+      try { bytes = readFileSync(guard.path, 'utf8'); }
+      catch { return { ok: false, conflict: true }; }
+      if (bytes !== guard.bytes) return { ok: false, conflict: true };
+    }
+    try {
+      beforeCommit();
+      atomicWriteSync(manifestPath, nextBytes, { encoding: 'utf8' });
+      applyLive();
+      return { ok: true };
+    } catch (error) {
+      try { atomicWriteSync(manifestPath, expectedBytes, { encoding: 'utf8' }); } catch {}
+      try { restoreLive(); } catch {}
+      return { ok: false, error: error.message || String(error) };
+    }
+  });
+}
 
 function draftsDir(userId) {
   return path.join(USERS_DIR, userId, 'skill-drafts');
@@ -631,6 +675,14 @@ function handleReadBlueprint() {
   catch { return `Blueprint not found at ${BLUEPRINT}`; }
 }
 
+function hasRequiredDashboardWidgetSmokeFailure(report) {
+  return Array.isArray(report?.results) && report.results.some(result => (
+    result?.outcome === 'fail'
+    && typeof result?.tool === 'string'
+    && result.tool.includes(' [dashboard:')
+  ));
+}
+
 // Clean + lightly validate a `localIntents` block (the skill-agnostic local
 // cognition tier — see SKILL_BLUEPRINT). Drops entries that don't bind a real
 // tool of this skill or are malformed; heavier checks (slot ⊆ tool params,
@@ -854,7 +906,7 @@ function cleanSelectedPlanKeep(selectedPlanKeep, toolNames) {
 }
 
 async function handleCreate(args, userId) {
-  const { id: rawId, name, description, icon, tools, code, drawer, watchers, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network, execution_hint } = args;
+  const { id: rawId, name, description, icon, tools, code, drawer, dashboardWidgets, watchers, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, voice_device, assign_to, skip_lsp, skip_validator, skip_smoke, from_draft, sandbox, allow_network, execution_hint } = args;
 
   if (!rawId?.trim()) return 'id is required.';
   if (!name?.trim())  return 'name is required.';
@@ -934,6 +986,11 @@ async function handleCreate(args, userId) {
     createdAt: new Date().toISOString(),
     tools,
   };
+  if (dashboardWidgets !== undefined) {
+    const checkedWidgets = validateSkillDashboardWidgets(dashboardWidgets, tools);
+    if (checkedWidgets.ok === false) return `Invalid dashboardWidgets: ${checkedWidgets.error}`;
+    if (checkedWidgets.widgets.length) manifest.dashboardWidgets = checkedWidgets.widgets;
+  }
   if (Array.isArray(watchers) && watchers.length) {
     manifest.watchers = watchers.map(w => ({
       kind: String(w.kind || '').trim(),
@@ -1036,9 +1093,13 @@ async function handleCreate(args, userId) {
       rmSync(skillDir, { recursive: true, force: true });
       return `Skill failed to load — files removed. Fix the issue and try again:\n\n${report.setupError}`;
     }
-    if (!report.ok && !skip_smoke) {
+    const requiredDashboardFailure = hasRequiredDashboardWidgetSmokeFailure(report);
+    if (!report.ok && (!skip_smoke || requiredDashboardFailure)) {
       rmSync(skillDir, { recursive: true, force: true });
-      return `Smoke-test failures (tool handlers crashed, hung, or returned the wrong type) — skill files removed. Fix and retry, or pass skip_smoke:true if these are tools the smoke test legitimately can't run (network-only, destructive, etc.):\n\n${formatSmokeReport(report)}`;
+      const bypassNote = requiredDashboardFailure
+        ? ' Exact dashboard-widget smoke cannot be bypassed with skip_smoke.'
+        : ' Fix and retry, or pass skip_smoke:true if these are tools the smoke test legitimately cannot run.';
+      return `Smoke-test failures (tool handlers crashed, hung, or returned the wrong type) — skill files removed.${bypassNote}\n\n${formatSmokeReport(report)}`;
     }
     // Surface skipped tools (destructive, returned-null) and non-blocking
     // failures (when skip_smoke is set) as warnings on the success message.
@@ -1167,9 +1228,14 @@ async function handleUpdateCode(args, userId) {
   // Pre-write gates: LSP + manifest/code validator on the new code
   // against the current on-disk manifest. Runs BEFORE any file is
   // touched so a broken update leaves the prior good version intact.
+  let expectedManifestBytes = null;
   /** @type {any} */
   let onDiskManifest = manifest;
-  try { onDiskManifest = JSON.parse(readFileSync(path.join(skillDir, 'manifest.json'), 'utf8')); }
+  try {
+    const bytes = readFileSync(path.join(skillDir, 'manifest.json'), 'utf8');
+    onDiskManifest = JSON.parse(bytes);
+    if (onDiskManifest.dashboardWidgets?.length) expectedManifestBytes = bytes;
+  }
   catch { /* fall back to the in-memory manifest from roles */ }
   const gates = await runPreWriteGates(skillDir, onDiskManifest, code, {
     skip_lsp, skip_validator, opName: `Update of "${skillId}"`, skillId,
@@ -1195,13 +1261,26 @@ async function handleUpdateCode(args, userId) {
       rmSync(backupPath, { force: true });
       return `Updated code failed to load — reverted to previous version:\n\n${report.setupError}`;
     }
-    if (!report.ok && !skip_smoke) {
+    const requiredDashboardFailure = hasRequiredDashboardWidgetSmokeFailure(report);
+    if (!report.ok && (!skip_smoke || requiredDashboardFailure)) {
       writeFileSync(execPath, readFileSync(backupPath));
       rmSync(backupPath, { force: true });
-      return `Smoke-test failures on the updated code — reverted to previous version. Fix and retry, or pass skip_smoke:true if the failing tools can't be smoke-tested:\n\n${formatSmokeReport(report)}`;
+      const bypassNote = requiredDashboardFailure
+        ? ' Exact dashboard-widget smoke cannot be bypassed with skip_smoke.'
+        : ' Fix and retry, or pass skip_smoke:true if the failing tools cannot be smoke-tested.';
+      return `Smoke-test failures on the updated code — reverted to previous version.${bypassNote}\n\n${formatSmokeReport(report)}`;
     }
     if (report.results.some(r => r.outcome !== 'pass')) {
       smokeWarnings = 'Smoke notes:\n' + formatSmokeReport(report);
+    }
+  }
+  if (expectedManifestBytes !== null) {
+    let latestManifestBytes = null;
+    try { latestManifestBytes = readFileSync(path.join(skillDir, 'manifest.json'), 'utf8'); } catch {}
+    if (latestManifestBytes !== expectedManifestBytes) {
+      writeFileSync(execPath, readFileSync(backupPath));
+      rmSync(backupPath, { force: true });
+      return 'Manifest changed while this widget-bearing code update was being validated. The previous code was restored; call skill_read_manifest and retry.';
     }
   }
   rmSync(backupPath, { force: true });
@@ -1270,6 +1349,21 @@ async function handleReadCode(args, userId) {
   return readFileSync(execPath, 'utf8');
 }
 
+async function handleReadManifest(args, userId) {
+  const skillId = String(args?.id || '').trim();
+  if (!skillId) return 'id is required.';
+  const resolved = await _resolveOwnedSkill(skillId, userId, args?.owner_id);
+  if (typeof resolved === 'string') return resolved;
+  const manifestPath = path.join(userSkillsDir(resolved.ownerId), skillId, 'manifest.json');
+  if (!existsSync(manifestPath)) return `Skill "${skillId}" has no manifest.json on disk.`;
+  try {
+    const disk = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    return JSON.stringify(disk, null, 2);
+  } catch (e) {
+    return `Could not parse manifest.json for "${skillId}": ${e.message}`;
+  }
+}
+
 async function handlePatchCode(args, userId) {
   const { id: skillId, edits, skip_lsp, skip_validator, skip_smoke } = args;
   if (!skillId?.trim()) return 'id is required.';
@@ -1324,9 +1418,14 @@ async function handlePatchCode(args, userId) {
   }
 
   // Pre-write gates on the post-patch content vs the on-disk manifest.
+  let expectedManifestBytes = null;
   /** @type {any} */
   let onDiskManifest = manifest;
-  try { onDiskManifest = JSON.parse(readFileSync(path.join(skillDir, 'manifest.json'), 'utf8')); }
+  try {
+    const bytes = readFileSync(path.join(skillDir, 'manifest.json'), 'utf8');
+    onDiskManifest = JSON.parse(bytes);
+    if (onDiskManifest.dashboardWidgets?.length) expectedManifestBytes = bytes;
+  }
   catch { /* fall back to roles' in-memory manifest */ }
   const gates = await runPreWriteGates(skillDir, onDiskManifest, current, {
     skip_lsp, skip_validator, opName: `Patch of "${skillId}"`, skillId,
@@ -1350,13 +1449,26 @@ async function handlePatchCode(args, userId) {
       rmSync(backupPath, { force: true });
       return `Patched code failed to load — reverted to previous version:\n\n${report.setupError}`;
     }
-    if (!report.ok && !skip_smoke) {
+    const requiredDashboardFailure = hasRequiredDashboardWidgetSmokeFailure(report);
+    if (!report.ok && (!skip_smoke || requiredDashboardFailure)) {
       writeFileSync(execPath, original);
       rmSync(backupPath, { force: true });
-      return `Smoke-test failures on the patched code — reverted to previous version. Fix and retry, or pass skip_smoke:true if the failing tools can't be smoke-tested:\n\n${formatSmokeReport(report)}`;
+      const bypassNote = requiredDashboardFailure
+        ? ' Exact dashboard-widget smoke cannot be bypassed with skip_smoke.'
+        : ' Fix and retry, or pass skip_smoke:true if the failing tools cannot be smoke-tested.';
+      return `Smoke-test failures on the patched code — reverted to previous version.${bypassNote}\n\n${formatSmokeReport(report)}`;
     }
     if (report.results.some(r => r.outcome !== 'pass')) {
       smokeWarnings = 'Smoke notes:\n' + formatSmokeReport(report);
+    }
+  }
+  if (expectedManifestBytes !== null) {
+    let latestManifestBytes = null;
+    try { latestManifestBytes = readFileSync(path.join(skillDir, 'manifest.json'), 'utf8'); } catch {}
+    if (latestManifestBytes !== expectedManifestBytes) {
+      writeFileSync(execPath, original);
+      rmSync(backupPath, { force: true });
+      return 'Manifest changed while this widget-bearing code patch was being validated. The previous code was restored; call skill_read_manifest and retry.';
     }
   }
   rmSync(backupPath, { force: true });
@@ -1390,19 +1502,19 @@ async function handlePatchCode(args, userId) {
 }
 
 async function handleUpdateToolDef(args, userId) {
-  const { id, tool_name, description, parameters } = args;
+  const { id, tool_name, description, parameters, readOnly, create_if_missing } = args;
   if (!id?.trim() || !tool_name?.trim()) {
     return 'Both `id` (skill id) and `tool_name` are required.';
   }
-  if (description == null && parameters == null) {
-    return 'Provide at least one of `description` or `parameters` to update.';
+  if (description == null && parameters == null && typeof readOnly !== 'boolean') {
+    return 'Provide at least one of `description`, `parameters`, or `readOnly` to update.';
   }
   if (parameters != null && typeof parameters !== 'object') {
     return '`parameters` must be a JSON-schema object (or omit it entirely).';
   }
 
   const skillId = id.trim();
-  const { getRoleManifest, listAllRoles, clearExecutorCache, addRoleManifest } = await import('../../roles.mjs');
+  const { getRoleManifest, listAllRoles, listRoles, clearExecutorCache, addRoleManifest } = await import('../../roles.mjs');
 
   let manifest = getRoleManifest(skillId, userId);
   if (manifest && !manifest.custom) {
@@ -1420,21 +1532,64 @@ async function handleUpdateToolDef(args, userId) {
   const manifestPath = path.join(skillDir, 'manifest.json');
   if (!existsSync(manifestPath)) return `Skill "${skillId}" has no manifest.json on disk.`;
 
+  let original;
   let disk;
   try {
-    disk = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    original = readFileSync(manifestPath, 'utf8');
+    disk = JSON.parse(original);
   } catch (e) {
     return `Could not parse manifest.json: ${e.message}`;
   }
 
+  const requestedToolName = tool_name.trim();
+  const referencedDashboardWidgets = (Array.isArray(disk.dashboardWidgets)
+    ? disk.dashboardWidgets : [])
+    .filter(widget => widget?.tool === requestedToolName);
   const tools = Array.isArray(disk.tools) ? disk.tools : [];
-  const toolIdx = tools.findIndex(t => t?.function?.name === tool_name.trim());
-  if (toolIdx === -1) {
+  if (!Array.isArray(disk.tools)) disk.tools = tools;
+  let toolIdx = tools.findIndex(t => t?.function?.name === requestedToolName);
+  let createdTool = false;
+  if (toolIdx === -1 && create_if_missing !== true) {
     const known = tools.map(t => t?.function?.name).filter(Boolean).join(', ');
-    return `Tool "${tool_name}" not found in this skill's manifest. Existing tools: ${known || '(none)'}.`;
+    return `Tool "${tool_name}" not found in this skill's manifest. Existing tools: ${known || '(none)'}. Patch its code handler first, then retry with create_if_missing:true plus description and parameters to add a new tool definition.`;
+  }
+  if (toolIdx === -1) {
+    const newName = requestedToolName;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(newName)) {
+      return 'A new tool name must contain only letters, numbers, underscores, or hyphens (128 characters maximum).';
+    }
+    if (typeof description !== 'string' || !description.trim()
+        || !parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
+      return 'Adding a tool requires a nonempty description and its complete JSON-schema parameters object.';
+    }
+    const collision = listRoles(ownerId, { includeDisabled: true }).find(candidate => (
+      candidate.id !== skillId
+      && candidate.tools?.some(tool => tool?.function?.name === newName)
+    ));
+    if (collision) return `Tool name collision: ${newName} is already declared by skill "${collision.id}".`;
+    tools.push({
+      type: 'function',
+      ...(readOnly === true ? { readOnly: true } : {}),
+      function: { name: newName, description: description.trim(), parameters },
+    });
+    toolIdx = tools.length - 1;
+    createdTool = true;
+
+    const codePath = path.join(skillDir, 'execute.mjs');
+    let code = '';
+    try { code = readFileSync(codePath, 'utf8'); }
+    catch (e) { return `Could not read execute.mjs: ${e.message}`; }
+    const { validateManifestCode } = await import('../../lib/manifest-validator.mjs');
+    const diagnostics = validateManifestCode(disk, code).diagnostics;
+    const missingHandler = diagnostics.find(item => (
+      item.code === 'MV001' && item.message.includes(`"${newName}"`)
+    ));
+    if (missingHandler) {
+      return `The new tool was not added because execute.mjs has no matching handler for "${newName}". Patch the code first, then retry this call.`;
+    }
   }
   const target = tools[toolIdx].function;
-  const changed = [];
+  const changed = createdTool ? ['created'] : [];
   if (typeof description === 'string') {
     target.description = description;
     changed.push('description');
@@ -1443,29 +1598,73 @@ async function handleUpdateToolDef(args, userId) {
     target.parameters = parameters;
     changed.push('parameters');
   }
+  if (typeof readOnly === 'boolean') {
+    if (readOnly && tools[toolIdx].destructive === true) {
+      return 'A destructive tool cannot be marked readOnly. Patch the implementation/manifest so it is genuinely side-effect free, or use a separate dashboard data tool.';
+    }
+    if (readOnly) tools[toolIdx].readOnly = true;
+    else delete tools[toolIdx].readOnly;
+    changed.push(`readOnly=${readOnly}`);
+  }
+  const checkedWidgets = validateSkillDashboardWidgets(disk.dashboardWidgets, tools);
+  if (checkedWidgets.ok === false) {
+    return `Tool update would invalidate this skill's dashboard widgets: ${checkedWidgets.error}`;
+  }
   if (!changed.length) {
     return 'No fields applied — nothing to update.';
   }
 
-  // Atomic write with backup so a write failure mid-stream can be recovered.
-  const backupPath = manifestPath + '.bak';
-  const original = readFileSync(manifestPath, 'utf8');
-  writeFileSync(backupPath, original);
-  try {
-    writeFileSync(manifestPath, JSON.stringify(disk, null, 2) + '\n');
-    // Re-register so the in-memory manifest matches disk. Doesn't reload the
-    // executor (no code changed); does refresh the tool list every agent sees
-    // on its next resolveAgentTools call.
-    addRoleManifest(disk, ownerId);
-    // Clear executor cache too: belt-and-suspenders for skills that read
-    // their own manifest at runtime. Cheap; the executor reloads on next call.
-    clearExecutorCache(skillId, ownerId);
-  } catch (e) {
-    writeFileSync(manifestPath, original);
-    rmSync(backupPath, { force: true });
-    return `Manifest write failed — reverted to previous version: ${e.message}`;
+  // A widget polls this exact contract unattended. Before changing any field
+  // that can alter invocation or side-effect safety, run the same exact-args,
+  // read-only-context smoke used when the widget declaration is created. A
+  // description-only edit is presentation metadata and stays a cheap update.
+  const changesWidgetContract = createdTool
+    || parameters != null
+    || typeof readOnly === 'boolean';
+  let expectedExecBytes = null;
+  if (referencedDashboardWidgets.length && changesWidgetContract) {
+    try { expectedExecBytes = readFileSync(path.join(skillDir, 'execute.mjs'), 'utf8'); }
+    catch (e) { return `Could not read execute.mjs before dashboard widget validation: ${e.message}`; }
+    const { runDashboardWidgetSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
+    const report = await runDashboardWidgetSmoke(skillDir, disk, {
+      userId: ownerId,
+      toolName: requestedToolName,
+    });
+    if (report.setupError) {
+      return `Dashboard widget smoke test could not run; tool definition was not changed:\n\n${report.setupError}`;
+    }
+    if (!report.ok) {
+      return `Dashboard widget smoke test failed; tool definition was not changed:\n\n${formatSmokeReport(report)}`;
+    }
   }
-  rmSync(backupPath, { force: true });
+
+  const nextBytes = JSON.stringify(disk, null, 2) + '\n';
+  const originalManifest = JSON.parse(original);
+  const committed = await commitManifestGeneration({
+    manifestPath,
+    expectedBytes: original,
+    nextBytes,
+    generationGuards: expectedExecBytes === null ? [] : [{
+      path: path.join(skillDir, 'execute.mjs'), bytes: expectedExecBytes,
+    }],
+    applyLive: () => {
+      // Re-register so the in-memory manifest matches disk. Doesn't reload the
+      // executor (no code changed); does refresh the tool list every agent sees
+      // on its next resolveAgentTools call.
+      addRoleManifest(disk, ownerId);
+      clearExecutorCache(skillId, ownerId);
+    },
+    restoreLive: () => {
+      addRoleManifest(originalManifest, ownerId);
+      clearExecutorCache(skillId, ownerId);
+    },
+  });
+  if (committed.conflict) {
+    return 'Manifest changed while this tool update was being validated. Nothing was written. Call skill_read_manifest and retry against the latest generation.';
+  }
+  if (!committed.ok) {
+    return `Manifest write failed — reverted to previous version: ${committed.error}`;
+  }
 
   // Versioned history — snapshot the manifest version we just replaced.
   try {
@@ -1481,15 +1680,15 @@ async function handleUpdateToolDef(args, userId) {
     });
   } catch (e) { console.debug('[skill-builder] log append (manifest_update) failed:', e.message); }
 
-  return `Skill "${manifest.name}" (${skillId}) — tool "${tool_name}" manifest updated (${changed.join(' + ')}). The new description/parameters take effect on every agent's next turn.`;
+  return `Skill "${manifest.name}" (${skillId}) — tool "${tool_name}" manifest updated (${changed.join(' + ')}). The updated tool contract takes effect on every agent's next turn.`;
 }
 
 // Update manifest-LEVEL fields (not a specific tool) on an existing skill:
-// voice_device, systemPromptAddition, intent_examples, coordinator_scope,
+// voice_device, systemPromptAddition, dashboardWidgets, intent_examples, coordinator_scope,
 // selected_plan_keep, description. Modeled on handleUpdateToolDef — atomic
 // write + re-register so the change is live without a server restart.
 async function handleUpdateManifest(args, userId) {
-  const { id, voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network, execution_hint } = args;
+  const { id, voice_device, systemPromptAddition, dashboardWidgets, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network, execution_hint } = args;
   if (!id?.trim()) return 'id is required.';
 
   const skillId = id.trim();
@@ -1507,8 +1706,12 @@ async function handleUpdateManifest(args, userId) {
   const manifestPath = path.join(skillDir, 'manifest.json');
   if (!existsSync(manifestPath)) return `Skill "${skillId}" has no manifest.json on disk.`;
 
+  let original;
   let disk;
-  try { disk = JSON.parse(readFileSync(manifestPath, 'utf8')); }
+  try {
+    original = readFileSync(manifestPath, 'utf8');
+    disk = JSON.parse(original);
+  }
   catch (e) { return `Could not parse manifest.json: ${e.message}`; }
 
   const changed = [];
@@ -1532,6 +1735,13 @@ async function handleUpdateManifest(args, userId) {
   if (typeof description === 'string' && description.trim()) {
     disk.description = description.trim();
     changed.push('description');
+  }
+  if (dashboardWidgets !== undefined) {
+    const checkedWidgets = validateSkillDashboardWidgets(dashboardWidgets, disk.tools || []);
+    if (checkedWidgets.ok === false) return `Invalid dashboardWidgets: ${checkedWidgets.error}`;
+    if (checkedWidgets.widgets.length) disk.dashboardWidgets = checkedWidgets.widgets;
+    else delete disk.dashboardWidgets;
+    changed.push(`dashboardWidgets(${checkedWidgets.widgets.length})`);
   }
   // localIntents — local cognition tier (see SKILL_BLUEPRINT). Pass [] to clear.
   // Same-tool paraphrase splits are auto-merged and cross-intent ambiguity
@@ -1602,22 +1812,51 @@ async function handleUpdateManifest(args, userId) {
     }
   }
   if (!changed.length) {
-    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network, execution_hint.';
+    return 'No fields applied. Provide at least one of: voice_device, systemPromptAddition, dashboardWidgets, intent_examples, localIntents, preferenceOpportunities, selected_plan_keep, coordinator_scope, description, sandbox, allow_network, execution_hint.';
   }
 
-  const backupPath = manifestPath + '.bak';
-  const original = readFileSync(manifestPath, 'utf8');
-  writeFileSync(backupPath, original);
-  try {
-    writeFileSync(manifestPath, JSON.stringify(disk, null, 2) + '\n');
-    addRoleManifest(disk, ownerId);
-    clearExecutorCache(skillId, ownerId);
-  } catch (e) {
-    writeFileSync(manifestPath, original);
-    rmSync(backupPath, { force: true });
-    return `Manifest write failed — reverted to previous version: ${e.message}`;
+  // Adding/replacing widgets is an unattended execution contract. Exercise
+  // each bound tool with the exact static args + initial config before making
+  // the candidate manifest live; a schema-generated ordinary smoke can mask a
+  // missing required argument here.
+  let expectedExecBytes = null;
+  if (dashboardWidgets !== undefined && disk.dashboardWidgets?.length) {
+    try { expectedExecBytes = readFileSync(path.join(skillDir, 'execute.mjs'), 'utf8'); }
+    catch (e) { return `Could not read execute.mjs before dashboard widget validation: ${e.message}`; }
+    const { runDashboardWidgetSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
+    const report = await runDashboardWidgetSmoke(skillDir, disk, { userId: ownerId });
+    if (report.setupError) {
+      return `Dashboard widget smoke test could not run; manifest was not changed:\n\n${report.setupError}`;
+    }
+    if (!report.ok) {
+      return `Dashboard widget smoke test failed; manifest was not changed:\n\n${formatSmokeReport(report)}`;
+    }
   }
-  rmSync(backupPath, { force: true });
+
+  const nextBytes = JSON.stringify(disk, null, 2) + '\n';
+  const originalManifest = JSON.parse(original);
+  const committed = await commitManifestGeneration({
+    manifestPath,
+    expectedBytes: original,
+    nextBytes,
+    generationGuards: expectedExecBytes === null ? [] : [{
+      path: path.join(skillDir, 'execute.mjs'), bytes: expectedExecBytes,
+    }],
+    applyLive: () => {
+      addRoleManifest(disk, ownerId);
+      clearExecutorCache(skillId, ownerId);
+    },
+    restoreLive: () => {
+      addRoleManifest(originalManifest, ownerId);
+      clearExecutorCache(skillId, ownerId);
+    },
+  });
+  if (committed.conflict) {
+    return 'Manifest changed while this manifest update was being validated. Nothing was written. Call skill_read_manifest and retry against the latest generation.';
+  }
+  if (!committed.ok) {
+    return `Manifest write failed — reverted to previous version: ${committed.error}`;
+  }
 
   // Versioned history — snapshot the manifest version we just replaced.
   try {
@@ -1839,21 +2078,50 @@ async function handleRollback(args, userId) {
     return `Skill "${skillId}"'s ${fileType} already matches snapshot #${snap.index} (${snap.ts}) — nothing to change.`;
   }
 
-  // Snapshot the CURRENT (pre-rollback) state first — same discipline as
-  // every other write in this file — so the rollback itself is undoable.
-  try {
-    snapshotToHistory(skillDir, fileType, currentContent);
-  } catch (e) {
-    return `Could not snapshot the current state before rolling back — aborted so nothing was lost: ${e.message}`;
+  // A manifest snapshot can reactivate an unattended widget contract. Validate
+  // the declaration and exercise every exact bound tool against the unchanged
+  // current code before touching history, disk, or the live role registry.
+  let restoredManifest = null;
+  let expectedExecBytes = null;
+  if (target === 'manifest') {
+    try { restoredManifest = JSON.parse(snap.content); }
+    catch (e) {
+      return `Snapshot #${snap.index} is not valid JSON — refusing to restore it: ${e.message}`;
+    }
+    if (restoredManifest?.id !== skillId
+        || restoredManifest?.custom !== true
+        || restoredManifest?.createdBy !== ownerId) {
+      return `Snapshot #${snap.index} does not preserve this skill's verified id and owner — refusing to restore it.`;
+    }
+    const { validateDashboardWidgets, formatManifestDiagnostics } = await import('../../lib/manifest-validator.mjs');
+    const widgetDiagnostics = validateDashboardWidgets(restoredManifest);
+    if (widgetDiagnostics.length) {
+      return `Manifest rollback would restore an invalid dashboard widget declaration; nothing changed:\n\n${formatManifestDiagnostics(widgetDiagnostics)}`;
+    }
+    if (restoredManifest.dashboardWidgets?.length) {
+      try { expectedExecBytes = readFileSync(path.join(skillDir, 'execute.mjs'), 'utf8'); }
+      catch (e) { return `Could not read execute.mjs before dashboard widget validation: ${e.message}`; }
+      const { runDashboardWidgetSmoke, formatSmokeReport } = await import('../../lib/skill-smoke.mjs');
+      const report = await runDashboardWidgetSmoke(skillDir, restoredManifest, { userId: ownerId });
+      if (report.setupError) {
+        return `Dashboard widget smoke test could not run on the manifest rollback target; nothing changed:\n\n${report.setupError}`;
+      }
+      if (!report.ok) {
+        return `Dashboard widget smoke test failed on the manifest rollback target; nothing changed:\n\n${formatSmokeReport(report)}`;
+      }
+    }
   }
-
-  const backupPath = filePath + '.bak';
-  writeFileSync(backupPath, currentContent);
 
   if (target === 'code') {
     const { clearExecutorCache } = await import('../../roles.mjs');
+    const manifestPath = path.join(skillDir, 'manifest.json');
+    let expectedManifestBytes = null;
     let onDiskManifest = manifest;
-    try { onDiskManifest = JSON.parse(readFileSync(path.join(skillDir, 'manifest.json'), 'utf8')); }
+    try {
+      const bytes = readFileSync(manifestPath, 'utf8');
+      onDiskManifest = JSON.parse(bytes);
+      if (onDiskManifest.dashboardWidgets?.length) expectedManifestBytes = bytes;
+    }
     catch { /* fall back to the in-memory manifest from roles */ }
 
     // Same pre-write gates skill_update_code runs, against the restored code.
@@ -1861,10 +2129,17 @@ async function handleRollback(args, userId) {
       opName: `Rollback of "${skillId}" (code → snapshot #${snap.index}, ${snap.ts})`, skillId,
     });
     if (gates.block) {
-      rmSync(backupPath, { force: true });
       return gates.block;
     }
 
+    // Snapshot the CURRENT code before temporarily installing the rollback
+    // target for its production smoke.
+    try { snapshotToHistory(skillDir, fileType, currentContent); }
+    catch (e) {
+      return `Could not snapshot the current state before rolling back — aborted so nothing was lost: ${e.message}`;
+    }
+    const backupPath = filePath + '.bak';
+    writeFileSync(backupPath, currentContent);
     writeFileSync(filePath, snap.content);
 
     // Same post-write smoke discipline as skill_update_code — revert on failure.
@@ -1879,6 +2154,15 @@ async function handleRollback(args, userId) {
       writeFileSync(filePath, currentContent);
       rmSync(backupPath, { force: true });
       return `Smoke-test failures on the rollback target — reverted, nothing changed. The older code may be stale relative to the CURRENT manifest:\n\n${formatSmokeReport(report)}`;
+    }
+    if (expectedManifestBytes !== null) {
+      let latestManifestBytes = null;
+      try { latestManifestBytes = readFileSync(manifestPath, 'utf8'); } catch {}
+      if (latestManifestBytes !== expectedManifestBytes) {
+        writeFileSync(filePath, currentContent);
+        rmSync(backupPath, { force: true });
+        return 'Manifest changed while this widget-bearing code rollback was being validated. The prior code was restored; call skill_read_manifest and retry.';
+      }
     }
     rmSync(backupPath, { force: true });
     clearExecutorCache(skillId, ownerId);
@@ -1905,24 +2189,31 @@ async function handleRollback(args, userId) {
   }
 
   // target === 'manifest'
-  let restoredManifest;
-  try { restoredManifest = JSON.parse(snap.content); }
-  catch (e) {
-    rmSync(backupPath, { force: true });
-    return `Snapshot #${snap.index} is not valid JSON — refusing to restore it: ${e.message}`;
-  }
-
   const { addRoleManifest, clearExecutorCache } = await import('../../roles.mjs');
-  writeFileSync(filePath, snap.content);
-  try {
-    addRoleManifest(restoredManifest, ownerId);
-    clearExecutorCache(skillId, ownerId);
-  } catch (e) {
-    writeFileSync(filePath, currentContent);
-    rmSync(backupPath, { force: true });
-    return `Manifest rollback failed to register — reverted, nothing changed: ${e.message}`;
+  const currentManifest = JSON.parse(currentContent);
+  const committed = await commitManifestGeneration({
+    manifestPath: filePath,
+    expectedBytes: currentContent,
+    nextBytes: snap.content,
+    generationGuards: expectedExecBytes === null ? [] : [{
+      path: path.join(skillDir, 'execute.mjs'), bytes: expectedExecBytes,
+    }],
+    beforeCommit: () => snapshotToHistory(skillDir, fileType, currentContent),
+    applyLive: () => {
+      addRoleManifest(restoredManifest, ownerId);
+      clearExecutorCache(skillId, ownerId);
+    },
+    restoreLive: () => {
+      addRoleManifest(currentManifest, ownerId);
+      clearExecutorCache(skillId, ownerId);
+    },
+  });
+  if (committed.conflict) {
+    return 'Manifest or execute.mjs changed while this widget-bearing manifest rollback was being validated. Nothing was written; call skill_read_manifest and retry.';
   }
-  rmSync(backupPath, { force: true });
+  if (!committed.ok) {
+    return `Manifest rollback failed — reverted, nothing changed: ${committed.error}`;
+  }
 
   // Manifest-sync advisory against the CURRENT (unchanged) code.
   let syncNote = '';
@@ -2197,6 +2488,11 @@ function renderDraftSummary(draft) {
     lines.push('');
   }
 
+  if (Array.isArray(s.dashboardWidgets) && s.dashboardWidgets.length) {
+    lines.push(`**Dashboard widgets**: ${s.dashboardWidgets.map(widget => `\`${widget.title || widget.id}\``).join(', ')} (read-only cards).`);
+    lines.push('');
+  }
+
   const keep = Array.isArray(s.selected_plan_keep) ? s.selected_plan_keep : s.selectedPlanKeep;
   if (Array.isArray(keep) && keep.length) {
     lines.push(`**Protected terminal tools**: ${keep.map(t => `\`${t}\``).join(', ')}`);
@@ -2372,6 +2668,7 @@ async function handleDraftBuild(args, userId) {
     tools: s.tools.filter(t => t.status !== 'rejected').map(t => t.toolDef).filter(Boolean),
     code: s.code,
     drawer: s.drawer,
+    dashboardWidgets: s.dashboardWidgets ?? s.dashboard_widgets,
     watchers: s.watchers,
     intent_examples: s.intentExamples,
     preferenceOpportunities: s.preferenceOpportunities,
@@ -2428,28 +2725,49 @@ export async function executeSkillTool(name, args, userId, agentId) {
   }
 
   try {
-    if (name === 'skill_read_blueprint')    return handleReadBlueprint();
-    if (name === 'skill_create')            { const r = await handleCreate(args, userId); return typeof r === 'string' ? r : r.message; }
-    if (name === 'skill_update_code')       return await handleUpdateCode(args, userId);
-    if (name === 'skill_read_code')         return await handleReadCode(args, userId);
-    if (name === 'skill_patch_code')        return await handlePatchCode(args, userId);
-    if (name === 'skill_update_tool_def')   return await handleUpdateToolDef(args, userId);
-    if (name === 'skill_update_manifest')   return await handleUpdateManifest(args, userId);
-    if (name === 'skill_read_drawer')       return await handleReadDrawer(args, userId);
-    if (name === 'skill_update_drawer')     return await handleUpdateDrawer(args, userId);
-    if (name === 'skill_delete_drawer')     return await handleDeleteDrawer(args, userId);
-    if (name === 'skill_rollback')          return await handleRollback(args, userId);
-    if (name === 'skill_try_tool')          return await handleTryTool(args, userId);
-    if (name === 'skill_delete')            return await handleDelete(args, userId);
-    if (name === 'skill_list')              return await handleList(userId);
-    if (name === 'skill_draft_start')       return await handleDraftStart(args, userId);
-    if (name === 'skill_draft_show')        return await handleDraftShow(args, userId);
-    if (name === 'skill_draft_update')      return await handleDraftUpdate(args, userId);
-    if (name === 'skill_draft_build')       return await handleDraftBuild(args, userId);
-    if (name === 'skill_draft_discard')     return await handleDraftDiscard(args, userId);
-    if (name === 'skill_draft_list')        return await handleDraftList(args, userId);
-    if (name === 'skill_read_logs')         return await handleReadLogs(args, userId);
-    return null;
+    const dispatch = async () => {
+      if (name === 'skill_read_blueprint')    return handleReadBlueprint();
+      if (name === 'skill_create')            { const r = await handleCreate(args, userId); return typeof r === 'string' ? r : r.message; }
+      if (name === 'skill_update_code')       return await handleUpdateCode(args, userId);
+      if (name === 'skill_read_code')         return await handleReadCode(args, userId);
+      if (name === 'skill_read_manifest')     return await handleReadManifest(args, userId);
+      if (name === 'skill_patch_code')        return await handlePatchCode(args, userId);
+      if (name === 'skill_update_tool_def')   return await handleUpdateToolDef(args, userId);
+      if (name === 'skill_update_manifest')   return await handleUpdateManifest(args, userId);
+      if (name === 'skill_read_drawer')       return await handleReadDrawer(args, userId);
+      if (name === 'skill_update_drawer')     return await handleUpdateDrawer(args, userId);
+      if (name === 'skill_delete_drawer')     return await handleDeleteDrawer(args, userId);
+      if (name === 'skill_rollback')          return await handleRollback(args, userId);
+      if (name === 'skill_try_tool')          return await handleTryTool(args, userId);
+      if (name === 'skill_delete')            return await handleDelete(args, userId);
+      if (name === 'skill_list')              return await handleList(userId);
+      if (name === 'skill_draft_start')       return await handleDraftStart(args, userId);
+      if (name === 'skill_draft_show')        return await handleDraftShow(args, userId);
+      if (name === 'skill_draft_update')      return await handleDraftUpdate(args, userId);
+      if (name === 'skill_draft_build')       return await handleDraftBuild(args, userId);
+      if (name === 'skill_draft_discard')     return await handleDraftDiscard(args, userId);
+      if (name === 'skill_draft_list')        return await handleDraftList(args, userId);
+      if (name === 'skill_read_logs')         return await handleReadLogs(args, userId);
+      return null;
+    };
+
+    // Code and widget manifests form one validated generation. Serialize every
+    // existing-skill mutation by normalized skill id (not caller id, so an
+    // owner/admin cannot race the creator) and retain per-file CAS below as a
+    // defense against manual/external writes.
+    const mutationId = name === 'skill_rollback'
+      ? args?.skill
+      : new Set([
+        'skill_update_code', 'skill_patch_code', 'skill_update_tool_def',
+        'skill_update_manifest', 'skill_update_drawer', 'skill_delete_drawer',
+        'skill_delete',
+      ]).has(name) ? args?.id : null;
+    const normalizedMutationId = typeof mutationId === 'string'
+      ? mutationId.trim().replace(/^usr_/, '').toLowerCase()
+      : '';
+    return normalizedMutationId
+      ? await withLock(`skill-builder:${normalizedMutationId}`, dispatch)
+      : await dispatch();
   } catch (e) {
     console.error(`[skill-builder] ${name}:`, e.message);
     return `Skill builder error: ${e.message}`;

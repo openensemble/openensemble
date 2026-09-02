@@ -47,6 +47,7 @@ These are useful, but none of them are required for your first chat.
 
 | Area | When to set it up |
 |---|---|
+| Display dashboards | When you want a dedicated wall-tablet, room, or browser view with its own stable address |
 | Email, calendar, and web search | When agents need to act on your accounts or browse the web |
 | Public access | When OAuth callbacks, Telegram webhooks, or external sharing links need to reach this server |
 | MCP servers | When you want agents to use tools from external MCP servers |
@@ -58,5 +59,6 @@ These are useful, but none of them are required for your first chat.
 
 - **Skills** — what each agent can actually *do*
 - **Tasks & scheduler** — recurring or one-shot agent jobs ("every morning at 7, brief me on the news")
+- **Display dashboards** — build per-profile tablet and browser views controlled from OE
 - **Remote nodes** — pair a homelab box, Pi, or workshop rig and have agents drive it
 - **Public access** — needed if you want OAuth logins (Gmail, MS, Google Calendar) or a Telegram bot to work

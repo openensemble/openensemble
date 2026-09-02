@@ -11,6 +11,7 @@ The first-run path is deliberately short: create the owner account, connect one 
 - **Skills** are the tools an agent can use. Web search, file editing in a sandbox, email, calendar, image generation, remote machine control, and so on. Each skill is a tiny manifest plus an `execute.mjs`.
 - **The Coordinator** is the agent at the front door. When you message it, it figures out which specialist should answer and delegates to them.
 - **Providers** are the LLM backends — Anthropic, OpenAI, Grok, Gemini, Ollama, LM Studio, OpenRouter, and others. You enable the ones you want; each agent picks one model.
+- **Display dashboards** are per-profile browser views for tablets and room screens. They can combine Home Assistant controls with read-only Calendar, Email, and custom-skill widgets at stable addresses.
 
 ## What it isn't
 
@@ -20,7 +21,7 @@ The first-run path is deliberately short: create the owner account, connect one 
 
 ## Feature maturity
 
-- **Core:** agents, roles, skills, providers, documents, memory, tasks, and per-user workspaces.
+- **Core:** agents, roles, skills, providers, documents, memory, tasks, per-user workspaces, and Display dashboards.
 - **Advanced:** remote nodes, service profiles, public access, backups, auto-update, MCP servers, and multi-user administration.
 - **Beta / hardware:** voice devices, flashing, local speech-to-text, and local text-to-speech.
 
@@ -29,4 +30,5 @@ The first-run path is deliberately short: create the owner account, connect one 
 - Brand new install? → **Getting started**
 - Setting up which AIs OpenEnsemble can talk to? → **LLM providers**
 - Want to know what each built-in skill does? → **Skills**
+- Building a wall-tablet or room display? → **Display dashboards**
 - Need to expose your install to the internet (Telegram, OAuth callbacks)? → **Public access**

@@ -13,6 +13,26 @@ async function init() {
   const me = await _origFetch('/api/me', { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : null).catch(() => null);
   if (!me) { showLoginScreen(); return; }
+
+  const requestedDashboardEditor = new URLSearchParams(window.location.search).get('dashboard-editor');
+  const dashboardEditorSlug = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(requestedDashboardEditor || '')
+    ? requestedDashboardEditor
+    : null;
+
+  // A display dashboard may send an expired/new browser session here for
+  // sign-in. Only honor same-origin, syntactically valid dashboard paths so
+  // this convenience can never become an open redirect.
+  const requestedNext = new URLSearchParams(window.location.search).get('next');
+  if (requestedNext) {
+    try {
+      const nextUrl = new URL(requestedNext, window.location.origin);
+      const validDashboardPath = /^\/dashboards\/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(nextUrl.pathname);
+      if (nextUrl.origin === window.location.origin && validDashboardPath) {
+        window.location.replace(`${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+        return;
+      }
+    } catch {}
+  }
   setCurrentUser(me);
   $('loginScreen').classList.add('hidden');
   ensureMediaToken().catch(() => {});
@@ -260,6 +280,14 @@ async function init() {
 
   // Render Lucide icons for any data-lucide elements
   if (window.lucide) lucide.createIcons();
+
+  if (dashboardEditorSlug) {
+    history.replaceState({}, '', '/');
+    setTimeout(() => {
+      if (!$('drawerDashboard')?.classList.contains('open')) openDashboard();
+      openDashboardDisplays('configure', dashboardEditorSlug);
+    }, 0);
+  }
 }
 
 function reconnectWS() { init(); }

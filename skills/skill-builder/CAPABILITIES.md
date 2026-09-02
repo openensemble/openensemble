@@ -215,22 +215,51 @@ domain.
 
 ---
 
-## 9. Drawer / sidebar UI
+## 9. Dashboard widget
 
-**Trigger:** user explicitly asks for a visual panel, a configuration
-screen, or a place to see status at a glance.
+**Trigger:** user explicitly asks to see this skill on a dashboard, as a
+widget/card, on a tablet display, or “at a glance.”
+
+**User pitch:** "I can give this skill a read-only dashboard card showing
+{the useful summary/list/metrics}. You can add it to any of your OE dashboards
+and it will refresh automatically."
+
+**Implementation rule:** add a dedicated pure data tool marked
+`readOnly:true`, plus a declarative `dashboardWidgets` entry. The result must
+be the blueprint's bounded text/metrics/list shape. Never put drawer HTML,
+JavaScript, actions, or credentials in a dashboard widget. Widget polling has
+no native network and all skill/user mounts are read-only, so render from local
+state that an ordinary tool or watcher refreshed earlier. Deployments using the
+dedicated skill-sandbox runner expose custom cards as unavailable until its
+protocol supports enforced read-only mounts. Widget execution cannot decrypt
+stored credentials; `ctx.credentials.list()` exposes metadata only.
+Local custom widgets also require bubblewrap; otherwise the catalog marks
+them unavailable rather than offering cards that can never refresh.
+Static args/config must contain no credential-shaped fields or recognizable
+plaintext credentials. Avoid `pattern`, `format`, references, and other
+unsupported parameter-schema keywords; widget binding rejects them closed.
+
+**Skip when:** the user did not ask for a dashboard/card/at-a-glance surface.
+Do not volunteer a visual for every skill.
+
+---
+
+## 10. Drawer / sidebar UI
+
+**Trigger:** user explicitly asks for a sidebar panel, a configuration
+screen, a form, or richer interactive UI.
 
 **User pitch:** "I can add a small sidebar panel showing {what's in
 flight, last fired, current settings} so you can see everything without
 asking. Most skills don't need one — it's pure UX, no extra
 functionality. Want one?"
 
-**Skip when:** user didn't ask. The blueprint already says drawers are
-optional and most skills should not include one.
+**Skip when:** user asked for a card on a dashboard; use capability 9 instead.
+Drawers are optional and most skills should not include one.
 
 ---
 
-## 10. OE Bridge browser extension
+## 11. OE Bridge browser extension
 
 > ✅ **THE EXTENSION IS SHIPPED; THE CUSTOM-SKILL API IS NOT.** OE Bridge is
 > included under `browser-extension/` and supports explicit, lease-bound
@@ -246,7 +275,7 @@ is available, explain that Bridge cannot yet be used as a custom-skill fetcher.
 Revisit this capability menu only after the browser broker has a documented,
 server-enforced custom-skill API with lease and confirmation semantics.
 
-## 11. Scheduled action (cron-style)
+## 12. Scheduled action (cron-style)
 
 **Trigger:** user mentions a TIME pattern rather than a condition —
 "every morning at 7", "every Sunday", "the first of each month",
@@ -265,7 +294,7 @@ upload) rather than a schedule — that's a watcher, not a cron.
 
 ---
 
-## 12. Automatic follow-up on a miss (open leads)
+## 13. Automatic follow-up on a miss (open leads)
 
 **Trigger:** the skill's lookups can come back empty-handed in a way
 that might change later — "is X in stock", "is it on sale", "any news
@@ -303,8 +332,8 @@ become a hit later (final answers, one-shot calculations).
 2. Cross-reference against the triggers above. Note matches.
 3. Surface 1-3 matched capabilities per turn, framed as concrete
    choices ("which feels right?"), never as feature checklists.
-4. If user says yes, add to `draft.tools` / `draft.watcherKinds` /
-   `draft.collection` / `draft.credentials` / etc. via
+4. If user says yes, add to `draft.tools` / `draft.dashboardWidgets` /
+   `draft.watcherKinds` / `draft.collection` / `draft.credentials` / etc. via
    `skill_draft_update`.
 5. If user says no, mark the capability as REJECTED in the draft so
    you don't re-offer it on the next iteration.

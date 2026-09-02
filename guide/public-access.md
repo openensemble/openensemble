@@ -7,6 +7,7 @@ Some features work better — or only work — when OpenEnsemble has a stable pu
 | **Telegram bot webhooks** | **Yes.** Telegram's servers need to push messages *into* your install, so it must be reachable on a public HTTPS URL. |
 | **OAuth callbacks** (Gmail, Microsoft, Google Calendar) | **Usually, on a homelab box.** Google/Microsoft require HTTPS redirect URIs and only accept a few exceptions (like `http://localhost`). If you're hitting OE at `http://192.168.x.x`, the provider will reject the redirect — a public HTTPS URL is the easiest fix. (If you're on the same machine as OE and use `http://localhost:3737`, OAuth works without a tunnel.) |
 | **External sharing links** | Only if you actually want them reachable outside your LAN. Intra-install sharing works without any of this. |
+| **Display dashboards** | Only if the tablet or browser is outside your LAN or private network. A dashboard address still requires a normal signed-in OE profile; it is not an anonymous sharing link. |
 
 The built-in **Cloudflare Tunnel** integration gives you a stable public HTTPS URL without opening ports on your router, getting a static IP, or running your own reverse proxy. It's the easy path. If you already have a real domain pointed at the install (nginx/Caddy + Let's Encrypt, etc.), you don't need the tunnel — that setup serves the same purpose.
 
@@ -19,6 +20,19 @@ The built-in **Cloudflare Tunnel** integration gives you a stable public HTTPS U
 5. Save. The tunnel comes up; the public URL is now reachable.
 
 The tunnel is **server-wide** — owner/admin only — and survives restarts. Any user on the install benefits from the same URL.
+
+## Display dashboards over a public URL
+
+A stable domain makes addresses such as
+`https://oe.example.com/dashboards/kitchen` convenient, but it does not make
+them public. The browser must sign in normally, and the active profile controls
+which same-named dashboard and data it receives. The URL contains no dashboard
+token or limited kiosk grant.
+
+An unattended display holds a full browser session for that OE profile. Prefer
+a dedicated least-privilege profile, private HTTPS or network access when
+possible, and the tablet/browser's own lock. See **Display dashboards** and
+**Security model** in the Guide before placing a screen in a shared space.
 
 ## Telegram
 

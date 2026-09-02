@@ -34,7 +34,12 @@ PDFs, images, CSVs, and code files all work. The active agent will see the attac
 
 ## Switching views
 
-The view toggle near the top of the workspace flips between **Chat** (the default) and **Desktop** — a customizable widget grid where you can pin tasks, news, market data, and other panels.
+The view switcher near the top of the workspace opens **Chat** (the default), **Dashboard**, or **Workspace**. Dashboard and the Dashboard item in the left menu open the same drawer; choose **Display dashboards** there to open the studio. Workspace keeps the customizable widget grid and your document, image, video, tutoring, and code-project collections.
+
+On a standalone display with more than one dashboard, swipe left for the next
+dashboard or right for the previous one. The list wraps around. The top toolbar
+has Previous and Next buttons as a non-touch alternative. See **Display
+dashboards** in the Guide for setup and gesture details.
 
 ## The agent pill
 

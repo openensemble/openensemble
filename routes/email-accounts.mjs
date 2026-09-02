@@ -88,6 +88,105 @@ function sanitize(account) {
   return rest;
 }
 
+const DASHBOARD_EMAIL_PROVIDERS = new Set(['gmail', 'microsoft', 'imap']);
+const DASHBOARD_TEXT_CONTROLS = /[\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+
+function dashboardText(value, maxLength, fallback = '') {
+  const normalized = String(value ?? '')
+    .replace(DASHBOARD_TEXT_CONTROLS, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (normalized || fallback).slice(0, maxLength);
+}
+
+function dashboardAccount(account) {
+  if (!account || typeof account !== 'object'
+      || typeof account.id !== 'string' || !account.id || account.id.length > 160
+      || /[\0\r\n]/.test(account.id)
+      || !DASHBOARD_EMAIL_PROVIDERS.has(account.provider)) return null;
+  return {
+    id: account.id,
+    label: dashboardText(account.label, 100, account.provider),
+    provider: account.provider,
+  };
+}
+
+/**
+ * Privacy-safe account choices for a dashboard editor. Host names, usernames,
+ * encrypted credentials, SMTP settings, and provider tokens never cross this
+ * boundary.
+ */
+export function listDashboardEmailAccounts(userId) {
+  const accounts = loadAccounts(userId);
+  return (Array.isArray(accounts) ? accounts : [])
+    .map(dashboardAccount)
+    .filter(Boolean)
+    .slice(0, 64);
+}
+
+/**
+ * Strict read adapter for a dashboard email card. Unlike the legacy inbox
+ * route this requires one exact saved account id, never falls back to another
+ * account, never exposes a message body or page token, and caps the first page
+ * at twenty messages.
+ */
+export async function fetchDashboardInbox(userId, {
+  accountId,
+  maxItems = 8,
+  showSnippet = false,
+} = {}) {
+  if (typeof accountId !== 'string' || !accountId || accountId.length > 160
+      || /[\0\r\n]/.test(accountId)) {
+    const error = new Error('A connected email account is required.');
+    error.code = 'DASHBOARD_EMAIL_ACCOUNT_REQUIRED';
+    throw error;
+  }
+  const accounts = loadAccounts(userId);
+  const account = (Array.isArray(accounts) ? accounts : [])
+    .find(candidate => candidate?.id === accountId);
+  const safeAccount = dashboardAccount(account);
+  if (!account || !safeAccount) {
+    const error = new Error('The selected email account is not connected.');
+    error.code = 'DASHBOARD_EMAIL_ACCOUNT_NOT_FOUND';
+    throw error;
+  }
+
+  const parsedMax = Number(maxItems);
+  const limit = Number.isSafeInteger(parsedMax)
+    ? Math.max(1, Math.min(20, parsedMax))
+    : 8;
+  let result;
+  if (account.provider === 'gmail') {
+    result = await fetchGmailInboxPage(userId, null, limit, account.id, null);
+  } else if (account.provider === 'microsoft') {
+    result = await fetchMsInboxPage(userId, account.id, null, limit, null);
+  } else if (account.provider === 'imap') {
+    result = await fetchImapPage(userId, account, null, limit, null);
+  }
+  if (!result || !Array.isArray(result.emails)) {
+    throw new Error('The email provider returned an invalid inbox response.');
+  }
+
+  const emails = [];
+  for (const candidate of result.emails.slice(0, limit)) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const id = dashboardText(candidate.id, 512);
+    if (!id) continue;
+    const email = {
+      id,
+      from: dashboardText(candidate.from, 320),
+      subject: dashboardText(candidate.subject, 500, '(no subject)'),
+      date: dashboardText(candidate.date, 100),
+    };
+    if (showSnippet === true) {
+      const snippet = dashboardText(candidate.snippet, 300);
+      if (snippet) email.snippet = snippet;
+    }
+    emails.push(email);
+  }
+  return { account: safeAccount, emails };
+}
+
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function handle(req, res) {

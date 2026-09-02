@@ -15,6 +15,7 @@ agents, choose the LLM providers they use, and keep each user's data isolated
 on your own server.
 
 [Get started]({{ site.baseurl }}/getting-started){: .btn .btn-primary }
+[Explore dashboards]({{ site.baseurl }}/dashboards){: .btn }
 [View on GitHub](https://github.com/openensemble/openensemble){: .btn }
 
 ![OpenEnsemble demo]({{ site.baseurl }}/demo.gif)
@@ -35,6 +36,10 @@ agent, and start a conversation.
 - **Voice satellites** — open-hardware ESP32-S3 smart speakers with on-device
   wake words. A private, self-hosted alternative to Alexa or Google Home.
   See [Voice devices]({{ site.baseurl }}/voice-devices).
+- **Display dashboards** — build fully customizable, per-profile wall-tablet
+  and browser views with stable addresses, swipe navigation, Home Assistant
+  controls, calendars, email, and safe custom-skill widgets. See
+  [Display dashboards]({{ site.baseurl }}/dashboards).
 - **Skills** — email, calendar, web research, expenses, scheduled tasks,
   remote nodes, MCP servers, and a built-in skill builder that creates new
   capabilities at runtime.

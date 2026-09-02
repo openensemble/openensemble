@@ -64,13 +64,15 @@ Use the built-in skill builder to add new capabilities at runtime. A blueprint s
 
 **Cortex — private reasoning & embeddings.** Bundled local models run in-process via `node-llama-cpp`: a reasoning model (`openensemble-reason-v1`, SmolLM2-based GGUF) and `nomic-embed-text-v1` embeddings. Retrieval, summarization, and classification can run without external calls or a GPU. Once OpenEnsemble is installed, run `oe bench` in the terminal to measure local performance.
 
-**Desktop & documents drawer.** A unified view of everything the user has: uploaded docs, AI-generated images, AI-generated videos, research reports, files shared from other users, and code projects — each with its own tab. Code projects are downloadable as zip archives.
+**Workspace & documents drawer.** A unified view of everything the user has: uploaded docs, AI-generated images, AI-generated videos, research reports, files shared from other users, and code projects — each with its own tab. Code projects are downloadable as zip archives.
 
 **Expenses.** Groups, books, receipt parsing, and per-user / per-group activity.
 
 **Background scheduler.** Cron-like recurring tasks. Custom built-in LLM to set and parse tasks. (e.g. a daily news briefing, a nightly uploads-folder cleanup) plus one-shot tasks an agent schedules for itself.
 
 **Per-user everything.** Agents, custom skills, sessions, chat history, uploads, AI outputs, code projects, and settings are all stored under `users/{userId}/` — a fresh install with multiple accounts is fully isolated.
+
+**Display dashboards.** Build per-profile wall-tablet, room, or browser displays from either **Dashboard** entry in OE. Each dashboard has a stable address, fully removable sections and cards, optional page chrome, its own colors, and cards for Home Assistant, Calendar, Email, or safe declarative custom-skill widgets. Standalone displays can swipe through the profile's dashboards while every individual address keeps working. Normal OE sign-in and profile permissions still apply. See the [public dashboard overview](https://openensemble.github.io/openensemble/dashboards) or the [complete in-repo guide](guide/dashboards.md).
 
 ### Admin and advanced
 

@@ -52,11 +52,22 @@ Configure under **Settings → Users → {user} → Access**. Schedules are eval
 
 Owner can hide entire drawers and tabs from a user — useful for child accounts or for limiting clutter. Toggleable per-user in **Settings → Users → {user} → Features**.
 
+## Per-user display dashboards
+
+Each profile owns an independent Display dashboard library, including its Home
+dashboard, layouts, colors, and stable slugs. Two profiles can both use
+`/dashboards/home`; the signed-in profile determines which one the browser
+sees. Dashboard cards still follow that profile's skill permissions, feature
+visibility, Home Assistant grant, and access schedule.
+
 ## Sessions
 
 A logged-in user has one or more session tokens, listed in **Settings → Profile → Active Sessions**. Revoke any session to log that device out.
 
-Default expiry is 30 days; tunable with `OE_SESSION_EXPIRY` (in seconds) or in **Settings → System → Session Expiry**.
+Browser sessions have a fixed seven-day maximum. `OE_SESSION_EXPIRY` or
+**Settings → System → Session Expiry** sets an optional shorter idle timeout in
+hours; `0` disables the idle timeout but not the seven-day hard limit. This also
+applies to browsers left open as dashboard displays.
 
 ## Switching users
 

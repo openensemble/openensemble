@@ -6,6 +6,70 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-09-02
+
+**Swipe between display dashboards**
+On a standalone display, swipe left for the next dashboard or right for the
+previous one. Navigation follows the profile's saved dashboard order and wraps
+at both ends. A compact Previous/name-and-position/Next control in the top
+toolbar provides the same navigation without touch. Configure mode and gestures
+that begin on controls stay put, the destination opens at its default focus,
+and an explicit fullscreen query carries across. Every dashboard keeps its own
+stable address for browsers that should open one display directly.
+
+**A complete dashboard guide**
+The new **Display dashboards** Guide page covers creation, editing, cards,
+Calendar and Email, custom-skill widgets, colors, page elements, tablet setup,
+authentication, permissions, privacy, deletion, and troubleshooting.
+
+---
+
+## 2026-09-01
+
+**Custom colors for every dashboard**
+Dashboard settings now include a saved color palette for the background,
+surfaces, cards, primary and muted text, accent, greeting, and tagline. Each
+color can inherit from Midnight or Warm daylight or use an exact custom value,
+so changing one dashboard never changes another dashboard.
+
+**Every dashboard page element is optional**
+Dashboard settings now control the complete display frame, not only its cards.
+The sidebar, top toolbar, OpenEnsemble branding, focus and section navigation,
+connection status, hero status line, greeting, tagline, clock, Home Assistant
+summary, and section headings can each be shown or hidden per dashboard. The
+status line and greeting can use OE's automatic text or exact custom text, and
+an empty tagline stays empty. Configure mode always keeps its management
+controls reachable even when the standalone display hides them.
+
+Dashboards can also be reduced to a truly blank canvas: the final section may
+be removed, while Configure mode retains a clear way to create a new section.
+Existing dashboards keep their current appearance until their owner changes a
+setting.
+
+---
+
+## 2026-08-30
+
+**Dashboards can show your calendar, inbox, and custom skills**
+The OE dashboard studio now includes read-only Calendar and Email cards next
+to Home Assistant devices. Each card refreshes independently, follows the
+signed-in profile's skill permissions and access schedule, and fails in place
+without blanking the rest of a wall display.
+
+Custom skills can contribute dashboard widgets too. Skill Builder can add or
+update a declarative `dashboardWidgets` contract tied to an exact
+`readOnly:true` data tool. OE—not the skill—renders the bounded summary,
+metrics, and list data, so a custom skill cannot inject HTML or JavaScript into
+the dashboard. Existing skills can gain a widget without being recreated.
+
+**One Dashboard entry everywhere**
+Dashboard in the main Chat/Dashboard/Workspace switcher and Dashboard in the
+left menu now open the same drawer; choose Display dashboards there to enter
+the per-profile studio. The former Desktop widget grid remains available as
+Workspace.
+
+---
+
 ## 2026-07-23
 
 **Home Assistant commands now confirm against live events**
@@ -85,7 +149,7 @@ A v2 node that was missing the server's update-signing key (upgraded via `oe upd
 The bottom bar now shows which agent you're talking to; tap it (or the Agents button beside it) to slide up an agent picker — the same sheet style as the ⋮ menu — with your current agent highlighted and a pulsing dot on any agent that's still working in the background. Sheets also dismiss the way you'd expect now: swipe down on the handle, tap the handle, or tap anywhere outside.
 
 **Mobile now has everything desktop has**
-The phone layout got a full refresh. Tapping ⋮ opens a bottom sheet with every feature as an icon tile — including ones mobile was missing before (Learn, Today · Tutor, Nodes, Voice devices, custom skill panels, and the advanced tools when they're enabled) — plus quick actions for search, switching profiles, signing out, and clearing the session. The menu builds itself from the same list desktop uses, so anything added later shows up on your phone automatically. A Chat/Desktop switch now lives in the top bar, unread and alert badges carry over to the menu tiles, and a small dot on ⋮ tells you when something needs attention (new mail, a node alert, or an available update).
+The phone layout got a full refresh. Tapping ⋮ opens a bottom sheet with every feature as an icon tile — including ones mobile was missing before (Learn, Today · Tutor, Nodes, Voice devices, custom skill panels, and the advanced tools when they're enabled) — plus quick actions for search, switching profiles, signing out, and clearing the session. The menu builds itself from the same list desktop uses, so anything added later shows up on your phone automatically. A Chat/Dashboard/Workspace switch now lives in the top bar, unread and alert badges carry over to the menu tiles, and a small dot on ⋮ tells you when something needs attention (new mail, a node alert, or an available update).
 
 **Learning now knows your automations aren't you**
 Personalization observations now carry provenance: activity fired by your scheduled tasks and watchers is tagged as automated, and reflection weighs each automation once as a deliberate choice you made ("keeps a watch on X") instead of reading its every firing as you actively doing something. Routine-heavy users still get full learning — it's just honest about what's a habit and what's a heartbeat.

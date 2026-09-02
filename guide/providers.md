@@ -69,7 +69,7 @@ The variables OE recognises:
 | `BRAVE_API_KEY` | Brave Search API key (used by the `web` skill) |
 | `OE_VISION_PROVIDER` | Provider used for image analysis, e.g. `openai`, `anthropic` |
 | `OE_VISION_MODEL` | Specific vision model, e.g. `gpt-4o`, `claude-3-5-sonnet` |
-| `OE_SESSION_EXPIRY` | Session token lifetime, in seconds |
+| `OE_SESSION_EXPIRY` | Optional browser-session idle timeout, in hours (`0` disables the idle timeout; the fixed seven-day browser maximum still applies) |
 
 ## Special-purpose providers
 
