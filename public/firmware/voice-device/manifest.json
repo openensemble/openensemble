@@ -1,6 +1,6 @@
 {
   "chip": "esp32s3",
-  "version": "0.2.92-selfheal",
+  "version": "0.2.93-portalhdr",
   "flashSettings": {
     "flashMode": "dio",
     "flashSize": "8MB",
@@ -12,7 +12,7 @@
       "name": "bootloader",
       "offset": "0x0",
       "file": "bootloader.bin",
-      "sha256": "3674df9a95bcbd919e183518c36d6252a96c8626471b87f09cba6f7a25dc413e"
+      "sha256": "d7cb899f0dc811240da3f7edfc43590c5e0f45d53daf6cd3aef7284a257c8326"
     },
     {
       "name": "partition-table",
@@ -30,13 +30,13 @@
       "name": "app",
       "offset": "0x20000",
       "file": "oe_voice_device.bin",
-      "sha256": "3654e43f650c101dd8ec2ff7852f39d66c9abf8bc3e177ba3fbded1363b72d76"
+      "sha256": "59776f4e20986ed4ec028977039dd1b2129097d223c064291b33e1465714295e"
     },
     {
       "name": "wakewords",
       "offset": "0x620000",
       "file": "wakewords.bin",
-      "sha256": "12a7ec876c3dcd80039b9ccc2fda11cd38960e7614c839eb7eefef8d8d235601"
+      "sha256": "b5d3ce6825eb0ae1392aa7f6d7981d166abb5967f1fb4f5de5cc1421217b6142"
     }
   ]
 }
