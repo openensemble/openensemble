@@ -8,6 +8,7 @@ import { supportsImageGeneration, supportsVision } from '../../lib/model-capabil
 import { listOpenAIOAuthModels } from '../../lib/openai-codex-models.mjs';
 import { listXaiOAuthModels } from '../../lib/xai-oauth-models.mjs';
 import { OPENAI_COMPAT_PROVIDERS } from '../../chat/providers/_shared.mjs';
+import { normalizeProviderModelsEndpoint } from '../../lib/user-providers.mjs';
 import { log } from '../../logger.mjs';
 
 const GROK_BASE = 'https://api.x.ai/v1';
@@ -35,14 +36,6 @@ function respondEmptyOnAuthRejection(res, provider, status) {
   res.end(JSON.stringify([]));
   return true;
 }
-
-const PERPLEXITY_STATIC_MODELS = [
-  { id: 'sonar', name: 'Sonar' },
-  { id: 'sonar-pro', name: 'Sonar Pro' },
-  { id: 'sonar-reasoning', name: 'Sonar Reasoning' },
-  { id: 'sonar-reasoning-pro', name: 'Sonar Reasoning Pro' },
-  { id: 'sonar-deep-research', name: 'Sonar Deep Research' },
-];
 
 export async function tryHandleModelRoutes(req, res) {
 
@@ -321,20 +314,9 @@ export async function tryHandleModelRoutes(req, res) {
         res.end(JSON.stringify([]));
         return true;
       }
-      // Perplexity has no /models endpoint — return the hardcoded Sonar family.
-      if (prov === 'perplexity') {
-        const annotated = PERPLEXITY_STATIC_MODELS.map(m => ({
-          ...m,
-          supportsVision: supportsVision('perplexity', m.id ?? m.name),
-          supportsImageGeneration: supportsImageGeneration('perplexity', m.id ?? m.name),
-          capabilities: supportsVision('perplexity', m.id ?? m.name) ? ['image_input'] : [],
-        }));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(annotated));
-        return true;
-      }
       try {
-        const url = `${provCfg.baseUrl.replace(/\/$/, '')}/models`;
+        const modelsEndpoint = normalizeProviderModelsEndpoint(provCfg.modelsEndpoint);
+        const url = `${provCfg.baseUrl.replace(/\/$/, '')}${modelsEndpoint}`;
         const r = await fetch(url, {
           headers: { 'Authorization': `Bearer ${key}` },
           signal: AbortSignal.timeout(15000),

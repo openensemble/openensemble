@@ -16,12 +16,20 @@ import { createLinkedAbortController, isAbortError } from '../../lib/abort-utils
 import { isEphemeralReadOnlyTool } from '../../lib/ephemeral-tool-cache.mjs';
 import {
   classifyClearlySplittableWork,
-  explicitParallelLaneCounts,
-  explicitParallelLaneRequests,
+  explicitAgentExecutionRequests,
   explicitlyRequestsAgentExecution,
   MAX_PARALLEL_WORKSTREAMS,
   unlockParallelWorkGate,
 } from '../../lib/parallel-work-gate.mjs';
+import {
+  applyAgentExecutionTarget,
+  executionTargetKey,
+  executionTargetLabel,
+  executionTargetMultisetMatches,
+  normalizeAgentExecutionAllocation,
+  normalizeAgentExecutionTarget,
+  validateAgentExecutionTargets,
+} from '../../lib/agent-execution-target.mjs';
 import { getTurn, getTurnRestartContext } from '../../lib/turn-trace-context.mjs';
 import { stableAgentRef } from '../../lib/agent-ref.mjs';
 import {
@@ -235,6 +243,7 @@ async function _parallelChildTools() {
     // Exact built-in allowlists below still provide a fail-closed surface.
   }
   const blocked = new Set([
+    'list_execution_targets',
     'parallel_work',
     'spawn_worker',
     'ask_agent',
@@ -258,6 +267,103 @@ async function _parallelChildTools() {
   });
 }
 
+async function* _listExecutionTargetsTool(args, userId) {
+  const { listExecutionTargets } = await import('../../lib/execution-model-policy.mjs');
+  const result = await listExecutionTargets(userId, {
+    query: args?.query,
+    provider: args?.provider,
+    refreshCatalog: args?.refresh === true,
+    limit: args?.limit,
+    offset: args?.offset,
+  });
+  _recordExecutionTargetAttestations(getToolRouterContext(), result);
+  yield {
+    type: 'result',
+    text: JSON.stringify(result),
+    ...(result.ok === false ? { isError: true } : {}),
+  };
+}
+
+const MAX_ATTESTED_EXECUTION_TARGETS = 512;
+const MAX_ATTESTED_EXECUTION_ALIASES = 64;
+
+function _executionTargetPairKey(target) {
+  return `${target?.provider || ''}\0${target?.model || ''}`;
+}
+
+function _attestedExecutionAliases(value) {
+  const raw = [
+    value?.display_name,
+    value?.displayName,
+    ...(Array.isArray(value?.aliases) ? value.aliases : []),
+  ];
+  const seen = new Set();
+  const aliases = [];
+  for (const candidate of raw) {
+    if (aliases.length >= MAX_ATTESTED_EXECUTION_ALIASES) break;
+    if (typeof candidate !== 'string') continue;
+    const alias = candidate.trim();
+    if (!alias || alias.length > 300 || /[\x00-\x1f\x7f]/.test(alias)) continue;
+    const key = alias.normalize('NFKC').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    aliases.push(alias);
+  }
+  return aliases;
+}
+
+/**
+ * Remember only exact pairs returned by the server-owned configured-target
+ * catalog in this router turn. Tool arguments never enter this set directly.
+ */
+function _recordExecutionTargetAttestations(router, result) {
+  if (!router || result?.ok !== true || !Array.isArray(result.targets)) return;
+  const attested = router._attestedExecutionTargetPairs instanceof Set
+    ? router._attestedExecutionTargetPairs
+    : (router._attestedExecutionTargetPairs = new Set());
+  const hints = router._attestedExecutionTargetHints instanceof Map
+    ? router._attestedExecutionTargetHints
+    : (router._attestedExecutionTargetHints = new Map());
+  for (const value of result.targets) {
+    if (attested.size >= MAX_ATTESTED_EXECUTION_TARGETS) break;
+    const normalized = normalizeAgentExecutionTarget(value);
+    if (!normalized.ok) continue;
+    const key = _executionTargetPairKey(normalized.target);
+    attested.add(key);
+    hints.set(key, {
+      provider: normalized.target.provider,
+      model: normalized.target.model,
+      aliases: _attestedExecutionAliases(value),
+    });
+  }
+}
+
+/**
+ * Structured spawn targets may teach the trusted-text parser a runtime alias
+ * only after this exact provider/model pair appeared in catalog discovery in
+ * the same router turn. This filters, rather than trusts, model-authored args.
+ */
+function _attestedExecutionTargetHints(router, targets) {
+  const attested = router?._attestedExecutionTargetPairs;
+  if (!(attested instanceof Set)) return [];
+  const attestedHints = router?._attestedExecutionTargetHints;
+  const hints = new Map();
+  for (const target of Array.isArray(targets) ? targets : []) {
+    const key = _executionTargetPairKey(target);
+    if (!attested.has(key)) continue;
+    const serverHint = attestedHints instanceof Map ? attestedHints.get(key) : null;
+    const pair = {
+      provider: target.provider,
+      model: target.model,
+      ...(Array.isArray(serverHint?.aliases) && serverHint.aliases.length
+        ? { aliases: [...serverHint.aliases] }
+        : {}),
+    };
+    hints.set(key, pair);
+  }
+  return [...hints.values()];
+}
+
 function _makeParallelChild(baseAgent, ownerKey, item, tools, teamSize) {
   const id = `ephemeral_workstream_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
   const childContract = [
@@ -271,7 +377,7 @@ function _makeParallelChild(baseAgent, ownerKey, item, tools, teamSize) {
     'Use report_progress for concrete milestones. Return a concise, evidence-based result for this lane only; the coordinator will synthesize all lanes.',
     'Do not delegate, create background work, or attempt to manage another child.',
   ].join('\n');
-  const child = {
+  let child = {
     ...baseAgent,
     id,
     name: item.label,
@@ -310,6 +416,8 @@ function _makeParallelChild(baseAgent, ownerKey, item, tools, teamSize) {
       .join('\n\n');
   }
   delete child._promptTiersAssembled;
+  delete child.executionTargetAllocation;
+  if (item.execution) child = applyAgentExecutionTarget(child, item.execution);
   return child;
 }
 
@@ -318,6 +426,196 @@ function _normalizedWorkstreamCount(value) {
     ? value
     : (typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN);
   return Number.isSafeInteger(count) && count >= 2 ? count : null;
+}
+
+function _buildExecutionTargetAllocation(entries, requestedCount = null) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { ok: true, allocation: null, declaredCount: null };
+  }
+  if (entries.length === 1) {
+    const entry = { ...entries[0] };
+    const declaredCount = entry.count;
+    if (requestedCount !== null && declaredCount !== null && declaredCount !== requestedCount) {
+      return {
+        ok: false,
+        error: `The execution target count (${declaredCount}) does not match worker_count ${requestedCount}. No worker was started.`,
+      };
+    }
+    const total = requestedCount ?? declaredCount ?? null;
+    return {
+      ok: true,
+      declaredCount,
+      allocation: {
+        mode: 'homogeneous',
+        entries: [entry],
+        total,
+      },
+    };
+  }
+
+  const normalizedEntries = entries.map(entry => ({
+    ...entry,
+    count: entry.count ?? 1,
+  }));
+  const total = normalizedEntries.reduce((sum, entry) => sum + entry.count, 0);
+  if (total > MAX_PARALLEL_WORKSTREAMS) {
+    return {
+      ok: false,
+      error: `The execution target allocation requests ${total} agents, above this server's per-outcome safety cap of ${MAX_PARALLEL_WORKSTREAMS}. No worker was started.`,
+    };
+  }
+  if (requestedCount !== null && total !== requestedCount) {
+    return {
+      ok: false,
+      error: `The execution target allocation totals ${total} agents, but worker_count is ${requestedCount}. No worker was started.`,
+    };
+  }
+  return {
+    ok: true,
+    declaredCount: total,
+    allocation: {
+      mode: 'mixed',
+      entries: normalizedEntries,
+      total,
+    },
+  };
+}
+
+function _expandedExecutionTargets(allocation, itemCount) {
+  if (!allocation) return [];
+  if (allocation.mode === 'homogeneous') {
+    const target = allocation.entries?.[0];
+    return target
+      ? Array.from({ length: itemCount }, () => ({
+          provider: target.provider,
+          model: target.model,
+          ...(Object.hasOwn(target, 'reasoningEffort')
+            ? { reasoningEffort: target.reasoningEffort }
+            : {}),
+        }))
+      : [];
+  }
+  return (allocation.entries || []).flatMap(entry =>
+    Array.from({ length: entry.count ?? 1 }, () => ({
+      provider: entry.provider,
+      model: entry.model,
+      ...(Object.hasOwn(entry, 'reasoningEffort')
+        ? { reasoningEffort: entry.reasoningEffort }
+        : {}),
+    })));
+}
+
+function _statusExecutionTarget(row) {
+  const provider = typeof row?.provider === 'string'
+    ? row.provider.replace(/[\r\n]/g, ' ').trim().slice(0, 100)
+    : '';
+  const model = typeof row?.model === 'string'
+    ? row.model.replace(/[\r\n]/g, ' ').trim().slice(0, 300)
+    : '';
+  if (!provider && !model) return '';
+  const target = provider && model ? `${provider}/${model}` : (provider || model);
+  const effort = typeof row?.reasoningEffort === 'string'
+    ? row.reasoningEffort.replace(/[\r\n]/g, ' ').trim().slice(0, 40)
+    : '';
+  return ` · execution: ${target}${effort ? ` · effort ${effort}` : ''}${row.executionTargetExplicit === true ? ' (explicit target)' : ''}`;
+}
+
+function _executionTargetPairMatches(left, right) {
+  return left?.provider === right?.provider && left?.model === right?.model;
+}
+
+function _omitEmptyReasoningEffortPlaceholders(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  let normalized = value;
+  for (const key of ['reasoningEffort', 'reasoning_effort']) {
+    if (typeof normalized[key] !== 'string' || normalized[key].trim() !== '') continue;
+    if (normalized === value) normalized = { ...value };
+    delete normalized[key];
+  }
+  return normalized;
+}
+
+function _normalizeCarriedPlaceholderAuto(target, expectedTargets) {
+  if (target?.reasoningEffort !== 'auto') return target;
+  const matching = expectedTargets.filter(expected =>
+    _executionTargetPairMatches(target, expected));
+  if (!matching.length
+      || matching.some(expected => Object.hasOwn(expected, 'reasoningEffort'))) return target;
+  const normalized = { ...target };
+  delete normalized.reasoningEffort;
+  return normalized;
+}
+
+async function _resolveParallelExecutionTargets(baseAgent, items, userId) {
+  const allocation = baseAgent?.executionTargetAllocation || null;
+  let resolved = items.map(item => ({ ...item }));
+  if (!allocation && resolved.some(item => item.execution)) {
+    return {
+      ok: false,
+      error: 'A child execution target requires a server-carried executionTargetAllocation from the user\'s spawn request. Omit work_items[].execution to inherit; no workstreams were started.',
+    };
+  }
+  if (allocation?.total !== null && allocation?.total !== undefined
+      && allocation.total !== items.length) {
+    return {
+      ok: false,
+      error: `The carried execution target allocation requires ${allocation.total} children, but parallel_work received ${items.length}. No workstreams were started.`,
+    };
+  }
+
+  if (allocation) {
+    const expectedTargets = _expandedExecutionTargets(allocation, items.length);
+    resolved = resolved.map(item => item.execution
+      ? {
+          ...item,
+          execution: _normalizeCarriedPlaceholderAuto(item.execution, expectedTargets),
+        }
+      : item);
+  }
+
+  if (allocation?.mode === 'homogeneous') {
+    const target = allocation.entries?.[0];
+    if (!target) return { ok: false, error: 'The carried execution target allocation is incomplete. No workstreams were started.' };
+    const conflicting = resolved.find(item => item.execution
+      && executionTargetKey(item.execution) !== executionTargetKey(target));
+    if (conflicting) {
+      return {
+        ok: false,
+        error: `Work item "${conflicting.label}" conflicts with the required homogeneous target ${executionTargetLabel(target)}. No workstreams were started.`,
+      };
+    }
+    resolved = resolved.map(item => ({
+      ...item,
+      execution: {
+        provider: target.provider,
+        model: target.model,
+        ...(Object.hasOwn(target, 'reasoningEffort')
+          ? { reasoningEffort: target.reasoningEffort }
+          : {}),
+      },
+    }));
+  } else if (allocation?.mode === 'mixed') {
+    if (resolved.some(item => !item.execution)) {
+      return {
+        ok: false,
+        error: 'Every work item must include execution.provider and execution.model for a mixed target allocation. No workstreams were started.',
+      };
+    }
+    const expected = _expandedExecutionTargets(allocation, items.length);
+    if (!executionTargetMultisetMatches(expected, resolved.map(item => item.execution))) {
+      return {
+        ok: false,
+        error: 'The work item execution targets do not match the carried provider/model allocation. No workstreams were started.',
+      };
+    }
+  }
+
+  const explicitTargets = resolved.map(item => item.execution).filter(Boolean);
+  if (explicitTargets.length) {
+    const access = await validateAgentExecutionTargets(userId, explicitTargets);
+    if (!access.ok) return access;
+  }
+  return { ok: true, items: resolved };
 }
 
 const COUNT_SCOPE_STOP_WORDS = new Set([
@@ -339,52 +637,310 @@ function _countScopeTokens(text) {
   );
 }
 
-function _resolveExactWorkerOutcome(count, task, label, trustedUserText) {
-  const requests = explicitParallelLaneRequests(trustedUserText);
-  const matching = requests
-    .map((request, index) => ({ ...request, index }))
-    .filter(request => request.count === count);
+function _targetIdentityParts(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function _targetLabelMatches(label, target, targetHints = []) {
+  const requested = String(label || '').normalize('NFKC').trim().toLowerCase();
+  const provider = String(target?.provider || '').normalize('NFKC').trim().toLowerCase();
+  const model = String(target?.model || '').normalize('NFKC').trim().toLowerCase();
+  if (!requested || !provider || !model) return false;
+  if (requested.includes('/')) return requested === `${provider}/${model}`;
+  if (requested === provider || requested === model) return true;
+  const attestedHint = targetHints.find(hint =>
+    _executionTargetPairKey(hint) === _executionTargetPairKey(target));
+  if ((attestedHint?.aliases || []).some(alias =>
+    String(alias || '').normalize('NFKC').trim().toLowerCase() === requested)) return true;
+
+  const providerParts = new Set(_targetIdentityParts(provider));
+  const modelParts = _targetIdentityParts(model);
+  const requestedParts = _targetIdentityParts(requested);
+  const exactModelPart = part => modelParts.includes(part);
+  const modelFamily = family => modelParts.some(part =>
+    part === family || new RegExp(`^${family}\\d`).test(part));
+
+  switch (requested) {
+    case 'openai': return provider === 'openai' || provider === 'openai-oauth';
+    case 'anthropic': return provider === 'anthropic';
+    case 'xai': return provider === 'xai' || provider === 'grok' || provider === 'xai-oauth';
+    case 'grok': return provider === 'grok' || provider === 'xai' || provider === 'xai-oauth' || modelFamily('grok');
+    case 'ollama': return provider === 'ollama' || provider === 'ollama-local';
+    case 'lmstudio':
+    case 'lm-studio': return provider === 'lmstudio';
+    case 'claude': return provider === 'anthropic' || modelFamily('claude');
+    case 'qwen': return modelFamily('qwen');
+    case 'llama': return modelFamily('llama');
+    case 'gemma': return modelFamily('gemma');
+    case 'mistral': return modelFamily('mistral');
+    case 'mixtral': return modelFamily('mixtral');
+    case 'deepseek': return providerParts.has('deepseek') || modelFamily('deepseek');
+    case 'gemini': return providerParts.has('gemini') || providerParts.has('google') || modelFamily('gemini');
+    case 'google': return providerParts.has('google') || providerParts.has('gemini');
+    case 'glm': return modelFamily('glm');
+    case 'kimi': return modelFamily('kimi');
+    case 'minimax': return modelFamily('minimax');
+    case 'openrouter': return provider === 'openrouter';
+    case 'perplexity': return provider === 'perplexity';
+    case 'sonar': return modelFamily('sonar');
+    case 'groq': return provider === 'groq';
+    case 'together': return provider === 'together';
+    case 'cerebras': return provider === 'cerebras';
+    case 'cohere': return provider === 'cohere';
+    case 'command': return modelFamily('command');
+    case 'gpt': return modelFamily('gpt');
+    case 'codex': return modelFamily('codex') || exactModelPart('codex');
+    case 'sol':
+    case 'terra':
+    case 'luna': return exactModelPart(requested);
+    default:
+      if (requestedParts.length === 1
+          && targetHints.some(hint =>
+            _executionTargetPairKey(hint) === _executionTargetPairKey(target))) {
+        const modelBase = model.split('/').at(-1) || '';
+        const catalogFamily = _targetIdentityParts(modelBase)[0] || '';
+        if (requestedParts[0] === catalogFamily) return true;
+      }
+      // Controlled multi-token aliases are normalized by the trusted-text
+      // parser (for example "5.6 Luna" → "5.6-luna"). Require every alias
+      // part to occur as a complete model-id part; never use substring
+      // matching, which would make "solutions" authorize Sol.
+      if (requestedParts.length < 2 || requestedParts.length > modelParts.length) return false;
+      for (let index = 0; index <= modelParts.length - requestedParts.length; index++) {
+        if (requestedParts.every((part, offset) => modelParts[index + offset] === part)) return true;
+      }
+      return false;
+  }
+}
+
+function _requestTargetsMatchAllocation(request, allocation, count, targetHints = []) {
+  const constraints = Array.isArray(request?.targets) ? request.targets : [];
+  if (!constraints.length || !allocation) return false;
+  const leafCount = Number.isSafeInteger(count)
+    ? count
+    : (Number.isSafeInteger(allocation.total) ? allocation.total : 1);
+  const leaves = _expandedExecutionTargets(allocation, leafCount);
+  if (leaves.length !== leafCount) return false;
+  const constraintMatches = (constraint, leaf) => {
+    if (!_targetLabelMatches(constraint.label, leaf, targetHints)) return false;
+    const constraintHasEffort = Object.hasOwn(constraint, 'reasoningEffort');
+    const leafHasEffort = Object.hasOwn(leaf, 'reasoningEffort');
+    return constraintHasEffort === leafHasEffort
+      && (!constraintHasEffort || constraint.reasoningEffort === leaf.reasoningEffort);
+  };
+
+  const all = constraints.filter(constraint => constraint.mode === 'all');
+  if (all.length) {
+    return all.every(constraint => leaves.every(leaf => constraintMatches(constraint, leaf)));
+  }
+
+  const expectedConstraints = constraints.flatMap(constraint =>
+    Array.from({ length: constraint.count ?? 1 }, () => constraint));
+  if (expectedConstraints.length !== leaves.length) return false;
+  // At twelve leaves a tiny backtracking matcher is simpler and safer than
+  // guessing which alias owns a target (for example xAI and Grok overlap).
+  const used = new Set();
+  const matchNext = index => {
+    if (index >= expectedConstraints.length) return true;
+    for (let leafIndex = 0; leafIndex < leaves.length; leafIndex++) {
+      if (used.has(leafIndex)
+          || !constraintMatches(expectedConstraints[index], leaves[leafIndex])) continue;
+      used.add(leafIndex);
+      if (matchNext(index + 1)) return true;
+      used.delete(leafIndex);
+    }
+    return false;
+  };
+  return matchNext(0);
+}
+
+/**
+ * `auto` is a real effort when the user names it, but some models emit it as
+ * a generic default marker. Remove it only when every trusted constraint for
+ * this exact target omitted effort. Ambiguous duplicate targets retain it and
+ * fail the normal exact matcher rather than guessing which constraint owns it.
+ */
+function _normalizeUnrequestedAutoEfforts(entries, requests, targetHints = []) {
+  const constraints = requests.flatMap(request =>
+    Array.isArray(request?.targets) ? request.targets : []);
+  return entries.map(entry => {
+    if (entry?.reasoningEffort !== 'auto') return entry;
+    const matching = constraints.filter(constraint =>
+      _targetLabelMatches(constraint.label, entry, targetHints));
+    if (!matching.length
+        || matching.some(constraint => Object.hasOwn(constraint, 'reasoningEffort'))) {
+      return entry;
+    }
+    const normalized = { ...entry };
+    delete normalized.reasoningEffort;
+    return normalized;
+  });
+}
+
+/**
+ * Some coordinators redundantly serialize their adaptive suggestion (2–4) as
+ * an exact count and use `auto` as a placeholder effort. For one uncounted,
+ * homogeneous target we can safely discard those defaults: the trusted user
+ * request still owns the provider/model pair and the detached coordinator
+ * still chooses the actual lane count. Everything ambiguous stays unchanged
+ * so the normal exact admission checks reject it.
+ */
+function _normalizeAdaptiveTargetDefaults({
+  entries,
+  requests,
+  parallelRequired,
+  hasWorkerCount,
+  requestedWorkstreams,
+  targetHints = [],
+}) {
+  const unchanged = {
+    entries,
+    hasWorkerCount,
+    requestedWorkstreams,
+  };
+  if (parallelRequired !== true
+      || requests.length !== 1
+      || entries.length !== 1) return unchanged;
+
+  const request = requests[0];
+  const constraints = Array.isArray(request?.targets) ? request.targets : [];
+  if (request.kind !== 'targeted'
+      || request.count !== null
+      || constraints.length !== 1
+      || constraints[0].mode !== 'all'
+      || constraints[0].count !== null) return unchanged;
+
+  const entry = entries[0];
+  const constraint = constraints[0];
+  if (!_targetLabelMatches(constraint.label, entry, targetHints)) return unchanged;
+
+  const requestHasEffort = Object.hasOwn(constraint, 'reasoningEffort');
+  const entryHasEffort = Object.hasOwn(entry, 'reasoningEffort');
+  if (requestHasEffort
+    ? (!entryHasEffort || entry.reasoningEffort !== constraint.reasoningEffort)
+    : (entryHasEffort && entry.reasoningEffort !== 'auto')) return unchanged;
+
+  const targetCount = entry.count;
+  const targetCountIsAdaptiveDefault = targetCount === null
+    || (Number.isSafeInteger(targetCount)
+      && targetCount >= 2
+      && targetCount <= MAX_ADAPTIVE_WORKSTREAMS);
+  const workerCountIsAdaptiveDefault = !hasWorkerCount
+    || (Number.isSafeInteger(requestedWorkstreams)
+      && requestedWorkstreams >= 2
+      && requestedWorkstreams <= MAX_ADAPTIVE_WORKSTREAMS);
+  if (!targetCountIsAdaptiveDefault || !workerCountIsAdaptiveDefault) return unchanged;
+  if (hasWorkerCount
+      && targetCount !== null
+      && targetCount !== requestedWorkstreams) return unchanged;
+
+  const normalizedEntry = { ...entry, count: null };
+  if (!requestHasEffort && normalizedEntry.reasoningEffort === 'auto') {
+    delete normalizedEntry.reasoningEffort;
+  }
+  return {
+    entries: [normalizedEntry],
+    hasWorkerCount: false,
+    requestedWorkstreams: null,
+  };
+}
+
+function _selectScopedExecutionOutcome(matching, requests, task, label) {
   if (!matching.length) return null;
   if (requests.length === 1) return matching[0];
 
   const outcomeTokens = _countScopeTokens(`${label || ''} ${task || ''}`);
   if (!outcomeTokens.size) return null;
-  const scores = requests.map((request, index) => {
+  const scores = requests.map(request => {
     const contextTokens = _countScopeTokens(request.context);
     let score = 0;
     for (const token of outcomeTokens) {
       if (contextTokens.has(token)) score += 1;
     }
-    return { ...request, index, score };
+    return { ...request, score };
   });
   const matchingScore = Math.max(
     0,
-    ...scores.filter(row => row.count === count).map(row => row.score),
+    ...scores.filter(row => matching.some(candidate => candidate.id === row.id))
+      .map(row => row.score),
   );
   const otherScore = Math.max(
     0,
-    ...scores.filter(row => row.count !== count).map(row => row.score),
+    ...scores.filter(row => !matching.some(candidate => candidate.id === row.id))
+      .map(row => row.score),
   );
   if (matchingScore <= 0 || matchingScore <= otherScore) return null;
 
   const bestMatches = scores.filter(row =>
-    row.count === count && row.score === matchingScore);
+    matching.some(candidate => candidate.id === row.id) && row.score === matchingScore);
   // Equal counts can describe separate outcomes. Never guess which occurrence
   // a vague worker task is meant to consume, because doing so can spend the
   // wrong outcome and admit a later duplicate.
   return bestMatches.length === 1 ? bestMatches[0] : null;
 }
 
+function _authorizeExecutionOutcome({
+  requests,
+  count,
+  task,
+  label,
+  allocation,
+  targetHints = [],
+}) {
+  const sameCount = requests.filter(request => request.count === count
+    || (allocation && request.count === null));
+  if (!sameCount.length) {
+    return { ok: false, error: `No explicit ${count}-agent outcome exists in the user's request.` };
+  }
+
+  if (allocation) {
+    const matchingTargets = sameCount.filter(request =>
+      request.kind === 'targeted'
+      && _requestTargetsMatchAllocation(request, allocation, count, targetHints));
+    const outcome = _selectScopedExecutionOutcome(matchingTargets, requests, task, label);
+    if (!outcome) {
+      return {
+        ok: false,
+        error: 'The execution target allocation does not match the provider/model targets explicitly named by the user. No worker was started.',
+      };
+    }
+    return { ok: true, outcome };
+  }
+
+  const outcome = _selectScopedExecutionOutcome(sameCount, requests, task, label);
+  if (!outcome) {
+    return {
+      ok: false,
+      error: `worker_count ${count} does not match this outcome's scoped count in the user's multi-outcome request. No worker was started; keep each count with its named outcome.`,
+    };
+  }
+  if (outcome.kind === 'targeted') {
+    return {
+      ok: false,
+      error: 'The user explicitly requested provider/model targets for this outcome, but execution_targets was omitted. No worker was started; explicit targets never inherit.',
+    };
+  }
+  return { ok: true, outcome };
+}
+
 function _exactOutcomeId(request) {
-  return `${request.index}:${request.count}:${request.context}`;
+  return request.id || `${request.index}:${request.count}:${request.context}`;
 }
 
 function _reserveAgentExecution(router, {
   kind,
   trustedUserText,
   exactOutcome = null,
+  executionRequests = null,
 }) {
-  const exactRequests = explicitParallelLaneRequests(trustedUserText);
+  const exactRequests = Array.isArray(executionRequests)
+    ? executionRequests
+    : explicitAgentExecutionRequests(trustedUserText);
   const max = kind === 'spawn_worker'
     ? Math.max(1, exactRequests.length)
     : 1;
@@ -419,10 +975,7 @@ function _reserveAgentExecution(router, {
 
   if (kind === 'spawn_worker' && exactRequests.length) {
     const validOutcome = exactOutcome
-      && exactRequests.some((request, index) =>
-        index === exactOutcome.index
-        && request.count === exactOutcome.count
-        && request.context === exactOutcome.context);
+      && exactRequests.some(request => request.id === exactOutcome.id);
     if (!validOutcome) {
       return {
         ok: false,
@@ -489,6 +1042,24 @@ function _releaseAgentExecution(reservation) {
   if (state.count === 0) state.mode = null;
 }
 
+function _suppressToolsAfterWorkerLaunch(moreExplicitOutcomes) {
+  const router = getToolRouterContext();
+  if (!moreExplicitOutcomes && Array.isArray(router?.agent?.tools)) {
+    // A verified receipt completes the launch turn. Removing the remaining
+    // surface forces the next provider round to acknowledge it instead of
+    // attempting the detached coordinator's work in the foreground.
+    for (const tool of [...router.agent.tools]) {
+      suppressToolForTurn(tool?.function?.name ?? tool?.name);
+    }
+    return;
+  }
+  // Multiple separately authorized outcomes may still need spawn/discovery,
+  // but worker-only primitives never belong on the foreground launcher.
+  for (const name of ['check_workers', 'parallel_work', 'claim_work', 'report_progress']) {
+    suppressToolForTurn(name);
+  }
+}
+
 function _parallelItems(args, maxItems) {
   const raw = Array.isArray(args?.work_items) ? args.work_items : [];
   if (raw.length < 2 || raw.length > maxItems) return [];
@@ -507,9 +1078,18 @@ function _parallelItems(args, maxItems) {
     const key = item.claim.key.trim().slice(0, 240);
     const mode = item.claim.mode ?? 'exclusive';
     if (!label || !task || !kind || !key || !allowedModes.has(mode)) return [];
+    let execution = null;
+    if (item.execution != null) {
+      const normalizedExecution = normalizeAgentExecutionTarget(
+        _omitEmptyReasoningEffortPlaceholders(item.execution),
+      );
+      if (!normalizedExecution.ok) return [];
+      execution = normalizedExecution.target;
+    }
     items.push({
       label,
       task,
+      ...(execution ? { execution } : {}),
       claim: {
         kind,
         key,
@@ -663,7 +1243,7 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
   // Validate the complete plan shape before looking up runtime agent metadata.
   // This keeps malformed calls fail-closed even if their router context is
   // unavailable, while exact-count enforcement below still uses that context.
-  const items = _parallelItems(args, MAX_PARALLEL_WORKSTREAMS);
+  let items = _parallelItems(args, MAX_PARALLEL_WORKSTREAMS);
   if (items.length < 2) {
     yield {
       type: 'result',
@@ -755,6 +1335,16 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
     return;
   }
 
+  // Resolve and authorize the entire provider/model wave before reserving a
+  // single child. An unavailable explicit target is a hard error; it never
+  // inherits the coordinator model or falls back to another provider.
+  const executionPlan = await _resolveParallelExecutionTargets(baseAgent, items, userId);
+  if (!executionPlan.ok) {
+    yield { type: 'result', text: executionPlan.error, isError: true };
+    return;
+  }
+  items = executionPlan.items;
+
   const childTools = await _parallelChildTools();
   if (!childTools.length) {
     yield { type: 'result', text: 'parallel_work has no safe child tools available in this turn.', isError: true };
@@ -788,6 +1378,12 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
       taskId: item.taskId,
       name: item.label,
       label: item.label,
+      provider: item.execution?.provider || baseAgent.provider || null,
+      model: item.execution?.model || baseAgent.model || null,
+      reasoningEffort: item.execution
+        ? (Object.hasOwn(item.execution, 'reasoningEffort') ? item.execution.reasoningEffort : null)
+        : (baseAgent.reasoningEffort ?? null),
+      executionTargetExplicit: Boolean(item.execution),
       claim: item.claim,
     })),
   });
@@ -802,7 +1398,11 @@ async function* _parallelWorkTool(args, userId, callerAgentId, ctx = null) {
   const bg = await import('../../background-tasks.mjs');
   bg.noteTaskTeamPlan?.(
     taskContext.rootTaskId,
-    `Coordinator assigned ${plannedItems.length} non-overlapping workstreams`,
+    `Coordinator assigned ${plannedItems.length} non-overlapping workstreams${
+      plannedItems.some(item => item.execution)
+        ? ` across ${[...new Set(plannedItems.filter(item => item.execution).map(item => executionTargetLabel(item.execution)))].join(', ')}`
+        : ''
+    }`,
   );
 
   const parentSignal = ctx?.signal || getTurnContext()?.signal || null;
@@ -990,13 +1590,13 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
         const head = w.stalled
           ? `⚠ STALLED — no activity for ${ago(w.idleSec)} (was running ${w.currentTool || 'nothing'})`
           : (w.currentTool ? `running ${w.currentTool}` : 'between steps');
-        out.push(`• ${w.name} [${w.taskId}] — ${head}; ${w.toolsUsed} tool calls, ${ago(w.elapsedSec)} elapsed. Job: ${w.summary}`);
+        out.push(`• ${w.name} [${w.taskId}]${_statusExecutionTarget(w)} — ${head}; ${w.toolsUsed} tool calls, ${ago(w.elapsedSec)} elapsed. Job: ${w.summary}`);
         if (Array.isArray(w.childTasks) && w.childTasks.length) {
           for (const child of w.childTasks) {
             const claims = Array.isArray(child.claims) && child.claims.length
               ? ` · claims: ${child.claims.filter(c => c?.status === 'active').map(c => c.label).filter(Boolean).join(', ')}`
               : '';
-            out.push(`    ↳ ${child.name || 'Worker'} [${child.taskId}] — ${child.currentTool ? `running ${child.currentTool}` : (child.status || 'running')}${claims}${child.lastEvent ? ` · ${child.lastEvent}` : ''}`);
+            out.push(`    ↳ ${child.name || 'Worker'} [${child.taskId}]${_statusExecutionTarget(child)} — ${child.currentTool ? `running ${child.currentTool}` : (child.status || 'running')}${claims}${child.lastEvent ? ` · ${child.lastEvent}` : ''}`);
           }
         }
         const log = fmtLog(w.progress);
@@ -1014,9 +1614,9 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
           d.watcherId ? `watcher=${d.watcherId}` : null,
           d.spanId ? `span=${d.spanId}` : null,
         ].filter(Boolean).join(' · ');
-        out.push(`• ${d.name} [${d.taskId}] — ${head}; ${d.toolsUsed} tool calls, ${ago(d.elapsedSec)} elapsed. Job: ${d.summary}${ids ? ` (${ids})` : ''}`);
+        out.push(`• ${d.name} [${d.taskId}]${_statusExecutionTarget(d)} — ${head}; ${d.toolsUsed} tool calls, ${ago(d.elapsedSec)} elapsed. Job: ${d.summary}${ids ? ` (${ids})` : ''}`);
         if (Array.isArray(d.childTasks) && d.childTasks.length) {
-          out.push(`    children: ${d.childTasks.map(c => `${c.name || 'Agent'}=${c.status || 'running'}${c.currentTool ? `/${c.currentTool}` : ''}`).join(', ')}`);
+          out.push(`    children: ${d.childTasks.map(c => `${c.name || 'Agent'}=${c.status || 'running'}${c.currentTool ? `/${c.currentTool}` : ''}${_statusExecutionTarget(c)}`).join(', ')}`);
         }
         const log = fmtLog(d.progress);
         if (log) out.push(log);
@@ -1032,7 +1632,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
           r.watcherId ? `watcher=${r.watcherId}` : null,
           r.spanId ? `span=${r.spanId}` : null,
         ].filter(Boolean).join(' · ');
-        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls)${ids ? ` (${ids})` : ''} — ${r.finalText || r.summary}`);
+        out.push(`${mark} ${r.name} [${r.taskId}]${_statusExecutionTarget(r)} ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls)${ids ? ` (${ids})` : ''} — ${r.finalText || r.summary}`);
       }
     }
     if (recentDelegations.length) {
@@ -1045,7 +1645,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
           r.watcherId ? `watcher=${r.watcherId}` : null,
           r.spanId ? `span=${r.spanId}` : null,
         ].filter(Boolean).join(' · ');
-        out.push(`${mark} ${r.name} [${r.taskId}] ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls)${ids ? ` (${ids})` : ''} — ${r.finalText || r.summary}`);
+        out.push(`${mark} ${r.name} [${r.taskId}]${_statusExecutionTarget(r)} ${verb} ${ago(r.endedAgoSec)} ago (${r.toolsUsed} tool calls)${ids ? ` (${ids})` : ''} — ${r.finalText || r.summary}`);
       }
     }
     yield { type: 'result', text: out.join('\n') };
@@ -1089,9 +1689,24 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   const hasInteractiveAdmissionContext = Boolean(
     router || String(getTurnRestartContext()?.text || '').trim(),
   );
+  const rawExecutionTargets = Array.isArray(args?.execution_targets)
+    ? args.execution_targets.map(_omitEmptyReasoningEffortPlaceholders)
+    : args?.execution_targets;
+  const normalizedAllocation = normalizeAgentExecutionAllocation(
+    rawExecutionTargets,
+    MAX_PARALLEL_WORKSTREAMS,
+  );
+  if (!normalizedAllocation.ok) {
+    yield { type: 'result', text: `${normalizedAllocation.error} No worker was started.`, isError: true };
+    return;
+  }
+  const attestedTargetHints = _attestedExecutionTargetHints(
+    router,
+    normalizedAllocation.entries,
+  );
   if (hasInteractiveAdmissionContext
       && !serverAuthorizedCompound
-      && !explicitlyRequestsAgentExecution(trustedUserText)) {
+      && !explicitlyRequestsAgentExecution(trustedUserText, attestedTargetHints)) {
     yield {
       type: 'result',
       text: 'No worker was started because this is an ordinary prompt. Complete it directly in the current execution path; workers require an explicit user request for background or agent execution.',
@@ -1099,11 +1714,19 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     };
     return;
   }
-  const parallelAssessment = classifyClearlySplittableWork(trustedUserText);
-  const trustedLaneCounts = explicitParallelLaneCounts(trustedUserText);
+  const parallelAssessment = classifyClearlySplittableWork(trustedUserText, {
+    executionTargets: attestedTargetHints,
+  });
+  const executionRequests = explicitAgentExecutionRequests(
+    trustedUserText,
+    attestedTargetHints,
+  );
+  const trustedExactCounts = [...new Set(executionRequests
+    .map(request => request.count)
+    .filter(count => Number.isSafeInteger(count) && count >= 2))];
   let exactOutcome = null;
-  const hasWorkerCount = args?.worker_count != null;
-  const modelRequestedWorkstreams = hasWorkerCount
+  let hasWorkerCount = args?.worker_count != null;
+  let modelRequestedWorkstreams = hasWorkerCount
     ? _normalizedWorkstreamCount(args.worker_count)
     : null;
   if (hasWorkerCount
@@ -1115,57 +1738,145 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     };
     return;
   }
-  if (hasWorkerCount && trustedLaneCounts.length === 0) {
+  const effortNormalizedEntries = _normalizeUnrequestedAutoEfforts(
+    normalizedAllocation.entries,
+    executionRequests,
+    attestedTargetHints,
+  );
+  const adaptiveDefaults = _normalizeAdaptiveTargetDefaults({
+    entries: effortNormalizedEntries,
+    requests: executionRequests,
+    parallelRequired: parallelAssessment.required,
+    hasWorkerCount,
+    requestedWorkstreams: modelRequestedWorkstreams,
+    targetHints: attestedTargetHints,
+  });
+  const admittedAllocationEntries = adaptiveDefaults.entries;
+  hasWorkerCount = adaptiveDefaults.hasWorkerCount;
+  modelRequestedWorkstreams = adaptiveDefaults.requestedWorkstreams;
+  if (!hasInteractiveAdmissionContext && !serverAuthorizedCompound) {
     yield {
       type: 'result',
-      text: 'worker_count was not accepted because the user did not explicitly request an exact number of agents. No worker was started.',
+      text: 'No worker was started because the server could not verify the initiating user request. Retry from the original chat turn.',
       isError: true,
     };
     return;
   }
-  if (hasWorkerCount && !trustedLaneCounts.includes(modelRequestedWorkstreams)) {
+  const initialAllocation = _buildExecutionTargetAllocation(
+    admittedAllocationEntries,
+    hasWorkerCount ? modelRequestedWorkstreams : null,
+  );
+  if (!initialAllocation.ok) {
+    yield { type: 'result', text: initialAllocation.error, isError: true };
+    return;
+  }
+  if (hasWorkerCount && trustedExactCounts.length === 0) {
     yield {
       type: 'result',
-      text: `worker_count ${modelRequestedWorkstreams} does not match any exact agent count in the user's request (${trustedLaneCounts.join(', ')}). No worker was started.`,
+      text: admittedAllocationEntries.length
+        ? 'execution_targets was not authorized because the provider/model name in the user request was not verified against this exact configured catalog pair. Call list_execution_targets in the same turn and pass only an exact returned pair. No worker was started.'
+        : 'worker_count was not accepted because the user did not explicitly request an exact number of agents. No worker was started.',
       isError: true,
     };
     return;
   }
-  if (hasWorkerCount && trustedLaneCounts.length > 1) {
-    exactOutcome = _resolveExactWorkerOutcome(
-      modelRequestedWorkstreams,
-      task,
-      args?.label,
-      trustedUserText,
-    );
-  }
-  if (hasWorkerCount && trustedLaneCounts.length > 1 && !exactOutcome) {
+  if (hasWorkerCount && !trustedExactCounts.includes(modelRequestedWorkstreams)) {
     yield {
       type: 'result',
-      text: `worker_count ${modelRequestedWorkstreams} does not match this outcome's scoped count in the user's multi-outcome request. No worker was started; keep each count with its named outcome.`,
+      text: `worker_count ${modelRequestedWorkstreams} does not match any exact agent count in the user's request (${trustedExactCounts.join(', ')}). No worker was started.`,
       isError: true,
     };
     return;
   }
-  if (trustedLaneCounts.length === 1) {
-    exactOutcome = _resolveExactWorkerOutcome(
-      hasWorkerCount ? modelRequestedWorkstreams : trustedLaneCounts[0],
-      task,
-      args?.label,
-      trustedUserText,
-    );
-  }
-  if (!hasWorkerCount && trustedLaneCounts.length > 1) {
+  if (!hasWorkerCount && executionRequests.length > 1
+      && initialAllocation.declaredCount === null) {
     yield {
       type: 'result',
-      text: `This prompt gives separate exact agent counts (${trustedLaneCounts.join(', ')}). Pass the count for this specific outcome as worker_count; no worker was started.`,
+      text: `This prompt gives separate exact agent outcomes (${trustedExactCounts.join(', ')}). Pass the count for this specific outcome as worker_count; no worker was started.`,
       isError: true,
     };
     return;
   }
-  const requestedWorkstreams = hasWorkerCount
+  const exactTextCounts = executionRequests
+    .map(request => request.count)
+    .filter(count => Number.isSafeInteger(count));
+  // Structured allocation counts describe how to realize an authorized user
+  // outcome; they cannot manufacture an exact count for an uncounted request.
+  // They may disambiguate one of several counts only when that exact count is
+  // already present in the trusted user text.
+  const allocationBackedExactCount = Number.isSafeInteger(initialAllocation.declaredCount)
+    && exactTextCounts.includes(initialAllocation.declaredCount)
+    ? initialAllocation.declaredCount
+    : null;
+  const outcomeCount = hasWorkerCount
     ? modelRequestedWorkstreams
-    : (trustedLaneCounts[0] ?? null);
+    : (allocationBackedExactCount
+      ?? (executionRequests.length === 1 ? executionRequests[0].count : null));
+  if (hasInteractiveAdmissionContext && !serverAuthorizedCompound && executionRequests.length) {
+    const authorized = _authorizeExecutionOutcome({
+      requests: executionRequests,
+      count: outcomeCount,
+      task,
+      label: args?.label,
+      allocation: initialAllocation.allocation,
+      targetHints: attestedTargetHints,
+    });
+    if (!authorized.ok) {
+      yield { type: 'result', text: authorized.error, isError: true };
+      return;
+    }
+    exactOutcome = authorized.outcome;
+  } else if (hasInteractiveAdmissionContext
+      && !serverAuthorizedCompound
+      && admittedAllocationEntries.length) {
+    yield {
+      type: 'result',
+      text: 'execution_targets was not authorized because the user did not name a provider or model for the requested agents. No worker was started.',
+      isError: true,
+    };
+    return;
+  }
+  let requestedWorkstreams = hasWorkerCount
+    ? modelRequestedWorkstreams
+    : (Number.isSafeInteger(outcomeCount) && outcomeCount >= 2 ? outcomeCount : null);
+  if (requestedWorkstreams === null && initialAllocation.declaredCount >= 2) {
+    if (parallelAssessment.required !== true) {
+      yield {
+        type: 'result',
+        text: 'The execution target allocation requests multiple agents, but the user did not request parallel agent execution. No worker was started.',
+        isError: true,
+      };
+      return;
+    }
+    if (initialAllocation.declaredCount > MAX_ADAPTIVE_WORKSTREAMS) {
+      yield {
+        type: 'result',
+        text: `The execution target allocation requests ${initialAllocation.declaredCount} agents, but the user did not specify that exact count. Adaptive fan-out is limited to 2–${MAX_ADAPTIVE_WORKSTREAMS}; no worker was started.`,
+        isError: true,
+      };
+      return;
+    }
+    requestedWorkstreams = initialAllocation.declaredCount;
+  }
+  const allocationPlan = _buildExecutionTargetAllocation(
+    admittedAllocationEntries,
+    requestedWorkstreams,
+  );
+  if (!allocationPlan.ok) {
+    yield { type: 'result', text: allocationPlan.error, isError: true };
+    return;
+  }
+  if (requestedWorkstreams === null
+      && parallelAssessment.required === true
+      && allocationPlan.allocation?.mode === 'homogeneous'
+      && allocationPlan.allocation.entries?.[0]?.count === 1) {
+    yield {
+      type: 'result',
+      text: 'A one-agent execution target cannot satisfy the user\'s uncounted parallel-agent request. Omit the target count to apply it to every adaptive child. No worker was started.',
+      isError: true,
+    };
+    return;
+  }
   if (requestedWorkstreams !== null && requestedWorkstreams > MAX_PARALLEL_WORKSTREAMS) {
     yield {
       type: 'result',
@@ -1182,8 +1893,22 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
 
   const label = args.label || (task.length > 56 ? task.slice(0, 56) + '…' : task);
   const workerId = `ephemeral_worker_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${ownerKey}`;
-  const workerAgent = { ...ownerAgent, id: workerId, ephemeral: true, workerOwnerId: ownerKey };
-  workerAgent.parallelWorkRequested = parallelAssessment.required === true;
+  let workerAgent = { ...ownerAgent, id: workerId, ephemeral: true, workerOwnerId: ownerKey };
+  const usesChildFanout = requestedWorkstreams !== null || parallelAssessment.required === true;
+  if (usesChildFanout) workerAgent._executionModelLocked = true;
+  if (allocationPlan.allocation && usesChildFanout) {
+    // The hidden coordinator remains on its parent's configured model. Only
+    // the user-counted leaf agents consume this allocation.
+    workerAgent.executionTargetAllocation = allocationPlan.allocation;
+  } else if (allocationPlan.allocation) {
+    // A one-agent request needs no extra coordinator layer; the detached
+    // worker itself is the explicitly targeted agent.
+    workerAgent = applyAgentExecutionTarget(workerAgent, allocationPlan.allocation.entries[0]);
+    delete workerAgent.executionTargetAllocation;
+  } else {
+    delete workerAgent.executionTargetAllocation;
+  }
+  workerAgent.parallelWorkRequested = usesChildFanout;
   if (requestedWorkstreams !== null) {
     workerAgent.requestedWorkstreams = requestedWorkstreams;
   } else {
@@ -1210,6 +1935,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     kind: 'spawn_worker',
     trustedUserText,
     exactOutcome,
+    executionRequests,
   });
   if (!launchReservation.ok) {
     yield {
@@ -1223,10 +1949,20 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   try {
     admitted = await spawnWorkerIdempotently({
       userId, ownerKey, label, task,
+      // This identity comes only from the trusted-text parser and keeps a
+      // reordered browser Retry attached to the same authorized outcome.
+      // There is intentionally no model-facing tool argument for it.
+      authorizedOutcomeId: exactOutcome?.id || null,
       // This runs while the durable admission helper holds its per-user lock,
       // closing the race between concurrent distinct spawn_worker calls. Keep
       // the existing single-mode user-wide quota and ensemble owner quota.
-      beforeSpawn: () => {
+      beforeSpawn: async () => {
+        if (admittedAllocationEntries.length) {
+          const access = await validateAgentExecutionTargets(userId, admittedAllocationEntries);
+          if (!access.ok) {
+            throw Object.assign(new Error(access.error), { code: 'EXECUTION_TARGET_DENIED' });
+          }
+        }
         const current = liveWorkers().length;
         if (current < MAX_WORKERS_PER_AGENT) return;
         throw Object.assign(new Error(capacityMessage(current)), { code: 'WORKER_CAPACITY' });
@@ -1253,13 +1989,17 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       yield { type: 'result', text: error.message };
       return;
     }
+    if (error?.code === 'EXECUTION_TARGET_DENIED') {
+      yield { type: 'result', text: error.message, isError: true };
+      return;
+    }
     throw error;
   }
   const tid = admitted.taskId;
   const moreExplicitOutcomes = launchReservation.remaining > 0;
   if (admitted.duplicate) {
     if (!moreExplicitOutcomes) suppressToolForTurn('spawn_worker');
-    suppressToolForTurn('check_workers');
+    _suppressToolsAfterWorkerLaunch(moreExplicitOutcomes);
     yield {
       type: 'result',
       text: moreExplicitOutcomes
@@ -1271,15 +2011,24 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
   const countNote = requestedWorkstreams === null
     ? ''
     : ` It is required to create exactly ${requestedWorkstreams} child workstreams; the coordinator does not count toward that total.`;
+  const targetNote = allocationPlan.allocation
+    ? (usesChildFanout
+      ? ` Child execution is pinned to ${allocationPlan.allocation.entries.map(entry => `${entry.count ?? requestedWorkstreams ?? 'all'} × ${executionTargetLabel(entry)}`).join(', ')}; unavailable targets fail instead of inheriting.`
+      : ` This worker is pinned to ${executionTargetLabel(allocationPlan.allocation.entries[0])}; unavailable targets fail instead of inheriting.`)
+    : '';
   if (!moreExplicitOutcomes) suppressToolForTurn('spawn_worker');
-  suppressToolForTurn('check_workers');
+  _suppressToolsAfterWorkerLaunch(moreExplicitOutcomes);
   yield {
     type: 'result',
-    text: `Hired a background worker (${tid}) on: ${label}.${countNote} This is a verified launch receipt: do NOT call check_workers in this turn. ${moreExplicitOutcomes ? 'Start only the remaining explicitly counted outcome, then reply.' : 'Reply to the user now; the report will post automatically when complete.'} Use check_workers only after a later user status request.`,
+    text: `Hired a background worker (${tid}) on: ${label}.${countNote}${targetNote} This is a verified launch receipt: do NOT call check_workers in this turn. ${moreExplicitOutcomes ? 'Start only the remaining explicitly counted outcome, then reply.' : 'Reply to the user now; the report will post automatically when complete.'} Use check_workers only after a later user status request.`,
   };
 }
 
 export async function* executeSkillTool(name, args, userId = 'default', callerAgentId = null, internalOptions = null) {
+  if (name === 'list_execution_targets') {
+    yield* _listExecutionTargetsTool(args, userId);
+    return;
+  }
   if (name === 'parallel_work') {
     yield* _parallelWorkTool(args, userId, callerAgentId, internalOptions);
     return;
@@ -1609,6 +2358,10 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
             targetAgentId: scopedAgent.id,
             targetAgentName: agentName,
             targetAgentEmoji: agentEmoji,
+            provider: scopedAgent.provider || null,
+            model: scopedAgent.model || null,
+            reasoningEffort: scopedAgent.reasoningEffort || null,
+            executionTargetExplicit: scopedAgent._executionTargetLocked === true,
             summary: taskSummary,
             startedAt: Date.now(),
             lastActivityAt: Date.now(),
@@ -1639,6 +2392,10 @@ export async function* executeSkillTool(name, args, userId = 'default', callerAg
         agentName,
         agentEmoji,
         summary: taskSummary,
+        provider: scopedAgent.provider || null,
+        model: scopedAgent.model || null,
+        reasoningEffort: scopedAgent.reasoningEffort || null,
+        executionTargetExplicit: scopedAgent._executionTargetLocked === true,
         watcherId: syncWatcherId,
         visibleAgentId: syncVisibleAgentId,
         abort: () => syncAbort.abort('delegation stopped'),

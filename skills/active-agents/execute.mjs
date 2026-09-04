@@ -22,6 +22,20 @@ function fmtElapsed(ms) {
   return remMin ? `${hr}h ${remMin}m` : `${hr}h`;
 }
 
+function fmtExecutionTarget(task) {
+  const provider = typeof task?.provider === 'string'
+    ? task.provider.replace(/[\r\n]/g, ' ').trim().slice(0, 100)
+    : '';
+  const model = typeof task?.model === 'string'
+    ? task.model.replace(/[\r\n]/g, ' ').trim().slice(0, 300)
+    : '';
+  if (!provider && !model) return '';
+  const effort = typeof task?.reasoningEffort === 'string'
+    ? task.reasoningEffort.replace(/[\r\n]/g, ' ').trim().slice(0, 40)
+    : '';
+  return `${provider && model ? `${provider}/${model}` : (provider || model)}${effort ? ` · effort ${effort}` : ''}${task.executionTargetExplicit === true ? ' (explicit target)' : ''}`;
+}
+
 export async function executeSkillTool(name, args, userId) {
   // Phase-14d: deep-dive on a single task_proxy watcher
   if (name === 'get_task_log') {
@@ -34,13 +48,14 @@ export async function executeSkillTool(name, args, userId) {
       const lines = [];
       lines.push(`Task: ${w.label || w.kind} (${w.status})`);
       if (w.state?.targetAgentName) lines.push(`Agent: ${w.state.targetAgentEmoji || ''} ${w.state.targetAgentName}`);
+      if (fmtExecutionTarget(w.state)) lines.push(`Execution: ${fmtExecutionTarget(w.state)}`);
       if (w.state?.rootTaskId) lines.push(`Root task: ${w.state.rootTaskId}`);
       if (w.state?.parentTaskId) lines.push(`Parent task: ${w.state.parentTaskId}`);
       if (w.state?.spanId) lines.push(`Span: ${w.state.spanId}`);
       if (Array.isArray(w.state?.childTasks) && w.state.childTasks.length) {
         lines.push('Child tasks:');
         for (const c of w.state.childTasks) {
-          lines.push(`  - ${c.name || 'Agent'} [${c.taskId}]${c.watcherId ? ` watcher=${c.watcherId}` : ''} — ${c.status || 'running'}${c.currentTool ? `, running ${c.currentTool}` : ''}`);
+          lines.push(`  - ${c.name || 'Agent'} [${c.taskId}]${c.watcherId ? ` watcher=${c.watcherId}` : ''} — ${c.status || 'running'}${c.currentTool ? `, running ${c.currentTool}` : ''}${fmtExecutionTarget(c) ? ` · execution: ${fmtExecutionTarget(c)}` : ''}`);
         }
       }
       const elapsed = w.endedAt
@@ -86,6 +101,10 @@ export async function executeSkillTool(name, args, userId) {
         watcherId: w.id,
         agentName: w.state?.targetAgentName || w.label || w.state?.tool || 'Background tool',
         agentEmoji: w.state?.targetAgentEmoji || '⏵',
+        provider: w.state?.provider || null,
+        model: w.state?.model || null,
+        reasoningEffort: w.state?.reasoningEffort || null,
+        executionTargetExplicit: w.state?.executionTargetExplicit === true,
         summary: w.state?.summary || w.lastStatusText || w.label || '',
         currentTool: w.state?.currentTool || w.state?.tool || null,
         toolsUsed: Number(w.state?.toolsUsed || 0),
@@ -118,9 +137,10 @@ export async function executeSkillTool(name, args, userId) {
       if (t.spanId) ids.push(`span ${t.spanId}`);
       const idLine = ids.length ? `\n   ids: ${ids.join(' · ')}` : '';
       const childLine = Array.isArray(t.childTasks) && t.childTasks.length
-        ? `\n   children: ${t.childTasks.map(c => `${c.name || 'Agent'}=${c.status || 'running'}${c.currentTool ? `/${c.currentTool}` : ''}`).join(', ')}`
+        ? `\n   children: ${t.childTasks.map(c => `${c.name || 'Agent'}=${c.status || 'running'}${c.currentTool ? `/${c.currentTool}` : ''}${fmtExecutionTarget(c) ? ` · execution: ${fmtExecutionTarget(c)}` : ''}`).join(', ')}`
         : '';
-      return `- ${t.agentEmoji || ''} ${t.agentName} (${t.taskId}) — ${elapsed} elapsed${taskLine}${idLine}${childLine}${tail}`;
+      const executionLine = fmtExecutionTarget(t) ? `\n   execution: ${fmtExecutionTarget(t)}` : '';
+      return `- ${t.agentEmoji || ''} ${t.agentName} (${t.taskId}) — ${elapsed} elapsed${taskLine}${idLine}${executionLine}${childLine}${tail}`;
     });
     return `${mine.length} background task${mine.length === 1 ? '' : 's'} in flight:\n${lines.join('\n')}`;
   } catch (e) {

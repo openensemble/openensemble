@@ -13,6 +13,7 @@ import { bindToolRouterContext, toolRouterContext } from '../lib/tool-router-con
 import { beginMemoryScope } from '../lib/memory-scope-context.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
 import { currentTaskContext } from '../lib/task-proxy-context.mjs';
+import { requiresResponsesTransport } from '../lib/provider-model-protocol.mjs';
 import { filterToolsForMcpPolicy, getMcpToolPolicy } from '../lib/mcp-tool-policy.mjs';
 import {
   classifyClearlySplittableWork,
@@ -798,9 +799,12 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     // web_search stay on the /chat/completions (openai-compat) path below.
     const grokNativeSearch = (agentObj.provider === 'grok' || agentObj.provider === 'xai')
       && agentObj.tools?.some(t => (t.function?.name ?? t.name) === 'web_search');
+    const responsesOnlyModel = requiresResponsesTransport(agentObj.provider, agentObj.model);
     // SuperGrok OAuth always uses the Responses adapter (CLI chat proxy).
-    // API-key Grok only switches when native web_search is needed.
-    if (agentObj.provider === 'openai-oauth' || agentObj.provider === 'xai-oauth' || grokNativeSearch) {
+    // API-key Grok also switches for native web search and for models such as
+    // Grok 4.20 Multi-Agent that do not implement Chat Completions.
+    if (agentObj.provider === 'openai-oauth' || agentObj.provider === 'xai-oauth'
+        || grokNativeSearch || responsesOnlyModel) {
       return { providerGen: streamOpenAIResponses(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
     if (OPENAI_COMPAT_PROVIDERS[compatProviderKey]) {
@@ -812,6 +816,14 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       // native path only for the no-tools/no-attachment case.
       return { providerGen: streamLMStudio(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
     }
+    if (agentObj.provider === 'ollama' || agentObj.provider === 'ollama-local') {
+      return { providerGen: streamOllama(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
+    }
+    if (agentObj._executionTargetLocked === true) {
+      throw new Error(`Unsupported explicit chat provider "${String(agentObj.provider || 'unknown')}"; refusing to fall back to Ollama.`);
+    }
+    // Preserve the legacy default for old durable agents that predate provider
+    // validation. Newly explicit execution targets are locked and fail above.
     return { providerGen: streamOllama(agentObj, prompt, messages, signal, userId), withSignalWordsGate: false };
   };
 
@@ -1468,6 +1480,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     skillCategory: agent.skillCategory ?? null,
     provider: agent.provider,
     model: agent.model,
+    executionTargetExplicit: agent._executionTargetLocked === true,
+    executionEffortExplicit: agent._executionEffortLocked === true,
     modelExpected: true,
     // Detached workers and scheduled runs mint an authoritative turn source.
     // Prefer it to the optional voice context so background work cannot be

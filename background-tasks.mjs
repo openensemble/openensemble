@@ -208,6 +208,10 @@ export async function bootRecoverInterruptedTasks() {
       recentWorkers.unshift({
         taskId, ownerKey: e.ownerKey, userId: e.userId,
         name, summary: e.summary, outcome: recentOutcome,
+        provider: e.provider || null,
+        model: e.model || null,
+        reasoningEffort: e.reasoningEffort || null,
+        executionTargetExplicit: e.executionTargetExplicit === true,
         finalText: interruptNote, toolsUsed: 0,
         startedAt: e.startedAt, endedAt: now,
       });
@@ -220,6 +224,10 @@ export async function bootRecoverInterruptedTasks() {
         watcherId: e.watcherId || null, rootWatcherId: null,
         visibleAgentId: e.visibleAgentId || null,
         name, summary: e.summary, outcome: recentOutcome,
+        provider: e.provider || null,
+        model: e.model || null,
+        reasoningEffort: e.reasoningEffort || null,
+        executionTargetExplicit: e.executionTargetExplicit === true,
         finalText: interruptNote, toolsUsed: 0,
         startedAt: e.startedAt, endedAt: now,
       });
@@ -232,6 +240,10 @@ export async function bootRecoverInterruptedTasks() {
       agentName: name,
       agentId: e.agentId || null,
       ownerKey: e.ownerKey || null,
+      provider: e.provider || null,
+      model: e.model || null,
+      reasoningEffort: e.reasoningEffort || null,
+      executionTargetExplicit: e.executionTargetExplicit === true,
       summary: interruptNote,
       durationMs: Math.max(0, now - (Number(e.startedAt) || now)),
       error: recoveredStatus === 'done' ? null : interruptNote,
@@ -458,6 +470,10 @@ function _rootChildSnapshot(root) {
       spanId: c.spanId || null,
       name: c.name || 'Agent',
       summary: c.summary || '',
+      provider: c.provider || null,
+      model: c.model || null,
+      reasoningEffort: c.reasoningEffort || null,
+      executionTargetExplicit: c.executionTargetExplicit === true,
       status,
       phase: c.phase || status,
       currentTool: c.currentTool || null,
@@ -543,6 +559,10 @@ function _attachRootChild(taskId, rec) {
     spanId: rec.spanId || null,
     name: rec.agentName,
     summary: rec.summary,
+    provider: rec.provider || null,
+    model: rec.model || null,
+    reasoningEffort: rec.reasoningEffort || null,
+    executionTargetExplicit: rec.executionTargetExplicit === true,
     status: rec.status || 'running',
     currentTool: rec.currentTool || null,
     startedAt: rec.startedAt,
@@ -799,6 +819,10 @@ function taskState(taskId, extra = {}) {
     targetAgentId: rec.agentId,
     targetAgentName: rec.agentName,
     targetAgentEmoji: rec.agentEmoji,
+    provider: rec.provider || null,
+    model: rec.model || null,
+    reasoningEffort: rec.reasoningEffort || null,
+    executionTargetExplicit: rec.executionTargetExplicit === true,
     summary: rec.summary || '',
     startedAt: rec.startedAt,
     lastActivityAt: Date.now(),
@@ -1316,6 +1340,10 @@ export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '
     rootWatcherId: rec.rootWatcherId || null,
     visibleAgentId: rec.visibleAgentId || null,
     name: rec.agentName, summary: rec.summary,
+    provider: rec.provider || null,
+    model: rec.model || null,
+    reasoningEffort: rec.reasoningEffort || null,
+    executionTargetExplicit: rec.executionTargetExplicit === true,
     outcome: syncOutcome,
     finalText: String(finalReportPreview || finalText || '').slice(0, 240),
     toolsUsed: rec.toolsUsed || 0,
@@ -1328,6 +1356,10 @@ export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '
   appendTaskOutcome(rec.userId, {
     taskId, kind: 'delegation', agentId: rec.agentId,
     agentName: rec.agentName, status: syncOutcome,
+    provider: rec.provider || null,
+    model: rec.model || null,
+    reasoningEffort: rec.reasoningEffort || null,
+    executionTargetExplicit: rec.executionTargetExplicit === true,
     summary: String(finalReportPreview || finalText || rec.summary || ''),
     durationMs: syncEndedAt - (rec.startedAt || syncEndedAt),
     error: status === 'error' ? String(finalText || finalReportPreview || '') : null,
@@ -1362,13 +1394,25 @@ export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '
  * Register a sync delegation. Returns a small handle the delegate skill uses
  * to keep the record honest while it streams, or null on bad input.
  */
-export function registerSyncDelegation({ taskId, userId, agentId, agentName, agentEmoji = '🤖', summary = '', watcherId = null, visibleAgentId = null, abort = null, rootTaskId = null, parentTaskId = null, parentWatcherId = null, rootWatcherId = null }) {
+export function registerSyncDelegation({
+  taskId, userId, agentId, agentName, agentEmoji = '🤖', summary = '',
+  provider = null, model = null, reasoningEffort = null,
+  executionTargetExplicit = false,
+  watcherId = null, visibleAgentId = null, abort = null, rootTaskId = null,
+  parentTaskId = null, parentWatcherId = null, rootWatcherId = null,
+}) {
   if (!taskId || !userId) return null;
   const rTask = rootTaskId || taskId;
   const scheduledCtx = getScheduledContext();
   const silentScheduled = scheduledCtx?.originTaskId && scheduledCtx?.silent === true;
   activeTasks.set(taskId, {
     agentId, userId, agentName, agentEmoji,
+    provider: typeof provider === 'string' ? provider.trim().slice(0, 100) : null,
+    model: typeof model === 'string' ? model.trim().slice(0, 300) : null,
+    reasoningEffort: typeof reasoningEffort === 'string'
+      ? reasoningEffort.trim().slice(0, 40)
+      : null,
+    executionTargetExplicit: executionTargetExplicit === true,
     startedAt: Date.now(), summary: String(summary || '').slice(0, 120),
     phase: 'running', status: 'running',
     watcherId: watcherId || null,
@@ -1506,6 +1550,16 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
   const record = {
     taskId,
     agentId: agent.id, userId, agentName, agentEmoji,
+    provider: typeof agent.provider === 'string' && agent.provider.trim()
+      ? agent.provider.trim().slice(0, 100)
+      : null,
+    model: typeof agent.model === 'string' && agent.model.trim()
+      ? agent.model.trim().slice(0, 300)
+      : null,
+    reasoningEffort: typeof agent.reasoningEffort === 'string' && agent.reasoningEffort.trim()
+      ? agent.reasoningEffort.trim().slice(0, 40)
+      : null,
+    executionTargetExplicit: agent._executionTargetLocked === true,
     summary: String(opts.label || task || '').slice(0, 120),
     startedAt: Date.now(), lastActivityAt: Date.now(),
     rootTaskId: taskCtx.rootTaskId,
@@ -1542,6 +1596,10 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
         userId,
         name: agentName,
         label: opts.label || agentName,
+        provider: record.provider,
+        model: record.model,
+        reasoningEffort: record.reasoningEffort,
+        executionTargetExplicit: record.executionTargetExplicit,
       });
     }
     if (opts.preRegistered !== true && opts.initialClaim?.key) {

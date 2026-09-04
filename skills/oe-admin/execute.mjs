@@ -35,6 +35,7 @@ import {
 } from '../../lib/oe-admin-audit.mjs';
 import {
   loadUserProviders, setUserProvider, removeUserProvider, mergeProviders,
+  normalizeProviderModelsEndpoint, normalizeProviderSampleModelId,
 } from '../../lib/user-providers.mjs';
 import { OPENAI_COMPAT_PROVIDERS } from '../../chat/providers/_shared.mjs';
 import { modifyConfig, loadConfig } from '../../routes/_helpers.mjs';
@@ -62,6 +63,16 @@ const USER_PROVIDERS    = path.join(BASE_DIR, 'config', 'user-providers.json');
 function recipeFilePath(name) {
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) throw new Error(`bad recipe name: ${name}`);
   return path.join(INTEGRATIONS_DIR, `${name}.json`);
+}
+
+function catalogModelIds(payload) {
+  const values = Array.isArray(payload?.data)
+    ? payload.data
+    : (Array.isArray(payload?.models) ? payload.models : []);
+  return [...new Set(values.slice(0, 10_000).map(value => {
+    if (typeof value === 'string') return value;
+    return value?.id ?? value?.slug ?? value?.name ?? null;
+  }).filter(Boolean).map(String))];
 }
 
 // ── Tool: oe_admin_read_blueprint ────────────────────────────────────────────
@@ -122,6 +133,14 @@ async function handleAddProvider(args, userId, agentId) {
   }
   const { name, baseUrl, keyField, displayName, modelsEndpoint, sampleModelId } = args ?? {};
   if (!name || !baseUrl || !keyField) return 'name, baseUrl, and keyField are required.';
+  let normalizedModelsEndpoint;
+  let normalizedSampleModelId;
+  try {
+    normalizedModelsEndpoint = normalizeProviderModelsEndpoint(modelsEndpoint);
+    normalizedSampleModelId = normalizeProviderSampleModelId(sampleModelId);
+  } catch (e) {
+    return `Invalid provider catalog metadata: ${e.message}`;
+  }
   // name charset is kept in sync with keyField's (letters+digits only, no
   // -/_) because keyField must equal `${name}ApiKey` below; allowing hyphens
   // in name would make that binding unsatisfiable (keyField forbids them).
@@ -184,7 +203,13 @@ async function handleAddProvider(args, userId, agentId) {
     const entryId = recordPending({
       userId,
       op: 'add_provider',
-      args: { name, baseUrl: validatedUrl, keyField, displayName: displayName || name },
+      args: {
+        name,
+        baseUrl: validatedUrl,
+        keyField,
+        displayName: displayName || name,
+        modelsEndpoint: normalizedModelsEndpoint,
+      },
       snapshotFiles: ['config.json', 'config/user-providers.json'],
       inverse: {
         kind: 'add_provider_revert',
@@ -199,25 +224,41 @@ async function handleAddProvider(args, userId, agentId) {
     // Write the encrypted key into config.json via modifyConfig.
     await modifyConfig(cfg => { cfg[keyField] = apiKey; });
     // Write the overlay entry.
-    setUserProvider(name, {
+    const storedProvider = setUserProvider(name, {
       baseUrl: validatedUrl,
       keyField,
       displayName: displayName || name,
+      modelsEndpoint: normalizedModelsEndpoint,
       addedBy: userId,
       addedAt: new Date().toISOString(),
     });
 
     // Optional probe — best-effort, doesn't fail the op.
-    const probeUrl = validatedUrl + (modelsEndpoint || '/models');
+    const probeUrl = validatedUrl + normalizedModelsEndpoint;
     let probeMsg;
     try {
       const r = await fetch(probeUrl, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(5000),
       });
-      probeMsg = r.ok
-        ? `✓ Probe of ${probeUrl} succeeded (HTTP ${r.status}).`
-        : `⚠ Probe of ${probeUrl} returned HTTP ${r.status} — provider may still work; sample model "${sampleModelId ?? '<none provided>'}" couldn't be auto-listed.`;
+      if (!r.ok) {
+        probeMsg = `⚠ Probe of ${probeUrl} returned HTTP ${r.status} — provider may still work; sample model "${normalizedSampleModelId ?? '<none provided>'}" couldn't be auto-listed.`;
+      } else {
+        const payload = await r.json().catch(() => null);
+        const discoveredIds = catalogModelIds(payload);
+        if (normalizedSampleModelId && discoveredIds.includes(normalizedSampleModelId)) {
+          setUserProvider(name, {
+            ...storedProvider,
+            sampleModelId: normalizedSampleModelId,
+            sampleModelVerified: true,
+          });
+          probeMsg = `✓ Probe of ${probeUrl} succeeded (HTTP ${r.status}) and verified model "${normalizedSampleModelId}".`;
+        } else if (normalizedSampleModelId) {
+          probeMsg = `⚠ Probe of ${probeUrl} succeeded (HTTP ${r.status}), but did not list sample model "${normalizedSampleModelId}". The provider was saved without unverified sample metadata.`;
+        } else {
+          probeMsg = `✓ Probe of ${probeUrl} succeeded (HTTP ${r.status})${discoveredIds.length ? ` and listed ${discoveredIds.length} model${discoveredIds.length === 1 ? '' : 's'}` : ''}.`;
+        }
+      }
     } catch (e) {
       probeMsg = `⚠ Probe of ${probeUrl} failed: ${e.message}. The key is stored anyway; verify manually in Settings → Providers after restart.`;
     }

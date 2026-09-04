@@ -83,6 +83,15 @@ function taskChipToolLabel(name) {
   return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
+function taskChipExecutionLabel(value) {
+  const provider = taskChipText(value?.provider, 100);
+  const model = taskChipText(value?.model, 300);
+  const reasoningEffort = taskChipText(value?.reasoningEffort, 40);
+  const identity = provider && model ? `${provider}/${model}` : (provider || model);
+  if (!identity) return '';
+  return `${identity}${reasoningEffort ? ` · effort ${reasoningEffort}` : ''}`;
+}
+
 function taskChipStateValue(value) {
   return taskChipText(value, 40).toLowerCase().replace(/\s+/g, '_');
 }
@@ -179,6 +188,11 @@ function taskChipChildList(value) {
         parentTaskId,
         name: taskChipText(raw.name || raw.agentName || raw.label, 160) || 'Worker',
         role: taskChipText(raw.role, 60),
+        provider: taskChipText(raw.provider, 100),
+        model: taskChipText(raw.model, 300),
+        reasoningEffort: taskChipText(raw.reasoningEffort, 40),
+        executionTargetExplicit: raw.executionTargetExplicit === true,
+        executionLabel: taskChipExecutionLabel(raw),
         detail: taskChipText(
           raw.scopeLabel || raw.assignment || raw.objective || raw.summary || raw.finalReportPreview,
           300,
@@ -340,6 +354,7 @@ function taskChipViewModel(status, ts = Date.now()) {
   const fallbackTaskPart = dashIdx > 0 ? label.slice(dashIdx + 2) : '';
   const agentPart = `${taskChipText(state.targetAgentEmoji, 16)} ${taskChipText(state.targetAgentName, 160) || fallbackAgentPart || 'Task'}`.trim();
   const taskPart = taskChipText(state.summary, 600) || fallbackTaskPart;
+  const executionLabel = taskChipExecutionLabel(state);
   const phaseText = taskChipPhase(status || {});
   const final = !!status?.final;
   const finalStatus = taskChipStateValue(status?.finalStatus);
@@ -390,6 +405,8 @@ function taskChipViewModel(status, ts = Date.now()) {
   return {
     agentPart,
     taskPart,
+    executionLabel,
+    executionTargetExplicit: state.executionTargetExplicit === true,
     phaseText,
     visualState,
     badge,
@@ -432,7 +449,7 @@ function renderTaskChipChildRow(child) {
   row.dataset.depth = String(child.depth || 0);
   row.dataset.status = taskChipStateClass(child.status);
   row.setAttribute('role', 'listitem');
-  row.setAttribute('aria-label', `${child.name}: ${child.action || child.status || 'running'}`);
+  row.setAttribute('aria-label', `${child.name}: ${child.action || child.status || 'running'}${child.executionLabel ? `; execution ${child.executionLabel}` : ''}`);
 
   const icon = document.createElement('span');
   icon.className = 'task-chip-child-icon';
@@ -453,6 +470,15 @@ function renderTaskChipChildRow(child) {
     role.className = 'task-chip-child-role';
     role.textContent = child.role;
     nameRow.appendChild(role);
+  }
+  if (child.executionLabel) {
+    const execution = document.createElement('span');
+    execution.className = 'task-chip-child-role task-chip-child-execution';
+    execution.textContent = child.executionLabel;
+    execution.title = child.executionTargetExplicit
+      ? `Explicit execution target: ${child.executionLabel}`
+      : `Execution: ${child.executionLabel}`;
+    nameRow.appendChild(execution);
   }
   main.appendChild(nameRow);
   if (child.detail) {
@@ -570,7 +596,8 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   el.removeAttribute('style');
   el.dataset.taskState = model.visualState;
   el.setAttribute('role', 'group');
-  el.setAttribute('aria-label', model.taskPart ? `${model.agentPart}: ${model.taskPart}` : model.agentPart);
+  const executionAria = model.executionLabel ? `; execution ${model.executionLabel}` : '';
+  el.setAttribute('aria-label', `${model.taskPart ? `${model.agentPart}: ${model.taskPart}` : model.agentPart}${executionAria}`);
 
   let header = el.querySelector('.task-chip-header');
   if (!header) {
@@ -584,6 +611,16 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   agentEl.className = 'task-chip-agent';
   agentEl.textContent = model.agentPart || 'Task';
   header.appendChild(agentEl);
+
+  if (model.executionLabel) {
+    const execution = document.createElement('span');
+    execution.className = 'task-chip-child-role task-chip-child-execution task-chip-root-execution';
+    execution.textContent = model.executionLabel;
+    execution.title = model.executionTargetExplicit
+      ? `Explicit execution target: ${model.executionLabel}`
+      : `Execution: ${model.executionLabel}`;
+    header.appendChild(execution);
+  }
 
   const badgeEl = document.createElement('span');
   badgeEl.className = 'task-chip-badge';

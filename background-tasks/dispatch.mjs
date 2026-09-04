@@ -120,6 +120,16 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const suppressLearning = parentTurnCtx.suppressLearning === true;
   activeTasks.set(taskId, {
     agentId: scopedAgent.id, userId, agentName: pipeName, agentEmoji,
+    provider: typeof scopedAgent.provider === 'string' && scopedAgent.provider.trim()
+      ? scopedAgent.provider.trim().slice(0, 100)
+      : null,
+    model: typeof scopedAgent.model === 'string' && scopedAgent.model.trim()
+      ? scopedAgent.model.trim().slice(0, 300)
+      : null,
+    reasoningEffort: typeof scopedAgent.reasoningEffort === 'string' && scopedAgent.reasoningEffort.trim()
+      ? scopedAgent.reasoningEffort.trim().slice(0, 40)
+      : null,
+    executionTargetExplicit: scopedAgent._executionTargetLocked === true,
     startedAt: Date.now(), summary, phase: 'queued', status: 'running',
     originalTask: task,
     coordinatorAgentId,
@@ -889,6 +899,10 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
       rootWatcherId: rec.rootWatcherId || null,
       visibleAgentId: rec.visibleAgentId || null,
       name: rec.agentName, summary: rec.summary,
+      provider: rec.provider || null,
+      model: rec.model || null,
+      reasoningEffort: rec.reasoningEffort || null,
+      executionTargetExplicit: rec.executionTargetExplicit === true,
       outcome: delegOutcome,
       finalText: finalReportPreview.slice(0, 240),
       toolsUsed: rec.toolsUsed || 0,
@@ -902,6 +916,10 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
     appendTaskOutcome(rec.userId, {
       taskId, kind: 'delegation', agentId: rec.agentId,
       agentName: rec.agentName, status: delegOutcome,
+      provider: rec.provider || null,
+      model: rec.model || null,
+      reasoningEffort: rec.reasoningEffort || null,
+      executionTargetExplicit: rec.executionTargetExplicit === true,
       summary: finalReportPreview || rec.summary,
       durationMs: Date.now() - (rec.startedAt || Date.now()),
       error: errorMsg || null,

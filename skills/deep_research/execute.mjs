@@ -590,6 +590,17 @@ export async function buildWorkerTools(userId) {
   return out;
 }
 
+function inheritedExecutionTargetMetadata(caller) {
+  const explicitTarget = caller?._explicitExecutionTarget;
+  return {
+    ...(caller?._executionTargetLocked === true ? { _executionTargetLocked: true } : {}),
+    ...(caller?._executionEffortLocked === true ? { _executionEffortLocked: true } : {}),
+    ...(explicitTarget && typeof explicitTarget === 'object' && !Array.isArray(explicitTarget)
+      ? { _explicitExecutionTarget: { ...explicitTarget } }
+      : {}),
+  };
+}
+
 function makeEphemeralWorker(caller, angle, workerTools) {
   return {
     id: `ephemeral_${randomBytes(4).toString('hex')}`,
@@ -602,6 +613,7 @@ function makeEphemeralWorker(caller, angle, workerTools) {
     skills: ['deep_research', 'web'],
     tools: workerTools,
     ephemeral: true,
+    ...inheritedExecutionTargetMetadata(caller),
     systemPrompt: [
       `You are a focused research worker. Your entire job is to research ONLY this angle:`,
       ``,
@@ -632,6 +644,7 @@ function makeEphemeralPlanner(caller) {
     skills: [],
     tools: [], // no tools — the planner just returns JSON
     ephemeral: true,
+    ...inheritedExecutionTargetMetadata(caller),
     systemPrompt: [
       `You decompose a research topic into 2 to 4 distinct sub-angles for parallel investigation.`,
       `Each angle must be a genuinely different dimension (not a rewording of the topic).`,
@@ -656,7 +669,10 @@ function makeEphemeralSynthesizer(caller) {
     ephemeral: true,
     // Preserve the historical medium-cost synthesis default unless the user
     // explicitly routed Deep Research to a skill execution profile.
-    reasoningEffort: caller._skillExecutionApplied ? caller.reasoningEffort : 'medium',
+    reasoningEffort: caller._executionEffortLocked === true || caller._skillExecutionApplied
+      ? caller.reasoningEffort
+      : 'medium',
+    ...inheritedExecutionTargetMetadata(caller),
     systemPrompt: [
       `You merge multiple parallel research sub-reports into a single cohesive markdown document.`,
       `Preserve distinct findings from each angle. Deduplicate sources. Remove redundancy.`,
@@ -698,13 +714,15 @@ async function* execResearchParallel(topic, depth, userId, callerAgentId, signal
   const blocked = checkChildSafety(userId, topic);
   if (blocked) { yield { type: 'result', text: blocked }; return; }
 
-  // Load caller agent for provider/model inheritance. The agentId passed to
-  // skill executors is scoped (e.g. "user_abc_coordinator") but getAgentsForUser
-  // returns agents with short ids ("coordinator"), so match on either form.
+  // Prefer the transient routed caller so an explicitly targeted sole worker
+  // keeps its provider/model lock. Fall back to the durable roster for legacy
+  // callers outside a routed turn. The agentId passed to skill executors is
+  // scoped (e.g. "user_abc_coordinator") while roster ids are short.
   const { getAgentsForUser, getUser } = await import('../../routes/_helpers.mjs');
   throwIfAborted(signal);
   const agents = getAgentsForUser(userId);
   let caller =
+    getToolRouterContext()?.agent ??
     agents.find(a => a.id === callerAgentId) ??
     agents.find(a => callerAgentId?.endsWith?.('_' + a.id)) ??
     agents[0];

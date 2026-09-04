@@ -55,6 +55,20 @@ export function bindWorkerDeps(deps) {
   if (deps._rootChildSnapshot !== undefined) _rootChildSnapshot = deps._rootChildSnapshot;
 }
 
+function _executionTargetStatus(row) {
+  const provider = typeof row?.provider === 'string'
+    ? row.provider.replace(/[\r\n]/g, ' ').trim().slice(0, 100)
+    : '';
+  const model = typeof row?.model === 'string'
+    ? row.model.replace(/[\r\n]/g, ' ').trim().slice(0, 300)
+    : '';
+  if (!provider && !model) return '';
+  const effort = typeof row?.reasoningEffort === 'string'
+    ? row.reasoningEffort.replace(/[\r\n]/g, ' ').trim().slice(0, 40)
+    : '';
+  return `${provider && model ? `${provider}/${model}` : (provider || model)}${effort ? ` · effort ${effort}` : ''}${row.executionTargetExplicit === true ? ' (explicit)' : ''}`;
+}
+
 // ── Agent-owned background workers (manager/employee model) ──────────────────
 // Generic capability: ANY agent can hire a background worker it OWNS, watch it,
 // and report on it. Differs from dispatchBackground (coordinator→specialist
@@ -75,6 +89,10 @@ export function _retire(taskId, outcome, finalText) {
   recentWorkers.unshift({
     taskId, ownerKey: info.ownerKey, userId: info.userId,
     name: info.agentName, summary: info.summary,
+    provider: info.provider || null,
+    model: info.model || null,
+    reasoningEffort: info.reasoningEffort || null,
+    executionTargetExplicit: info.executionTargetExplicit === true,
     outcome,                                   // 'done' | 'error' | 'stopped'
     finalText: (finalText || '').slice(0, 240),
     toolsUsed: info.toolsUsed || 0,
@@ -88,6 +106,10 @@ export function _retire(taskId, outcome, finalText) {
   appendTaskOutcome(info.userId, {
     taskId, kind: 'worker', ownerKey: info.ownerKey, agentId: info.agentId,
     agentName: info.agentName, status: outcome,
+    provider: info.provider || null,
+    model: info.model || null,
+    reasoningEffort: info.reasoningEffort || null,
+    executionTargetExplicit: info.executionTargetExplicit === true,
     summary: finalText || info.summary,
     durationMs: endedAt - (info.startedAt || endedAt),
     error: outcome === 'error' ? finalText : null,
@@ -181,6 +203,16 @@ export function spawnWorker({
     : null;
   const taskRecord = {
     agentId: workerAgent.id, userId, agentName: workerName, agentEmoji: emoji,
+    provider: typeof workerAgent.provider === 'string' && workerAgent.provider.trim()
+      ? workerAgent.provider.trim().slice(0, 100)
+      : null,
+    model: typeof workerAgent.model === 'string' && workerAgent.model.trim()
+      ? workerAgent.model.trim().slice(0, 300)
+      : null,
+    reasoningEffort: typeof workerAgent.reasoningEffort === 'string' && workerAgent.reasoningEffort.trim()
+      ? workerAgent.reasoningEffort.trim().slice(0, 40)
+      : null,
+    executionTargetExplicit: workerAgent._executionTargetLocked === true,
     startedAt: Date.now(), summary, ownerKey, isWorker: true, phase: 'queued',
     requestedWorkstreams: Number.isSafeInteger(workerAgent.requestedWorkstreams)
       ? workerAgent.requestedWorkstreams
@@ -423,6 +455,10 @@ export function listWorkersForOwner(userId, ownerKey) {
         visibleAgentId: info.visibleAgentId || null,
         name: info.agentName,
         summary: info.summary,
+        provider: info.provider || null,
+        model: info.model || null,
+        reasoningEffort: info.reasoningEffort || null,
+        executionTargetExplicit: info.executionTargetExplicit === true,
         currentTool: info.currentTool || null,
         toolsUsed: info.toolsUsed || 0,
         elapsedSec: Math.round((now - info.startedAt) / 1000),
@@ -453,6 +489,10 @@ export function listWorkersForUser(userId) {
         ownerKey: info.ownerKey || null,
         name: info.agentName,
         summary: info.summary,
+        provider: info.provider || null,
+        model: info.model || null,
+        reasoningEffort: info.reasoningEffort || null,
+        executionTargetExplicit: info.executionTargetExplicit === true,
         currentTool: info.currentTool || null,
         toolsUsed: info.toolsUsed || 0,
         elapsedSec: Math.round((now - info.startedAt) / 1000),
@@ -477,6 +517,10 @@ function _outcomeRowToRecent(row, userId) {
     userId,
     ownerKey: row.ownerKey || null,
     agentId: row.agentId || null,
+    provider: row.provider || null,
+    model: row.model || null,
+    reasoningEffort: row.reasoningEffort || null,
+    executionTargetExplicit: row.executionTargetExplicit === true,
     name: row.agentName || 'Agent',
     summary: row.summary || '',
     outcome: row.status,   // already normalized to 'done'|'stopped'|'error' at write time
@@ -557,6 +601,10 @@ export function listActiveDelegationsForUser(userId, excludeAgentId = null) {
         visibleAgentId: info.visibleAgentId || null,
         name: info.agentName,
         summary: info.summary,
+        provider: info.provider || null,
+        model: info.model || null,
+        reasoningEffort: info.reasoningEffort || null,
+        executionTargetExplicit: info.executionTargetExplicit === true,
         currentTool: info.currentTool || null,
         toolsUsed: info.toolsUsed || 0,
         elapsedSec: Math.round((now - info.startedAt) / 1000),
@@ -598,15 +646,18 @@ export function describeBackgroundWorkForSession(userId, sessionAgentId = null) 
   const ownerKey = m ? m[1] : (raw || null);
   const singleMode = getOrchestrationPolicy(userId).mode === 'single';
   const ago = s => s < 90 ? `${s}s` : `${Math.round(s / 60)}m`;
+  const target = row => _executionTargetStatus(row)
+    ? `, execution ${_executionTargetStatus(row)}`
+    : '';
   const lines = [];
   for (const d of listActiveDelegationsForUser(userId, sessionAgentId)) {
-    lines.push(`RUNNING: ${d.name} — "${d.summary}" (${d.toolsUsed} tool calls, started ${ago(d.elapsedSec)} ago${d.stalled ? ', STALLED' : ''})`);
+    lines.push(`RUNNING: ${d.name} — "${d.summary}" (${d.toolsUsed} tool calls, started ${ago(d.elapsedSec)} ago${d.stalled ? ', STALLED' : ''}${target(d)})`);
   }
   const activeWorkers = singleMode
     ? listWorkersForUser(userId)
     : (ownerKey ? listWorkersForOwner(userId, ownerKey) : []);
   for (const w of activeWorkers) {
-    lines.push(`RUNNING worker: ${w.name} — "${w.summary}" (${w.toolsUsed} tool calls, started ${ago(w.elapsedSec)} ago${w.stalled ? ', STALLED' : ''})`);
+    lines.push(`RUNNING worker: ${w.name} — "${w.summary}" (${w.toolsUsed} tool calls, started ${ago(w.elapsedSec)} ago${w.stalled ? ', STALLED' : ''}${target(w)})`);
   }
   const recent = [
     ...listRecentDelegationsForUser(userId, sessionAgentId),
@@ -616,7 +667,7 @@ export function describeBackgroundWorkForSession(userId, sessionAgentId = null) 
   ].sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0)).slice(0, 5);
   for (const r of recent) {
     const verb = r.outcome === 'done' ? 'FINISHED' : (r.outcome === 'stopped' ? 'STOPPED' : 'FAILED');
-    lines.push(`${verb} ${ago(r.endedAgoSec)} ago: ${r.name} — ${r.finalText || r.summary}`);
+    lines.push(`${verb} ${ago(r.endedAgoSec)} ago: ${r.name}${target(r)} — ${r.finalText || r.summary}`);
   }
   if (!lines.length) return 'NONE — no delegations or background workers are running for this user, and none finished recently.';
   return lines.join(' | ');

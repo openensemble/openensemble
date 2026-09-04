@@ -136,6 +136,8 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
 
     yield modelCallTraceEvent({
       provider: 'anthropic', model: agent.model, tools: body.tools, round: guard.count,
+      requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
+      wireReasoningEffort: body.output_config?.effort ?? null,
     });
 
     // Retried on 429/529/5xx + network failures (honoring Retry-After) — a
@@ -165,7 +167,9 @@ export async function* streamAnthropic(agent, systemPrompt, messages, signal, us
         if (notice) yield notice;
         continue;
       }
-      if (!reasoningDisabled && isReasoningUnsupportedError(res.status, err)) {
+      if (agent._executionEffortLocked !== true
+        && !reasoningDisabled
+        && isReasoningUnsupportedError(res.status, err)) {
         console.warn('[anthropic] reasoning effort rejected; retrying without effort field');
         reasoningDisabled = true;
         const notice = capabilityNotice('anthropic', 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');

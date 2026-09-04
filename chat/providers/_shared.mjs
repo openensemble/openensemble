@@ -82,12 +82,25 @@ export const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
 export const OPENAI_OAUTH_BASE = 'https://chatgpt.com/backend-api/codex';
 
 const OLLAMA_URL_DEFAULT = 'http://localhost:11434/api/chat';
-export function getOllamaUrl() {
-  const base = loadConfig()?.cortex?.ollamaUrl;
+export function getOllamaUrl(agentOrProvider = null) {
+  const cfg = loadConfig();
+  const provider = typeof agentOrProvider === 'string'
+    ? agentOrProvider
+    : agentOrProvider?.provider;
+  if (provider === 'ollama-local') {
+    const localBase = String(cfg?.cortex?.ollamaLocalUrl || 'http://localhost:11434')
+      .replace(/\/+$/, '');
+    return /\/api$/i.test(localBase) ? `${localBase}/chat` : `${localBase}/api/chat`;
+  }
+  const base = cfg?.cortex?.ollamaUrl;
   return base ? base.replace(/\/$/, '') + '/chat' : OLLAMA_URL_DEFAULT;
 }
-export function getOllamaKey() {
+export function getOllamaKey(agentOrProvider = null) {
   const cfg = loadConfig();
+  const provider = typeof agentOrProvider === 'string'
+    ? agentOrProvider
+    : agentOrProvider?.provider;
+  if (provider === 'ollama-local') return cfg?.cortex?.ollamaLocalApiKey ?? null;
   return cfg?.cortex?.ollamaApiKey ?? cfg?.ollamaApiKey ?? null;
 }
 
@@ -128,7 +141,7 @@ const STATIC_OPENAI_COMPAT_PROVIDERS = {
   mistral:     { baseUrl: 'https://api.mistral.ai/v1',                               keyField: 'mistralApiKey',     displayName: 'Mistral' },
   groq:        { baseUrl: 'https://api.groq.com/openai/v1',                          keyField: 'groqApiKey',        displayName: 'Groq' },
   together:    { baseUrl: 'https://api.together.xyz/v1',                             keyField: 'togetherApiKey',    displayName: 'Together AI' },
-  perplexity:  { baseUrl: 'https://api.perplexity.ai',                               keyField: 'perplexityApiKey',  displayName: 'Perplexity' },
+  perplexity:  { baseUrl: 'https://api.perplexity.ai',                               keyField: 'perplexityApiKey',  displayName: 'Perplexity', modelsEndpoint: '/v1/models' },
   gemini:      { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', keyField: 'geminiApiKey',      displayName: 'Google Gemini' },
   xai:         { baseUrl: 'https://api.x.ai/v1',                                     keyField: 'grokApiKey',        displayName: 'xAI Grok' },
   zai:         { baseUrl: 'https://api.z.ai/api/paas/v4',                            keyField: 'zaiApiKey',         displayName: 'Z.AI' },
@@ -168,6 +181,9 @@ export function getCompatKey(provider) {
   if (!field) return null;
   // Check env var too (e.g. OPENAI_API_KEY, DEEPSEEK_API_KEY)
   const envVar = field.replace(/ApiKey$/, '').toUpperCase() + '_API_KEY';
+  if (provider === 'xai') {
+    return process.env.GROK_API_KEY ?? process.env.XAI_API_KEY ?? cfg[field] ?? null;
+  }
   return process.env[envVar] ?? cfg[field] ?? null;
 }
 
@@ -178,7 +194,11 @@ function getApiKey(envVar, configKey) {
 }
 export function getAnthropicKey()  { return getApiKey('ANTHROPIC_API_KEY',  'anthropicApiKey'); }
 export function getFireworksKey()  { return getApiKey('FIREWORKS_API_KEY',  'fireworksApiKey'); }
-export function getGrokKey()       { return getApiKey('GROK_API_KEY',       'grokApiKey'); }
+export function getGrokKey() {
+  if (process.env.GROK_API_KEY) return process.env.GROK_API_KEY;
+  if (process.env.XAI_API_KEY) return process.env.XAI_API_KEY;
+  return loadConfig().grokApiKey ?? null;
+}
 export function getOpenRouterKey() { return getApiKey('OPENROUTER_API_KEY', 'openrouterApiKey'); }
 
 export function getStripThinkingTags() {

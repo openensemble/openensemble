@@ -47,8 +47,6 @@ async function checkAnthropicKey(apiKey) {
 
 // Cloud OpenAI-compatible providers that expose a Bearer-auth GET /models endpoint.
 // Each entry maps a top-level config field to the URL we hit to validate the key.
-// Perplexity is intentionally omitted — it has no /models endpoint, so we fall
-// back to "configured iff key present" for it below.
 const COMPAT_HEALTH_PROBES = [
   { id: 'openai',     keyField: 'openaiApiKey',     modelsUrl: 'https://api.openai.com/v1/models' },
   { id: 'gemini',     keyField: 'geminiApiKey',     modelsUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/models' },
@@ -56,6 +54,7 @@ const COMPAT_HEALTH_PROBES = [
   { id: 'groq',       keyField: 'groqApiKey',       modelsUrl: 'https://api.groq.com/openai/v1/models' },
   { id: 'mistral',    keyField: 'mistralApiKey',    modelsUrl: 'https://api.mistral.ai/v1/models' },
   { id: 'together',   keyField: 'togetherApiKey',   modelsUrl: 'https://api.together.xyz/v1/models' },
+  { id: 'perplexity', keyField: 'perplexityApiKey', modelsUrl: 'https://api.perplexity.ai/v1/models' },
   { id: 'zai',        keyField: 'zaiApiKey',        modelsUrl: 'https://api.z.ai/api/paas/v4/models' },
   { id: 'grok',       keyField: 'grokApiKey',       modelsUrl: 'https://api.x.ai/v1/models' },
   { id: 'openrouter', keyField: 'openrouterApiKey', modelsUrl: 'https://openrouter.ai/api/v1/models' },
@@ -221,9 +220,6 @@ async function buildFullHealth() {
   if (ollamaConfigured)    providers.ollama    = ollamaOk;
   if (lmstudioConfigured)  providers.lmstudio  = lmstudioOk;
   compatProbes.forEach((p, i) => { providers[p.id] = compatResults[i]; });
-
-  // Perplexity has no /models endpoint — treat "key present" as configured+ok.
-  if (cfg.perplexityApiKey && isEnabled('perplexity')) providers.perplexity = true;
 
   // OpenAI / xAI OAuth logins — per-user tokens, no global API key.
   const oauthStatus = openAIOAuthStatus(users);

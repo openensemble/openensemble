@@ -112,6 +112,8 @@ function renderRunInspectorDetail(t) {
 
     <div class="run-metrics">
       ${metric('Provider', `${t.provider || '—'} / ${t.model || '—'}`)}
+      ${metric('Execution target', t.executionTargetExplicit === true ? 'explicit (locked)' : 'configured/inherited')}
+      ${metric('Reasoning effort', t.executionEffortExplicit === true ? 'explicit (locked)' : 'configured/inherited')}
       ${metric('Duration', fmtDuration(t.durationMs))}
       ${metric('Tools Shipped', sizes.toolCount)}
       ${metric('Tools Used', (tools.usedNames || []).length)}

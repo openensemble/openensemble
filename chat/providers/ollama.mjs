@@ -47,13 +47,23 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     compressOllamaHistory(ollamaMessages, agent.contextSize ?? 32768);
 
     const effort = effectiveReasoningEffort(agent, 'auto');
+    const gptOssEffortModel = /(?:^|[/_-])gpt-?oss(?:$|[:/_-])/i.test(String(agent.model || ''));
+    let wireThinking = agent.think ?? false;
+    if (thinkingDisabled || effort === 'off') wireThinking = false;
+    else if (gptOssEffortModel && effort !== 'auto') {
+      // GPT-OSS uses Ollama's string-valued low/medium/high control. Boolean
+      // true is valid for ordinary thinking models but loses the requested
+      // GPT-OSS level (and explicit high must remain the string "high").
+      wireThinking = effort;
+    } else if (effort === 'high') wireThinking = true;
+    else if (agent._executionEffortLocked === true && effort !== 'auto') wireThinking = effort;
     const body = {
       model:    agent.model,
       messages: finalRound
         ? appendFinalProviderRoundInstructionToMessages(ollamaMessages)
         : ollamaMessages,
       stream:   true,
-      think:    thinkingDisabled ? false : (effort === 'high' ? true : effort === 'off' ? false : (agent.think ?? false)),
+      think:    wireThinking,
       options:  { num_ctx: agent.contextSize ?? 32768, num_predict: agent.maxTokens ?? 8192 },
     };
     if (!finalRound && agent.tools.length) {
@@ -64,7 +74,11 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     }
 
     yield modelCallTraceEvent({
-      provider: 'ollama', model: agent.model, tools: body.tools, round: guard.count,
+      provider: agent.provider || 'ollama', model: agent.model, tools: body.tools, round: guard.count,
+      requestedReasoningEffort: effort,
+      wireReasoningEffort: typeof body.think === 'string'
+        ? body.think
+        : (body.think ? 'on' : 'off'),
     });
 
     // ── Ollama request diagnostics ─────────────────────────────────────────
@@ -86,8 +100,8 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
     // Retry transient statuses (5xx/429/…) AND network-level failures via the
     // shared wrapper. The old hand-rolled loop only retried 500/503 and let a
     // dropped connection throw straight out of the generator with no retry.
-    const ollamaUrl = getOllamaUrl();
-    const ollamaKey = getOllamaKey();
+    const ollamaUrl = getOllamaUrl(agent);
+    const ollamaKey = getOllamaKey(agent);
     const ollamaHeaders = { 'Content-Type': 'application/json' };
     if (ollamaKey) ollamaHeaders['Authorization'] = `Bearer ${ollamaKey}`;
     let res;
@@ -107,7 +121,10 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
     if (!res.ok) {
       const err = await res.text();
-      if (!thinkingDisabled && body.think && isReasoningUnsupportedError(res.status, err)) {
+      if (agent._executionEffortLocked !== true
+        && !thinkingDisabled
+        && body.think
+        && isReasoningUnsupportedError(res.status, err)) {
         console.warn(`[ollama] thinking rejected (${res.status}); retrying without think`);
         thinkingDisabled = true;
         continue;
@@ -349,6 +366,6 @@ export async function* streamOllama(agent, systemPrompt, working, signal, userId
 
   yield { type: '__content', content: assistantContent };
   if (ollamaInputTokens || ollamaOutputTokens) {
-    yield { type: '__usage', inputTokens: ollamaInputTokens, outputTokens: ollamaOutputTokens, provider: 'ollama', model: agent.model };
+    yield { type: '__usage', inputTokens: ollamaInputTokens, outputTokens: ollamaOutputTokens, provider: agent.provider || 'ollama', model: agent.model };
   }
 }

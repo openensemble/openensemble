@@ -118,6 +118,9 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
 
     yield modelCallTraceEvent({
       provider: 'openrouter', model: agent.model, tools: body.tools, round: guard.count,
+      requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
+      wireReasoningEffort: body.reasoning?.effort
+        ?? (body.reasoning?.enabled === false ? 'off' : null),
     });
 
     const res = await fetchWithRetry(OPENROUTER_URL, {
@@ -142,7 +145,9 @@ export async function* streamOpenRouter(agent, systemPrompt, messages, signal, u
         if (notice) yield notice;
         continue;
       }
-      if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
+      if (agent._executionEffortLocked !== true
+        && !reasoningDisabled
+        && isReasoningUnsupportedError(res.status, errText)) {
         console.warn('[openrouter] reasoning effort rejected; retrying without reasoning field');
         reasoningDisabled = true;
         const notice = capabilityNotice('openrouter', 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');

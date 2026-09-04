@@ -101,6 +101,10 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
 
     yield modelCallTraceEvent({
       provider: providerKey, model: agent.model, tools: body.tools, round: guard.count,
+      requestedReasoningEffort: agent.reasoningEffort ?? 'auto',
+      wireReasoningEffort: body.reasoning_effort
+        ?? body.reasoning?.effort
+        ?? (body.reasoning?.enabled === false ? 'off' : null),
     });
 
     const res = await fetchWithRetry(endpoint, {
@@ -140,7 +144,9 @@ export async function* streamOpenAICompat(providerKey, agent, systemPrompt, mess
         if (notice) yield notice;
         continue;
       }
-      if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
+      if (agent._executionEffortLocked !== true
+        && !reasoningDisabled
+        && isReasoningUnsupportedError(res.status, errText)) {
         console.warn(`[${providerKey}] reasoning effort rejected; retrying without reasoning field`);
         reasoningDisabled = true;
         const notice = capabilityNotice(providerKey, 'reasoning_effort', 'Provider rejected the configured reasoning effort — continuing without it.');

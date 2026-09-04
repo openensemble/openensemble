@@ -28,7 +28,7 @@ import {
   getRoleManifest, addRoleManifest, removeRoleManifest, getRoleTools,
   isSkillRuntimeEnabledForUser,
 } from '../roles.mjs';
-import { EFFORT_VALUES, normalizeReasoningEffort, reasoningEffortOptions } from '../lib/reasoning-effort.mjs';
+import { isReasoningEffortValue, normalizeReasoningEffort } from '../lib/reasoning-effort.mjs';
 import {
   clearSkillOverride,
   getSkillExecutionOverride,
@@ -36,7 +36,10 @@ import {
   setSkillExecutionOverride,
 } from '../lib/skill-overrides.mjs';
 import { isExecutionTextModel } from '../lib/skill-execution.mjs';
-import { validateExecutionModelAccess } from '../lib/execution-model-policy.mjs';
+import {
+  listExecutionReasoningEfforts,
+  validateExecutionModelAccess,
+} from '../lib/execution-model-policy.mjs';
 import {
   tryAcquireUserTopologyTransition,
   runWithUserTopologyLease,
@@ -91,6 +94,36 @@ function cleanOptionalExecutionValue(value) {
   return typeof value === 'string' ? value.trim() : value;
 }
 
+function parseRequestedReasoningEffort(value) {
+  const effort = value == null || value === ''
+    ? 'auto'
+    : (typeof value === 'string' ? value.trim().toLowerCase() : '');
+  return isReasoningEffortValue(effort)
+    ? { ok: true, effort }
+    : { ok: false, status: 400, error: 'Invalid reasoning effort' };
+}
+
+async function validateReasoningEffortForModel(userId, provider, model, effort) {
+  if (!isExecutionTextModel(provider, model)) {
+    return { ok: false, status: 400, error: 'A valid provider/model is required for that reasoning effort' };
+  }
+  const access = await validateExecutionModelAccess(userId, provider, model, { refreshCatalog: true });
+  if (!access.ok) return { ok: false, status: access.status ?? 400, error: access.error };
+  if (effort === 'auto') return { ok: true };
+  const supported = new Set((await listExecutionReasoningEfforts(
+    userId,
+    provider,
+    model,
+  )).map(option => option.value));
+  return supported.has(effort)
+    ? { ok: true }
+    : {
+      ok: false,
+      status: 400,
+      error: `Reasoning effort "${effort}" is not supported by ${provider}/${model}`,
+    };
+}
+
 async function validateSkillExecution(userId, skillId, body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { status: 400, error: 'Execution setting must be an object' };
@@ -106,7 +139,7 @@ async function validateSkillExecution(userId, skillId, body) {
   if (provider != null && !isExecutionTextModel(provider, model)) {
     return { status: 400, error: 'That provider/model is not a valid text model' };
   }
-  if (reasoningEffort != null && !EFFORT_VALUES.includes(reasoningEffort)) {
+  if (reasoningEffort != null && !isReasoningEffortValue(reasoningEffort)) {
     return { status: 400, error: 'Invalid reasoning effort' };
   }
 
@@ -119,7 +152,11 @@ async function validateSkillExecution(userId, skillId, body) {
     const inherited = inheritedAgentForSkill(userId, skillId);
     const effectiveProvider = provider ?? inherited?.provider ?? '';
     const effectiveModel = model ?? inherited?.model ?? '';
-    const supported = new Set(reasoningEffortOptions(effectiveProvider, effectiveModel).map(option => option.value));
+    const supported = new Set((await listExecutionReasoningEfforts(
+      userId,
+      effectiveProvider,
+      effectiveModel,
+    )).map(option => option.value));
     if (!supported.has(reasoningEffort)) {
       return {
         status: 400,
@@ -153,7 +190,7 @@ export async function handle(req, res) {
       model: resolvedModel,
       provider: resolvedProvider,
       current,
-      options: reasoningEffortOptions(resolvedProvider, resolvedModel),
+      options: await listExecutionReasoningEfforts(authId, resolvedProvider, resolvedModel),
     }));
     return true;
   }
@@ -164,6 +201,16 @@ export async function handle(req, res) {
     const authId = requirePrivileged(req, res); if (!authId) return true;
     try {
       const { model, provider } = JSON.parse(await readBody(req));
+      const current = getAgentsForUser(authId).find(agent => agent.id === agentModelMatch[1]);
+      const parsedEffort = parseRequestedReasoningEffort(current?.reasoningEffort);
+      const effortValidation = parsedEffort.ok
+        ? await validateReasoningEffortForModel(authId, provider, model, parsedEffort.effort)
+        : parsedEffort;
+      if (!effortValidation.ok) {
+        res.writeHead(effortValidation.status);
+        res.end(JSON.stringify({ error: effortValidation.error }));
+        return true;
+      }
       await updateAgentMeta(agentModelMatch[1], { model, provider });
       broadcastAgentList();
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -287,7 +334,13 @@ export async function handle(req, res) {
         res.writeHead(429); res.end(JSON.stringify({ error: `Agent limit reached (${MAX_AGENTS_PER_USER}). Delete some before creating more.` })); return true;
       }
       let { name, emoji, description, model, provider, toolSet, skillCategory, systemPrompt, personality, maxTokens, contextSize, reasoningEffort } = JSON.parse(await readBody(req));
-      reasoningEffort = normalizeReasoningEffort(reasoningEffort, 'auto');
+      const parsedEffort = parseRequestedReasoningEffort(reasoningEffort);
+      if (!parsedEffort.ok) {
+        res.writeHead(parsedEffort.status);
+        res.end(JSON.stringify({ error: parsedEffort.error }));
+        return true;
+      }
+      reasoningEffort = parsedEffort.effort;
       if (personality != null && (typeof personality !== 'string' || personality.length > 2000)) {
         res.writeHead(400); res.end(JSON.stringify({ error: 'personality must be a string of 2000 characters or fewer' })); return true;
       }
@@ -322,6 +375,23 @@ export async function handle(req, res) {
         return true;
       }
       skillCategory = roleValidation.skillCategory;
+      // Existing API callers may omit both fields to inherit the coordinator
+      // model chosen by createCustomAgent. Auto effort adds no provider-specific
+      // parameter, so that legacy/default path needs no catalog lookup. Any
+      // explicit pair or effort is still checked atomically before creation.
+      if (model != null || provider != null || reasoningEffort !== 'auto') {
+        const effortValidation = await validateReasoningEffortForModel(
+          authId,
+          provider,
+          model,
+          reasoningEffort,
+        );
+        if (!effortValidation.ok) {
+          res.writeHead(effortValidation.status);
+          res.end(JSON.stringify({ error: effortValidation.error }));
+          return true;
+        }
+      }
       topologyTransition = tryAcquireUserTopologyTransition(authId);
       if (!topologyTransition) {
         res.writeHead(409);
@@ -400,10 +470,35 @@ export async function handle(req, res) {
       // Existence check BEFORE any mutation — updateAgentMeta/saveUserAgentOverride
       // used to run first, so a PATCH against a garbage id wrote a global
       // agentModels entry (or a per-user override) into config before 404ing.
-      if (!getAgent(agentMatch[1])) {
+      const baseAgent = getAgent(agentMatch[1]);
+      if (!baseAgent) {
         res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return true;
       }
       const rawOwnedAgent = getCustomAgentRecord(agentMatch[1], authId);
+      const effectiveAgent = getAgentsForUser(authId).find(agent => agent.id === agentMatch[1])
+        ?? baseAgent;
+      if ('reasoningEffort' in changes || changes.model || changes.provider) {
+        const parsedEffort = parseRequestedReasoningEffort(
+          'reasoningEffort' in changes ? changes.reasoningEffort : effectiveAgent.reasoningEffort,
+        );
+        if (!parsedEffort.ok) {
+          res.writeHead(parsedEffort.status);
+          res.end(JSON.stringify({ error: parsedEffort.error }));
+          return true;
+        }
+        const effortValidation = await validateReasoningEffortForModel(
+          authId,
+          changes.provider || effectiveAgent.provider,
+          changes.model || effectiveAgent.model,
+          parsedEffort.effort,
+        );
+        if (!effortValidation.ok) {
+          res.writeHead(effortValidation.status);
+          res.end(JSON.stringify({ error: effortValidation.error }));
+          return true;
+        }
+        if ('reasoningEffort' in changes) changes.reasoningEffort = parsedEffort.effort;
+      }
       const uiChanges = {};
       const globalChanges = {};
       if (changes.name)     uiChanges.name     = changes.name;
@@ -634,6 +729,17 @@ export async function handle(req, res) {
           throw new Error('Agent record still exists after deletion');
         }
         deletionCommitted = true;
+
+        try {
+          await modifyUser(ownerId, user => {
+            if (!user.agentOverrides || typeof user.agentOverrides !== 'object'
+                || Array.isArray(user.agentOverrides)) return;
+            delete user.agentOverrides[agentMatch[1]];
+            if (Object.keys(user.agentOverrides).length === 0) delete user.agentOverrides;
+          });
+        } catch (e) {
+          warnCleanup('agent-override cleanup', e);
+        }
 
         // Repair a primary policy first. If the normal service fails, make one
         // direct best-effort repair while the writer is still held. Read-time

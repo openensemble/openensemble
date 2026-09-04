@@ -6,6 +6,34 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-09-04
+
+**Build an agent team from any configured model**
+Any agent can now launch background workers on any model available to your
+OpenEnsemble profile, regardless of which provider or model is running the
+parent. Ask for “five Luna agents,” “Terra agents,” “one Qwen and one Grok,” or
+any other homogeneous or mixed combination across OpenAI, Anthropic, xAI,
+Ollama, LM Studio, OpenRouter, and compatible providers. Exact requests stay
+exact: if a requested provider or model is unavailable, OE reports that instead
+of quietly substituting another target.
+
+**Reasoning effort now matches the model doing the work**
+Each worker validates its requested reasoning level against its own target
+model, so a level such as low, medium, high, xhigh, ultra, or ultra-code is used
+only when that model supports it. OE refreshes provider-advertised models and
+reasoning levels into a writable local capability catalog, allowing newly added
+models and levels to appear without waiting for an OE code update. OpenAI
+“ultra” requests remain visible as ultra even when the provider's wire protocol
+names that setting differently.
+
+**See exactly where delegated work ran**
+Agent controls and Run Inspector now show each worker's requested and resolved
+provider, model, and reasoning effort. Mixed teams retain their individual
+assignments through planning, retries, saved skills, and nested parallel work,
+making routing drift and unsupported combinations visible instead of silent.
+
+---
+
 ## 2026-09-02
 
 **See remote-node health on a dashboard**

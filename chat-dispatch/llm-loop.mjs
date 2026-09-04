@@ -36,6 +36,8 @@ import { buildVoiceSystemAddition } from '../lib/voice-context.mjs';
 import { getTurn, recordRouting } from '../lib/turn-trace-context.mjs';
 import { isRetrySafeControlTool } from '../chat/recovery.mjs';
 import { stableAgentRef } from '../lib/agent-ref.mjs';
+import { applyAgentExecutionTarget } from '../lib/agent-execution-target.mjs';
+import { validateExecutionModelAccess } from '../lib/execution-model-policy.mjs';
 
 // ── Specialist router (pre-LLM) ───────────────────────────────────────────────
 // Skip the coordinator's reasoning turn when the user's message clearly
@@ -613,6 +615,47 @@ function isRetriableProviderFailure(error) {
     || RETRIABLE_RE.test(String(error?.message || ''));
 }
 
+async function prepareProviderFailoverAgent(userId, scopedAgent, failover) {
+  // A spawned child's explicit provider/model is part of the user's requested
+  // execution allocation. Global failover policy must never reroute it.
+  if (scopedAgent?._executionTargetLocked === true) return null;
+  const provider = typeof failover?.fallbackProvider === 'string'
+    ? failover.fallbackProvider.trim()
+    : '';
+  const model = typeof failover?.fallbackModel === 'string'
+    ? failover.fallbackModel.trim()
+    : '';
+  if (!provider || !model) return null;
+
+  let access;
+  try {
+    access = await validateExecutionModelAccess(
+      userId,
+      provider,
+      model,
+      { refreshCatalog: true },
+    );
+  } catch (error) {
+    log.warn('chat', 'provider failover authorization threw', {
+      userId, provider, model, err: error?.message || String(error),
+    });
+    return null;
+  }
+  if (!access?.ok) {
+    log.warn('chat', 'provider failover target rejected', {
+      userId, provider, model,
+      reason: access?.reason || access?.error || 'unavailable',
+    });
+    return null;
+  }
+
+  // Applying a provider/model target without an effort intentionally removes
+  // the primary model's reasoningEffort and effort lock. The fallback starts
+  // at its own provider default, with fresh target metadata and fail-closed
+  // dispatch semantics if its adapter is unavailable.
+  return applyAgentExecutionTarget(scopedAgent, { provider, model });
+}
+
 // Only arm when the reply actually ENDS by asking the user something — a "?"
 // earlier in the reply is usually rhetorical or embedded and would open a
 // needless listen window (a false-listen vector). The LLM is prompted to end
@@ -792,19 +835,18 @@ export async function runLlmTurn({
     if (failoverError) {
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
-      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel
-          && isRetriableProviderFailure(failoverError) && !effectfulToolInvoked) {
+      const fallbackAgent = fo?.enabled
+          && isRetriableProviderFailure(failoverError)
+          && !effectfulToolInvoked
+        ? await prepareProviderFailoverAgent(userId, scopedAgent, fo)
+        : null;
+      if (fallbackAgent) {
         console.log(`[failover] Primary ${scopedAgent.provider}/${scopedAgent.model} failed: ${failoverError.message} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         // Voice devices TTS every token — never speak provider/model names
         // (spoken errors are provider-agnostic by rule). Web keeps the
         // informative version.
         onEvent({ type: 'token', text: source === 'voice-device' ? 'One moment — retrying. ' : `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
 
-        const fallbackAgent = {
-          ...scopedAgent,
-          provider: fo.fallbackProvider,
-          model: fo.fallbackModel,
-        };
         const fallbackError = await runStream(fallbackAgent);
         if (fallbackError) await emitTurnFailure(fallbackError, !effectfulToolInvoked && fallbackError.retryable !== false);
       } else {
@@ -835,15 +877,18 @@ export async function runLlmTurn({
       // Attempt failover on thrown errors too (e.g. fetch failures)
       const cfg = loadConfig();
       const fo = cfg.providerFailover;
-      if (fo?.enabled && fo?.fallbackProvider && fo?.fallbackModel
-          && isRetriableProviderFailure(e) && !effectfulToolInvoked) {
+      const fallbackAgent = fo?.enabled
+          && isRetriableProviderFailure(e)
+          && !effectfulToolInvoked
+        ? await prepareProviderFailoverAgent(userId, scopedAgent, fo)
+        : null;
+      if (fallbackAgent) {
         console.log(`[failover] Primary threw: ${enrichedMessage} — trying ${fo.fallbackProvider}/${fo.fallbackModel}`);
         // Voice devices TTS every token — never speak provider/model names
         // (spoken errors are provider-agnostic by rule). Web keeps the
         // informative version.
         onEvent({ type: 'token', text: source === 'voice-device' ? 'One moment — retrying. ' : `_Retrying with ${fo.fallbackProvider}/${fo.fallbackModel}…_\n\n`, agent: agentId });
         try {
-          const fallbackAgent = { ...scopedAgent, provider: fo.fallbackProvider, model: fo.fallbackModel };
           const fallbackError = await runStream(fallbackAgent);
           if (fallbackError) await emitTurnFailure(fallbackError, !effectfulToolInvoked && fallbackError.retryable !== false);
         } catch (e2) {

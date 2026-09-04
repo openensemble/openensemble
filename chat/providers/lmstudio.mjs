@@ -56,13 +56,15 @@ export async function* streamLMStudio(agent, systemPrompt, messages, signal, use
   };
   const effort = effectiveReasoningEffort(agent, 'auto');
   if (!reasoningDisabled) {
-    if (effort === 'off' || agent.think === false) body.reasoning = 'off';
-    if (effort === 'high') body.reasoning = 'on';
+    if (effort !== 'auto') body.reasoning = effort;
+    else if (agent.think === false) body.reasoning = 'off';
   }
   if (prevId) body.previous_response_id = prevId;
 
   yield modelCallTraceEvent({
     provider: 'lmstudio', model: agent.model, tools: body.tools, round: 1,
+    requestedReasoningEffort: effort,
+    wireReasoningEffort: body.reasoning ?? null,
   });
 
   const res = await fetchWithRetry(getLmstudioNativeUrl(), {
@@ -73,7 +75,10 @@ export async function* streamLMStudio(agent, systemPrompt, messages, signal, use
 
   if (!res.ok) {
     const err = await res.text();
-    if (!reasoningDisabled && body.reasoning !== undefined && isReasoningUnsupportedError(res.status, err)) {
+    if (agent._executionEffortLocked !== true
+      && !reasoningDisabled
+      && body.reasoning !== undefined
+      && isReasoningUnsupportedError(res.status, err)) {
       console.warn(`[lmstudio] reasoning rejected (${res.status}); retrying without reasoning`);
       yield* streamLMStudio(agent, systemPrompt, messages, signal, userId, true);
       return;
@@ -225,12 +230,14 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
     if (!streamUsageDisabled) body.stream_options = { include_usage: true };
     const effort = effectiveReasoningEffort(agent, 'auto');
     if (!reasoningDisabled) {
-      if (effort === 'off' || agent.think === false) body.reasoning = 'off';
-      if (effort === 'high') body.reasoning = 'on';
+      if (effort !== 'auto') body.reasoning = effort;
+      else if (agent.think === false) body.reasoning = 'off';
     }
 
     yield modelCallTraceEvent({
       provider: 'lmstudio', model: agent.model, tools: body.tools, round: guard.count,
+      requestedReasoningEffort: effort,
+      wireReasoningEffort: body.reasoning ?? null,
     });
 
     const res = await fetchWithRetry(getLmstudioCompatUrl(), {
@@ -247,7 +254,10 @@ export async function* streamLMStudioCompat(agent, systemPrompt, messages, signa
         streamUsageDisabled = true;
         continue;
       }
-      if (!reasoningDisabled && body.reasoning !== undefined && isReasoningUnsupportedError(res.status, errText)) {
+      if (agent._executionEffortLocked !== true
+        && !reasoningDisabled
+        && body.reasoning !== undefined
+        && isReasoningUnsupportedError(res.status, errText)) {
         console.warn(`[lmstudio] reasoning rejected (${res.status}); retrying without reasoning`);
         reasoningDisabled = true;
         continue;

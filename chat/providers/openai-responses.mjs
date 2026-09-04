@@ -288,15 +288,23 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
   //   - ChatGPT Codex (openai-oauth, per-user OAuth → chatgpt.com/.../codex)
   //   - xAI SuperGrok OAuth (xai-oauth → cli-chat-proxy.grok.com)
   //   - xAI Grok API key (grok/xai → api.x.ai/v1)
+  //   - Perplexity Agent API (provider-qualified catalog ids → /v1/responses)
   // They share the Responses wire shape — identical SSE events, tool format,
   // and instructions/input — so the tool loop is shared; only auth, endpoint,
   // headers, and the native-search provider slug differ.
   const isXaiOauth  = agent.provider === 'xai-oauth';
   const isXaiKey    = agent.provider === 'grok' || agent.provider === 'xai';
-  const isCodex     = !isXaiOauth && !isXaiKey;
-  const wsProvider  = isCodex ? 'openai-oauth' : (isXaiOauth ? 'xai-oauth' : 'xai');
-  const tag         = isCodex ? 'openai-oauth' : (isXaiOauth ? 'xai-oauth' : 'grok');
-  const displayName = isCodex ? 'OpenAI Codex' : (isXaiOauth ? 'xAI Grok (SuperGrok)' : 'xAI Grok');
+  const isPerplexity = agent.provider === 'perplexity';
+  const isCodex     = !isXaiOauth && !isXaiKey && !isPerplexity;
+  const wsProvider  = isCodex
+    ? 'openai-oauth'
+    : (isXaiOauth ? 'xai-oauth' : (isPerplexity ? 'perplexity' : 'xai'));
+  const tag         = isCodex
+    ? 'openai-oauth'
+    : (isXaiOauth ? 'xai-oauth' : (isPerplexity ? 'perplexity' : 'grok'));
+  const displayName = isCodex
+    ? 'OpenAI Codex'
+    : (isXaiOauth ? 'xAI Grok (SuperGrok)' : (isPerplexity ? 'Perplexity Agent API' : 'xAI Grok'));
   const labCodexRelay = isCodex
     && process.env.OPENENSEMBLE_LAB === '1'
     && process.env.OE_LAB_CODEX_RELAY === '1';
@@ -304,7 +312,9 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     ? `${OPENAI_OAUTH_BASE}/responses`
     : isXaiOauth
       ? `${GROK_CLI_PROXY_BASE.replace(/\/$/, '')}/responses`
-      : `${OPENAI_COMPAT_PROVIDERS['xai'].baseUrl.replace(/\/$/, '')}/responses`;
+      : isPerplexity
+        ? `${OPENAI_COMPAT_PROVIDERS.perplexity.baseUrl.replace(/\/$/, '')}/v1/responses`
+        : `${OPENAI_COMPAT_PROVIDERS.xai.baseUrl.replace(/\/$/, '')}/responses`;
 
   let assistantContent = '';
   let totalInputTokens = 0, totalOutputTokens = 0, totalCachedTokens = 0;
@@ -395,10 +405,13 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       return;
     }
   } else {
-    const key = getCompatKey('xai');
+    const key = getCompatKey(isPerplexity ? 'perplexity' : 'xai');
     if (!key) {
       yield usageTelemetry();
-      yield { type: 'error', message: 'xAI Grok API key not set. Add it in Settings → Providers.' };
+      yield {
+        type: 'error',
+        message: `${isPerplexity ? 'Perplexity' : 'xAI Grok'} API key not set. Add it in Settings → Providers.`,
+      };
       return;
     }
     auth = { access_token: key, account_id: null };
@@ -688,7 +701,9 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
           };
           return;
         }
-      } else if (!reasoningDisabled && isReasoningUnsupportedError(res.status, errText)) {
+      } else if (agent._executionEffortLocked !== true
+        && !reasoningDisabled
+        && isReasoningUnsupportedError(res.status, errText)) {
         usageCardinalityValid = false;
         console.warn(`[${tag}] reasoning effort rejected; retrying without reasoning field`);
         reasoningDisabled = true;
@@ -798,7 +813,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       // A missing [DONE] is valid for SuperGrok only at a genuinely clean EOF.
       // Strict parsing keeps a malformed or truncated trailing record from
       // being silently discarded and misclassified as that clean close.
-      strict: labCodexRelay || isXaiOauth,
+      strict: labCodexRelay || isXaiOauth || isPerplexity,
     })) {
       if (ev.__sseDone === true) {
         loopSseDoneCount++;

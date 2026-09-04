@@ -279,14 +279,109 @@ function _populateAgentModelSelect(agent, { preserveCurrent = false } = {}) {
     ['xAI Grok ⚡',                 byProv('grok')],
     ['OpenRouter 🔀',              byProv('openrouter')],
   ];
+  // Compatible providers are server-configurable, so keep the familiar groups
+  // above in their stable order and append any remaining provider at runtime.
+  // Metadata order is authoritative for configured providers (including Z.AI);
+  // first-seen model order covers any provider that predates its metadata load.
+  const groupedProviders = new Set([
+    'anthropic', 'openai', 'openai-oauth', 'xai-oauth', 'gemini', 'deepseek',
+    'mistral', 'groq', 'together', 'perplexity', 'ollama', 'lmstudio',
+    'fireworks', 'grok', 'openrouter',
+  ]);
+  const compatMeta = typeof window.getCompatProviderMeta === 'function'
+    ? window.getCompatProviderMeta()
+    : [];
+  const compatLabels = new Map(compatMeta.map(meta => [meta.id, meta.label || meta.id]));
+  const dynamicProviderIds = [...new Set([
+    ...compatMeta.map(meta => meta.id),
+    ...all.map(model => model.provider),
+  ])].filter(provider => provider && !groupedProviders.has(provider));
+  for (const provider of dynamicProviderIds) {
+    const models = byProv(provider);
+    if (models.length) groups.push([compatLabels.get(provider) || provider, models]);
+  }
   sel.innerHTML = all.length
-    ? groups.map(([label, list]) => list.length ? `<optgroup label="${label}">${list.map(mkOpt).join('')}</optgroup>` : '').join('')
+    ? groups.map(([label, list]) => list.length ? `<optgroup label="${escHtml(label)}">${list.map(mkOpt).join('')}</optgroup>` : '').join('')
     : `<option value="qwen2.5:7b||ollama">qwen2.5:7b</option>`;
   // If the agent's saved model isn't in the dropdown (provider disabled / not yet loaded),
   // inject it so the select reflects reality instead of silently defaulting to option 0.
   if (agent?.model && !all.some(m => m.name === curModel && m.provider === curProvider)) {
     const orphan = `<option value="${escHtml(curModel)}||${escHtml(curProvider ?? '')}" selected>${escHtml(curModel)} (unavailable)</option>`;
     sel.innerHTML = orphan + sel.innerHTML;
+  }
+  if (!sel.dataset.reasoningEffortListener) {
+    sel.dataset.reasoningEffortListener = '1';
+    sel.addEventListener('change', () => {
+      _refreshAgentReasoningEfforts({
+        desired: $('aReasoningEffort')?.value || 'auto',
+        preserveUnsupported: false,
+      });
+    });
+  }
+}
+
+let agentReasoningEffortRequestId = 0;
+
+function _setAgentReasoningEffortOptions(options, desired, preserveUnsupported = false) {
+  const select = $('aReasoningEffort');
+  if (!select) return;
+  const normalized = [];
+  const seen = new Set();
+  for (const option of Array.isArray(options) ? options : []) {
+    const value = typeof option?.value === 'string' ? option.value.trim().toLowerCase() : '';
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push({ value, label: option.label || value });
+  }
+  if (!seen.has('auto')) normalized.unshift({ value: 'auto', label: 'Auto' });
+  const requested = typeof desired === 'string' && desired ? desired.toLowerCase() : 'auto';
+  if (preserveUnsupported && !seen.has(requested)) {
+    normalized.push({
+      value: requested,
+      label: `${requested} (not supported for this model)`,
+    });
+  }
+  select.innerHTML = '';
+  for (const option of normalized) {
+    const element = document.createElement('option');
+    element.value = option.value;
+    element.textContent = option.label;
+    select.appendChild(element);
+  }
+  select.value = seen.has(requested) || preserveUnsupported ? requested : 'auto';
+}
+
+async function _refreshAgentReasoningEfforts({ desired = 'auto', preserveUnsupported = false } = {}) {
+  const modelSelect = $('aModel');
+  const effortSelect = $('aReasoningEffort');
+  if (!modelSelect || !effortSelect) return;
+  const [model, provider] = String(modelSelect.value || '').split('||');
+  if (!model || !provider) {
+    _setAgentReasoningEffortOptions([{ value: 'auto', label: 'Auto' }], desired, preserveUnsupported);
+    return;
+  }
+  const requestId = ++agentReasoningEffortRequestId;
+  effortSelect.disabled = true;
+  effortSelect.setAttribute('aria-busy', 'true');
+  try {
+    const params = new URLSearchParams({ provider, model });
+    const response = await fetch(`/api/reasoning-efforts?${params}`, { cache: 'no-store' });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !Array.isArray(result.options)) {
+      throw new Error(result.error || `Could not load reasoning efforts (HTTP ${response.status})`);
+    }
+    if (requestId !== agentReasoningEffortRequestId) return;
+    _setAgentReasoningEffortOptions(result.options, desired, preserveUnsupported);
+  } catch {
+    if (requestId !== agentReasoningEffortRequestId) return;
+    _setAgentReasoningEffortOptions(
+      [{ value: 'auto', label: 'Auto' }], desired, preserveUnsupported,
+    );
+  } finally {
+    if (requestId === agentReasoningEffortRequestId) {
+      effortSelect.disabled = false;
+      effortSelect.removeAttribute('aria-busy');
+    }
   }
 }
 const EMOJI_PICKS = ['🤖','🔬','📧','📈','🎯','🛠','📝','🎓','💡','🔐','🧑‍💻','🎨',
@@ -439,7 +534,12 @@ async function openNewAgentModal(agent = null) {
   _populateAgentModelSelect(agent);
 
   $('aMaxTokens').value = agent?.maxTokens ?? '';
-  if ($('aReasoningEffort')) $('aReasoningEffort').value = agent?.reasoningEffort ?? 'auto';
+  const savedReasoningEffort = agent?.reasoningEffort ?? 'auto';
+  if ($('aReasoningEffort')) $('aReasoningEffort').value = savedReasoningEffort;
+  _refreshAgentReasoningEfforts({
+    desired: savedReasoningEffort,
+    preserveUnsupported: Boolean(agent),
+  });
   // contextSize: show blank if the value is the default 32768 (agentToWire always populates it)
   const cs = agent?.contextSize;
   $('aContextSize').value = (cs && cs !== 32768) ? cs : '';

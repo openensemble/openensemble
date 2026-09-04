@@ -346,9 +346,15 @@ async function saveNewsPreference() {
 const _SKILL_EXECUTION_EFFORT_OPTIONS = [
   { value: 'auto', label: 'Auto' },
   { value: 'off', label: 'Off' },
+  { value: 'on', label: 'On' },
+  { value: 'none', label: 'None' },
+  { value: 'minimal', label: 'Minimal' },
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' },
+  { value: 'max', label: 'Max' },
+  { value: 'ultra', label: 'Ultra' },
 ];
 const _skillExecutionSaved = new Map();
 const _skillExecutionEffortRequests = new Map();

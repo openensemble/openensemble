@@ -275,6 +275,17 @@
   font-size: 9px;
   text-transform: lowercase;
 }
+.task-chip-child-execution {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+.task-chip-root-execution {
+  flex: 0 1 45%;
+}
 .task-chip-child-detail {
   overflow: hidden;
   color: var(--muted);
