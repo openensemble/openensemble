@@ -884,6 +884,8 @@ function _selectScopedExecutionOutcome(matching, requests, task, label) {
   return bestMatches.length === 1 ? bestMatches[0] : null;
 }
 
+const INHERITED_EXECUTION_GUIDANCE = 'Omit execution_targets entirely to inherit the owner\'s configured model and reasoning effort. Do not send blank provider/model fields.';
+
 function _authorizeExecutionOutcome({
   requests,
   count,
@@ -899,6 +901,12 @@ function _authorizeExecutionOutcome({
   }
 
   if (allocation) {
+    if (sameCount.every(request => request.kind === 'generic')) {
+      return {
+        ok: false,
+        error: `This agent outcome does not name a provider or model. ${INHERITED_EXECUTION_GUIDANCE} No worker was started.`,
+      };
+    }
     const matchingTargets = sameCount.filter(request =>
       request.kind === 'targeted'
       && _requestTargetsMatchAllocation(request, allocation, count, targetHints));
@@ -1697,7 +1705,11 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
     MAX_PARALLEL_WORKSTREAMS,
   );
   if (!normalizedAllocation.ok) {
-    yield { type: 'result', text: `${normalizedAllocation.error} No worker was started.`, isError: true };
+    yield {
+      type: 'result',
+      text: `${normalizedAllocation.error} If the user did not name a provider or model: ${INHERITED_EXECUTION_GUIDANCE} No worker was started.`,
+      isError: true,
+    };
     return;
   }
   const attestedTargetHints = _attestedExecutionTargetHints(
@@ -1831,7 +1843,7 @@ async function* _workerTool(name, args, userId, callerAgentId, internalOptions =
       && admittedAllocationEntries.length) {
     yield {
       type: 'result',
-      text: 'execution_targets was not authorized because the user did not name a provider or model for the requested agents. No worker was started.',
+      text: `execution_targets was not authorized because the user did not name a provider or model for the requested agents. ${INHERITED_EXECUTION_GUIDANCE} No worker was started.`,
       isError: true,
     };
     return;
