@@ -7,7 +7,8 @@ set -euo pipefail
 
 OE_VERSION="1.0.0"
 DEFAULT_INSTALL_DIR="$HOME/.openensemble"
-MIN_NODE_MAJOR=18
+MIN_NODE_MAJOR=22
+MIN_NODE_MINOR=12
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -232,14 +233,16 @@ check_node() {
   command -v node &>/dev/null || return 1
   local ver; ver=$(node --version 2>/dev/null | sed 's/v//')
   local major="${ver%%.*}"
-  [[ "$major" -ge "$MIN_NODE_MAJOR" ]] 2>/dev/null
+  local remainder="${ver#*.}"
+  local minor="${remainder%%.*}"
+  [[ "$major" -gt "$MIN_NODE_MAJOR" || ( "$major" -eq "$MIN_NODE_MAJOR" && "$minor" -ge "$MIN_NODE_MINOR" ) ]] 2>/dev/null
 }
 
 if check_node; then
   NODE_VER=$(node --version)
   success "Node.js $NODE_VER found"
 else
-  warn "Node.js $MIN_NODE_MAJOR+ not found"
+  warn "Node.js $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ not found"
   if prompt_yn "Install Node.js via nvm?" "y"; then
     # Install nvm if missing
     if [[ ! -s "$HOME/.nvm/nvm.sh" ]]; then
@@ -258,7 +261,7 @@ else
     set -u
     success "Node.js $(node --version) installed"
   else
-    error "Node.js $MIN_NODE_MAJOR+ is required. Install it from https://nodejs.org and re-run."
+    error "Node.js $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ is required. Install it from https://nodejs.org and re-run."
     exit 1
   fi
 fi
@@ -269,7 +272,7 @@ if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   # nvm internals reference unset vars — temporarily relax -u while sourcing.
   set +u
   # shellcheck source=/dev/null
-  source "$NVM_DIR/nvm.sh" 2>/dev/null || true
+  source "$NVM_DIR/nvm.sh" --no-use 2>/dev/null || true
   set -u
 fi
 
@@ -293,68 +296,14 @@ resolve_node_npm() {
   export PATH="$node_dir${PATH:+:$PATH}"
 }
 resolve_node_npm
+check_node || { error "Selected Node.js must be $MIN_NODE_MAJOR.$MIN_NODE_MINOR or newer."; exit 1; }
 
 # ─── Copy Application Files ───────────────────────────────────────────────────
 header "Installing OpenEnsemble"
 
-# .git is NOT excluded — preserved so `oe update` can git-pull in place.
-EXCLUDES=(
-  --exclude='.claude'
-  --exclude='node_modules'
-  --exclude='config.json'
-  --exclude='gmail-credentials.json'
-  --exclude='users/'
-  --exclude='training-data/'
-  --exclude='unsloth_compiled_cache/'
-  --exclude='venv/'
-  --exclude='research/'
-  --exclude='images/'
-  --exclude='videos/'
-  --exclude='cortex-lancedb/'
-  --exclude='memory-db/'
-  # Top-level user-data excludes — anchored with leading slash so they don't
-  # also match skills/{expenses,tasks,shared-docs} which the runtime imports.
-  --exclude='/expenses/'
-  --exclude='/tasks/'
-  --exclude='/agents/'
-  --exclude='/shared-docs/'
-  --exclude='active-sessions.json'
-  --exclude='messages.json'
-  --exclude='threads.json'
-  --exclude='shared-notes.json'
-  --exclude='sharing.json'
-  --exclude='sessions/'
-  --exclude='lancedb/'
-  --exclude='plugins/usr_*'
-  --exclude='plugins/*_*'
-  --exclude='activity/'
-  --exclude='tools/'
-  --exclude='*.log'
-  --exclude='*.bak'
-  --exclude='CLAUDE.md'
-  --exclude='WORKSPACE_LOG.md'
-  --exclude='server.log'
-)
-
-mkdir -p "$INSTALL_DIR"
-
-if command -v rsync &>/dev/null; then
-  rsync -a --delete "${EXCLUDES[@]}" "$SOURCE_DIR/" "$INSTALL_DIR/"
-else
-  # Fallback: cp with manual exclusions (.git is kept so `oe update` can git-pull)
-  find "$SOURCE_DIR" -mindepth 1 -maxdepth 1 \
-    ! -name '.claude' ! -name 'node_modules' \
-    ! -name 'config.json' ! -name 'gmail-credentials.json' \
-    ! -name 'users' ! -name 'training-data' ! -name 'unsloth_compiled_cache' \
-    ! -name 'venv' ! -name 'research' ! -name 'images' ! -name 'videos' \
-    ! -name 'cortex-lancedb' ! -name 'memory-db' ! -name 'expenses' \
-    ! -name 'tasks' ! -name 'agents' ! -name 'shared-docs' \
-    ! -name 'sharing.json' ! -name 'sessions' ! -name 'lancedb' ! -name 'activity' ! -name 'tools' \
-    ! -name '*.log' ! -name '*.bak' ! -name 'CLAUDE.md' \
-    -exec cp -r {} "$INSTALL_DIR/" \;
-  # Remove any user-created plugins that slipped through (rsync has --exclude for this)
-  find "$INSTALL_DIR/plugins" -mindepth 1 -maxdepth 1 -type d ! -name 'markets' ! -name 'news' -exec rm -rf {} + 2>/dev/null
-fi
+# Git's index (or .gitignore for release archives) defines application files.
+# Both copy paths preserve all destination runtime data and custom plugins.
+node "$SOURCE_DIR/scripts/install-source.mjs" "$SOURCE_DIR" "$INSTALL_DIR"
 
 success "Application files copied to $INSTALL_DIR"
 

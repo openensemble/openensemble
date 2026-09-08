@@ -79,9 +79,9 @@ async function restoreBackup() {
       return;
     }
     if (data.restarting) {
-      status.textContent = `Restored ${data.restored} file(s). Restarting server…`;
+      status.textContent = 'Backup validated. Restarting to restore the snapshot…';
       status.style.color = 'var(--green,#43b89c)';
-      showToast(`Backup restored — server restarting`);
+      showToast('Backup validated — server restarting');
       if (pwInput) pwInput.value = '';
       _waitForServerAfterRestore(status);
     } else {

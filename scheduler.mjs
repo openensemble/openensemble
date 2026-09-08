@@ -24,6 +24,16 @@ function recordTaskRun(task, row) {
     .catch(e => console.warn('[scheduler] appendTaskRun failed:', e.message));
 }
 
+async function deviceAlarmLifecycle(method, task, deadlineIso) {
+  if (!task?.alarm && !task?.voiceTimer) return;
+  try {
+    const alarms = await import('./lib/scheduled-device-alarms.mjs');
+    await alarms[method](task, deadlineIso);
+  } catch (error) {
+    console.warn(`[scheduler] ${method} failed:`, error?.message || error);
+  }
+}
+
 const TASKS_DIR      = path.join(BASE_DIR, 'tasks'); // legacy fallback
 const TASKS_LOCK_KEY = path.join(BASE_DIR, 'tasks.lock');
 
@@ -251,19 +261,41 @@ export async function addTask(task) {
   return saved;
 }
 
-export function removeTask(id, ownerId = null) {
+export async function removeTask(id, ownerId = null, { completed = false } = {}) {
   _lastIntervalFireAt.delete(id); // drop the interval fire-history entry (bounded leak fix)
-  return modifyTaskById(id, tasks => { const i = tasks.findIndex(t => t.id === id); if (i !== -1) tasks.splice(i, 1); }, ownerId);
+  const removed = await modifyTaskById(id, tasks => {
+    const i = tasks.findIndex(t => t.id === id);
+    if (i !== -1) return tasks.splice(i, 1)[0];
+  }, ownerId);
+  await deviceAlarmLifecycle(completed ? 'completeScheduledDeviceAlarm' : 'cancelScheduledDeviceAlarm', removed);
 }
 
 export function updateTask(id, patch, ownerId = null) {
   // ownerId is pinned at creation — a patch can't migrate a task to another
   // owner's file (route PATCH bodies pass through here verbatim, and the old
   // load-all/save-all path would silently re-home the record).
-  const { ownerId: _pinned, ...rest } = patch ?? {};
+  const { ownerId: _pinned, deviceAlarmRevision: _revision, ...rest } = patch ?? {};
   // Prefer the caller-supplied owner as the fast-path hint; fall back to a
   // pinned ownerId in the patch, else the O(users) scan inside modifyTaskById.
-  return modifyTaskById(id, tasks => { const i = tasks.findIndex(t => t.id === id); if (i !== -1) Object.assign(tasks[i], rest); }, ownerId ?? _pinned ?? null);
+  const alarmFields = ['enabled', 'voiceDeviceId', 'datetime', 'time', 'timezone', 'repeat',
+    'intervalMs', 'dow', 'weekdaysOnly', 'weekendsOnly', 'alarm', 'voiceTimer'];
+  return modifyTaskById(id, tasks => {
+    const i = tasks.findIndex(t => t.id === id);
+    if (i === -1) return;
+    const previous = { ...tasks[i] };
+    Object.assign(tasks[i], rest);
+    if (alarmFields.some(key => key in rest && rest[key] !== previous[key])) {
+      tasks[i].deviceAlarmRevision = (Number(previous.deviceAlarmRevision) || 0) + 1;
+      return { previous, fresh: { ...tasks[i] } };
+    }
+  }, ownerId ?? _pinned ?? null).then(async change => {
+    if (!change) return;
+    const { previous, fresh } = change;
+    await deviceAlarmLifecycle('cancelScheduledDeviceAlarm', previous);
+    // Device-only patches also need reconciliation; nextRunAt/anchor writes
+    // deliberately bypass this path so arming cannot recursively re-arm.
+    if (_schedulerRunning && (previous.alarm || previous.voiceTimer || fresh.alarm || fresh.voiceTimer)) scheduleNewTask(fresh);
+  });
 }
 
 // ── Scheduling ────────────────────────────────────────────────────────────────
@@ -504,8 +536,17 @@ async function runTask(task, broadcast, opts = {}) {
       const output = await handler(task, { occurrenceId, scheduledRunRootId, manual });
       console.log(`[scheduler] Task "${task.label}" complete: ${output}`);
       log.info('scheduler', 'builtin task complete', { taskId: task.id, label: task.label, handler: task.handler, durationMs: Date.now() - startedAt });
-      if (task.repeat === 'once' && !manual) await removeTask(task.id, task.ownerId);
-      else await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: output }, task.ownerId);
+      recordTaskRun(task, {
+        runId: scheduledRunRootId,
+        scheduledFor: task.datetime ?? task.time ?? null,
+        status: 'ok',
+        ...(manual ? { manual: true } : {}),
+      });
+      if (task.repeat === 'once' && !manual) await removeTask(task.id, task.ownerId, { completed: true });
+      else await updateTask(task.id, {
+        lastRun: new Date().toISOString(), lastOutput: output, lastError: null,
+        ...(!manual && task.consecutiveFailures ? { consecutiveFailures: 0 } : {}),
+      }, task.ownerId);
       if (broadcast) broadcast({ type: 'task_complete', taskId: task.id, agent: task.agent ?? 'system' });
       return;
     }
@@ -853,7 +894,7 @@ async function finalizeScheduledTask(task, {
     await updateTask(task.id, patch, task.ownerId);
   } else if (task.repeat === 'once') {
     // One-shot tasks vanish after firing.
-    await removeTask(task.id, task.ownerId);
+    await removeTask(task.id, task.ownerId, { completed: succeeded });
   } else {
     const patch = { lastRun: new Date().toISOString(), ...(runId ? { lastFinalizedRunId: runId } : {}) };
     // Cross-fire failure tracking. Per-fire retry (MAX_ATTEMPTS) handles
@@ -975,23 +1016,32 @@ function findFreshScheduledTask(task) {
                       : loadAllTasksForScheduler().find(t => t.id === task.id);
 }
 
+function intervalAnchor(task, interval, now = Date.now()) {
+  const saved = Date.parse(task.intervalAnchorAt || '');
+  if (Number.isFinite(saved)) return saved;
+  const legacy = Date.parse(task.lastRun || '');
+  if (Number.isFinite(legacy)) return legacy;
+  const due = Date.parse(task.nextRunAt || '');
+  return Number.isFinite(due) ? due - interval : now;
+}
+
 // Schedule a single task (schedules → runs → reschedules daily, or runs once).
-// `fireAnchorTs` (interval tasks only) overrides task.lastRun when computing the
-// next delay — passed by the re-arm below so the cadence anchors to the actual
-// fire time even before the child barrier stamps lastRun.
+// `fireAnchorTs` keeps an interval anchored to its actual start while an
+// asynchronous child barrier is still publishing the previous outcome.
 function scheduleTask(task, broadcast, fireAnchorTs = null) {
   if (!task.enabled) {
     // A disabled task has no armed timer, so any nextRunAt left over from
     // before it was disabled is stale — clear it so the drawer doesn't show
     // a "next run" time that will never happen.
     if (task.nextRunAt) updateTask(task.id, { nextRunAt: null }, task.ownerId).catch(() => {});
+    void deviceAlarmLifecycle('cancelScheduledDeviceAlarm', task);
     return;
   }
 
   // Clear any existing timer for this task before scheduling a new one
   if (_timers.has(task.id)) { clearTimeout(_timers.get(task.id)); _timers.delete(task.id); }
 
-  let delay, label, occurrenceAt;
+  let delay, label, occurrenceAt, intervalAnchorAt;
   let isLateOnce = false, lateByMs = 0;
   if (task.repeat === 'once') {
     if (!task.datetime) return;
@@ -1008,26 +1058,17 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
     lateByMs = isLateOnce ? -rawDelay : 0;
     label = new Date(task.datetime).toLocaleString();
   } else if (task.repeat === 'interval') {
-    // Fixed-cadence tasks: anchored to lastRun, not to boot. Arming a full
-    // interval from every boot meant a task whose interval never elapsed
-    // between OE's frequent restarts NEVER fired while showing enabled
-    // ("every 2 days" on a box that restarts daily). An overdue task fires
-    // promptly once, then re-arms normally (lastRun is stamped per fire).
-    // A missing/invalid intervalMs means a malformed task — skip rather than
-    // spin every minute.
+    // The cadence anchor survives restart separately from lastRun, which
+    // records completion and can also be changed by an explicit Run now.
     const raw = Number(task.intervalMs);
     if (!Number.isFinite(raw) || raw <= 0) {
       console.warn(`[scheduler] Task "${task.label}" has invalid intervalMs=${task.intervalMs}; not scheduled.`);
       return;
     }
     const interval = Math.max(raw, MIN_INTERVAL_MS);
-    // Anchor to the ACTUAL last fire. On re-arm the caller passes fireAnchorTs
-    // because the child barrier stamps lastRun asynchronously — reading
-    // task.lastRun here would still hold the PREVIOUS fire's time, yielding
-    // delay≈0 and a double-fire every cycle. Boot/PATCH callers pass nothing
-    // and fall back to the persisted lastRun.
-    const anchor = Number.isFinite(fireAnchorTs) ? fireAnchorTs : (Date.parse(task.lastRun || '') || 0);
-    const dueAt = anchor ? anchor + interval : Date.now() + interval;
+    const anchor = Number.isFinite(fireAnchorTs) ? fireAnchorTs : intervalAnchor(task, interval);
+    intervalAnchorAt = new Date(anchor).toISOString();
+    const dueAt = anchor + interval;
     delay = Math.max(0, dueAt - Date.now());
     occurrenceAt = new Date(dueAt).toISOString();
     label = `every ${formatInterval(interval)}`;
@@ -1053,7 +1094,10 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
   // console log. Fire-and-forget: scheduleTask is called synchronously from
   // hot paths (boot arm loop, every re-arm after a fire, every PATCH), and a
   // slow write here must not delay arming the next task's timer.
-  updateTask(task.id, { nextRunAt: eta.toISOString() }, task.ownerId).catch(e =>
+  updateTask(task.id, {
+    nextRunAt: occurrenceAt,
+    ...(intervalAnchorAt ? { intervalAnchorAt } : {}),
+  }, task.ownerId).then(() => deviceAlarmLifecycle('syncScheduledDeviceAlarm', task, occurrenceAt)).catch(e =>
     console.warn(`[scheduler] Failed to persist nextRunAt for "${task.label}":`, e.message));
 
   scheduleLongTimeout(task.id, delay, async () => {
@@ -1078,6 +1122,7 @@ function scheduleTask(task, broadcast, fireAnchorTs = null) {
             log.warn('scheduler', 'interval task fired early — skipping spurious tick', { taskId: task.id, label: task.label, sinceLastMs: firedAt - prevFire, intervalMs: iv });
             return; // finally re-arms anchored to prevFire
           }
+          await updateTask(task.id, { intervalAnchorAt: new Date(firedAt).toISOString() }, current.ownerId);
           _lastIntervalFireAt.set(task.id, firedAt);
         }
         if (isLateOnce) {
@@ -1152,5 +1197,11 @@ export function scheduleNewTask(task) {
 export async function runTaskNow(id, ownerId) {
   const task = findTaskById(id, ownerId);
   if (!task) throw new Error(`Task ${id} not found`);
+  if (task.repeat === 'interval' && !Number.isFinite(Date.parse(task.intervalAnchorAt || ''))) {
+    const interval = Math.max(Number(task.intervalMs) || 0, MIN_INTERVAL_MS);
+    await updateTask(task.id, {
+      intervalAnchorAt: new Date(intervalAnchor(task, interval)).toISOString(),
+    }, ownerId);
+  }
   return runTask(task, _broadcast, { manual: true });
 }

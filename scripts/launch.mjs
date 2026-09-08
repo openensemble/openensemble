@@ -24,10 +24,14 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { applyPendingRestore } from '../lib/backup-state.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const SCRIPTS_DIR = path.dirname(SELF);
 const ROOT = path.resolve(SCRIPTS_DIR, '..');
+// Restore while no application cache, session, or background writer exists.
+// On failure the transaction restores old state and leaves an actionable error.
+applyPendingRestore(ROOT);
 const SERVER_ENTRY = process.env.OE_LAUNCH_TARGET
   ? path.resolve(ROOT, process.env.OE_LAUNCH_TARGET)
   : path.join(ROOT, 'server.mjs');

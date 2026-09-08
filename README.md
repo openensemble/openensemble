@@ -112,7 +112,7 @@ Currently the only supported hardware is the **Seeed reSpeaker XVF3800 4-Mic Arr
 ## Requirements
 
 - Linux (tested on Debian-family LXCs and VMs); macOS works for local dev
-- Node.js ≥ 18 (the installer pulls one via `nvm` if missing)
+- Node.js ≥ 22.12 (the installer pulls one via `nvm` if missing)
 - `build-essential`, Python ≥ 3.7 (`python3` and `python3-full`), `zip`, `bubblewrap`, `git`, `ffmpeg`, `openssl` (installer offers to install them — `git` is required for in-app auto-update; if you grabbed the source as a zip instead of cloning, install `git` and run `git clone --depth 1` over the install dir or auto-update will be disabled)
 - **For voice devices (beta, optional):** a **Seeed reSpeaker XVF3800 4-Mic Array + XIAO ESP32-S3** carrier board. This is currently the only supported hardware. Other voice-hardware combinations may work but aren't tested or shipped with matching firmware. Chrome or Edge browser required for the in-app flash wizard (WebUSB + Web Serial).
 

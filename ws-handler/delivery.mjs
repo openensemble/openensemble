@@ -87,13 +87,14 @@ export function sendToUser(userId, msg) {
  * Used for OTA wake-word delivery (ww_upload) and any future device-
  * scoped pushes.
  */
-export function sendToDevice(deviceId, msg) {
+export function sendToDevice(deviceId, msg, { requiredCapability = null } = {}) {
   if (!getMainWss() || !deviceId) return 0;
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   let delivered = 0;
   let sendError = null;
   for (const client of getMainWss().clients) {
-    if (client.readyState === client.OPEN && client._deviceId === deviceId) {
+    if (client.readyState === client.OPEN && client._deviceId === deviceId
+        && (!requiredCapability || (client._authenticated && client._caps?.includes(requiredCapability)))) {
       try { client.send(data); delivered++; }
       catch (e) { sendError = e.message; }
     }

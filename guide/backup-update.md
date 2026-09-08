@@ -2,13 +2,13 @@
 
 ## Backups
 
-OpenEnsemble is fully backed by files on disk — `users/`, `config.json`, `messages.json`, `tasks/`, `expenses/`, `roles/`, etc. The Backup tab packs all of them into a single `tar.gz`.
+OpenEnsemble is fully backed by files on disk — `users/`, `config.json`, `messages.json`, `tasks/`, `expenses/`, `roles/`, etc. The Backup tab packs all of them into a single `tar.gz` (or encrypted `.oeb`).
 
 ### Export
 
 **Settings → Backup → Export Backup** → **Download**. The file includes:
 
-- `config.json`
+- `config.json` and the custom-provider registry (`config/user-providers.json`)
 - All user dirs under `users/` (which is where each user's per-user encryption key lives, so encrypted-at-rest fields restore cleanly)
 - `messages.json`, `threads.json`, `tasks/`
 - Expenses, autolabel rules, sharing manifest
@@ -34,7 +34,13 @@ Two paths:
 - **Existing install** — Settings → Backup → Restore Backup → upload `.tar.gz`. Replaces current state.
 - **Fresh install** — on the first-run screen, click "Already have an OpenEnsemble backup?" and upload. Skips the rest of first-run.
 
-Restore is destructive: anything currently in the install is overwritten. Take an export first if you might want to roll back.
+Restore validates the archive and stages it before restarting. The launcher applies it before loading accounts, encryption keys, scheduler tasks, or other in-memory state. Users, files, and custom drawers created after the snapshot are removed from the restored data. Browser and API sessions are cleared; sign in again after restart. Paired devices reconnect through the restored device registries.
+
+If a restore cannot finish applying, OE rolls back the changed paths and keeps the staged archive for a retry. The startup error explains the failure. Fix the storage or permission problem and start `node scripts/launch.mjs` again. For manual starts, `npm start` also uses the launcher. Keep a separate export if you want to return to the state before a successful restore.
+
+Both plain and encrypted UI backups have a 500 MiB compressed limit and a 5 GiB restored-data limit. Export checks the limits before returning a download. Larger installations need an offline filesystem backup.
+
+Backups contain saved configuration, credentials, and the keys needed to decrypt them. Global configuration is copied in its saved on-disk form; environment-only credentials are not included. Use a password-protected export when storing the backup somewhere untrusted. Restoring a legacy export that omitted configuration preserves non-secret destination configuration. If the destination has encrypted global credentials, use a fresh installation or create a new export, so the restore cannot pair those credentials with an unrelated encryption key.
 
 ### Encryption keys
 

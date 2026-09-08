@@ -4,7 +4,7 @@
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "scripts": {
-    "start": "node server.mjs",
+    "start": "node scripts/launch.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "node scripts/danger-zone-lint.mjs",
@@ -29,5 +29,8 @@
     "@types/node": "^25.9.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

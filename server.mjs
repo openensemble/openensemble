@@ -3,6 +3,7 @@
  * HTTP + WebSocket on port 3737
  */
 
+import { assertNoPendingRestore, hasPendingRestore } from './lib/backup-state.mjs';
 import http       from 'http';
 import https      from 'https';
 import fs         from 'fs';
@@ -135,6 +136,7 @@ const PORT     = 3737;
 const HTTPS_PORT = 3739;  // adjacent to 3737; 3738 reserved for the node-agent UDP discovery broadcast
 const UI_DIR  = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 const BASE_DIR = path.dirname(fileURLToPath(import.meta.url));
+assertNoPendingRestore(BASE_DIR);
 // The isolated real-model lab must not start any independent writer, network
 // listener, credential migration, or host repair before the later scheduler
 // guard is reached. Production never sets this environment variable.
@@ -403,7 +405,7 @@ const SECURITY_HEADERS = {
   'X-Frame-Options': 'SAMEORIGIN',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()',
   'Content-Security-Policy': CSP,
 };
 
@@ -413,6 +415,11 @@ const SECURITY_HEADERS = {
 const API_BODY_CAP = 25 * 1024 * 1024; // 25 MiB
 
 const httpServer = http.createServer(async (req, res) => {
+  if (hasPendingRestore(BASE_DIR)) {
+    res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '3' });
+    res.end(JSON.stringify({ error: 'A validated backup restore is waiting for restart. Start OE with node scripts/launch.mjs if restart does not complete.' }));
+    return;
+  }
   // Inject security headers into every response
   const _origWriteHead = res.writeHead.bind(res);
   res.writeHead = (status, headers) => {
@@ -739,23 +746,35 @@ registerBuiltin('fireReminder', async (task, runContext = {}) => {
         // the 10-minute cap hits. Distinct from one-shot reminders below.
         const isAlarm = (task.voiceTimer && task.voiceTimerSeconds) || task.alarm;
         if (isAlarm) {
+          const { getScheduledDeviceAlarm } = await import('./lib/scheduled-device-alarms.mjs');
+          const scheduled = runContext.manual ? null : await getScheduledDeviceAlarm(task, runContext.occurrenceId);
           const label = task.voiceTimerSeconds
             ? formatDurationAdj(task.voiceTimerSeconds)
             : (task.label || 'alarm');
-          const id = registerAlarm({
+          const remainingDevices = scheduled?.cancelled ? [] : deviceIds.filter(id =>
+            !scheduled?.ackedDeviceIds?.includes(id) && !scheduled?.retiredDeviceIds?.includes(id));
+          const id = remainingDevices.length ? registerAlarm({
+            ...(scheduled && { id: scheduled.id }),
             userId: task.ownerId,
             label,
-            deviceIds,
-            triggerAtMs: Date.now(),
+            deviceIds: remainingDevices,
+            triggerAtMs: scheduled?.deadline ?? Date.now(),
+            firedDeviceIds: scheduled?.firedDeviceIds || [],
             awaitingFireAck: true,
-          });
+          }) : scheduled.id;
           // Alarms ring chime-only — no TTS announcement. The chime + cadence
           // is the alarm; the label is for logging / future "list my alarms"
           // queries only. Skipping synth saves an OpenAI TTS round-trip per
           // fire and matches phone-alarm behavior.
           let pushed = 0;
           const alarmType = task.voiceTimer ? 'timer' : 'wallclock';
-          for (const dId of deviceIds) {
+          for (const dId of remainingDevices) {
+            if (scheduled?.deviceIds?.includes(dId)) {
+              // A capable device already owns the persisted deadline. Repeating
+              // the due-time command could restart an offline-dismissed alarm.
+              if (!scheduled.cancelled) pushed++;
+              continue;
+            }
             if (sendAlarmArm(dId, { id, label, triggerAtMs: Date.now(), audioMp3: null, type: alarmType })) {
               pushed++;
             }
@@ -777,11 +796,8 @@ registerBuiltin('fireReminder', async (task, runContext = {}) => {
     if (n > 0) delivered.push(`ws-fallback(${n})`);
   }
 
-  // Auto-delete one-time reminders after firing — they don't need to persist
-  if (task.repeat === 'once') {
-    const { removeTask } = await import('./scheduler.mjs');
-    removeTask(task.id);
-  }
+  // The scheduler finalizes automatic one-shots after recording success.
+  // Manual runs keep their future occurrence and device countdown intact.
 
   const summary = delivered.length ? delivered.join('+') : 'nobody-online';
   console.log(`[reminder] "${task.label}" → ${summary} for ${task.ownerId}`);

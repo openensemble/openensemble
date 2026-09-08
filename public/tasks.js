@@ -73,7 +73,13 @@ function formatTaskCadenceLabel(t) {
 }
 
 async function loadTaskList() {
-  try { const r = await fetch('/api/tasks'); tasks = await r.json(); } catch { tasks = []; }
+  try {
+    const r = await fetch('/api/tasks');
+    if (r.ok) {
+      const data = await r.json();
+      if (Array.isArray(data)) tasks = data;
+    }
+  } catch { /* Keep the last task list and open drafts during a connection loss. */ }
   try {
     const r = await fetch('/api/watchers');
     watchers = await r.json();
@@ -295,7 +301,8 @@ function renderTaskHistoryPanel(taskId) {
   return `<div style="margin-top:2px">${runs.map(_renderRunRow).join('')}</div>`;
 }
 
-function renderTaskRow(t) {
+function renderTaskRow(t, view = 'taskList') {
+  const controlId = field => `te-${field}-${view}-${t.id}`;
   const schedStr = t.repeat === 'once'
     ? (t.datetime ? '1× ' + new Date(t.datetime).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '1× (no time set)')
     : `🔁 ${formatTaskCadenceText(t)}`;
@@ -360,35 +367,58 @@ function renderTaskRow(t) {
   const agentOptions = parkedRunnerOption
     + agents.map(a => `<option value="${escHtml(a.id)}"${a.id===t.agent?' selected':''}>${escHtml(a.emoji||'')} ${escHtml(a.name)}</option>`).join('');
   const timeField = t.repeat === 'once'
-    ? `<label>When<input type="datetime-local" id="te-dt-${escHtml(t.id)}" value="${_toLocalInputValue(t.datetime)}"></label>`
+    ? `<label>When<input type="datetime-local" data-task-field="dt" id="${escHtml(controlId('dt'))}" value="${_toLocalInputValue(t.datetime)}"></label>`
     : t.repeat === 'interval'
-    ? `<label>Run every (minutes)<input type="number" min="1" step="1" id="te-iv-${escHtml(t.id)}" value="${escHtml(String(Math.max(1, Math.round((t.intervalMs||3600000)/60000))))}"></label>`
-    : `<label>${escHtml(formatTaskCadenceLabel(t))}<input type="time" id="te-tm-${escHtml(t.id)}" value="${escHtml(t.time||'09:00')}"></label>`;
+    ? `<label>Run every (minutes)<input type="number" min="1" step="1" data-task-field="iv" id="${escHtml(controlId('iv'))}" value="${escHtml(String(Math.max(1, Math.round((t.intervalMs||3600000)/60000))))}"></label>`
+    : `<label>${escHtml(formatTaskCadenceLabel(t))}<input type="time" data-task-field="tm" id="${escHtml(controlId('tm'))}" value="${escHtml(t.time||'09:00')}"></label>`;
   const agentBlock = isReminder ? '' : `
       <label>Runner
-        <select id="te-ag-${escHtml(t.id)}">${agentOptions}</select>
+        <select data-task-field="ag" id="${escHtml(controlId('ag'))}">${agentOptions}</select>
       </label>
       <label>Prompt (what to ask the agent at fire time)
-        <textarea id="te-pr-${escHtml(t.id)}" rows="3">${escHtml(t.prompt||'')}</textarea>
+        <textarea data-task-field="pr" id="${escHtml(controlId('pr'))}" rows="3">${escHtml(t.prompt||'')}</textarea>
       </label>
       <label style="flex-direction:row;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;align-self:flex-start">
-        <input type="checkbox" id="te-si-${escHtml(t.id)}" ${t.silent ? 'checked' : ''} style="margin:0;padding:0;width:auto;background:transparent;border:none;appearance:auto">
+        <input type="checkbox" data-task-field="si" id="${escHtml(controlId('si'))}" ${t.silent ? 'checked' : ''} style="margin:0;padding:0;width:auto;background:transparent;border:none;appearance:auto">
         Silent — run without showing in chat
       </label>`;
   const lastOutput = t.lastOutput ? `<div class="task-edit-meta">Last run: ${escHtml(String(t.lastOutput).slice(0, 200))}</div>` : '';
   const editor = `
-    <div class="task-edit-panel">
-      <label>Label<input type="text" id="te-lb-${escHtml(t.id)}" value="${escHtml(t.label||'')}"></label>
+    <div class="task-edit-panel" data-task-editor="${escHtml(t.id)}">
+      <label>Label<input type="text" data-task-field="lb" id="${escHtml(controlId('lb'))}" value="${escHtml(t.label||'')}"></label>
       ${timeField}
       ${agentBlock}
       ${lastOutput}
       <div class="task-edit-actions">
-        <button class="btn-task-save" data-action="saveTaskEdits" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>Save</button>
-        ${isReminder ? '' : `<button class="btn-task-run" data-action="runTaskNow" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' title="Run this task once right now to test it">▶ Run now</button>`}
+        <button class="btn-task-save" data-action="saveTaskEdits" data-args='${JSON.stringify([t.id, "$el"]).replace(/'/g, "&#39;")}'>Save</button>
+        ${isReminder ? '' : `<button class="btn-task-run" data-action="runTaskNow" data-args='${JSON.stringify([t.id, "$el"]).replace(/'/g, "&#39;")}' title="Run this task once right now to test it">▶ Run now</button>`}
         <button class="btn-task-cancel" data-action="toggleTaskExpanded" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}'>Cancel</button>
       </div>
     </div>`;
   return header + editor;
+}
+
+function replaceTaskList(list, html) {
+  if (!list) return;
+  const editor = list.querySelector('[data-task-editor]');
+  const focused = editor?.contains(document.activeElement) ? document.activeElement : null;
+  const selection = focused && typeof focused.selectionStart === 'number'
+    ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
+  const scrollTop = list.scrollTop;
+  list.innerHTML = html;
+  const replacement = list.querySelector('[data-task-editor]');
+  if (editor && replacement?.dataset.taskEditor === editor.dataset.taskEditor) {
+    replacement.replaceWith(editor);
+  } else if (replacement) {
+    // Compare saves against the values shown when this editor opened. A
+    // refresh can change server fields that the user has not edited.
+    replacement._taskEditBaseline = { ...tasks.find(t => t.id === replacement.dataset.taskEditor) };
+  }
+  if (focused && list.contains(focused)) {
+    focused.focus({ preventScroll: true });
+    if (selection) focused.setSelectionRange(...selection);
+  }
+  list.scrollTop = scrollTop;
 }
 
 function renderTasks() {
@@ -397,8 +427,8 @@ function renderTasks() {
   // scheduler/watchers.mjs for the design rationale.
   const sectionHeader = (label) => `<div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;margin:8px 4px 4px">${label}</div>`;
 
-  const tasksHtml = tasks.length
-    ? tasks.map(renderTaskRow).join('')
+  const tasksHtml = view => tasks.length
+    ? tasks.map(t => renderTaskRow(t, view)).join('')
     : '<em style="color:var(--muted);font-size:13px">No scheduled tasks.</em>';
 
   const activeWatchers = watchers.active || [];
@@ -437,15 +467,13 @@ function renderTasks() {
       }).join('')
     : '';
 
-  const html =
-    sectionHeader('⏰ Scheduled tasks') + tasksHtml +
+  const html = view =>
+    sectionHeader('⏰ Scheduled tasks') + tasksHtml(view) +
     sectionHeader('📡 Active monitors') + watchersHtml +
     (recentHtml ? sectionHeader('Recent') + recentHtml : '');
 
-  const list = $('taskList');
-  if (list) list.innerHTML = html;
-  const settingsList = $('settingsTaskList');
-  if (settingsList) settingsList.innerHTML = html;
+  replaceTaskList($('taskList'), html('taskList'));
+  replaceTaskList($('settingsTaskList'), html('settingsTaskList'));
 }
 
 function toggleTaskExpanded(id) {
@@ -484,15 +512,17 @@ async function loadTaskHistory(id) {
   renderTasks();
 }
 
-async function saveTaskEdits(id) {
-  const t = tasks.find(x => x.id === id);
-  if (!t) return;
+async function saveTaskEdits(id, source) {
+  const panel = source?.closest?.('[data-task-editor]');
+  if (!panel || panel.dataset.taskEditor !== id || !tasks.some(t => t.id === id)) return;
+  const t = panel._taskEditBaseline || tasks.find(x => x.id === id);
+  const field = name => panel.querySelector(`[data-task-field="${name}"]`);
   const patch = {};
-  const lb = document.getElementById(`te-lb-${id}`);
+  const lb = field('lb');
   if (lb && lb.value.trim() && lb.value.trim() !== t.label) patch.label = lb.value.trim();
   if (t.repeat === 'once') {
-    const dt = document.getElementById(`te-dt-${id}`);
-    if (dt && dt.value) {
+    const dt = field('dt');
+    if (dt && dt.value && dt.value !== _toLocalInputValue(t.datetime)) {
       const d = new Date(dt.value);
       if (Number.isNaN(d.getTime())) { alert('Invalid date/time.'); return; }
       if (d.getTime() < Date.now() + 5000) { alert('That time is in the past.'); return; }
@@ -500,28 +530,30 @@ async function saveTaskEdits(id) {
       if (iso !== t.datetime) patch.datetime = iso;
     }
   } else if (t.repeat === 'interval') {
-    const iv = document.getElementById(`te-iv-${id}`);
-    if (iv && iv.value) {
+    const iv = field('iv');
+    if (iv && iv.value && iv.value !== String(Math.max(1, Math.round((t.intervalMs || 3600000) / 60000)))) {
       const mins = Math.round(Number(iv.value));
       if (!Number.isFinite(mins) || mins < 1) { alert('Interval must be at least 1 minute.'); return; }
       const ms = mins * 60000;
       if (ms !== t.intervalMs) patch.intervalMs = ms;
     }
   } else {
-    const tm = document.getElementById(`te-tm-${id}`);
+    const tm = field('tm');
     if (tm && /^\d{1,2}:\d{2}$/.test(tm.value) && tm.value !== t.time) patch.time = tm.value;
   }
   if (t.type !== 'reminder') {
-    const ag = document.getElementById(`te-ag-${id}`);
+    const ag = field('ag');
     if (ag && ag.value && ag.value !== t.agent) patch.agent = ag.value;
-    const pr = document.getElementById(`te-pr-${id}`);
+    const pr = field('pr');
     if (pr && pr.value !== (t.prompt||'')) patch.prompt = pr.value;
-    const si = document.getElementById(`te-si-${id}`);
+    const si = field('si');
     if (si && !!si.checked !== !!t.silent) patch.silent = !!si.checked;
   }
   if (!Object.keys(patch).length) { expandedTaskId = null; renderTasks(); return; }
-  const r = await fetch(`/api/tasks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
-  if (!r.ok) { alert('Update failed.'); return; }
+  try {
+    const r = await fetch(`/api/tasks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    if (!r.ok) { alert('Update failed.'); return; }
+  } catch { alert('Update failed. Check your connection and try again.'); return; }
   expandedTaskId = null;
   await loadTaskList();
 }
@@ -580,8 +612,9 @@ async function deleteTask(id) {
 // Run a task once, right now, to test it. The server fires it out of band
 // (doesn't disturb the schedule, delete a one-shot, or count failures). The
 // run streams into the agent's chat session like a scheduled fire.
-async function runTaskNow(id) {
-  const btn = document.querySelector(`.btn-task-run[data-args*='"${id}"']`);
+async function runTaskNow(id, source) {
+  const btn = source?.matches?.('.btn-task-run') ? source
+    : document.querySelector(`.btn-task-run[data-args*='"${id}"']`);
   const restore = btn ? btn.textContent : null;
   if (btn) { btn.disabled = true; btn.textContent = '▶ Running…'; }
   try {
@@ -589,7 +622,10 @@ async function runTaskNow(id) {
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
     if (btn) btn.textContent = '✓ Started — check chat';
     // Give the run a moment, then refresh so the "Last run" line updates.
-    setTimeout(() => loadTaskList(), 2500);
+    setTimeout(async () => {
+      await loadTaskList();
+      if (btn) { btn.disabled = false; btn.textContent = restore; }
+    }, 2500);
   } catch (e) {
     alert(`Run failed: ${e.message}`);
     if (btn) { btn.disabled = false; btn.textContent = restore; }

@@ -18,6 +18,7 @@ import {
 import { getVoiceRef } from '../lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from '../lib/voice-tts-stream.mjs';
 import { beginTurn, noteTurn, endTurn } from '../lib/voice-turn-journal.mjs';
+import { recordScheduledAlarmReceipt, reconcileScheduledDeviceAlarms } from '../lib/scheduled-device-alarms.mjs';
 import { recordLinkEvent } from '../lib/voice-connectivity-journal.mjs';
 import { getSessionMeta, setSessionDeviceId, adoptSession } from '../routes/_helpers/auth-sessions.mjs';
 import {
@@ -322,7 +323,8 @@ export function onConnection(ws, req) {
   if (ws._authenticated) {
     sendInitialData();
     if (ws._deviceId) {
-      touchDevice(ws._userId, ws._deviceId);
+      ws._caps = [];
+      touchDevice(ws._userId, ws._deviceId, { caps: [] });
       reconcileVoiceDeviceState(ws);
       scheduleVoiceConfigPush(ws);
     }
@@ -399,28 +401,27 @@ export function onConnection(ws, req) {
             ? msg.firmware_version.slice(0, 64) : null;
         const muteReported = typeof msg.mute_state === 'boolean' ? msg.mute_state : undefined;
         if (typeof muteReported === 'boolean') ws._voiceMuteState = muteReported;
-        // Android TV client (2026-07): auth optionally reports platform +
-        // a capability list so the server can route tv_command/tv_state
-        // traffic to this socket and the tv-control tool can find a TV
-        // target. Absent for every existing ESP32 device and browser tab —
-        // strictly additive, same shape as the fw_version handling above.
+        // Capabilities describe this authenticated connection. Missing or
+        // malformed lists clear older advertisements after a firmware downgrade.
         const platformReported = typeof msg.platform === 'string' && msg.platform.length > 0
             ? msg.platform.slice(0, 32) : null;
         const capsReported = Array.isArray(msg.caps)
             ? msg.caps.filter(c => typeof c === 'string' && c).slice(0, 20).map(c => c.slice(0, 32))
-            : null;
+            : [];
         if (platformReported) ws._platform = platformReported;
-        if (capsReported) ws._caps = capsReported;
+        ws._caps = capsReported;
         touchDevice(ws._userId, ws._deviceId, {
           ...(fwReported ? { fw_version: fwReported } : {}),
           ...(typeof muteReported === 'boolean' ? { mute_state: muteReported } : {}),
           ...(platformReported ? { platform: platformReported } : {}),
-          ...(capsReported ? { caps: capsReported } : {}),
+          caps: capsReported,
         });
         // Backfill the token's sha256 so a future expiry can be auto-recovered by
         // strong hash match. Idempotent — only writes when the token changes.
         recordTokenSecret(ws._userId, ws._deviceId, msg.token);
         reconcileVoiceDeviceState(ws);
+        reconcileScheduledDeviceAlarms(ws._userId, ws._deviceId)
+          .catch(error => console.warn('[alarm] reconnect reconciliation failed:', error.message));
       }
       scheduleVoiceConfigPush(ws);
       return;
@@ -860,12 +861,33 @@ export function onConnection(ws, req) {
       return;
     }
 
+    if (msg.type === 'alarm_armed') {
+      if (!ws._deviceId) return;
+      await recordScheduledAlarmReceipt(ws._userId, ws._deviceId, msg);
+      return;
+    }
+
     if (msg.type === 'alarm_fired') {
+      if (!ws._deviceId) return;
       // Device reports it started ringing. State transition: armed → firing.
       // Phase A4: this also cancels the ack-timeout watchdog (no fallback
       // email/telegram needed since device clearly received the arm).
       const id = typeof msg.id === 'string' ? msg.id : null;
       if (id) {
+        const scheduled = await recordScheduledAlarmReceipt(ws._userId, ws._deviceId, msg);
+        if (scheduled?.cancelled || scheduled?.retiredDeviceIds?.includes(ws._deviceId)
+            || scheduled?.ackedDeviceIds?.includes(ws._deviceId)) {
+          ws.send(JSON.stringify({ type: 'alarm_disarm', id }));
+          return;
+        }
+        if (scheduled && !scheduled.ackedDeviceIds.includes(ws._deviceId)) {
+          const { registerAlarm } = await import('../lib/alarms.mjs');
+          registerAlarm({ id, userId: ws._userId, label: scheduled.label,
+            deviceIds: scheduled.deviceIds.filter(d => !scheduled.ackedDeviceIds.includes(d)
+              && !scheduled.retiredDeviceIds?.includes(d)),
+            triggerAtMs: scheduled.deadline, firedDeviceIds: scheduled.firedDeviceIds,
+            awaitingFireAck: true });
+        }
         const ok = markAlarmFired(ws._userId, id, ws._deviceId ?? null);
         console.log(`[alarm] fired ack from device=${ws._deviceId ?? '?'} id=${id} known=${ok}`);
       }
@@ -873,9 +895,11 @@ export function onConnection(ws, req) {
     }
 
     if (msg.type === 'alarm_acked') {
+      if (!ws._deviceId) return;
       // Device reports user-dismissed. Remove from registry.
       const id = typeof msg.id === 'string' ? msg.id : null;
       if (id) {
+        await recordScheduledAlarmReceipt(ws._userId, ws._deviceId, msg);
         const ok = markAlarmAcked(ws._userId, id, ws._deviceId ?? null);
         console.log(`[alarm] acked from device=${ws._deviceId ?? '?'} id=${id} known=${ok}`);
       }

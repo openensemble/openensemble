@@ -27,6 +27,7 @@ import { getOrchestrationPolicy } from './lib/orchestration-policy.mjs';
 import { assertActiveLabVerifierLeaseToken } from './lib/lab-verifier-lease.mjs';
 import { iterateUntilAbort } from './lib/abortable-async-iterator.mjs';
 import { abortError, createLinkedAbortController } from './lib/abort-utils.mjs';
+import { taskCancellationScope } from './lib/task-cancellation-scope.mjs';
 import {
   registerCoordinatedTask,
   claimWork,
@@ -1244,6 +1245,7 @@ export function cancelTask(userId, id, reason = 'cancelled') {
     }
     if (typeof info.abort !== 'function') return { ok: false, reason: 'not cancellable' };
     if (info.status === 'cancelling') return { ok: true, taskId, watcherId: info.watcherId, alreadyCancelling: true };
+    const targets = taskCancellationScope(taskId, userId, activeTasks, rootTaskGraphs);
     info.status = 'cancelling';
     info.phase = 'cancelling';
     info.currentTool = null;
@@ -1255,34 +1257,23 @@ export function cancelTask(userId, id, reason = 'cancelled') {
       currentTool: null,
     });
     try { info.abort(reason); } catch { /* already stopping */ }
-    // Cancelling a root cancels its still-running children too. Children share
-    // the root's rootTaskId but have their own AbortControllers, so aborting
-    // only the root would leave orphaned child delegations running (and
-    // reporting) with no visible chip left to stop them from.
-    // The graph may be keyed by this task's own id, by its rootTaskId, or by
-    // its watcher id (auto-bg ADOPTS the sync delegation's chip as the root
-    // key) — check all three or the cascade silently misses the children.
-    const root = rootTaskGraphs.get(taskId)
-      || (info.rootTaskId && rootTaskGraphs.get(info.rootTaskId))
-      || (info.watcherId && rootTaskGraphs.get(info.watcherId))
-      || null;
-    if (root?.children?.size) {
-      for (const childId of root.children.keys()) {
-        if (childId === taskId) continue;
-        const child = activeTasks.get(childId);
-        if (!child || child.status === 'cancelling' || typeof child.abort !== 'function') continue;
-        child.status = 'cancelling';
-        child.phase = 'cancelling';
-        child.currentTool = null;
-        pushTaskProgress(childId, `Cancelling ${child.agentName || 'task'}...`, {
-          status: 'cancelling',
-          phase: 'cancelling',
-          canCancel: false,
-          cancelling: true,
-          currentTool: null,
-        });
-        try { child.abort(reason); } catch { /* already stopping */ }
-      }
+    for (const childId of targets) {
+      if (childId === taskId) continue;
+      const child = activeTasks.get(childId);
+      if (!child || child.userId !== userId || child._finalizationClaimed || child._terminalMarked
+          || ['cancelling', 'done', 'error', 'cancelled', 'finalizing'].includes(child.status)
+          || typeof child.abort !== 'function') continue;
+      child.status = 'cancelling';
+      child.phase = 'cancelling';
+      child.currentTool = null;
+      pushTaskProgress(childId, `Cancelling ${child.agentName || 'task'}...`, {
+        status: 'cancelling',
+        phase: 'cancelling',
+        canCancel: false,
+        cancelling: true,
+        currentTool: null,
+      });
+      try { child.abort(reason); } catch { /* already stopping */ }
     }
     return { ok: true, taskId, watcherId: info.watcherId };
   }
