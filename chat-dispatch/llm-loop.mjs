@@ -394,16 +394,27 @@ export async function runSpecialistRoute({
     let sawInnerDone = false;
     let sawInnerError = false;
     let routeCompleted = false;
+    let effectfulToolInvoked = false;
     /** @type {Record<string, any> | null} */
     let innerDoneEvent = null;
     /** @type {Record<string, any> | null} */
     let routeErrorEvent = null;
-    const emitRouteTerminalError = async (code, message) => {
+    /** @param {string} code @param {string} message @param {Record<string, any> | null} [failure] */
+    const emitRouteTerminalError = async (code, message, failure = null) => {
+      // A manual retry replays the entire routed turn. Only transient provider
+      // failures before potentially effectful work can safely offer it.
+      const failureCode = String(failure?.code || failure?.cause?.code || '');
+      const storageFailure = /persist|storage|session.*(?:clear|write|save)|(?:write|save).*session/i.test(
+        `${code} ${failureCode} ${message}`,
+      ) || ['ENOSPC', 'EACCES', 'EROFS', 'EIO'].includes(failureCode.toUpperCase());
+      const retryable = !!failure && !ac.signal.aborted && failure.name !== 'AbortError'
+        && !effectfulToolInvoked && getTurn()?.preLlmSideEffectCommitted !== true
+        && !storageFailure && isRetriableProviderFailure(failure);
       let durable = false;
       try {
         durable = await failPendingTurn(`${userId}_${agentId}`, message, {
           status: ac.signal.aborted ? 'stopped' : 'failed',
-          retryable: false,
+          retryable,
           partial: routerBuf,
         });
       } catch (e) {
@@ -414,7 +425,7 @@ export async function runSpecialistRoute({
         type: 'error',
         code: durable ? code : 'persistence_failed',
         message: durable ? message : `Storage error while recording the specialist failure: ${message}`,
-        retryable: false,
+        retryable: durable ? retryable : false,
         agent: agentId,
       });
     };
@@ -432,6 +443,7 @@ export async function runSpecialistRoute({
         awaitSlowTools: toolPlan?.mode === 'selected',
       }, async () => {
       for await (const event of streamChat(scopedSpec, userText, ac.signal, (e) => {
+        if (e?.type === 'tool_call' && !isRetrySafeControlTool(e.name)) effectfulToolInvoked = true;
         // The routed specialist is ephemeral, so its terminal event is only an
         // inner-run boundary — it does NOT mean the coordinator session is on
         // disk. Hold it until the coordinator write below succeeds. streamChat
@@ -446,6 +458,7 @@ export async function runSpecialistRoute({
         if (e?.type === 'error') { sawInnerError = true; routeErrorEvent = { ...e }; return; }
         onEvent({ ...e, agent: agentId });
       }, userId, _attachments, null, false, { source, deviceId }, { toolPlan })) {
+        if (event.type === 'tool_call' && !isRetrySafeControlTool(event.name)) effectfulToolInvoked = true;
         if (event.type === '__notify') { onNotify(userId, agentId, event); continue; }
         if (event.type === '__usage')  { recordTokenUsage(userId, event.inputTokens, event.outputTokens, event.provider, event.model); continue; }
         if (event.type === 'token')    routerBuf += event.text;
@@ -473,6 +486,7 @@ export async function runSpecialistRoute({
         await emitRouteTerminalError(
           routeErrorEvent?.code || 'specialist_failed',
           routeErrorEvent?.message || 'The specialist reply failed before completion.',
+          routeErrorEvent,
         );
         return { handled: true };
       }
@@ -538,7 +552,7 @@ export async function runSpecialistRoute({
     } catch (e) {
       if (e.name !== 'AbortError') {
         console.error('[chat] specialist-router stream failed:', e.message);
-        await emitRouteTerminalError('specialist_failed', e.message);
+        await emitRouteTerminalError('specialist_failed', e.message, e);
       } else {
         await failPendingTurn(`${userId}_${agentId}`, 'Stopped by user', {
           status: 'stopped', retryable: false, partial: routerBuf,
