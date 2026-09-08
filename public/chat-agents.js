@@ -2,6 +2,7 @@
 // authoritative snapshots; history alone must never resurrect a busy agent.
 const chatAgentTasks = new Map();
 const chatAgentHistory = new Set();
+const chatAgentCompletedTasks = new Map();
 let chatAgentsConnected = false;
 
 function chatAgentScope(agent) {
@@ -47,16 +48,41 @@ function resetChatAgents(agent) {
   if (agent) {
     for (const [key, entry] of chatAgentTasks) if (entry.agent === agent) chatAgentTasks.delete(key);
     chatAgentHistory.delete(agent);
+    chatAgentCompletedTasks.delete(agent);
   } else {
     chatAgentTasks.clear();
     chatAgentHistory.clear();
+    chatAgentCompletedTasks.clear();
     chatAgentsConnected = false;
     closeChatAgents(false);
   }
   updateChatAgents();
 }
 
-function loadChatAgentHistory(agent) {
+function loadChatAgentHistory(agent, completedTasks, snapshotRevision = 0) {
+  const completed = new Map();
+  const userId = typeof _currentUser !== 'undefined' ? _currentUser?.id : null;
+  const epoch = typeof agentSessionEpochs !== 'undefined' ? agentSessionEpochs[agent] : null;
+  for (const status of (Array.isArray(completedTasks) ? completedTasks : [])) {
+    if (status?.kind !== 'task_proxy' || status.final !== true || !status.watcherId
+        || !TASK_CHIP_TERMINAL_STATES.has(status.state?.status)) continue;
+    // A completed snapshot is accepted only for this exact chat incarnation.
+    // Historical records never supply live work or cross a user/profile clear.
+    if (!userId || !epoch || status.state.sourceSessionKey !== `${userId}_${agent}`
+        || status.state.sourceSessionEpoch !== epoch
+        || chatAgentScope(status.agent || status.state.visibleAgentId) !== agent) continue;
+    completed.set(status.watcherId, {
+      status: { ...status, state: { ...status.state, canCancel: false, currentTool: null } },
+      revision: Number(snapshotRevision) || 0,
+    });
+    const live = chatAgentTasks.get(status.watcherId);
+    if (live?.agent === agent && !live.status.final && live.revision <= (Number(snapshotRevision) || 0)) {
+      // Once authoritative history confirms completion, an obsolete running
+      // entry must not reappear when this recent-history window later expires.
+      chatAgentTasks.delete(status.watcherId);
+    }
+  }
+  chatAgentCompletedTasks.set(agent, completed);
   chatAgentHistory.add(agent);
   updateChatAgents();
 }
@@ -79,12 +105,21 @@ function chatAgentRows() {
   // Retain the most recent completed delegations after a reload.
   for (const row of (chatAgentHistory.has(activeAgent) ? sessions[activeAgent] || [] : [])) {
     if (row?.hidden || row?.status?.kind !== 'task_proxy' || !row.status.final) continue;
-    if (chatAgentCurrentEpoch(activeAgent, row.status.state)) entries.set(row.status.watcherId, row.status);
+    if (chatAgentCurrentEpoch(activeAgent, row.status.state)) entries.set(row.status.watcherId, {
+      status: row.status, revision: Number(row._liveRevision) || 0,
+    });
+  }
+  for (const [key, entry] of (chatAgentHistory.has(activeAgent) ? chatAgentCompletedTasks.get(activeAgent) || [] : [])) {
+    if (chatAgentCurrentEpoch(activeAgent, entry.status.state)) entries.set(key, entry);
   }
   for (const [key, entry] of chatAgentTasks) {
-    if (entry.agent === activeAgent && chatAgentCurrentEpoch(activeAgent, entry.status.state)) entries.set(key, entry.status);
+    if (entry.agent !== activeAgent || !chatAgentCurrentEpoch(activeAgent, entry.status.state)) continue;
+    const prior = entries.get(key);
+    // Equal-revision live finals retain their detail; terminal history wins
+    // over an equally old running entry, including legacy revision-zero data.
+    if (!prior || entry.revision > prior.revision || (entry.status.final && entry.revision === prior.revision)) entries.set(key, entry);
   }
-  const statuses = [...entries.values()].sort((a, b) => Number(!!a.final) - Number(!!b.final)
+  const statuses = [...entries.values()].map(entry => entry.status).sort((a, b) => Number(!!a.final) - Number(!!b.final)
     || (Number(b.state?.startedAt) || 0) - (Number(a.state?.startedAt) || 0));
   const rows = [];
   const seen = new Set();

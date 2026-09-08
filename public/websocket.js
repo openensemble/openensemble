@@ -633,7 +633,7 @@ function handleServerMessage(msg) {
           });
         }
       }
-      if (typeof loadChatAgentHistory === 'function') loadChatAgentHistory(agent);
+      if (typeof loadChatAgentHistory === 'function') loadChatAgentHistory(agent, msg.completedTasks, snapshotRevision);
       if (agent === activeAgent) {
         renderSession();
         projectAgentStreamState(agent);

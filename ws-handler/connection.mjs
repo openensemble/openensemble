@@ -9,6 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
 import { projectActiveTasksForWire } from '../lib/background-task-wire.mjs';
+import { completedTasksForSession } from '../lib/completed-task-wire.mjs';
 import { loadSession, clearSession, appendToSession, getStreamBuffer, getSessionEpoch } from '../sessions.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
@@ -283,11 +284,14 @@ export function onConnection(ws, req) {
       const key = sessionKey(ws._userId, agent.id);
       const sessionRevision = getChatRevision(ws._userId, agent.id);
       const snapshotGeneration = nextSessionSnapshotSeq();
+      const messages = await loadSession(key, 60);
+      const sessionEpoch = getSessionEpoch(key);
       return {
         agent,
-        messages: await loadSession(key, 60),
+        messages,
+        completedTasks: completedTasksForSession(ws._userId, key, sessionEpoch),
         pendingStream: getStreamBuffer(key),
-        sessionEpoch: getSessionEpoch(key),
+        sessionEpoch,
         sessionRevision,
         snapshotGeneration,
         credentialPrompts: getPendingCredentialPrompts(ws._userId, agent.id),
@@ -304,9 +308,9 @@ export function onConnection(ws, req) {
       chatRevision: activeSnapshotRevisions[stream.agentId] ?? 0,
     }));
     const activeByAgent = new Map(active.map(s => [s.agentId, s]));
-    for (const { agent, messages, pendingStream, sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts } of sessionLoads) {
+    for (const { agent, messages, completedTasks, pendingStream, sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts } of sessionLoads) {
       ws.send(JSON.stringify({
-        type: 'session_loaded', agent: agent.id, messages, pendingStream,
+        type: 'session_loaded', agent: agent.id, messages, completedTasks, pendingStream,
         activeStream: activeByAgent.get(agent.id) ?? null,
         activeSnapshotRevision: activeSnapshotRevisions[agent.id] ?? 0,
         sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts,
@@ -964,6 +968,7 @@ export function onConnection(ws, req) {
           ? msg.request_id : null;
         ws.send(JSON.stringify({
           type: 'session_loaded', agent: agentId, messages, pendingStream,
+          completedTasks: completedTasksForSession(ws._userId, key, sessionEpoch),
           activeStream: activeStream ? {
             ...activeStream,
             chatRevision: activeSnapshotRevision,
