@@ -37,6 +37,7 @@ import { log } from '../logger.mjs';
 import { buildSkillPersonalizationHelpers } from '../lib/personalization/skill-helper.mjs';
 import { getPreferenceSafeAutoContext } from '../lib/personalization/safe-auto-context.mjs';
 import { atomicWriteSync } from '../routes/_helpers/io-lock.mjs';
+import { taskActivity } from '../lib/task-runtime-status.mjs';
 import { resolveRuntimeAgentId } from '../routes/_helpers/agent-resolver.mjs';
 import { tryAcquireUserTurnLease } from '../chat-dispatch/slot-registry.mjs';
 import {
@@ -540,6 +541,10 @@ export function pushWatcherStatus(
   if (!record) return false;
   if (extraState && typeof extraState === 'object') {
     record.state = { ...(record.state || {}), ...extraState };
+    if (record.kind === 'task_proxy' && !Object.hasOwn(extraState, 'activity')
+        && ['status', 'phase', 'currentTool', 'awaiting_input'].some(key => Object.hasOwn(extraState, key))) {
+      record.state.activity = taskActivity(record.state);
+    }
   }
   if (record.state) record.state.lastActivityAt = Date.now();
   if (isManagedPreferenceWatcher(record)) {
@@ -578,6 +583,10 @@ export function completeWatcher(userId, watcherId, { status = 'done', finalText 
   if (!data) return false;
   const record = data.active.find(w => w.id === watcherId);
   if (!record) return false;
+  if (record.kind === 'task_proxy') {
+    record.state = { ...(record.state || {}), status, phase: status, currentTool: null };
+    record.state.activity = taskActivity(record.state);
+  }
   finalizeWatcher(record, status, finalText || record.lastStatusText || `${record.label} ${status}`);
   return true;
 }

@@ -102,6 +102,8 @@ export function _journalAdd(taskId) {
     agentEmoji: rec.agentEmoji || '🤖',
     ...(rec.provider ? { provider: String(rec.provider).slice(0, 100) } : {}),
     ...(rec.model ? { model: String(rec.model).slice(0, 300) } : {}),
+    ...(rec.runtimeProvider ? { runtimeProvider: String(rec.runtimeProvider).slice(0, 100) } : {}),
+    ...(rec.runtimeModel ? { runtimeModel: String(rec.runtimeModel).slice(0, 300) } : {}),
     ...(rec.reasoningEffort ? { reasoningEffort: String(rec.reasoningEffort).slice(0, 40) } : {}),
     ...(rec.executionTargetExplicit === true ? { executionTargetExplicit: true } : {}),
     summary: rec.summary || '',

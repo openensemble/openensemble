@@ -24,6 +24,7 @@ function renderSession(opts) {
     renderSessionInner(keepScroll);
   } finally {
     _renderingSession = false;
+    if (typeof updateChatAgents === 'function') updateChatAgents();
   }
 }
 function renderSessionInner(keepScroll) {

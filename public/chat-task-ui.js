@@ -190,6 +190,8 @@ function taskChipChildList(value) {
         role: taskChipText(raw.role, 60),
         provider: taskChipText(raw.provider, 100),
         model: taskChipText(raw.model, 300),
+        runtimeProvider: taskChipText(raw.runtimeProvider, 100),
+        runtimeModel: taskChipText(raw.runtimeModel, 300),
         reasoningEffort: taskChipText(raw.reasoningEffort, 40),
         executionTargetExplicit: raw.executionTargetExplicit === true,
         executionLabel: taskChipExecutionLabel(raw),

@@ -104,6 +104,7 @@ function _hasAnyProviderConfigured() {
 }
 
 function buildTabs() {
+  if (typeof updateChatAgents === 'function') updateChatAgents();
   // Mobile bottom bar: current-agent chip + busy signals. The full agent list
   // lives in the bottom-sheet switcher (drawers.js buildAgentSheet).
   const a = agents.find(x => x.id === activeAgent);

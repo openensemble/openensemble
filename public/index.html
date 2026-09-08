@@ -283,6 +283,17 @@
       <div class="slash-menu" id="atMenu" style="display:none"></div>
       <div class="attach-preview" id="attachPreview" style="display:none"></div>
       <div class="tool-plan-picker" id="toolPlanPicker" style="display:none"></div>
+      <section class="chat-agents-panel" id="chatAgentsPanel" role="dialog" aria-labelledby="chatAgentsTitle" hidden>
+        <div class="chat-agents-header">
+          <div><h2 id="chatAgentsTitle">Agents in this chat</h2><p id="chatAgentsSummary" role="status" aria-live="polite"></p></div>
+          <button type="button" id="chatAgentsClose" aria-label="Close agents panel">✕</button>
+        </div>
+        <div id="chatAgentsList" class="chat-agents-list" role="list" aria-label="Agent tasks"></div>
+        <p id="chatAgentsEmpty" class="chat-agents-empty">When this chat delegates work, agents and their progress will appear here.</p>
+      </section>
+      <div class="chat-agents-controls">
+        <button type="button" class="chat-agents-toggle" id="chatAgentsToggle" aria-controls="chatAgentsPanel" aria-expanded="false" aria-haspopup="dialog" title="Show agents working in this chat"><i data-lucide="network" aria-hidden="true"></i><span class="chat-agents-toggle-label">Agents</span><span id="chatAgentsCount" hidden>0</span></button>
+      </div>
       <div class="input-row">
         <button class="btn-attach" id="btnAttach" title="Attach file"><i data-lucide="paperclip"></i></button>
         <input type="file" id="chatFileInput" accept="image/*,audio/*,video/*,.pdf,.csv" multiple style="display:none">
@@ -1873,6 +1884,7 @@
 <script src="/chat-outbox.js"></script>
 <script src="/chat-tool-run.js"></script>
 <script src="/chat-task-ui.js"></script>
+<script src="/chat-agents.js"></script>
 <script src="/chat-decisions.js"></script>
 <script src="/chat-tool-labels.js"></script>
 <script src="/chat-scroll.js"></script>

@@ -29,6 +29,7 @@ import {
   recentDelegations,
 } from './state.mjs';
 import { _journalAdd } from './journal.mjs';
+import { taskRuntimeFields } from '../lib/task-runtime-status.mjs';
 
 // Bound from background-tasks.mjs after parent helpers exist.
 let _onComplete = async () => {};
@@ -134,7 +135,7 @@ export function recordWorkerProgress(taskId, note) {
   const rec = activeTasks.get(taskId);
   if (!rec) return false;
   pushWorkerProgress(taskId, { kind: 'note', text: String(note || '').slice(0, 240) });
-  if (rec.watcherId) { try { pushWatcherStatus(rec.userId, rec.watcherId, `• ${String(note || '').slice(0, 80)}`); } catch { /* chip gone */ } }
+  if (rec.watcherId) { try { pushWatcherStatus(rec.userId, rec.watcherId, `• ${String(note || '').slice(0, 80)}`, taskRuntimeFields(rec)); } catch { /* chip gone */ } }
   return true;
 }
 

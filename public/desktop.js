@@ -29,6 +29,7 @@ function switchView(mode) {
   const desktopView = $('desktopView');
 
   if (mode === 'desktop') {
+    if (typeof closeChatAgents === 'function') closeChatAgents(false);
     chatArea.style.display = 'none';
     inputArea.style.display = 'none';
     desktopView.style.display = 'block';

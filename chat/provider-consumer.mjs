@@ -8,6 +8,7 @@
 import { looksLikeToolError } from '../lib/tool-error.mjs';
 import { recordError } from '../lib/turn-trace-context.mjs';
 import { toolRouterContext } from '../lib/tool-router-context.mjs';
+import { recordTaskRuntimeExecution } from '../lib/task-runtime-status.mjs';
 import { redactTextForTrace } from '../lib/run-inspector.mjs';
 import {
   compactDocumentToolResult,
@@ -228,6 +229,7 @@ export async function* consumeProvider(providerGen, {
     }
     if (event.type === '__content') { assistantContent = event.content; continue; }
     if (event.type === '__model_call') {
+      recordTaskRuntimeExecution(event);
       _providerCallCount += 1;
       const nextOrdinal = _providerCallOffset + _providerCallCount;
       _providerCallOrdinal = isProviderCallOrdinal(nextOrdinal) ? nextOrdinal : null;

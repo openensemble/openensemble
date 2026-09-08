@@ -28,6 +28,7 @@ import { assertActiveLabVerifierLeaseToken } from './lib/lab-verifier-lease.mjs'
 import { iterateUntilAbort } from './lib/abortable-async-iterator.mjs';
 import { abortError, createLinkedAbortController } from './lib/abort-utils.mjs';
 import { taskCancellationScope } from './lib/task-cancellation-scope.mjs';
+import { bindTaskRuntimeStatus, taskRuntimeFields, taskSourceFields } from './lib/task-runtime-status.mjs';
 import {
   registerCoordinatedTask,
   claimWork,
@@ -254,6 +255,14 @@ export async function bootRecoverInterruptedTasks() {
     //    completeWatcher no-ops if the reap already moved it to recent.
     if (e.watcherId && !silentScheduled) {
       try {
+        // The model update may have reached the journal before the debounced
+        // watcher write. Preserve its observed target in the terminal replay.
+        pushWatcherStatus(e.userId, e.watcherId, '', {
+          ...taskRuntimeFields({ ...e, status: recoveredStatus }),
+          status: recoveredStatus,
+          phase: recoveredStatus,
+          currentTool: null,
+        });
         completeWatcher(e.userId, e.watcherId, {
           status: recoveredStatus,
           finalText: completion
@@ -469,10 +478,12 @@ function _rootChildSnapshot(root) {
       parentTaskId: c.parentTaskId || null,
       watcherId: c.watcherId || null,
       spanId: c.spanId || null,
+      agentId: c.agentId || null,
       name: c.name || 'Agent',
       summary: c.summary || '',
       provider: c.provider || null,
       model: c.model || null,
+      ...taskRuntimeFields({ ...(activeTasks.get(c.taskId) || c), status }),
       reasoningEffort: c.reasoningEffort || null,
       executionTargetExplicit: c.executionTargetExplicit === true,
       status,
@@ -558,13 +569,16 @@ function _attachRootChild(taskId, rec) {
     parentTaskId: rec.parentTaskId || null,
     watcherId: rec.watcherId || null,
     spanId: rec.spanId || null,
+    agentId: rec.agentId || null,
     name: rec.agentName,
     summary: rec.summary,
     provider: rec.provider || null,
     model: rec.model || null,
+    ...taskRuntimeFields(rec),
     reasoningEffort: rec.reasoningEffort || null,
     executionTargetExplicit: rec.executionTargetExplicit === true,
     status: rec.status || 'running',
+    phase: rec.phase || 'running',
     currentTool: rec.currentTool || null,
     startedAt: rec.startedAt,
     lastActivityAt: Date.now(),
@@ -589,10 +603,13 @@ function _updateRootChildProgress(rec, extra = {}) {
   const child = root?.children?.get(rec.taskId);
   if (!root || !child) return;
   Object.assign(child, {
+    name: rec.agentName || child.name,
     status: rec.status || child.status || 'running',
+    phase: rec.phase || child.phase || 'running',
     currentTool: rec.currentTool || null,
     lastActivityAt: Date.now(),
     ...extra,
+    ...taskRuntimeFields({ ...rec, ...extra }),
   });
   _touchRootCompletionOwner(root);
   if (root.rootWatcherId && rec.watcherId !== root.rootWatcherId) {
@@ -700,6 +717,7 @@ function _completeRootChild(taskId, rec, status, finalReportPreview) {
   if (!root) return;
   const child = root.children.get(taskId);
   if (child) {
+    Object.assign(child, taskRuntimeFields({ ...rec, status, phase: status, currentTool: null }));
     child.status = status;
     child.phase = status;
     child.currentTool = null;
@@ -839,6 +857,7 @@ function taskState(taskId, extra = {}) {
     canCancel: typeof rec.abort === 'function' && rec.status !== 'cancelling',
     cancelling: rec.status === 'cancelling',
     ...extra,
+    ...taskRuntimeFields({ ...rec, ...extra }),
   };
 }
 
@@ -1374,7 +1393,7 @@ export function completeSyncDelegation(taskId, { outcome = 'done', finalText = '
       completeWatcher(rec.userId, rec.watcherId, { status, finalText });
       for (const k of [taskId, rec.rootTaskId, rec.watcherId]) {
         const g = k && rootTaskGraphs.get(k);
-        if (g && !g.children.size) rootTaskGraphs.delete(k);
+        if (g && !g.children.size && !_rootCompletionOwnerActive(g)) rootTaskGraphs.delete(k);
       }
     }
   }
@@ -1410,6 +1429,7 @@ export function registerSyncDelegation({
     visibleAgentId: visibleAgentId || null,
     rootTaskId: rTask,
     parentTaskId: parentTaskId || null,
+    ...taskSourceFields({ userId, parentTaskId }),
     parentWatcherId: parentWatcherId || null,
     rootWatcherId: rootWatcherId || watcherId || null,
     spanId: `${rTask}:${_slug(agentName)}:${taskId}`,
@@ -1555,6 +1575,7 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
     startedAt: Date.now(), lastActivityAt: Date.now(),
     rootTaskId: taskCtx.rootTaskId,
     parentTaskId: taskCtx.parentTaskId,
+    ...taskSourceFields({ userId, parentTaskId: taskCtx.parentTaskId }),
     parentWatcherId: taskCtx.parentWatcherId,
     rootWatcherId: taskCtx.rootWatcherId,
     visibleAgentId: taskCtx.visibleAgentId,
@@ -1733,6 +1754,18 @@ export async function dispatchEphemeral(agent, task, userId, opts = {}) {
 }
 
 // Workers: background-tasks/workers.mjs (spawn/list/stop + query helpers).
+
+bindTaskRuntimeStatus((taskId, rec) => {
+  if (rec.isWorker || rec.isDelegation || rec.isSync) {
+    try { _journalAdd(taskId); }
+    catch (error) { console.warn('[task-status] runtime journal update failed:', error?.message || error); }
+  }
+  if (rec.watcherId) {
+    pushWatcherStatus(rec.userId, rec.watcherId, `${rec.agentName || 'Agent'} started working`,
+      taskState(taskId), { emitIfUnchanged: true });
+  }
+  _updateRootChildProgress({ ...rec, taskId });
+});
 
 bindDispatchDeps({
   _attachRootChild,

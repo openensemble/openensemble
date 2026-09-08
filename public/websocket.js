@@ -43,6 +43,7 @@ function noteAgentLiveRevision(msg) {
 function observeServerBootId(bootId) {
   if (typeof bootId !== 'string' || !bootId) return;
   if (_serverBootId && _serverBootId !== bootId) {
+    if (typeof resetChatAgents === 'function') resetChatAgents();
     for (const key of Object.keys(agentLiveRevisions)) delete agentLiveRevisions[key];
     for (const key of Object.keys(agentSnapshotGenerations)) delete agentSnapshotGenerations[key];
     for (const key of Object.keys(agentStreams)) delete agentStreams[key];
@@ -339,6 +340,7 @@ function projectAgentStreamState(agent) {
 }
 
 function connect() {
+  if (typeof setChatAgentsConnected === 'function') setChatAgentsConnected(false);
   _connectionGeneration++;
   // Tear down any prior socket first. Signup/login/invite flows can call init()
   // — and thus connect() — multiple times; without this, old sockets keep their
@@ -371,6 +373,7 @@ function connect() {
     _reconnectDelay = 1000; if (!streaming) setStatus('online'); schedulePing();
   };
   ws.onclose = () => {
+    if (typeof setChatAgentsConnected === 'function') setChatAgentsConnected(false);
     clearTimeout(_pingTimer);
     // Preserve the live overlay under its agent/turn. Never commit a partial
     // into persisted-history cache: session_loaded + pendingStream used to
@@ -630,6 +633,7 @@ function handleServerMessage(msg) {
           });
         }
       }
+      if (typeof loadChatAgentHistory === 'function') loadChatAgentHistory(agent);
       if (agent === activeAgent) {
         renderSession();
         projectAgentStreamState(agent);
@@ -1208,6 +1212,7 @@ function handleServerMessage(msg) {
       const agent = clientSessionAgentId(msg.agent);
       if (msg.sessionEpoch) agentSessionEpochs[agent] = msg.sessionEpoch;
       sessions[agent] = [];
+      if (typeof resetChatAgents === 'function') resetChatAgents(agent);
       sessionsLoaded.add(agent);
       delete agentStreams[agent];
       delete terminalTurnIds[agent];
@@ -1300,6 +1305,7 @@ function handleServerMessage(msg) {
         if (existingIdx >= 0) arr[existingIdx] = statusEntry;
         else arr.push(statusEntry);
       }
+      if (typeof receiveChatAgentStatus === 'function') receiveChatAgentStatus(msg);
       // Refresh the tasks drawer so its watcher rows stay current. Debounced
       // — this fires per progress push; final transitions refresh immediately.
       if (typeof loadTaskListSoon === 'function') loadTaskListSoon({ immediate: !!msg.final });
@@ -1477,6 +1483,7 @@ function handleServerMessage(msg) {
         if ((state.liveRevision || 0) <= snapshotRevision) delete agentStreams[agentId];
       }
       const taskSnapshotChanged = reconcileActiveBackgroundTasks(msg.tasks);
+      if (typeof reconcileChatAgents === 'function') reconcileChatAgents(msg.tasks, msg.snapshotRevisions);
       if (taskSnapshotChanged) renderSession();
       projectAgentStreamState(activeAgent);
       buildTabs();
