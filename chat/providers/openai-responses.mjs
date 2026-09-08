@@ -123,7 +123,7 @@ export function toResponsesInput(messages) {
   return items;
 }
 
-export function toResponsesTools(tools) {
+export function toResponsesTools(tools, { defaultStrict } = {}) {
   // Responses API wants a flat { type:"function", name, description, parameters } shape,
   // not the /chat/completions nested { type:"function", function:{ ... } } shape.
   return compressToolDefs(tools).map(t => ({
@@ -131,6 +131,9 @@ export function toResponsesTools(tools) {
     name:        t.function.name,
     description: t.function.description ?? '',
     parameters:  t.function.parameters ?? { type: 'object', properties: {} },
+    ...(typeof t.function.strict === 'boolean'
+      ? { strict: t.function.strict }
+      : typeof defaultStrict === 'boolean' ? { strict: defaultStrict } : {}),
   }));
 }
 
@@ -472,7 +475,12 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     // request_tools meta-tool expanding the coordinator's surface mid-turn)
     // take effect on the very next provider call. Cost: one O(tools) map
     // per iteration — negligible vs the API roundtrip.
-    let responsesTools = agent.tools?.length ? toResponsesTools(agent.tools) : undefined;
+    // Codex must keep OE's optional fields optional rather than relying on
+    // Responses' implicit strict normalization. Other providers keep their
+    // existing default; an explicit tool-level boolean always takes priority.
+    let responsesTools = agent.tools?.length
+      ? toResponsesTools(agent.tools, { defaultStrict: isCodex ? false : undefined })
+      : undefined;
     // Native web search: if the model can search+synthesize in one call AND the
     // agent already holds our Brave `web_search` tool, drop the Brave function
     // and inject the provider's hosted tool instead — one round-trip instead of
