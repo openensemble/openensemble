@@ -4,6 +4,7 @@ let _memoryFilter = 'all';
 let _memorySearch = '';
 let _memoryControlTarget = 'memoryControlBody';
 let _memorySelectedKey = '';
+let _memoryLoadGeneration = 0;
 
 function memDate(ts) {
   if (!ts) return 'unknown';
@@ -16,6 +17,7 @@ function memScore(v) {
 }
 
 async function loadMemoryControl(targetId = _memoryControlTarget) {
+  const generation = ++_memoryLoadGeneration;
   _memoryControlTarget = targetId;
   const body = $(_memoryControlTarget);
   if (!body) return;
@@ -28,10 +30,13 @@ async function loadMemoryControl(targetId = _memoryControlTarget) {
       }),
       fetch('/api/memory/stats', { cache: 'no-store' }).then(r => r.ok ? r.json() : 0).catch(() => 0),
     ]);
-    _memoryItems = items || [];
+    if (generation !== _memoryLoadGeneration) return;
+    if (!Array.isArray(items)) throw new Error('Invalid memory response.');
+    _memoryItems = items;
     _memoryStats = stats;
     renderMemoryControl();
   } catch (e) {
+    if (generation !== _memoryLoadGeneration) return;
     body.innerHTML = `<div class="cdraw-empty" style="color:var(--red)">Failed to load memories: ${escHtml(e.message)}</div>`;
   }
 }
@@ -49,7 +54,13 @@ function setMemoryFilter(filter) {
 
 function updateMemorySearch(value) {
   _memorySearch = value || '';
-  renderMemoryControl();
+  // Keep the input itself mounted so typing does not lose focus/caret.
+  const body = $(_memoryControlTarget);
+  const list = body?.querySelector('.mem-list');
+  if (!list) return;
+  const filtered = _memoryItems.filter(memoryMatches);
+  list.innerHTML = filtered.length ? filtered.map(renderMemoryCard).join('') : '<div class="cdraw-empty">No memories match this filter.</div>';
+  bindMemoryCardSelection(body);
 }
 
 function memoryMatches(m) {

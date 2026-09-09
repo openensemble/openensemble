@@ -11,6 +11,7 @@
 
 let _learnState = { pending: [], learnings: null, ledger: null, busy: new Set(), policyBusy: false };
 let _learnFactRefs = new Map();
+let _learnLoadGeneration = 0;
 const _learnProfileTypes = new Set(['pattern', 'fact', 'relationship', 'preference', 'constraint', 'goal', 'routine']);
 
 function _learnFactRef(id) {
@@ -32,6 +33,7 @@ function _learnAgo(ms) {
 }
 
 async function loadLearnDrawer() {
+  const generation = ++_learnLoadGeneration;
   const body = $('learnBody');
   if (!body) return;
   body.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Loading…</div>`;
@@ -39,19 +41,29 @@ async function loadLearnDrawer() {
     // Ledger fetch is failure-isolated: personalization being unavailable
     // (feature off, route error) must not blank the whole drawer.
     const [propsRes, learnRes, ledgerRes] = await Promise.all([
-      fetch('/api/proposals', { cache: 'no-store' }).then(r => r.json()),
-      fetch('/api/learnings', { cache: 'no-store' }).then(r => r.json()),
+      fetch('/api/proposals', { cache: 'no-store' }).then(readLearnResponse),
+      fetch('/api/learnings', { cache: 'no-store' }).then(readLearnResponse),
       fetch('/api/personalization/ledger', { cache: 'no-store' })
         .then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
+    if (generation !== _learnLoadGeneration) return;
     _learnState.pending = propsRes.pending ?? [];
     _learnState.learnings = learnRes ?? null;
     _learnState.ledger = Array.isArray(ledgerRes?.ledger) ? ledgerRes.ledger : null;
     _renderLearnDrawer();
     _updateLearnBadge();
   } catch (e) {
+    if (generation !== _learnLoadGeneration) return;
     body.innerHTML = `<div style="color:var(--err,#c33);font-size:13px;padding:20px">${escHtml(e.message)}</div>`;
   }
+}
+
+async function readLearnResponse(response) {
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Could not load suggestions (${response.status}).`);
+  }
+  return response.json();
 }
 
 // Public bridge used by personalization receipts. The caller supplies only an
@@ -231,7 +243,8 @@ async function learnBulkAccept() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     });
-    if (!r.ok) { alert(`Failed: ${r.statusText}`); return; }
+    const result = await readLearnResponse(r);
+    reportBulkProposalFailures(result);
   } catch (e) { alert(`Failed: ${e.message}`); return; }
   loadLearnDrawer();
 }
@@ -245,9 +258,18 @@ async function learnBulkDismiss() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
     });
-    if (!r.ok) { alert(`Failed: ${r.statusText}`); return; }
+    const result = await readLearnResponse(r);
+    reportBulkProposalFailures(result);
   } catch (e) { alert(`Failed: ${e.message}`); return; }
   loadLearnDrawer();
+}
+
+function reportBulkProposalFailures(result) {
+  const failures = (result.results || []).filter(item => !item.ok);
+  if (failures.length) {
+    const reasons = [...new Set(failures.map(item => item.error || 'Unknown error'))].join('; ');
+    alert(`${failures.length} suggestion(s) could not be updated: ${reasons}`);
+  }
 }
 
 function _renderPendingCard(p) {
@@ -751,7 +773,10 @@ function _renderRoutinesSection(routines) {
       </div>`;
     }).join('');
   }
-  return _renderSectionHdr('Routines', routines.length) + body;
+  const manage = `<div style="padding:8px 12px">
+    <button class="cdraw-btn" data-action="toggleDrawer" data-args='["drawerDevices","sbtnRoutines"]'>Manage routines</button>
+  </div>`;
+  return _renderSectionHdr('Routines', routines.length) + manage + body;
 }
 
 async function learnRevokeRoutine(id, trigger) {

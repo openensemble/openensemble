@@ -10,6 +10,7 @@
 import { requireAuth, readBody, revokeSessionByPrefix, clearUserVoiceDeviceSessions, isChildRequest } from './_helpers.mjs';
 import { listDevices, getDevice, updateDevice, removeDevice, findIncomingSlots, clearSlotAssignment, recordDeviceOtaProgress } from '../lib/voice-devices.mjs';
 import { handlePairingRoutes } from './devices/pairing.mjs';
+import { handleVoiceDiagnostics } from './devices/diagnostics.mjs';
 import { sendToDevice, isDeviceOnline, closeDeviceSockets } from '../ws-handler.mjs';
 import { randomBytes } from 'crypto';
 import fs from 'fs';
@@ -180,6 +181,7 @@ export async function handle(req, res) {
   // Pairing endpoints first so /api/devices/pair and /api/devices/redeem
   // don't fall through to the generic /api/devices/:id handlers below.
   if (await handlePairingRoutes(req, res, p)) return true;
+  if (handleVoiceDiagnostics(req, res, p)) return true;
 
   // GET /api/voice-chime — report whether this user has a custom chime
   // installed and how big it is. UI uses this to decide between

@@ -2,7 +2,8 @@
 let activeDrawerId = null;
 
 function toggleDrawer(drawerId, btnId) {
-  if (activeDrawerId === drawerId) {
+  // A drawer can have shortcuts to different sections (Devices / Routines).
+  if (activeDrawerId === drawerId && (!btnId || $(btnId)?.classList.contains('active'))) {
     closeAllDrawers();
     return;
   }
@@ -28,7 +29,13 @@ function toggleDrawer(drawerId, btnId) {
   if (drawerId === 'drawerExpenses') openExpensesDrawer();
   if (drawerId === 'drawerDashboard') loadDashboard();
   if (drawerId === 'drawerNodes') loadNodes();
-  if (drawerId === 'drawerDevices' && typeof loadDevices === 'function') loadDevices();
+  if (drawerId === 'drawerDevices' && typeof loadDevices === 'function') {
+    loadDevices().then(() => {
+      if (activeDrawerId !== drawerId || (btnId && !$(btnId)?.classList.contains('active'))) return;
+      if (btnId === 'sbtnRoutines') focusRoutinesPanel();
+      else $('drawerDevicesBody').scrollTop = 0;
+    });
+  }
   if (drawerId === 'drawerGuide') openGuideDrawer();
 
   // Custom (skill-builder) drawers: run the manifest's initJs once per session.
@@ -39,6 +46,7 @@ function toggleDrawer(drawerId, btnId) {
 }
 
 function closeAllDrawers(resetActive = true) {
+  if (activeDrawerId === 'drawerDevices' && typeof stopVoiceDiagnostics === 'function') stopVoiceDiagnostics();
   const wasMessages = activeDrawerId === 'drawerMessages';
   document.querySelectorAll('.desk-drawer.open').forEach(d => d.classList.remove('open'));
   $('drawerOverlay').classList.remove('open');

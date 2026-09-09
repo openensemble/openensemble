@@ -162,9 +162,9 @@ export async function handle(req, res) {
   const pinMatch = req.url?.match(/^\/api\/memory\/([^/]+)\/(pin|unpin)$/);
   if (pinMatch && req.method === 'POST') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const memId = decodeURIComponent(pinMatch[1]);
     const action = pinMatch[2];
     try {
+      const memId = decodeURIComponent(pinMatch[1]);
       const body = JSON.parse(await readBody(req) || '{}');
       const tableName = safeTableName(body.table);
       assertId(memId);
@@ -199,8 +199,8 @@ export async function handle(req, res) {
   const tablePatchMatch = req.url?.match(/^\/api\/memory\/([^/]+)\/table$/);
   if (tablePatchMatch && req.method === 'PATCH') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const memId = decodeURIComponent(tablePatchMatch[1]);
     try {
+      const memId = decodeURIComponent(tablePatchMatch[1]);
       const body = JSON.parse(await readBody(req) || '{}');
       const tableName = safeTableName(body.table);
       const text = String(body.text ?? '').trim();
@@ -214,28 +214,46 @@ export async function handle(req, res) {
         res.end(JSON.stringify({ error: 'Memory not found' }));
         return true;
       }
+      if (tableName === 'user_facts') {
+        const ledger = await import('../lib/personalization/ledger.mjs');
+        if ((await ledger.listLedger(authId)).some(row => row.id === memId)) {
+          const corrected = await ledger.correctLedgerRow(authId, memId, { statement: text });
+          if (!corrected) throw new Error('Memory changed. Refresh and try again.');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, id: memId }));
+          return true;
+        }
+        if (['personalization', 'user_confirmed', 'user_corrected'].includes(rows[0].source)) {
+          throw new Error('The profile record for this memory is unavailable. Refresh and try again.');
+        }
+      }
       const vector = await embed(text);
-      if (vector.length && vector.every(v => v === 0)) {
+      if (!vector.length || vector.every(v => v === 0)) {
         throw new Error('Embedding failed. Check cortex embed model configuration.');
       }
       const current = rows[0];
       const salience = current.immortal
         ? { composite: 1.0, emotional_weight: 1.0, decision_weight: 1.0, uniqueness: 1.0 }
         : await scoreSalience(text, { userId: authId, agentId: current.agent_id || 'main' });
-      await queuedWrite(tableName, () => table.update({
-        where: `id = '${memId}'`,
-        values: {
-          text,
-          vector,
-          source: current.source === 'user_stated' ? current.source : 'user_edited',
-          salience_composite: salience.composite,
-          emotional_weight: salience.emotional_weight,
-          decision_weight: salience.decision_weight,
-          uniqueness_score: salience.uniqueness,
-          priority: salience.composite,
-          enriched: true,
-        },
-      }), authId);
+      const values = {
+        text,
+        vector,
+        source: current.source === 'user_stated' ? current.source : 'user_edited',
+        salience_composite: salience.composite,
+        emotional_weight: salience.emotional_weight,
+        decision_weight: salience.decision_weight,
+        uniqueness_score: salience.uniqueness,
+        priority: salience.composite,
+        enriched: true,
+      };
+      await queuedWrite(tableName, async () => {
+        await table.checkoutLatest?.();
+        const latest = (await table.query().where(`id = '${memId}'`).limit(1).toArray())[0];
+        if (!latest || latest.forgotten) throw new Error('Memory was removed. Refresh and try again.');
+        // Encode embeddings with Arrow's schema; SQL array literals reject
+        // valid vectors containing both integer and fractional elements.
+        await table.mergeInsert('id').whenMatchedUpdateAll().execute([{ ...latest, ...values }]);
+      }, authId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, id: memId }));
     } catch (e) { safeError(res, e, 400); }
@@ -249,8 +267,8 @@ export async function handle(req, res) {
   const tableDeleteMatch = tableDeleteUrl?.pathname.match(/^\/api\/memory\/([^/]+)\/table$/);
   if (tableDeleteMatch && req.method === 'DELETE') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const memId = decodeURIComponent(tableDeleteMatch[1]);
     try {
+      const memId = decodeURIComponent(tableDeleteMatch[1]);
       const tableName = safeTableName(tableDeleteUrl.searchParams.get('table'));
       const force = tableDeleteUrl.searchParams.get('force') === '1';
       assertId(memId);
@@ -258,7 +276,7 @@ export async function handle(req, res) {
         const result = await forget({ agentId: 'shared', type: 'user_facts', exactId: memId, userId: authId, includeImmortal: force });
         if (result?.refused) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: result.reason || 'Memory could not be forgotten.', requiresForce: true }));
+          res.end(JSON.stringify({ error: result.reason || 'Memory could not be forgotten.', requiresForce: result.requiresForce === true }));
           return true;
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -297,12 +315,12 @@ export async function handle(req, res) {
   const deleteMatch = req.url?.match(/^\/api\/memory\/([^?]+)/);
   if (deleteMatch && req.method === 'DELETE') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const memId = decodeURIComponent(deleteMatch[1]);
     const url = new URL(req.url, 'http://localhost');
     const type = url.searchParams.get('type') || 'episodes';
     const agentId = url.searchParams.get('agent') || 'main';
 
     try {
+      const memId = decodeURIComponent(deleteMatch[1]);
       const result = await forget({ agentId, type, exactId: memId, userId: authId });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));

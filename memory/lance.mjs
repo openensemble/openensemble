@@ -319,10 +319,13 @@ async function rememberEnrich(record, tableName, userId = 'default') {
     }
 
     const table = await getTable(tableName, userId);
+    // A delayed score belongs only to the untouched row it was computed for.
+    // Pin/edit/forget must win even when they happen while scoring is running.
+    const unchanged = `id = '${assertId(record.id)}' AND forgotten = false AND immortal = false AND enriched = false AND text = '${record.text.replace(/'/g, "''")}'`;
     await queuedWrite(
       tableName,
       () => table.update({
-        where: `id = '${assertId(record.id)}'`,
+        where: unchanged,
         values: {
           salience_composite: salience.composite,
           emotional_weight:   salience.emotional_weight,
@@ -332,20 +335,12 @@ async function rememberEnrich(record, tableName, userId = 'default') {
           priority:           salience.composite,
           superseded_by:      supersededBy,
           enriched:           true,
+          ...(record.category === 'episodes' && salience.composite < 0.25 ? softForgetValues() : {}),
         }
       }).catch(e => console.debug('[cortex] LanceDB update error:', e.message)),
       userId,
     );
 
-    // Post-enrichment GC: soft-delete truly unimportant episodes
-    if (record.category === 'episodes' && salience.composite < 0.25) {
-      await queuedWrite(
-        tableName,
-        () => table.update({ where: `id = '${assertId(record.id)}'`, values: softForgetValues() })
-          .catch(e => console.debug('[cortex] Episode GC error:', e.message)),
-        userId,
-      );
-    }
   } catch (e) {
     console.warn('[cortex] enrichment failed:', e.message);
   }
@@ -403,11 +398,6 @@ export async function remember({
   //     paraphrase case without merging genuinely distinct facts.
   // If the existing match was forgotten, we'd already have skipped it via
   // the where(forgotten = false) filter.
-  const existing = await table.vectorSearch(vector).where('forgotten = false').limit(3).toArray().catch(() => []);
-  const dupThreshold = immortal ? 0.12 : 0.05;
-  const dupHit = existing.find(r => (r._distance ?? 2) < dupThreshold);
-  if (dupHit) return { ...dupHit, _dedupHit: true }; // near-duplicate — return existing, flag for caller
-
   const record = {
     id: 'mem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
     text, vector, agent_id: agentId, source, confidence, immortal,
@@ -434,7 +424,24 @@ export async function remember({
     host_scope: metadata.host_scope || '',
   };
 
-  await queuedWrite(tableName, () => table.add([record]), userId);
+  const saved = await queuedWrite(tableName, async () => {
+    await table.checkoutLatest?.();
+    const scope = key => `(${key} = '${String(record[key]).replace(/'/g, "''")}'${record[key] ? '' : ` OR ${key} IS NULL`})`;
+    const existing = await table.vectorSearch(vector)
+      .where(`forgotten = false AND ${scope('role_scope')} AND ${scope('host_scope')}`)
+      .limit(3).toArray();
+    const dupHit = existing.find(r => (r._distance ?? 2) < (immortal ? 0.12 : 0.05));
+    if (dupHit) {
+      if (immortal && !dupHit.immortal) {
+        const values = { immortal: true, stability: 999999, retention_score: 1.0 };
+        await table.update({ where: `id = '${assertId(dupHit.id)}'`, values });
+        return { ...dupHit, ...values, _dedupHit: true };
+      }
+      return { ...dupHit, _dedupHit: true };
+    }
+    await table.add([record]);
+    return record;
+  }, userId);
 
   // NOTE: inline contradiction detection was trialed here (stamp an old
   // conflicting fact's superseded_by so recall hides it) but reverted
@@ -446,7 +453,7 @@ export async function remember({
   // coexist (the pre-existing minor behavior). A proper redesign needs: a
   // reliable contradiction signal, resurrection on re-affirmation, an audit
   // trail, exclusion of immortal pins, and a non-blocking (detached) write.
-  return record;
+  return saved;
 }
 
 // ── pin — immortal memory (never decays, never forgotten) ────────────────────

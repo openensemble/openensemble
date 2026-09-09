@@ -8,6 +8,8 @@ Consequential actions start ask-first. Learning happens passively in the backgro
 
 Set it up in **Settings → Personalization** (sources, privacy, model, engagement style, and reset controls). Review what it has actually learned in the **Learn** drawer, under **About you**.
 
+For accepted suggestions that save aliases, voice routines, standing rules, tool defaults, routing overrides, or learned phrases, **Undo** restores the previous value within 24 hours. If you have saved changes in the same area since acceptance, OE keeps those changes and directs you to review the current value in **Learn**. Older suggestions without saved history also require review in **Learn**.
+
 ## First-time setup
 
 The first time you open Personalization, OpenEnsemble asks you to acknowledge what it stores and choose:

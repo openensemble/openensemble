@@ -25,6 +25,7 @@
 <script src="/vendor/chart.umd.min.js"></script>
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/project-spaces.css">
+<link rel="stylesheet" href="/voice-diagnostics.css">
 </head>
 <body>
 
@@ -146,6 +147,10 @@
         <i data-lucide="square-check"></i>
         <span class="strip-tooltip">Tasks</span>
         <span class="strip-badge" id="tasksBadge" style="display:none"></span>
+      </button>
+      <button class="strip-btn" id="sbtnRoutines" data-action="toggleDrawer" data-args="[&quot;drawerDevices&quot;, &quot;sbtnRoutines&quot;]" title="Routines" aria-label="Routines">
+        <i data-lucide="repeat"></i>
+        <span class="strip-tooltip">Routines</span>
       </button>
       <button class="strip-btn" id="sbtnLearn" data-action="toggleDrawer" data-args="[&quot;drawerLearn&quot;, &quot;sbtnLearn&quot;]" title="Learn">
         <i data-lucide="sparkles"></i>
@@ -409,6 +414,13 @@
         <button class="btn-drawer-x" data-action="closeAllDrawers">✕</button>
       </div>
       <div class="desk-drawer-body">
+        <div style="display:flex;align-items:center;gap:12px;padding:12px;margin-bottom:14px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+          <div style="flex:1;font-size:12px;line-height:1.5">
+            <strong>Routines</strong>
+            <div style="color:var(--muted)">Save an action sequence and run it again with a phrase.</div>
+          </div>
+          <button class="cdraw-btn" data-action="toggleDrawer" data-args="[&quot;drawerDevices&quot;, &quot;sbtnRoutines&quot;]">Open routines</button>
+        </div>
         <div class="task-list" id="taskList"><em style="color:var(--muted);font-size:13px">No tasks yet.</em></div>
         <div class="task-form">
           <label>Agent<select id="tAgent"></select></label>
@@ -1942,6 +1954,7 @@
 <script src="/desktop.js"></script>
 <script src="/nodes.js"></script>
 <script src="/devices.js"></script>
+<script src="/voice-diagnostics.js"></script>
 <script src="/flash-wizard.js"></script>
 <script src="/guide.js"></script>
 <script src="/init.js"></script>

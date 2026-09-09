@@ -4,6 +4,23 @@ A **voice device** is a small physical box you talk to — wake word, mic captur
 
 Once paired, the device acts like any other OE client: it logs into a user account, sends transcribed utterances as chat messages to that user's coordinator (or any agent), and plays the reply back through its speaker or 3.5 mm jack.
 
+## Routines
+
+Choose **Routines** next to **Tasks** in the sidebar, or **Menu → Routines** on mobile, to jump straight to your saved action sequences. You can also choose **Open routines** in Tasks or **Manage routines** in Learn.
+
+Use **+ New routine** to save a trigger phrase and its actions, or ask in chat: *"When I say goodnight, turn off the lights."* Existing routines have **Test**, **Edit**, and **Delete** controls. You can create and edit routines before pairing a device; the **Test** button currently needs an online paired device. Webhook URLs are available inside each saved routine's editor for triggers from other apps.
+
+## Voice diagnostics
+
+Open **Voice devices → Voice diagnostics** to check a paired device or this browser's microphone.
+
+- **Start device check:** choose a device, then say its wake word followed by *"What is two plus two?"* Use a wake word assigned to your profile. OE waits up to 60 seconds for the new turn and shows whether audio and recognized speech reached the server.
+- **Connection:** see live connection status, microphone capture health, Wi-Fi strength, and disconnects over the past 24 hours. Old or missing telemetry is marked unknown.
+- **Response timing:** expand a recent turn to compare recording/upload, speech recognition, time to the agent's first text, and first audio preparation. Detailed audio timings are available for new server-streamed voice turns. Older turns or other playback paths show **Not recorded** where a measurement is unavailable. Stages overlap, and speaker buffering is not included.
+- **Check this microphone:** speak normally for six seconds while the input meter moves. This tests the microphone on your computer or phone, not the selected voice device. Audio is analyzed locally and is never uploaded by this check. Browser microphone access requires HTTPS or localhost.
+
+Both guided checks can be canceled. Microphone access stops automatically after six seconds, when you close the drawer, or when the tab goes into the background. The device panel displays timing and audio-level metadata, without transcripts.
+
 ## Pairing a device
 
 1. **Flash it** — see the **Voice device flashing** page. New devices need both the XVF audio chip and the ESP32 application firmware before they'll boot.

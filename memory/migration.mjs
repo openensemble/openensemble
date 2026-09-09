@@ -24,9 +24,11 @@ export async function getMemoryStats(userId = 'default') {
 
 export async function listMemoryRows({ userId = 'default', table = null, limit = 100, includeForgotten = false } = {}) {
   const db = await getDb(userId);
-  const tableNames = table ? [table] : await db.tableNames();
-  const rows = [];
+  const existingTables = await db.tableNames();
+  const tableNames = table ? existingTables.filter(name => name === table) : existingTables;
+  const keep = [], recent = [];
   const max = Math.max(1, Math.min(Number(limit) || 100, 500));
+  const byRecency = (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''));
   for (const name of tableNames) {
     if (!/^[a-zA-Z0-9_ -]+$/.test(name)) continue;
     try {
@@ -35,22 +37,30 @@ export async function listMemoryRows({ userId = 'default', table = null, limit =
       const where = includeForgotten
         ? `id != '_init' AND id != '${seedId}'`
         : `forgotten = false AND id != '_init' AND id != '${seedId}'`;
-      const got = await t.query().where(where).limit(max).toArray();
-      for (const m of got) rows.push({ ...m, _table: name, _memory_type: tableType(name), _agent_table_id: tableAgentId(name) });
+      // Lance's plain limit returns storage order, not the newest rows. Scan
+      // metadata in batches, retaining all curated facts and only max others.
+      // Excluding embeddings keeps large episode tables inexpensive to browse.
+      const columns = (await t.schema()).fields.map(field => field.name).filter(name => name !== 'vector');
+      for await (const batch of t.query().where(where).select(columns)) {
+        for (const m of batch.toArray()) {
+          const row = { ...m, _table: name, _memory_type: tableType(name), _agent_table_id: tableAgentId(name) };
+          if (row.immortal || name === 'user_facts') keep.push(row);
+          else recent.push(row);
+        }
+        recent.sort(byRecency);
+        if (recent.length > max) recent.length = max;
+      }
     } catch (e) {
       console.warn('[cortex] Failed to list rows in', name + ':', e.message);
     }
   }
-  const byRecency = (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''));
   // Curated, low-volume memories — pinned (immortal) rows and shared user_facts —
   // must never be evicted by the recency cap. Otherwise high-churn episode tables
   // (chat history) crowd them out and the control panel shows only a fraction of
   // the user's pinned/shared facts. Keep all of those, then fill the remaining
   // budget with the most-recent of everything else.
-  const keep = rows.filter(m => m.immortal || m._table === 'user_facts');
-  const rest = rows.filter(m => !(m.immortal || m._table === 'user_facts')).sort(byRecency);
   const room = Math.max(0, max - keep.length);
-  return [...keep, ...rest.slice(0, room)].sort(byRecency);
+  return [...keep, ...recent.slice(0, room)].sort(byRecency);
 }
 
 function tableType(name) {

@@ -171,6 +171,7 @@ function fmtTimeAgo(ts) {
 async function loadDevices() {
   const body = $('drawerDevicesBody');
   if (!body) return;
+  if (typeof stopVoiceDiagnostics === 'function') stopVoiceDiagnostics();
   try {
     // Parallel fetches: paired devices, incoming-slots (other users
     // routing to me), wake-word library, TTS provider/voices, voice
@@ -281,18 +282,9 @@ async function loadDevices() {
       try { const j = await rRoutines.json(); _routines = Array.isArray(j.routines) ? j.routines : []; }
       catch { _routines = []; }
     } else { _routines = []; }
-    // Preserve an in-progress "new routine" editor across the reload. The
-    // server list has no synthetic '_new' row, so without re-splicing it the
-    // editor collapses mid-create and the user loses what they typed.
-    // _readEditorIntoBuffer() grabs the latest field values from the still-live
-    // DOM (renderDevices() below hasn't torn it down yet).
-    if (_editingRoutineId === '_new') {
-      _readEditorIntoBuffer();
-      if (_routineEditBuffer) {
-        _routines = _routines.filter(r => r.id !== '_new');
-        _routines.push({ ..._routineEditBuffer, id: '_new' });
-      }
-    }
+    // Preserve unsaved edits when switching between Devices and Routines.
+    // Read the still-live editor before renderDevices() replaces the DOM.
+    if (_editingRoutineId) _readEditorIntoBuffer();
     if (rAmbient && rAmbient.ok) {
       try { const j = await rAmbient.json(); _ambientFiles = Array.isArray(j.files) ? j.files : []; }
       catch { _ambientFiles = []; }
@@ -314,6 +306,7 @@ async function loadDevices() {
     // know which user(s) are assigned to slots until the DOM is in place,
     // and the agents-per-user lookup is admin-gated and per-user-cached.
     populateCoordinatorLabels();
+    if (typeof refreshVoiceDiagnostics === 'function') void refreshVoiceDiagnostics();
   } catch (e) {
     body.innerHTML = `<div class="cdraw-empty" style="color:var(--red)">Failed to load: ${escHtml(e.message)}</div>`;
   }
@@ -439,6 +432,16 @@ function renderVoiceHealthPanel() {
 function renderDevices() {
   const body = $('drawerDevicesBody');
   if (!body) return;
+  const routinesFirst = $('sbtnRoutines')?.classList.contains('active');
+  const routinePanels = renderRoutinesPanel() + renderAmbientLibraryPanel();
+  const drawer = $('drawerDevices');
+  drawer.querySelector('.drawer-label').textContent = routinesFirst ? 'Routines' : 'Voice devices';
+  drawer.querySelector('.drawer-icon').innerHTML = `<i data-lucide="${routinesFirst ? 'repeat' : 'mic'}"></i>`;
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+  if (routinesFirst) {
+    body.innerHTML = routinePanels;
+    return;
+  }
 
   const header = `
     <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
@@ -453,6 +456,7 @@ function renderDevices() {
     </div>
     ${renderTtsAvailabilityBanner()}
     ${renderVoiceHealthPanel()}
+    ${typeof renderVoiceDiagnosticsPanel === 'function' ? renderVoiceDiagnosticsPanel() : ''}
   `;
 
   // Wake-word library — user-uploaded .tflite + .json pairs available for
@@ -577,16 +581,8 @@ function renderDevices() {
   ` : '';
 
   if (!_devicesList.length) {
-    // Routines + ambient library are PER-USER (users/<id>/routines.json,
-    // users/<id>/ambient/*.mp3) and fire when the user says their wake word on
-    // ANY device — including a slot SHARED to them on someone else's device. A
-    // user who owns no device but has an incoming slot (e.g. a household member) still needs
-    // them, so render those panels here too instead of bailing to a bare empty
-    // state. (voiceConfigPanel is intentionally omitted — slot routing is owned
-    // by whoever owns the physical device.)
-    const sharedPanels = _incomingSlots.length
-      ? renderRoutinesPanel() + renderAmbientLibraryPanel()
-      : '';
+    // Routines are per-user and can be saved before pairing a voice device.
+    // Shared wake slots and webhook triggers can also use them.
     body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + `
       <div class="cdraw-empty" style="padding:30px 18px;text-align:center;font-size:13px;color:var(--muted);line-height:1.55">
         <div style="font-size:32px;margin-bottom:10px;opacity:.4">🎙️</div>
@@ -594,7 +590,7 @@ function renderDevices() {
           ? `You don't own any voice devices, but you can speak to other users' devices using the wake words above.`
           : `No voice devices paired yet.<br>Click <strong>+ Pair new device</strong> above to begin.`}
       </div>
-    ` + sharedPanels;
+    ` + routinePanels;
     return;
   }
 
@@ -677,9 +673,7 @@ function renderDevices() {
     `;
   }).join('');
 
-  const routinesPanel = renderRoutinesPanel();
-  const ambientPanel = renderAmbientLibraryPanel();
-  body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + voiceConfigPanel + routinesPanel + ambientPanel + rows;
+  body.innerHTML = header + chimeHtml + libraryHtml + refsHtml + incomingHtml + voiceConfigPanel + routinePanels + rows;
 }
 
 // ── Routines panel ──────────────────────────────────────────────────────────
@@ -690,29 +684,45 @@ function renderDevices() {
 let _editingRoutineId = null;
 let _ambientUploadProgress = null;
 
+function focusRoutinesPanel() {
+  const panel = $('routinesPanel');
+  if (!panel) return;
+  // Scroll only the drawer body; scrollIntoView can shift the whole workspace
+  // horizontally while the drawer is still sliding into view.
+  $('drawerDevicesBody').scrollTop = 0;
+  panel.focus({ preventScroll: true });
+}
+
 function renderRoutinesPanel() {
-  const rows = _routines.length
-    ? _routines.map(renderRoutineRow).join('')
-    : `<div style="font-size:11px;color:var(--muted);padding:8px 0;line-height:1.5">No routines yet. Click <strong>+ New routine</strong> to bind a phrase to an action sequence — e.g. "goodnight" turns off scene.goodnight and plays thunderstorm.mp3.</div>`;
+  // Render drafts without mutating the saved list: Cancel must discard them,
+  // and saving or deleting another routine must never persist these edits.
+  const visibleRoutines = [..._routines];
+  if (_editingRoutineId && _routineEditBuffer && !visibleRoutines.some(r => r.id === _editingRoutineId)) {
+    visibleRoutines.push({ ..._routineEditBuffer, id: _editingRoutineId });
+  }
+  const rows = visibleRoutines.length
+    ? visibleRoutines.map(renderRoutineRow).join('')
+    : `<div style="font-size:12px;color:var(--muted);padding:8px 0;line-height:1.5">No routines yet. Choose <strong>+ New routine</strong>, or ask in chat: <em>"When I say goodnight, turn off the lights."</em></div>`;
   return `
-    <div style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2)">
+    <section id="routinesPanel" tabindex="-1" aria-labelledby="routinesPanelTitle" style="padding:10px 14px;border-bottom:1px solid var(--border);background:var(--bg2);scroll-margin-top:10px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
-          Voice routines
-          <span style="text-transform:none;letter-spacing:0;margin-left:6px;opacity:.7">${_routines.length}</span>
-        </div>
+        <h2 id="routinesPanelTitle" style="font-size:14px;margin:0">
+          Routines
+          <span style="font-size:12px;font-weight:400;color:var(--muted);margin-left:6px">${_routines.filter(r => r.id !== '_new').length}</span>
+        </h2>
         <button class="cdraw-btn cdraw-btn-primary" data-action="addRoutine" style="font-size:11px;padding:4px 10px">+ New routine</button>
       </div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.45">
-        Say the trigger phrase after your wake word ("hey ensemble, goodnight") to fire the actions in order.
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px;line-height:1.5">
+        Save an action sequence and reuse it with a trigger phrase — for example, "hey ensemble, goodnight".
+        You can also run it with Test on a paired device or use its webhook URL from another app.
       </div>
       ${rows}
-    </div>
+    </section>
   `;
 }
 
 function renderRoutineRow(r) {
-  if (_editingRoutineId === r.id) return renderRoutineEditor(r);
+  if (_editingRoutineId === r.id) return renderRoutineEditor({ ...(_routineEditBuffer || r), id: r.id });
   const aliases = r.aliases?.length ? ` <span style="color:var(--muted);font-size:11px">(${r.aliases.map(escHtml).join(', ')})</span>` : '';
   const summary = r.actions.map(summarizeRoutineAction).join(' → ');
   const boundDevice = r.device_id ? _devicesList.find(d => d.id === r.device_id) : null;
@@ -759,11 +769,11 @@ function summarizeRoutineAction(a) {
 
 function renderRoutineEditor(r) {
   // "_new" is the synthetic id used to flag an in-progress create. Don't
-  // surface it in the id input — leave the field empty so the user types
-  // their own slug. After save, the editor switches to readonly with the
+  // surface it in the id input — show the user's draft slug instead.
+  // After save, the editor switches to readonly with the
   // user's chosen id, so this branch only fires while authoring.
   const isNew = !r.id || r.id === '_new';
-  const displayId = isNew ? '' : r.id;
+  const displayId = isNew ? (_routineEditBuffer?.id || '') : r.id;
   const ambientOpts = _ambientFiles.map(f => `<option value="${escHtml(f.name)}">${escHtml(f.name)}</option>`).join('');
   const actionsHtml = (r.actions || []).map((a, i) => renderActionEditor(a, i, ambientOpts)).join('');
   // Target-device dropdown: "(originating device)" plus every paired device.
@@ -1652,9 +1662,9 @@ window.revertChime = async function () {
     showDeviceToast('Chime reset to default.');
     // Micro-action: patch local state + re-render rather than a full
     // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
-    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    // Preserve the open routine editor before replacing its inputs.
     _chimeInfo = { hasCustom: false, sizeBytes: 0 };
-    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    _readEditorIntoBuffer();
     renderDevices();
     populateCoordinatorLabels();
   } catch (e) {
@@ -1784,9 +1794,9 @@ window.deleteVoiceRef = async function (id) {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     // Micro-action: patch local state + re-render rather than a full
     // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
-    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    // Preserve the open routine editor before replacing its inputs.
     _voiceRefs = _voiceRefs.filter(x => x.id !== id);
-    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    _readEditorIntoBuffer();
     renderDevices();
     populateCoordinatorLabels();
   } catch (e) {
@@ -1806,9 +1816,9 @@ window.deleteWakeword = async function (id) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     // Micro-action: patch local state + re-render rather than a full
     // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
-    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    // Preserve the open routine editor before replacing its inputs.
     _wakewordLibrary = _wakewordLibrary.filter(x => x.id !== id);
-    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    _readEditorIntoBuffer();
     renderDevices();
     populateCoordinatorLabels();
   } catch (e) {
@@ -1948,10 +1958,6 @@ window.addRoutine = function () {
   _readEditorIntoBuffer();
   _routineEditBuffer = { id: '', trigger: '', aliases: [], actions: [] };
   _editingRoutineId = '_new';
-  // Put the in-progress buffer into _routines temporarily so renderRoutineRow
-  // → renderRoutineEditor finds it.
-  _routines = _routines.filter(r => r.id !== '_new');
-  _routines.push({ ..._routineEditBuffer, id: '_new' });
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -1967,8 +1973,6 @@ window.editRoutine = function (id) {
 };
 
 window.cancelRoutineEdit = function () {
-  // Drop the in-progress new-routine row if it never got saved.
-  _routines = _routines.filter(r => r.id !== '_new');
   _routineEditBuffer = null;
   _editingRoutineId = null;
   renderDevices();
@@ -2146,21 +2150,6 @@ window.blockRoutineIdSpace = function (key, ev) {
   if (key === ' ') ev.preventDefault();
 };
 
-// Apply buffer edits to the in-progress row in _routines so the next render
-// keeps showing the editor with the user's typed values + new actions. For
-// '_new' rows we MUST keep r.id === '_new' even if the buffer's id has been
-// typed in, otherwise renderRoutineRow's `_editingRoutineId === r.id` check
-// fails and the editor collapses to a summary row. The real id is stamped
-// at save time.
-function _flushBufferToRoutines() {
-  if (!_routineEditBuffer || !_editingRoutineId) return;
-  const target = _routines.find(r => r.id === _editingRoutineId);
-  if (!target) return;
-  const cloned = JSON.parse(JSON.stringify(_routineEditBuffer));
-  if (_editingRoutineId === '_new') cloned.id = '_new';
-  Object.assign(target, cloned);
-}
-
 window.addRoutineAction = function (type, ev) {
   if (!type) return;
   if (ev?.target) ev.target.value = '';  // reset dropdown
@@ -2174,7 +2163,6 @@ window.addRoutineAction = function (type, ev) {
   if (!fresh) return;
   _routineEditBuffer.actions = _routineEditBuffer.actions || [];
   _routineEditBuffer.actions.push(fresh);
-  _flushBufferToRoutines();
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -2183,7 +2171,6 @@ window.removeRoutineAction = function (idx) {
   _readEditorIntoBuffer();
   if (!_routineEditBuffer) return;
   _routineEditBuffer.actions.splice(idx, 1);
-  _flushBufferToRoutines();
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -2215,8 +2202,6 @@ window.refreshHaEntities = async function (_ignored, ev) {
       const j = await r4.json();
       _haServiceCatalog = (j.services && typeof j.services === 'object') ? j.services : {};
     }
-    // Persist edits to the editor's working buffer so the re-render keeps them.
-    _flushBufferToRoutines();
     const svcDomains = Object.keys(_haServiceCatalog).length;
     showDeviceToast(`HA refreshed — ${_haSceneEntities.length} scenes/scripts/groups, ${_haActionEntities.length} entities, ${svcDomains} service domains.`);
     renderDevices();
@@ -2248,7 +2233,6 @@ window.changeHaCallDomain = function (_idx, _value) {
       action.data = next;
     }
   }
-  _flushBufferToRoutines();
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -2260,7 +2244,6 @@ window.moveRoutineAction = function (idx, delta) {
   const ni = idx + delta;
   if (ni < 0 || ni >= list.length) return;
   [list[idx], list[ni]] = [list[ni], list[idx]];
-  _flushBufferToRoutines();
   renderDevices();
   populateCoordinatorLabels();
 };
@@ -2291,10 +2274,8 @@ async function _uploadAmbientFile(file) {
     showDeviceToast('Only MP3 files are supported.', { variant: 'error' });
     return;
   }
-  // Preserve an in-progress routine editor across the progress + result
-  // re-renders (renderDevices renders the editor from _routines, not the buffer).
+  // Preserve an in-progress routine editor across progress + result renders.
   _readEditorIntoBuffer();
-  _flushBufferToRoutines();
   _ambientUploadProgress = { name: file.name, pct: 0 };
   renderDevices();
   populateCoordinatorLabels();
@@ -2326,9 +2307,9 @@ window.deleteAmbient = async function (name) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     // Micro-action: patch local state + re-render rather than a full
     // loadDevices() (15-endpoint fan-out incl. HA catalogs that didn't change).
-    // _readEditorIntoBuffer/_flushBufferToRoutines keep an open routine editor.
+    // Preserve the open routine editor before replacing its inputs.
     _ambientFiles = _ambientFiles.filter(f => f.name !== name);
-    _readEditorIntoBuffer(); _flushBufferToRoutines();
+    _readEditorIntoBuffer();
     renderDevices();
     populateCoordinatorLabels();
   } catch (e) {
@@ -2337,10 +2318,8 @@ window.deleteAmbient = async function (name) {
 };
 
 window.previewAmbient = function (name) {
-  // Preserve an in-progress routine editor across the re-renders below
-  // (renderDevices renders the editor from _routines, not the buffer).
+  // Preserve an in-progress routine editor across the re-renders below.
   _readEditorIntoBuffer();
-  _flushBufferToRoutines();
   // Toggle: clicking the play button while THIS file is already playing
   // stops it; otherwise stop any other preview and start this one. The
   // button's icon (▶ vs ■) is driven by window._ambientPreviewName so a

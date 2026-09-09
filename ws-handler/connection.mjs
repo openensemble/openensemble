@@ -21,6 +21,7 @@ import {
 import { getVoiceRef } from '../lib/voice-refs.mjs';
 import { createVoiceTtsStreamer } from '../lib/voice-tts-stream.mjs';
 import { beginTurn, noteTurn, endTurn } from '../lib/voice-turn-journal.mjs';
+import { analyzePcm16 } from '../lib/voice-capture.mjs';
 import { recordScheduledAlarmReceipt, reconcileScheduledDeviceAlarms } from '../lib/scheduled-device-alarms.mjs';
 import { recordLinkEvent } from '../lib/voice-connectivity-journal.mjs';
 import { getSessionMeta, setSessionDeviceId, adoptSession } from '../routes/_helpers/auth-sessions.mjs';
@@ -584,6 +585,7 @@ export function onConnection(ws, req) {
         sttBytes: s.bytes,
         sttGaps: s.gaps,
         sttCaptureMs: Date.now() - s.startedAt,
+        sttLevels: analyzePcm16(pcm),
         sttSamples: Number.isInteger(msg.samples) ? msg.samples : null,
         sttEndReason: typeof msg.end_reason === 'string' ? msg.end_reason.slice(0, 24) : null,
         sttSpeechMs: Number.isInteger(msg.speech_ms) ? msg.speech_ms : null,
@@ -1226,6 +1228,7 @@ export function onConnection(ws, req) {
         // Routing is only resolved here, so backfill the journal row opened at
         // stt_begin — that row was created before we knew which user the slot
         // routed to or which agent would answer.
+        beginTurn({ id: voiceTurn.id, deviceId: voiceTurn.deviceId, authUserId: voiceTurn.authUserId, effectiveUserId: voiceTurn.effectiveUserId });
         noteTurn(voiceTurn.id, {
           effectiveUserId: voiceTurn.effectiveUserId,
           agentId: voiceTurn.agentId,
@@ -1310,6 +1313,7 @@ export function onConnection(ws, req) {
       }
 
       let chatAttachments = msg.attachments;
+      let firstReplyTextSeen = false;
       try {
         // A browser outbox deliberately stores only the durable file_id (plus
         // bounded extracted text), never multi-megabyte image base64. Restore
@@ -1382,6 +1386,10 @@ export function onConnection(ws, req) {
         // When effectiveUserId == ws._userId (single-user case), step (2)
         // delivers to admin's other browser tabs the same way as before.
         onEvent: (e) => {
+          if (voiceTurn?.id && !firstReplyTextSeen && e?.type === 'token' && typeof e.text === 'string' && e.text.trim()) {
+            firstReplyTextSeen = true;
+            noteTurn(voiceTurn.id, { firstReplyTextAt: Date.now() });
+          }
           if (incomingDocumentRequest && e && typeof e === 'object' && !e.documentRequest) {
             e = { ...e, documentRequest: incomingDocumentRequest, documentTurn: true };
           }
@@ -1523,11 +1531,21 @@ export function onConnection(ws, req) {
       // means audio was actually delivered to the device.
       if (voiceTurn?.id) {
         const suppressed = isVoiceOutputSuppressed(ws, voiceTurn);
-        endTurn(voiceTurn.id, suppressed ? 'suppressed' : 'completed', {
+        const fields = {
           replyChars: (ws._lastReplySpoken ?? '').length,
           ttsAborted: !!ttsStreamer?.aborted,
           ttsFinished: !!ttsStreamer?.finished,
-        });
+        };
+        // Text generation can finish while synthesized audio is still in
+        // flight. Finalize streaming timings when delivery actually closes.
+        if (ttsStreamer && !suppressed) {
+          noteTurn(voiceTurn.id, fields, 'tts');
+          ttsStreamer.onClosed(clean => endTurn(voiceTurn.id, clean ? 'completed' : ttsStreamer.aborted ? 'suppressed' : 'tts_failed', {
+            ...fields, ttsDeliveryMeasured: ttsStreamer.audioSent === true, ttsAborted: !!ttsStreamer.aborted,
+          }));
+        } else {
+          endTurn(voiceTurn.id, suppressed ? 'suppressed' : 'completed', fields);
+        }
       }
       return;
     }
@@ -1581,6 +1599,9 @@ export function onConnection(ws, req) {
       clearTimeout(ws._voiceConfigPushTimer);
       ws._voiceConfigPushTimer = null;
     }
+    const turn = ws._activeVoiceTurn;
+    const dispatchActive = !!turn && _activeVoiceTurnByKey.get(`${turn.effectiveUserId}_${turn.agentId}`) === turn.id;
+    const ttsActive = !!ws._ttsStreamer && !ws._ttsStreamer.closed && !ws._ttsStreamer.aborted;
     const r = reason ? reason.toString().slice(0, 80) : '';
     // code 1006 = abnormal (no close frame: network drop / TCP RST); 1000/1001 = clean.
     console.log(`[ws] client disconnected device=${ws._deviceId ?? '-'} user=${ws._userId} code=${code ?? '?'}${r ? ' reason=' + r : ''}`);
@@ -1593,8 +1614,14 @@ export function onConnection(ws, req) {
       code: code ?? null,
       reason: r || null,
       sessionMs: ws._linkOpenedAt ? Date.now() - ws._linkOpenedAt : null,
-      hadActiveTurn: !!ws._activeVoiceTurn,
+      hadActiveTurn: dispatchActive || ttsActive || !!ws._sttSession,
       hadSttSession: !!ws._sttSession,
+    });
+    // Record the disconnect before abort() invokes delivery callbacks. The
+    // chat's abort-key claim may already be released while audio still drains.
+    if (turn?.id) endTurn(turn.id, 'aborted_disconnect', {
+      failStage: ttsActive && !dispatchActive ? 'tts' : 'dispatch',
+      ttsDeliveryMeasured: ws._ttsStreamer?.audioSent === true,
     });
     // Kill any in-flight TTS streamer: frames were only droppable (isOpen()
     // guards), but the active Pocket fetch + ffmpeg kept running for up to
@@ -1613,7 +1640,6 @@ export function onConnection(ws, req) {
     // streamed to nobody while tools kept executing. Abort it; the device
     // starts a fresh turn on its next wake after reconnecting. abortChat is
     // a no-op when the turn already finished.
-    const turn = ws._activeVoiceTurn;
     if (turn?.effectiveUserId && turn?.agentId) {
       const key = `${turn.effectiveUserId}_${turn.agentId}`;
       // Only abort if THIS socket's turn is still the active one for this
@@ -1626,7 +1652,6 @@ export function onConnection(ws, req) {
           abortChat(turn.effectiveUserId, turn.agentId);
           _activeVoiceTurnByKey.delete(key);
           log.info('voice', 'aborted turn on device disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });
-          endTurn(turn.id, 'aborted_disconnect', { failStage: 'dispatch' });
         } catch { /* best-effort */ }
       } else {
         log.info('voice', 'skipped stale turn abort on disconnect', { deviceId: turn.deviceId, turnId: turn.id, agentId: turn.agentId });

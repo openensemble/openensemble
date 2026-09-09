@@ -1,0 +1,29 @@
+.voice-diagnostics { padding: 14px; border-bottom: 1px solid var(--border); background: var(--bg2); font-size: 12px; line-height: 1.5; }
+.voice-diagnostics h2 { margin: 0 0 10px; font-size: 14px; }
+.voice-diagnostics h3 { margin: 0 0 6px; font-size: 13px; }
+.voice-diag-label { display: flex; flex-direction: column; gap: 5px; }
+.voice-diag-label select { width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.voice-diag-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0; }
+.voice-diag-actions button:disabled { opacity: .5; cursor: default; }
+.voice-diag-actions [hidden] { display: none; }
+.voice-diag-status { margin: 8px 0; overflow-wrap: anywhere; }
+.voice-diag-status:empty { display: none; }
+.voice-diag-hint { margin: 7px 0; color: var(--muted); }
+.voice-diag-error { color: var(--red, #e05c5c); }
+.voice-diag-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 7px; margin: 10px 0; }
+.voice-diag-check { padding: 8px; border: 1px solid var(--border); border-left: 3px solid var(--muted); border-radius: 5px; background: var(--bg); }
+.voice-diag-check strong, .voice-diag-check span { display: block; }
+.voice-diag-check span { color: var(--muted); margin-top: 4px; }
+.voice-diag-check[data-status="ok"] { border-left-color: var(--green, #3cc36f); }
+.voice-diag-check[data-status="warning"] { border-left-color: var(--amber, #d49a44); }
+.voice-diag-check[data-status="error"] { border-left-color: var(--red, #e05c5c); }
+.voice-diag-recent details { border-top: 1px solid var(--border); padding: 8px 0; }
+.voice-diag-recent summary { cursor: pointer; font-weight: 600; }
+.voice-diag-turn p { margin: 8px 0; }
+.voice-diag-timings { width: 100%; border-collapse: collapse; }
+.voice-diag-timings caption { text-align: left; font-weight: 600; padding: 4px 0; }
+.voice-diag-timings th, .voice-diag-timings td { padding: 5px 0; border-bottom: 1px solid var(--border); }
+.voice-diag-timings th { text-align: left; font-weight: 400; color: var(--muted); padding-right: 12px; }
+.voice-diag-timings td { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.voice-diag-browser { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; }
+.voice-diag-browser meter { display: block; width: 100%; height: 16px; }

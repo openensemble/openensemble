@@ -6,6 +6,8 @@
 
 OpenEnsemble has a built-in scheduler that runs agent prompts on a schedule. Use it for daily briefings, recurring sweeps, or one-shot reminders — anything you'd otherwise have to remember to ask for.
 
+For saved action sequences you trigger yourself, choose **Routines** next to **Tasks** in the sidebar, or **Menu → Routines** on mobile. **Open routines** at the top of Tasks takes you to the same editor, where you can create, edit, test, and delete routines.
+
 ## Two flavours
 
 - **Recurring tasks** — fire on a cron-style schedule ("every weekday at 7am", "Sunday nights"). Best for routines: daily news briefing, weekly expense roll-up, nightly cleanup.

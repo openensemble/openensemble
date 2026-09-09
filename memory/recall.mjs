@@ -239,7 +239,22 @@ export async function forget({ agentId = 'main', type = 'episodes', exactId, use
   const table = await getTable(tableName, userId);
   assertId(exactId);
   const rows = await table.query().where(`id = '${exactId}'`).toArray().catch(() => []);
-  if (rows[0]?.immortal && !includeImmortal) return { refused: true, reason: 'Immortal — cannot forget.' };
+  if (!rows.length) return { refused: true, reason: 'Memory not found.' };
+  if (rows[0].immortal && !includeImmortal) return { refused: true, requiresForce: true, reason: 'Immortal — cannot forget.' };
+  if (tableName === 'user_facts') {
+    const ledger = await import('../lib/personalization/ledger.mjs');
+    const owned = (await ledger.listLedger(userId)).some(row => row.id === exactId);
+    if (owned) {
+      const removed = await ledger.forgetLedgerRow(userId, exactId, {
+        reason: 'forgotten', expectedStatement: ledgerStatementFromMemoryText(rows[0].text),
+      });
+      return removed ? { forgotten: true, id: exactId }
+        : { refused: true, reason: 'Memory changed. Refresh and try again.' };
+    }
+    if (PERSONALIZATION_FACT_SOURCES.has(rows[0].source)) {
+      return { refused: true, reason: 'The profile record for this memory is unavailable. Refresh and try again.' };
+    }
+  }
   await queuedWrite(tableName, () => table.update({
     where: `id = '${exactId}'`, values: softForgetValues(),
   }), userId);
