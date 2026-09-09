@@ -1,3 +1,4 @@
+import { withoutProjectSuffix, projectIdFromSession, projectContext } from '../lib/project-context.mjs';
 /**
  * Background dispatch + completion pipeline.
  * Extracted from background-tasks.mjs — pure move with bindDispatchDeps for
@@ -5,6 +6,7 @@
  */
 
 import fs from 'fs';
+import { taskCheckpoint } from './checkpoints.mjs';
 import path from 'path';
 import { USERS_DIR } from '../lib/paths.mjs';
 import { getTurnContext, runWithTurnContext } from '../lib/turn-abort-context.mjs';
@@ -119,6 +121,13 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
   const parentTurnCtx = getTurnContext() || {};
   const suppressLearning = parentTurnCtx.suppressLearning === true;
   activeTasks.set(taskId, {
+    checkpoint: taskCheckpoint(scopedAgent, task, {
+      userId, note: opts?.extraSystemNote || null,
+      disabledReason: scheduledCtx?.originTaskId || opts?.originScheduledTaskId ? 'Scheduled job recovery is managed by its schedule.'
+        : handoff ? 'This job requires a live multi-stage handoff.'
+          : parentTaskId ? 'This job belongs to a live agent team.'
+            : suppressLearning ? 'Verification capabilities expire at restart.' : null,
+    }),
     agentId: scopedAgent.id, userId, agentName: pipeName, agentEmoji,
     provider: typeof scopedAgent.provider === 'string' && scopedAgent.provider.trim()
       ? scopedAgent.provider.trim().slice(0, 100)
@@ -223,7 +232,11 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
       console.warn('[background-tasks] task_proxy watcher registration failed:', e.message);
     }
   }
-  _journalAdd(taskId);
+  if (!_journalAdd(taskId)) {
+    activeTasks.delete(taskId);
+    if (watcherId) completeWatcher(userId, watcherId, { status: 'error', finalText: 'The job could not start because its checkpoint could not be saved.' });
+    throw new Error('The job could not start because its checkpoint could not be saved.');
+  }
 
   // Fire and forget — do not await
   (async () => {
@@ -447,7 +460,7 @@ export function dispatchBackground(scopedAgent, task, userId, coordinatorAgentId
 }
 
 export function _coordinatorAgentIdFromSessionKey(sessionKey, userId) {
-  const raw = String(sessionKey || '');
+  const raw = withoutProjectSuffix(sessionKey);
   const prefix = `${userId}_`;
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
@@ -459,7 +472,8 @@ export async function _resolveRuntimeSessionKey(userId, sessionKey) {
     const raw = _coordinatorAgentIdFromSessionKey(sessionKey, userId);
     const resolved = resolveRuntimeAgentId(userId, raw);
     if (!resolved) return sessionKey;
-    return String(sessionKey).startsWith(`${userId}_`) ? `${userId}_${resolved}` : resolved;
+    const suffix = projectIdFromSession(sessionKey);
+    return (String(sessionKey).startsWith(`${userId}_`) ? `${userId}_${resolved}` : resolved) + (suffix ? `__${suffix}` : '');
   } catch {
     return sessionKey;
   }
@@ -799,7 +813,12 @@ async function _runContinuation({
   return terminal === 'done';
 }
 
-export async function _onComplete(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '', media = null) {
+export async function _onComplete(...args) {
+  const [taskId, userId] = args;
+  const projectId = projectIdFromSession(activeTasks.get(taskId)?.sourceSessionKey);
+  return projectId ? projectContext.run({ userId, projectId }, () => completeInProject(...args)) : completeInProject(...args);
+}
+async function completeInProject(taskId, userId, coordinatorAgentId, agentName, agentEmoji, result, errorMsg = null, finalStatus = null, toolEvents = [], targetAgentId = null, originalTask = '', media = null) {
   const rec = activeTasks.get(taskId);
   // Cancellation, TTL reaping, provider failure, and a late provider success
   // can converge in adjacent microtasks. Claim terminal ownership before the
@@ -834,7 +853,7 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
   } catch (e) {
     console.warn('[background-tasks] report-image extraction failed, continuing with no images:', e.message);
   }
-  if (rec.isWorker) {
+  if (rec.isWorker || rec.checkpoint) {
     completionJournalDurable = _journalMarkCompletion(taskId, {
       status,
       result,
@@ -1007,7 +1026,7 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
     try {
       const reportAgentId = await _resolveRuntimeSessionKey(
       userId,
-      rec?.visibleAgentId || coordinatorAgentId,
+      rec?.sourceSessionKey || rec?.visibleAgentId || coordinatorAgentId,
     );
     const taskSummary = rec?.summary || '';
     const taskRef = taskSummary
@@ -1045,6 +1064,7 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
       ts: reportTs,
     });
     if (rec.isWorker) workerRawContextDurable = Boolean(rawReportStored);
+    if (rec.checkpoint && !rawReportStored) completionDeliveryDurable = false;
     // Workers are an implementation detail of the single primary. Their raw
     // report remains hidden model context; only the primary-authored buffered
     // completion below is visible. Named delegations retain their report card.
@@ -1072,7 +1092,7 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
       });
     }
     } catch (e) {
-      if (rec.isWorker) completionDeliveryDurable = false;
+      if (rec.isWorker || rec.checkpoint) completionDeliveryDurable = false;
       console.error('[background-tasks] failed to inject session notice:', e.message);
     }
   }
@@ -1169,6 +1189,6 @@ export async function _onComplete(taskId, userId, coordinatorAgentId, agentName,
   // A completed worker remains journaled until its hidden raw report and the
   // primary-authored visible completion (or scheduled barrier handoff) are
   // durable. Boot recovery retries publication without rerunning the producer.
-  if (!rec.isWorker || completionDeliveryDurable) _journalRemove(taskId);
+  if ((!rec.isWorker && !rec.checkpoint) || completionDeliveryDurable) _journalRemove(taskId);
   return true;
 }

@@ -1,3 +1,5 @@
+import { projectSessionKey } from '../lib/project-context.mjs';
+import { getProjectSpace } from '../lib/project-spaces.mjs';
 /**
  * Misc routes: /api/notes, /api/history/:id, /api/tasks, /api/dashboard
  */
@@ -356,10 +358,16 @@ export async function handle(req, res) {
   }
 
   // Session history for an agent
-  const histMatch = req.url.match(/^\/api\/history\/(\w+)$/);
+  const historyUrl = new URL(req.url, 'http://localhost');
+  const histMatch = historyUrl.pathname.match(/^\/api\/history\/(\w+)$/);
   if (histMatch) {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const sessionId = `${authId}_${histMatch[1]}`;
+    const projectId = historyUrl.searchParams.get('project');
+    if (projectId) {
+      try { getProjectSpace(authId, projectId); }
+      catch { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Project space not found' })); return true; }
+    }
+    const sessionId = projectSessionKey(authId, histMatch[1], projectId);
     const messages = await loadSession(sessionId, 60);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(messages));

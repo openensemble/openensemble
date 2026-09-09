@@ -5,6 +5,7 @@
  * (circular import is ESM-live-binding safe for function exports).
  */
 import path from 'path';
+import { beginTaskAction, checkpointToolEvent } from '../background-tasks/checkpoints.mjs';
 import { existsSync, readFileSync } from 'fs';
 import { pathToFileURL } from 'url';
 import { SKILLS_DIR, USERS_DIR, userSkillsDir, getUserFilesDir, readConfig } from '../lib/paths.mjs';
@@ -146,6 +147,14 @@ export const NON_LEARNING_BLOCKED_TOOLS = new Set([
 // (which would create a circular import). Used only for the child-account
 // tool gate below — a tight, read-only, non-cached path.
 export async function* executeToolStreaming(name, args, userId = 'default', agentId = null, allowedTools = null) {
+  const checkpoint = { action: null };
+  for await (const event of executeCheckpointedTool(name, args, userId, agentId, allowedTools, checkpoint)) {
+    checkpointToolEvent(checkpoint.action, event);
+    yield event;
+  }
+}
+
+async function* executeCheckpointedTool(name, args, userId, agentId, allowedTools, checkpoint) {
   const turnContext = getTurnContext();
   const suppressLearning = turnContext?.suppressLearning === true;
   // Resolve alias before lookup so models that drop the skill prefix still work.
@@ -380,6 +389,12 @@ export async function* executeToolStreaming(name, args, userId = 'default', agen
     name,
     mergedArgs,
   );
+  checkpoint.action = beginTaskAction({ userId, name, args: mergedArgs, mutation: advancesReplayEpoch });
+  if (checkpoint.action?.replay) {
+    for (const event of checkpoint.action.events) yield event;
+    yield { type: 'result', text: `${checkpoint.action.text}\n\n[Recovered result: this action already ran before restart and was not repeated.]`, isError: checkpoint.action.isError, _reusedToolResult: true };
+    return;
+  }
   // Inferred/default mutations are non-idempotent for the duration of an
   // ordinary user turn. Only a manifest's explicit "mutation" policy opts a
   // tool into A → other mutation → A re-execution (for example test → edit →

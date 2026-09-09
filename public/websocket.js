@@ -94,6 +94,11 @@ function projectCredentialPrompts(agent) {
 
 function clientSessionAgentId(agent) {
   if (typeof agent !== 'string' || !agent) return agent;
+  const project = agent.match(/__(space_[a-f0-9]{24})$/);
+  if (project) {
+    if (typeof activeProjectSpaceId !== 'string' || activeProjectSpaceId !== project[1]) return null;
+    agent = agent.slice(0, -project[0].length);
+  }
   const uid = (typeof _currentUser !== 'undefined' && _currentUser?.id) ? String(_currentUser.id) : '';
   if (uid && agent.startsWith(`${uid}_`)) return agent.slice(uid.length + 1);
   // Fallback for the window before _currentUser is set: real user ids are
@@ -358,7 +363,7 @@ function connect() {
   // OE is served over a secure tunnel — the browser blocks the upgrade and
   // every WS-dependent feature (chat send, streaming, drawers) goes silent.
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${wsProto}://${location.host}`);
+  ws = new WebSocket(`${wsProto}://${location.host}${typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? '/?project=' + encodeURIComponent(activeProjectSpaceId) : ''}`);
   ws.onopen  = () => {
     sessionsLoaded.clear();
     // Authenticate via first message instead of URL query string
@@ -372,7 +377,8 @@ function connect() {
     }
     _reconnectDelay = 1000; if (!streaming) setStatus('online'); schedulePing();
   };
-  ws.onclose = () => {
+  ws.onclose = (event) => {
+    if (event?.code === 4004) { setStatus('offline'); clearTimeout(_pingTimer); return; }
     if (typeof setChatAgentsConnected === 'function') setChatAgentsConnected(false);
     clearTimeout(_pingTimer);
     // Preserve the live overlay under its agent/turn. Never commit a partial
@@ -527,6 +533,12 @@ function reloadDocumentSession(agentId) {
 
 // ── Server messages ───────────────────────────────────────────────────────────
 function handleServerMessage(msg) {
+  if (msg.type === 'project_error') {
+    if (typeof showProjectUnavailable === 'function') showProjectUnavailable(msg.message);
+    return;
+  }
+  if (typeof activeProjectSpaceId !== 'undefined' && (msg.agent || ['session_loaded', 'session_cleared', 'active_streams'].includes(msg.type))
+      && (msg.projectId || null) !== (activeProjectSpaceId || null)) return;
   observeServerBootId(msg?.boot_id);
   noteAgentLiveRevision(msg);
   if (!acceptTurnEnvelope(msg)) return;
@@ -634,6 +646,7 @@ function handleServerMessage(msg) {
         }
       }
       if (typeof loadChatAgentHistory === 'function') loadChatAgentHistory(agent, msg.completedTasks, snapshotRevision);
+      if (typeof restoreChatAgentTaskRows === 'function') restoreChatAgentTaskRows(agent);
       if (agent === activeAgent) {
         renderSession();
         projectAgentStreamState(agent);
@@ -1337,6 +1350,11 @@ function handleServerMessage(msg) {
         _currentUser.orchestration = msg.orchestration;
       }
       agents = msg.agents;
+      const requestedProjectAgent = new URLSearchParams(location.search).get('agent');
+      if (typeof activeProjectSpaceId === 'string' && activeProjectSpaceId && requestedProjectAgent && agents.some(a => a.id === requestedProjectAgent)) {
+        activeAgent = requestedProjectAgent;
+        const cleanUrl = new URL(location.href); cleanUrl.searchParams.delete('agent'); history.replaceState(null, '', cleanUrl);
+      }
       if (agents.length > 0 && !agents.find(a => a.id === activeAgent)) {
         activeAgent = agents[0].id;
         if (!(activeAgent in sessions)) {

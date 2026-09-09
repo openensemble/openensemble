@@ -11,6 +11,7 @@
  */
 
 import fs from 'fs';
+import { resolveProjectSessionKey } from './lib/project-context.mjs';
 import { randomBytes } from 'crypto';
 import { USERS_DIR } from './lib/paths.mjs';
 import {
@@ -676,7 +677,7 @@ export async function handleChatMessage({
   const wireMessageId = messageId ?? null;
   const wireAttemptId = attemptId ?? turnId ?? wireTurnId;
   let eventSeq = 0;
-  let eventScopedSessionKey = `${userId}_${agentId}`;
+  let eventScopedSessionKey = resolveProjectSessionKey(`${userId}_${agentId}`);
   /** @type {Record<string, any>|null} */
   let heldDoneEvent = null;
   /** @type {Record<string, any>|null} */
@@ -810,7 +811,7 @@ export async function handleChatMessage({
     return;
   }
 
-  const scopedSessionKey = `${userId}_${agentId}`;
+  const scopedSessionKey = resolveProjectSessionKey(`${userId}_${agentId}`);
   eventScopedSessionKey = scopedSessionKey;
   const currentSessionEpoch = getSessionEpoch(scopedSessionKey);
   if (_expectedSessionEpoch && currentSessionEpoch !== _expectedSessionEpoch) {
@@ -1569,7 +1570,7 @@ export async function handleChatMessage({
       verifierLeaseToken: labVerifierLeaseToken,
     });
   } catch (e) {
-    const key = `${userId}_${agentId}`;
+    const key = resolveProjectSessionKey(`${userId}_${agentId}`);
     if (!_silent) {
       await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
         status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',
@@ -1618,7 +1619,7 @@ export async function handleChatMessage({
   })();
 
   } catch (e) {
-    const key = `${userId}_${agentId}`;
+    const key = resolveProjectSessionKey(`${userId}_${agentId}`);
     if (!_silent) {
       await failPendingTurn(key, e?.message || 'Turn failed unexpectedly', {
         status: e?.code === 'SESSION_CLEARED' ? 'stopped' : 'failed',

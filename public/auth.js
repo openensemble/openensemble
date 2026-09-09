@@ -295,6 +295,7 @@ function getCurrentUserId() {
 function setCurrentUser(user) {
   if (_currentUser?.id !== user?.id && typeof resetChatAgents === 'function') resetChatAgents();
   _currentUser = user;
+  if (user && typeof refreshProjectSpaceBanner === 'function') refreshProjectSpaceBanner();
   if (user) {
     localStorage.setItem('oe_user_id', user.id);
     if (user.avatar) {

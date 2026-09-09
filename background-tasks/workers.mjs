@@ -30,6 +30,7 @@ import {
 } from './state.mjs';
 import { _journalAdd } from './journal.mjs';
 import { taskRuntimeFields } from '../lib/task-runtime-status.mjs';
+import { taskCheckpoint } from './checkpoints.mjs';
 
 // Bound from background-tasks.mjs after parent helpers exist.
 let _onComplete = async () => {};
@@ -203,6 +204,12 @@ export function spawnWorker({
     ? parentTurnCtx.verifierLeaseToken
     : null;
   const taskRecord = {
+    checkpoint: taskCheckpoint(workerAgent, modelTask, {
+      userId, completionContract,
+      disabledReason: scheduledCtx?.originTaskId ? 'Scheduled job recovery is managed by its schedule.'
+        : verifierLeaseRequired ? 'Verification capabilities expire at restart.'
+          : workerAgent.parallelWorkRequested ? 'This job requires a live agent team.' : null,
+    }),
     agentId: workerAgent.id, userId, agentName: workerName, agentEmoji: emoji,
     provider: typeof workerAgent.provider === 'string' && workerAgent.provider.trim()
       ? workerAgent.provider.trim().slice(0, 100)
@@ -462,6 +469,8 @@ export function listWorkersForOwner(userId, ownerKey) {
         executionTargetExplicit: info.executionTargetExplicit === true,
         currentTool: info.currentTool || null,
         toolsUsed: info.toolsUsed || 0,
+        status: info.status || 'running',
+        phase: info.phase || 'running',
         elapsedSec: Math.round((now - info.startedAt) / 1000),
         idleSec: Math.round((now - lastAt) / 1000),
         stalled: (now - lastAt) > 120000,         // no tool activity for >2min
@@ -496,6 +505,8 @@ export function listWorkersForUser(userId) {
         executionTargetExplicit: info.executionTargetExplicit === true,
         currentTool: info.currentTool || null,
         toolsUsed: info.toolsUsed || 0,
+        status: info.status || 'running',
+        phase: info.phase || 'running',
         elapsedSec: Math.round((now - info.startedAt) / 1000),
         idleSec: Math.round((now - lastAt) / 1000),
         stalled: (now - lastAt) > 120000,

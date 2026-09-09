@@ -526,7 +526,7 @@ function openDashboardTool(tool) {
 }
 
 function handleTaskComplete(msg) {
-  fetch(`/api/history/${msg.agent}`).then(r => r.json()).then(messages => {
+  fetch(`/api/history/${msg.agent}${typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? '?project=' + encodeURIComponent(activeProjectSpaceId) : ''}`).then(r => r.json()).then(messages => {
     sessions[msg.agent] = messages;
     if (msg.agent === activeAgent) renderSession();
     // Flash tasks badge

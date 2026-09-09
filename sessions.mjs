@@ -8,6 +8,7 @@
  */
 
 import fs from 'fs';
+import { resolveProjectSessionKey } from './lib/project-context.mjs';
 import fsp from 'fs/promises';
 import { randomUUID } from 'crypto';
 import {
@@ -75,6 +76,7 @@ function sessionFileLockPath(agentId) {
 
 /** Current durable clear-generation. Missing means the pre-upgrade generation. */
 export function getSessionEpoch(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   try {
     const value = fs.readFileSync(sessionEpochPath(agentId), 'utf8').trim();
     return value || 'legacy';
@@ -119,6 +121,7 @@ async function atomicRewrite(p, text) {
 }
 
 export async function loadSession(agentId, limit = MAX_HISTORY) {
+  agentId = resolveProjectSessionKey(agentId);
   const p = sessionPath(agentId);
   // Async read — sync readFileSync on every chat dispatch / WS connect /
   // tool-routing decision (8 call sites) was real event-loop pressure
@@ -235,6 +238,7 @@ function terminalReplay(rows, turn) {
 }
 
 export function appendToSession(agentId, ...messages) {
+  agentId = resolveProjectSessionKey(agentId);
   // Ephemeral agents (spawned per-call by deep_research_parallel etc.) have
   // no persistent session — skip all disk writes for IDs prefixed "ephemeral_".
   if (typeof agentId === 'string' && agentId.startsWith('ephemeral_')) return Promise.resolve();
@@ -321,6 +325,7 @@ export function appendToSession(agentId, ...messages) {
  * @returns {Promise<'appended'|'existing'>}
  */
 export function appendSessionReportOnce(agentId, row, { expectedEpoch = null } = {}) {
+  agentId = resolveProjectSessionKey(agentId);
   if (!row?.reportId) return Promise.reject(new Error('Session report requires a reportId'));
   if (typeof agentId === 'string' && agentId.startsWith('ephemeral_')) {
     return Promise.reject(new Error('Session report requires a persistent agent'));
@@ -367,6 +372,7 @@ export function appendSessionReportOnce(agentId, row, { expectedEpoch = null } =
  * so the pathological no-ALS case degrades to today's behavior instead.
  */
 export function appendUserTurnPending(agentId, msg) {
+  agentId = resolveProjectSessionKey(agentId);
   const turn = getTurn();
   const turnId = turn?.turnId ?? null;
   if (!turnId) return Promise.resolve({ inserted: false, duplicate: false });
@@ -597,6 +603,7 @@ async function replacePendingUserRow(p, agentId, turnId, messages) {
 
 /** Persist a terminal failure/stopped row before the error reaches clients. */
 export function failPendingTurn(agentId, message, { status = 'failed', retryable = true, partial = '' } = {}) {
+  agentId = resolveProjectSessionKey(agentId);
   const turn = getTurn();
   const turnId = turn?.turnId ?? null;
   if (!turnId) return Promise.resolve(false);
@@ -708,6 +715,7 @@ export function failPendingTurn(agentId, message, { status = 'failed', retryable
  * duplicate attempts use for authoritative terminal replay.
  */
 export function markTurnTerminal(agentId, terminal = {}) {
+  agentId = resolveProjectSessionKey(agentId);
   const turn = getTurn();
   if (!turn?.turnId) return Promise.resolve(false);
   const turnMeta = {
@@ -794,6 +802,7 @@ export function markTurnTerminal(agentId, terminal = {}) {
  * (including its decisionId) rather than append conflicting duplicates.
  */
 export function appendTurnArtifactOnce(agentId, artifact) {
+  agentId = resolveProjectSessionKey(agentId);
   const turn = getTurn();
   if (!turn?.turnId) return Promise.reject(new Error('Turn artifact requires a turn id'));
   const expectedEpoch = turn?.sessionKey === agentId ? turn.sessionEpoch : null;
@@ -838,6 +847,7 @@ export function appendTurnArtifactOnce(agentId, artifact) {
  * held, so two stale tabs cannot record conflicting Keep/Discard outcomes.
  */
 export function resolveAttachmentDecision(agentId, { decisionId, fileId, decision }, action = async () => {}) {
+  agentId = resolveProjectSessionKey(agentId);
   return withSessionWriteLock(agentId, async () => {
     const p = sessionPath(agentId);
     let rows;
@@ -878,6 +888,7 @@ export function resolveAttachmentDecision(agentId, { decisionId, fileId, decisio
 }
 
 export function clearSession(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   return withSessionWriteLock(agentId, async () => {
     const p = sessionPath(agentId);
     const nextEpoch = `se_${randomUUID().slice(0, 12)}`;
@@ -913,6 +924,7 @@ export function clearSession(agentId) {
 // tombstone so an old restart/task checkpoint can never match a deleted and
 // later recreated agent merely because both otherwise read as "legacy".
 export async function deleteSession(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   return withSessionWriteLock(agentId, async () => {
     const paths = [sessionPath(agentId), streamBufferPath(agentId), lmsIdPath(agentId)];
     try {
@@ -938,6 +950,7 @@ export async function deleteSession(agentId) {
 // ── LM Studio stateful response ID ───────────────────────────────────────────
 
 export function getLmsResponseId(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   const p = lmsIdPath(agentId);
   try {
     if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
@@ -952,6 +965,7 @@ export function getLmsResponseId(agentId) {
 }
 
 export function setLmsResponseId(agentId, responseId) {
+  agentId = resolveProjectSessionKey(agentId);
   const turn = getTurn();
   const epoch = turn?.sessionKey === agentId && turn.sessionEpoch
     ? turn.sessionEpoch
@@ -976,6 +990,7 @@ function streamBufferPath(agentId) {
 }
 
 export function writeStreamBuffer(agentId, contentOrState) {
+  agentId = resolveProjectSessionKey(agentId);
   if (typeof agentId === 'string' && agentId.startsWith('ephemeral_')) return;
   const turn = getTurn();
   const expectedEpoch = turn?.sessionKey === agentId
@@ -1012,6 +1027,7 @@ export function writeStreamBuffer(agentId, contentOrState) {
 }
 
 export function clearStreamBuffer(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   const turn = getTurn();
   const ownTurnId = turn?.turnId ?? null;
   for (const key of _lastFlush.keys()) {
@@ -1033,6 +1049,7 @@ export function clearStreamBuffer(agentId) {
 }
 
 export function getStreamBuffer(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   const p = streamBufferPath(agentId);
   try {
     if (!fs.existsSync(p)) return null;

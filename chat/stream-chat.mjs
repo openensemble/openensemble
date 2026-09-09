@@ -1,3 +1,5 @@
+import { currentProjectId } from '../lib/project-context.mjs';
+import { buildProjectContext } from '../lib/project-spaces.mjs';
 /**
  * Main multi-provider chat generator (streamChat).
  * Extracted from chat.mjs — pure move.
@@ -95,6 +97,8 @@ import {
 } from './recovery.mjs';
 
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
+  const projectId = currentProjectId(userId);
+  if (projectId) systemNote = `${systemNote || ''}${buildProjectContext(userId, projectId)}`;
   // Every nested MCP delegation/worker inherits a dedicated capability store.
   // Trim its provider schema on entry, while the final dispatcher gate remains
   // authoritative against cached schemas or model-invented tool calls.
@@ -123,7 +127,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   const inheritedLabVerifierTurn = process.env.OPENENSEMBLE_LAB === '1'
     && getTurnContext()?.suppressLearning === true;
   const labVerifierTurn = inheritedLabVerifierTurn;
-  const suppressLearning = readOnlyTurn || labVerifierTurn;
+  const suppressLearning = readOnlyTurn || labVerifierTurn || !!projectId;
   // Foreground verifier turns honor the dispatcher-authenticated 1..4 cap.
   // Detached verifier work gets two bounded extra rounds so a multi-step task
   // can correct one lookup and still produce a final answer.
@@ -377,7 +381,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
       }).catch(() => null);
     }
     return buildAgentContext(agent.id, recallQuery, userId, {
-      includeEpisodes: !isolatedTaskRun,
+      includeEpisodes: !isolatedTaskRun && !projectId,
       suppressLearning,
     }).catch(() => null);
   })();

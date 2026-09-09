@@ -1,3 +1,4 @@
+import { projectContext, currentProjectId } from './lib/project-context.mjs';
 /**
  * OpenEnsemble Scheduler
  * Runs tasks at set times, saves results to agent sessions.
@@ -250,7 +251,7 @@ export async function addTask(task) {
   // (scheduleNewTask), a collision would overwrite one task's timer and fire
   // the wrong config. Ids are opaque (nothing parses the numeric part).
   const id = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const entry = { id, enabled: true, ...task };
+  const entry = { id, enabled: true, ...task, ...(currentProjectId(task.ownerId) ? { projectId: currentProjectId(task.ownerId) } : {}) };
   // modifyTasksForOwner goes through withLock and is async — must await or callers
   // get a Promise where they expect a task object (then `task.enabled` is
   // undefined, scheduleTask bails, and chat outcomes show "label=undefined").
@@ -453,6 +454,9 @@ export function registerBuiltin(name, fn) {
 
 // Run a task: builtin handler OR agent chat stream
 async function runTask(task, broadcast, opts = {}) {
+  return projectContext.run({ userId: task.ownerId, projectId: task.projectId || null }, () => runTaskInProject(task, broadcast, opts));
+}
+async function runTaskInProject(task, broadcast, opts = {}) {
   // manual: a user pressed "Run now". Bypass day-of-week + access-curfew gating
   // (they asked for it explicitly), never delete a one-shot, and don't touch the
   // consecutive-failure streak — a test fire must not consume or disable a task.

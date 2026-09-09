@@ -24,6 +24,7 @@
 <script src="/vendor/purify.min.js"></script>
 <script src="/vendor/chart.umd.min.js"></script>
 <link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/project-spaces.css">
 </head>
 <body>
 
@@ -119,6 +120,7 @@
   <!-- Left sidebar strip -->
   <div class="sidebar-strip" id="sidebarStrip">
     <div class="sidebar-feature-scroll" id="sidebarFeatureScroll">
+      <button class="strip-btn" id="sbtnProjects" data-action="openProjectSpaces" title="Project spaces"><i data-lucide="folder-open"></i><span class="strip-tooltip">Project spaces</span></button>
       <button class="strip-btn" id="sbtnAgents" data-action="toggleDrawer" data-args="[&quot;drawerAgents&quot;, &quot;sbtnAgents&quot;]" title="Agents">
         <i data-lucide="bot"></i>
         <span class="strip-tooltip">Agents</span>
@@ -225,6 +227,7 @@
 
   <!-- Main workspace -->
   <div class="workspace" id="workspace">
+    <div class="project-space-banner" id="projectSpaceBanner" hidden><span>Project</span><strong id="projectSpaceName"></strong><button data-action="openProjectSpaces">Details</button><button data-action="enterProjectSpace" data-args="[null]">General chat</button></div>
 
     <!-- Agent pill -->
     <div class="agent-pill" id="agentPill">
@@ -1876,8 +1879,14 @@
 
 
 
+<dialog id="projectSpacesDialog" class="project-spaces-dialog" aria-labelledby="projectSpacesTitle">
+  <header class="project-spaces-header"><h2 id="projectSpacesTitle">Project spaces</h2><button data-action="enterProjectSpace" data-args="[null]">General chat</button><button data-action="closeProjectSpaces" aria-label="Close project spaces">✕</button></header>
+  <div class="project-spaces-layout"><aside class="project-spaces-nav"><button class="project-primary" data-action="newProjectSpace">+ New project</button><nav id="projectSpaceList" aria-label="Your projects"></nav></aside><main id="projectSpaceDetail" class="project-space-detail"></main></div>
+  <div id="projectSpaceMessage" class="project-space-message" role="status" aria-live="polite"></div>
+</dialog>
 <script src="/event-delegation.js"></script>
 <script src="/core.js"></script>
+<script src="/project-spaces.js"></script>
 <script src="/tutor.js"></script>
 <script src="/tutor-today.js"></script>
 <script src="/websocket.js"></script>

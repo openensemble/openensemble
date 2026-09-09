@@ -68,7 +68,8 @@ function loadChatAgentHistory(agent, completedTasks, snapshotRevision = 0) {
         || !TASK_CHIP_TERMINAL_STATES.has(status.state?.status)) continue;
     // A completed snapshot is accepted only for this exact chat incarnation.
     // Historical records never supply live work or cross a user/profile clear.
-    if (!userId || !epoch || status.state.sourceSessionKey !== `${userId}_${agent}`
+    const projectSuffix = typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? `__${activeProjectSpaceId}` : '';
+    if (!userId || !epoch || status.state.sourceSessionKey !== `${userId}_${agent}${projectSuffix}`
         || status.state.sourceSessionEpoch !== epoch
         || chatAgentScope(status.agent || status.state.visibleAgentId) !== agent) continue;
     completed.set(status.watcherId, {
@@ -90,6 +91,19 @@ function loadChatAgentHistory(agent, completedTasks, snapshotRevision = 0) {
 function setChatAgentsConnected(connected) {
   chatAgentsConnected = connected;
   updateChatAgents();
+}
+
+// An explicit history request can arrive after the reconnect task snapshot.
+// Keep its live cards when replacing conversation rows with durable history.
+function restoreChatAgentTaskRows(agent) {
+  const rows = sessions[agent];
+  if (!Array.isArray(rows)) return;
+  for (const entry of chatAgentTasks.values()) {
+    if (entry.agent !== agent || entry.status.final || !chatAgentCurrentEpoch(agent, entry.status.state)) continue;
+    if (rows.some(row => row.role === 'status' && row.status?.watcherId === entry.status.watcherId)) continue;
+    rows.push({ role: 'status', status: entry.status, content: `[Status: ${entry.status.text}]`,
+      ts: entry.status.state?.startedAt || Date.now(), _activeTaskSnapshot: true });
+  }
 }
 
 function chatAgentModel(state) {

@@ -49,6 +49,10 @@ Everything else - email, calendar, MCP servers, remote nodes, voice devices, tun
 
 ### Core
 
+**Project spaces.** Keep a shared brief, decisions, next steps, checklist, and reference files alongside separate project conversations with each agent. Project context follows delegated and scheduled work; switch spaces from the sidebar folder button. See [Project spaces](guide/project-spaces.md).
+
+**Resumable agent jobs.** Background workers and standalone delegations continue after a restart using saved tool results. Uncertain actions pause for review, and stopped jobs stay stopped. See [Resumable agent jobs](guide/resumable-jobs.md) for supported jobs and recovery limits.
+
 **Multi-agent chat.** A roster of specialist agents each tuned for a role. The Coordinator reads incoming messages and delegates to the right specialist, or you can talk to one directly.
 
 **Bring your own LLMs.** Providers include Anthropic, OpenAI (API key or ChatGPT-login/OAuth), Grok, Gemini, DeepSeek, Mistral, Groq, Together, Perplexity, Fireworks, OpenRouter, Z.ai, Ollama, and LM Studio. Enable what you want; assign different models per agent.

@@ -95,6 +95,9 @@ export function _journalAdd(taskId) {
   const rec = activeTasks.get(taskId);
   if (!rec) return false;
   return _journalMutate(entries => { entries[taskId] = {
+    ...entries[taskId],
+    // Runtime-model refreshes must not overwrite newer tool checkpoints.
+    ...(rec.checkpoint && !entries[taskId]?.checkpoint ? { checkpoint: rec.checkpoint } : {}),
     userId: rec.userId,
     kind: rec.isWorker ? 'worker' : 'delegation',
     agentId: rec.agentId,
@@ -111,6 +114,10 @@ export function _journalAdd(taskId) {
     watcherId: rec.watcherId || null,
     rootWatcherId: rec.rootWatcherId || null,
     rootTaskId: rec.rootTaskId || taskId,
+    traceRootTaskId: rec.traceRootTaskId || null,
+    spanId: rec.spanId || null,
+    parentTaskId: rec.parentTaskId || null,
+    parentWatcherId: rec.parentWatcherId || null,
     ownerKey: rec.ownerKey || null,
     coordinatorAgentId: rec.coordinatorAgentId || null,
     visibleAgentId: rec.visibleAgentId || null,
@@ -127,6 +134,7 @@ export function _journalAdd(taskId) {
     // Nonsecret restart guard only. The verifier lease capability itself is
     // memory-only and is intentionally absent from this explicit serializer.
     verifierLeaseRequired: rec.verifierLeaseRequired === true,
+    autoContinue: rec.autoContinue === true,
     startedAt: rec.startedAt,
   }; });
 }

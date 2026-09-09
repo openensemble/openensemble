@@ -60,6 +60,7 @@ import {
   _journalRemove,
   _journalMarkCompletion,
   _journalSnapshot,
+  _journalMutate,
   JOURNAL_PATH,
 } from './background-tasks/journal.mjs';
 import {
@@ -129,9 +130,8 @@ function _rowCarriesModelContext(row) {
 /**
  * Restart recovery — called once from server boot, AFTER startWatcherSupervisor
  * (completeWatcher only sees watcher files already loaded into memory). Every
- * journal entry at this point is a task the restart killed mid-flight; mark it
- * cancelled + notify, do NOT auto-resume: silently re-running a side-effectful
- * task ("send the email") after a restart is worse than asking again.
+ * Jobs with durable execution checkpoints continue from saved progress. Older
+ * jobs and unsupported coordination retain their interruption notice.
  */
 export async function bootRecoverInterruptedTasks() {
   let entries;
@@ -151,6 +151,17 @@ export async function bootRecoverInterruptedTasks() {
   }
   const ids = Object.keys(entries);
   if (!ids.length) return 0;
+  const { recoverCheckpointedTask } = await import('./background-tasks/resume.mjs');
+  for (const [taskId, entry] of Object.entries(entries)) {
+    if (!entry?.checkpoint) continue;
+    // Failed checkpoint validation must never fall through to a producer replay.
+    try {
+      if (await recoverCheckpointedTask(taskId, entry)) delete entries[taskId];
+    } catch (error) {
+      console.error('[background-tasks] checkpoint recovery paused:', error.message);
+      delete entries[taskId];
+    }
+  }
   const now = Date.now();
   const scheduledRecovery = new Map();
   const scheduledGroups = new Map();
@@ -280,7 +291,7 @@ export async function bootRecoverInterruptedTasks() {
     //    the session that holds the old promise now also holds the cancellation.
     const reportAgentId = await _resolveRuntimeSessionKey(
       e.userId,
-      e.visibleAgentId || e.coordinatorAgentId,
+      e.sourceSessionKey || e.visibleAgentId || e.coordinatorAgentId,
     );
     const content = completion
       ? `[${name}'s completion notice was recovered after restart — re: "${e.summary}"]\n${recoveredError || recoveredResult}`
@@ -1212,6 +1223,7 @@ export async function reapStaleTasks(now = Date.now()) {
   // children), so iterating while calling it would be unsafe.
   const stale = [];
   for (const [taskId, info] of activeTasks) {
+    if (info.status === 'paused' && info.checkpoint) continue;
     if (info.startedAt && (now - info.startedAt) > TASK_TTL_MS) stale.push([taskId, info]);
   }
   for (const [taskId, info] of stale) {
@@ -1265,6 +1277,21 @@ export function cancelTask(userId, id, reason = 'cancelled') {
     if (typeof info.abort !== 'function') return { ok: false, reason: 'not cancellable' };
     if (info.status === 'cancelling') return { ok: true, taskId, watcherId: info.watcherId, alreadyCancelling: true };
     const targets = taskCancellationScope(taskId, userId, activeTasks, rootTaskGraphs);
+    if (targets.some(target => activeTasks.get(target)?.checkpoint)) {
+      const saved = _journalMutate(entries => {
+        for (const target of targets) {
+          if (!activeTasks.get(target)?.checkpoint) continue;
+          if (!entries[target]?.checkpoint || entries[target].userId !== userId) return false;
+        }
+        for (const target of targets) {
+          if (!entries[target]?.checkpoint) continue;
+          entries[target].checkpoint.status = 'cancelled';
+          entries[target].checkpoint.revision++;
+        }
+        return true;
+      });
+      if (!saved) return { ok: false, reason: 'Cancellation could not be saved. Try again when storage is available.' };
+    }
     info.status = 'cancelling';
     info.phase = 'cancelling';
     info.currentTool = null;

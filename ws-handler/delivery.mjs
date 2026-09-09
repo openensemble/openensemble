@@ -1,3 +1,4 @@
+import { projectContext, currentProjectId, projectEvent, matchesProject } from '../lib/project-context.mjs';
 /**
  * User/device WebSocket delivery helpers (broadcast, sendTo*, online probes).
  * Extracted from ws-handler.mjs — pure move. Main connection setup stays there.
@@ -23,7 +24,7 @@ function rawChatAgentId(userId, agentId) {
 }
 
 function chatRevisionKey(userId, agentId) {
-  return `${userId}:${rawChatAgentId(userId, agentId)}`;
+  return `${userId}:${rawChatAgentId(userId, agentId)}${currentProjectId(userId) ? ':' + currentProjectId(userId) : ''}`;
 }
 
 export function getChatRevision(userId, agentId) {
@@ -31,6 +32,7 @@ export function getChatRevision(userId, agentId) {
 }
 
 export function stampChatEvent(userId, event) {
+  event = projectEvent(userId, event);
   if (!event || typeof event !== 'object' || !event.agent) return event;
   if (Number.isFinite(event.chat_revision)) return event;
   const key = chatRevisionKey(userId, event.agent);
@@ -53,6 +55,8 @@ export function orchestrationPolicyForClient(userId) {
 // ── Broadcast helpers ────────────────────────────────────────────────────────
 export function broadcast(msg) {
   if (!getMainWss()) return;
+  const context = projectContext.getStore();
+  if (context?.projectId && msg?.agent) { sendToUser(context.userId, projectEvent(context.userId, msg)); return; }
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   for (const client of getMainWss().clients)
     if (client.readyState === client.OPEN && !client._deviceId) try { client.send(data); } catch {}
@@ -61,6 +65,11 @@ export function broadcast(msg) {
 
 export function broadcastToUsers(userIds, msg) {
   if (!getMainWss()) return;
+  const context = projectContext.getStore();
+  if (context?.projectId && msg?.agent) {
+    if (userIds.includes(context.userId)) sendToUser(context.userId, projectEvent(context.userId, msg));
+    return;
+  }
   const data = typeof msg === 'string' ? msg : JSON.stringify(msg);
   const idSet = new Set(userIds);
   for (const client of getMainWss().clients)
@@ -74,7 +83,7 @@ export function sendToUser(userId, msg) {
   const data = typeof stamped === 'string' ? stamped : JSON.stringify(stamped);
   let delivered = 0;
   for (const client of getMainWss().clients) {
-    if (client.readyState === client.OPEN && !client._deviceId && client._userId === userId) {
+    if (client.readyState === client.OPEN && !client._deviceId && client._userId === userId && (!stamped?.agent || matchesProject(client, stamped))) {
       try { client.send(data); delivered++; } catch {}
     }
   }

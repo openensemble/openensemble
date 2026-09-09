@@ -1,3 +1,5 @@
+import { projectContext, projectSessionKey, projectIdFromSession, matchesProject } from '../lib/project-context.mjs';
+import { getProjectSpace } from '../lib/project-spaces.mjs';
 /**
  * Main browser/voice WebSocket connection handler.
  * Extracted from ws-handler.mjs — pure move.
@@ -210,6 +212,8 @@ export function bindConnectionDeps(deps) {
 }
 
 export function onConnection(ws, req) {
+  const requestedProject = new URL(req.url || '/', 'http://localhost').searchParams.get('project');
+  ws._projectId = null;
   try { ws._socket?.setKeepAlive?.(true, WS_PING_INTERVAL); } catch {}
   ws._clientIp = wsClientIp(req);
   const desktopHeader = String(req.headers['x-openensemble-desktop-app'] || '').trim() === '1';
@@ -250,6 +254,21 @@ export function onConnection(ws, req) {
   // raw request URL, which may contain a legacy ?token= that would otherwise
   // land in logs / ship to log aggregators in plaintext.
   async function sendInitialData() {
+    try {
+      if (requestedProject) {
+        if (ws._deviceId) throw new Error('Project spaces require a browser session');
+        getProjectSpace(ws._userId, requestedProject);
+        ws._projectId = requestedProject;
+      }
+      await projectContext.run({ userId: ws._userId, projectId: ws._projectId }, sendProjectInitialData);
+    } catch {
+      // A rejected project must never accept queued frames as general chat.
+      ws._authenticated = false;
+      ws.send(JSON.stringify({ type: requestedProject ? 'project_error' : 'error', message: requestedProject ? 'Project space unavailable for this profile' : 'Unable to load conversations' }));
+      ws.close(requestedProject ? 4004 : 1011, requestedProject ? 'Project unavailable' : 'Session load failed');
+    }
+  }
+  async function sendProjectInitialData() {
     console.log('[ws] client connected, user:', ws._userId, 'device:', ws._deviceId ?? '-', 'source:', ws._clientSource ?? '-');
     log.info('ws', 'client connected', { userId: ws._userId, deviceId: ws._deviceId ?? null, source: ws._clientSource ?? null });
     // Session clock for the matching disconnect row — without it a link event
@@ -281,7 +300,7 @@ export function onConnection(ws, req) {
     // reads at WS connect time. Parallel async makes total wall time =
     // the slowest single read, not the sum.
     const sessionLoads = await Promise.all(userAgents.map(async (agent) => {
-      const key = sessionKey(ws._userId, agent.id);
+      const key = projectSessionKey(ws._userId, agent.id);
       const sessionRevision = getChatRevision(ws._userId, agent.id);
       const snapshotGeneration = nextSessionSnapshotSeq();
       const messages = await loadSession(key, 60);
@@ -310,7 +329,7 @@ export function onConnection(ws, req) {
     const activeByAgent = new Map(active.map(s => [s.agentId, s]));
     for (const { agent, messages, completedTasks, pendingStream, sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts } of sessionLoads) {
       ws.send(JSON.stringify({
-        type: 'session_loaded', agent: agent.id, messages, completedTasks, pendingStream,
+        type: 'session_loaded', projectId: ws._projectId, agent: agent.id, messages, completedTasks, pendingStream,
         activeStream: activeByAgent.get(agent.id) ?? null,
         activeSnapshotRevision: activeSnapshotRevisions[agent.id] ?? 0,
         sessionEpoch, sessionRevision, snapshotGeneration, credentialPrompts,
@@ -319,9 +338,9 @@ export function onConnection(ws, req) {
     // Send a narrow, folded UI snapshot rather than serializing execution
     // callbacks, private prompts, verifier leases, or ambient contexts.
     const tasks = projectActiveTasksForWire(
-      getActiveBgTasks().filter(t => t.userId === ws._userId),
+      getActiveBgTasks().filter(t => t.userId === ws._userId && projectIdFromSession(t.sourceSessionKey) === (ws._projectId || null)),
     );
-    ws.send(JSON.stringify({ type: 'active_streams', agents: active, tasks, snapshotRevisions: activeSnapshotRevisions }));
+    ws.send(JSON.stringify({ type: 'active_streams', projectId: ws._projectId, agents: active, tasks, snapshotRevisions: activeSnapshotRevisions }));
   }
 
   if (ws._authenticated) {
@@ -337,7 +356,7 @@ export function onConnection(ws, req) {
   // Named (not inline) so the streaming-STT path can re-enter it with a
   // synthesized `chat` frame — the transcript then takes the EXACT same road
   // a device-side transcription would (interceptors, fastpaths, streamer).
-  const onWsMessage = async (raw, isBinary = false) => {
+  const handleWsMessage = async (raw, isBinary = false) => {
    // Hoisted above the try so the catch below can tell chat failures apart
    // from other frame types when picking the device-spoken fallback.
    let msg;
@@ -765,10 +784,10 @@ export function onConnection(ws, req) {
       if (agentId) {
         abortChat(ws._userId, agentId);
         cancelPendingCredentialPrompts(ws._userId, { agentId });
-        const sessionEpoch = await clearSession(sessionKey(ws._userId, agentId));
+        const sessionEpoch = await clearSession(projectSessionKey(ws._userId, agentId));
         const cleared = stampChatEvent(ws._userId, { type: 'session_cleared', agent: agentId, sessionEpoch });
         for (const client of getMainWss().clients) {
-          if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN) continue;
+          if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN || !matchesProject(client, cleared)) continue;
           try { client.send(JSON.stringify(cleared)); } catch {}
         }
       }
@@ -956,7 +975,7 @@ export function onConnection(ws, req) {
     if (msg.type === 'load_session') {
       const agentId = msg.agent;
       if (agentId) {
-        const key = sessionKey(ws._userId, agentId);
+        const key = projectSessionKey(ws._userId, agentId);
         const sessionRevision = getChatRevision(ws._userId, agentId);
         const snapshotGeneration = nextSessionSnapshotSeq();
         const messages = await loadSession(key, 60);
@@ -967,7 +986,7 @@ export function onConnection(ws, req) {
         const requestId = typeof msg.request_id === 'string' && msg.request_id.length <= 80
           ? msg.request_id : null;
         ws.send(JSON.stringify({
-          type: 'session_loaded', agent: agentId, messages, pendingStream,
+          type: 'session_loaded', projectId: ws._projectId, agent: agentId, messages, pendingStream,
           completedTasks: completedTasksForSession(ws._userId, key, sessionEpoch),
           activeStream: activeStream ? {
             ...activeStream,
@@ -1454,7 +1473,7 @@ export function onConnection(ws, req) {
           }
           for (const client of getMainWss().clients) {
             if (client === ws) continue;
-            if (client._userId !== effectiveUserId) continue;
+            if (client._userId !== effectiveUserId || !matchesProject(client, e)) continue;
             if (client.readyState !== client.OPEN) continue;
             // Never fan chat events out to a voice device that didn't
             // originate the chat. Without this, typing into a browser tab
@@ -1553,6 +1572,8 @@ export function onConnection(ws, req) {
     } catch {}
    }
   };
+  const onWsMessage = (...args) => projectContext.run(
+    { userId: ws._userId, projectId: ws._projectId }, () => handleWsMessage(...args));
   ws.on('message', onWsMessage);
 
   ws.on('close', (code, reason) => {

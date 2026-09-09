@@ -27,6 +27,7 @@
  */
 
 import fs from 'fs';
+import { _journalSnapshot } from '../background-tasks/journal.mjs';
 import path from 'path';
 import { randomUUID, createHash } from 'crypto';
 import { USERS_DIR, SKILLS_DIR, userSkillsDir } from '../lib/paths.mjs';
@@ -191,8 +192,15 @@ function loadUserWatchers(userId) {
   const TASK_PROXY_BOOT_REAP_MS = 60 * 60 * 1000;
   const now = Date.now();
   let reaped = 0;
+  let resumableWatchers = new Set();
+  try {
+    resumableWatchers = new Set(Object.values(_journalSnapshot())
+      .filter(entry => entry?.userId === userId && entry.checkpoint && !entry.completion && !entry.checkpoint.disabledReason && entry.checkpoint.status !== 'cancelled')
+      .map(entry => entry.watcherId));
+  } catch { /* journal recovery reports unreadable evidence separately */ }
   data.active = data.active.filter(w => {
     if (w.kind !== 'task_proxy') return true;
+    if (resumableWatchers.has(w.id)) return true;
     if (w.state?.awaiting_input) return true;   // user was just being slow
     const lastActivity = w.state?.lastActivityAt || w.lastChangeAt || w.createdAt || 0;
     if (lastActivity && now - lastActivity > TASK_PROXY_BOOT_REAP_MS) {

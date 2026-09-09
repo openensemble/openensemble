@@ -58,6 +58,8 @@ import { handle as handleDesktop }  from './routes/desktop.mjs';
 import { handle as handleMisc }     from './routes/misc.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
 import { handle as handleHealth, setRuntimeMetricsFn } from './routes/health.mjs';
+import { handle as handleProjectSpaces } from './routes/project-spaces.mjs';
+import { handle as handleJobRecovery } from './routes/job-recovery.mjs';
 import { handle as handleDashboards } from './routes/dashboards.mjs';
 import { handle as handleOAuth }         from './routes/oauth.mjs';
 import { handle as handleMsOAuth }       from './routes/ms-oauth.mjs';
@@ -327,6 +329,8 @@ function isDashboardViewPath(pathname) {
 // ── Route dispatch order ─────────────────────────────────────────────────────
 const routeHandlers = [
   handleHealth,    // /health (public) + /api/admin/health (authed)
+  handleProjectSpaces,
+  handleJobRecovery,
   handleDashboards, // per-user dashboards + authenticated renderer compatibility APIs
   handlePlugins,   // must be early — delegates /api/* to plugin servers
   handleOAuth,          // /api/oauth/google/* — per-user Google OAuth flow

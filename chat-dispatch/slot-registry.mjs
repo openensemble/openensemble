@@ -1,3 +1,4 @@
+import { resolveProjectSessionKey, projectIdFromSession, currentProjectId } from '../lib/project-context.mjs';
 // @ts-check
 /**
  * chat-dispatch/slot-registry.mjs
@@ -170,10 +171,12 @@ export function getUserTopologyState(userId) {
 }
 
 export function isAgentBusy(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   return busyPromises.has(agentId);
 }
 
 export function waitForAgentIdle(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   return busyPromises.get(agentId) ?? Promise.resolve();
 }
 
@@ -187,6 +190,7 @@ export function waitForAgentIdle(agentId) {
  * @returns {{waitTurn: () => Promise<unknown>, release: () => void}}
  */
 export function markAgentBusy(agentId) {
+  agentId = resolveProjectSessionKey(agentId);
   // Serialize: if something is already in flight, chain onto it.
   const prev = busyPromises.get(agentId) ?? Promise.resolve();
   /** @type {() => void} */
@@ -221,7 +225,7 @@ export function getActiveStreams(userId) {
   for (const info of activeStreams.values()) {
     // Internal silent turns still own the per-agent execution slot, but they
     // are not a browser stream and must stay absent from reconnect snapshots.
-    if (info.userId === userId && info.omitFromReconnect !== true) {
+    if (info.userId === userId && info.omitFromReconnect !== true && (info.projectId || null) === currentProjectId(userId)) {
       result.push(snapshotActiveStream(info));
     }
   }
@@ -229,7 +233,7 @@ export function getActiveStreams(userId) {
 }
 
 export function getActiveStream(userId, agentId) {
-  const info = activeStreams.get(`${userId}_${agentId}`);
+  const info = activeStreams.get(resolveProjectSessionKey(`${userId}_${agentId}`));
   return info ? snapshotActiveStream(info) : null;
 }
 
@@ -237,7 +241,7 @@ export function getActiveStream(userId, agentId) {
 // getActiveStream above intentionally remains unfiltered for Stop/recovery
 // ownership checks inside the server.
 export function getActiveStreamForClient(userId, agentId) {
-  const info = activeStreams.get(`${userId}_${agentId}`);
+  const info = activeStreams.get(resolveProjectSessionKey(`${userId}_${agentId}`));
   return info && info.omitFromReconnect !== true
     ? snapshotActiveStream(info)
     : null;
@@ -247,6 +251,7 @@ export function getActiveStreamForClient(userId, agentId) {
 function snapshotActiveStream(info) {
   return {
     agentId: info.agentId,
+    ...(info.projectId ? { projectId: info.projectId } : {}),
     startTs: info.startTs,
     turnId: info.turnId ?? null,
     messageId: info.messageId ?? null,
@@ -369,6 +374,7 @@ export function openTurn(scopedSessionKey, userId, agentId, meta = {}) {
   const info = {
     userId,
     agentId,
+    projectId: projectIdFromSession(scopedSessionKey),
     startTs: Date.now(),
     turnId: meta.turnId ?? null,
     messageId: meta.messageId ?? null,
@@ -396,7 +402,7 @@ export function openTurn(scopedSessionKey, userId, agentId, meta = {}) {
 
 export function abortChat(userId, agentId) {
   if (!userId || !agentId) return;
-  const key = `${userId}_${agentId}`;
+  const key = resolveProjectSessionKey(`${userId}_${agentId}`);
   abortControllers.get(key)?.abort();
   abortControllers.delete(key);
   activeStreams.delete(key);

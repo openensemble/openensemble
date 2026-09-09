@@ -20,6 +20,7 @@
         { "slug": "agents",        "title": "Agents" },
         { "slug": "roles",         "title": "Roles" },
         { "slug": "coordinator",   "title": "The Coordinator" },
+        { "slug": "resumable-jobs", "title": "Resumable agent jobs" },
         { "slug": "skills",        "title": "Skills" },
         { "slug": "skill-builder", "title": "Building custom skills" }
       ]
@@ -27,6 +28,7 @@
     {
       "title": "Daily use",
       "pages": [
+        { "slug": "project-spaces", "title": "Project spaces" },
         { "slug": "dashboards", "title": "Display dashboards" },
         { "slug": "tasks",      "title": "Tasks & scheduler" },
         { "slug": "documents",  "title": "Documents & sharing" },

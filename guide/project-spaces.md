@@ -1,0 +1,27 @@
+# Project spaces
+
+Project spaces keep ongoing work together: a shared brief, decisions, current state, a checklist, reference files, and a separate conversation with each agent.
+
+Open **Project spaces** using the folder button in the sidebar, then choose **New project**. Give it a name, describe the goal and constraints in **Shared brief**, and save. Choose **Open chat** to start working inside the project. The project name above chat shows which space is active; **General chat** returns to your ordinary conversations.
+
+## Shared context
+
+Every agent answering inside a space receives its saved brief, decisions, next steps, checklist, and file references. Delegated workers inherit that context. Use **Details** to keep the project's decisions and current state up to date; saved changes apply to the next message. The notes and checklist are edited by you, rather than automatically inferred from replies.
+
+Each agent has its own conversation within the project. **Chats** opens those conversations, including earlier messages after a reload. Switching projects opens a fresh view and leaves any running work in its original space. Different browser tabs can use different spaces.
+
+Project conversation history and composer drafts are separate from general chat and other spaces. OE does not automatically learn project conversations into its general conversation memory. Your profile's standing preferences, explicitly saved memories, agents, connected services, and tool permissions remain available; a project is an organizational space within your profile, not a separate permissions sandbox.
+
+## Files and tasks
+
+Use the project's **Files** tab to upload reference files. They are stored in your profile and linked to the project, and agents can read them using the listed file references. Click a file to download it. **Remove link** removes it from the project while keeping the original profile file. Files uploaded only through the chat composer remain chat attachments; add them through the project's Files tab when they should be shared project references.
+
+The **Checklist** is a manual list of project tasks. Add an item, mark it complete, then choose **Save changes**. It does not create a scheduled reminder. Agent tasks scheduled from project chat retain the project's context and conversation when they run, including after a server restart. Manage those schedules in the existing **Tasks** drawer.
+
+## Saving and archiving
+
+Unsaved edits to an existing project are retained as a draft in this browser tab, including across reloads. Separate tabs keep separate drafts. If another tab saves first, OE rejects the stale save and keeps your draft visible. Copy any edits you want to preserve, then choose **Reload saved version** before combining the changes.
+
+**Archive** keeps a finished project, its files, and its conversations available. Choose **Unarchive** to return it to active work. Archiving does not cancel scheduled tasks; pause those in **Tasks** if needed.
+
+Project data lives inside your profile and is included in OE backups. Each profile can keep up to 64 spaces, with up to 100 file links and 100 checklist items per space. Each agent's project conversation follows OE's existing chat-history retention limits.

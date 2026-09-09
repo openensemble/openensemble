@@ -26,7 +26,7 @@ let pendingAttachments = [];
 // lose the last few keystrokes to a pending debounce timer. Cleared once a
 // message actually sends (see send()); restored on agent switch (same
 // switchAgent hook) and on page load / reconnect (websocket.js session_loaded).
-const DRAFT_STORAGE_KEY = 'oe.composerDrafts.v1';
+const DRAFT_STORAGE_KEY = 'oe.composerDrafts.v1' + (typeof activeProjectSpaceId === 'string' && activeProjectSpaceId ? '.' + activeProjectSpaceId : '');
 const DRAFT_SAVE_DEBOUNCE_MS = 400;
 let _draftSaveTimer = null;
 

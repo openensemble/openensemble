@@ -10,6 +10,7 @@
  */
 
 import { executeToolStreaming } from '../../roles.mjs';
+import { checkpointNativeEvent } from '../../background-tasks/checkpoints.mjs';
 import { writeFileSync } from 'fs';
 import path from 'path';
 import { ensureFreshToken, forceRefreshToken } from '../../lib/openai-codex-auth.mjs';
@@ -540,6 +541,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     if (responsesTools?.length) { body.tools = responsesTools; body.parallel_tool_calls = true; }
     if (promptCacheKey) body.prompt_cache_key = promptCacheKey;
     const paidHostedImageOffered = body.tools?.some(tool => tool?.type === 'image_generation') === true;
+    if (paidHostedImageOffered) checkpointNativeEvent(userId, { providerHosted: true });
 
     const headers = {
       'Content-Type':  'application/json',

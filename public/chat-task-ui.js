@@ -13,6 +13,8 @@ function taskChipPhase(status) {
   if (status.final && status.finalStatus === 'error') return 'error';
   if (status.final && status.finalStatus === 'cancelled') return 'cancelled';
   if (phase === 'cancelling') return 'cancelling';
+  if (phase === 'paused') return 'paused';
+  if (phase === 'resuming') return 'resuming';
   if (phase === 'cancelled') return 'cancelled';
   if (phase === 'queued') return 'queued';
   if (phase === 'tool') return 'using tool';
@@ -63,6 +65,60 @@ async function cancelTaskChip(watcherId, btn) {
 const TASK_CHIP_TERMINAL_STATES = new Set([
   'done', 'complete', 'completed', 'error', 'failed', 'cancelled', 'canceled', 'stopped',
 ]);
+
+async function reviewJobRecovery(taskId) {
+  let dialog;
+  try {
+    const response = await fetch(`/api/job-recovery/${encodeURIComponent(taskId)}`);
+    const job = await response.json();
+    if (!response.ok) throw new Error(job.error || 'Could not load the job.');
+    dialog = document.createElement('dialog');
+    dialog.className = 'job-recovery-dialog';
+    const title = document.createElement('h3'); title.textContent = 'Resume interrupted job';
+    const summary = document.createElement('p'); summary.textContent = `${job.summary} — ${job.completed} saved actions.`;
+    const reason = document.createElement('p'); reason.textContent = job.reason || 'Continue from saved progress.';
+    dialog.append(title, summary, reason);
+    const reviews = job.uncertain.map(action => {
+      const section = document.createElement('fieldset');
+      const legend = document.createElement('legend'); legend.textContent = action.name;
+      const args = document.createElement('pre'); args.textContent = JSON.stringify(action.args, null, 2);
+      const label = document.createElement('label'); label.textContent = 'After checking the outcome:';
+      const choice = document.createElement('select');
+      for (const [value, text] of [['', 'Choose an outcome'], ['completed', 'It completed — use my result below'], ['retry', 'I checked — authorize this action to run again']]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = text; choice.appendChild(option);
+      }
+      label.appendChild(choice);
+      const resultLabel = document.createElement('label'); resultLabel.textContent = 'Observed result';
+      const result = document.createElement('textarea'); result.maxLength = 12000; result.rows = 3;
+      resultLabel.appendChild(result); resultLabel.hidden = true;
+      choice.addEventListener('change', () => { resultLabel.hidden = choice.value !== 'completed'; });
+      section.append(legend, args, label, resultLabel); dialog.appendChild(section);
+      return { action, choice, result };
+    });
+    const error = document.createElement('p'); error.setAttribute('role', 'alert');
+    const buttons = document.createElement('div'); buttons.className = 'job-recovery-buttons';
+    const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close';
+    close.addEventListener('click', () => dialog.close());
+    const resume = document.createElement('button'); resume.type = 'button'; resume.textContent = 'Resume job';
+    resume.addEventListener('click', async () => {
+      const unresolved = reviews.some(r => !r.choice.value || (r.choice.value === 'completed' && !r.result.value.trim()));
+      if (unresolved) { error.textContent = 'Choose an outcome for each action and enter its result if it completed.'; return; }
+      resume.disabled = true; error.textContent = '';
+      try {
+        const result = await fetch(`/api/job-recovery/${encodeURIComponent(taskId)}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ revision: job.revision, resolutions: reviews.map(r => ({ id: r.action.id, outcome: r.choice.value, result: r.result.value })) }),
+        });
+        const data = await result.json();
+        if (!result.ok) throw new Error(data.error || 'Could not resume the job.');
+        dialog.close();
+      } catch (err) { error.textContent = err.message; resume.disabled = false; }
+    });
+    buttons.append(close, resume); dialog.append(error, buttons);
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.appendChild(dialog); dialog.showModal();
+  } catch (error) { dialog?.remove(); alert(error.message); }
+}
 
 function taskChipText(value, maxLength = 500) {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
@@ -374,6 +430,8 @@ function taskChipViewModel(status, ts = Date.now()) {
     visualState = 'finished'; badge = '· finished';
   } else if (state.cancelling || state.status === 'cancelling') {
     visualState = 'cancelled'; badge = '■ stopping';
+  } else if (state.phase === 'paused' || state.status === 'paused') {
+    visualState = 'blocked'; badge = '⏸ paused';
   } else if (state.phase === 'stalled' || state.status === 'stalled') {
     visualState = 'blocked'; badge = '⚠ needs attention';
   }
@@ -630,6 +688,12 @@ function appendTaskChip(status, ts = Date.now(), scroll = true) {
   badgeEl.textContent = model.badge;
   badgeEl.setAttribute('aria-label', `Status: ${model.phaseText}`);
   header.appendChild(badgeEl);
+  if (!status.final && status.state?.recoveryAvailable && status.state?.taskId) {
+    const review = document.createElement('button');
+    review.type = 'button'; review.className = 'task-chip-recover'; review.textContent = 'Review & resume';
+    review.addEventListener('click', () => reviewJobRecovery(status.state.recoveryTaskId || status.state.taskId));
+    header.appendChild(review);
+  }
 
   let cancelBtn = el.querySelector('.task-chip-cancel');
   if (model.canCancel) {
