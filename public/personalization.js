@@ -338,6 +338,8 @@ function _pzInboxHtml() {
       ? event.why.preferenceId : null;
     const editKey = preferenceId ? _pzRef(preferenceId) : null;
     const controls = [
+      event.kind === 'prepared_work' && event.metadata?.workId
+        ? `<button class="pz-btn pz-btn-small" data-action="openProactiveWork" data-args='${escHtml(JSON.stringify([event.metadata.projectId || null, event.metadata.workId]))}'>Open prepared work</button>` : '',
       controlActions.includes('useful')
         ? `<button class="pz-btn pz-btn-small" data-action="feedbackPersonalizationEvent" data-args='["$el","useful"]' data-pz-key="${eventKey}">Useful</button>` : '',
       controlActions.includes('acted')
@@ -383,6 +385,7 @@ function _pzInboxMode(event) {
 }
 
 function _pzInboxExplanation(event) {
+  if (event?.kind === 'prepared_work') return event.metadata?.reason || 'Prepared from your active work and connected sources.';
   if (event?.why?.source === 'confirmed preference' && typeof event?.why?.statement === 'string'
     && event.why.statement.trim()) {
     return `You confirmed: “${event.why.statement.trim()}”`;
@@ -578,6 +581,14 @@ function _pzRenderPanelHtml() {
     <div class="settings-section-title pz-section-heading">Keeping an eye on</div>
     <div class="pz-list">${_pzLeadsHtml()}</div>
 
+    <div class="settings-section-title pz-section-heading">Prepare useful work</div>
+    <select class="pz-select" data-change-action="setWorkPreparationMode" data-change-args='["$value"]'>
+      <option value="off" ${!cfg.workMode || cfg.workMode === 'off' ? 'selected' : ''}>Off — keep goals for chat</option>
+      <option value="suggest" ${cfg.workMode === 'suggest' ? 'selected' : ''}>Suggest preparation — I choose which drafts to create</option>
+      <option value="prepare" ${cfg.workMode === 'prepare' ? 'selected' : ''}>Prepare private drafts automatically</option>
+    </select>
+    <p class="pz-hint">Checks upcoming meetings, active goals, linked Gmail replies, and failed tasks. Preparing a draft sends the relevant goal, project notes, linked document excerpts, and enabled calendar or reply context to your selected personalization model. Background preparation is limited to four drafts per day. Delivery follows your quiet hours and briefing preference. Drafts stay in OE until you use them.</p>
+    <button class="pz-btn" data-action="openProactiveWork">Open goals and prepared work</button>
     <div class="settings-section-title pz-section-heading pz-heading-actions"><span>Proactive activity</span>${_pzInbox.some(e => e.status !== 'read') ? '<button class="pz-link-btn" data-action="readAllPersonalizationEvents">Mark all read</button>' : ''}</div>
     <div class="pz-list">${_pzInboxHtml()}</div>
 

@@ -10,6 +10,7 @@
  */
 
 import fs from 'fs';
+import { INITIATIVE_GUIDANCE } from '../../lib/personalization/work-context.mjs';
 import path from 'path';
 import { BASE_DIR, USERS_DIR } from './paths.mjs';
 import { userRoleRulesPath } from '../../lib/paths.mjs';
@@ -504,7 +505,7 @@ export function getAgentsForUser(userId) {
     // systemPrompt below is the legacy flat concatenation for callers that
     // haven't migrated to the tier-aware path yet (every non-Anthropic
     // provider — the bytes still match what we used to send).
-    const _stableShellParts = [expandedPrompt, personalityBlock, modelCapabilityGuidance, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p);
+    const _stableShellParts = [expandedPrompt, personalityBlock, modelCapabilityGuidance, INITIATIVE_GUIDANCE, parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p);
     const _promptTiers = {
       stable: _stableShellParts.join('\n\n'),
       context: skillPromptAdditions || '',
@@ -515,7 +516,7 @@ export function getAgentsForUser(userId) {
     // SPA section after per-turn tool trimming. Kept for back-compat with
     // the legacy single-string path; new code reads _promptTiers.context
     // directly.
-    const _systemPromptShell = [expandedPrompt, personalityBlock, modelCapabilityGuidance, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '').join('\n\n');
+    const _systemPromptShell = [expandedPrompt, personalityBlock, modelCapabilityGuidance, INITIATIVE_GUIDANCE, '%%SKILL_SPAS%%', parallelToolsGuidance, serverUrlGuidance, selfReferenceGuidance, escalationGuidance].filter(p => p !== '').join('\n\n');
 
     // Patch ask_agent's agent_id description per-agent. Coordinators see the
     // full delegatable-specialist roster; specialists see only the literal

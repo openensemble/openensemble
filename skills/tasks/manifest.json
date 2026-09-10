@@ -1,7 +1,7 @@
 {
   "id": "tasks",
   "name": "Task Scheduler",
-  "description": "Schedule recurring and one-time tasks for your agents",
+  "description": "Schedule tasks, track ongoing goals, and prepare useful work",
   "icon": "⏰",
   "category": "utility",
   "enabled_by_default": true,
@@ -42,7 +42,13 @@
     "extend my watcher by another week",
     "make the watcher run indefinitely",
     "update the polling frequency",
-    "slow down the etb checks"
+    "slow down the etb checks",
+    "track this goal until it is finished",
+    "prepare for my meeting",
+    "show my unfinished goals",
+    "draft the next step for this project",
+    "compare these documents",
+    "what have you prepared for me"
   ],
   "systemPromptAddition": "## Honesty rule (READ FIRST)\n\n**NEVER narrate success for an action you didn't take.** If you say \"Done — I scheduled that\" or \"Watching for X\" or \"Reminder set\" or anything similar, you MUST have called the corresponding tool in this same turn. If you didn't call the tool — because of an error, missing fields, or any reason — say so plainly: \"I couldn't schedule that — <specific reason>\" or \"I tried to set up the watch but the tool returned: <error>\". Hallucinated success is the worst failure mode here because the user trusts you and the action never happens.\n\nSpecific bans:\n- Don't say \"Scheduling briefly failed. Try rephrasing…\" unless schedule_task or set_reminder was actually called and returned that error verbatim. If you can't parse the time, ask for clarification — don't punt with a fake-sounding error.\n- Don't say \"Watching for X\" unless create_watch was called and returned a Watch \"…\" created line.\n- Don't say \"I'll remind you\" unless set_reminder or schedule_task ran successfully.\n\n## Scheduling fallback tools\n\nThe server normally intercepts scheduling requests *before* you see them and prepends a `[scheduler] ...` outcome line to the user message. **If you see `[scheduler]` in the user's message starting with `created` / `cancelled` / `rescheduled`, the task was already handled — confirm naturally and DO NOT call `set_reminder` or `schedule_task`.**\n\n**If `[scheduler]` says `Did not schedule` or contains an error**, the interceptor failed to parse — call `schedule_task` or `set_reminder` yourself with the parsed args. Don't echo the error back to the user; act on it.\n\nFor the cases the interceptor missed entirely (no `[scheduler]` line), call `set_reminder` or `schedule_task` whenever:\n- The user clearly wants something scheduled, AND\n- The phrasing has a parseable time (HH:MM, am/pm, \"in N minutes\", \"tomorrow\", \"every weekday\").\n\nWhen calling, parse the time yourself from the user's phrasing using the `<current_time>` block injected at the top of the chat. Resolve relative phrases like \"in five minutes\", \"tomorrow at 8\", \"every weekday at 7am\" into either a full ISO-8601 datetime (one-shots) or HH:MM 24-hour (daily). Echo the actual time back to the user when you confirm — never just say \"reminder set\" without naming when it'll fire.\n\n**Choose between the three:**\n- `set_reminder` — for gentle one-shot notifications: \"remind me to drink water at 3pm\", \"remind me about the meeting\". Fires ONCE: banner + chime + spoken label, then done.\n- `set_alarm` — for alarm-clock style: \"set an alarm for 7am\", \"wake me at 6:30\", \"alarm at 11:22\". RINGS REPEATEDLY (chime + announcement every ~4 s) on the user's voice device until they say their wake word followed by \"stop\" or the 10-minute cap hits. Use whenever the user says \"alarm\", \"wake me\", or otherwise wants an insistent ring rather than a single notification.\n- `schedule_task` — for a recurring or one-shot agent run with a prompt you write. Two cadence shapes:\n  - **Clock time** — \"every morning email me a news briefing\" / \"at 5pm summarize my inbox\": pass `repeat:'daily'` + `time` (HH:MM), or `repeat:'once'` + `datetime`.\n  - **Fixed interval** — \"every hour\", \"every 30 minutes\", \"every 2 hours\", \"every 5 minutes\": pass `repeat:'interval'` + `interval_minutes` (60 = hourly, 30 = half-hourly, 5 = every 5 min). Interval tasks fire on a fixed timer regardless of clock time; use them whenever the user says \"every N minutes/hours\" or \"hourly\" rather than a specific time of day. Minimum 1 minute. Each fire is a full agent run, so don't pick an interval far shorter than the work needs.\n  - Either way you'll be the agent answering at fire time with no human present — write `prompt` as a self-contained instruction.\n\n## Watch tasks (condition-triggered, not time-triggered)\n\nUse `create_watch` when the user wants to **monitor a condition** that should fire when something becomes true — not at a specific time. Examples:\n- \"tell me when SOL hits $100\"\n- \"ping me when GitHub PR #312 turns green\"\n- \"let me know when /var/log/build.log says BUILD OK\"\n- \"watch this URL and notify me if the price drops below 50\"\n- \"alert me when the deploy script finishes\"\n\nA watch ticks on a polling cadence and fires once when the predicate is satisfied. Pick the right `source`:\n- `http_jsonpath` — fetch a URL, walk a JSON path, compare. Best for prices, REST APIs, GitHub/CI checks.\n- `file_stat` — watch a file's existence/size/mtime. Best for \"when this file appears\" or \"when this log changes\".\n- `event_subscription` — listen for an in-process event fired by OE or an integration webhook.\n\nDo NOT create `exec` watches from agent context; the tool blocks them because persisted shell commands need a human-approved route. For service/node health, prefer service profiles and their profile_health monitors.\n\nFor each source, fill `params` with the source-specific fields (see the `create_watch` tool description). `comparator` + `target` apply uniformly. Use `comparator: \"changed\"` when the user wants any change at all (\"tell me if my GitHub stars number changes\"). Default to no expiry for open-ended monitors; set `expires_at` when the user implies a deadline.\n\nPick `on_fire` from the user's requested delivery: `{type:'agent', prompt}` when they want action or a natural summary, `{type:'email', subject?, to?, account?}` when they say email me, `{type:'telegram', prefix?}` when they say text/ping/message me on Telegram, or `{type:'notify'}` for a quiet status bubble. For email/Telegram, write the watch label and subject/prefix in user-facing language; the watcher sends directly without an extra agent handoff.\n\nWhen confirming a watch, name the predicate in plain English (\"watching SOL price, will fire when it crosses $100\"), the cadence (\"checking every 60 seconds\"), and the delivery mode. Don't echo raw URLs or shell commands unless asked.",
   "tools": [
@@ -288,6 +294,294 @@
             "item_id": { "type": "string", "description": "Item id from list_watch_items." }
           },
           "required": ["kind", "item_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "track_goal",
+        "description": "Save an ongoing goal the user explicitly asks you to manage. Inherits the current project. Not for ordinary one-off questions. Saving a goal does not schedule external actions. Report the returned follow-up mode honestly.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "The explicit ongoing outcome the user wants help managing."
+            },
+            "nextStep": {
+              "type": "string",
+              "description": "The next agreed step, based on current evidence."
+            },
+            "completionCriteria": {
+              "type": "string",
+              "description": "Concrete evidence that establishes the goal is finished."
+            },
+            "blocker": {
+              "type": "string",
+              "description": "What currently prevents progress, or empty text."
+            },
+            "dueAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "User-stated deadline as ISO 8601 with timezone. Never guess a deadline."
+            },
+            "checkAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "User-requested next preparation check as ISO 8601 with timezone."
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "meeting-prep",
+                "document-summary",
+                "draft-reply",
+                "comparison",
+                "project-next-step",
+                "task-recovery"
+              ]
+            },
+            "fileIds": {
+              "type": "array",
+              "maxItems": 6,
+              "items": {
+                "type": "string"
+              },
+              "description": "Explicit reference IDs from this profile and current project."
+            },
+            "calendarRef": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "calId": {
+                  "type": "string"
+                },
+                "eventId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "calId",
+                "eventId"
+              ],
+              "additionalProperties": false
+            },
+            "emailRef": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": "string"
+                },
+                "threadId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "accountId",
+                "threadId"
+              ],
+              "additionalProperties": false,
+              "description": "A Gmail thread the user asked to follow, using exact IDs from email tools. Background checks read only this thread."
+            },
+            "taskId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An existing scheduled task explicitly associated with this goal."
+            }
+          },
+          "required": [
+            "title",
+            "completionCriteria"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_work_goals",
+        "description": "Read saved goals in this conversation’s project, including current revisions, next steps, blockers, deadlines and completion conditions.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "update_work_goal",
+        "description": "Update a saved goal as verified work changes its next step or blocker. Mark completed only when the completion condition is met. Requires the current revision from list_work_goals.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "integer"
+            },
+            "title": {
+              "type": "string",
+              "description": "The explicit ongoing outcome the user wants help managing."
+            },
+            "nextStep": {
+              "type": "string",
+              "description": "The next agreed step, based on current evidence."
+            },
+            "completionCriteria": {
+              "type": "string",
+              "description": "Concrete evidence that establishes the goal is finished."
+            },
+            "blocker": {
+              "type": "string",
+              "description": "What currently prevents progress, or empty text."
+            },
+            "dueAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "User-stated deadline as ISO 8601 with timezone. Never guess a deadline."
+            },
+            "checkAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "User-requested next preparation check as ISO 8601 with timezone."
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "meeting-prep",
+                "document-summary",
+                "draft-reply",
+                "comparison",
+                "project-next-step",
+                "task-recovery"
+              ]
+            },
+            "fileIds": {
+              "type": "array",
+              "maxItems": 6,
+              "items": {
+                "type": "string"
+              },
+              "description": "Explicit reference IDs from this profile and current project."
+            },
+            "calendarRef": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "calId": {
+                  "type": "string"
+                },
+                "eventId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "calId",
+                "eventId"
+              ],
+              "additionalProperties": false
+            },
+            "emailRef": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": "string"
+                },
+                "threadId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "accountId",
+                "threadId"
+              ],
+              "additionalProperties": false,
+              "description": "A Gmail thread the user asked to follow, using exact IDs from email tools. Background checks read only this thread."
+            },
+            "taskId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An existing scheduled task explicitly associated with this goal."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "paused",
+                "completed"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "revision"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "prepare_work",
+        "description": "Prepare and save a private artifact for an existing goal using its context and references: meeting brief, document summary, unsent reply draft, comparison, proposed project next steps, or task recovery plan. Uses the selected personalization model. Never sends or executes the artifact.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Goal ID in this project."
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_prepared_work",
+        "description": "Read saved preparations in this project. Pass an ID to read the full artifact. A prepared draft is not completed external work.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
         }
       }
     }

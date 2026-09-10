@@ -275,6 +275,9 @@ export async function pollNewMessages(userId, accountId) {
           );
           const hdrs = {};
           for (const h of msg.payload?.headers ?? []) hdrs[h.name] = h.value;
+          const { signalWorkEvent } = await import('./lib/personalization/work-events.mjs');
+          signalWorkEvent(userId, { kind: 'email', accountId: accountId || '__default__', threadId: msg.threadId,
+            messageId: msgId, subject: hdrs.Subject || '', snippet: msg.snippet || '' });
           const matches = matchRules(rules, hdrs.From ?? '', hdrs.Subject ?? '', hdrs.To ?? '');
           if (!matches.length) continue;
           // Learned-pin awareness: read-only lookup, gated the same way the

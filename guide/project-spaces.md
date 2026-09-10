@@ -28,6 +28,8 @@ Use the project's **Files** tab to upload reference files. They are stored in yo
 
 The **Checklist** is a manual list of project tasks. Add an item, mark it complete, then choose **Save changes**. It does not create a scheduled reminder. Agent tasks scheduled from project chat retain the project's context and conversation when they run, including after a server restart. Manage those schedules in the existing **Tasks** drawer.
 
+**Goals and prepared work** tracks ongoing outcomes with next steps, blockers, deadlines, and completion conditions. Ask an agent to track a goal in project chat, or add one from this view. OE can prepare a meeting brief, reference summary, comparison, or proposed next steps using the project's notes and linked files. Review a proposal before applying its next steps and checklist. Background preparation is controlled separately in **Settings → Personalization**; see [Goals and prepared work](personalization.md#goals-and-prepared-work).
+
 ## Saving and archiving
 
 Unsaved edits to an existing project are retained as a draft in this browser tab, including across reloads. Separate tabs keep separate drafts. If another tab saves first, OE rejects the stale save and keeps your draft visible. Copy any edits you want to preserve, then choose **Reload saved version** before combining the changes.

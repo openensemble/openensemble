@@ -176,3 +176,25 @@ The **Learn about me** toggle and the model picker's **Off** option stop differe
 - Picking **Off** in the model picker stops reflection and lead re-checks specifically — but activity keeps being recorded as long as the toggle above is on. Use this if you want the quiet, deterministic digests to keep accumulating without any model (local or cloud) reflecting on them yet.
 
 Turning either off doesn't immediately erase what it already learned. Confirmed entries stay until you delete them (or an explicitly temporary preference expires); inferred entries can still age out under the normal confidence-decay policy, or you can remove them with **Start fresh**. The master switch also stops those ledger-owned facts from being injected into agent context; choosing only the model's **Off** option leaves existing facts usable while pausing model-driven reflection and lead judging.
+
+## Goals and prepared work
+
+Open **Goals and prepared work** from the sidebar, or from a project's details. Add an ongoing goal with a completion condition, next step, blocker, and optional deadline or next check. You can also ask an agent to track the goal in chat. Goals created in a project stay in that project, and their current state follows future conversations and delegated work there. Marking a goal complete stops further preparation for it; preparing a draft does not mark the goal complete.
+
+In **Settings → Personalization → Prepare useful work**, choose:
+
+- **Off** keeps goals available in chat and allows individually requested preparations. Existing profiles start here.
+- **Suggest preparation** finds useful opportunities and lets you choose which drafts to generate.
+- **Prepare private drafts automatically** lets OE produce up to four background drafts per day using the selected personalization model.
+
+Preparation can produce meeting briefs, document summaries, unsent reply drafts, comparisons, proposed project next steps, and recovery plans for failed scheduled tasks. It uses the relevant goal, saved project notes, and up to six reference files. Supported references are text, Markdown, CSV, JSON, HTML, and PDF, up to 2 MB per file; PDF preparation reads the first 20 pages, and each reference excerpt is limited to 8,000 characters. OE shows when an excerpt was shortened. If a source is unavailable, it reports the failure instead of claiming to have read it.
+
+Creating a draft sends that selected context to your personalization model. Calendar, session, and tool source switches also apply to background preparation. Draft creation never sends a reply, updates a calendar, executes a recovery command, or marks project checklist items complete. The agent can continue work you request in chat using its existing tools and permissions.
+
+Calendar syncs, project and goal edits, and scheduled task results wake a targeted check after a short delay. A one-minute background sweep catches approaching deadlines and recovers checks after a restart. Meeting preparation considers timed events within the next 24 hours; changes and cancellations invalidate the old preparation. Agents can attach an exact Gmail account and thread to a goal you ask them to follow. Those threads are checked about every five minutes, independently of auto-labeling, using bounded incoming-message excerpts. Automatic reply detection currently supports Gmail; other email providers remain available through normal chat tools.
+
+Prepared work stays available in the Work view and proactive activity inbox. Approaching deadlines and useful work for an active goal can produce a notice. Ordinary suggestions wait for review or your scheduled briefing. OE holds interruptions while a chat or calendar event is in progress and respects quiet hours, delivery preferences, and the existing daily notification budget. Offline notifications remain pending. **Snooze 1 day**, **Dismiss**, **Useful**, **I used this**, and **Not useful** control future delivery; negative feedback makes that preparation kind ask first for 30 days. Counts in the Work view show prepared and used drafts and completed goals.
+
+For a project draft, review the proposed next steps and checklist, then choose **Use proposed next steps and add checklist**. This replaces the project's saved next-steps text and adds the proposed checklist entries. A concurrent project edit prevents a stale suggestion from overwriting it. Repeating the same application does not add duplicate tasks.
+
+Explicit goals remain saved until you remove them. Prepared artifacts follow Personalization's retention period, and incoming-message excerpts are kept for up to seven days, including when background preparation is turned off. **Remove** on a paused or completed goal removes that goal and its preparations. Download a draft if you want to keep a separate copy.

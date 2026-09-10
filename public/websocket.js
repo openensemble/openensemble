@@ -543,6 +543,9 @@ function handleServerMessage(msg) {
   noteAgentLiveRevision(msg);
   if (!acceptTurnEnvelope(msg)) return;
   switch (msg.type) {
+    case 'proactive_work':
+      if (typeof showPreparedWorkNotice === 'function') showPreparedWorkNotice(msg);
+      break;
     case 'pong': _lastPongAt = Date.now(); break;
     case 'session_loaded': {
       const agent = clientSessionAgentId(msg.agent);

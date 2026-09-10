@@ -39,6 +39,12 @@ Open saved **Routines** directly from the sidebar or mobile menu, with shortcuts
 **Safer learning and Undo**
 For newly accepted learning suggestions, **Undo** can restore the previous setting within 24 hours. OE checks for later manual edits before restoring and directs you to review conflicting changes in Learn. Memory edits and deletions also stay consistent with personalization. See [Personalization](personalization.md).
 
+**Goals and prepared work**
+Track an ongoing goal with a next step, blocker, deadline, and completion condition. Goals stay with their project and follow future chats. Open the new sidebar view to review meeting briefs, summaries, reply drafts, comparisons, and proposed project next steps. Choose whether OE suggests preparation or produces private drafts automatically in Settings → Personalization.
+
+**Help when circumstances change**
+Calendar and project changes, linked Gmail replies, task failures, and approaching deadlines can trigger preparation. OE checks that the source is still current, holds interruptions during chats and calendar events, and keeps routine items for review or a briefing. Snooze, dismiss, and usefulness feedback help control what appears next.
+
 ---
 
 ## 2026-09-08

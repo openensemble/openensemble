@@ -62,7 +62,7 @@ const OPAQUE_ID_RE = /^[a-zA-Z0-9_-]{3,160}$/;
 const PROFILE_TYPES = new Set(['pattern', 'fact', 'relationship', 'preference', 'constraint', 'goal', 'routine']);
 const PUBLIC_CONFIG_FIELDS = new Set([
   'enabled', 'setupComplete', 'model', 'retentionDays', 'engagement', 'proactivity',
-  'initiativeMode', 'deliveryMode', 'timezone', 'quietHours', 'sources',
+  'initiativeMode', 'workMode', 'deliveryMode', 'timezone', 'quietHours', 'sources',
 ]);
 const SOURCE_FIELDS = new Set(['tools', 'calendar', 'sessions']);
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -290,6 +290,7 @@ function isValidModelPick(model, providers) {
 }
 
 function validatePublicConfigPatch(body) {
+  if ('workMode' in body && !['off', 'suggest', 'prepare'].includes(body.workMode)) return 'workMode must be off, suggest, or prepare';
   const unknown = Object.keys(body).find(key => !PUBLIC_CONFIG_FIELDS.has(key));
   if (unknown) return `unsupported config field: ${unknown}`;
   if ('enabled' in body && typeof body.enabled !== 'boolean') return 'enabled must be a boolean';

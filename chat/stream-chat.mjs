@@ -1,5 +1,6 @@
 import { currentProjectId } from '../lib/project-context.mjs';
 import { buildProjectContext } from '../lib/project-spaces.mjs';
+import { buildWorkContext } from '../lib/personalization/work-store.mjs';
 /**
  * Main multi-provider chat generator (streamChat).
  * Extracted from chat.mjs — pure move.
@@ -116,6 +117,8 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
 async function* streamChatInTurn(agent, userText, signal, emit, userId, attachment, systemNote, silent, voiceCtx, turnOpts) {
   const projectId = currentProjectId(userId);
   if (projectId) systemNote = `${systemNote || ''}${buildProjectContext(userId, projectId)}`;
+  try { systemNote = `${systemNote || ''}${buildWorkContext(userId, projectId)}`; }
+  catch (error) { console.warn('[proactive-work] goal context unavailable:', error.message); }
   // Every nested MCP delegation/worker inherits a dedicated capability store.
   // Trim its provider schema on entry, while the final dispatcher gate remains
   // authoritative against cached schemas or model-invented tool calls.

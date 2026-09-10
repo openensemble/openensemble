@@ -105,6 +105,7 @@ function renderProjectSpaceDetail() {
     <div class="project-detail-heading"><div><h2>${space ? escHtml(space.name) : 'New project'}</h2><p>Keep your conversations and shared context together.</p></div>
     ${space ? `<button class="project-primary" data-action="enterProjectSpace" data-args='${projectArgs(space.id)}'>Open chat</button>` : ''}</div>
     ${space ? `<nav class="project-tabs" aria-label="Project sections">${[['overview', 'Overview'], ['progress', 'Progress'], ['files', 'Files'], ['chats', 'Chats']].map(([tab, label]) => `<button aria-pressed="${tab === projectSpaceTab}" data-action="setProjectSpaceTab" data-args='${projectArgs(tab)}'>${label}</button>`).join('')}</nav>` : ''}
+    ${space ? `<button class="project-primary" data-action="openProactiveWork" data-args='${projectArgs(space.id)}'>Goals and prepared work</button>` : ''}
     <div id="projectSpaceTabBody"></div>`;
   renderProjectSpaceTab();
   $('projectSpaceDetail').scrollTop = 0;

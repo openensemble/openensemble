@@ -220,12 +220,12 @@ export function markAgentBusy(agentId) {
   };
 }
 
-export function getActiveStreams(userId) {
+export function getActiveStreams(userId, { allProjects = false } = {}) {
   const result = [];
   for (const info of activeStreams.values()) {
     // Internal silent turns still own the per-agent execution slot, but they
     // are not a browser stream and must stay absent from reconnect snapshots.
-    if (info.userId === userId && info.omitFromReconnect !== true && (info.projectId || null) === currentProjectId(userId)) {
+    if (info.userId === userId && info.omitFromReconnect !== true && (allProjects || (info.projectId || null) === currentProjectId(userId))) {
       result.push(snapshotActiveStream(info));
     }
   }

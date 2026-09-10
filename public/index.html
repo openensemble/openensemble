@@ -25,6 +25,7 @@
 <script src="/vendor/chart.umd.min.js"></script>
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/project-spaces.css">
+<link rel="stylesheet" href="/proactive-work.css">
 <link rel="stylesheet" href="/voice-diagnostics.css">
 </head>
 <body>
@@ -122,6 +123,7 @@
   <div class="sidebar-strip" id="sidebarStrip">
     <div class="sidebar-feature-scroll" id="sidebarFeatureScroll">
       <button class="strip-btn" id="sbtnProjects" data-action="openProjectSpaces" title="Project spaces"><i data-lucide="folder-open"></i><span class="strip-tooltip">Project spaces</span></button>
+      <button class="strip-btn" id="sbtnWork" data-action="openProactiveWork" title="Goals and prepared work"><i data-lucide="list-checks"></i><span class="strip-tooltip">Goals and prepared work</span></button>
       <button class="strip-btn" id="sbtnAgents" data-action="toggleDrawer" data-args="[&quot;drawerAgents&quot;, &quot;sbtnAgents&quot;]" title="Agents">
         <i data-lucide="bot"></i>
         <span class="strip-tooltip">Agents</span>
@@ -1898,6 +1900,11 @@
 </dialog>
 <script src="/event-delegation.js"></script>
 <script src="/core.js"></script>
+<dialog id="proactiveWorkDialog" class="proactive-work-dialog" aria-labelledby="proactiveWorkTitle">
+  <header><div><h2 id="proactiveWorkTitle">Goals and prepared work</h2><small id="proactiveWorkScope"></small></div><button data-action="closeProactiveWork" aria-label="Close goals and prepared work">✕</button></header>
+  <div id="proactiveWorkBody"></div><div id="proactiveWorkMessage" role="status" aria-live="polite"></div>
+</dialog>
+<script src="/proactive-work.js"></script>
 <script src="/project-spaces.js"></script>
 <script src="/tutor.js"></script>
 <script src="/tutor-today.js"></script>

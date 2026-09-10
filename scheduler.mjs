@@ -21,7 +21,7 @@ import { tryAcquireUserTurnLease } from './chat-dispatch/slot-registry.mjs';
 // no per-user drawer to read this back from.
 function recordTaskRun(task, row) {
   if (!task?.ownerId || !String(task.ownerId).startsWith('user_')) return;
-  return appendTaskRun(task.ownerId, { taskId: task.id, taskName: task.label,
+  return appendTaskRun(task.ownerId, { taskId: task.id, taskName: task.label, projectId: task.projectId || null,
     agent: task.agent || null, repeat: task.repeat || null, timezone: task.timezone || null, ...row })
     .catch(e => console.warn('[scheduler] appendTaskRun failed:', e.message));
 }

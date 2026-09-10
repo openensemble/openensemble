@@ -59,6 +59,8 @@ import { handle as handleMisc }     from './routes/misc.mjs';
 import { handle as handleSharedDocs } from './routes/shared-docs.mjs';
 import { handle as handleHealth, setRuntimeMetricsFn } from './routes/health.mjs';
 import { handle as handleProjectSpaces } from './routes/project-spaces.mjs';
+import { handle as handleProactiveWork } from './routes/proactive-work.mjs';
+import { startProactiveWork, stopProactiveWork } from './lib/personalization/work-engine.mjs';
 import { handle as handleJobRecovery } from './routes/job-recovery.mjs';
 import { handle as handleDashboards } from './routes/dashboards.mjs';
 import { handle as handleOAuth }         from './routes/oauth.mjs';
@@ -330,6 +332,7 @@ function isDashboardViewPath(pathname) {
 const routeHandlers = [
   handleHealth,    // /health (public) + /api/admin/health (authed)
   handleProjectSpaces,
+  handleProactiveWork,
   handleJobRecovery,
   handleDashboards, // per-user dashboards + authenticated renderer compatibility APIs
   handlePlugins,   // must be early — delegates /api/* to plugin servers
@@ -1155,6 +1158,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     showVideo:        (userId, msg) => sendToUser(userId, { type: 'video', ...msg }),
   });
   setNotifyFn((userId, msg) => sendToUser(userId, msg));
+  startProactiveWork();
 
   // Restart recovery for in-flight background delegations/workers: anything
   // still in the on-disk journal was killed by this restart — mark it
@@ -1377,6 +1381,7 @@ async function shutdown(signal) {
 
   // 2. Stop scheduled tasks, gmail watchers, and the update checker
   stopScheduler();
+  stopProactiveWork();
   stopWatcherSupervisor();
   stopAllWatchers();
   stopVoiceDeviceMonitor();

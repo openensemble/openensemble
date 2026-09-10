@@ -49,6 +49,8 @@ Everything else - email, calendar, MCP servers, remote nodes, voice devices, tun
 
 ### Core
 
+**Goals and prepared work.** Track ongoing goals across project conversations, prepare meeting briefs and private drafts, and follow up when connected sources change. Review preparations from the sidebar; choose suggestion or automatic preparation in Personalization settings. See [Personalization](guide/personalization.md#goals-and-prepared-work).
+
 **Project spaces.** Keep a shared brief, decisions, next steps, checklist, and reference files alongside separate project conversations with each agent. Project context follows delegated and scheduled work; switch spaces from the sidebar folder button. See [Project spaces](guide/project-spaces.md).
 
 **Resumable agent jobs.** Background workers and standalone delegations continue after a restart using saved tool results. Uncertain actions pause for review, and stopped jobs stay stopped. See [Resumable agent jobs](guide/resumable-jobs.md) for supported jobs and recovery limits.

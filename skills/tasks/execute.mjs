@@ -866,6 +866,10 @@ async function execAutonomyStatus(userId, agentId) {
 }
 
 export default async function execute(name, args, userId, agentId, ctx) {
+  if (['track_goal', 'list_work_goals', 'update_work_goal', 'prepare_work', 'list_prepared_work'].includes(name)) {
+    const { executeWorkTool } = await import('../../lib/personalization/work-tools.mjs');
+    return executeWorkTool(name, args || {}, userId);
+  }
   if (name === 'set_reminder')    return execSetReminder(args || {}, userId);
   if (name === 'set_alarm')       return execSetReminder({ ...(args || {}), _alarm: true }, userId);
   if (name === 'schedule_task')   return execScheduleTask(args || {}, userId, agentId);
