@@ -688,6 +688,12 @@ function handleServerMessage(msg) {
       buildTabs(); buildAgentDrawer();
       break;
     }
+    case 'memory_context': {
+      const state = agentStreams[msg.agent] || (agentStreams[msg.agent] = freshAgentTurnState(msg.agent, msg));
+      state.memoryRefs = Array.isArray(msg.memories) ? msg.memories : [];
+      if (msg.agent === activeAgent && streamEl && typeof appendAnswerMemories === 'function') appendAnswerMemories(streamEl.closest('.msg'), state.memoryRefs);
+      break;
+    }
     case 'token':
       if (typeof handleDocumentChatToken === 'function' && handleDocumentChatToken(msg.agent, msg.text, msg.documentRequest)) {
         setTyping(false);
@@ -993,6 +999,7 @@ function handleServerMessage(msg) {
           }));
           sessions[msg.agent].push({
             role: 'assistant', content: bg.buf, ts: Date.now(),
+            ...(bg.memoryRefs?.length ? { memoryRefs: bg.memoryRefs } : {}),
             ...(bg.turnId ? { turnId: bg.turnId } : {}),
             ...(bg.messageId ? { messageId: bg.messageId } : {}),
             ...(bg.attemptId ? { attemptId: bg.attemptId } : {}),
@@ -1027,7 +1034,7 @@ function handleServerMessage(msg) {
         if (!sessions[msg.agent]) sessions[msg.agent] = [];
         const state = agentStreams[msg.agent];
         updateToolRunHeader(liveToolRun, true);
-        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents(), ...(state?.turnId ? { turnId: state.turnId } : {}), ...(state?.messageId ? { messageId: state.messageId } : {}), ...(state?.attemptId ? { attemptId: state.attemptId } : {}), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
+        sessions[msg.agent].push({ role: 'assistant', content: streamBuf, ts: Date.now(), toolEvents: currentLiveToolEvents(), ...(state?.memoryRefs?.length ? { memoryRefs: state.memoryRefs } : {}), ...(state?.turnId ? { turnId: state.turnId } : {}), ...(state?.messageId ? { messageId: state.messageId } : {}), ...(state?.attemptId ? { attemptId: state.attemptId } : {}), ...(Number.isFinite(msg.chat_revision) ? { _liveRevision: msg.chat_revision } : {}) });
         addTimestamp(streamEl.closest('.msg'));
         if (msg.agent === activeAgent) updateSessionWarning();
       } else if (liveToolRun?.events?.length) {

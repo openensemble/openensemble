@@ -151,7 +151,8 @@ function renderSessionInner(keepScroll) {
       if (Array.isArray(m._nodeExecTaskReports)) {
         for (const report of m._nodeExecTaskReports) appendNodeExecTaskReport(report, m, false);
       }
-      appendAssistantBubble(m.content, m.ts, false);
+      const bubble = appendAssistantBubble(m.content, m.ts, false);
+      if (typeof appendAnswerMemories === 'function') appendAnswerMemories(bubble, m.memoryRefs);
     }
   });
   if (keepScroll) return;

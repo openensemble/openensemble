@@ -6,6 +6,68 @@ let _memoryControlTarget = 'memoryControlBody';
 let _memorySelectedKey = '';
 let _memoryLoadGeneration = 0;
 
+function appendAnswerMemories(element, memories) {
+  if (!element || !Array.isArray(memories) || !memories.length) return;
+  element.querySelector('.answer-memories')?.remove();
+  const details = document.createElement('details');
+  details.className = 'answer-memories';
+  details.style.cssText = 'margin-top:8px;font-size:12px;max-width:100%;overflow-wrap:anywhere';
+  details.innerHTML = `<summary>Memories used as context (${memories.length})</summary><p style="margin:8px 0;line-height:1.5">These memories were supplied to the model for this answer. This shows its available context; it does not establish which facts determined the wording.</p>`;
+  for (const memory of memories.slice(0, 80)) {
+    const card = document.createElement('div');
+    card.style.cssText = 'padding:8px 0;border-top:1px solid var(--border)';
+    card.innerHTML = `<strong>${escHtml(memory.reason || memory.type || 'Remembered context')}</strong><p style="margin:5px 0;line-height:1.5">${escHtml(memory.text || '')}</p>`;
+    for (const [label, action] of [['Source conversation', 'source'], ['This is outdated', 'edit']]) {
+      const button = document.createElement('button');
+      button.className = 'cdraw-btn';
+      button.style.marginRight = '6px';
+      button.textContent = label;
+      button.addEventListener('click', () => showAnswerMemory(memory.id, memory.table, action));
+      card.appendChild(button);
+    }
+    details.appendChild(card);
+  }
+  element.appendChild(details);
+}
+
+async function showAnswerMemory(id, table, action = 'source') {
+  try {
+    const res = await fetch(`/api/memory/${encodeURIComponent(id)}/details?${new URLSearchParams({ table })}`, { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Memory could not be loaded.');
+    if (action === 'edit') {
+      const replacement = prompt('Correct this memory. Future answers will use the updated text.', data.memory.text || '');
+      if (replacement == null || replacement.trim() === data.memory.text) return;
+      const saved = await fetch(`/api/memory/${encodeURIComponent(id)}/table`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table, text: replacement.trim(), expectedText: data.memory.text }),
+      });
+      const result = await saved.json();
+      if (!saved.ok) throw new Error(result.error || 'Memory could not be corrected.');
+      if (typeof showToast === 'function') showToast('Memory corrected. Earlier answers retain their original context record.');
+      return;
+    }
+    const dialog = document.createElement('dialog');
+    dialog.className = 'memory-source-dialog';
+    dialog.style.cssText = 'width:min(640px,90vw);max-height:80vh;overflow:auto;margin:auto;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:20px;line-height:1.5';
+    dialog.innerHTML = `<h2 style="font-size:20px;margin-bottom:8px">Memory source</h2><p>${escHtml(data.memory.text)}</p>
+      <p style="margin:12px 0;color:var(--muted)">${data.source ? `Recorded ${escHtml(new Date(data.source.at).toLocaleString())}.` : 'A source conversation was not recorded for this older memory.'}</p>
+      ${data.source && !data.conversation.length ? '<p>The original conversation is no longer available in chat history.</p>' : ''}
+      ${data.conversation.map(message => `<div style="margin:12px 0"><strong>${message.role === 'user' ? 'You' : 'Assistant'}</strong><pre style="white-space:pre-wrap;overflow-wrap:anywhere;font:inherit">${escHtml(message.text)}</pre></div>`).join('')}
+      ${(data.evidence || []).map(item => `<p>${escHtml(item.source || 'Activity')}: ${escHtml(item.summary || '')}</p>`).join('')}`;
+    const edit = document.createElement('button');
+    edit.textContent = 'Correct memory'; edit.className = 'cdraw-btn';
+    edit.style.marginRight = '8px';
+    edit.addEventListener('click', () => { dialog.close(); void showAnswerMemory(id, table, 'edit'); });
+    const close = document.createElement('button');
+    close.textContent = 'Close'; close.className = 'cdraw-btn';
+    close.addEventListener('click', () => dialog.close());
+    dialog.append(edit, close);
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.appendChild(dialog); dialog.showModal();
+  } catch (error) { showMemoryActionError(error); }
+}
+
 function memDate(ts) {
   if (!ts) return 'unknown';
   try { return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
@@ -163,6 +225,7 @@ function renderMemoryCard(m) {
           ${m.superseded_by ? `<span>superseded by: ${escHtml(m.superseded_by)}</span>` : ''}
         </div>
         <div class="mem-actions">
+          <button data-action="showAnswerMemory" data-args='${args}'>Source conversation</button>
           <button data-action="editMemoryItem" data-args='${args}'>Edit</button>
           <button data-action="${pinAction}" data-args='${args}'>${pinLabel}</button>
           <button class="danger" data-action="forgetMemoryItem" data-args='${args}'>Forget</button>

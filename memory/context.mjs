@@ -15,6 +15,24 @@ const PERSONALIZATION_FACT_SOURCES = new Set(['personalization', 'user_confirmed
 const LEGACY_MODEL_PREFERENCE_SOURCE = 'preference';
 const CONFIRMED_PROFILE_PER_TYPE_CAP = 3;
 
+function tailReferences(rows, textFor, maxChars) {
+  const texts = rows.map(textFor);
+  const total = texts.join('\n').length;
+  const start = Math.max(0, total - maxChars);
+  let offset = 0;
+  return rows.flatMap((row, i) => {
+    const end = offset + texts[i].length;
+    const text = end > start ? texts[i].slice(Math.max(0, start - offset)) : '';
+    offset = end + 1;
+    return text ? [{ row, text }] : [];
+  });
+}
+
+function memoryReference(row, table, type, reason, text = row.text || row.statement || '') {
+  return { id: row.id, table, type, reason, text: text.slice(0, 1000),
+    source: row.source || null, pinned: row.immortal === true, confidence: row.confidence ?? null };
+}
+
 function normalizedConflictValue(value) {
   return String(value || '').normalize('NFKC').trim().toLocaleLowerCase()
     .replace(/\s+/g, ' ');
@@ -153,7 +171,7 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
   const normalText     = normalParams.map(p => p.text).join('\n');
   const immortalTokens = Math.ceil(immortalText.length / 4);
   const normalBudget   = Math.max(0, TOKEN_BUDGET.systemInstructions - immortalTokens);
-  const normalTrimmed  = normalText.length / 4 > normalBudget
+  const normalTrimmed  = normalBudget === 0 ? '' : normalText.length / 4 > normalBudget
     ? '[...]\n' + normalText.slice(-(normalBudget * 4)) : normalText;
   const systemInstructions = [immortalText, normalTrimmed].filter(Boolean).join('\n');
 
@@ -291,11 +309,17 @@ export async function buildAgentContext(agentId, currentQuery, userId = 'default
       immortalCount: immortalParams.length,
       setupInventory: !!setupInventoryText,
       injectedMemoryIds: [
-        ...params.map(m => ({ id: m.id, table: `${agentId}_params`, type: 'params', text: m.text?.slice(0, 160) ?? '' })),
-        ...episodes.map(m => ({ id: m.id, table: `${agentId}_episodes`, type: 'episodes', text: m.text?.slice(0, 160) ?? '' })),
-        ...semanticFacts.map(m => ({ id: m.id, table: 'user_facts', type: 'user_facts', text: m.text?.slice(0, 160) ?? '' })),
+        ...immortalParams.map(m => memoryReference(m, `${agentId}_params`, 'params', 'Pinned rule')),
+        ...tailReferences(normalParams, m => m.text, normalBudget * 4)
+          .map(({ row, text }) => memoryReference(row, `${agentId}_params`, 'params', 'Relevant remembered rule', text)),
+        ...tailReferences(episodes, m => {
+          const date = new Date(m.created_at).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+          return `[${date}] ${m.text.length > 500 ? m.text.slice(0, 500) + '...' : m.text}`;
+        }, TOKEN_BUDGET.episodeHistory * 4)
+          .map(({ row, text }) => memoryReference(row, `${agentId}_episodes`, 'episodes', 'Relevant past conversation', text)),
+        ...semanticFacts.map(m => memoryReference(m, 'user_facts', 'user_facts', m.immortal ? 'Pinned fact' : 'Relevant fact')),
         ...confirmedProfile.filter(m => !semanticFacts.some(f => f.id === m.id))
-          .map(m => ({ id: m.id, table: 'user_facts', type: 'user_facts', text: m.statement?.slice(0, 160) ?? '' })),
+          .map(m => memoryReference(m, 'user_facts', 'user_facts', 'Confirmed profile information')),
       ],
     } };
 }

@@ -124,7 +124,7 @@ export function documentArtifactContent(request, artifact, fallback = '') {
   return `[Document ${artifact.action}: ${artifact.filename || request?.filename || 'document'}${artifact.version ? ` (v${artifact.version})` : ''}]`;
 }
 
-export async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], toolIdentityAnomalies = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, excludeHiddenUserFromModel = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, suppressLearning = false, workerLeafRun = false } = {}) {
+export async function persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, { withSignalWordsGate = false, toolsUsed = [], toolEvents = [], toolIdentityAnomalies = [], voiceCtx = null, hideTurn = false, hideTaskId = null, hiddenUser = false, excludeHiddenUserFromModel = false, turnImages = [], attachments = [], documentRequest = null, readOnlyTurn = false, suppressLearning = false, workerLeafRun = false, memoryRefs = [] } = {}) {
   // Detached task workers are deliberately non-learning. Their completed
   // report is persisted by the owner-continuation path; writing a second
   // ephemeral session here is unnecessary, and proceeding below would also
@@ -234,6 +234,7 @@ export async function persist(agent, sessionText, assistantContent, userId, emit
   // entry (status role) remains visible.
   const assistantEntry = {
     role: 'assistant', content: persistedAssistantContent, ts: Date.now(),
+    ...(Array.isArray(memoryRefs) && memoryRefs.length ? { memoryRefs: memoryRefs.slice(0, 80) } : {}),
     ...(toolsSummary ? { toolsUsed: toolsSummary } : {}),
     ...(toolResults && toolResults.length ? { toolResults } : {}),
     ...((toolsSummary || compactToolIdentityAnomalies.length)

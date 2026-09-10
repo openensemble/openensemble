@@ -55,6 +55,36 @@ function safeMemoryRow(m) {
 }
 
 export async function handle(req, res) {
+  const detailsUrl = new URL(req.url || '/', 'http://localhost');
+  const detailsMatch = detailsUrl.pathname.match(/^\/api\/memory\/([^/]+)\/details$/);
+  if (detailsMatch && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    try {
+      const id = assertId(decodeURIComponent(detailsMatch[1]));
+      const tableName = safeTableName(detailsUrl.searchParams.get('table'));
+      const table = await getTable(tableName, authId);
+      const row = (await table.query().where(`id = '${id}'`).limit(1).toArray())[0];
+      if (!row || row.forgotten) { res.writeHead(404); res.end(JSON.stringify({ error: 'Memory is no longer available.' })); return true; }
+      const { getMemorySource } = await import('../lib/memory-provenance.mjs');
+      const origin = getMemorySource(authId, tableName, id);
+      let conversation = [];
+      if (origin?.sessionKey?.startsWith(`${authId}_`)) {
+        const { loadSession } = await import('../sessions.mjs');
+        conversation = (await loadSession(origin.sessionKey)).filter(message => message.turnId === origin.turnId
+          && !message.hidden && ['user', 'assistant'].includes(message.role))
+          .slice(0, 8).map(message => ({ role: message.role, text: String(message.content || '').slice(0, 6000), ts: message.ts }));
+      }
+      let evidence = [];
+      if (tableName === 'user_facts') {
+        const { listLedger } = await import('../lib/personalization/ledger.mjs');
+        evidence = (await listLedger(authId)).find(item => item.id === id)?.evidenceDetails || [];
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' });
+      res.end(JSON.stringify({ memory: safeMemoryRow({ ...row, _table: tableName }),
+        source: origin ? { at: origin.at, available: conversation.length > 0 } : null, conversation, evidence }));
+    } catch (error) { safeError(res, error, 400); }
+    return true;
+  }
   // ── GET /api/memory/browse?table=...&limit=... ───────────────────────────
   // Auth-scoped: no userId parameter is accepted. The route always reads only
   // users/{authId}/cortex via listMemoryRows({ userId: authId }).
@@ -217,7 +247,7 @@ export async function handle(req, res) {
       if (tableName === 'user_facts') {
         const ledger = await import('../lib/personalization/ledger.mjs');
         if ((await ledger.listLedger(authId)).some(row => row.id === memId)) {
-          const corrected = await ledger.correctLedgerRow(authId, memId, { statement: text });
+          const corrected = await ledger.correctLedgerRow(authId, memId, { statement: text, expectedStatement: body.expectedText });
           if (!corrected) throw new Error('Memory changed. Refresh and try again.');
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, id: memId }));
@@ -250,6 +280,7 @@ export async function handle(req, res) {
         await table.checkoutLatest?.();
         const latest = (await table.query().where(`id = '${memId}'`).limit(1).toArray())[0];
         if (!latest || latest.forgotten) throw new Error('Memory was removed. Refresh and try again.');
+        if (typeof body.expectedText === 'string' && latest.text !== body.expectedText) throw new Error('Memory changed on another screen. Refresh before correcting it.');
         // Encode embeddings with Arrow's schema; SQL array literals reject
         // valid vectors containing both integer and fractional elements.
         await table.mergeInsert('id').whenMatchedUpdateAll().execute([{ ...latest, ...values }]);

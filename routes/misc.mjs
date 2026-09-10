@@ -908,6 +908,28 @@ export async function handle(req, res) {
     return true;
   }
 
+  if (req.url === '/api/tasks/history' && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const { loadTaskRuns } = await import('../lib/task-runs.mjs');
+    const active = new Set(loadTasksForOwner(authId).map(task => task.id));
+    const runs = loadTaskRuns(authId).sort((a, b) => b.ts - a.ts).slice(0, 200)
+      .map(run => ({ ...run, archived: !active.has(run.taskId) }));
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' });
+    res.end(JSON.stringify({ runs, retentionDays: 30, limit: 200 }));
+    return true;
+  }
+
+  const previewMatch = req.url.match(/^\/api\/tasks\/([\w-]+)\/preview$/);
+  if (previewMatch && req.method === 'GET') {
+    const authId = requireAuth(req, res); if (!authId) return true;
+    const task = findTaskById(previewMatch[1], authId);
+    if (!task) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    const { previewTaskSchedule } = await import('../scheduler.mjs');
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' });
+    res.end(JSON.stringify(previewTaskSchedule(task)));
+    return true;
+  }
+
   const taskMatch = req.url.match(/^\/api\/tasks\/([\w-]+)$/);
   if (taskMatch && req.method === 'DELETE') {
     const authId = requireAuth(req, res); if (!authId) return true;
@@ -955,12 +977,13 @@ export async function handle(req, res) {
   const taskRunsMatch = req.url.match(/^\/api\/tasks\/([^/?]+)\/runs$/);
   if (taskRunsMatch && req.method === 'GET') {
     const authId = requireAuth(req, res); if (!authId) return true;
-    const id = decodeURIComponent(taskRunsMatch[1]);
+    let id;
+    try { id = decodeURIComponent(taskRunsMatch[1]); } catch { res.writeHead(400); res.end('{}'); return true; }
     const t = findTaskById(id, authId);
-    if (!t) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return true; }
     const { loadTaskRuns } = await import('../lib/task-runs.mjs');
     const runs = loadTaskRuns(authId, id).sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)).slice(0, 200);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (!t && !runs.length) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return true; }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' });
     res.end(JSON.stringify(runs));
     return true;
   }

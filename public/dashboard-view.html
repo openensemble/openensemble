@@ -126,6 +126,10 @@
         <section class="canvas-toolbar">
           <div class="mobile-spaces" id="mobileSpaces"></div>
           <div class="edit-tools" id="editTools" hidden>
+            <button class="button ghost" id="dashboardUndo" data-action="undo-layout" title="Undo" disabled><svg><use href="#i-chevron-left"></use></svg>Undo</button>
+            <button class="button ghost" id="dashboardRedo" data-action="redo-layout" title="Redo" disabled><svg><use href="#i-chevron-right"></use></svg>Redo</button>
+            <button class="button ghost" data-action="layout-versions" title="Saved versions"><svg><use href="#i-clock"></use></svg>Saved versions</button>
+            <button class="button ghost" id="dashboardRecoverDraft" data-action="recover-layout-draft" title="Recover draft" hidden><svg><use href="#i-refresh"></use></svg>Recover draft</button>
             <button class="button ghost" id="addSectionButton"><svg><use href="#i-folder-plus"></use></svg>New section</button>
             <button class="button ghost" id="dashboardStyleButton"><svg><use href="#i-settings"></use></svg>Dashboard settings</button>
           </div>

@@ -21,7 +21,8 @@ import { tryAcquireUserTurnLease } from './chat-dispatch/slot-registry.mjs';
 // no per-user drawer to read this back from.
 function recordTaskRun(task, row) {
   if (!task?.ownerId || !String(task.ownerId).startsWith('user_')) return;
-  appendTaskRun(task.ownerId, { taskId: task.id, taskName: task.label, ...row })
+  return appendTaskRun(task.ownerId, { taskId: task.id, taskName: task.label,
+    agent: task.agent || null, repeat: task.repeat || null, timezone: task.timezone || null, ...row })
     .catch(e => console.warn('[scheduler] appendTaskRun failed:', e.message));
 }
 
@@ -393,10 +394,10 @@ function parseCronDow(spec) {
 // Ms until next occurrence of HH:MM (daily).
 // If `tz` (IANA string, e.g. 'America/New_York') is given, compute the next
 // firing in that timezone so DST transitions don't silently shift the reminder.
-function msUntilNext(hour, minute, tz = null) {
-  const now = new Date();
+function msUntilNext(hour, minute, tz = null, referenceNow = Date.now()) {
+  const now = new Date(referenceNow);
   if (!tz) {
-    const next = new Date();
+    const next = new Date(referenceNow);
     next.setHours(hour, minute, 0, 0);
     if (next <= now) next.setDate(next.getDate() + 1);
     return next.getTime() - now.getTime();
@@ -419,7 +420,7 @@ function msUntilNext(hour, minute, tz = null) {
     // The wall-clock delta assumes a fixed UTC offset — across a DST
     // transition night it's 1h off. Verify the candidate instant's wall clock
     // in tz and nudge by the residual error (bounded: at most two passes).
-    let candidate = now.getTime() + deltaMin * 60_000;
+    let candidate = Math.floor(now.getTime() / 60_000) * 60_000 + deltaMin * 60_000;
     for (let i = 0; i < 2; i++) {
       const p2 = Object.fromEntries(fmt.formatToParts(new Date(candidate)).map(p => [p.type, p.value]));
       const gotTotal = (parseInt(p2.hour) % 24) * 60 + parseInt(p2.minute);
@@ -431,10 +432,10 @@ function msUntilNext(hour, minute, tz = null) {
     }
     // Never 0/negative (spring-forward can make the target wall time not
     // exist) — floor at one minute so the timer can't spin-fire.
-    return Math.max(candidate - now.getTime(), 60_000);
+    return candidate > now.getTime() ? candidate - now.getTime() : 60_000;
   } catch (e) {
     console.warn(`[scheduler] Invalid tz "${tz}", falling back to server-local:`, e.message);
-    return msUntilNext(hour, minute, null);
+    return msUntilNext(hour, minute, null, referenceNow);
   }
 }
 
@@ -442,6 +443,53 @@ function msUntilNext(hour, minute, tz = null) {
 function msUntilDatetime(iso) {
   const ms = new Date(iso).getTime() - Date.now();
   return Math.max(ms, 0);
+}
+
+// Uses the same clock calculation and day filters as the running scheduler.
+export function previewTaskSchedule(task, { now = Date.now(), count = 5 } = {}) {
+  const timezone = task.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const result = { timezone, occurrences: [], enabled: task.enabled === true, overdue: false,
+    note: 'Preview assumes OE is running and your access schedule allows execution. Run now does not change the recurring schedule.' };
+  if (!task.enabled) return result;
+  count = Math.min(10, Math.max(1, Number(count) || 5));
+  try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format(now); }
+  catch { return { ...result, error: 'Invalid schedule timezone.' }; }
+  if (task.repeat === 'once') {
+    const due = Date.parse(task.datetime || '');
+    if (!Number.isFinite(due)) return { ...result, error: 'No valid scheduled time.' };
+    result.overdue = due <= now;
+    result.occurrences.push(new Date(due).toISOString());
+    return result;
+  }
+  const allowed = parseCronDow(task.dow);
+  const weekdayFormatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' });
+  const acceptsDay = instant => {
+    const name = weekdayFormatter.format(instant);
+    const day = _DOW_NAMES_SHORT.indexOf(name);
+    return allowed ? allowed.has(day) : task.weekdaysOnly ? day >= 1 && day <= 5 : task.weekendsOnly ? day === 0 || day === 6 : true;
+  };
+  if (task.repeat === 'interval') {
+    const interval = Math.max(Number(task.intervalMs) || 0, MIN_INTERVAL_MS);
+    if (!(Number(task.intervalMs) > 0)) return { ...result, error: 'Invalid interval.' };
+    const saved = Date.parse(task.nextRunAt || '');
+    let due = Number.isFinite(saved) ? saved : intervalAnchor(task, interval, now) + interval;
+    // A late first tick runs now; later ticks are anchored to that start.
+    result.overdue = due <= now;
+    due = Math.max(now, due);
+    for (let i = 0; i < 11000 && result.occurrences.length < count; i++, due += interval) {
+      if (acceptsDay(due)) result.occurrences.push(new Date(due).toISOString());
+    }
+    return result;
+  }
+  if (!/^\d{1,2}:\d{1,2}$/.test(task.time || '')) return { ...result, error: 'No valid scheduled time.' };
+  const { hour, minute } = parseTime(task.time);
+  let cursor = now;
+  for (let i = 0; i < 80 && result.occurrences.length < count; i++) {
+    const due = cursor + msUntilNext(hour, minute, task.timezone || null, cursor);
+    if (acceptsDay(due)) result.occurrences.push(new Date(due).toISOString());
+    cursor = due + 1000;
+  }
+  return result;
 }
 
 // ── Builtin task handlers ─────────────────────────────────────────────────────
@@ -530,6 +578,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       const handler = _builtins[task.handler];
       if (!handler) {
         console.error(`[scheduler] No builtin handler "${task.handler}" for task "${task.id}"`);
+        await recordTaskRun(task, { runId: scheduledRunRootId, firedAt: startedAt, status: 'error', error: `No handler "${task.handler}"`, ...(manual ? { manual: true } : {}) });
         await updateTask(task.id, { lastRun: new Date().toISOString(), lastOutput: `Error: no handler "${task.handler}"`, enabled: false }, task.ownerId);
         return;
       }
@@ -540,10 +589,10 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       const output = await handler(task, { occurrenceId, scheduledRunRootId, manual });
       console.log(`[scheduler] Task "${task.label}" complete: ${output}`);
       log.info('scheduler', 'builtin task complete', { taskId: task.id, label: task.label, handler: task.handler, durationMs: Date.now() - startedAt });
-      recordTaskRun(task, {
+      await recordTaskRun(task, {
         runId: scheduledRunRootId,
         scheduledFor: task.datetime ?? task.time ?? null,
-        status: 'ok',
+        status: 'ok', output, firedAt: startedAt, durationMs: Date.now() - startedAt, attempts: 1,
         ...(manual ? { manual: true } : {}),
       });
       if (task.repeat === 'once' && !manual) await removeTask(task.id, task.ownerId, { completed: true });
@@ -579,6 +628,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       // succeed, so this mirrors the consecutive-failures auto-disable.
       console.error(`[scheduler] Unknown agent "${task.agent}" for task "${task.id}" — disabling`);
       log.error('scheduler', 'task agent unresolvable', { taskId: task.id, label: task.label, agent: task.agent });
+      await recordTaskRun(task, { runId: scheduledRunRootId, firedAt: startedAt, status: 'error', error: `Agent "${task.agent}" not found`, ...(manual ? { manual: true } : {}) });
       await updateTask(task.id, {
         lastRun: new Date().toISOString(),
         lastError: `Agent "${task.agent}" not found — re-assign the task to an existing agent and re-enable it.`,
@@ -682,7 +732,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
     if (useChildBarrier) registerScheduledMain({ userId, scheduledCtx, label: task.label || 'scheduled run' });
     else log.warn('scheduler', 'CHILD BARRIER DISABLED (diagnostic)', { taskId: task.id });
 
-    const { succeeded, lastError, assistantContent } = await runAgentWithRetry({
+    const { succeeded, lastError, assistantContent, attempts = 1, errorCode = null } = await runAgentWithRetry({
       scopedAgent, userText: task.prompt, systemNote: scheduledNote, userId, streamChat,
       maxAttempts: MAX_ATTEMPTS,
       context: 'scheduler',
@@ -696,11 +746,11 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       traceSource: 'scheduled',
     });
 
-    if (!succeeded) console.error(`[scheduler] Task "${task.label}" main turn failed after ${MAX_ATTEMPTS} attempts`);
+    if (!succeeded) console.error(`[scheduler] Task "${task.label}" main turn failed after ${attempts} attempt(s)`);
     else console.log(`[scheduler] Task "${task.label}" main turn complete`);
     const durationMs = Date.now() - startedAt;
     if (succeeded) log.info('scheduler', 'task main complete', { taskId: task.id, label: task.label, durationMs });
-    else           log.error('scheduler', 'task failed', { taskId: task.id, label: task.label, durationMs, attempts: MAX_ATTEMPTS, err: lastError });
+    else           log.error('scheduler', 'task failed', { taskId: task.id, label: task.label, durationMs, attempts, errorCode, err: lastError });
 
     // A schedule the user set up has now given up entirely. Until this, that
     // was a log line only — the task simply stopped producing output and
@@ -709,11 +759,15 @@ async function runTaskInProject(task, broadcast, opts = {}) {
     if (!succeeded && userId && userId !== 'default') {
       import('./lib/user-alerts.mjs')
         .then(({ alertUserOfFailure }) => alertUserOfFailure(userId, {
-          title: `Scheduled task failed: ${task.label}`,
-          detail: `It didn't complete after ${MAX_ATTEMPTS} attempts.${lastError ? ` Last error: ${String(lastError).slice(0, 200)}` : ''}`,
-          remedy: 'It will run again on its normal schedule. Ask me to check it if this keeps happening.',
+          title: errorCode === 'persistence_failed' ? `Task reply could not be saved: ${task.label}` : `Scheduled task failed: ${task.label}`,
+          detail: errorCode === 'persistence_failed'
+            ? 'OE finished the reply, but could not save its chat history. Actions may already have completed. They were not repeated.'
+            : `It stopped after ${attempts} attempt(s).${lastError ? ` Last error: ${String(lastError).slice(0, 200)}` : ''}`,
+          remedy: task.repeat === 'once' || manual
+            ? 'Review the task history and any completed actions before running it again.'
+            : 'Review the task history. The recurring task will run at its next scheduled time unless it is disabled.',
           dedupKey: `scheduled-task-failed:${task.id}`,
-          meta: { taskId: task.id, attempts: MAX_ATTEMPTS },
+          meta: { taskId: task.id, attempts, errorCode },
         }))
         .catch(e => log.warn('scheduler', 'failure alert failed', { taskId: task.id, err: e?.message || String(e) }));
     }
@@ -741,7 +795,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
           output: (aggregate && aggregate.trim()) ? aggregate : assistantContent,
           lastError: lastError || (info.errorCount ? 'background work failed' : null),
           manual, sessionKey, broadcast, briefingAcknowledgements, briefingUserId: userId,
-          runId: scheduledCtx.runId,
+          runId: scheduledCtx.runId, attempts, errorCode, startedAt,
         }),
       });
     } else {
@@ -749,7 +803,7 @@ async function runTaskInProject(task, broadcast, opts = {}) {
       // turn (pre-barrier behavior). Background work, if any, runs detached.
       await finalizeScheduledTask(task, {
         succeeded, output: assistantContent, lastError, manual, sessionKey, broadcast,
-        briefingAcknowledgements, briefingUserId: userId,
+        briefingAcknowledgements, briefingUserId: userId, runId: scheduledCtx.runId, attempts, errorCode, startedAt,
       });
     }
   } catch (e) {
@@ -842,6 +896,7 @@ async function runScheduledReaction({ task, scheduledCtx, userId, aggregate, cum
 async function finalizeScheduledTask(task, {
   succeeded, output, lastError, manual, sessionKey, broadcast,
   briefingAcknowledgements = [], briefingUserId = task.ownerId, runId = null,
+  attempts = null, errorCode = null, startedAt = null,
 }) {
   const completionUserId = task.ownerId ?? 'default';
   const completionAgent = resolveRuntimeAgentForUser(completionUserId, task.agent)?.id ?? task.agent;
@@ -865,7 +920,9 @@ async function finalizeScheduledTask(task, {
     try {
       const failureRow = {
         role: 'assistant',
-        content: `⚠️ Scheduled task failed. Last error: ${lastError || 'unknown'}.\n\nThe task is still scheduled and will retry on its next run.`,
+        content: errorCode === 'persistence_failed'
+          ? '⚠️ The task reply finished, but chat history could not be saved. Actions may already have completed; they were not repeated. Review task history before running it again.'
+          : `⚠️ Scheduled task failed. Last error: ${lastError || 'unknown'}.\n\n${task.repeat === 'once' ? 'This one-time task will not run again automatically. Review its history before retrying.' : 'The recurring task will run at its next scheduled time unless it is disabled.'}`,
         scheduled: true,
         taskId: task.id,
         taskFailed: true,
@@ -881,10 +938,12 @@ async function finalizeScheduledTask(task, {
     }
   }
 
-  recordTaskRun(task, {
+  await recordTaskRun(task, {
     ...(runId ? { runId } : {}),
     scheduledFor: task.datetime ?? task.time ?? null,
-    status: succeeded ? 'ok' : 'error',
+    status: succeeded ? 'ok' : errorCode === 'persistence_failed' ? 'warning' : 'error',
+    output, attempts, errorCode,
+    ...(startedAt ? { firedAt: startedAt, durationMs: Date.now() - startedAt } : {}),
     ...(succeeded ? {} : { error: lastError || 'unknown' }),
     ...(manual ? { manual: true } : {}),
   });

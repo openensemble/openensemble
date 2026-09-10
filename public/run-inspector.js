@@ -208,6 +208,8 @@ function renderRunInspectorDetail(t) {
             <div class="run-memory-hit">
               <code>${escHtml(mem.table || '')}/${escHtml(mem.id || '')}</code>
               <span>${escHtml(mem.text || '')}</span>
+              <span>${escHtml(mem.reason || '')}</span>
+              <button data-action="showAnswerMemory" data-args='${JSON.stringify([mem.id, mem.table]).replace(/'/g, '&#39;')}'>Source / correct</button>
             </div>
           `).join('')}
         </div>

@@ -12,6 +12,14 @@ Cortex is the bundled set of local models OpenEnsemble runs in-process. They han
 
 All three run via [`node-llama-cpp`](https://github.com/withcatai/node-llama-cpp) on CPU. No GPU required. They're loaded the first time they're needed and stay resident.
 
+## See and correct remembered context
+
+New chat answers show **Memories used as context** when stored memories were supplied to the model. Expand it to see the remembered text and why it was included, such as a pinned rule, relevant fact, or past conversation. This identifies the context the model received; it does not prove which memory determined the answer.
+
+**Source conversation** opens the original conversation excerpt when OE recorded a source link and that conversation is still available. Older memories may have no recorded source. The same source controls are available in **Memory Control** and **Run Inspector**.
+
+Use **This is outdated** to correct a memory for future answers. OE checks that another screen has not changed it first. Previous answers keep the context they originally received, and a correction preserves the original source conversation. Memory details are private to the owning profile.
+
 ## What you don't need to do
 
 - You don't need to download anything separately — the GGUFs ship with OpenEnsemble.

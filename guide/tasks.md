@@ -38,7 +38,15 @@ Each task is essentially: *"send this prompt to this agent on this schedule"*. T
 
 Scheduled tasks always use the agent's **current** model — there's no model snapshot at schedule time. If you change your coordinator from gpt-5.5 to claude-sonnet-4.6 today, tomorrow's morning briefing fires on the new model. Same applies if you swap providers entirely.
 
-If a scheduled run fails (transient network blip, provider 5xx, etc.), it retries 3 times with a 30-second gap before giving up. Final failures leave a visible **⚠️ Scheduled task failed** message in the agent's chat with the underlying error — no more silent orphan headers. The task stays scheduled and tries again at its next normal time.
+If a scheduled run fails before calling an action tool, OE can make up to three attempts with a 30-second gap. Permanent errors stop sooner. Once an action tool has run, OE does not repeat the whole task automatically, because the action may already have completed. Failure details show the actual attempt count. Recurring tasks can try again at their next scheduled time; one-time tasks finish their single occurrence.
+
+If the agent finishes but its chat reply cannot be saved, OE reports **Task reply could not be saved** and preserves the available output in task history. This is a recording problem: actions may already have completed. Check the result before running the task again.
+
+## Results and upcoming runs
+
+Open a task's **History** in **Tasks** to see its previous runs and the next five scheduled times, displayed in that task's timezone. The preview follows its interval, weekday filters, and daylight-saving changes. **Run now** is a separate manual run and does not move the recurring schedule. Previews assume OE is running and your account's access schedule permits execution.
+
+Choose **View completed task history** to review the most recent 200 runs from the past 30 days. Results remain available after a one-time task finishes or a schedule is deleted. Expand a run, then **View result**, for its saved output. Long outputs are labeled as excerpts; the archive stores up to 16,000 characters per result and 5,000 run records per profile.
 
 ## Silent runs
 

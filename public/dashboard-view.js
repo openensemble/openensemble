@@ -15,6 +15,7 @@ const OE_EDITOR_ACTIONS = new Set([
   'toggle-focus-hidden', 'save-section', 'remove-card', 'remove-section',
   'save-dashboard', 'reset-focus', 'reset-layout', 'move-card', 'move-section',
   'edit-card', 'edit-focus-card', 'edit-section', 'create-empty-section',
+  'undo-layout', 'redo-layout', 'layout-versions', 'restore-layout-version', 'recover-layout-draft',
   'reset-dashboard-color', 'reset-dashboard-colors',
 ]);
 
@@ -1403,8 +1404,10 @@ async function loadApp() {
     const layoutData = await layoutRequest;
     if (!layoutData.layout && !app.entitiesLoaded) await entityRequest;
     app.layoutEtag = layoutData._etag || null;
+    app.profileId = layoutData.profileId || null;
     app.layout = layoutData.layout ? cleanLayout(layoutData.layout) : buildDefaultLayout();
     app.layoutDirty = false;
+    initializeLayoutHistory();
     app.provisionalLayout = !layoutData.layout && app.entities.size === 0;
     app.focusMode = app.layout.focus.defaultMode;
     const deepLink = focusFromHash();
@@ -2656,8 +2659,93 @@ function setSaveStatus(text, className = '') {
   $('#saveStatus').className = `save-status ${className}`;
 }
 
+let layoutHistory = [];
+let layoutHistoryIndex = -1;
+let layoutHistoryRestoring = false;
+let recoverableLayoutDraft = null;
+
+function layoutDraftKey() {
+  return app.profileId ? `oe-dashboard-draft:${app.profileId}:${app.dashboardSlug}` : null;
+}
+
+function updateLayoutHistoryButtons() {
+  if ($('#dashboardUndo')) $('#dashboardUndo').disabled = layoutHistoryIndex <= 0;
+  if ($('#dashboardRedo')) $('#dashboardRedo').disabled = layoutHistoryIndex >= layoutHistory.length - 1;
+  if ($('#dashboardRecoverDraft')) $('#dashboardRecoverDraft').hidden = !recoverableLayoutDraft;
+}
+
+function initializeLayoutHistory() {
+  layoutHistory = [JSON.stringify(app.layout)];
+  layoutHistoryIndex = 0;
+  recoverableLayoutDraft = null;
+  if (OE_EDITOR_MODE) {
+    try {
+      const key = layoutDraftKey();
+      const draft = key ? JSON.parse(sessionStorage.getItem(key) || 'null') : null;
+      const unfinished = draft?.layout?.sections && JSON.stringify(draft.layout) !== layoutHistory[0] ? draft : draft?.recovery;
+      if (unfinished?.layout?.sections && JSON.stringify(unfinished.layout) !== layoutHistory[0]) {
+        recoverableLayoutDraft = { layout: unfinished.layout, etag: unfinished.etag, savedAt: unfinished.savedAt };
+      }
+    } catch {}
+  }
+  updateLayoutHistoryButtons();
+}
+
+function rememberLayoutEdit() {
+  const snapshot = JSON.stringify(app.layout);
+  if (!layoutHistoryRestoring && snapshot !== layoutHistory[layoutHistoryIndex]) {
+    layoutHistory = layoutHistory.slice(0, layoutHistoryIndex + 1);
+    layoutHistory.push(snapshot);
+    if (layoutHistory.length > 50) layoutHistory.shift();
+    layoutHistoryIndex = layoutHistory.length - 1;
+  }
+  try {
+    const key = layoutDraftKey();
+    if (key) sessionStorage.setItem(key, JSON.stringify({ layout: app.layout, etag: app.layoutEtag, savedAt: Date.now(), recovery: recoverableLayoutDraft }));
+  } catch { toast('This browser could not keep a recovery draft. Keep the editor open until Saved appears.', 'refresh'); }
+  updateLayoutHistoryButtons();
+}
+
+function travelLayoutHistory(delta) {
+  const next = layoutHistoryIndex + delta;
+  if (next < 0 || next >= layoutHistory.length) return;
+  layoutHistoryIndex = next;
+  app.layout = JSON.parse(layoutHistory[next]);
+  layoutHistoryRestoring = true;
+  try { closePanel(); scheduleSave(); renderAll(); } finally { layoutHistoryRestoring = false; }
+}
+
+async function showLayoutVersions() {
+  try {
+    const data = await api(`/api/dashboards/${encodeURIComponent(app.dashboardSlug)}/versions`);
+    const body = `<p>Up to 50 previous layouts. Restoring creates a new save and keeps the current layout available here.</p>`
+      + (data.versions.map(version => `<div class="field"><strong>${escapeHtml(version.title || 'Dashboard layout')}</strong><span>${escapeHtml(new Date(version.savedAt).toLocaleString())} · ${version.sectionCount} sections · ${version.cardCount} cards</span><button class="button secondary" data-action="restore-layout-version" data-id="${version.id}">Restore this version</button></div>`).join('') || '<p>No previous layouts yet. Versions are kept when saved layouts change.</p>');
+    panelShell('Saved versions', app.dashboard.name, body, '<button class="button ghost" data-action="close-panel">Close</button>');
+  } catch (error) { toast(error.message, 'refresh'); }
+}
+
+async function restoreLayoutVersion(id) {
+  if (!confirm('Restore this saved layout? Your current layout will remain in saved versions.')) return;
+  try {
+    if (!(await flushPendingLayout())) return;
+    const version = await api(`/api/dashboards/${encodeURIComponent(app.dashboardSlug)}/versions/${encodeURIComponent(id)}`);
+    app.layout = cleanLayout(version.layout);
+    closePanel(); scheduleSave(); renderAll();
+  } catch (error) { toast(error.message, 'refresh'); }
+}
+
+function recoverLayoutDraft() {
+  if (!recoverableLayoutDraft) return;
+  if (!confirm('Restore this tab’s unfinished edits onto the current dashboard? You can undo this change.')) return;
+  app.layout = cleanLayout(recoverableLayoutDraft.layout);
+  recoverableLayoutDraft = null;
+  scheduleSave(); renderAll();
+}
+
 function scheduleSave(delay = 420) {
-  if (!OE_EDITOR_MODE || app.saveConflict || !app.layout) return;
+  if (!OE_EDITOR_MODE || !app.layout) return;
+  rememberLayoutEdit();
+  if (app.saveConflict) { app.layoutDirty = true; return; }
   app.provisionalLayout = false;
   app.layoutDirty = true;
   app.saveError = null;
@@ -2675,6 +2763,7 @@ function scheduleSave(delay = 420) {
 }
 
 async function saveLayout() {
+  if (OE_EDITOR_MODE && app.layout) rememberLayoutEdit();
   clearTimeout(app.saveTimer);
   app.saveTimer = null;
   if (!OE_EDITOR_MODE || app.saveConflict || !app.layout) return false;
@@ -2703,7 +2792,7 @@ async function saveLayout() {
         app.saveConflict = true;
         app.saveQueued = false;
         setSaveStatus('Update conflict', 'error');
-        const reload = confirm('This dashboard changed on another screen. Reload the latest layout? Your unsaved changes on this screen will be discarded.');
+        const reload = confirm('This dashboard changed on another screen. Your edits are kept in this tab’s recovery draft. Reload the latest layout?');
         if (reload) location.reload();
         else toast('Reload before making more layout changes on this screen', 'refresh');
       } else {
@@ -2718,6 +2807,7 @@ async function saveLayout() {
         app.layoutEtag = result.data._etag || app.layoutEtag;
         app.layoutDirty = changed;
         if (!changed) {
+          try { const key = layoutDraftKey(); if (key && !recoverableLayoutDraft) sessionStorage.removeItem(key); } catch {}
           setSaveStatus('Saved', 'saved');
           setTimeout(() => { if ($('#saveStatus').textContent === 'Saved') setSaveStatus(''); }, 1800);
         }
@@ -4678,6 +4768,11 @@ document.addEventListener('click', event => {
   }
   else if (action === 'close-camera') closeCameraViewer();
   else if (action === 'close-panel') closePanel();
+  else if (action === 'undo-layout') travelLayoutHistory(-1);
+  else if (action === 'redo-layout') travelLayoutHistory(1);
+  else if (action === 'layout-versions') void showLayoutVersions();
+  else if (action === 'restore-layout-version') void restoreLayoutVersion(target.dataset.id);
+  else if (action === 'recover-layout-draft') recoverLayoutDraft();
   else if (action === 'picker-source') {
     app.pickerSource = target.dataset.value === 'widgets' ? 'widgets' : 'devices';
     app.pickerQuery = '';
@@ -4942,6 +5037,10 @@ document.addEventListener('click', event => {
 }, true);
 
 document.addEventListener('keydown', event => {
+  if (OE_EDITOR_MODE && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z'
+      && !event.target.matches?.('input, textarea, select, [contenteditable="true"]')) {
+    event.preventDefault(); travelLayoutHistory(event.shiftKey ? 1 : -1); return;
+  }
   if (event.key === 'Escape') { closeExpandedCard(); closeCameraViewer(); closePanel(); closeMobileMenu(); }
   const typing = event.target.matches?.('input, select, textarea, [contenteditable="true"]');
   const editingCard = app.editing && event.target.matches?.('[data-card-id][data-action]') ? event.target : null;

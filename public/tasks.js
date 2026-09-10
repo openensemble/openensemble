@@ -8,6 +8,9 @@ let expandedHistoryId = null;
 const watcherDetails = new Map();
 const nodeHealthDetails = new Map();
 const taskHistoryDetails = new Map();
+let taskArchiveOpen = false;
+let taskArchive = null;
+const taskSchedulePreviews = new Map();
 
 const _DOW_NAMES_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function _parseCronDow(spec) {
@@ -87,6 +90,12 @@ async function loadTaskList() {
     if (!Array.isArray(watchers.active)) watchers.active = [];
     if (!Array.isArray(watchers.recent)) watchers.recent = [];
   } catch { watchers = { active: [], recent: [] }; }
+  if (taskArchiveOpen) {
+    try {
+      const response = await fetch('/api/tasks/history');
+      if (response.ok) taskArchive = await response.json();
+    } catch { /* Keep the last archive while offline. */ }
+  }
   renderTasks(); updateTasksBadge();
 }
 
@@ -285,11 +294,53 @@ function _renderRunRow(run) {
   let statusText;
   if (run.status === 'ok') statusText = '✓ ok';
   else if (run.status === 'error') statusText = `⚠ error${run.error ? ' — ' + String(run.error).slice(0, 140) : ''}`;
+  else if (run.status === 'warning') statusText = `⚠ ${String(run.error || 'Completed with a recording problem').slice(0, 140)}`;
   else if (run.status === 'skipped') statusText = `⊘ ${String(run.error || 'skipped').slice(0, 140)}`;
   else if (run.status === 'late') statusText = `⏰ late${run.lateByMs != null ? ' +' + Math.max(1, Math.round(run.lateByMs / 60000)) + 'm' : ''}`;
   else statusText = String(run.status || '?');
   const manualTag = run.manual ? ' <span style="opacity:.7">(manual)</span>' : '';
-  return `<div class="task-edit-meta">${escHtml(when)} — ${escHtml(statusText)}${manualTag}</div>`;
+  return `<div class="task-edit-meta">${escHtml(when)} — ${escHtml(statusText)}${manualTag}${run.attempts ? ` · ${escHtml(run.attempts)} attempt(s)` : ''}</div>
+    ${run.output ? `<details class="task-run-output"><summary>View result${run.outputTruncated ? ' (excerpt)' : ''}</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;font:inherit">${escHtml(run.output)}</pre></details>` : ''}`;
+}
+
+function renderTaskSchedulePreview(id) {
+  const preview = taskSchedulePreviews.get(id);
+  if (!preview) return '<div class="task-edit-meta">Loading schedule preview…</div>';
+  if (preview.error) return `<div class="task-edit-meta">${escHtml(preview.error)}</div>`;
+  const dates = (preview.occurrences || []).map(iso => new Date(iso).toLocaleString([], { timeZone: preview.timezone, dateStyle: 'medium', timeStyle: 'short' }));
+  return `<details class="task-schedule-preview" open><summary>Upcoming runs · ${escHtml(preview.timezone)}</summary>
+    ${preview.overdue ? '<p>Overdue: expected to run when OE processes it.</p>' : ''}
+    ${dates.length ? `<ol>${dates.map(date => `<li>${escHtml(date)}</li>`).join('')}</ol>` : `<p>${preview.enabled ? 'No eligible upcoming times were found.' : 'No upcoming runs while this task is disabled.'}</p>`}
+    <p class="task-edit-meta">${escHtml(preview.note || '')}</p></details>`;
+}
+
+async function loadTaskSchedulePreview(id) {
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(id)}/preview`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Could not load schedule (${res.status}).`);
+    taskSchedulePreviews.set(id, await res.json());
+  } catch (error) { taskSchedulePreviews.set(id, { error: error.message }); }
+  renderTasks();
+}
+
+async function toggleTaskArchive() {
+  taskArchiveOpen = !taskArchiveOpen;
+  renderTasks();
+  if (!taskArchiveOpen) return;
+  try {
+    const res = await fetch('/api/tasks/history', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Could not load task history (${res.status}).`);
+    taskArchive = await res.json();
+  } catch (error) { taskArchive = { error: error.message }; }
+  renderTasks();
+}
+
+function renderTaskArchive() {
+  const button = `<button class="cdraw-btn" data-action="toggleTaskArchive">${taskArchiveOpen ? 'Hide' : 'View'} completed task history</button>`;
+  if (!taskArchiveOpen) return button;
+  const content = !taskArchive ? 'Loading…' : taskArchive.error ? escHtml(taskArchive.error)
+    : (taskArchive.runs || []).map(run => `<details class="task-run-archive"><summary>${escHtml(run.taskName || run.taskId)}${run.archived ? ' · archived' : ''}</summary>${_renderRunRow(run)}</details>`).join('') || 'No task runs in the last 30 days.';
+  return `${button}<p class="task-edit-meta">Most recent 200 runs from the last 30 days. Results remain here after a one-time task finishes or a schedule is deleted.</p>${content}`;
 }
 
 function renderTaskHistoryPanel(taskId) {
@@ -335,7 +386,7 @@ function renderTaskRow(t, view = 'taskList') {
   // area (matches the watcher-dot pattern in renderWatcherRow).
   const isHistOpen = expandedHistoryId === t.id;
   const historyToggle = `<button data-action="toggleTaskHistory" data-args='${JSON.stringify([t.id]).replace(/'/g, "&#39;")}' data-stop-propagation style="margin-top:4px;font-size:11px;background:none;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:5px;cursor:pointer">${isHistOpen ? '▾' : '▸'} History</button>`;
-  const historyPanel = isHistOpen ? renderTaskHistoryPanel(t.id) : '';
+  const historyPanel = isHistOpen ? renderTaskSchedulePreview(t.id) + renderTaskHistoryPanel(t.id) : '';
   // The header row: clicking the info area toggles the expanded view.
   // Edit/toggle/delete buttons remain accessible without expanding first.
   const header = `
@@ -468,7 +519,7 @@ function renderTasks() {
     : '';
 
   const html = view =>
-    sectionHeader('⏰ Scheduled tasks') + tasksHtml(view) +
+    sectionHeader('⏰ Scheduled tasks') + tasksHtml(view) + renderTaskArchive() +
     sectionHeader('📡 Active monitors') + watchersHtml +
     (recentHtml ? sectionHeader('Recent') + recentHtml : '');
 
@@ -491,6 +542,7 @@ function toggleTaskHistory(id) {
     taskHistoryDetails.delete(id);
     renderTasks();
     loadTaskHistory(id);
+    loadTaskSchedulePreview(id);
   } else {
     renderTasks();
   }

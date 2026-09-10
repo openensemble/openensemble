@@ -486,6 +486,7 @@ export function onConnection(ws, req) {
         id: ws._sttSession.turnId,
         deviceId: ws._deviceId,
         authUserId: ws._userId ?? null,
+        effectiveUserId: getSlotAssignment(ws._userId, ws._deviceId, ws._sttSession.wakeSlot)?.ownerUserId || ws._userId,
         agentId: ws._sttSession.agent,
         wakeSlot: ws._sttSession.wakeSlot,
         startedAt: ws._sttSession.startedAt,
@@ -1179,6 +1180,11 @@ export function onConnection(ws, req) {
             avgCutoff: slotAssignment.avg_prob_cutoff,
           });
         } else if (avg < slotAssignment.avg_prob_cutoff) {
+          if (deviceTurnId) {
+            beginTurn({ id: deviceTurnId, deviceId: ws._deviceId, authUserId: ws._userId, effectiveUserId, wakeSlot });
+            endTurn(deviceTurnId, 'wake_rejected', { effectiveUserId, wakeSlot, wakeAvgProb: avg,
+              wakeCutoff: slotAssignment.avg_prob_cutoff, failStage: 'wake', transcriptChars: (msg.text || '').length });
+          }
           log.info('voice', 'wake gated (avg below cutoff)', {
             userId: ws._userId,
             deviceId: ws._deviceId,
@@ -1243,6 +1249,11 @@ export function onConnection(ws, req) {
           agentId: voiceTurn.agentId,
           wakeSlot: voiceTurn.wakeSlot,
           dispatchStartedAt: Date.now(),
+          transcript: typeof msg.text === 'string' ? msg.text.slice(0, 2000) : '',
+          transcriptChars: typeof msg.text === 'string' ? msg.text.length : 0,
+          wakeAvgProb: Number.isInteger(msg.wake_avg_prob) ? msg.wake_avg_prob / 255 : null,
+          wakeCutoff: slotAssignment?.avg_prob_cutoff ?? null,
+          followup: !!followupCtx,
         }, 'dispatch');
       }
       // Server-side voice TTS streaming: when the device advertises the

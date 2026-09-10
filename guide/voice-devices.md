@@ -19,7 +19,17 @@ Open **Voice devices → Voice diagnostics** to check a paired device or this br
 - **Response timing:** expand a recent turn to compare recording/upload, speech recognition, time to the agent's first text, and first audio preparation. Detailed audio timings are available for new server-streamed voice turns. Older turns or other playback paths show **Not recorded** where a measurement is unavailable. Stages overlap, and speaker buffering is not included.
 - **Check this microphone:** speak normally for six seconds while the input meter moves. This tests the microphone on your computer or phone, not the selected voice device. Audio is analyzed locally and is never uploaded by this check. Browser microphone access requires HTTPS or localhost.
 
-Both guided checks can be canceled. Microphone access stops automatically after six seconds, when you close the drawer, or when the tab goes into the background. The device panel displays timing and audio-level metadata, without transcripts.
+Both guided checks can be canceled. Microphone access stops automatically after six seconds, when you close the drawer, or when the tab goes into the background.
+
+Recent turn details show **What OE heard**, the selected agent, the average wake score and cutoff, and whether the wake was accepted or rejected. New transcripts are bounded to 2,000 characters and kept with OE's private voice-turn journal for up to 30 days; this panel shows recent turns from the past 24 hours. Older turns may have no transcript. A shared device's other users' conversations are excluded. The diagnostics API returns metadata by default; authenticated detail requests opt into transcript content.
+
+### Room and wake-word calibration
+
+With supported firmware connected and fresh wake telemetry available, choose **Calibrate slot** for one of your wake words. Leave normal room noise running while you stay quiet for 30 seconds. Then say your wake word and “What is two plus two?” three times from your usual speaking position, waiting for each reply.
+
+OE compares quiet-room peak scores with the average scores of those wake attempts. When the samples are sufficiently separated, it suggests an average-score cutoff. **Apply** changes only that device's server-side average wake gate; **Restore slot defaults** removes the override. The setting is tied to the wake word and owner, so replacing either stops the old override from applying. Firmware peak thresholds and shared voice settings are unchanged.
+
+When noise overlaps speech scores, OE recommends repositioning the device and repeating the check. Missing or stale telemetry produces no recommendation. The displayed microphone level is in device units, not calibrated decibels.
 
 ## Pairing a device
 

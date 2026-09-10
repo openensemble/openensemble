@@ -31,6 +31,7 @@ import {
 import { listRoles } from '../roles.mjs';
 import { resolveValidatedSkillExecutionForTurn } from '../lib/skill-execution.mjs';
 import { voiceContext } from '../lib/voice-context.mjs';
+import { iterateInDetachedTurn } from '../lib/turn-trace-iterator.mjs';
 import { composeSkillSpaBlock } from '../lib/skill-prompt-composer.mjs';
 import { learnToolPlanFromTurn } from '../lib/tool-plan-memory.mjs';
 import { recordRunTrace, redactArgsForTrace, redactTextForTrace } from '../lib/run-inspector.mjs';
@@ -96,7 +97,23 @@ import {
   AUTONOMOUS_TASK_CREATION_TOOLS,
 } from './recovery.mjs';
 
+const BOUND_DETACHED_TRACE = Symbol('boundDetachedTrace');
+
 export async function* streamChat(agent, userText, signal, emit, userId = 'default', attachment = null, systemNote = null, silent = false, voiceCtx = null, turnOpts = {}) {
+  if (turnOpts?.rootTaskId || turnOpts?.traceSource) {
+    yield* iterateInDetachedTurn(() => streamChatInTurn(agent, userText, signal, emit, userId,
+      attachment, systemNote, silent, voiceCtx, { ...turnOpts, [BOUND_DETACHED_TRACE]: true }), {
+      userId, agentId: agent?.id ?? agent?.name ?? null,
+      source: turnOpts.traceSource || 'background', rootId: turnOpts.rootTaskId || null,
+      messageId: turnOpts.messageId || null, attemptId: turnOpts.attemptId || null,
+      sessionKey: turnOpts.sessionKey || null, sessionEpoch: turnOpts.sessionEpoch || null,
+    });
+    return;
+  }
+  yield* streamChatInTurn(agent, userText, signal, emit, userId, attachment, systemNote, silent, voiceCtx, turnOpts);
+}
+
+async function* streamChatInTurn(agent, userText, signal, emit, userId, attachment, systemNote, silent, voiceCtx, turnOpts) {
   const projectId = currentProjectId(userId);
   if (projectId) systemNote = `${systemNote || ''}${buildProjectContext(userId, projectId)}`;
   // Every nested MCP delegation/worker inherits a dedicated capability store.
@@ -163,7 +180,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // run-agent-with-retry) have no store, so we lazily begin one here, seeding
   // rootId from the caller's rootTaskId so bg children join their originating
   // turn tree. We own (and must flush) the trace only when WE begin it.
-  let _ownsTurnTrace = false;
+  let _ownsTurnTrace = turnOpts?.[BOUND_DETACHED_TRACE] === true;
   const _streamChatStart = Date.now();
   // A detached run (background/scheduled/ephemeral — signalled by rootTaskId or
   // traceSource in turnOpts) inherited the spawning turn's store via ALS, but it
@@ -171,7 +188,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // ask_agent) shares the dispatcher's async tree, so getTurn() returns the live
   // turn and we just add our span to it.
   const _detachedRun = detachedTaskRun;
-  if (_detachedRun || !getTurn()) {
+  if (!_ownsTurnTrace && (_detachedRun || !getTurn())) {
     beginTurn({
       userId,
       agentId: agent?.id ?? agent?.name ?? null,
@@ -1681,6 +1698,7 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
     try {
       await persist(agent, sessionText, assistantContent, userId, emit, skipSignals, skipEpisodes, {
         withSignalWordsGate, toolsUsed, toolEvents, toolIdentityAnomalies, voiceCtx, hideTurn, hideTaskId,
+        memoryRefs: ctx?._meta?.injectedMemoryIds || [],
         hiddenUser: turnOpts?.hiddenUser === true, turnImages, attachments,
         excludeHiddenUserFromModel: turnOpts?.excludeHiddenUserFromModel === true,
         readOnlyTurn,
@@ -1695,7 +1713,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
         status: 'error',
         error: `Session persistence failed: ${String(e?.message || e || 'unknown error').slice(0, 500)}`,
       });
-      yield { type: 'error', code: 'persistence_failed', retryable: false, message: 'The reply finished, but the chat turn could not be saved. Reload before trying again.' };
+      yield { type: 'error', code: 'persistence_failed', retryable: false,
+        content: _observableAssistantContent,
+        message: 'The reply finished, but the chat turn could not be saved. Reload before trying again.' };
       return;
     }
   }
@@ -1703,6 +1723,9 @@ export async function* streamChat(agent, userText, signal, emit, userId = 'defau
   // committed. Write it only after the awaited session append succeeds; a
   // storage failure above records an error instead of leaving a false green.
   recordRunTrace(userId, { ..._traceBase, status: 'complete' });
+  if (!silent && !hideTurn && ctx?._meta?.injectedMemoryIds?.length) {
+    yield { type: 'memory_context', memories: ctx._meta.injectedMemoryIds.slice(0, 80) };
+  }
   // Phase-14 chip-replaces-turn: emit __content only when we're NOT hiding
   // the turn. Silent/internal consumers retain the pre-existing event shape.
   if ((assistantContent || turnOpts?.documentRequest) && !hideTurn) {

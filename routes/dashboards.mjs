@@ -315,6 +315,29 @@ function layoutEtag(layout) {
   return `\"layout-${digest}\"`;
 }
 
+function dashboardVersionsPath(paths, slug) {
+  return path.join(paths.root, 'versions', `${slug}.json`);
+}
+
+function loadDashboardVersions(paths, slug) {
+  try {
+    const rows = JSON.parse(fs.readFileSync(dashboardVersionsPath(paths, slug), 'utf8'));
+    if (!Array.isArray(rows)) throw new Error('Invalid versions');
+    return rows.filter(row => /^[a-f0-9]{64}$/.test(row?.id) && validateLayout(row.layout).ok).slice(-50);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw new DashboardHttpError(503, 'Dashboard versions are temporarily unavailable. Your layout has not been changed.');
+  }
+}
+
+function savePreviousDashboardVersion(paths, slug, current, incoming) {
+  if (!current || JSON.stringify(current) === JSON.stringify(incoming)) return;
+  const id = createHash('sha256').update(JSON.stringify(current)).digest('hex');
+  const versions = loadDashboardVersions(paths, slug).filter(row => row.id !== id);
+  versions.push({ id, savedAt: Date.now(), layout: current });
+  privateAtomicWrite(dashboardVersionsPath(paths, slug), JSON.stringify(versions.slice(-50)));
+}
+
 function ifMatchAllows(header, currentEtag) {
   if (header === undefined) return false;
   const value = Array.isArray(header) ? header.join(',') : String(header);
@@ -346,6 +369,12 @@ function dashboardRoute(pathname) {
   if (!pathname.startsWith('/api/dashboards/')) return null;
   const remainder = pathname.slice('/api/dashboards/'.length);
   const segments = remainder.split('/');
+  if ((segments.length === 2 || segments.length === 3) && segments[1] === 'versions') {
+    let slug;
+    try { slug = decodeURIComponent(segments[0]); } catch { throw new DashboardHttpError(400, 'Invalid dashboard slug.'); }
+    if (!isDashboardSlug(slug) || (segments[2] && !/^[a-f0-9]{64}$/.test(segments[2]))) throw new DashboardHttpError(400, 'Invalid dashboard version.');
+    return { kind: 'versions', slug, versionId: segments[2] || null };
+  }
   if (segments.length > 2 || (segments.length === 2 && segments[1] !== 'layout')) {
     return { kind: 'not-found' };
   }
@@ -400,6 +429,8 @@ async function handleDashboardCollection(req, res, paths, owner) {
       if (fs.existsSync(targetPath)) {
         throw new DashboardHttpError(409, `Dashboard storage already exists for slug: ${metadata.slug}.`);
       }
+      // A recreated slug starts its own history, including after interrupted deletion.
+      fs.rmSync(dashboardVersionsPath(paths, metadata.slug), { force: true });
       privateAtomicWrite(targetPath, layout.serialized);
       try {
         registry.dashboards.push(metadata);
@@ -421,6 +452,23 @@ async function handleDashboardCollection(req, res, paths, owner) {
 }
 
 async function handleDashboardItem(req, res, route, paths, owner) {
+  if (route.kind === 'versions') {
+    if (req.method !== 'GET') { methodNotAllowed(res, 'GET'); return; }
+    const result = await withLock(paths.registryPath, () => {
+      const metadata = dashboardMetadata(loadRegistry(paths, owner), route.slug);
+      if (!metadata) throw new DashboardHttpError(404, 'Dashboard not found.');
+      const versions = loadDashboardVersions(paths, route.slug);
+      if (route.versionId) {
+        const version = versions.find(row => row.id === route.versionId);
+        if (!version) throw new DashboardHttpError(404, 'Version not found.');
+        return version;
+      }
+      return { versions: versions.reverse().map(row => ({ id: row.id, savedAt: row.savedAt,
+        title: row.layout.title, sectionCount: row.layout.sections.length, cardCount: cardCount(row.layout) })), limit: 50 };
+    });
+    sendJson(res, 200, result);
+    return;
+  }
   if (route.kind === 'layout') {
     if (req.method === 'GET') {
       const layout = await withLock(paths.registryPath, () => {
@@ -429,7 +477,7 @@ async function handleDashboardItem(req, res, route, paths, owner) {
         if (!metadata) throw new DashboardHttpError(404, 'Dashboard not found.');
         return loadLayout(paths, metadata);
       });
-      sendJson(res, 200, { layout }, { ETag: layoutEtag(layout) });
+      sendJson(res, 200, { layout, profileId: path.basename(path.dirname(paths.root)) }, { ETag: layoutEtag(layout) });
       return;
     }
     if (req.method === 'PUT') {
@@ -487,6 +535,7 @@ async function handleDashboardItem(req, res, route, paths, owner) {
             error: 'This dashboard uses grouped cards and requires a current OpenEnsemble client.',
           };
         }
+        savePreviousDashboardVersion(paths, route.slug, current, incoming.layout);
         privateAtomicWrite(dashboardLayoutPath(paths, route.slug), incoming.serialized);
         return { conflict: false, layout: incoming.layout, etag: layoutEtag(incoming.layout) };
       });
@@ -580,6 +629,8 @@ async function handleDashboardItem(req, res, route, paths, owner) {
         try { fs.unlinkSync(quarantinedPath); }
         catch (error) { console.warn(`[dashboards] failed to remove ${route.slug} quarantine:`, error.message); }
       }
+      try { fs.rmSync(dashboardVersionsPath(paths, route.slug), { force: true }); }
+      catch (error) { console.warn(`[dashboards] failed to remove ${route.slug} history:`, error.message); }
     });
     sendJson(res, 200, { ok: true });
     return;

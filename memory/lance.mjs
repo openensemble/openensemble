@@ -266,6 +266,8 @@ export async function rememberFast({ agentId = 'main', type = 'episodes', text,
   };
 
   await queuedWrite(tableName, () => table.add([record]), userId);
+  const { recordMemorySource } = await import('../lib/memory-provenance.mjs');
+  await recordMemorySource(userId, tableName, record.id);
   return record;
 }
 
@@ -453,6 +455,10 @@ export async function remember({
   // coexist (the pre-existing minor behavior). A proper redesign needs: a
   // reliable contradiction signal, resurrection on re-affirmation, an audit
   // trail, exclusion of immortal pins, and a non-blocking (detached) write.
+  if (!saved._dedupHit) {
+    const { recordMemorySource } = await import('../lib/memory-provenance.mjs');
+    await recordMemorySource(userId, tableName, saved.id);
+  }
   return saved;
 }
 

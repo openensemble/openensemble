@@ -8,6 +8,18 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ## 2026-09-10
 
+**Explainable memory**
+New answers can show the memories supplied as context, why each was included, and its source conversation when available. **This is outdated** corrects a memory for future answers while preserving the original context record. See [Cortex](cortex.md#see-and-correct-remembered-context).
+
+**Voice detail and room calibration**
+Voice diagnostics show recent recognized speech, agent routing, wake decisions, and response timings. A guided quiet-room and wake check can suggest a device-specific average-score cutoff, with an explicit Apply button and reset control. See [Voice devices](voice-devices.md#room-and-wake-word-calibration).
+
+**Dashboard undo and recovery**
+Customize adds Undo, Redo, saved layout versions, and recovery of unfinished layout edits after failed or conflicting saves. See [Dashboards](dashboards.md#undo-and-recovery).
+
+**Task results and schedule previews**
+Review saved outputs after one-time tasks finish or schedules are deleted, and preview upcoming runs in each task's timezone. Scheduled work keeps its own chat-turn identity, preventing a completed action from being mislabeled because it tried to save into the scheduling conversation's finished turn. Recording failures and actual retry counts are reported separately. See [Tasks](tasks.md#results-and-upcoming-runs).
+
 **Project progress survives clearing context**
 Use **Clear session** or type **`/clear`** by itself to start a fresh conversation. Inside a project, OE first saves the conversation and a handoff automatically, then includes saved progress in future project chats. Older history is also saved before automatic trimming. Review handoffs or download saved conversations from the project's **Progress** tab. If saving fails, the conversation stays intact. See [Project spaces](project-spaces.md#automatic-progress-and-clearing-context).
 

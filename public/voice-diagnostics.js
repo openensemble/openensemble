@@ -10,6 +10,10 @@ let _voiceDiagRequest = null;
 let _voiceDiagPoll = null;
 let _voiceMic = null;
 let _voiceMicMessage = '';
+let _voiceCalibration = null;
+let _voiceCalibrationResult = null;
+let _voiceCalibrationTimer = null;
+let _voiceCalibrationStatus = '';
 
 function voiceDiagnosticTime(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms)) return 'Not recorded';
@@ -19,7 +23,7 @@ function voiceDiagnosticTime(ms) {
 function voiceDiagnosticOutcome(outcome) {
   return ({ completed: 'Completed', suppressed: 'Stopped or intentionally silent', no_speech: 'No speech detected',
     stt_dropped: 'Audio capture interrupted', stt_failed: 'Speech recognition failed', tts_failed: 'Voice generation failed', abandoned: 'Turn timed out',
-    evicted: 'Turn interrupted', aborted_disconnect: 'Connection lost', handler_error: 'Reply failed' })[outcome] || 'Unknown outcome';
+    evicted: 'Turn interrupted', aborted_disconnect: 'Connection lost', handler_error: 'Reply failed', wake_rejected: 'Wake rejected by sensitivity gate' })[outcome] || 'Unknown outcome';
 }
 
 function renderVoiceTurnDiagnostics(turn) {
@@ -36,6 +40,8 @@ function renderVoiceTurnDiagnostics(turn) {
     : `Audio reached OE. Peak ${levels.peakDbfs ?? '—'} dBFS; average ${levels.rmsDbfs ?? '—'} dBFS.`) : 'Audio levels were not recorded for this turn.';
   const recognized = turn.recognizedSpeech === true ? 'Speech was recognized.' : turn.recognizedSpeech === false ? 'No words were recognized.' : '';
   return `<div class="voice-diag-turn">
+    <p><b>What OE heard:</b> ${escHtml(turn.transcript ?? 'Transcript was not recorded for this turn.')}</p>
+    <p><b>Wake:</b> ${escHtml(turn.wake?.decision || 'Not recorded')}${typeof turn.wake?.score === 'number' ? ` · score ${Math.round(turn.wake.score * 100)}%` : ''}${typeof turn.wake?.cutoff === 'number' ? ` · cutoff ${Math.round(turn.wake.cutoff * 100)}%` : ''}. <b>Agent:</b> ${escHtml(turn.agentId || 'No agent dispatch recorded')}</p>
     <p>${escHtml(mic)} ${escHtml(recognized)}${turn.gaps ? ` ${escHtml(turn.gaps)} audio frame gap(s) were recorded.` : ''}</p>
     <table class="voice-diag-timings"><caption>Response timing</caption><tbody>${rows.map(([label, ms]) => `<tr><th scope="row">${label}</th><td>${voiceDiagnosticTime(ms)}</td></tr>`).join('')}</tbody></table>
     <p class="voice-diag-hint">Stages can overlap. Audio timings measure when OE sends sound; speaker buffering is not measured.</p>
@@ -71,6 +77,7 @@ function renderVoiceDiagnosticsPanel() {
     </div>
     <p class="voice-diag-status" id="voiceDiagStatus" role="status">${escHtml(_voiceDiagMessage)}</p>
     <div id="voiceDiagResults">${renderVoiceDiagnosticResults()}</div>
+    <div id="voiceRoomCalibration">${renderVoiceRoomCalibration()}</div>
     <div class="voice-diag-browser">
       <h3>This browser’s microphone</h3>
       <p class="voice-diag-hint">Speak normally for six seconds. This checks audio levels on this computer or phone; audio stays in this browser.</p>
@@ -87,6 +94,7 @@ function renderVoiceDiagnosticsPanel() {
 function updateVoiceDiagnosticResults() {
   const body = $('voiceDiagResults');
   if (body) body.innerHTML = renderVoiceDiagnosticResults();
+  if ($('voiceRoomCalibration')) $('voiceRoomCalibration').innerHTML = renderVoiceRoomCalibration();
   const status = $('voiceDiagStatus');
   if (status) status.textContent = _voiceDiagMessage;
   const start = $('voiceDiagStart');
@@ -113,7 +121,7 @@ async function fetchVoiceDiagnostics(request) {
   const started = performance.now();
   const timeout = setTimeout(() => ac.abort(), 8000);
   try {
-    const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/diagnostics`, { signal: ac.signal, cache: 'no-store' });
+    const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/diagnostics?details=1`, { signal: ac.signal, cache: 'no-store' });
     if (!res.ok) throw new Error(`Could not load device diagnostics (${res.status}).`);
     const data = await res.json();
     if (generation !== _voiceDiagGeneration || _voiceDiagRequest !== request) return null;
@@ -283,8 +291,99 @@ function stopVoiceDiagnostics() {
   _voiceDiagError = '';
   _voiceDiagMessage = '';
   _voiceDiagRoundTrip = null;
+  clearTimeout(_voiceCalibrationTimer);
+  _voiceCalibration = null;
+  _voiceCalibrationResult = null;
+  _voiceCalibrationStatus = '';
   finishVoiceMicrophoneCheck('');
   updateVoiceDiagnosticResults();
+}
+
+function renderVoiceRoomCalibration() {
+  const data = _voiceDiagData;
+  const latest = data?.room?.samples?.at(-1);
+  const fresh = latest && data.serverNow - latest.ts < 45_000;
+  const slots = data?.calibrationSlots || [];
+  const result = _voiceCalibrationResult;
+  return `<section class="voice-diag-browser"><h3>Room and wake-word calibration</h3>
+    <p class="voice-diag-hint">Measure 30 seconds of room noise, then make three separate wake attempts from your usual position. Changes below affect only this device’s average wake-score gate.</p>
+    ${fresh ? `<p>Microphone level: ${escHtml(latest.audioLevel ?? 'unknown')} device units · Gain control: ${escHtml(latest.agc || 'unknown')}. Recent wake peaks: ${latest.peaks.map(peak => `slot ${peak.slot + 1}: ${Math.round(peak.score * 100)}%`).join(', ')}.</p>` : '<p>No recent wake telemetry. Supported voice-device firmware must be connected before room calibration can run.</p>'}
+    <div class="voice-diag-actions">${slots.map(slot => `<button class="cdraw-btn" data-action="startVoiceRoomCalibration" data-args='[${slot.slot}]' ${!fresh || _voiceCalibration || _voiceDiagCheck ? 'disabled' : ''}>Calibrate slot ${slot.slot + 1}</button>${slot.overridden ? `<button class="cdraw-btn" data-action="resetVoiceRoomCalibration" data-args='[${slot.slot}]'>Restore slot ${slot.slot + 1} defaults</button>` : ''}`).join('')}
+    ${_voiceCalibration ? '<button class="cdraw-btn" data-action="cancelVoiceRoomCalibration">Cancel calibration</button>' : ''}</div>
+    <p role="status">${escHtml(_voiceCalibrationStatus)}</p>
+    ${result ? `<p>${escHtml(result.explanation)}</p><p>${result.quietSamples} quiet samples · ${result.attempts} wake attempts${result.quietLevel != null ? ` · Quiet-room level ${result.quietLevel} device units` : ''}</p>${result.recommendation != null ? `<button class="cdraw-btn" data-action="applyVoiceRoomCalibration">Apply ${Math.round(result.recommendation * 100)}% average cutoff to this device</button>` : ''}` : ''}
+  </section>`;
+}
+
+async function voiceCalibrationRequest(deviceId, body) {
+  const response = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/calibration`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Calibration request failed.');
+  return result;
+}
+
+async function startVoiceRoomCalibration(slot) {
+  if (_voiceCalibration || _voiceDiagCheck) return;
+  const pending = { deviceId: _voiceDiagDevice };
+  _voiceCalibration = pending;
+  const data = await refreshVoiceDiagnostics();
+  if (_voiceCalibration !== pending || pending.deviceId !== _voiceDiagDevice) return;
+  const assignment = data?.calibrationSlots?.find(item => item.slot === slot);
+  const latest = data?.room?.samples?.at(-1);
+  if (!assignment || !latest || data.serverNow - latest.ts >= 45_000 || !data.device.online || data.device.muted) {
+    _voiceCalibration = null;
+    _voiceCalibrationStatus = 'Connect and unmute the device, then wait for fresh wake telemetry.'; updateVoiceDiagnosticResults(); return;
+  }
+  const check = { deviceId: _voiceDiagDevice, slot, wakewordId: assignment.wakewordId, startedAt: data.serverNow, quietUntil: data.serverNow + 30_000 };
+  _voiceCalibration = check; _voiceCalibrationResult = null;
+  const poll = async () => {
+    if (_voiceCalibration !== check) return;
+    const snapshot = await refreshVoiceDiagnostics();
+    if (_voiceCalibration !== check) return;
+    if (!snapshot || !snapshot.device.online) { cancelVoiceRoomCalibration(); return; }
+    const quietRemaining = check.quietUntil - snapshot.serverNow;
+    const attempts = snapshot.turns.filter(turn => turn.startedAt > check.quietUntil && turn.wake?.slot === slot && turn.wake?.decision !== 'followup');
+    _voiceCalibrationStatus = quietRemaining > 0
+      ? `Quiet-room step: stay quiet for ${Math.ceil(quietRemaining / 1000)} more seconds. Leave normal room noise running.`
+      : `Say your wake word, then “What is two plus two?” three separate times. Wait for each reply before trying again. ${attempts.length}/3 attempts recorded.`;
+    if (quietRemaining <= 0 && (attempts.length >= 3 || snapshot.serverNow > check.quietUntil + 120_000)) {
+      try {
+        const result = await voiceCalibrationRequest(check.deviceId, { ...check, action: 'summarize' });
+        if (_voiceCalibration !== check) return;
+        _voiceCalibrationResult = { ...check, ...result }; _voiceCalibrationStatus = 'Calibration measurements complete.';
+      } catch (error) { _voiceCalibrationStatus = error.message; }
+      _voiceCalibration = null;
+    }
+    updateVoiceDiagnosticResults();
+    if (_voiceCalibration === check) _voiceCalibrationTimer = setTimeout(poll, 2000);
+  };
+  await poll();
+}
+
+function cancelVoiceRoomCalibration() {
+  clearTimeout(_voiceCalibrationTimer); _voiceCalibration = null;
+  _voiceCalibrationStatus = 'Calibration stopped. Device sensitivity was not changed.'; updateVoiceDiagnosticResults();
+}
+
+async function applyVoiceRoomCalibration() {
+  const result = _voiceCalibrationResult;
+  if (!result || result.deviceId !== _voiceDiagDevice || result.recommendation == null) return;
+  try {
+    await voiceCalibrationRequest(result.deviceId, { action: 'apply', slot: result.slot, wakewordId: result.wakewordId, cutoff: result.recommendation });
+    _voiceCalibrationStatus = 'Average wake cutoff applied to this device. Repeat the device check to verify it.';
+    _voiceCalibrationResult = null; await refreshVoiceDiagnostics();
+  } catch (error) { _voiceCalibrationStatus = error.message; updateVoiceDiagnosticResults(); }
+}
+
+async function resetVoiceRoomCalibration(slot) {
+  const assignment = _voiceDiagData?.calibrationSlots?.find(item => item.slot === slot);
+  if (!assignment) return;
+  try {
+    await voiceCalibrationRequest(_voiceDiagDevice, { action: 'reset', slot, wakewordId: assignment.wakewordId });
+    _voiceCalibrationStatus = 'This device is using the shared voice settings again.'; await refreshVoiceDiagnostics();
+  } catch (error) { _voiceCalibrationStatus = error.message; updateVoiceDiagnosticResults(); }
 }
 
 window.addEventListener('pagehide', stopVoiceDiagnostics);

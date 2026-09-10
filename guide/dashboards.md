@@ -66,6 +66,14 @@ page elements, colors, and tagline—are applied with **Save dashboard**. If a
 second editor has changed the same layout, OE stops instead of overwriting it
 and asks you to reload the current version.
 
+### Undo and recovery
+
+In **Customize**, use **Undo** and **Redo** for layout edits, including cards, sections, organization, colors, page elements, and tagline changes. Keyboard shortcuts are Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z when you are outside a text field. Each editor keeps up to 50 layout states during the session.
+
+**Saved versions** keeps up to 50 previous layouts on the server. Restoring one makes a new save and preserves the layout it replaces. Dashboard names, descriptions, and base themes are separate settings and are not part of layout history.
+
+If a layout save fails or conflicts with another screen, its unfinished edits remain in this tab's recovery draft. Reload the latest dashboard, enter **Customize**, and choose **Recover draft** to review and restore those edits. Recovery is tied to your profile, dashboard, and browser tab; closing the tab or clearing browser storage can remove it. A conflicting save never overwrites the other screen's layout automatically.
+
 ## Add cards and widgets
 
 Choose **Add card**, then select **Devices** or **Widgets**.
