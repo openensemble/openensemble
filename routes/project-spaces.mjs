@@ -3,6 +3,7 @@ import { requireAuth, readBody, isUserTimeBlocked, getAgentsForUser } from './_h
 import { createProjectSpace, listProjectSpaces, getProjectSpace, updateProjectSpace, changeProjectFile, projectFilePath, ProjectError } from '../lib/project-spaces.mjs';
 import { projectSessionKey } from '../lib/project-context.mjs';
 import { loadSession } from '../sessions.mjs';
+import { listProjectProgress, readProjectCheckpoint } from '../lib/project-progress.mjs';
 
 const reply = (res, status, value) => {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -24,6 +25,19 @@ export async function handle(req, res) {
       const space = getProjectSpace(userId, id);
       if (!action && req.method === 'GET') reply(res, 200, space);
       else if (!action && req.method === 'PATCH') reply(res, 200, await updateProjectSpace(userId, id, JSON.parse(await readBody(req))));
+      else if (action === 'progress' && req.method === 'GET') {
+        const offset = Number(url.searchParams.get('offset') || 0);
+        if (!Number.isInteger(offset) || offset < 0) throw new ProjectError(400, 'Invalid progress page');
+        reply(res, 200, listProjectProgress(userId, id, { offset }));
+      } else if (action === 'progress-file' && req.method === 'GET') {
+        const checkpoint = url.searchParams.get('id');
+        if (!/^checkpoint_[a-f0-9]{32}$/.test(checkpoint || '')) throw new ProjectError(400, 'Invalid saved conversation');
+        const record = readProjectCheckpoint(userId, id, checkpoint);
+        res.writeHead(200, { 'Content-Type': 'application/json',
+          'Content-Disposition': `attachment; filename="${checkpoint}.json"`,
+          'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(record, null, 2));
+      }
       else if (action === 'files' && ['POST', 'DELETE'].includes(req.method)) {
         reply(res, 200, await changeProjectFile(userId, id, JSON.parse(await readBody(req)), req.method === 'DELETE'));
       } else if (action === 'file' && req.method === 'GET') {

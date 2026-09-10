@@ -9,6 +9,7 @@
  * events, persists the session, and calls finalizeTurn.
  *
  * Currently:
+ *   /clear               — handled at dispatcher entry, before turn persistence
  *   /trim on|off|status   — runtime toggle for specialist-router tool trim
  *   /threshold [N]        — embed-router cosine threshold get/set
  *   /claim <skillId>      — assign a role to the current agent

@@ -76,6 +76,7 @@
     "ha_list_services",
     "list_profile_files",
     "read_profile_file",
+    "read_project_progress",
     "oe_admin_read_blueprint",
     "admin_diagnose_tool",
     "add_provider",

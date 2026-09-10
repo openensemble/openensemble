@@ -367,5 +367,10 @@ async function execRead(args, userId) {
 export default async function execute(name, args, userId) {
   if (name === 'list_profile_files') return execList(args, userId);
   if (name === 'read_profile_file')  return execRead(args, userId);
+  if (name === 'read_project_progress') {
+    const { currentProjectId } = await import('../../lib/project-context.mjs');
+    const { readProjectProgress } = await import('../../lib/project-progress.mjs');
+    return JSON.stringify(readProjectProgress(userId, currentProjectId(userId), args || {}));
+  }
   return null;
 }

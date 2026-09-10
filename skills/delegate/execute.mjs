@@ -214,6 +214,7 @@ const PARALLEL_BUILTIN_SAFE_TOOL_NAMES = new Set([
   'fetch_url',
   'list_profile_files',
   'read_profile_file',
+  'read_project_progress',
   'list_documents',
   'read_document',
   'list_document_versions',

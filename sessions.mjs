@@ -8,7 +8,7 @@
  */
 
 import fs from 'fs';
-import { resolveProjectSessionKey } from './lib/project-context.mjs';
+import { resolveProjectSessionKey, projectIdFromSession } from './lib/project-context.mjs';
 import fsp from 'fs/promises';
 import { randomUUID } from 'crypto';
 import {
@@ -305,6 +305,7 @@ export function appendToSession(agentId, ...messages) {
       try {
         const all = (await fsp.readFile(p, 'utf8')).trim().split('\n').filter(Boolean);
         if (all.length > PRUNE_THRESHOLD) {
+          await preserveProjectProgress(agentId, all.join('\n'), 'retention');
           await atomicRewrite(p, all.slice(-PRUNE_KEEP).join('\n') + '\n');
           _lineCounts.set(agentId, PRUNE_KEEP);
         } else {
@@ -595,6 +596,16 @@ async function replacePendingUserRow(p, agentId, turnId, messages) {
   // userA,userB,assistantB,assistantA when two pre-open fastpaths completed out
   // of order, corrupting both UI reconstruction and future model history.
   lines.splice(idx, 1, ...[finalUser, ...messages.slice(1)].map(m => JSON.stringify(m)));
+  if (lines.length > PRUNE_THRESHOLD) {
+    // A failed checkpoint postpones pruning; the completed reply still saves.
+    try { await preserveProjectProgress(agentId, lines.join('\n'), 'retention'); }
+    catch (error) {
+      console.warn('[sessions] Project progress save failed; retaining history:', error.message);
+      await atomicRewrite(p, lines.join('\n') + '\n');
+      _lineCounts.set(agentId, lines.length);
+      return true;
+    }
+  }
   const keep = lines.length > PRUNE_THRESHOLD ? lines.slice(-PRUNE_KEEP) : lines;
   await atomicRewrite(p, keep.join('\n') + '\n');
   _lineCounts.set(agentId, keep.length);
@@ -887,13 +898,65 @@ export function resolveAttachmentDecision(agentId, { decisionId, fileId, decisio
   });
 }
 
-export function clearSession(agentId) {
+async function preserveProjectProgress(agentId, text, reason, streamSnapshot = null) {
+  if (!projectIdFromSession(agentId)) return null;
+  const rows = text.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
+  if (reason === 'clear') {
+    const stream = streamSnapshot || getStreamBuffer(agentId);
+    if (stream && (stream.content || stream.toolEvents?.length)
+        && !rows.some(row => row.role === 'assistant' && stream.turnId && row.turnId === stream.turnId && !row.partial)) {
+      const { redactTextForTrace, redactArgsForTrace } = await import('./lib/run-inspector.mjs');
+      const toolEvents = (stream.toolEvents || []).map(tool => ({ ...tool,
+        ...(tool.args ? { args: redactArgsForTrace(tool.args) } : {}),
+        ...(tool.text ? { text: redactTextForTrace(tool.text) } : {}),
+        ...(tool.preview ? { preview: redactTextForTrace(tool.preview) } : {}),
+      }));
+      rows.push({ role: 'assistant', content: redactTextForTrace(stream.content || ''), toolEvents,
+        turnId: stream.turnId || null, ts: stream.ts || Date.now(), partial: true, status: 'interrupted',
+        ...(stream.hidden ? { hidden: true, excludeFromModel: true } : {}) });
+    }
+  }
+  const { checkpointProjectSession } = await import('./lib/project-progress.mjs');
+  return checkpointProjectSession(agentId, getSessionEpoch(agentId), rows, reason);
+}
+
+export function clearSession(agentId, { expectedEpoch = null, streamSnapshot = null, requestId = null, beforeClear = null } = {}) {
   agentId = resolveProjectSessionKey(agentId);
   return withSessionWriteLock(agentId, async () => {
     const p = sessionPath(agentId);
+    const epoch = getSessionEpoch(agentId);
+    const changed = () => {
+      const error = new Error('This conversation has already been cleared');
+      error.code = 'SESSION_CHANGED';
+      throw error;
+    };
+    if (expectedEpoch && expectedEpoch !== epoch) changed();
+    const receiptsPath = `${p}.clears.json`;
+    let receipts = [];
+    if (requestId) {
+      if (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new Error('Invalid clear request');
+      try { receipts = JSON.parse(await fsp.readFile(receiptsPath, 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (!Array.isArray(receipts)) throw new Error('Invalid clear receipts');
+      if (receipts.some(receipt => receipt.id === requestId && receipt.epoch !== epoch)) changed();
+    }
+    const activeSnapshot = beforeClear?.() || streamSnapshot;
+    if (projectIdFromSession(agentId)) {
+      let text = '';
+      try { text = await fsp.readFile(p, 'utf8'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      await preserveProjectProgress(agentId, text, 'clear', activeSnapshot);
+    }
     const nextEpoch = `se_${randomUUID().slice(0, 12)}`;
+    if (requestId) {
+      // Publish the receipt before clearing. If the process stops before the
+      // epoch rotates, the same request may safely retry in the original epoch.
+      await atomicRewrite(receiptsPath, JSON.stringify([
+        ...receipts.filter(receipt => receipt.id !== requestId), { id: requestId, epoch },
+      ].slice(-100)));
+    }
     // Empty first, then publish the new epoch, under one cross-process lock.
-    // loadSession is intentionally lock-free; publishing the epoch first left
+    // Publishing the epoch first previously left
     // a window where it could observe new epoch + old transcript and return
     // history the user had just cleared. Writers wait on this same lock and
     // validate their captured epoch only after release, so ordering the two
@@ -926,7 +989,7 @@ export function clearSession(agentId) {
 export async function deleteSession(agentId) {
   agentId = resolveProjectSessionKey(agentId);
   return withSessionWriteLock(agentId, async () => {
-    const paths = [sessionPath(agentId), streamBufferPath(agentId), lmsIdPath(agentId)];
+    const paths = [sessionPath(agentId), `${sessionPath(agentId)}.clears.json`, streamBufferPath(agentId), lmsIdPath(agentId)];
     try {
       const { localId } = parseAgentId(agentId);
       const prefix = `${safeId(localId)}.`;

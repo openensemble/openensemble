@@ -225,14 +225,18 @@ function updateSessionWarning() {
   $('sbtnClear').title = tip || 'Clear session';
 }
 
-function clearSession() {
+function clearSession(skipConfirmation = false) {
   const agentName = agents.find(a => a.id === activeAgent)?.name ?? activeAgent;
-  if (!confirm(`Clear ${agentName} session?`)) return;
+  const project = typeof activeProjectSpaceId === 'string' && activeProjectSpaceId;
+  if (skipConfirmation !== true && !confirm(`Clear ${agentName} session?${project ? ' Project progress will be saved automatically and available in the next chat.' : ''}`)) return false;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     showToast('Not connected — the session was not cleared');
-    return;
+    return false;
   }
-  ws.send(JSON.stringify({ type: 'clear_session', agent: activeAgent }));
+  ws.send(JSON.stringify({ type: 'clear_session', agent: activeAgent,
+    request_id: crypto.randomUUID(),
+    session_epoch: typeof agentSessionEpochs !== 'undefined' ? agentSessionEpochs[activeAgent] : undefined }));
+  return true;
 }
 
 // ── New Agent ─────────────────────────────────────────────────────────────────

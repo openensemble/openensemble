@@ -8,6 +8,16 @@ Open **Project spaces** using the folder button in the sidebar, then choose **Ne
 
 Every agent answering inside a space receives its saved brief, decisions, next steps, checklist, and file references. Delegated workers inherit that context. Use **Details** to keep the project's decisions and current state up to date; saved changes apply to the next message. The notes and checklist are edited by you, rather than automatically inferred from replies.
 
+### Automatic progress and clearing context
+
+Use **Clear session** or type **`/clear`** by itself to clear the current agent's conversation. Inside a project, OE first saves the conversation and a handoff automatically, including available partial replies and tool results when work was interrupted. If saving fails, the conversation is kept and Clear reports an error. Other project chats stay intact.
+
+The next project message includes saved handoffs so the agent can resume from previous findings, decisions, and remaining work. A compact summary is prepared using the same agent's configured model; saved excerpts remain available if that model is unavailable. Agents can read or search the full saved conversations with `read_project_progress`. Interrupted operations are not treated as completed work.
+
+Open the project's **Progress** tab to review handoffs or download saved conversations. OE also saves a handoff before automatically trimming older project history. Your shared brief, decisions, next steps, and checklist remain your own editable notes. Clearing a project conversation preserves its saved progress; it is not a deletion of those archives. General chat clears without creating project handoffs.
+
+Progress is stored under `users/<profile>/project-spaces/<projectId>/progress.json`, with the saved conversations alongside it, and is included in profile backups. Work already cleared or trimmed before this feature was enabled cannot be recovered through it.
+
 Each agent has its own conversation within the project. **Chats** opens those conversations, including earlier messages after a reload. Switching projects opens a fresh view and leaves any running work in its original space. Different browser tabs can use different spaces.
 
 Project conversation history and composer drafts are separate from general chat and other spaces. OE does not automatically learn project conversations into its general conversation memory. Your profile's standing preferences, explicitly saved memories, agents, connected services, and tool permissions remain available; a project is an organizational space within your profile, not a separate permissions sandbox.

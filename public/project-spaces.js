@@ -104,7 +104,7 @@ function renderProjectSpaceDetail() {
   $('projectSpaceDetail').innerHTML = `
     <div class="project-detail-heading"><div><h2>${space ? escHtml(space.name) : 'New project'}</h2><p>Keep your conversations and shared context together.</p></div>
     ${space ? `<button class="project-primary" data-action="enterProjectSpace" data-args='${projectArgs(space.id)}'>Open chat</button>` : ''}</div>
-    ${space ? `<nav class="project-tabs" aria-label="Project sections">${[['overview', 'Overview'], ['files', 'Files'], ['chats', 'Chats']].map(([tab, label]) => `<button aria-pressed="${tab === projectSpaceTab}" data-action="setProjectSpaceTab" data-args='${projectArgs(tab)}'>${label}</button>`).join('')}</nav>` : ''}
+    ${space ? `<nav class="project-tabs" aria-label="Project sections">${[['overview', 'Overview'], ['progress', 'Progress'], ['files', 'Files'], ['chats', 'Chats']].map(([tab, label]) => `<button aria-pressed="${tab === projectSpaceTab}" data-action="setProjectSpaceTab" data-args='${projectArgs(tab)}'>${label}</button>`).join('')}</nav>` : ''}
     <div id="projectSpaceTabBody"></div>`;
   renderProjectSpaceTab();
   $('projectSpaceDetail').scrollTop = 0;
@@ -115,6 +115,10 @@ function setProjectSpaceTab(tab) {
 function renderProjectSpaceTab() {
   const body = $('projectSpaceTabBody');
   const space = selectedProjectSpace;
+  if (projectSpaceTab === 'progress' && space) {
+    loadProjectProgress();
+    return;
+  }
   if (projectSpaceTab === 'files' && space) {
     body.innerHTML = `<p class="project-help">Files stay in your profile and are available to every agent working in this space. Removing a link keeps the original file.</p>
       <label class="project-upload">Add files<input type="file" multiple data-change-action="uploadProjectFiles" data-change-args='["$files"]'></label>
@@ -138,6 +142,27 @@ function renderProjectSpaceTab() {
     <div class="project-save-row"><button id="projectSave" class="project-primary" data-action="saveProjectSpace">${space ? 'Save changes' : 'Create project'}</button>
     ${space ? `<button data-action="reloadProjectDraft">Reload saved version</button><button data-action="archiveProjectSpace">${space.archived ? 'Unarchive' : 'Archive'}</button>` : ''}</div>`;
   renderProjectChecklist();
+}
+async function loadProjectProgress(offset = 0) {
+  if (!Number.isInteger(offset)) offset = 0;
+  const id = selectedProjectSpace?.id;
+  const body = $('projectSpaceTabBody');
+  body.innerHTML = '<p class="project-empty">Loading saved progress…</p>';
+  try {
+    const data = await projectApi(`/${id}/progress?offset=${offset}`);
+    if (selectedProjectSpace?.id !== id || projectSpaceTab !== 'progress') return;
+    body.innerHTML = `<p class="project-help">Project conversations are saved automatically before you clear context or older chat history is trimmed. These handoffs remain available to your agents. Summaries may finish shortly after saving; the full conversation is available immediately.</p>
+      <button data-action="loadProjectProgress">Refresh</button>
+      ${data.checkpoints.map(item => `<details class="project-progress-entry"><summary>${escHtml(new Date(item.savedAt).toLocaleString())} · ${item.reason === 'clear' ? 'Context cleared' : 'Older conversation saved'}</summary>
+        <p class="project-help">${escHtml(agents.find(agent => agent.id === item.agentId)?.name || item.agentId)} · ${item.messageCount} messages · ${item.summaryKind === 'generated' ? 'Handoff summary' : 'Conversation excerpts'}</p>
+        <pre>${escHtml(item.summary)}</pre><a href="/api/project-spaces/${id}/progress-file?id=${item.id}">Download saved conversation</a></details>`).join('') || '<p class="project-empty">Your chat is saved as you work. A handoff will appear here when context is cleared or older history is trimmed.</p>'}
+      <div class="project-save-row">${offset ? `<button data-action="loadProjectProgress" data-args='[${Math.max(0, offset - 20)}]'>Newer</button>` : ''}${data.nextOffset !== null ? `<button data-action="loadProjectProgress" data-args='[${data.nextOffset}]'>Older</button>` : ''}</div>`;
+  } catch (error) {
+    if (selectedProjectSpace?.id === id && projectSpaceTab === 'progress') {
+      body.innerHTML = '<p class="project-empty">Saved progress could not be loaded.</p>';
+      projectMessage(error.message, true);
+    }
+  }
 }
 function renderProjectChecklist() {
   $('projectChecklist').innerHTML = projectSpaceDraft.tasks.map(task => `<div class="project-task"><label><input type="checkbox" ${task.done ? 'checked' : ''} data-change-action="toggleProjectTask" data-change-args='${escHtml(JSON.stringify([task.id, '$checked']))}'><span>${escHtml(task.text)}</span></label><button data-action="removeProjectTask" data-args='${projectArgs(task.id)}' aria-label="Remove task">×</button></div>`).join('');

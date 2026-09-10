@@ -4,6 +4,13 @@
 async function send() {
   let text = $('input').value.trim();
   if (!text && !pendingAttachments.length) return;
+  if (/^\/clear$/i.test(text) && !pendingAttachments.length) {
+    if (clearSession(true)) {
+      clearTimeout(_draftSaveTimer);
+      $('input').value = ''; clearDraftForAgent(activeAgent); resizeTextarea();
+    }
+    return;
+  }
   if (streaming && !awaitingPermission) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { showToast('Not connected — try again in a moment'); return; }
   if (pendingAttachments.some(a => a._uploading)) { showToast('Still uploading — one moment'); return; }
@@ -107,4 +114,3 @@ async function send() {
   if (toolPlan) payload.toolPlan = toolPlan;
   ws.send(JSON.stringify(payload));
 }
-

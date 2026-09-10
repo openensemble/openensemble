@@ -811,6 +811,24 @@ export async function handleChatMessage({
     return;
   }
 
+  // Clear is a conversation control, before pending-turn persistence or model
+  // routing. Internal prompts and attachments must never trigger it.
+  if (/^\s*\/clear\s*$/i.test(rawText || '') && source !== 'voice-device' && !attachmentList.length
+      && !_hiddenUser && !_silent && !_isBackgroundContinuation && !_isolatedTaskRun
+      && !_isRoutineFollowup && !_readOnlyTurn && !labVerifierTurn && !documentRequest) {
+    skipPostTurnArtifacts = true;
+    try {
+      const { clearChatSession } = await import('./lib/chat-clear.mjs');
+      rawOnEvent(await clearChatSession(userId, agentId, { requestId: wireMessageId || wireAttemptId }));
+    }
+    catch (error) {
+      console.warn('[chat] Context clear failed:', error.message);
+      rawOnEvent({ type: 'error', agent: agentId, code: 'session_clear_failed', retryable: false,
+        message: 'Context was not cleared because it could not be saved. Your conversation is still available.' });
+    }
+    return;
+  }
+
   const scopedSessionKey = resolveProjectSessionKey(`${userId}_${agentId}`);
   eventScopedSessionKey = scopedSessionKey;
   const currentSessionEpoch = getSessionEpoch(scopedSessionKey);

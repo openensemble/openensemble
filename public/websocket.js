@@ -1060,6 +1060,10 @@ function handleServerMessage(msg) {
       break;
     }
     case 'error':
+      if (msg.code === 'session_clear_failed') {
+        showToast(msg.message);
+        break;
+      }
       // Server-side auth rejection on the WS handshake — clear the stale
       // token and bail. Without this, ws.onclose's reconnect loop would keep
       // re-auth'ing with the same bad token and spawning a chat bubble per
@@ -1221,6 +1225,21 @@ function handleServerMessage(msg) {
         }
       }
       break;
+    case 'session_clear_ignored': {
+      const agent = clientSessionAgentId(msg.agent);
+      if (msg.sessionEpoch && agentSessionEpochs[agent] !== msg.sessionEpoch) {
+        // A tab may have missed the original clear acknowledgement. Adopt the
+        // server generation before requesting its current conversation.
+        agentSessionEpochs[agent] = msg.sessionEpoch;
+        sessions[agent] = [];
+        sessionsLoaded.delete(agent);
+        delete agentStreams[agent];
+        if (typeof clearPendingAttemptsForAgent === 'function') clearPendingAttemptsForAgent(agent);
+      }
+      requestAgentSession(msg.agent);
+      if (agent === activeAgent) showToast('That clear request was already handled. Current chat kept.');
+      break;
+    }
     case 'session_cleared': {
       const agent = clientSessionAgentId(msg.agent);
       if (msg.sessionEpoch) agentSessionEpochs[agent] = msg.sessionEpoch;
@@ -1241,6 +1260,7 @@ function handleServerMessage(msg) {
         updateSessionWarning();
       }
       buildTabs(); buildAgentDrawer();
+      if (agent === activeAgent) showToast(msg.projectProgressSaved ? 'Context cleared. Project progress saved.' : 'Context cleared.');
       break;
     }
     case 'stop_ignored': {

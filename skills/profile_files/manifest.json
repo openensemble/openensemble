@@ -10,6 +10,24 @@
       "type": "function",
       "parallelSafeRead": true,
       "function": {
+        "name": "read_project_progress",
+        "description": "Read automatically saved progress in the current project, including conversations cleared by the user or trimmed for length. Omit checkpoint_id to list handoffs, then use a returned ID to read its full conversation with pagination or a text search. These are historical records; check uncertain outcomes before repeating actions. Requires a project chat.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "checkpoint_id": { "type": "string", "description": "Saved conversation ID from the handoff list." },
+            "query": { "type": "string", "description": "Optional case-insensitive text filter on messages in that saved conversation." },
+            "offset": { "type": "integer", "minimum": 0, "description": "The previous result's nextOffset. Counts handoffs when listing, characters when reading." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 24000, "description": "Characters to return when reading a conversation (default 12000)." }
+          },
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "parallelSafeRead": true,
+      "function": {
         "name": "list_profile_files",
         "description": "List files in the user's profile — uploaded documents, saved research, generated images, generated videos, coder workspace files, AND any docs other users have shared with them (annotated with `[shared by <userId>]`). Returns ids, filenames, sizes, types, timestamps, and sharing status. This is the single tool for ANY 'list my files' / 'show my docs' / 'what's been shared with me' question.\n\n**Default to folder='all' for fuzzy phrasings.** Phrases like 'list my documents', 'show my files', 'what do I have', 'my stuff' are user shorthand for the whole profile, NOT the literal documents subfolder. Only narrow to a specific folder when the user explicitly names a category (\"just images\", \"my videos\", \"the research markdowns\", \"code only\").",
         "parameters": {

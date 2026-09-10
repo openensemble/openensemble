@@ -12,7 +12,7 @@ import os from 'node:os';
 import { getActiveTasks as getActiveBgTasks } from '../background-tasks.mjs';
 import { projectActiveTasksForWire } from '../lib/background-task-wire.mjs';
 import { completedTasksForSession } from '../lib/completed-task-wire.mjs';
-import { loadSession, clearSession, appendToSession, getStreamBuffer, getSessionEpoch } from '../sessions.mjs';
+import { loadSession, appendToSession, getStreamBuffer, getSessionEpoch } from '../sessions.mjs';
 import {
   getAgentsForUser, agentToWire, getUser, getUserCoordinatorAgentId,
   getSessionUserId, getAuthToken, resolveShareGroup, loadConfig,
@@ -783,14 +783,23 @@ export function onConnection(ws, req) {
 
     if (msg.type === 'clear_session') {
       const agentId = msg.agent;
-      if (agentId) {
-        abortChat(ws._userId, agentId);
-        cancelPendingCredentialPrompts(ws._userId, { agentId });
-        const sessionEpoch = await clearSession(projectSessionKey(ws._userId, agentId));
-        const cleared = stampChatEvent(ws._userId, { type: 'session_cleared', agent: agentId, sessionEpoch });
-        for (const client of getMainWss().clients) {
-          if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN || !matchesProject(client, cleared)) continue;
-          try { client.send(JSON.stringify(cleared)); } catch {}
+      if (typeof agentId === 'string') {
+        try {
+          const { clearChatSession } = await import('../lib/chat-clear.mjs');
+          const result = await clearChatSession(ws._userId, agentId, {
+            expectedEpoch: typeof msg.session_epoch === 'string' ? msg.session_epoch : null,
+            requestId: typeof msg.request_id === 'string' ? msg.request_id : null,
+          });
+          const cleared = stampChatEvent(ws._userId, result);
+          for (const client of getMainWss().clients) {
+            if (client._userId !== ws._userId || client._deviceId || client.readyState !== client.OPEN || !matchesProject(client, cleared)) continue;
+            try { client.send(JSON.stringify(cleared)); } catch {}
+          }
+        } catch (error) {
+          console.warn('[ws] Context clear failed:', error.message);
+          ws.send(JSON.stringify({ type: 'error', agent: agentId, projectId: ws._projectId || null,
+            code: 'session_clear_failed', retryable: false,
+            message: 'Context was not cleared because it could not be saved. Your conversation is still available.' }));
         }
       }
       return;

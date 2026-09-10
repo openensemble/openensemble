@@ -15,7 +15,8 @@
 .project-space-detail{padding:22px;overflow:auto;min-width:0}
 .project-detail-heading{display:flex;align-items:flex-start;gap:16px;margin-bottom:16px}
 .project-detail-heading>div{flex:1;min-width:0}.project-detail-heading h2{margin:0;font-size:22px;overflow-wrap:anywhere}.project-detail-heading p{margin:6px 0}
-.project-tabs{display:flex;gap:8px;margin-bottom:20px}.project-tabs button[aria-pressed=true]{background:var(--accent);color:white}
+.project-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}.project-tabs button[aria-pressed=true]{background:var(--accent);color:white}
+.project-progress-entry{margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;font-size:13px;overflow-wrap:anywhere}.project-progress-entry summary{cursor:pointer}.project-progress-entry pre{font:inherit;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}.project-progress-entry a{color:var(--accent)}
 .project-field{display:block;margin-bottom:18px}.project-field>span{display:block;font-size:13px;font-weight:600;margin-bottom:8px}
 .project-field input,.project-field textarea,.project-task-input input{box-sizing:border-box;width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font:inherit;font-size:13px;line-height:1.6;resize:vertical}
 .project-save-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px;padding-bottom:12px}
