@@ -6,6 +6,45 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-09-10
+
+**Project progress survives clearing context**
+Use **Clear session** or type **`/clear`** by itself to start a fresh conversation. Inside a project, OE first saves the conversation and a handoff automatically, then includes saved progress in future project chats. Older history is also saved before automatic trimming. Review handoffs or download saved conversations from the project's **Progress** tab. If saving fails, the conversation stays intact. See [Project spaces](project-spaces.md#automatic-progress-and-clearing-context).
+
+---
+
+## 2026-09-09
+
+**Project spaces**
+Keep a project's brief, decisions, next steps, checklist, files, and agent conversations together. Delegated and scheduled work carry the project's context, and unsaved project drafts survive reloads. Open **Project spaces** from the sidebar folder button. See [Project spaces](project-spaces.md).
+
+**Resumable agent jobs**
+Supported background workers and single-stage agent delegations save progress and can continue in their original chat after an OE restart. If an interrupted action has an uncertain outcome, the job pauses with **Review & resume** so you can check what happened before it continues. See [Resumable agent jobs](resumable-jobs.md).
+
+**Routines and voice diagnostics**
+Open saved **Routines** directly from the sidebar or mobile menu, with shortcuts from Tasks and Learn. **Voice devices → Voice diagnostics** adds guided device and browser microphone checks, connection history, and response timing. The browser microphone check analyzes audio locally without uploading it. See [Voice devices](voice-devices.md#voice-diagnostics).
+
+**Safer learning and Undo**
+For newly accepted learning suggestions, **Undo** can restore the previous setting within 24 hours. OE checks for later manual edits before restoring and directs you to review conflicting changes in Learn. Memory edits and deletions also stay consistent with personalization. See [Personalization](personalization.md).
+
+---
+
+## 2026-09-08
+
+**Live agent activity in chat**
+Open the **Agents** pop-out to follow background work, see current activity, and stop jobs. Completed agent results now return when you reload the chat.
+
+**More reliable worker launches and scheduling**
+Improved worker discovery and guidance for inheriting the owner's configured model and reasoning effort. Optional tool arguments stay optional when using Codex. Scheduling better distinguishes requests from examples, discussion, and instructions not to create reminders; requests to edit existing tasks no longer accidentally create new ones.
+
+**Backup and task recovery**
+Backup restores are validated and staged before restart, so accounts, credentials, and scheduled tasks load from the restored state together. Backups also include custom-provider configuration. Task cancellation, recovery, and draft editing received reliability fixes. See [Backups and updates](backup-update.md).
+
+**Voice firmware 0.2.94-reliability**
+The bundled firmware improves playback recovery, pairing retries, OTA validation, wake-word updates, and persisted device alarms. Up to eight armed alarms can ring during a Wi-Fi or server outage. After a device reboot, recovering saved deadlines still requires clock synchronization.
+
+---
+
 ## 2026-09-04
 
 **Build an agent team from any configured model**
