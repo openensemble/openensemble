@@ -16,6 +16,8 @@ async function searchInbox(query) {
   query = query?.trim();
   if (!query) { clearInboxSearch(); return; }
   _activeInboxQuery = query;
+  const listGen = resetInboxListState();
+  const accountId = _activeInboxAccountId;
   const el = $('inboxPreview');
   // Re-render toolbar so the X button appears and the input retains its value
   // when the cardList is replaced below.
@@ -26,8 +28,9 @@ async function searchInbox(query) {
       `<div id="inboxScrollSentinel" style="height:1px"></div>`;
   }
   try {
-    const qs = `/api/inbox?max=30&query=${encodeURIComponent(query)}${_activeInboxAccountId ? `&accountId=${encodeURIComponent(_activeInboxAccountId)}` : ''}`;
+    const qs = `/api/inbox?max=30&query=${encodeURIComponent(query)}${accountId ? `&accountId=${encodeURIComponent(accountId)}` : ''}`;
     const data = await fetch(qs, { cache: 'no-store' }).then(r => r.json());
+    if (listGen !== _inboxListGen) return;
     if (data.error) throw new Error(data.error);
     const emails = data.emails ?? [];
     _inboxNextPageToken = data.nextPageToken ?? null;
@@ -39,6 +42,7 @@ async function searchInbox(query) {
         : '<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">No results.</div>';
     }
   } catch (err) {
+    if (listGen !== _inboxListGen) return;
     const list = $('inboxCardList');
     if (list) list.innerHTML = `<div style="color:var(--red);font-size:13px;padding:20px">${escHtml(err.message)}</div>`;
   }
@@ -53,7 +57,8 @@ function _inboxCardHtml(e) {
   const from = e.from.replace(/<[^>]+>/, '').replace(/"/g, '').trim() || e.from;
   const date = e.date ? new Date(e.date).toLocaleDateString(undefined, { month:'short', day:'numeric' }) : '';
   const id = escHtml(e.id);
-  return `<div class="news-card email-card-row" data-action="openEmailDetail" data-args='${JSON.stringify([e.id]).replace(/'/g, "&#39;")}'>
+  const selected = _activeEmailDetail?.msgId === e.id && _activeEmailDetail?.accountId === _activeInboxAccountId;
+  return `<div class="news-card email-card-row${selected ? ' is-selected' : ''}" data-message-id="${id}" role="button" tabindex="0" aria-controls="drawerEmail" aria-expanded="${selected}" data-action="openEmailDetail" data-args='${JSON.stringify([e.id]).replace(/'/g, "&#39;")}'>
     <div class="news-card-body">
       <div class="news-card-meta">
         <span class="news-card-source">${escHtml(from)}</span>
@@ -71,13 +76,8 @@ function _inboxCardHtml(e) {
 async function inboxQuickDelete(msgId, ev) {
   ev?.stopPropagation?.();
   ev?.preventDefault?.();
-  if (!_inboxEmailActions.length) {
-    try {
-      const skills = await fetch('/api/roles').then(r => r.json());
-      const emailSkill = skills.find(s => s.category === 'email' && s.enabled && s.actions);
-      _inboxEmailActions = emailSkill?.actions ?? [];
-    } catch {}
-  }
+  const accountId = _activeInboxAccountId;
+  await loadInboxEmailActions();
   const action = _inboxEmailActions.find(a => a.id === 'trash');
   if (!action?.tool) { showToast?.('Trash action unavailable'); return; }
   // ev.target works regardless of which inner element of the button (the
@@ -93,20 +93,12 @@ async function inboxQuickDelete(msgId, ev) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         tool: action.tool,
-        args: { account: _activeInboxAccountId ?? undefined, messageId: msgId },
+        args: { account: accountId ?? undefined, messageId: msgId },
       }),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     if (typeof updateStatusBar === 'function') updateStatusBar();
-    // Optimistic remove — drop the card and keep the rest of the list intact.
-    delete _inboxEmailMeta[msgId];
-    if (card) card.remove();
-    const list = $('inboxCardList');
-    if (list && !list.querySelector('.email-card-row')) {
-      // Last visible card — refresh once to either pull the next page or
-      // show the "empty" placeholder.
-      loadInboxPreview();
-    }
+    removeInboxEmail(msgId, accountId);
   } catch (e) {
     if (card) { card.style.opacity = ''; card.style.pointerEvents = ''; }
     showToast?.(`Delete failed: ${e.message}`);
@@ -134,46 +126,58 @@ async function loadEmailAccountTabs() {
 }
 
 function switchInboxTab(accountId) {
+  closeEmailDetail(false);
   _activeInboxAccountId = accountId;
   loadInboxPreview(accountId);
 }
 
+function resetInboxListState() {
+  _inboxNextPageToken = null;
+  _inboxLoading = false;
+  _inboxLastFetch = 0;
+  _inboxKeyIdx = -1;
+  _inboxEmailMeta = {};
+  return ++_inboxListGen;
+}
+
 async function loadInboxPreview(accountId) {
   // event-delegation.js appends the click Event as the last positional arg
-  // to every data-action handler. The back-button (`data-action="loadInboxPreview"`
-  // with no data-args) and the toolbar refresh button both fire with `event`
-  // as the only arg, which sailed past the `if (!accountId)` check below and
-  // hit /api/inbox with `accountId=[object PointerEvent]` → 500 from
-  // resolveAccount's "Account ${id} not found". Coerce to null when the
-  // caller didn't supply a real account id string.
+  // to the toolbar refresh handler, so only accept real account id strings.
   if (typeof accountId !== 'string') accountId = null;
-  // Invalidate any in-flight detail body fetch so it cannot paint into the list.
-  _emailDetailGen++;
+  const listGen = resetInboxListState();
   // Load tabs if stale or empty
   if (!_inboxAccounts.length || Date.now() - _inboxAccountsLoadedAt > 300000) {
     await loadEmailAccountTabs();
   }
-  // No-arg calls (refresh-after-action, "back" button) preserve the current
-  // tab. Only fall back to the first account when nothing is selected yet.
+  if (listGen !== _inboxListGen) return;
+  // Refresh preserves the current tab and the separate email drawer.
   if (!accountId) accountId = _activeInboxAccountId ?? _inboxAccounts[0]?.id ?? null;
+  if (_activeEmailDetail && _activeEmailDetail.accountId !== accountId) closeEmailDetail(false);
   _activeInboxAccountId = accountId;
   // Re-render tabs to update active highlight
   await loadEmailAccountTabs();
+  if (listGen !== _inboxListGen) return;
 
   const el = $('inboxPreview');
-  // Reset scroll/pagination state
-  _inboxNextPageToken = null;
-  _inboxLoading = false;
-  _inboxLastFetch = 0;
-  // Restore drawer body scroll when returning to list
-  el.style.height = '';
+  if (!el) return;
   const drawerBody = el.closest('.desk-drawer-body');
-  if (drawerBody) { drawerBody.style.overflow = ''; drawerBody.style.height = ''; }
+  if (drawerBody && !drawerBody._inboxScrollHandler) {
+    drawerBody._inboxScrollHandler = () => {
+      if (!_inboxNextPageToken || _inboxLoading) return;
+      const sentinel = $('inboxScrollSentinel');
+      if (!sentinel) return;
+      const rect = sentinel.getBoundingClientRect();
+      const parentRect = drawerBody.getBoundingClientRect();
+      if (rect.top - parentRect.bottom < 200) loadMoreInboxEmails();
+    };
+    drawerBody.addEventListener('scroll', drawerBody._inboxScrollHandler);
+  }
   el.innerHTML = makeDrawerToolbar('Inbox', 'loadInboxPreview') +
     `<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">Loading…</div>`;
   try {
     const qs = `/api/inbox?max=30${accountId ? `&accountId=${encodeURIComponent(accountId)}` : ''}${_activeInboxQuery ? `&query=${encodeURIComponent(_activeInboxQuery)}` : ''}`;
     const data = await fetch(qs, { cache: 'no-store' }).then(r => r.json());
+    if (listGen !== _inboxListGen) return;
     if (data.error) throw new Error(data.error);
     const emails = data.emails ?? [];
     _inboxNextPageToken = data.nextPageToken ?? null;
@@ -182,28 +186,14 @@ async function loadInboxPreview(accountId) {
         `<div style="color:var(--muted);font-size:13px;padding:24px;text-align:center">${_activeInboxQuery ? 'No results.' : 'Inbox is empty.'}</div>`;
       return;
     }
-    // Store email metadata for the detail view to look up by id; clear action cache
-    _inboxEmailMeta = {};
-    _inboxEmailActions = [];
+    // Store metadata for newly selected emails; the open drawer has its own copy.
     emails.forEach(e => { _inboxEmailMeta[e.id] = e; });
 
     el.innerHTML = makeDrawerToolbar('Inbox', 'loadInboxPreview') +
       `<div id="inboxCardList" class="inbox-card-list">${emails.map(_inboxCardHtml).join('')}</div>` +
       `<div id="inboxScrollSentinel" style="height:1px"></div>`;
-
-    // Attach infinite scroll to drawer body
-    if (drawerBody) {
-      drawerBody._inboxScrollHandler = () => {
-        if (!_inboxNextPageToken || _inboxLoading) return;
-        const sentinel = $('inboxScrollSentinel');
-        if (!sentinel) return;
-        const rect = sentinel.getBoundingClientRect();
-        const parentRect = drawerBody.getBoundingClientRect();
-        if (rect.top - parentRect.bottom < 200) loadMoreInboxEmails();
-      };
-      drawerBody.addEventListener('scroll', drawerBody._inboxScrollHandler);
-    }
   } catch (err) {
+    if (listGen !== _inboxListGen) return;
     el.innerHTML = `<div style="color:var(--red);font-size:13px;padding:20px">Failed: ${escHtml(err.message)}</div>`;
   }
 }
@@ -214,6 +204,7 @@ async function loadMoreInboxEmails() {
   if (now - _inboxLastFetch < 2000) return; // rate-limit: 2s between fetches
   _inboxLoading = true;
   _inboxLastFetch = now;
+  const listGen = _inboxListGen;
 
   const sentinel = $('inboxScrollSentinel');
   if (sentinel) sentinel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:8px;text-align:center">Loading more…</div>`;
@@ -221,6 +212,7 @@ async function loadMoreInboxEmails() {
   try {
     const url = `/api/inbox?max=30&pageToken=${encodeURIComponent(_inboxNextPageToken)}${_activeInboxAccountId ? `&accountId=${encodeURIComponent(_activeInboxAccountId)}` : ''}${_activeInboxQuery ? `&query=${encodeURIComponent(_activeInboxQuery)}` : ''}`;
     const data = await fetch(url, { cache: 'no-store' }).then(r => r.json());
+    if (listGen !== _inboxListGen) return;
     if (data.error) throw new Error(data.error);
     const emails = data.emails ?? [];
     _inboxNextPageToken = data.nextPageToken ?? null;
@@ -233,9 +225,10 @@ async function loadMoreInboxEmails() {
       sentinel.innerHTML = _inboxNextPageToken ? '' : `<div style="color:var(--muted);font-size:12px;padding:8px;text-align:center">End of inbox</div>`;
     }
   } catch (err) {
+    if (listGen !== _inboxListGen) return;
     if (sentinel) sentinel.innerHTML = `<div style="color:var(--red);font-size:12px;padding:8px;text-align:center">Failed to load more</div>`;
   } finally {
-    _inboxLoading = false;
+    if (listGen === _inboxListGen) _inboxLoading = false;
   }
 }
 
@@ -255,6 +248,8 @@ function askEmailAgentAbout(msgId, subject) {
 
 let _inboxEmailMeta = {};   // id -> { id, subject, from, date, snippet }
 let _inboxEmailActions = []; // cached from skill manifest
+let _inboxEmailActionsPromise = null;
+let _inboxListGen = 0;
 let _inboxNextPageToken = null;
 let _inboxLoading = false;
 let _inboxLastFetch = 0;
@@ -264,49 +259,85 @@ let _activeInboxQuery = null;
 let _inboxAccountsLoadedAt = 0;
 
 // Generation counter so a slow body fetch for message A cannot overwrite the
-// iframe after the user has already opened message B (or gone back to the list).
+// iframe after the user has already opened message B or closed the drawer.
 let _emailDetailGen = 0;
+let _activeEmailDetail = null;
+
+async function loadInboxEmailActions() {
+  if (_inboxEmailActions.length) return _inboxEmailActions;
+  if (!_inboxEmailActionsPromise) {
+    _inboxEmailActionsPromise = fetch('/api/roles').then(r => r.json()).then(skills => {
+      const emailSkill = skills.find(s => s.category === 'email' && s.enabled && s.actions);
+      _inboxEmailActions = emailSkill?.actions ?? [];
+      return _inboxEmailActions;
+    }).catch(() => []).finally(() => { _inboxEmailActionsPromise = null; });
+  }
+  return _inboxEmailActionsPromise;
+}
+
+function syncInboxEmailSelection() {
+  document.querySelectorAll('#inboxCardList .email-card-row').forEach(card => {
+    const selected = card.dataset.messageId === _activeEmailDetail?.msgId
+      && _activeInboxAccountId === _activeEmailDetail?.accountId;
+    card.classList.toggle('is-selected', selected);
+    card.setAttribute('aria-expanded', String(selected));
+  });
+}
+
+function closeEmailDetail(restoreFocus = true) {
+  const currentId = _activeEmailDetail?.msgId;
+  _emailDetailGen++;
+  _activeEmailDetail = null;
+  closeReplyComposer();
+  const drawer = $('drawerEmail');
+  if (drawer) { drawer.classList.remove('open'); drawer.inert = true; }
+  $('drawerInbox')?.classList.remove('email-detail-open');
+  $('emailDetailPreview')?.replaceChildren();
+  syncInboxEmailSelection();
+  if (restoreFocus !== false && currentId && isInboxDrawerOpen()) {
+    const card = [...document.querySelectorAll('#inboxCardList .email-card-row')]
+      .find(el => el.dataset.messageId === currentId);
+    (card || $('inboxSearch'))?.focus({ preventScroll: true });
+  }
+}
+
+function removeInboxEmail(msgId, accountId) {
+  if (_activeEmailDetail?.msgId === msgId && _activeEmailDetail?.accountId === accountId) closeEmailDetail();
+  if (_activeInboxAccountId !== accountId) return;
+  delete _inboxEmailMeta[msgId];
+  const list = $('inboxCardList');
+  const card = [...(list?.querySelectorAll('.email-card-row') ?? [])]
+    .find(el => el.dataset.messageId === msgId);
+  if (card) {
+    if (card.contains(document.activeElement)) {
+      (card.nextElementSibling || card.previousElementSibling || $('inboxSearch'))?.focus({ preventScroll: true });
+    }
+    card.remove();
+  }
+  _inboxKeyIdx = -1;
+  if (list && !list.querySelector('.email-card-row')) loadInboxPreview();
+}
 
 async function openEmailDetail(msgId) {
   const meta = _inboxEmailMeta[msgId];
-  if (!meta) return;
-  const el = $('inboxPreview');
+  const drawer = $('drawerEmail');
+  const el = $('emailDetailPreview');
+  if (!meta || !drawer || !el || !isInboxDrawerOpen()) return;
   const detailGen = ++_emailDetailGen;
   const accountIdAtOpen = _activeInboxAccountId;
-  // Lock the drawer body so the iframe can fill it with height:100%
-  const drawerBody = el.closest('.desk-drawer-body');
-  // Remove infinite scroll listener while viewing detail
-  if (drawerBody && drawerBody._inboxScrollHandler) {
-    drawerBody.removeEventListener('scroll', drawerBody._inboxScrollHandler);
-  }
-  if (drawerBody) { drawerBody.style.overflow = 'hidden'; drawerBody.style.height = '100%'; }
-  el.style.height = '100%';
-
-  // Fetch skill actions from manifest (cache after first load)
-  if (!_inboxEmailActions.length) {
-    try {
-      const skills = await fetch('/api/roles').then(r => r.json());
-      const emailSkill = skills.find(s => s.category === 'email' && s.enabled && s.actions);
-      _inboxEmailActions = emailSkill?.actions ?? [];
-    } catch {}
-  }
-  // User navigated away while skills were loading.
-  if (detailGen !== _emailDetailGen) return;
+  _activeEmailDetail = { msgId, accountId: accountIdAtOpen, meta };
+  closeReplyComposer();
+  syncInboxEmailSelection();
+  $('drawerInbox').classList.add('email-detail-open');
+  $('emailDetailSubject').textContent = meta.subject || '(No subject)';
+  drawer.inert = false;
+  drawer.classList.add('open');
+  $('emailDetailClose')?.focus({ preventScroll: true });
 
   const fromDisplay = meta.from.replace(/<[^>]+>/, '').replace(/"/g, '').trim() || meta.from;
   const dateDisplay = meta.date ? new Date(meta.date).toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
 
-  const actionBtns = _inboxEmailActions.map(a =>
-    `<button class="btn-email-action${a.id === 'trash' ? ' danger' : ''}" data-action="emailActionClick" data-args='${JSON.stringify([a.id, msgId]).replace(/'/g, "&#39;")}'>
-      <span class="action-icon">${a.icon}</span>${escHtml(a.label)}
-    </button>`
-  ).join('');
-
-  el.innerHTML = `<div class="email-detail">
-    <div class="email-detail-hdr">
-      <button class="btn-email-back" data-action="loadInboxPreview" title="Back">←</button>
-      <div class="email-detail-subject">${escHtml(meta.subject)}</div>
-    </div>
+  el.innerHTML = `
     <div class="email-detail-meta">
       <div class="email-detail-from">${escHtml(fromDisplay)}</div>
       <div class="email-detail-date">${escHtml(dateDisplay)}</div>
@@ -318,22 +349,31 @@ async function openEmailDetail(msgId) {
       <div id="emailReplyLabel" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
       <input id="emailForwardTo" type="email" placeholder="Forward to (email address)" style="display:none;width:100%;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;color:var(--text);font-family:inherit;margin-bottom:6px;box-sizing:border-box">
       <textarea id="emailReplyText" style="width:100%;min-height:80px;max-height:200px;resize:vertical;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;color:var(--text);font-family:inherit" placeholder="Type your reply…"></textarea>
-      <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;justify-content:flex-end">
         <button data-action="closeReplyComposer" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer">Cancel</button>
         <button id="emailReplyDraft" data-action="draftWithEmailAgent" style="background:none;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">Draft with AI</button>
         <button id="emailReplySend" data-action="sendInlineReply" style="background:var(--accent);border:none;color:#fff;border-radius:6px;padding:5px 12px;font-size:11px;cursor:pointer;font-weight:600">Send</button>
       </div>
     </div>
-    ${_inboxEmailActions.length ? `<div class="email-action-bar">${actionBtns}</div>` : ''}
-  </div>`;
+    <div id="emailActionBar" class="email-action-bar"></div>`;
 
   const frame = $('emailFrame');
   if (frame) {
     frame.srcdoc = `<p style="font-family:sans-serif;color:#888;padding:16px">Loading message…</p>`;
   }
 
+  // Load actions and the message independently so the drawer opens immediately.
+  const actionsReady = loadInboxEmailActions().then(actions => {
+    if (detailGen !== _emailDetailGen) return;
+    $('emailActionBar').innerHTML = actions.map(a =>
+      `<button class="btn-email-action${a.id === 'trash' ? ' danger' : ''}" data-email-action="${escHtml(a.id)}" data-action="emailActionClick" data-args='${JSON.stringify([a.id, msgId]).replace(/'/g, "&#39;")}'>
+        <span class="action-icon">${a.icon}</span>${escHtml(a.label)}
+      </button>`
+    ).join('');
+  });
+
   // Fetch HTML with auth token, inject via srcdoc. Ignore the response if the
-  // user has already opened another message or returned to the list.
+  // user has already opened another message or closed the drawer.
   try {
     const acctQs = accountIdAtOpen ? `?accountId=${encodeURIComponent(accountIdAtOpen)}` : '';
     const resp = await fetch(`/api/inbox/${encodeURIComponent(msgId)}${acctQs}`, { cache: 'no-store' });
@@ -356,21 +396,27 @@ async function openEmailDetail(msgId) {
     if (detailGen !== _emailDetailGen) return;
     const errFrame = $('emailFrame');
     if (errFrame) errFrame.srcdoc = `<p style="font-family:sans-serif;color:red;padding:16px">Failed to load: ${escHtml(e.message)}</p>`;
+  } finally {
+    await actionsReady;
   }
 }
 
 async function emailActionClick(actionId, msgId) {
   const action = _inboxEmailActions.find(a => a.id === actionId);
-  const meta = _inboxEmailMeta[msgId];
-  if (!action || !meta) return;
+  const detail = _activeEmailDetail;
+  if (!action || detail?.msgId !== msgId) return;
+  const { meta, accountId } = detail;
+  const detailGen = _emailDetailGen;
 
   // Direct actions call the skill tool immediately — no AI involved
   if (action.direct && action.tool) {
-    const btn = document.querySelector(`.btn-email-action[onclick*="${actionId}"]`);
+    const btn = [...document.querySelectorAll('#emailActionBar .btn-email-action')]
+      .find(el => el.dataset.emailAction === actionId);
+    if (btn?.disabled) return;
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
 
     // Build args per action type
-    let toolArgs = { account: _activeInboxAccountId ?? undefined };
+    const toolArgs = { account: accountId ?? undefined };
     if (actionId === 'mark_read') {
       toolArgs.messageIds = [msgId];
     } else if (actionId === 'archive') {
@@ -380,37 +426,27 @@ async function emailActionClick(actionId, msgId) {
       toolArgs.messageId = msgId;
     }
 
-    // Trash — delete immediately and return to inbox
-    if (actionId === 'trash') {
-      try {
-        await fetch('/api/email/action', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tool: action.tool, args: toolArgs }),
-        });
-        updateStatusBar();
-        loadInboxPreview();
-      } catch (e) { showToast(`Delete failed: ${e.message}`); }
-      return;
-    }
-
     try {
-      await fetch('/api/email/action', {
+      const response = await fetch('/api/email/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tool: action.tool, args: toolArgs }),
       });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
       if (actionId === 'mark_read') {
         showToast('Marked as read');
-      } else if (actionId === 'archive') {
-        showToast('Archived');
-        loadInboxPreview();
-      } else {
+      } else if (actionId === 'archive' || actionId === 'trash') {
+        showToast(actionId === 'archive' ? 'Archived' : 'Deleted');
+        removeInboxEmail(msgId, accountId);
+      } else if (detailGen === _emailDetailGen) {
         loadInboxPreview();
       }
+      if (typeof updateStatusBar === 'function') updateStatusBar();
     } catch (e) {
+      showToast(`Action failed: ${e.message}`);
+    } finally {
       if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-      alert(`Action failed: ${e.message}`);
     }
     return;
   }
@@ -423,6 +459,7 @@ async function emailActionClick(actionId, msgId) {
     const label = actionId === 'forward' ? 'Forward this email' : `Reply to ${escHtml(meta.from.replace(/<[^>]+>/, '').replace(/"/g, '').trim())}`;
     $('emailReplyLabel').innerHTML = label;
     $('emailReplyText').value = '';
+    $('emailReplySend').disabled = false;
     $('emailReplySend').textContent = actionId === 'forward' ? 'Forward' : 'Send Reply';
     const fwdTo = $('emailForwardTo');
     if (fwdTo) {
@@ -445,8 +482,13 @@ function closeReplyComposer() {
 }
 
 async function sendInlineReply() {
+  const detail = _activeEmailDetail;
+  if (!detail || detail.msgId !== _replyMsgId) return;
+  const detailGen = _emailDetailGen;
+  const replyActionId = _replyActionId;
   const text = $('emailReplyText')?.value?.trim();
   const btn = $('emailReplySend');
+  if (btn?.disabled) return;
   const isForward = _replyActionId === 'forward';
   let to = '';
   if (isForward) {
@@ -458,8 +500,8 @@ async function sendInlineReply() {
   if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
   try {
     const payload = isForward
-      ? { tool: 'email_compose', args: { account: _activeInboxAccountId ?? undefined, to, subject: 'Fwd: ' + (_inboxEmailMeta[_replyMsgId]?.subject ?? ''), body: text || '' } }
-      : { tool: 'email_reply',   args: { messageId: _replyMsgId, account: _activeInboxAccountId ?? undefined, body: text } };
+      ? { tool: 'email_compose', args: { account: detail.accountId ?? undefined, to, subject: 'Fwd: ' + (detail.meta.subject ?? ''), body: text || '' } }
+      : { tool: 'email_reply',   args: { messageId: detail.msgId, account: detail.accountId ?? undefined, body: text } };
     const r = await fetch('/api/email/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -475,7 +517,7 @@ async function sendInlineReply() {
     // Accept either shape; treat anything else (Gmail API error, "Unknown tool", etc.) as failure.
     const looksSuccessful = /Message ID:/i.test(out) || /^\s*(?:Email|Reply|Message)\s+(?:sent|moved)\b/i.test(out);
     if (!looksSuccessful) throw new Error(out || 'Send failed');
-    closeReplyComposer();
+    if (detailGen === _emailDetailGen && replyActionId === _replyActionId) closeReplyComposer();
     showToast(isForward ? 'Forwarded' : 'Reply sent');
   } catch (e) {
     alert(`Failed: ${e.message}`);
@@ -486,7 +528,7 @@ async function sendInlineReply() {
 function draftWithEmailAgent() {
   const emailAgent = agents.find(a => a.skillCategory === 'email');
   if (!emailAgent) { alert('No email agent configured. Assign the email skill to one of your agents in Settings.'); return; }
-  const meta = _inboxEmailMeta[_replyMsgId];
+  const meta = _activeEmailDetail?.msgId === _replyMsgId ? _activeEmailDetail.meta : null;
   if (!meta) return;
   const action = _inboxEmailActions.find(a => a.id === _replyActionId);
   if (!action?.prompt) return;
@@ -505,44 +547,51 @@ function draftWithEmailAgent() {
 // ── Inbox keyboard shortcuts ──────────────────────────────────────────────────
 let _inboxKeyIdx = -1;
 function isInboxDrawerOpen() { return $('drawerInbox')?.classList.contains('open'); }
-function isInboxListView() { return !!$('inboxCardList'); }
 
 document.addEventListener('keydown', (e) => {
-  if (!isInboxDrawerOpen()) return;
-  // Don't capture when typing in inputs
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  const cards = $('inboxCardList')?.children;
-
-  if (isInboxListView() && cards?.length) {
+  if (!isInboxDrawerOpen() || e.altKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
+  const composerOpen = $('emailReplyComposer')?.style.display === '';
+  if (e.target.matches('input, textarea, select') || e.target.isContentEditable) {
+    if (e.key === 'Escape' && e.target.closest('#emailReplyComposer')) {
+      e.preventDefault();
+      closeReplyComposer();
+      $('emailDetailClose')?.focus({ preventScroll: true });
+    }
+    return;
+  }
+  if (_activeEmailDetail && (e.key === 'Escape' || e.key === 'Backspace')) {
+    e.preventDefault();
+    if (composerOpen) closeReplyComposer();
+    else closeEmailDetail();
+    return;
+  }
+  // The list stays mounted. Route shortcuts by focus and the selected message.
+  if (_activeEmailDetail && !e.target.closest('#drawerInbox')) {
+    const actions = { r: 'reply', f: 'forward', e: 'archive', '#': 'trash' };
+    if (actions[e.key]) {
+      e.preventDefault();
+      emailActionClick(actions[e.key], _activeEmailDetail.msgId);
+    }
+    return;
+  }
+  const cards = [...document.querySelectorAll('#inboxCardList .email-card-row')];
+  const focusedIndex = cards.indexOf(e.target.closest('.email-card-row'));
+  if (focusedIndex >= 0) _inboxKeyIdx = focusedIndex;
+  if (cards.length) {
     if (e.key === 'j' || e.key === 'ArrowDown') {
       e.preventDefault();
       _inboxKeyIdx = Math.min(_inboxKeyIdx + 1, cards.length - 1);
+      cards[_inboxKeyIdx]?.focus({ preventScroll: true });
       cards[_inboxKeyIdx]?.scrollIntoView({ block: 'nearest' });
-      for (const c of cards) c.style.outline = '';
-      cards[_inboxKeyIdx].style.outline = '2px solid var(--accent)';
     } else if (e.key === 'k' || e.key === 'ArrowUp') {
       e.preventDefault();
-      _inboxKeyIdx = Math.max(_inboxKeyIdx - 1, 0);
+      _inboxKeyIdx = Math.min(Math.max(_inboxKeyIdx - 1, 0), cards.length - 1);
+      cards[_inboxKeyIdx]?.focus({ preventScroll: true });
       cards[_inboxKeyIdx]?.scrollIntoView({ block: 'nearest' });
-      for (const c of cards) c.style.outline = '';
-      cards[_inboxKeyIdx].style.outline = '2px solid var(--accent)';
-    } else if (e.key === 'Enter' && _inboxKeyIdx >= 0) {
+    } else if ((e.key === 'Enter' || e.key === ' ') && focusedIndex >= 0 && !e.target.closest('button')) {
       e.preventDefault();
-      cards[_inboxKeyIdx].click();
-    }
-  } else if (!isInboxListView()) {
-    // Detail view shortcuts
-    const emailIds = Object.keys(_inboxEmailMeta);
-    const currentId = _replyMsgId || emailIds.find(id => $('emailFrame'));
-    if (e.key === 'r') { e.preventDefault(); emailActionClick('reply', currentId); }
-    else if (e.key === 'f') { e.preventDefault(); emailActionClick('forward', currentId); }
-    else if (e.key === 'e') { e.preventDefault(); emailActionClick('archive', currentId); }
-    else if (e.key === '#') { e.preventDefault(); emailActionClick('trash', currentId); }
-    else if (e.key === 'Escape' || e.key === 'Backspace') {
-      e.preventDefault();
-      if ($('emailReplyComposer')?.style.display !== 'none') closeReplyComposer();
-      else loadInboxPreview();
+      cards[focusedIndex].click();
     }
   }
+  if (e.key === 'Escape') { e.preventDefault(); closeAllDrawers(); }
 });
-
