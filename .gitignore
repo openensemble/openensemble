@@ -115,6 +115,7 @@ public/styles.css
 
 # --- Installer-generated (path-baked, varies per install dir) ---
 /start.sh
+/skills/motion/.oe-motion-install.json
 
 # --- Node ---
 node_modules/

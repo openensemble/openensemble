@@ -1,0 +1,1041 @@
+{
+  "id": "motion",
+  "name": "Character Animation",
+  "description": "Direct the connected OE character using the original OE Motion performance engine.",
+  "icon": "\ud83e\uddcd",
+  "category": "utility",
+  "enabled_by_default": true,
+  "intent_patterns": [
+    "animate",
+    "animation",
+    "make (?:the |your )?(?:avatar|character)",
+    "wave (?:at|to) me"
+  ],
+  "intent_examples": [
+    "Make the character wave at me",
+    "Animate four steps, then a bow",
+    "Have the avatar point left while speaking"
+  ],
+  "systemPromptAddition": "Use animate_character when the user directs the connected character to move. For simple supported language pass direction. For nuanced timing, side, count or simultaneous gestures, construct a version 1 plan of explicit beats and retain the user's original words in plan.direction. Call animation_capabilities for supported actions and limits. Do not pretend unsupported actions are implemented. Distances are meters and angles are radians. Sit requires a seat in the client scene; stand before a walk if seated. Commands are sent to the selected authenticated user\u2019s rendering connection. Call inspect_animation to obtain the actual pose, body proportions, scene and revision. For novel choreography, preview_animation first, inspect every reported failure, revise the failing beat and preview again, with at most three attempts before reporting a concrete limitation. Keep the user\u2019s intent and constraints throughout revisions; do not silently replace difficult actions. Pass the latest expected_revision when animating. animation_result reports actual start, pause, completion, cancellation or rejection. A dispatched receipt alone is not playback confirmation. Numerical preview does not establish artistic quality. An absent client, rejected plan, or unsupported action must be explained. For an action outside the named vocabulary, use a perform beat with custom target keyframes when fixed foot support is appropriate. Every keyframe has time in seconds; first 0, last equals duration. Address the same hands and channels in every frame. Hands specify anchor (hips, chest, head, leftUpperArm, rightUpperArm, or world), offset in meters, finger direction, independent palm normal, and curl for thumb/index/middle/ring/little. An optional hand effector selects wrist (the default), thumbTip, indexTip, middleTip, ringTip or littleTip. With a fingertip effector, offset locates that calibrated fingertip center; the engine solves the wrist using the actual curl and palm orientation. Read handTargets for available complete finger chains and their calibration. A head anchor is a joint pivot, not a temple landmark; fingertip estimates do not certify skin contact. Coordinates: +X character left, +Y up, +Z forward. Offsets and orientations follow character facing unless anchor is world. Body channels are torso and head [pitch,yaw,roll] in radians and pelvis [x,y,z] offset in meters. Use spaced targets for anticipation, action strokes, recovery, and rests. The engine generates smooth trajectories and solves contacts for the actual rig. Do not use fixed-support perform to claim flight, running, climbing, physical grasping, or arbitrary balance. Unreachable targets are a limitation, not successful motion. Style also accepts confidence, warmth and tension from 0 to 1; individual beats may override these and energy. These controls change coordinated posture, hand shape and expression. Gesture timing can specify preparation and recovery as duration fractions, an action hold in score seconds, and eyeLead as head delay during a look. Preserve side, count and target when revising style. A point target is the destination being indicated; a reach target is an actual hand position and must be reachable. For free-form direction, direct_character runs the complete inspect, generate, numerical preview, correction and playback loop. It uses your currently configured language model for intent when the bounded interpreter cannot parse the instruction, and the original OE motion core for movement. It preserves the exact original direction and rejects unsupported requirements. Its success is mechanical acceptance, not human artistic approval. For physical interaction, grasp and place support declared upright small cylinder props with calibrated finger chains. Use object for the exact prop ID, one explicit side, and at least 5.6 real seconds. Place also needs target: a declared support surface point or scene target ID under the prop, not its center. A grasp persists through subsequent commands. Read pose.holds and pose.props; an occupied hand cannot perform a conflicting gesture. Mid-contact commands wait for the pickup or placement to settle and report queued_until_contact_settles. Unsupported shapes, unreachable staging and bad contact are rejected before replacement. Use express beats for timed facial acting with keyframes [{time:0,face:{smile:0.6}},{time:3,face:{smile:0.6}}]. Read expressions.controls and pose.face; a declared missing control rejects. Available canonical names are smile, blink, blinkLeft, blinkRight, jawOpen and brow, normalized 0\u20131. Express controls only the face and may overlap body motion or a different facial control. Use the same face fields in every key and allow smooth preparation/recovery. Repeated identical keys create a hold. Individual eyelids require those native controls. Active speech owns the mouth; do not promise an independent jaw pose while audio is speaking. Facial expressions and their incoming values/velocities survive take archives. The native director can also render timestamped whole-body/upper-body views and ask the configured openai-oauth model for timed visual corrections before playing. Inspect artisticReview and reviewAvailability in its result; sampled_visual_review describes a model assessment of sampled views, not independent animator approval. Other providers or an unbound mannequin may report image review unavailable. Visible asset defects can require a rig or mesh correction; do not claim a score edit repaired them.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "animation_capabilities",
+        "description": "Get the original animation engine's supported actions, timing defaults, and limitations.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "animate_character",
+        "description": "Start a performance on the selected authenticated user\u2019s avatar and return its correlated acceptance or rejection. Query animation_result to confirm completion.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "string",
+              "description": "Supported movement direction, e.g. Walk forward for four steps while waving with your left hand, then nod twice."
+            },
+            "plan": {
+              "type": "object",
+              "description": "Version 1 performance score. Use this instead of direction for explicit timing and choreography.",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "direction": {
+                  "type": "string"
+                },
+                "seed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "style": {
+                  "type": "object",
+                  "properties": {
+                    "energy": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "tempo": {
+                      "type": "number",
+                      "minimum": 0.5,
+                      "maximum": 1.5
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "warmth": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "tension": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "beats": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 24,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "enum": [
+                          "idle",
+                          "walk",
+                          "turn",
+                          "wave",
+                          "nod",
+                          "shake",
+                          "look",
+                          "point",
+                          "reach",
+                          "bow",
+                          "squat",
+                          "sit",
+                          "stand",
+                          "listen",
+                          "think",
+                          "speak",
+                          "perform",
+                          "express",
+                          "grasp",
+                          "place"
+                        ]
+                      },
+                      "start": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 120
+                      },
+                      "duration": {
+                        "type": "number",
+                        "minimum": 0.6,
+                        "maximum": 30
+                      },
+                      "side": {
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "right",
+                          "both"
+                        ]
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 12
+                      },
+                      "distance": {
+                        "type": "number",
+                        "minimum": 0.05,
+                        "maximum": 8
+                      },
+                      "angle": {
+                        "type": "number",
+                        "minimum": -3.141592653589793,
+                        "maximum": 3.141592653589793
+                      },
+                      "target": {
+                        "anyOf": [
+                          {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {
+                              "type": "number",
+                              "minimum": -10,
+                              "maximum": 10
+                            }
+                          },
+                          {
+                            "type": "string",
+                            "maxLength": 64
+                          }
+                        ],
+                        "description": "World position or exact scene target ID for walk, point, reach or look. Walking positions must lie on the floor."
+                      },
+                      "keyframes": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 32,
+                        "description": "For perform body targets or express facial targets. All keys address the same channels; first time 0, last equals duration. The engine adds smooth entry and recovery.",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "time": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 30
+                            },
+                            "hands": {
+                              "type": "object",
+                              "properties": {
+                                "left": {
+                                  "type": "object",
+                                  "properties": {
+                                    "anchor": {
+                                      "type": "string",
+                                      "enum": [
+                                        "hips",
+                                        "chest",
+                                        "head",
+                                        "leftUpperArm",
+                                        "rightUpperArm",
+                                        "world"
+                                      ]
+                                    },
+                                    "offset": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -2,
+                                        "maximum": 2
+                                      }
+                                    },
+                                    "direction": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "normal": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "curl": {
+                                      "type": "array",
+                                      "minItems": 5,
+                                      "maxItems": 5,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1.3
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "anchor",
+                                    "offset",
+                                    "direction",
+                                    "normal",
+                                    "curl"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "right": {
+                                  "type": "object",
+                                  "properties": {
+                                    "anchor": {
+                                      "type": "string",
+                                      "enum": [
+                                        "hips",
+                                        "chest",
+                                        "head",
+                                        "leftUpperArm",
+                                        "rightUpperArm",
+                                        "world"
+                                      ]
+                                    },
+                                    "offset": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -2,
+                                        "maximum": 2
+                                      }
+                                    },
+                                    "direction": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "normal": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "curl": {
+                                      "type": "array",
+                                      "minItems": 5,
+                                      "maxItems": 5,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1.3
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "anchor",
+                                    "offset",
+                                    "direction",
+                                    "normal",
+                                    "curl"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "head": {
+                              "type": "array",
+                              "minItems": 3,
+                              "maxItems": 3,
+                              "items": {
+                                "type": "number",
+                                "minimum": -0.8,
+                                "maximum": 0.8
+                              }
+                            },
+                            "torso": {
+                              "type": "array",
+                              "minItems": 3,
+                              "maxItems": 3,
+                              "items": {
+                                "type": "number",
+                                "minimum": -0.5,
+                                "maximum": 0.5
+                              }
+                            },
+                            "pelvis": {
+                              "type": "array",
+                              "minItems": 3,
+                              "maxItems": 3,
+                              "items": {
+                                "type": "number",
+                                "minimum": -0.35,
+                                "maximum": 0.35
+                              }
+                            },
+                            "face": {
+                              "type": "object",
+                              "properties": {
+                                "smile": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "blink": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "blinkLeft": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "blinkRight": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "jawOpen": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "brow": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                }
+                              },
+                              "additionalProperties": false,
+                              "description": "For express only. Use declared facial controls; active speech owns jawOpen."
+                            }
+                          },
+                          "required": [
+                            "time"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "style": {
+                        "type": "object",
+                        "properties": {
+                          "energy": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "warmth": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "tension": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          }
+                        },
+                        "additionalProperties": false,
+                        "description": "Optional expression of this beat; omitted fields inherit the performance style."
+                      },
+                      "timing": {
+                        "type": "object",
+                        "properties": {
+                          "preparation": {
+                            "type": "number",
+                            "minimum": 0.08,
+                            "maximum": 0.45
+                          },
+                          "recovery": {
+                            "type": "number",
+                            "minimum": 0.08,
+                            "maximum": 0.45
+                          },
+                          "hold": {
+                            "type": "number",
+                            "minimum": 0,
+                            "description": "Additional hold after the action strokes, in score seconds."
+                          },
+                          "eyeLead": {
+                            "type": "number",
+                            "minimum": 0.03,
+                            "maximum": 0.5,
+                            "description": "Head delay for a look, in playback seconds."
+                          }
+                        },
+                        "additionalProperties": false,
+                        "description": "Upper-body timing. Preparation/recovery are fractions of beat duration. Preparation + recovery + hold/duration must stay below .9."
+                      },
+                      "object": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "Declared scene prop ID for grasp or place; these actions also need an explicit side."
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "start",
+                      "duration"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "version",
+                "beats"
+              ],
+              "additionalProperties": false
+            },
+            "request_id": {
+              "type": "string",
+              "description": "Optional stable ID for retries of the same command."
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Optional client performance revision from a prior inspection."
+            },
+            "client_id": {
+              "type": "string",
+              "description": "Rendering client ID from animation_capabilities; optional when exactly one avatar is connected."
+            },
+            "expected_instance": {
+              "type": "string",
+              "description": "Renderer instance ID from inspect_animation; prevents a proposal reaching a replaced character."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "inspect_animation",
+        "description": "Inspect the connected character\u2019s current performance, revision, support, measured proportions, world landmarks and scene before planning movement.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "client_id": {
+              "type": "string",
+              "description": "Rendering client ID from animation_capabilities; optional when exactly one avatar is connected."
+            },
+            "request_id": {
+              "type": "string",
+              "description": "A stable request ID for retries of the same operation."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "preview_animation",
+        "description": "Evaluate a proposed score on the actual connected rig and scene without changing playback. Returns reach, contact, continuity diagnostics and the current revision; revise failed beats before animating.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "string",
+              "description": "Supported movement direction, e.g. Walk forward for four steps while waving with your left hand, then nod twice."
+            },
+            "plan": {
+              "type": "object",
+              "description": "Version 1 performance score. Use this instead of direction for explicit timing and choreography.",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "direction": {
+                  "type": "string"
+                },
+                "seed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "style": {
+                  "type": "object",
+                  "properties": {
+                    "energy": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "tempo": {
+                      "type": "number",
+                      "minimum": 0.5,
+                      "maximum": 1.5
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "warmth": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "tension": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "beats": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 24,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "enum": [
+                          "idle",
+                          "walk",
+                          "turn",
+                          "wave",
+                          "nod",
+                          "shake",
+                          "look",
+                          "point",
+                          "reach",
+                          "bow",
+                          "squat",
+                          "sit",
+                          "stand",
+                          "listen",
+                          "think",
+                          "speak",
+                          "perform",
+                          "express",
+                          "grasp",
+                          "place"
+                        ]
+                      },
+                      "start": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 120
+                      },
+                      "duration": {
+                        "type": "number",
+                        "minimum": 0.6,
+                        "maximum": 30
+                      },
+                      "side": {
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "right",
+                          "both"
+                        ]
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 12
+                      },
+                      "distance": {
+                        "type": "number",
+                        "minimum": 0.05,
+                        "maximum": 8
+                      },
+                      "angle": {
+                        "type": "number",
+                        "minimum": -3.141592653589793,
+                        "maximum": 3.141592653589793
+                      },
+                      "target": {
+                        "anyOf": [
+                          {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {
+                              "type": "number",
+                              "minimum": -10,
+                              "maximum": 10
+                            }
+                          },
+                          {
+                            "type": "string",
+                            "maxLength": 64
+                          }
+                        ],
+                        "description": "World position or exact scene target ID for walk, point, reach or look. Walking positions must lie on the floor."
+                      },
+                      "keyframes": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 32,
+                        "description": "For perform body targets or express facial targets. All keys address the same channels; first time 0, last equals duration. The engine adds smooth entry and recovery.",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "time": {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 30
+                            },
+                            "hands": {
+                              "type": "object",
+                              "properties": {
+                                "left": {
+                                  "type": "object",
+                                  "properties": {
+                                    "anchor": {
+                                      "type": "string",
+                                      "enum": [
+                                        "hips",
+                                        "chest",
+                                        "head",
+                                        "leftUpperArm",
+                                        "rightUpperArm",
+                                        "world"
+                                      ]
+                                    },
+                                    "offset": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -2,
+                                        "maximum": 2
+                                      }
+                                    },
+                                    "direction": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "normal": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "curl": {
+                                      "type": "array",
+                                      "minItems": 5,
+                                      "maxItems": 5,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1.3
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "anchor",
+                                    "offset",
+                                    "direction",
+                                    "normal",
+                                    "curl"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "right": {
+                                  "type": "object",
+                                  "properties": {
+                                    "anchor": {
+                                      "type": "string",
+                                      "enum": [
+                                        "hips",
+                                        "chest",
+                                        "head",
+                                        "leftUpperArm",
+                                        "rightUpperArm",
+                                        "world"
+                                      ]
+                                    },
+                                    "offset": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -2,
+                                        "maximum": 2
+                                      }
+                                    },
+                                    "direction": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "normal": {
+                                      "type": "array",
+                                      "minItems": 3,
+                                      "maxItems": 3,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": -1,
+                                        "maximum": 1
+                                      }
+                                    },
+                                    "curl": {
+                                      "type": "array",
+                                      "minItems": 5,
+                                      "maxItems": 5,
+                                      "items": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1.3
+                                      }
+                                    }
+                                  },
+                                  "required": [
+                                    "anchor",
+                                    "offset",
+                                    "direction",
+                                    "normal",
+                                    "curl"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "head": {
+                              "type": "array",
+                              "minItems": 3,
+                              "maxItems": 3,
+                              "items": {
+                                "type": "number",
+                                "minimum": -0.8,
+                                "maximum": 0.8
+                              }
+                            },
+                            "torso": {
+                              "type": "array",
+                              "minItems": 3,
+                              "maxItems": 3,
+                              "items": {
+                                "type": "number",
+                                "minimum": -0.5,
+                                "maximum": 0.5
+                              }
+                            },
+                            "pelvis": {
+                              "type": "array",
+                              "minItems": 3,
+                              "maxItems": 3,
+                              "items": {
+                                "type": "number",
+                                "minimum": -0.35,
+                                "maximum": 0.35
+                              }
+                            },
+                            "face": {
+                              "type": "object",
+                              "properties": {
+                                "smile": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "blink": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "blinkLeft": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "blinkRight": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "jawOpen": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "brow": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                }
+                              },
+                              "additionalProperties": false,
+                              "description": "For express only. Use declared facial controls; active speech owns jawOpen."
+                            }
+                          },
+                          "required": [
+                            "time"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "style": {
+                        "type": "object",
+                        "properties": {
+                          "energy": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "warmth": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "tension": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          }
+                        },
+                        "additionalProperties": false,
+                        "description": "Optional expression of this beat; omitted fields inherit the performance style."
+                      },
+                      "timing": {
+                        "type": "object",
+                        "properties": {
+                          "preparation": {
+                            "type": "number",
+                            "minimum": 0.08,
+                            "maximum": 0.45
+                          },
+                          "recovery": {
+                            "type": "number",
+                            "minimum": 0.08,
+                            "maximum": 0.45
+                          },
+                          "hold": {
+                            "type": "number",
+                            "minimum": 0,
+                            "description": "Additional hold after the action strokes, in score seconds."
+                          },
+                          "eyeLead": {
+                            "type": "number",
+                            "minimum": 0.03,
+                            "maximum": 0.5,
+                            "description": "Head delay for a look, in playback seconds."
+                          }
+                        },
+                        "additionalProperties": false,
+                        "description": "Upper-body timing. Preparation/recovery are fractions of beat duration. Preparation + recovery + hold/duration must stay below .9."
+                      },
+                      "object": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "Declared scene prop ID for grasp or place; these actions also need an explicit side."
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "start",
+                      "duration"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "version",
+                "beats"
+              ],
+              "additionalProperties": false
+            },
+            "request_id": {
+              "type": "string",
+              "description": "Optional stable ID for retries of the same command."
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Optional client performance revision from a prior inspection."
+            },
+            "client_id": {
+              "type": "string",
+              "description": "Rendering client ID from animation_capabilities; optional when exactly one avatar is connected."
+            },
+            "expected_instance": {
+              "type": "string",
+              "description": "Renderer instance ID from inspect_animation; prevents a proposal reaching a replaced character."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "animation_result",
+        "description": "Read the actual rendering client\u2019s receipt for a previous command, including completion, pause, cancellation or rejection. A dispatched receipt alone does not confirm playback.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "wait_seconds": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10,
+              "description": "Optionally wait briefly for completion."
+            }
+          },
+          "required": [
+            "request_id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "direct_character",
+        "description": "Automatically direct the character from a full user instruction. Uses the current agent\u2019s configured language model for directions beyond the local grammar, previews the actual rig, and corrects up to three attempts before playing. Unsupported requirements remain explicit. On a supported native client, it reviews rendered views with the configured model and revises visible problems before playback; read the reported review scope.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "string",
+              "description": "The user\u2019s complete original direction, including actions, order, side, counts, intent and tone. The director inspects the scene, generates an original score, checks it, and revises failed attempts."
+            },
+            "request_id": {
+              "type": "string",
+              "description": "Optional stable ID for retries of the same command."
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Optional client performance revision from a prior inspection."
+            },
+            "client_id": {
+              "type": "string",
+              "description": "Rendering client ID from animation_capabilities; optional when exactly one avatar is connected."
+            },
+            "expected_instance": {
+              "type": "string",
+              "description": "Renderer instance ID from inspect_animation; prevents a proposal reaching a replaced character."
+            }
+          },
+          "required": [
+            "direction"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

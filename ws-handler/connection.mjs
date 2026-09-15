@@ -5,6 +5,7 @@ import { getProjectSpace } from '../lib/project-spaces.mjs';
  * Extracted from ws-handler.mjs — pure move.
  */
 
+import { handleMotionMessage } from '../lib/motion-runtime.mjs';
 import { randomBytes } from 'crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -289,6 +290,10 @@ export function onConnection(ws, req) {
     // never-shrinking heap accumulator per fragmented frame and burned
     // marginal-Wi-Fi airtime exactly when the link was already flapping.
     if (ws._deviceId) return;
+    if (new URL(req.url || '/', 'http://localhost').searchParams.get('client') === 'motion') {
+      ws.send(JSON.stringify({ type: 'oe_motion_connected', version: 1 }));
+      return;
+    }
     const userAgents = getAgentsForUser(ws._userId);
     ws.send(JSON.stringify({
       type: 'agent_list',
@@ -457,6 +462,8 @@ export function onConnection(ws, req) {
       ws.close(4001, 'Unauthorized');
       return;
     }
+
+    if (handleMotionMessage(ws, msg)) return;
 
     if (msg.type === 'ping') {
       ws.send(JSON.stringify({ type: 'pong', boot_id: BOOT_ID }));
