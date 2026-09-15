@@ -7,6 +7,25 @@
 // for the currently-streaming response.
 
 const $ = (id) => document.getElementById(id);
+const PANEL_REQUEST_TIMEOUT_MS = 5000;
+
+async function withPanelTimeout(operation) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('OE Bridge is not responding. Reload it from Extensions.')), PANEL_REQUEST_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function requestPanelState(type) {
+  return withPanelTimeout(() => chrome.runtime.sendMessage({ type }));
+}
 
 let _currentRequestId = null;
 let _currentAssistantEl = null;
@@ -48,21 +67,24 @@ function renderStatus(status) {
 
 async function refreshStatus() {
   try {
-    const r = await chrome.runtime.sendMessage({ type: 'get_status' });
-    if (r?.status) renderStatus(r.status);
-  } catch {}
+    const r = await requestPanelState('get_status');
+    if (!r?.status) throw new Error('OE Bridge returned no connection status.');
+    renderStatus(r.status);
+  } catch (error) {
+    renderStatus({ lastError: error?.message || String(error) });
+  }
 }
 
 async function refreshSuggestion() {
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'suggestion_get' });
+    const response = await requestPanelState('suggestion_get');
     renderSuggestionAvailable(response?.ok && response.available);
   } catch {}
 }
 
 async function refreshTeachState() {
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'get_teach_state' });
+    const response = await requestPanelState('get_teach_state');
     _teachActive = Boolean(response?.active);
     const button = $('teachThisSite');
     button.textContent = _teachActive ? '■ Stop teaching' : '🎓 Teach this site';
@@ -83,7 +105,7 @@ function renderActionConfirmation(confirmation) {
 
 async function refreshActionConfirmation() {
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'get_pending_confirmation' });
+    const response = await requestPanelState('get_pending_confirmation');
     renderActionConfirmation(response?.confirmation || null);
   } catch {}
 }
@@ -250,12 +272,26 @@ async function openFieldWatchPanel() {
 
 async function loadHistory() {
   const msgsEl = $('messages');
-  msgsEl.innerHTML = '<div id="empty" class="empty">Loading…</div>';
+  const placeholder = document.createElement('div');
+  placeholder.id = 'empty';
+  placeholder.className = 'empty';
+  placeholder.textContent = 'Loading…';
+  msgsEl.replaceChildren(placeholder);
   try {
-    const r = await chrome.runtime.sendMessage({ type: 'chat_history_get' });
-    const history = r?.history || [];
+    let r;
+    try {
+      r = await requestPanelState('chat_history_get');
+      if (!Array.isArray(r?.history)) throw new Error('OE Bridge returned no chat history.');
+    } catch {
+      // Open saved chat even when worker messaging is unavailable.
+      const saved = await withPanelTimeout(() => chrome.storage.local.get(['chat_history', 'chat_current']));
+      r = { history: saved.chat_history, current: saved.chat_current };
+    }
+    // A live message or Clear may have replaced the loading placeholder.
+    if (!placeholder.isConnected) return;
+    const history = Array.isArray(r?.history) ? r.history : [];
     const current = r?.current || null;
-    msgsEl.innerHTML = '';
+    msgsEl.replaceChildren();
     if (!history.length && !current) {
       msgsEl.innerHTML = '<div id="empty" class="empty">No conversation yet. Ask Sydney something.</div>';
       return;
@@ -267,7 +303,13 @@ async function loadHistory() {
       _currentAssistantEl = appendMessage('assistant', current.assistantText || '…');
     }
   } catch (e) {
-    msgsEl.innerHTML = `<div class="empty">Couldn't load history: ${e?.message || String(e)}</div>`;
+    if (!placeholder.isConnected) return;
+    placeholder.textContent = `Couldn't load history: ${e?.message || String(e)} `;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', loadHistory);
+    placeholder.appendChild(retry);
   }
 }
 
@@ -777,15 +819,27 @@ window.addEventListener('pagehide', () => {
   _voiceStream?.getTracks().forEach(track => track.stop());
 });
 
-(async () => {
-  await loadHistory();
-  await refreshStatus();
-  await refreshSuggestion();
-  await refreshTeachState();
-  await refreshActionConfirmation();
+let _refreshInFlight = false;
+async function refreshPanelState() {
+  if (_refreshInFlight) return;
+  _refreshInFlight = true;
   try {
-    const pending = await chrome.runtime.sendMessage({ type: 'clip_pending_get' });
+    await Promise.allSettled([
+      refreshStatus(), refreshSuggestion(), refreshTeachState(), refreshActionConfirmation(),
+    ]);
+  } finally {
+    _refreshInFlight = false;
+  }
+}
+
+async function restorePendingClip() {
+  try {
+    const pending = await requestPanelState('clip_pending_get');
     if (pending?.capture) await openClipPicker(pending.capture);
   } catch {}
-  setInterval(() => { refreshStatus(); refreshSuggestion(); refreshTeachState(); refreshActionConfirmation(); }, 4000);
-})();
+}
+
+loadHistory();
+refreshPanelState();
+restorePendingClip();
+setInterval(refreshPanelState, 4000);

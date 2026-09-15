@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "OpenEnsemble Bridge",
   "short_name": "OE Bridge",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Ask, clip, compare, block ads and trackers locally, teach browser procedures, watch fields, and run confirmed tasks with scoped access.",
   "permissions": ["tabs", "storage", "scripting", "activeTab", "alarms", "sidePanel", "contextMenus", "declarativeNetRequestWithHostAccess", "declarativeNetRequestFeedback"],
   "omnibox": { "keyword": "oe" },
