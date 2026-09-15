@@ -367,6 +367,17 @@
       </div>
     </div>
 
+    <!-- Drawer: Selected email (opens alongside the inbox) -->
+    <div class="desk-drawer" id="drawerEmail" role="region" aria-labelledby="emailDetailSubject" inert>
+      <div class="desk-drawer-hdr">
+        <span class="drawer-label email-detail-subject" id="emailDetailSubject">Email</span>
+        <button class="btn-drawer-x" id="emailDetailClose" data-action="closeEmailDetail" title="Close email" aria-label="Close email">✕</button>
+      </div>
+      <div class="desk-drawer-body">
+        <div id="emailDetailPreview" class="email-detail"></div>
+      </div>
+    </div>
+
     <!-- Drawer: News -->
     <div class="desk-drawer" id="drawerNews">
       <div class="desk-drawer-hdr">

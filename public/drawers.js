@@ -46,6 +46,7 @@ function toggleDrawer(drawerId, btnId) {
 }
 
 function closeAllDrawers(resetActive = true) {
+  if (typeof closeEmailDetail === 'function') closeEmailDetail(false);
   if (activeDrawerId === 'drawerDevices' && typeof stopVoiceDiagnostics === 'function') stopVoiceDiagnostics();
   const wasMessages = activeDrawerId === 'drawerMessages';
   document.querySelectorAll('.desk-drawer.open').forEach(d => d.classList.remove('open'));
