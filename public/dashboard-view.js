@@ -140,6 +140,8 @@ const app = {
   dashboardMutation: false,
   dashboardMutationPromise: null,
   layout: null,
+  layoutOrientation: dashboardOrientation(),
+  layoutGeneration: 0,
   layoutEtag: null,
   status: { mode: 'demo', configured: false, connected: true, canView: false, canControl: false },
   editing: false,
@@ -514,8 +516,18 @@ function dashboardPath(slug) {
   return `/dashboards/${encodeURIComponent(slug)}`;
 }
 
+function dashboardOrientation() {
+  const selected = new URLSearchParams(location.search).get('oe_orientation');
+  if (OE_EDITOR_MODE && ['portrait', 'landscape'].includes(selected)) return selected;
+  return matchMedia('(orientation: portrait)').matches ? 'portrait' : 'landscape';
+}
+
+function orientationQuery() {
+  return app.layoutOrientation ? `?orientation=${app.layoutOrientation}` : '';
+}
+
 function dashboardLayoutApiPath(slug) {
-  return `/api/dashboards/${encodeURIComponent(slug)}/layout`;
+  return `/api/dashboards/${encodeURIComponent(slug)}/layout${orientationQuery()}`;
 }
 
 function dashboardMetadataApiPath(slug) {
@@ -1149,7 +1161,7 @@ function widgetRefreshSeconds(card) {
 }
 
 function widgetRuntimePath(cardId, dashboardSlug = app.dashboardSlug) {
-  return `/api/dashboard-runtime/widgets/${encodeURIComponent(cardId)}?dashboardSlug=${encodeURIComponent(dashboardSlug)}`;
+  return `/api/dashboard-runtime/widgets/${encodeURIComponent(cardId)}?dashboardSlug=${encodeURIComponent(dashboardSlug)}${app.layoutOrientation ? `&orientation=${app.layoutOrientation}` : ''}`;
 }
 
 function widgetState(card) {
@@ -1198,6 +1210,7 @@ async function refreshWidgetCard(card, { force = false } = {}) {
   }
 
   const dashboardSlug = app.dashboardSlug;
+  const layoutGeneration = app.layoutGeneration;
   const hadData = current.status === 'ready' || current.data !== null;
   setWidgetState(card.id, {
     ...current,
@@ -1213,7 +1226,7 @@ async function refreshWidgetCard(card, { force = false } = {}) {
       if (payload?.error && !Object.prototype.hasOwnProperty.call(payload, 'data')) {
         throw new Error(String(payload.error));
       }
-      if (dashboardSlug !== app.dashboardSlug || !dashboardHasCard(card.id, card.widgetId)) return null;
+      if (dashboardSlug !== app.dashboardSlug || layoutGeneration !== app.layoutGeneration || !dashboardHasCard(card.id, card.widgetId)) return null;
       const fetchedAt = typeof payload?.fetchedAt === 'string' || Number.isFinite(Number(payload?.fetchedAt))
         ? payload.fetchedAt
         : new Date().toISOString();
@@ -1230,7 +1243,7 @@ async function refreshWidgetCard(card, { force = false } = {}) {
       renderSections();
       return next;
     } catch (error) {
-      if (dashboardSlug !== app.dashboardSlug || !dashboardHasCard(card.id, card.widgetId)) return null;
+      if (dashboardSlug !== app.dashboardSlug || layoutGeneration !== app.layoutGeneration || !dashboardHasCard(card.id, card.widgetId)) return null;
       const previous = widgetState(card);
       const accessLost = [403, 404].includes(error.status);
       const next = setWidgetState(card.id, {
@@ -1310,6 +1323,7 @@ function redirectToOeLogin() {
 }
 
 async function loadApp() {
+  const generation = ++app.layoutGeneration;
   clearInterval(app.pollTimer);
   clearInterval(app.widgetPollTimer);
   $('#sections').innerHTML = `<div class="loading-grid"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
@@ -1403,6 +1417,7 @@ async function loadApp() {
 
     const layoutData = await layoutRequest;
     if (!layoutData.layout && !app.entitiesLoaded) await entityRequest;
+    if (generation !== app.layoutGeneration) return;
     app.layoutEtag = layoutData._etag || null;
     app.profileId = layoutData.profileId || null;
     app.layout = layoutData.layout ? cleanLayout(layoutData.layout) : buildDefaultLayout();
@@ -1422,6 +1437,7 @@ async function loadApp() {
     void refreshWidgets({ force: true });
     openRequestedDashboardPanel();
     void Promise.all([statusRequest, catalogRequest, weatherRequest, widgetCatalogRequest]);
+    if (!OE_EDITOR_MODE && dashboardOrientation() !== app.layoutOrientation) void switchDashboardOrientation(dashboardOrientation());
   } catch (error) {
     if (error.status === 401) return;
     $('#hero').hidden = true;
@@ -1438,6 +1454,9 @@ async function refreshDashboard(showFeedback = false) {
   const button = $('#refreshButton');
   if (button) button.disabled = true;
   try {
+    if (!OE_EDITOR_MODE && dashboardOrientation() !== app.layoutOrientation) {
+      await switchDashboardOrientation(dashboardOrientation());
+    }
     await Promise.all([
       refreshEntities(false),
       loadWidgetCatalog({ force: true }),
@@ -2663,9 +2682,78 @@ let layoutHistory = [];
 let layoutHistoryIndex = -1;
 let layoutHistoryRestoring = false;
 let recoverableLayoutDraft = null;
+const orientationHistories = new Map();
+let orientationLoadSequence = 0;
+
+async function switchDashboardOrientation(orientation) {
+  if (!['portrait', 'landscape'].includes(orientation) || !app.layout) return false;
+  const sequence = ++orientationLoadSequence;
+  if (orientation === app.layoutOrientation) return true;
+  if (OE_EDITOR_MODE) {
+    if ($('#panel')?.classList.contains('open')) {
+      toast('Save or close the open panel before switching layouts.', 'sliders');
+      return false;
+    }
+    if (!(await flushPendingLayout())) return false;
+    // A user may have opened a form while an in-flight autosave finished.
+    if ($('#panel')?.classList.contains('open')) {
+      toast('Save or close the open panel before switching layouts.', 'sliders');
+      return false;
+    }
+  }
+  const root = $('#dashboardThemeRoot');
+  if (OE_EDITOR_MODE && root) root.inert = true;
+  const slug = app.dashboardSlug;
+  try {
+    const data = await api(`/api/dashboards/${encodeURIComponent(slug)}/layout?orientation=${orientation}`);
+    if (sequence !== orientationLoadSequence || slug !== app.dashboardSlug) return false;
+    orientationHistories.set(`${slug}:${app.layoutOrientation}`, {
+      history: [...layoutHistory], index: layoutHistoryIndex,
+    });
+    closeExpandedCard(false);
+    closeCameraViewer();
+    closeMobileMenu();
+    closePanel();
+    app.layoutGeneration++;
+    app.layoutOrientation = orientation;
+    app.layout = data.layout ? cleanLayout(data.layout) : buildDefaultLayout();
+    app.layoutEtag = data._etag || null;
+    app.profileId = data.profileId || app.profileId;
+    app.layoutDirty = false;
+    app.provisionalLayout = !data.layout && app.entities.size === 0;
+    app.saveConflict = false;
+    app.saveError = null;
+    app.widgetData.clear();
+    app.focusMode = app.layout.focus.defaultMode;
+    app.focusId = null;
+    app.activeSection = 'all';
+    app.focusQuery = '';
+    const deepLink = focusFromHash();
+    if (deepLink) {
+      app.focusMode = deepLink.mode;
+      if (deepLink.id && focusItems(deepLink.mode, true).some(item => item.id === deepLink.id)) app.focusId = deepLink.id;
+    }
+    initializeLayoutHistory();
+    renderAll();
+    void refreshWidgets({ force: true });
+    if (OE_EDITOR_MODE) {
+      const url = new URL(location.href);
+      url.searchParams.set('oe_orientation', orientation);
+      history.replaceState(null, '', url);
+    }
+    return true;
+  } catch (error) {
+    if (sequence === orientationLoadSequence) toast(`Could not load the ${orientation} layout: ${error.message}`, 'refresh');
+    return false;
+  } finally {
+    if (OE_EDITOR_MODE && root) root.inert = false;
+  }
+}
+
+window.oeDashboardSetOrientation = switchDashboardOrientation;
 
 function layoutDraftKey() {
-  return app.profileId ? `oe-dashboard-draft:${app.profileId}:${app.dashboardSlug}` : null;
+  return app.profileId ? `oe-dashboard-draft:${app.profileId}:${app.dashboardSlug}${app.layoutOrientation ? `:${app.layoutOrientation}` : ''}` : null;
 }
 
 function updateLayoutHistoryButtons() {
@@ -2675,15 +2763,22 @@ function updateLayoutHistoryButtons() {
 }
 
 function initializeLayoutHistory() {
-  layoutHistory = [JSON.stringify(app.layout)];
-  layoutHistoryIndex = 0;
+  const current = JSON.stringify(app.layout);
+  const cached = orientationHistories.get(`${app.dashboardSlug}:${app.layoutOrientation}`);
+  layoutHistory = cached?.history[cached.index] === current ? cached.history : [current];
+  layoutHistoryIndex = cached?.history[cached.index] === current ? cached.index : 0;
   recoverableLayoutDraft = null;
   if (OE_EDITOR_MODE) {
     try {
       const key = layoutDraftKey();
+      if (app.layoutOrientation === 'portrait' && key && !sessionStorage.getItem(key)) {
+        const legacyKey = `oe-dashboard-draft:${app.profileId}:${app.dashboardSlug}`;
+        const legacy = sessionStorage.getItem(legacyKey);
+        if (legacy) { sessionStorage.setItem(key, legacy); sessionStorage.removeItem(legacyKey); }
+      }
       const draft = key ? JSON.parse(sessionStorage.getItem(key) || 'null') : null;
-      const unfinished = draft?.layout?.sections && JSON.stringify(draft.layout) !== layoutHistory[0] ? draft : draft?.recovery;
-      if (unfinished?.layout?.sections && JSON.stringify(unfinished.layout) !== layoutHistory[0]) {
+      const unfinished = draft?.layout?.sections && JSON.stringify(draft.layout) !== current ? draft : draft?.recovery;
+      if (unfinished?.layout?.sections && JSON.stringify(unfinished.layout) !== current) {
         recoverableLayoutDraft = { layout: unfinished.layout, etag: unfinished.etag, savedAt: unfinished.savedAt };
       }
     } catch {}
@@ -2716,11 +2811,13 @@ function travelLayoutHistory(delta) {
 }
 
 async function showLayoutVersions() {
+  const generation = app.layoutGeneration;
   try {
-    const data = await api(`/api/dashboards/${encodeURIComponent(app.dashboardSlug)}/versions`);
+    const data = await api(`/api/dashboards/${encodeURIComponent(app.dashboardSlug)}/versions${orientationQuery()}`);
+    if (generation !== app.layoutGeneration) return;
     const body = `<p>Up to 50 previous layouts. Restoring creates a new save and keeps the current layout available here.</p>`
       + (data.versions.map(version => `<div class="field"><strong>${escapeHtml(version.title || 'Dashboard layout')}</strong><span>${escapeHtml(new Date(version.savedAt).toLocaleString())} · ${version.sectionCount} sections · ${version.cardCount} cards</span><button class="button secondary" data-action="restore-layout-version" data-id="${version.id}">Restore this version</button></div>`).join('') || '<p>No previous layouts yet. Versions are kept when saved layouts change.</p>');
-    panelShell('Saved versions', app.dashboard.name, body, '<button class="button ghost" data-action="close-panel">Close</button>');
+    panelShell('Saved versions', `${app.dashboard.name} · ${app.layoutOrientation || 'portrait'}`, body, '<button class="button ghost" data-action="close-panel">Close</button>');
   } catch (error) { toast(error.message, 'refresh'); }
 }
 
@@ -2728,7 +2825,9 @@ async function restoreLayoutVersion(id) {
   if (!confirm('Restore this saved layout? Your current layout will remain in saved versions.')) return;
   try {
     if (!(await flushPendingLayout())) return;
-    const version = await api(`/api/dashboards/${encodeURIComponent(app.dashboardSlug)}/versions/${encodeURIComponent(id)}`);
+    const generation = app.layoutGeneration;
+    const version = await api(`/api/dashboards/${encodeURIComponent(app.dashboardSlug)}/versions/${encodeURIComponent(id)}${orientationQuery()}`);
+    if (generation !== app.layoutGeneration) return;
     app.layout = cleanLayout(version.layout);
     closePanel(); scheduleSave(); renderAll();
   } catch (error) { toast(error.message, 'refresh'); }
@@ -5116,6 +5215,9 @@ $('#cameraViewerVideo').addEventListener('playing', () => markCameraWebRtcReady(
 window.addEventListener('pagehide', () => { cancelDashboardSwipe(); closeCameraViewer(); });
 window.addEventListener('blur', cancelDashboardSwipe);
 window.addEventListener('resize', cancelDashboardSwipe);
+matchMedia('(orientation: portrait)').addEventListener('change', () => {
+  if (!OE_EDITOR_MODE) void switchDashboardOrientation(dashboardOrientation());
+});
 window.addEventListener('beforeunload', event => {
   if (!app.layoutDirty
       && !app.saveInFlight

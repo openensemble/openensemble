@@ -49,6 +49,23 @@ working size; this is the supported editing surface. Adding `?oe_editor=1` to
 a dashboard opened directly does not turn that top-level display into an
 editor.
 
+Each dashboard has **separate saved portrait and landscape layouts**. Choose
+**Portrait** or **Landscape** above the editor to arrange that orientation's
+cards, sections, focus views, page elements, and colors independently. Existing
+dashboards start both orientations from their original layout. Changing one
+orientation leaves the other intact. Names, descriptions, and base themes are
+shared by the dashboard; duplicating a dashboard copies both layouts.
+
+Portrait previews an 800 × 1280 tablet and Landscape previews 1280 × 800.
+**Fit** scales the preview to the available space. Choose **100%** for full-size
+controls and scroll around the preview when needed. Finish or close an open
+settings panel before switching layouts. Pending canvas edits are saved before
+switching; a failed or conflicting save keeps you in the current layout.
+
+The standalone display automatically loads the matching layout when rotated.
+OE's installed web app allows both orientations; enable auto-rotate on the
+device. Choosing an orientation in the editor does not lock the actual display.
+
 Use **Customize** to edit the canvas. You can:
 
 - Add, rename, reorder, restyle, collapse, or remove sections.
@@ -71,6 +88,10 @@ and asks you to reload the current version.
 In **Customize**, use **Undo** and **Redo** for layout edits, including cards, sections, organization, colors, page elements, and tagline changes. Keyboard shortcuts are Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z when you are outside a text field. Each editor keeps up to 50 layout states during the session.
 
 **Saved versions** keeps up to 50 previous layouts on the server. Restoring one makes a new save and preserves the layout it replaces. Dashboard names, descriptions, and base themes are separate settings and are not part of layout history.
+
+Undo, Redo, and recovery drafts belong to the orientation being edited. Saved
+versions show that orientation from the dashboard's retained saves; restoring
+one leaves the other orientation unchanged.
 
 If a layout save fails or conflicts with another screen, its unfinished edits remain in this tab's recovery draft. Reload the latest dashboard, enter **Customize**, and choose **Recover draft** to review and restore those edits. Recovery is tied to your profile, dashboard, and browser tab; closing the tab or clearing browser storage can remove it. A conflicting save never overwrites the other screen's layout automatically.
 

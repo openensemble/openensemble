@@ -11,6 +11,14 @@ let _oeDisplayMutation = false;
 let _oeDisplaySlugTouched = false;
 let _oeDisplayThemeTouched = false;
 let _oeDisplayLoadGeneration = 0;
+let _oeDisplayPreviewMode = 'portrait';
+let _oeDisplayPreviewZoom = 'fit';
+let _oeDisplayPreviewChanging = false;
+
+const OE_DISPLAY_PREVIEWS = {
+  portrait: { label: 'Portrait', icon: 'rectangle-vertical', width: 800, height: 1280 },
+  landscape: { label: 'Landscape', icon: 'rectangle-horizontal', width: 1280, height: 800 },
+};
 
 const OE_DISPLAY_THEMES = {
   midnight: 'Midnight',
@@ -120,6 +128,7 @@ function oeDisplayNormalizeSummary(raw) {
     isDefault: raw.isDefault === true,
     sectionCount: Math.max(0, Number(raw.sectionCount) || 0),
     cardCount: Math.max(0, Number(raw.cardCount) || 0),
+    orientationCounts: raw.orientationCounts || null,
   };
 }
 
@@ -263,6 +272,7 @@ function oeDisplayLibraryCard(dashboard) {
   const permanent = dashboard.slug === 'home' || dashboard.isDefault;
   const address = oeDisplayAddress(dashboard.slug);
   const owner = dashboard.owner || _currentUser?.name || 'Your profile';
+  const counts = dashboard.orientationCounts;
   const deleteAction = permanent
     ? `<button class="dash-display-danger" type="button" disabled title="Home is required. To start over, use Customize → Dashboard settings → Reset everything.">${icon('lock-keyhole', 14)} Home is required</button>`
     : `<button class="dash-display-danger" type="button" data-action="dashboardDisplayDelete" data-args='${args}'>${icon('trash-2', 14)} Delete</button>`;
@@ -282,8 +292,7 @@ function oeDisplayLibraryCard(dashboard) {
       <div class="dash-display-address" title="${escHtml(address)}">${icon('link', 13)}<span>${escHtml(address)}</span></div>
       <div class="dash-display-card-meta">
         <span>${icon('user-round', 13)}${escHtml(owner)}</span>
-        <span>${icon('layout-grid', 13)}${dashboard.sectionCount} section${dashboard.sectionCount === 1 ? '' : 's'}</span>
-        <span>${icon('panels-top-left', 13)}${dashboard.cardCount} card${dashboard.cardCount === 1 ? '' : 's'}</span>
+        ${counts ? ['portrait', 'landscape'].map(orientation => `<span>${icon(OE_DISPLAY_PREVIEWS[orientation].icon, 13)}${OE_DISPLAY_PREVIEWS[orientation].label}: ${Math.max(0, Number(counts[orientation]?.cardCount) || 0)} cards</span>`).join('') : `<span>${icon('layout-grid', 13)}${dashboard.sectionCount} sections</span><span>${icon('panels-top-left', 13)}${dashboard.cardCount} cards</span>`}
         <span>${icon(dashboard.theme === 'sand' ? 'sun' : 'moon', 13)}${escHtml(OE_DISPLAY_THEMES[dashboard.theme])}</span>
       </div>
       <div class="dash-display-card-actions">
@@ -635,6 +644,9 @@ function oeDisplayStarterLayout(rawEntities) {
 }
 
 function oeDisplayUpgradeLayout(rawLayout) {
+  if (rawLayout?.version === 7) {
+    return { version: 7, portrait: oeDisplayUpgradeLayout(rawLayout.portrait), landscape: oeDisplayUpgradeLayout(rawLayout.landscape) };
+  }
   const layout = typeof structuredClone === 'function'
     ? structuredClone(rawLayout)
     : JSON.parse(JSON.stringify(rawLayout));
@@ -667,7 +679,8 @@ async function oeDisplayLayoutForTemplate(template) {
     const source = oeDisplaySafeSlug($('dashboardDisplayCopySource')?.value);
     if (!source) throw new Error('Choose a dashboard to copy.');
     const data = await oeDisplayApi(`/api/dashboards/${encodeURIComponent(source)}/layout`, { cache: 'no-store' });
-    if (!data?.layout || !Array.isArray(data.layout.sections)) {
+    if (!data?.layout || !(Array.isArray(data.layout.sections)
+      || data.layout.version === 7 && Array.isArray(data.layout.portrait?.sections) && Array.isArray(data.layout.landscape?.sections))) {
       throw new Error('The selected dashboard has no layout to copy.');
     }
     return oeDisplayUpgradeLayout(data.layout);
@@ -802,6 +815,72 @@ async function dashboardDisplayCopyAddress(slug) {
   oeDisplaySetNotice('Address copied', 'success');
 }
 
+async function dashboardDisplaySetPreview(mode) {
+  if (!Object.hasOwn(OE_DISPLAY_PREVIEWS, mode) || _oeDisplayPreviewChanging || mode === _oeDisplayPreviewMode) return;
+  const frame = $('dashboardDisplayEditorFrame');
+  if (!frame?.contentWindow?.oeDashboardSetOrientation) return;
+  _oeDisplayPreviewChanging = true;
+  const buttons = [...document.querySelectorAll('[data-dashboard-preview]')];
+  buttons.forEach(button => { button.disabled = true; });
+  oeDisplaySetNotice(`Opening ${mode} layout…`);
+  try {
+    const switched = await frame.contentWindow.oeDashboardSetOrientation(mode);
+    if (!frame.isConnected || $('dashboardDisplayEditorFrame') !== frame) return;
+    if (!switched) {
+      oeDisplaySetNotice('Layout unchanged. Close the open panel or resolve the error in the editor before switching.', 'error');
+      return;
+    }
+    _oeDisplayPreviewMode = mode;
+    buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.dashboardPreview === mode)));
+    oeDisplayResizePreview();
+    oeDisplaySetNotice(`Editing ${mode}`, 'success');
+  } catch (error) {
+    if (frame.isConnected) oeDisplaySetNotice(error.message || 'The layout could not be switched.', 'error');
+  } finally {
+    _oeDisplayPreviewChanging = false;
+    buttons.forEach(button => { button.disabled = false; });
+  }
+}
+
+function dashboardDisplaySetPreviewZoom(zoom) {
+  if (!['fit', 'actual'].includes(zoom)) return;
+  _oeDisplayPreviewZoom = zoom;
+  oeDisplayResizePreview();
+}
+
+function oeDisplayResizePreview() {
+  const wrap = $('dashboardDisplayFrameWrap');
+  const stage = $('dashboardDisplayFrameStage');
+  const frame = $('dashboardDisplayEditorFrame');
+  const dimensions = $('dashboardDisplayPreviewDimensions');
+  if (!wrap || !stage || !frame || !dimensions) return;
+  const preset = OE_DISPLAY_PREVIEWS[_oeDisplayPreviewMode];
+  const width = wrap.clientWidth;
+  const height = wrap.clientHeight;
+  if (!width || !height) return;
+  const scale = _oeDisplayPreviewZoom === 'actual'
+    ? 1
+    : Math.min(1, width / preset.width, height / preset.height);
+  // Keep the iframe's viewport at the target dimensions so its media queries
+  // reflow exactly as they would on the display. Zoom never changes layouts.
+  stage.style.width = `${preset.width * scale}px`;
+  stage.style.height = `${preset.height * scale}px`;
+  frame.style.width = `${preset.width}px`;
+  frame.style.height = `${preset.height}px`;
+  frame.style.transform = `scale(${scale})`;
+  dimensions.textContent = `${preset.width} × ${preset.height} · ${Math.round(scale * 100)}%`;
+}
+
+function oeDisplayObservePreview() {
+  const wrap = $('dashboardDisplayFrameWrap');
+  if (!wrap || typeof ResizeObserver === 'undefined') return;
+  const observer = new ResizeObserver(() => {
+    if (!wrap.isConnected) { observer.disconnect(); return; }
+    oeDisplayResizePreview();
+  });
+  observer.observe(wrap);
+}
+
 function dashboardDisplayConfigure(slug) {
   const dashboard = _oeDisplayDashboards.find(item => item.slug === slug);
   if (!dashboard) return;
@@ -816,6 +895,7 @@ function dashboardDisplayConfigure(slug) {
     : `<button class="dash-display-danger" type="button" data-action="dashboardDisplayDelete" data-args='${oeDisplayArgs([slug])}'>${icon('trash-2', 14)} Delete</button>`;
   const frameUrl = new URL(dashboard.url || oeDisplayPath(slug), location.origin);
   frameUrl.searchParams.set('oe_editor', '1');
+  frameUrl.searchParams.set('oe_orientation', _oeDisplayPreviewMode);
   panel.classList.add('configuring');
   panel.innerHTML = `
     <div class="dash-display-configure">
@@ -829,9 +909,21 @@ function dashboardDisplayConfigure(slug) {
         <a class="dash-display-primary" href="${escHtml(dashboard.url)}" target="_blank" rel="noopener">${icon('external-link', 14)} Open display</a>
         ${deleteAction}
       </div>
-      <div class="dash-display-frame-wrap">
-        <iframe class="dash-display-editor-frame" src="${escHtml(`${frameUrl.pathname}${frameUrl.search}`)}" title="Configure ${escHtml(dashboard.name)}"></iframe>
+      <div class="dash-display-preview-bar">
+        <div class="dash-display-preview-modes" role="group" aria-label="Dashboard layout orientation">
+          ${Object.entries(OE_DISPLAY_PREVIEWS).map(([mode, preset]) => `<button type="button" data-action="dashboardDisplaySetPreview" data-args='${oeDisplayArgs([mode])}' data-dashboard-preview="${mode}" aria-pressed="${mode === _oeDisplayPreviewMode}">${icon(preset.icon, 14)} ${preset.label}</button>`).join('')}
+        </div>
+        <label class="dash-display-preview-zoom">Zoom <select id="dashboardDisplayPreviewZoom" data-change-action="dashboardDisplaySetPreviewZoom" data-change-args='["$value"]'><option value="fit"${_oeDisplayPreviewZoom === 'fit' ? ' selected' : ''}>Fit</option><option value="actual"${_oeDisplayPreviewZoom === 'actual' ? ' selected' : ''}>100%</option></select></label>
+        <span class="dash-display-preview-dimensions" id="dashboardDisplayPreviewDimensions" aria-live="polite"></span>
+        <p>Portrait and landscape save separately. The display switches automatically when rotated.</p>
+      </div>
+      <div class="dash-display-frame-wrap fixed-preview" id="dashboardDisplayFrameWrap">
+        <div class="dash-display-frame-stage" id="dashboardDisplayFrameStage">
+          <iframe class="dash-display-editor-frame" id="dashboardDisplayEditorFrame" src="${escHtml(`${frameUrl.pathname}${frameUrl.search}`)}" title="Configure ${escHtml(dashboard.name)}"></iframe>
+        </div>
       </div>
     </div>`;
+  oeDisplayResizePreview();
+  oeDisplayObservePreview();
   if (window.lucide) lucide.createIcons();
 }

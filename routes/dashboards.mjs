@@ -37,6 +37,7 @@ import { validateSkillDashboardWidgets } from '../lib/dashboard-widgets.mjs';
 import { readOnlySkillSandboxAvailable } from '../lib/skill-subprocess.mjs';
 import { getNodes } from '../skills/nodes/node-registry.mjs';
 import {
+  dashboardLayoutForOrientation,
   isCameraEntityId,
   isDashboardSlug,
   isWeatherEntityId,
@@ -52,7 +53,8 @@ import {
 
 const MAX_DASHBOARDS = 32;
 const LAYOUT_MAX_BYTES = 128 * 1024;
-const CREATE_MAX_BYTES = LAYOUT_MAX_BYTES + (8 * 1024);
+const LAYOUT_DOCUMENT_MAX_BYTES = LAYOUT_MAX_BYTES * 2 + 1024;
+const CREATE_MAX_BYTES = LAYOUT_DOCUMENT_MAX_BYTES + (8 * 1024);
 const METADATA_MAX_BYTES = 8 * 1024;
 const REGISTRY_MAX_BYTES = 64 * 1024;
 const CONTROL_MAX_BYTES = 4 * 1024;
@@ -221,7 +223,9 @@ function checkedLayout(value) {
   const checked = validateLayout(value);
   if (!checked.ok) throw new DashboardHttpError(400, checked.error);
   const serialized = JSON.stringify(checked.layout);
-  if (Buffer.byteLength(serialized) > LAYOUT_MAX_BYTES) {
+  const layouts = checked.layout.version === 7
+    ? [checked.layout.portrait, checked.layout.landscape] : [checked.layout];
+  if (layouts.some(layout => Buffer.byteLength(JSON.stringify(layout)) > LAYOUT_MAX_BYTES)) {
     throw new DashboardHttpError(413, `Layout must be at most ${LAYOUT_MAX_BYTES} bytes.`);
   }
   return { layout: checked.layout, serialized };
@@ -299,7 +303,7 @@ function loadLayout(paths, metadata) {
     if (error?.code === 'ENOENT') return null;
     throw new DashboardHttpError(503, 'Dashboard layout is temporarily unavailable.');
   }
-  if (Buffer.byteLength(raw) > LAYOUT_MAX_BYTES) {
+  if (Buffer.byteLength(raw) > LAYOUT_DOCUMENT_MAX_BYTES) {
     throw new DashboardHttpError(503, 'Dashboard layout is unreadable.');
   }
   let parsed;
@@ -346,11 +350,16 @@ function ifMatchAllows(header, currentEtag) {
 }
 
 function cardCount(layout) {
+  layout = dashboardLayoutForOrientation(layout);
   if (!layout) return 0;
   return layout.sections.reduce((total, section) => total + section.cards.length, 0);
 }
 
 function summary(metadata, layout, owner) {
+  const orientationCounts = Object.fromEntries(['portrait', 'landscape'].map(orientation => {
+    const selected = dashboardLayoutForOrientation(layout, orientation);
+    return [orientation, { sectionCount: selected?.sections.length || 0, cardCount: cardCount(selected) }];
+  }));
   return {
     slug: metadata.slug,
     name: metadata.name,
@@ -359,8 +368,9 @@ function summary(metadata, layout, owner) {
     theme: metadata.theme,
     url: `/dashboards/${metadata.slug}`,
     isDefault: metadata.slug === 'home',
-    sectionCount: layout?.sections.length || 0,
+    sectionCount: orientationCounts.portrait.sectionCount,
     cardCount: cardCount(layout),
+    ...(layout?.version === 7 ? { orientationCounts } : {}),
   };
 }
 
@@ -451,7 +461,18 @@ async function handleDashboardCollection(req, res, paths, owner) {
   methodNotAllowed(res, 'GET, POST');
 }
 
-async function handleDashboardItem(req, res, route, paths, owner) {
+function requestedOrientation(url) {
+  const values = url.searchParams.getAll('orientation');
+  if (!values.length) return null;
+  if (values.length !== 1 || !['portrait', 'landscape'].includes(values[0])) {
+    throw new DashboardHttpError(400, 'Orientation must be portrait or landscape.');
+  }
+  return values[0];
+}
+
+async function handleDashboardItem(req, res, route, paths, owner, url) {
+  const orientation = requestedOrientation(url);
+  const select = layout => orientation ? dashboardLayoutForOrientation(layout, orientation) : layout;
   if (route.kind === 'versions') {
     if (req.method !== 'GET') { methodNotAllowed(res, 'GET'); return; }
     const result = await withLock(paths.registryPath, () => {
@@ -461,10 +482,17 @@ async function handleDashboardItem(req, res, route, paths, owner) {
       if (route.versionId) {
         const version = versions.find(row => row.id === route.versionId);
         if (!version) throw new DashboardHttpError(404, 'Version not found.');
-        return version;
+        return { ...version, layout: select(version.layout) };
       }
-      return { versions: versions.reverse().map(row => ({ id: row.id, savedAt: row.savedAt,
-        title: row.layout.title, sectionCount: row.layout.sections.length, cardCount: cardCount(row.layout) })), limit: 50 };
+      const seen = new Set();
+      return { versions: versions.reverse().flatMap(row => {
+        const layout = dashboardLayoutForOrientation(row.layout, orientation || 'portrait');
+        const signature = JSON.stringify(orientation ? layout : row.layout);
+        if (seen.has(signature)) return [];
+        seen.add(signature);
+        return [{ id: row.id, savedAt: row.savedAt,
+          title: layout.title, sectionCount: layout.sections.length, cardCount: cardCount(layout) }];
+      }), limit: 50 };
     });
     sendJson(res, 200, result);
     return;
@@ -475,23 +503,27 @@ async function handleDashboardItem(req, res, route, paths, owner) {
         const registry = loadRegistry(paths, owner);
         const metadata = dashboardMetadata(registry, route.slug);
         if (!metadata) throw new DashboardHttpError(404, 'Dashboard not found.');
-        return loadLayout(paths, metadata);
+        return select(loadLayout(paths, metadata));
       });
       sendJson(res, 200, { layout, profileId: path.basename(path.dirname(paths.root)) }, { ETag: layoutEtag(layout) });
       return;
     }
     if (req.method === 'PUT') {
       requireJsonContentType(req);
-      const body = await readJsonBody(req, LAYOUT_MAX_BYTES + 1024);
+      const body = await readJsonBody(req, LAYOUT_DOCUMENT_MAX_BYTES + 1024);
       const wrapped = body && typeof body === 'object' && !Array.isArray(body)
         && Object.keys(body).length === 1
         && Object.prototype.hasOwnProperty.call(body, 'layout');
       const incoming = checkedLayout(wrapped ? body.layout : body);
+      if (orientation && incoming.layout.version === 7) {
+        throw new DashboardHttpError(400, 'An orientation save must contain one layout.');
+      }
       const result = await withLock(paths.registryPath, () => {
         const registry = loadRegistry(paths, owner);
         const metadata = dashboardMetadata(registry, route.slug);
         if (!metadata) throw new DashboardHttpError(404, 'Dashboard not found.');
-        const current = loadLayout(paths, metadata);
+        const currentDocument = loadLayout(paths, metadata);
+        const current = select(currentDocument);
         const currentEtag = layoutEtag(current);
         if (req.headers['if-match'] === undefined) {
           throw new DashboardHttpError(
@@ -502,6 +534,10 @@ async function handleDashboardItem(req, res, route, paths, owner) {
         }
         if (!ifMatchAllows(req.headers['if-match'], currentEtag)) {
           return { conflict: true, layout: current, etag: currentEtag };
+        }
+        if (current?.version === 7 && incoming.layout.version < 7) {
+          return { conflict: true, layout: current, etag: currentEtag,
+            error: 'This dashboard has separate portrait and landscape layouts. Reload with a current OpenEnsemble client.' };
         }
         if (current?.version === 6 && incoming.layout.version < 6) {
           return {
@@ -535,8 +571,15 @@ async function handleDashboardItem(req, res, route, paths, owner) {
             error: 'This dashboard uses grouped cards and requires a current OpenEnsemble client.',
           };
         }
-        savePreviousDashboardVersion(paths, route.slug, current, incoming.layout);
-        privateAtomicWrite(dashboardLayoutPath(paths, route.slug), incoming.serialized);
+        const document = orientation ? {
+          version: 7,
+          portrait: dashboardLayoutForOrientation(currentDocument, 'portrait') || incoming.layout,
+          landscape: dashboardLayoutForOrientation(currentDocument, 'landscape') || incoming.layout,
+          [orientation]: incoming.layout,
+        } : incoming.layout;
+        const saved = checkedLayout(document);
+        savePreviousDashboardVersion(paths, route.slug, currentDocument, saved.layout);
+        privateAtomicWrite(dashboardLayoutPath(paths, route.slug), saved.serialized);
         return { conflict: false, layout: incoming.layout, etag: layoutEtag(incoming.layout) };
       });
       if (result.conflict) {
@@ -968,11 +1011,11 @@ function calendarWidgetData(mirror, config) {
   return { events };
 }
 
-function persistedWidgetCard(paths, owner, dashboardSlug, cardId) {
+function persistedWidgetCard(paths, owner, dashboardSlug, cardId, orientation = 'portrait') {
   const registry = loadRegistry(paths, owner);
   const metadata = dashboardMetadata(registry, dashboardSlug);
   if (!metadata) throw new DashboardHttpError(404, 'Dashboard not found.');
-  const layout = loadLayout(paths, metadata);
+  const layout = dashboardLayoutForOrientation(loadLayout(paths, metadata), orientation);
   const card = layout?.version >= 4
     ? layout.sections.flatMap(section => section.cards)
       .find(candidate => candidate.id === cardId && candidate.kind === 'widget')
@@ -1015,9 +1058,10 @@ async function coalescedCustomWidgetRefresh(userId, key, execute) {
 async function handleWidgetRuntime(req, res, userId, url, route) {
   if (req.method !== 'GET') { methodNotAllowed(res, 'GET'); return; }
   if (url.searchParams.getAll('dashboardSlug').length !== 1
-      || [...url.searchParams.keys()].some(key => key !== 'dashboardSlug')) {
-    throw new DashboardHttpError(400, 'dashboardSlug is required and must be the only query parameter.');
+      || [...url.searchParams.keys()].some(key => !['dashboardSlug', 'orientation'].includes(key))) {
+    throw new DashboardHttpError(400, 'dashboardSlug is required; only orientation may also be provided.');
   }
+  const orientation = requestedOrientation(url) || 'portrait';
   const dashboardSlug = url.searchParams.get('dashboardSlug');
   if (!isDashboardSlug(dashboardSlug)) {
     throw new DashboardHttpError(400, 'Invalid dashboard slug.');
@@ -1026,7 +1070,7 @@ async function handleWidgetRuntime(req, res, userId, url, route) {
   const paths = dashboardPathsForUser(userId);
   const owner = profileLabel(userId);
   const card = await withLock(paths.registryPath, () =>
-    persistedWidgetCard(paths, owner, dashboardSlug, route.cardId));
+    persistedWidgetCard(paths, owner, dashboardSlug, route.cardId, orientation));
   const cardSnapshot = JSON.stringify(card);
   const access = requireWidgetAccess(userId, card.widgetId);
   let data;
@@ -1092,7 +1136,7 @@ async function handleWidgetRuntime(req, res, userId, url, route) {
   }
 
   const latestCard = await withLock(paths.registryPath, () =>
-    persistedWidgetCard(paths, owner, dashboardSlug, route.cardId));
+    persistedWidgetCard(paths, owner, dashboardSlug, route.cardId, orientation));
   if (JSON.stringify(latestCard) !== cardSnapshot) {
     throw new DashboardHttpError(409, 'Dashboard widget changed while it was refreshing.');
   }
@@ -1515,7 +1559,7 @@ export async function handle(req, res) {
       if (route.kind === 'collection') {
         await handleDashboardCollection(req, res, paths, owner);
       } else {
-        await handleDashboardItem(req, res, route, paths, owner);
+        await handleDashboardItem(req, res, route, paths, owner, url);
       }
     }
   } catch (error) {
