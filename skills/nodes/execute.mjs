@@ -13,6 +13,7 @@ import { mkdirSync, appendFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { shouldDetachNodeExec } from './background-policy.mjs';
+import { toolError } from '../../lib/tool-error.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -27,7 +28,7 @@ function nodeExecReportText({ status, hostname, cmdPreview, output }) {
   return `${header}\n\nCommand: ${cmdPreview}\n\n${body}`.trim();
 }
 
-async function publishNodeExecReport({ userId, agentId, hostname, cmdPreview, status, output, watcherId = null }) {
+async function publishNodeExecReport({ userId, agentId, hostname, cmdPreview, status, output, args, watcherId = null }) {
   const content = nodeExecReportText({ status, hostname, cmdPreview, output });
   const taskId = watcherId ? `autobg_${watcherId}` : null;
   const report = {
@@ -55,6 +56,18 @@ async function publishNodeExecReport({ userId, agentId, hostname, cmdPreview, st
     });
   } catch (e) {
     console.warn('[node_exec] failed to broadcast completion report:', e.message);
+  }
+  // A task card stores raw output; the owning agent still needs to interpret
+  // it. Use the same queued, read-only report-back as elapsed-time detachment.
+  try {
+    const { _runAutoBgToolContinuation } = await import('../../roles/auto-background.mjs');
+    await _runAutoBgToolContinuation({
+      userId, agentId, toolName: 'node_exec', args,
+      resultText: output,
+      errorMsg: status === 'error' ? output : null,
+    });
+  } catch (e) {
+    console.warn('[node_exec] completion follow-up failed:', e.message);
   }
 }
 
@@ -387,10 +400,9 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     const node = getNode(node_id, userId);
     if (!node) { yield { type: 'result', text: `Node "${node_id}" not found or not connected. Use node_list to see available nodes.` }; return; }
 
-    // Phase 14e: auto-background for long-shaped commands. Either the LLM
-    // sets background:true explicitly, OR the command matches a long-running
-    // pattern (package managers, builds, downloads). Sync mode is kept as
-    // the default so quick reads still work inline.
+    // Explicit background requests get an immediate task card. Otherwise the
+    // dispatcher awaits output and detaches only if the command actually runs
+    // past its foreground deadline.
     const wantBackground = shouldDetachNodeExec({
       background: args.background,
       command,
@@ -488,6 +500,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
                   cmdPreview,
                   status: 'done',
                   output: `Agent reconnected after restart.${tail ? `\n\n${tail}` : ''}`,
+                  args,
                   watcherId,
                 });
                 return;
@@ -503,6 +516,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
                 cmdPreview,
                 status: 'error',
                 output: `Agent disconnected and did not reconnect within 90s: ${recon.reason}`,
+                args,
                 watcherId,
               });
               return;
@@ -518,6 +532,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
               cmdPreview,
               status: 'error',
               output: e.message,
+              args,
               watcherId,
             });
             return;
@@ -539,15 +554,14 @@ export async function* executeSkillTool(name, args, userId, agentId) {
             cmdPreview,
             status,
             output,
+            args,
             watcherId,
           });
         })();
 
-        // Terse result so the LLM doesn't echo the whole "started in background"
-        // sentence back to the user — the chip is already visible. The
-        // __hide_turn meta event tells chat.mjs to suppress the assistant
-        // bubble entirely; the chip BECOMES the assistant's reply visually.
-        yield { type: 'result', text: `[task chip rendered: "${friendly}"] OK — the chip is the user-visible reply. You don't need to reply with text; if you do, keep it to one short word.` };
+        // The card acknowledges starting, never completion. The queued
+        // continuation above supplies the actual result for the final reply.
+        yield { type: 'result', text: `${friendly} is running in the background (task ${watcherId}). The result will be delivered to you automatically when it finishes. This is a start acknowledgement, not command output. Wait for the completed result before drawing conclusions or running dependent commands.` };
         yield { type: '__hide_turn', reason: 'bg_chip', taskId: watcherId };
         return;
       }
@@ -605,14 +619,15 @@ export async function* executeSkillTool(name, args, userId, agentId) {
         yield { type: 'tool_progress', name: 'node_exec', text: drainBuf() };
       }
       if (cmdError) {
-        yield { type: 'result', text: `Command failed: ${cmdError.message}` };
+        yield { type: 'result', text: toolError(`Command failed: ${cmdError.message}`), isError: true };
         return;
       }
       let output = '';
       if (cmdResult.stdout) output += truncate(cmdResult.stdout);
       if (cmdResult.stderr) output += (output ? '\n\n' : '') + `STDERR:\n${truncate(cmdResult.stderr)}`;
       output += `\n\nExit code: ${cmdResult.exitCode} (${cmdResult.duration}ms)`;
-      yield { type: 'result', text: output || `Command completed with exit code ${cmdResult.exitCode}` };
+      const isError = cmdResult.exitCode !== 0;
+      yield { type: 'result', text: isError ? toolError(output) : output, isError };
       return;
     }
   }

@@ -64,7 +64,7 @@
       "type": "function",
       "function": {
         "name": "node_exec",
-        "description": "Execute a shell command on a remote computer (Linux/Windows/macOS server, VM, or workstation) connected via oe-node-agent. Returns stdout, stderr, and exit code. Use for system administration: package updates, service management, file operations, etc. Shell is auto-detected (bash for Linux/macOS, PowerShell for Windows). NOT for Home Assistant. STRONGLY RECOMMENDED to set `background: true` for any long-running command (package upgrades, builds, downloads, installs) — returns immediately, shows a live progress chip in chat, and lets the user keep talking to you while the command runs. Sync mode blocks the chat for the entire duration.",
+        "description": "Execute a shell command on a remote computer (Linux/Windows/macOS server, VM, or workstation) connected via oe-node-agent. Returns stdout, stderr, and exit code. Use for system administration: package updates, service management, file operations, etc. Shell is auto-detected (bash for Linux/macOS, PowerShell for Windows). NOT for Home Assistant. Quick commands return their actual output directly; commands still running after 10 seconds move to a live task card and automatically trigger a completion update. Set background:true to request that handoff immediately for work known to be long-running. A start acknowledgement is not evidence that the command succeeded.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -82,11 +82,11 @@
             },
             "background": {
               "type": "boolean",
-              "description": "Set to true for long-running commands (apt/dnf/yum install or upgrade, npm/pip install, docker pull/build, make, downloads, etc.). Tool returns immediately with a 'started' message and the command runs in the background. A live task chip appears in chat showing progress; when the command finishes its result lands as a follow-up message you read on your next turn. The user can keep chatting with you while it runs. Use false (default) only for QUICK read-only commands whose output you need to act on immediately in this same turn (ls, df, uptime, single greps, status checks). If you're updating, installing, building, downloading, or deploying anything — set this true."
+              "description": "Set true to start a long-running command with an immediate live task card. When it finishes, the agent automatically receives the result and reports back without another user message. Omit or use false for status checks and other commands whose output you need now; they return directly unless they actually run longer than 10 seconds. Worker-owned and scheduled commands retain their existing completion owner. Wait for actual results before making completion claims or running dependent commands."
             },
             "label": {
               "type": "string",
-              "description": "Short human-readable description of what the task is doing — used as the title of the live chat chip when background:true. The user sees this, not the raw command. Phrase it in terms of intent: \"Updating Cesium09\", \"Installing nginx on shareserver06\", \"Building OE on test-vm\", \"Restarting pihole DNS\". Keep it under 60 chars. The chip + this label become the user's primary acknowledgment that work started — you don't need to also write a confirmation reply, just say \"On it\" or one short word."
+              "description": "Short human-readable description used as the live task card title when background:true, e.g. \"Updating Cesium09\" or \"Building OE on test-vm\". Keep it under 60 characters. The card acknowledges that work started; the completion update follows when the command finishes."
             }
           },
           "required": ["node_id", "command"]

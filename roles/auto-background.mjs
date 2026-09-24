@@ -12,6 +12,7 @@ import { registerScheduledChild, completeScheduledChild } from '../lib/scheduled
 import { normalizeToolResult } from '../lib/tool-error.mjs';
 import { isEphemeralAgentId as _isEphem } from '../lib/ephemeral-tool-cache.mjs';
 import { getTurnContext } from '../lib/turn-abort-context.mjs';
+import { getTurn } from '../lib/turn-trace-context.mjs';
 import { currentTaskContext } from '../lib/task-proxy-context.mjs';
 import {
   raceWithAbort,
@@ -78,6 +79,7 @@ export async function _runAutoBgToolContinuation({ userId, agentId, toolName, ar
   if (!BG_REPORT_TOOLS.has(toolName)) return;
   const targetAgentId = _agentIdFromSessionKey(agentId, userId);
   if (!targetAgentId) return;
+  const originSessionEpoch = getTurn()?.sessionEpoch ?? null;
   const prompt = [
     'A background tool call you started has completed. Continue the original user workflow for THIS completed tool only.',
     '',
@@ -102,6 +104,8 @@ export async function _runAutoBgToolContinuation({ userId, agentId, toolName, ar
       onNotify: () => {},
       _hiddenUser: true,
       _isBackgroundContinuation: true,
+      _expectedSessionEpoch: originSessionEpoch,
+      _expectedResolvedAgentId: targetAgentId,
       // This turn exists only to interpret already-finished command output.
       // Enforce the prompt's "do not take further actions" rule structurally
       // so a model cannot turn a report-back into an uncorrelated side effect.
