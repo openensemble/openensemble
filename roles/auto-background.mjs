@@ -178,6 +178,15 @@ export function _autoBackgroundDelayMs(suppressLearning) {
 const AUTO_BG_REPORT_TEXT_MAX = 4_000;
 const AUTO_BG_WATCHER_TEXT_MAX = 1_200;
 
+function compactCompletionText(value, max = AUTO_BG_REPORT_TEXT_MAX) {
+  const text = String(value ?? '');
+  if (text.length <= max) return text;
+  const marker = '\n\n… [middle output omitted] …\n\n';
+  const budget = max - marker.length;
+  const head = Math.floor(budget * 0.4);
+  return text.slice(0, head) + marker + text.slice(-(budget - head));
+}
+
 /**
  * Classify a detached completion once so every durable and live surface uses
  * the same terminal status. In particular, ctx.toolError() and legacy
@@ -187,7 +196,9 @@ export function normalizeAutoBgCompletion(value, displayName = 'Tool') {
   const structured = value && typeof value === 'object' && typeof value.text === 'string';
   const normalized = normalizeToolResult(structured ? value.text : String(value ?? ''));
   const isError = value?.isError === true || normalized.isError;
-  const text = String(normalized.text ?? '').slice(0, AUTO_BG_REPORT_TEXT_MAX);
+  // Command diagnostics and exit status usually follow stdout. Keep the tail
+  // in every completion surface, including the owning model's report-back.
+  const text = compactCompletionText(normalized.text);
   const content = text || (isError ? 'Tool error: Tool failed' : `${displayName} completed.`);
   const status = isError ? 'error' : 'done';
   return {
@@ -196,7 +207,7 @@ export function normalizeAutoBgCompletion(value, displayName = 'Tool') {
     isError,
     status,
     watcherFinalText: isError
-      ? `⚠ ${displayName} failed: ${content.slice(0, AUTO_BG_WATCHER_TEXT_MAX)}`
+      ? `⚠ ${displayName} failed: ${compactCompletionText(content, AUTO_BG_WATCHER_TEXT_MAX)}`
       : `✓ ${displayName} done${text ? `: ${text.slice(-AUTO_BG_WATCHER_TEXT_MAX)}` : ''}`,
     observation: { resultText: text, ok: !isError },
     report: { content, status },
@@ -255,7 +266,7 @@ export async function _emitAutoBgToolReport({
 }) {
   if (!userId || !watcherId) return;
   const name = displayName || toolName || 'Tool';
-  const body = String(content || `${name} completed.`).slice(0, 4000);
+  const body = compactCompletionText(content || `${name} completed.`);
   const key = agentId
     ? (String(agentId).startsWith(`${userId}_`) ? String(agentId) : `${userId}_${agentId}`)
     : null;

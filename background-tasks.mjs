@@ -202,13 +202,15 @@ export async function bootRecoverInterruptedTasks() {
   for (const [taskId, e] of Object.entries(entries)) {
     const name = e.agentName || 'Agent';
     const completion = e?.completion && typeof e.completion === 'object' ? e.completion : null;
-    const recoveredStatus = !completion ? 'cancelled'
+    const remoteOutcomeUnknown = !completion && e.isAutoBgTool === true && e.toolName === 'node_exec';
+    const remoteInterruptNote = 'Node monitoring was interrupted by a server restart. The remote job may still be running; its final outcome is unknown. Check its status before starting it again.';
+    const recoveredStatus = !completion ? (remoteOutcomeUnknown ? 'error' : 'cancelled')
       : (completion.status === 'done' ? 'done'
         : (completion.status === 'cancelled' ? 'cancelled' : 'error'));
     const recoveredResult = completion?.result || '';
     const recoveredError = completion
       ? (completion.error || (recoveredStatus === 'cancelled' ? 'Cancelled before completion.' : ''))
-      : 'Interrupted by a server restart — did not finish.';
+      : (remoteOutcomeUnknown ? remoteInterruptNote : 'Interrupted by a server restart — did not finish.');
     const interruptNote = completion
       ? (recoveredError || recoveredResult || 'The task finished before restart, but its completion notice was interrupted.')
       : recoveredError;
@@ -295,10 +297,10 @@ export async function bootRecoverInterruptedTasks() {
     );
     const content = completion
       ? `[${name}'s completion notice was recovered after restart — re: "${e.summary}"]\n${recoveredError || recoveredResult}`
-      : `[${name}'s background task was interrupted — re: "${e.summary}"]\nThe server restarted while ${name} was working on this. The task was cancelled and did NOT finish. If it is still wanted, it must be started again.`;
+      : `[${name}'s background task was interrupted — re: "${e.summary}"]\n${remoteOutcomeUnknown ? remoteInterruptNote : `The server restarted while ${name} was working on this. The task was cancelled and did NOT finish. If it is still wanted, it must be started again.`}`;
     const displayContent = completion
       ? (recoveredError || recoveredResult)
-      : `The server restarted while ${name} was working on this. The task was cancelled and did not finish. If it is still wanted, it must be started again.`;
+      : (remoteOutcomeUnknown ? remoteInterruptNote : `The server restarted while ${name} was working on this. The task was cancelled and did not finish. If it is still wanted, it must be started again.`);
     const reportId = e.spanId || taskId;
     const scheduledKey = e.originScheduledTaskId
       ? `${e.userId}:${e.originScheduledTaskId}:${e.originScheduledRunId || 'r0'}`

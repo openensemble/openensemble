@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { shouldDetachNodeExec } from './background-policy.mjs';
 import { toolError } from '../../lib/tool-error.mjs';
+import { parseCompletionCheck, waitForNodeCompletion } from './completion-check.mjs';
 
 const BASE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -204,6 +205,55 @@ function isAgentRestartCommand(command) {
     || /\bsudo\s+oe\s+change-access\b/.test(c);
 }
 
+async function runNodeExec(nodeId, userId, command, timeout, onChunk, onReconnecting, completionCheck = null) {
+  let outputTail = '';
+  let result;
+  const startedAt = Date.now();
+  try {
+    result = await sendCommandStreaming(nodeId, userId, {
+      type: 'exec', command, timeout: Math.min(timeout, 300),
+    }, (stream, data) => {
+      outputTail = (outputTail + data).slice(-1800);
+      onChunk(stream, data);
+    });
+  } catch (error) {
+    if (!/Node disconnected/i.test(error.message || '') || !isAgentRestartCommand(command)) throw error;
+    onReconnecting();
+    const recon = await waitForNodeReconnect(nodeId, userId, 90_000);
+    if (!recon.ok) throw new Error(`Agent disconnected and did not reconnect within 90s: ${recon.reason}`);
+    const tail = truncate(outputTail.trim());
+    // Reconnection confirms the agent is back, not the interrupted shell's
+    // exit status. Report that evidence without inventing an exit code.
+    return { reconnected: true, stdout: `Agent reconnected after restart.${tail ? `\n\n${tail}` : ''}` };
+  }
+  if (!completionCheck || result.exitCode !== 0) return result;
+  onChunk('stdout', '\nJob launched; watching for its final result.\n');
+  let completed;
+  try {
+    completed = await waitForNodeCompletion(completionCheck,
+      (checkCommand, checkTimeout) => sendCommandStreaming(nodeId, userId, {
+        type: 'exec', command: checkCommand, timeout: checkTimeout,
+      }, onChunk),
+      text => onChunk('stdout', text));
+  } catch (error) {
+    throw new Error(`Job completion could not be verified: ${error.message}\nThe remote job may still be running. Do not launch it again automatically.`);
+  }
+  return {
+    ...completed,
+    stdout: `Launch output:\n${truncate(result.stdout || '(no output)')}\n\nFinal job result:\n${completed.stdout || '(no output)'}`,
+    stderr: [result.stderr, completed.stderr].filter(Boolean).join('\n'),
+    duration: Date.now() - startedAt,
+  };
+}
+
+function nodeExecResultText(result) {
+  if (result.reconnected) return result.stdout;
+  let output = '';
+  if (result.stdout) output += truncate(result.stdout);
+  if (result.stderr) output += (output ? '\n\n' : '') + `STDERR:\n${truncate(result.stderr)}`;
+  return output + `\n\nExit code: ${result.exitCode} (${result.duration}ms)`;
+}
+
 // Guard against a failure mode seen in the wild: a generated script ran
 // `set -eu` … `pct set <id> -memory <n>` … `pct reboot <id>`. The reboot's
 // shutdown half completed, then it exited 255 on a monitor-socket timeout.
@@ -388,6 +438,14 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     if (!node_id) { yield { type: 'result', text: 'This tool needs a node_id. Call it again with node_id specified.' }; return; }
     if (!command) { yield { type: 'result', text: 'This tool needs a command. Call it again with command specified.' }; return; }
 
+    let completionCheck;
+    try {
+      completionCheck = parseCompletionCheck(args.completion_check, command);
+    } catch (error) {
+      yield { type: 'result', text: toolError(error.message), isError: true };
+      return;
+    }
+
     const restartHazard = guestRestartHazard(command);
     if (restartHazard) { yield { type: 'result', text: restartHazard }; return; }
 
@@ -403,7 +461,9 @@ export async function* executeSkillTool(name, args, userId, agentId) {
     // Explicit background requests get an immediate task card. Otherwise the
     // dispatcher awaits output and detaches only if the command actually runs
     // past its foreground deadline.
-    const wantBackground = shouldDetachNodeExec({
+    // Completion checks use the dispatcher's journaled task owner. It creates
+    // their watcher immediately and keeps the launch + checks in one task.
+    const wantBackground = !completionCheck && shouldDetachNodeExec({
       background: args.background,
       command,
       timeout,
@@ -466,9 +526,7 @@ export async function* executeSkillTool(name, args, userId, agentId) {
           const chunks = { stdout: '', stderr: '' };
           let cmdResult = null;
           try {
-            cmdResult = await sendCommandStreaming(node.nodeId, userId, {
-              type: 'exec', command, timeout: Math.min(timeout, 300),
-            }, (stream, data) => {
+            cmdResult = await runNodeExec(node.nodeId, userId, command, timeout, (stream, data) => {
               if (stream === 'stderr') chunks.stderr += data;
               else                     chunks.stdout += data;
               // Throttled status update — last 200 chars of stdout/stderr
@@ -478,49 +536,14 @@ export async function* executeSkillTool(name, args, userId, agentId) {
                 currentTool: 'node_exec',
                 canCancel: false,
               });
-            });
-          } catch (e) {
-            if (/Node disconnected/i.test(e.message || '') && isAgentRestartCommand(command)) {
+            }, () => {
               pushWatcherStatus(userId, watcherId, 'agent restarted; waiting for reconnect…', {
                 phase: 'reconnecting',
                 currentTool: 'node_exec',
                 canCancel: false,
               });
-              const recon = await waitForNodeReconnect(node.nodeId, userId, 90_000);
-              if (recon.ok) {
-                const tail = truncate((chunks.stdout + chunks.stderr).trim()).slice(-1800);
-                completeWatcher(userId, watcherId, {
-                  status: 'done',
-                  finalText: `✓ ${cmdPreview}\nAgent reconnected after restart.${tail ? `\n\n${tail}` : ''}`,
-                });
-                await publishNodeExecReport({
-                  userId,
-                  agentId: attribAgentId,
-                  hostname: node.hostname || node_id,
-                  cmdPreview,
-                  status: 'done',
-                  output: `Agent reconnected after restart.${tail ? `\n\n${tail}` : ''}`,
-                  args,
-                  watcherId,
-                });
-                return;
-              }
-              completeWatcher(userId, watcherId, {
-                status: 'error',
-                finalText: `⚠ ${cmdPreview}\nAgent disconnected and did not reconnect within 90s: ${recon.reason}`,
-              });
-              await publishNodeExecReport({
-                userId,
-                agentId: attribAgentId,
-                hostname: node.hostname || node_id,
-                cmdPreview,
-                status: 'error',
-                output: `Agent disconnected and did not reconnect within 90s: ${recon.reason}`,
-                args,
-                watcherId,
-              });
-              return;
-            }
+            });
+          } catch (e) {
             completeWatcher(userId, watcherId, {
               status: 'error',
               finalText: `⚠ Command failed: ${e.message}`,
@@ -537,11 +560,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
             });
             return;
           }
-          let output = '';
-          if (cmdResult?.stdout) output += truncate(cmdResult.stdout);
-          if (cmdResult?.stderr) output += (output ? '\n\n' : '') + `STDERR:\n${truncate(cmdResult.stderr)}`;
-          output += `\n\nExit code: ${cmdResult?.exitCode ?? '?'} (${cmdResult?.duration ?? 0}ms)`;
-          const status = cmdResult?.exitCode === 0 ? 'done' : 'error';
+          const output = nodeExecResultText(cmdResult);
+          const status = cmdResult.reconnected || cmdResult.exitCode === 0 ? 'done' : 'error';
           const prefix = status === 'done' ? '✓' : '⚠';
           completeWatcher(userId, watcherId, {
             status,
@@ -582,11 +602,10 @@ export async function* executeSkillTool(name, args, userId, agentId) {
 
     let cmdResult = null;
     let cmdError = null;
-    sendCommandStreaming(node.nodeId, userId, {
-      type: 'exec',
-      command,
-      timeout: Math.min(timeout, 300),
-    }, (stream, data) => push({ kind: 'chunk', stream, data }))
+    runNodeExec(node.nodeId, userId, command, timeout,
+      (stream, data) => push({ kind: 'chunk', stream, data }),
+      () => push({ kind: 'chunk', stream: 'stdout', data: 'Agent restarted; waiting for reconnect…\n' }),
+      completionCheck)
       .then(r => { cmdResult = r; push({ kind: 'done' }); })
       .catch(e => { cmdError = e; push({ kind: 'done' }); });
 
@@ -622,11 +641,8 @@ export async function* executeSkillTool(name, args, userId, agentId) {
         yield { type: 'result', text: toolError(`Command failed: ${cmdError.message}`), isError: true };
         return;
       }
-      let output = '';
-      if (cmdResult.stdout) output += truncate(cmdResult.stdout);
-      if (cmdResult.stderr) output += (output ? '\n\n' : '') + `STDERR:\n${truncate(cmdResult.stderr)}`;
-      output += `\n\nExit code: ${cmdResult.exitCode} (${cmdResult.duration}ms)`;
-      const isError = cmdResult.exitCode !== 0;
+      const output = nodeExecResultText(cmdResult);
+      const isError = !cmdResult.reconnected && cmdResult.exitCode !== 0;
       yield { type: 'result', text: isError ? toolError(output) : output, isError };
       return;
     }

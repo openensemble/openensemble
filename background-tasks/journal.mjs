@@ -103,6 +103,7 @@ export function _journalAdd(taskId) {
     agentId: rec.agentId,
     agentName: rec.agentName,
     agentEmoji: rec.agentEmoji || '🤖',
+    ...(rec.isAutoBgTool ? { isAutoBgTool: true, toolName: rec.currentTool } : {}),
     ...(rec.provider ? { provider: String(rec.provider).slice(0, 100) } : {}),
     ...(rec.model ? { model: String(rec.model).slice(0, 300) } : {}),
     ...(rec.runtimeProvider ? { runtimeProvider: String(rec.runtimeProvider).slice(0, 100) } : {}),

@@ -741,6 +741,14 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
     }
 
     let textContent  = '';
+    const finalAnswerMessages = new Map();
+    const rememberFinalAnswer = (item, outputIndex) => {
+      if (item?.type !== 'message' || item.phase !== 'final_answer') return;
+      const text = (item.content || [])
+        .filter(part => part?.type === 'output_text' && typeof part.text === 'string')
+        .map(part => part.text).join('');
+      if (text.trim()) finalAnswerMessages.set(item.id ?? outputIndex, text);
+    };
     const generatedImages = [];
     const imageGenerationItemStatus = new Map();
     const recordGeneratedImage = (item, fallbackKey = 'unkeyed-image-generation') => {
@@ -884,6 +892,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       }
       if (t === 'response.output_item.done') {
         const item = ev.item ?? {};
+        rememberFinalAnswer(item, ev.output_index);
         if (item.type === 'function_call') {
           const callId = item.call_id ?? item.id;
           const entry = toolCalls.get(callId);
@@ -936,6 +945,7 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
         completionCount++;
         loopCompletionCount++;
         for (const [outputIndex, item] of (ev.response?.output ?? []).entries()) {
+          rememberFinalAnswer(item, outputIndex);
           if (item?.type === 'image_generation_call') {
             const image = recordGeneratedImage(item, `response-output:${outputIndex}`);
             if (image) {
@@ -1307,6 +1317,15 @@ export async function* streamOpenAIResponses(agent, systemPrompt, messages, sign
       continue;
     }
 
+    // Progress commentary and the final answer are separate Responses
+    // messages. Retain the completed answer rather than gluing both together
+    // (which repeated node completion updates in chat and stored history).
+    // Providers without phase metadata keep the existing text fallback.
+    if (finalAnswerMessages.size) {
+      const finalAnswerText = [...finalAnswerMessages.values()].join('\n\n');
+      if (finalAnswerText !== textContent) yield { type: 'replace', text: finalAnswerText };
+      textContent = finalAnswerText;
+    }
     if (generatedImages.length) {
       const imageText = generatedImages
         .map(img => `[Image: ${img.filename}]${img.savedPath ? `\nSaved to: ${img.savedPath}` : ''}`)

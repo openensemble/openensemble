@@ -474,8 +474,12 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
   // A verifier-owned tool must remain inside its correlated turn. A generous
   // foreground deadline prevents the normal UX auto-background path from
   // detaching learning/report work beyond the terminal frame.
-  const AUTO_BG_MS = _autoBackgroundDelayMs(suppressLearning);
+  const AUTO_BG_MS = name === 'node_exec' && mergedArgs?.completion_check && !suppressLearning
+    ? 0 : _autoBackgroundDelayMs(suppressLearning);
   const AUTO_BG_ENABLED = autoBackgroundToolsInCurrentContext();
+  // Node agents have no exec-cancel protocol. A local abort would only stop
+  // reading output while the remote process keeps running.
+  const AUTO_BG_CANCELLABLE = name !== 'node_exec';
 
   // Ephemeral-delegation post-processor for the final `{type:'result'}` yield.
   // Two things happen here, only when agentId is an ephemeral_deleg_* session:
@@ -670,7 +674,9 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
         // longer than the boundary; checking elapsed time only after next()
         // resolves leaves that stream stuck in the foreground indefinitely.
         if (!backgrounded && boundaryTimedOut) {
-          const displayName = delegatedMeta?.agentName || name;
+          const displayName = delegatedMeta?.agentName
+            || (name === 'node_exec' && mergedArgs?.completion_check
+              ? String(mergedArgs.label || `Node job on ${mergedArgs.node_id}`).slice(0, 100) : name);
           const displayEmoji = delegatedMeta?.agentEmoji || (delegatedMeta ? '' : '⏵');
           const label = `${displayEmoji || '⏵'} ${displayName}`.trim();
           const adoptedChipId = delegatedMeta?.chipWatcherId || null;
@@ -706,7 +712,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
                   summary: `${displayName} is still running`,
                   startedAt,
                   lastActivityAt: Date.now(),
-                  canCancel: true,
+                  canCancel: AUTO_BG_CANCELLABLE,
                 },
                 cadenceSec: 30,
                 expiresAt: null,
@@ -718,18 +724,18 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
                 toolName: name,
                 watcherId,
                 startedAt,
-                abort: reason => toolAbort.abort(reason),
+                abort: AUTO_BG_CANCELLABLE ? reason => toolAbort.abort(reason) : null,
               })) {
                 throw new Error('slow-tool owner registration failed');
               }
               freshOwnerRegistered = true;
             }
             backgrounded = true;
-            cancelBackgroundOwner = reason => taskGraph.cancelTask(
+            cancelBackgroundOwner = AUTO_BG_CANCELLABLE ? reason => taskGraph.cancelTask(
               userId,
               freshTaskId || delegatedMeta?.chipTaskId || watcherId,
               reason,
-            );
+            ) : null;
             taskGraph.registerTaskRoot({
               userId,
               rootTaskId: watcherId,
@@ -741,7 +747,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
               rootTaskId: watcherId,
               phase: 'backgrounded',
               currentTool: name,
-              canCancel: true,
+              canCancel: AUTO_BG_CANCELLABLE,
             });
           } catch (e) {
             console.warn('[auto-bg] watcher register failed; staying foreground:', e.message);
@@ -766,6 +772,9 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
           }
 
           if (backgrounded) {
+            // Once the card owns an uninterruptible remote command, stopping
+            // its originating chat must not discard the eventual result.
+            if (!AUTO_BG_CANCELLABLE) toolAbort.dispose();
             // Inform the coordinator's LLM the tool was backgrounded — its turn
             // ends gracefully with this message in place of the real result.
             const deferredText = `${displayName} is running in the background (task ${watcherId}). The result will be delivered to you automatically when it finishes. If the user asks about it before then, call list_active_agents to find this task and get_task_log to read its live progress and partial results — never tell the user you have no information about it.`;
@@ -791,7 +800,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
               taskId: freshTaskId,
               args: mergedArgs,
               pendingNext,
-              toolSignal: toolAbort.signal,
+              toolSignal: AUTO_BG_CANCELLABLE ? toolAbort.signal : null,
               disposeToolSignal: toolAbort.dispose,
               scheduledCtx: getScheduledContext(),
               cancel: cancelBackgroundOwner,
@@ -875,7 +884,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
                         rootTaskId: captured.rootTaskId,
                         phase: 'streaming',
                         currentTool: captured.name,
-                        canCancel: true,
+                        canCancel: AUTO_BG_CANCELLABLE,
                       });
                     } else if (v?.type === 'image') {
                       // Media is a first-class stream event. Collect it for the
@@ -900,7 +909,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
                           rootTaskId: captured.rootTaskId,
                           phase: 'result',
                           currentTool: null,
-                          canCancel: true,
+                          canCancel: AUTO_BG_CANCELLABLE,
                         });
                       }
                     }
@@ -1290,7 +1299,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
             summary: `${name} is still running`,
             startedAt: _toolStart,
             lastActivityAt: Date.now(),
-            canCancel: true,
+            canCancel: AUTO_BG_CANCELLABLE,
           },
           cadenceSec: 30,
           expiresAt: null,
@@ -1298,7 +1307,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
           watchersMod.pushWatcherStatus(userId, wid, `${name} is still running in the background`, {
             phase: 'backgrounded',
             currentTool: name,
-            canCancel: true,
+            canCancel: AUTO_BG_CANCELLABLE,
           });
           const bg = await import('../background-tasks.mjs');
           if (!bg.registerAutoBackgroundTool({
@@ -1308,12 +1317,14 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
             toolName: name,
             watcherId: wid,
             startedAt: _toolStart,
-            abort: reason => toolAbort.abort(reason),
+            abort: AUTO_BG_CANCELLABLE ? reason => toolAbort.abort(reason) : null,
           })) {
             throw new Error('slow-tool owner registration failed');
           }
           ownerRegistered = true;
-          cancelBackgroundOwner = reason => bg.cancelTask(userId, autoBgTaskId, reason);
+          cancelBackgroundOwner = AUTO_BG_CANCELLABLE
+            ? reason => bg.cancelTask(userId, autoBgTaskId, reason)
+            : null;
         } catch (error) {
           // The promise is already running. If ownership registration fails,
           // keep this turn attached and await the real result; throwing here
@@ -1330,6 +1341,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
           );
           break promiseAutoBackground;
         }
+        if (!AUTO_BG_CANCELLABLE) toolAbort.dispose();
         _registerScheduledAutoBgChild({
           scheduledCtx,
           userId,
@@ -1359,7 +1371,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
         };
         raceWithAbort(
           racePromise,
-          toolAbort.signal,
+          AUTO_BG_CANCELLABLE ? toolAbort.signal : null,
           `Tool ${name} cancelled`,
         ).then((val) => runInTaskContext(promiseOwnerContext, async () => {
           // Normalize structured tool results like the inline path does — otherwise
@@ -1471,7 +1483,7 @@ async function* executeCheckpointedTool(name, args, userId, agentId, allowedTool
           if (completion.isError) log.warn('tool', 'auto-bg tool returned error', { ...completionLog, err: completion.text.slice(0, 200) });
           else log.info('tool', 'auto-bg tool complete', completionLog);
         })).catch((err) => runInTaskContext(promiseOwnerContext, async () => {
-          const cancelled = isAbortError(err, toolAbort.signal);
+          const cancelled = isAbortError(err, AUTO_BG_CANCELLABLE ? toolAbort.signal : null);
           const terminalError = cancelled
             ? abortError(toolAbort.signal, `${name} cancelled`).message
             : (err?.message || String(err));
