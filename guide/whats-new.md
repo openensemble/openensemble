@@ -6,6 +6,23 @@ If you auto-update (`oe update`), you'll get these as they land. If not, run `oe
 
 ---
 
+## 2026-09-25
+
+**Task results have their own ledger**
+Open **Tasks → Ledger** to follow running tasks and review their results or errors. The ledger is now the default task view. Scheduled runs and **Run now** keep their prompts, replies, progress, and failures out of chat history and future chat context, including work done by background agents. Use **Schedules** to manage tasks and **Monitors** for condition-triggered watches. Results refresh automatically and can be filtered by status.
+
+History is kept for 30 days, up to 5,000 runs per profile, with the latest 200 shown. Results remain after a one-time task finishes or its schedule is deleted. Reminders and explicitly requested notifications keep their configured delivery. See [Tasks](tasks.md#task-ledger).
+
+**Separate portrait and landscape dashboard layouts**
+Choose **Portrait** or **Landscape** above the dashboard editor to arrange each orientation's cards, sections, colors, and page elements independently. Existing dashboards start both orientations from their original layout, and the standalone display selects the matching layout when the device rotates. **Fit** and **100%** control the preview size. Undo, Redo, and draft recovery stay with the orientation being edited. See [Dashboards](dashboards.md#configure-the-layout).
+
+**Node jobs report back when the work finishes**
+Long-running commands on remote nodes now trigger an automatic agent follow-up with the result, without another message from you. Quick checks return their output directly. Jobs that continue after their launch command exits can use a completion check to track the actual work; SMART disk self-tests require one.
+
+Failed commands are marked as failures, and long results retain final diagnostics and exit status. If monitoring times out or an OE restart interrupts it, the result explains that the remote job may still be running and its outcome is unknown. OpenAI replies also keep final answers separate from progress commentary, reducing repeated completion messages.
+
+---
+
 ## 2026-09-10
 
 **Explainable memory**
@@ -18,7 +35,7 @@ Voice diagnostics show recent recognized speech, agent routing, wake decisions, 
 Customize adds Undo, Redo, saved layout versions, and recovery of unfinished layout edits after failed or conflicting saves. See [Dashboards](dashboards.md#undo-and-recovery).
 
 **Task results and schedule previews**
-Review saved outputs after one-time tasks finish or schedules are deleted, and preview upcoming runs in each task's timezone. Scheduled work keeps its own chat-turn identity, preventing a completed action from being mislabeled because it tried to save into the scheduling conversation's finished turn. Recording failures and actual retry counts are reported separately. See [Tasks](tasks.md#results-and-upcoming-runs).
+Review saved outputs after one-time tasks finish or schedules are deleted, and preview upcoming runs in each task's timezone. Scheduled work keeps its own chat-turn identity, preventing a completed action from being mislabeled because it tried to save into the scheduling conversation's finished turn. Recording failures and actual retry counts are reported separately. See [Tasks](tasks.md#task-ledger).
 
 **Project progress survives clearing context**
 Use **Clear session** or type **`/clear`** by itself to start a fresh conversation. Inside a project, OE first saves the conversation and a handoff automatically, then includes saved progress in future project chats. Older history is also saved before automatic trimming. Review handoffs or download saved conversations from the project's **Progress** tab. If saving fails, the conversation stays intact. See [Project spaces](project-spaces.md#automatic-progress-and-clearing-context).
